@@ -113,6 +113,27 @@
             export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
             export PATH="${androidSdk}/libexec/android-sdk/cmdline-tools/${cmdLineToolsVer}/bin:$PATH"
 
+            # Fix for Tauri AppImage bundler on NixOS:
+            # pkg-config returns all transitive -L flags for libayatana-appindicator3,
+            # and Tauri's bundler treats the entire multi-word output as a single file
+            # path, causing "does not exist" errors.  We provide a minimal .pc file
+            # that returns only the direct library path so the bundler can parse it.
+            _APPINDICATOR_PREFIX="${pkgs.libayatana-appindicator}"
+            _pc_fix_dir=$(mktemp -d -t keytao-pkgfix.XXXXXX)
+            cat > "$_pc_fix_dir/libayatana-appindicator3-0.1.pc" << PCEOF
+prefix=$_APPINDICATOR_PREFIX
+exec_prefix=\${prefix}
+libdir=\${prefix}/lib
+includedir=\${prefix}/include/libayatana-appindicator3-0.1
+
+Name: libayatana-appindicator3
+Description: Application Indicators
+Version: 0.5.92
+Libs: -L\${libdir} -layatana-appindicator3
+Cflags: -I\${includedir}
+PCEOF
+            export PKG_CONFIG_PATH="$_pc_fix_dir:''${PKG_CONFIG_PATH:-}"
+
             # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
             # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath
             # so the dynamic linker finds the libs at runtime even outside the shell.
