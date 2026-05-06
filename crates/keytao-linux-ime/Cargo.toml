@@ -1,0 +1,37 @@
+[package]
+name = "keytao-linux-ime"
+version = "0.1.0"
+edition = "2021"
+description = "KeyTao standalone Linux IME — Wayland input-method-v2 + X11 XIM, no ibus/fcitx5 required"
+
+[[bin]]
+name = "keytao-ime"
+path = "src/main.rs"
+
+# ── Linux-only dependencies ───────────────────────────────────────────────────
+[target.'cfg(target_os = "linux")'.dependencies]
+keytao-core = { path = "../keytao-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Wayland: input-method-v2 (from wayland-protocols-misc) + layer-shell
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+
+# XKB state machine for both Wayland (evdev→keysym) and X11 (keycode→keysym)
+xkbcommon = { version = "0.7", features = ["wayland", "x11"] }
+
+# X11: XIM server + candidate window
+xim = { version = "0.5", features = ["x11rb-server", "x11rb-xcb"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+libc = "0.2"
+dirs = "5"
+
+# Candidate panel rendering (software rasteriser, no GPU required)
+tiny-skia = "0.11"
+fontdue = "0.9"
+
+# SHM pool helper (anonymous fd for Wayland shm)
+memmap2 = "0.9"
