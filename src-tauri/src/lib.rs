@@ -12,6 +12,10 @@ mod rime;
 #[cfg(target_os = "linux")]
 mod ime;
 
+// keytao-ime binary embedded at compile time (build.rs copies it to OUT_DIR)
+#[cfg(target_os = "linux")]
+static KEYTAO_IME_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/keytao-ime"));
+
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
     etag: String,
@@ -1425,20 +1429,9 @@ fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
 #[cfg(target_os = "linux")]
 async fn linux_install_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
     use std::os::unix::fs::PermissionsExt;
-    use tauri::Manager;
 
-    // Resolve the bundled sidecar binary
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| e.to_string())?
-        .join("keytao-ime");
-
-    if !resource_path.exists() {
-        return Err(format!(
-            "找不到捆绑的 keytao-ime 二进制：{}",
-            resource_path.display()
-        ));
+    if KEYTAO_IME_BYTES.is_empty() {
+        return Err("keytao-ime 未嵌入此构建（仅 pnpm tauri build/dev 构建时可用）".into());
     }
 
     // Install to ~/.local/bin/keytao-ime
@@ -1448,7 +1441,7 @@ async fn linux_install_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
     std::fs::create_dir_all(&local_bin).map_err(|e| format!("无法创建 ~/.local/bin: {e}"))?;
 
     let dest = local_bin.join("keytao-ime");
-    std::fs::copy(&resource_path, &dest).map_err(|e| format!("复制二进制失败: {e}"))?;
+    std::fs::write(&dest, KEYTAO_IME_BYTES).map_err(|e| format!("写入二进制失败: {e}"))?;
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| format!("设置权限失败: {e}"))?;
 
