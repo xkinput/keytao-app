@@ -53,7 +53,7 @@
             hash = "sha256-AE9CaMpL0z3R/3Zln8TU73HeOiRcaBJmoclsdqRw7Iw=";
           };
 
-          dontUnpack = false;
+          dontUnpack = true;
 
           nativeBuildInputs = [
             pkgs.autoPatchelfHook
@@ -83,7 +83,9 @@
           ];
 
           installPhase = ''
-            install -Dm755 keytao-installer $out/bin/keytao-installer
+            mkdir -p $out/bin
+            tar -xzf $src -C $out/bin
+            chmod +x $out/bin/keytao-installer
           '';
         };
       in
