@@ -151,6 +151,7 @@
                         export JAVA_HOME="${pkgs.jdk17}"
                         export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
                         export MOLD_PATH="${pkgs.mold}/bin/mold"
+                        export CARGO_INCREMENTAL=0
 
                         # Add Android platform-tools (adb) and cmdline-tools to PATH
                         export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
@@ -171,9 +172,9 @@
                                     # forcing a full recompile on every direnv reload.
                                     _pkgfix_dir="$HOME/.cache/keytao-pkgfix"
                                     _appindicator_lib="${pkgs.libayatana-appindicator}/lib"
-                                    _real_pkgconfig="''${PKG_CONFIG:-$(which pkg-config)}"
+                                    _real_pkgconfig="$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'keytao-pkgfix' | tr '\n' ':') which pkg-config)"
                                     mkdir -p "$_pkgfix_dir"
-                                    cat > "$_pkgfix_dir/pkg-config" << SHIMEOF
+                                    cat > "$_pkgfix_dir/pkg-config.tmp" << SHIMEOF
             #!/bin/sh
             if [ "\$*" = "--libs libayatana-appindicator3-0.1" ] || \\
                [ "\$*" = "libayatana-appindicator3-0.1 --libs" ]; then
@@ -182,7 +183,8 @@
               exec $_real_pkgconfig "\$@"
             fi
             SHIMEOF
-                                    chmod +x "$_pkgfix_dir/pkg-config"
+                                    chmod +x "$_pkgfix_dir/pkg-config.tmp"
+                                    mv -f "$_pkgfix_dir/pkg-config.tmp" "$_pkgfix_dir/pkg-config"
                                     export PATH="$_pkgfix_dir:$PATH"
                                     export PKG_CONFIG="$_pkgfix_dir/pkg-config"
 

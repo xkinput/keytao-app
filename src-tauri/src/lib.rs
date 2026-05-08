@@ -12,10 +12,6 @@ mod rime;
 #[cfg(target_os = "linux")]
 mod ime;
 
-// keytao-ime binary embedded at compile time (build.rs copies it to OUT_DIR)
-#[cfg(target_os = "linux")]
-static KEYTAO_IME_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/keytao-ime"));
-
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
     etag: String,
@@ -1384,127 +1380,6 @@ async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<Instal
     Err("Not supported on mobile".into())
 }
 
-// ─── Linux IME install & status ──────────────────────────────────────────────
-
-#[derive(Serialize, Clone)]
-pub struct LinuxImeStatus {
-    pub installed: bool,
-    pub binary_path: String,
-    pub autostart: bool,
-    pub display_server: String, // "wayland" | "x11" | "unknown"
-}
-
-#[cfg(target_os = "linux")]
-fn linux_ime_status_inner(app: &AppHandle) -> LinuxImeStatus {
-    let binary_path = dirs::home_dir()
-        .map(|h| h.join(".local/bin/keytao-ime"))
-        .unwrap_or_default();
-    let autostart_path = dirs::home_dir()
-        .map(|h| h.join(".config/autostart/keytao-ime.desktop"))
-        .unwrap_or_default();
-    let display_server = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        "wayland".into()
-    } else if std::env::var_os("DISPLAY").is_some() {
-        "x11".into()
-    } else {
-        "unknown".into()
-    };
-    // Check sidecar availability as a proxy for "this feature is supported in this build"
-    let _ = app;
-    LinuxImeStatus {
-        installed: binary_path.exists(),
-        binary_path: binary_path.to_string_lossy().into_owned(),
-        autostart: autostart_path.exists(),
-        display_server,
-    }
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
-    linux_ime_status_inner(&app)
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-async fn linux_install_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if KEYTAO_IME_BYTES.is_empty() {
-        return Err("keytao-ime 未嵌入此构建（仅 pnpm tauri build/dev 构建时可用）".into());
-    }
-
-    // Install to ~/.local/bin/keytao-ime
-    let local_bin = dirs::home_dir()
-        .ok_or("无法确定用户主目录")?
-        .join(".local/bin");
-    std::fs::create_dir_all(&local_bin).map_err(|e| format!("无法创建 ~/.local/bin: {e}"))?;
-
-    let dest = local_bin.join("keytao-ime");
-    std::fs::write(&dest, KEYTAO_IME_BYTES).map_err(|e| format!("写入二进制失败: {e}"))?;
-    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置权限失败: {e}"))?;
-
-    // Write ~/.config/autostart/keytao-ime.desktop
-    let autostart_dir = dirs::home_dir()
-        .ok_or("无法确定用户主目录")?
-        .join(".config/autostart");
-    std::fs::create_dir_all(&autostart_dir).map_err(|e| format!("无法创建 autostart 目录: {e}"))?;
-
-    let desktop_content = format!(
-        "[Desktop Entry]\nType=Application\nName=KeyTao IME\nComment=KeyTao input method engine (Wayland/X11)\nExec={bin}\nX-GNOME-Autostart-enabled=true\nHidden=false\nNoDisplay=false\n",
-        bin = dest.to_string_lossy()
-    );
-    std::fs::write(autostart_dir.join("keytao-ime.desktop"), desktop_content)
-        .map_err(|e| format!("写入 autostart 条目失败: {e}"))?;
-
-    Ok(linux_ime_status_inner(&app))
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-fn linux_uninstall_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
-    let binary = dirs::home_dir()
-        .ok_or("无法确定用户主目录")?
-        .join(".local/bin/keytao-ime");
-    let desktop = dirs::home_dir()
-        .ok_or("无法确定用户主目录")?
-        .join(".config/autostart/keytao-ime.desktop");
-
-    if binary.exists() {
-        std::fs::remove_file(&binary).map_err(|e| format!("删除二进制失败: {e}"))?;
-    }
-    if desktop.exists() {
-        std::fs::remove_file(&desktop).map_err(|e| format!("删除 autostart 条目失败: {e}"))?;
-    }
-
-    Ok(linux_ime_status_inner(&app))
-}
-
-// Non-linux stubs
-#[tauri::command]
-#[cfg(not(target_os = "linux"))]
-fn linux_ime_status(_app: AppHandle) -> LinuxImeStatus {
-    LinuxImeStatus {
-        installed: false,
-        binary_path: String::new(),
-        autostart: false,
-        display_server: "unknown".into(),
-    }
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "linux"))]
-async fn linux_install_ime(_app: AppHandle) -> Result<LinuxImeStatus, String> {
-    Err("仅 Linux 支持".into())
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "linux"))]
-fn linux_uninstall_ime(_app: AppHandle) -> Result<LinuxImeStatus, String> {
-    Err("仅 Linux 支持".into())
-}
-
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1673,9 +1548,6 @@ pub fn run() {
             android_smart_extract,
             check_local_schema,
             rime_deploy_default,
-            linux_ime_status,
-            linux_install_ime,
-            linux_uninstall_ime,
             // ── IME engine commands (desktop only) ──
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_setup,

@@ -10,6 +10,12 @@ mod wayland_backend;
 mod x11_backend;
 
 fn main() {
+    if std::env::args().any(|a| a == "--version") {
+        println!("keytao-ime {}", env!("CARGO_PKG_VERSION"));
+        println!("librime {}", env!("RIME_VERSION"));
+        return;
+    }
+
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("keytao-ime: this binary only runs on Linux.");

@@ -1,0 +1,12 @@
+[build]
+# Use mold for fast linking on Linux
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+# Compile dependencies with optimization even in dev mode
+# This makes GTK/WebKit bindings much faster to run without full release build
+opt-level = 3
+debug = false
