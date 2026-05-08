@@ -25,7 +25,8 @@ jobs:
             libxdo-dev xdg-utils \
             squashfs-tools libfuse2 \
             gcc libc6-dev \
-            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            mold
 
       - uses: dtolnay/rust-toolchain@stable
 
