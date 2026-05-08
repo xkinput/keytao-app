@@ -62,7 +62,8 @@ jobs:
 
       - name: Package bare binary for Nix
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
           tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
             -C target/release keytao-installer
 
