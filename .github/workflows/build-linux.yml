@@ -60,6 +60,12 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
 
+      - name: Package bare binary for Nix
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
+            -C target/release keytao-installer
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -67,6 +73,7 @@ jobs:
           path: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
+            target/release/bundle/*.tar.gz
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -76,3 +83,4 @@ jobs:
           files: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
+            target/release/bundle/*.tar.gz

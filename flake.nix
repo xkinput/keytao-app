@@ -42,47 +42,50 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        keytaoInstallerPkg =
-          let
-            binary = ./target/release/keytao-installer;
-          in
-          pkgs.stdenv.mkDerivation {
-            pname = "keytao-installer";
-            version = "0.0.1";
+        version = "0.1.0";
 
-            src = binary;
-            dontUnpack = true;
+        keytaoInstallerPkg = pkgs.stdenv.mkDerivation {
+          pname = "keytao-installer";
+          inherit version;
 
-            nativeBuildInputs = [
-              pkgs.autoPatchelfHook
-              pkgs.makeWrapper
-            ];
-
-            buildInputs = with pkgs; [
-              webkitgtk_4_1
-              gtk3
-              glib
-              gdk-pixbuf
-              pango
-              atk
-              cairo
-              harfbuzz
-              libayatana-appindicator
-              librime
-              openssl
-              dbus
-              xdotool
-              libxkbcommon
-              libsoup_3
-              xorg.libX11
-              xorg.libxcb
-              wayland
-            ];
-
-            installPhase = ''
-              install -Dm755 $src $out/bin/keytao-installer
-            '';
+          src = pkgs.fetchurl {
+            url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
+            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           };
+
+          dontUnpack = false;
+
+          nativeBuildInputs = [
+            pkgs.autoPatchelfHook
+            pkgs.makeWrapper
+          ];
+
+          buildInputs = with pkgs; [
+            webkitgtk_4_1
+            gtk3
+            glib
+            gdk-pixbuf
+            pango
+            atk
+            cairo
+            harfbuzz
+            libayatana-appindicator
+            librime
+            openssl
+            dbus
+            xdotool
+            xz
+            libxkbcommon
+            libsoup_3
+            xorg.libX11
+            xorg.libxcb
+            wayland
+          ];
+
+          installPhase = ''
+            install -Dm755 keytao-installer $out/bin/keytao-installer
+          '';
+        };
       in
       {
         packages.default = keytaoInstallerPkg;
