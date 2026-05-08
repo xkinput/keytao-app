@@ -48,7 +48,7 @@ jobs:
           restore-keys: linux-cargo-
 
       - name: Install frontend dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --config.onlyBuiltDependencies=esbuild
 
       - name: Pre-build keytao-linux-ime
         run: |
