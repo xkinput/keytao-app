@@ -1,0 +1,68 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    APPIMAGE_EXTRACT_AND_RUN=1 \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    PATH="/root/.cargo/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl file git \
+        gcc g++ pkg-config \
+        python3 \
+        mold \
+        clang libclang-dev \
+        libwebkit2gtk-4.1-dev \
+        libgtk-3-dev \
+        libssl-dev \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
+        librime-dev \
+        libxdo-dev \
+        squashfs-tools \
+        patchelf \
+        xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 + pnpm
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g pnpm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust stable via apt (no external download needed)
+RUN apt-get update && apt-get install -y --no-install-recommends rustup \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup default stable \
+    && rustup show
+
+# Use rsproxy.cn mirror for cargo (avoids index.crates.io DNS issues)
+RUN mkdir -p /root/.cargo && cat > /root/.cargo/config.toml << 'EOF'
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/index/"
+EOF
+
+# Cache real linuxdeploy AppImages and shell plugins to avoid re-download at build time.
+# Tauri validates cached AppImages by size/magic; real files pass, shell wrappers do not.
+RUN mkdir -p /root/.cache/tauri
+COPY scripts/cache/linuxdeploy-x86_64.AppImage /root/.cache/tauri/linuxdeploy-x86_64.AppImage
+COPY scripts/cache/linuxdeploy-plugin-appimage-x86_64.AppImage /root/.cache/tauri/linuxdeploy-plugin-appimage-x86_64.AppImage
+COPY scripts/cache/linuxdeploy-plugin-gtk.sh /root/.cache/tauri/linuxdeploy-plugin-gtk.sh
+COPY scripts/cache/linuxdeploy-plugin-gstreamer.sh /root/.cache/tauri/linuxdeploy-plugin-gstreamer.sh
+COPY scripts/cache/AppRun-x86_64 /root/.cache/tauri/AppRun-x86_64
+RUN chmod 755 /root/.cache/tauri/linuxdeploy-x86_64.AppImage \
+              /root/.cache/tauri/linuxdeploy-plugin-appimage-x86_64.AppImage \
+              /root/.cache/tauri/linuxdeploy-plugin-gtk.sh \
+              /root/.cache/tauri/linuxdeploy-plugin-gstreamer.sh \
+              /root/.cache/tauri/AppRun-x86_64
+
+# AppImage binfmt runner — build-linux.sh copies this to /run/binfmt/appimage_type_{1,2}
+# at container startup so the kernel can find the interpreter when executing AppImages.
+# /run is a tmpfs at runtime, so we stage the script at /opt and copy at startup.
+COPY scripts/appimage-runner.sh /opt/appimage-runner
+RUN chmod 755 /opt/appimage-runner

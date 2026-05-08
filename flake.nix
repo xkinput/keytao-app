@@ -176,12 +176,21 @@
                                     mkdir -p "$_pkgfix_dir"
                                     cat > "$_pkgfix_dir/pkg-config.tmp" << SHIMEOF
             #!/bin/sh
-            if [ "\$*" = "--libs libayatana-appindicator3-0.1" ] || \\
-               [ "\$*" = "libayatana-appindicator3-0.1 --libs" ]; then
-              echo "-L$_appindicator_lib -layatana-appindicator3"
-            else
-              exec $_real_pkgconfig "\$@"
-            fi
+            case "\$*" in
+              "--libs libayatana-appindicator3-0.1"|"libayatana-appindicator3-0.1 --libs"|\
+              "--libs ayatana-appindicator3-0.1"|"ayatana-appindicator3-0.1 --libs")
+                echo "-L$_appindicator_lib -layatana-appindicator3"
+                ;;
+              "--libs-only-L libayatana-appindicator3-0.1"|"--libs-only-L ayatana-appindicator3-0.1")
+                echo "-L$_appindicator_lib"
+                ;;
+              "--libs-only-l libayatana-appindicator3-0.1"|"--libs-only-l ayatana-appindicator3-0.1")
+                echo "-layatana-appindicator3"
+                ;;
+              *)
+                exec $_real_pkgconfig "\$@"
+                ;;
+            esac
             SHIMEOF
                                     chmod +x "$_pkgfix_dir/pkg-config.tmp"
                                     mv -f "$_pkgfix_dir/pkg-config.tmp" "$_pkgfix_dir/pkg-config"
