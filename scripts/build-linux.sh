@@ -13,45 +13,14 @@ fi
 
 mkdir -p "$DIST_DIR"
 
-echo "==> Caching linuxdeploy tools (download if missing)..."
-CACHE_DIR="$SCRIPT_DIR/cache"
-mkdir -p "$CACHE_DIR"
-_gh="https://github.com"
-if [ ! -f "$CACHE_DIR/linuxdeploy-x86_64.AppImage" ]; then
-  curl -fSL "$_gh/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage" \
-       -o "$CACHE_DIR/linuxdeploy-x86_64.AppImage"
-fi
-if [ ! -f "$CACHE_DIR/linuxdeploy-plugin-appimage-x86_64.AppImage" ]; then
-  curl -fSL "$_gh/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage" \
-       -o "$CACHE_DIR/linuxdeploy-plugin-appimage-x86_64.AppImage"
-fi
-if [ ! -f "$CACHE_DIR/linuxdeploy-plugin-gtk.sh" ]; then
-  curl -fSL "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh" \
-       -o "$CACHE_DIR/linuxdeploy-plugin-gtk.sh"
-fi
-if [ ! -f "$CACHE_DIR/linuxdeploy-plugin-gstreamer.sh" ]; then
-  curl -fSL "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh" \
-       -o "$CACHE_DIR/linuxdeploy-plugin-gstreamer.sh"
-fi
-if [ ! -f "$CACHE_DIR/AppRun-x86_64" ]; then
-  curl -fSL "https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64" \
-       -o "$CACHE_DIR/AppRun-x86_64"
-fi
-chmod +x "$CACHE_DIR"/linuxdeploy-x86_64.AppImage \
-         "$CACHE_DIR"/linuxdeploy-plugin-appimage-x86_64.AppImage \
-         "$CACHE_DIR"/linuxdeploy-plugin-gtk.sh \
-         "$CACHE_DIR"/linuxdeploy-plugin-gstreamer.sh \
-         "$CACHE_DIR"/AppRun-x86_64
-
 echo "==> Building builder image..."
 docker build -f "$SCRIPT_DIR/Dockerfile.linux-builder" -t "$IMAGE" "$PROJECT_DIR"
 
-echo "==> Building deb + AppImage inside container..."
+echo "==> Building deb + tar.gz inside container..."
 _uid=$(id -u)
 _gid=$(id -g)
 docker run --rm \
   --network=host \
-  --privileged \
   -v "$PROJECT_DIR":/app \
   -v keytao-installer-cargo:/root/.cargo/registry \
   -v keytao-installer-cargo-git:/root/.cargo/git \
@@ -61,9 +30,9 @@ docker run --rm \
 
 echo ""
 echo "==> Artifacts:"
-ls -lh "$DIST_DIR"/*.AppImage "$DIST_DIR"/*.deb 2>/dev/null \
-  || ls -lh "$PROJECT_DIR"/target/release/bundle/appimage/*.AppImage \
-            "$PROJECT_DIR"/target/release/bundle/deb/*.deb 2>/dev/null \
+ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.tar.gz 2>/dev/null \
+  || ls -lh "$PROJECT_DIR"/target/release/bundle/deb/*.deb \
+            "$PROJECT_DIR"/target/release/bundle/*.tar.gz 2>/dev/null \
   || echo "(check target/release/bundle/)"
 
 exit 0

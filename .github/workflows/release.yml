@@ -38,7 +38,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: ''
+            args: --bundles deb
           - platform: macos-latest
             args: --target universal-apple-darwin
           - platform: windows-latest
@@ -90,6 +90,18 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release-id }}
           args: ${{ matrix.args }}
+
+      - name: Upload Linux tar.gz to release
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
+            -C target/release keytao-installer
+          gh release upload ${{ github.ref_name }} \
+            "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
+            --clobber
 
   build-android:
     needs: create-release

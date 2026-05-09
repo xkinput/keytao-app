@@ -23,7 +23,6 @@ jobs:
             libsoup-3.0-dev libharfbuzz-dev libbz2-dev liblzma-dev \
             librime-dev libclang-dev clang \
             libxdo-dev xdg-utils \
-            squashfs-tools libfuse2 \
             gcc libc6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             mold
@@ -56,10 +55,8 @@ jobs:
           cargo build -p keytao-linux-ime --release
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> $GITHUB_ENV
 
-      - name: Build AppImage + deb
-        run: pnpm tauri build --bundles deb,appimage
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
+      - name: Build deb
+        run: pnpm tauri build --bundles deb
 
       - name: Package bare binary for Nix
         run: |
@@ -73,7 +70,6 @@ jobs:
         with:
           name: linux-packages
           path: |
-            target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
             target/release/bundle/*.tar.gz
           if-no-files-found: error
@@ -83,6 +79,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
             target/release/bundle/*.tar.gz

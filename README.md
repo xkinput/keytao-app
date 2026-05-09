@@ -45,7 +45,7 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-Linux 打包（deb + AppImage）：
+Linux 打包（deb + tar.gz）：
 
 ```bash
 pnpm build:linux

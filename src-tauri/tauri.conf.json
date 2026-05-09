@@ -26,8 +26,7 @@
     "targets": [
       "dmg",
       "nsis",
-      "deb",
-      "appimage"
+      "deb"
     ],
     "externalBin": [],
     "icon": [
