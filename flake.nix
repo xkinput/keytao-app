@@ -101,8 +101,8 @@
         };
 
         iconPkg = pkgs.runCommand "keytao-installer-icon" { } ''
-          mkdir -p $out/share/icons/hicolor/256x256/apps
-          cp ${self}/public/logo.png $out/share/icons/hicolor/256x256/apps/keytao-installer.png
+          mkdir -p $out/share/icons/hicolor/128x128/apps
+          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-installer.png
         '';
 
         keytaoInstallerPkg = pkgs.symlinkJoin {
