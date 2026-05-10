@@ -132,7 +132,6 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             llvmPackages.libclang
-            wrapGAppsHook
           ];
           buildInputs = with pkgs; [
             librime
