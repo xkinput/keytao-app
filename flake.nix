@@ -129,13 +129,24 @@
             "--package"
             "keytao-linux-ime"
           ];
-          nativeBuildInputs = with pkgs; [ pkg-config llvmPackages.libclang ];
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            llvmPackages.libclang
+            wrapGAppsHook
+          ];
           buildInputs = with pkgs; [
             librime
             libxkbcommon
             xorg.libxcb
             xorg.libX11
+            dbus
+            glib
+            gtk3
+            libsoup_3
+            webkitgtk_4_1
+            openssl
           ];
+          doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
