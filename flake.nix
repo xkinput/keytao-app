@@ -47,78 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.8-alpha";
-
-        binaryPkg = pkgs.stdenv.mkDerivation {
-          pname = "keytao-installer-bin";
-          inherit version;
-
-          src = pkgs.fetchurl {
-            url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
-            hash = "sha256-rXcH/fxASFyuEz7xibLP6HpBaWZYCZMJnoM5LeQs2Ck=";
-          };
-
-          dontUnpack = true;
-          dontPatchELF = true;
-          dontFixup = true;
-
-          installPhase = ''
-            mkdir -p $out/bin
-            tar -xzf $src -C $out/bin
-            chmod +x $out/bin/keytao-installer
-          '';
-        };
-
-        fhsEnv = pkgs.buildFHSEnv {
-          name = "keytao-installer";
-          targetPkgs =
-            p: with p; [
-              webkitgtk_4_1
-              gtk3
-              glib
-              gdk-pixbuf
-              pango
-              atk
-              cairo
-              harfbuzz
-              libayatana-appindicator
-              librime
-              openssl
-              dbus
-              xdotool
-              xz
-              libxkbcommon
-              libsoup_3
-              freetype
-              xorg.libX11
-              xorg.libxcb
-              wayland
-            ];
-          runScript = "${binaryPkg}/bin/keytao-installer";
-        };
-
-        desktopItem = pkgs.makeDesktopItem {
-          name = "keytao-installer";
-          exec = "keytao-installer %U";
-          icon = "keytao-installer";
-          desktopName = "键道安装器";
-          comment = "Keytao IME installer";
-          categories = [ "Utility" ];
-        };
-
-        iconPkg = pkgs.runCommand "keytao-installer-icon" { } ''
-          mkdir -p $out/share/icons/hicolor/128x128/apps
-          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-installer.png
-        '';
-
-        keytaoInstallerPkg = pkgs.symlinkJoin {
-          name = "keytao-installer";
-          paths = [
-            fhsEnv
-            desktopItem
-            iconPkg
-          ];
-        };
+        version = "0.0.9-alpha";
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
@@ -151,6 +80,103 @@
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        };
+
+        keytaoInstallerBin = pkgs.rustPlatform.buildRustPackage {
+          pname = "keytao-installer";
+          inherit version;
+          src = pkgs.lib.cleanSource ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [
+            "--package"
+            "keytao-installer"
+          ];
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            llvmPackages.libclang
+          ];
+          buildInputs = with pkgs; [
+            librime
+            libxkbcommon
+            xorg.libxcb
+            xorg.libX11
+            dbus
+            glib
+            gtk3
+            gdk-pixbuf
+            pango
+            atk
+            cairo
+            harfbuzz
+            libsoup_3
+            webkitgtk_4_1
+            openssl
+            freetype
+            libayatana-appindicator
+            xdotool
+            xz
+          ];
+          preBuild = ''
+            test -f dist/index.html || {
+              echo "dist/index.html is missing; run pnpm build before updating the flake source" >&2
+              exit 1
+            }
+          '';
+          doCheck = false;
+          RIME_INCLUDE_DIR = "${pkgs.librime}/include";
+          RIME_LIB_DIR = "${pkgs.librime}/lib";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        };
+
+        fhsEnv = pkgs.buildFHSEnv {
+          name = "keytao-installer";
+          targetPkgs =
+            p: with p; [
+              webkitgtk_4_1
+              gtk3
+              glib
+              gdk-pixbuf
+              pango
+              atk
+              cairo
+              harfbuzz
+              libayatana-appindicator
+              librime
+              openssl
+              dbus
+              xdotool
+              xz
+              libxkbcommon
+              libsoup_3
+              freetype
+              xorg.libX11
+              xorg.libxcb
+              wayland
+            ];
+          runScript = "${keytaoInstallerBin}/bin/keytao-installer";
+        };
+
+        desktopItem = pkgs.makeDesktopItem {
+          name = "keytao-installer";
+          exec = "keytao-installer %U";
+          icon = "keytao-installer";
+          desktopName = "键道安装器";
+          comment = "Keytao IME installer";
+          categories = [ "Utility" ];
+        };
+
+        iconPkg = pkgs.runCommand "keytao-installer-icon" { } ''
+          mkdir -p $out/share/icons/hicolor/128x128/apps
+          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-installer.png
+        '';
+
+        keytaoInstallerPkg = pkgs.symlinkJoin {
+          name = "keytao-installer";
+          paths = [
+            fhsEnv
+            desktopItem
+            iconPkg
+          ];
         };
 
         keytaoBundlePkg = pkgs.symlinkJoin {
