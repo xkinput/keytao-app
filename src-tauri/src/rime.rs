@@ -163,7 +163,10 @@ pub fn get_frontmost_pid() -> u32 {
             ])
             .output();
         match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0),
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
             Err(_) => 0,
         }
     }
@@ -173,7 +176,10 @@ pub fn get_frontmost_pid() -> u32 {
             .args(["getactivewindow", "getwindowpid"])
             .output();
         match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0),
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
             Err(_) => 0,
         }
     }

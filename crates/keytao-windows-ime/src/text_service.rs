@@ -104,7 +104,9 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         if let (Some(thread_mgr), client_id) = (&st.thread_mgr, st.client_id) {
             if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
-                unsafe { let _ = km.UnadviseKeyEventSink(client_id); }
+                unsafe {
+                    let _ = km.UnadviseKeyEventSink(client_id);
+                }
             }
         }
 

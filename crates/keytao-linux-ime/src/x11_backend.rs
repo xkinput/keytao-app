@@ -20,20 +20,61 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 use xim::{
-    x11rb::X11rbServer, InputStyle, Server, ServerError, ServerHandler, UserInputContext,
-    XimConnections,
+    x11rb::X11rbServer, CommitData, InputContext, InputStyle, Request, Server, ServerCore,
+    ServerError, ServerHandler, UserInputContext, XimConnections,
 };
 
 use crate::{
-    engine::CoreEngine,
+    engine::{CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
 };
+
+const MOD_CONTROL: u32 = 0x0004;
+const MOD_MOD1: u32 = 0x0008;
+
+fn is_candidate_select_key(sym: u32) -> bool {
+    sym == 0x0020
+}
+
+fn is_enter_key(sym: u32) -> bool {
+    matches!(sym, 0xff0d | 0xff8d)
+}
+
+fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
+    if !state.preedit.is_empty() || !state.candidates.is_empty() {
+        return false;
+    }
+    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
+        return true;
+    }
+    matches!(
+        sym,
+        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
+    )
+}
+
+fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(), ServerError> {
+    tracing::debug!("XIM commit text: {text:?}");
+    server.send_req(
+        ic.client_win(),
+        Request::Commit {
+            input_method_id: ic.input_method_id().get(),
+            input_context_id: ic.input_context_id().get(),
+            data: CommitData::Chars {
+                commited: text.as_bytes().to_vec(),
+                syncronous: false,
+            },
+        },
+    )
+}
 
 // ── IC per-context data ───────────────────────────────────────────────────────
 
 // Spot location is stored directly on InputContext by xim (via preedit_spot()).
 // No extra per-IC data needed.
-struct IcData;
+struct IcData {
+    session: ImeSession,
+}
 
 // ── Main handler type ─────────────────────────────────────────────────────────
 
@@ -43,6 +84,7 @@ struct KeyTaoHandler {
     engine: CoreEngine,
     renderer: Option<PanelRenderer>,
     conn: Arc<XCBConnection>,
+    root: Window,
     panel_win: Window,
     panel_depth: u8,
     gc: Gcontext,
@@ -57,7 +99,7 @@ struct KeyTaoHandler {
 
 impl KeyTaoHandler {
     fn new(engine: CoreEngine, conn: Arc<XCBConnection>, screen_num: usize) -> Self {
-        let renderer = load_font().map(PanelRenderer::new);
+        let renderer = load_font().and_then(PanelRenderer::new);
         let setup = conn.setup();
         let screen = &setup.roots[screen_num];
         let root = screen.root;
@@ -122,6 +164,7 @@ impl KeyTaoHandler {
             engine,
             renderer,
             conn,
+            root,
             panel_win,
             panel_depth: depth,
             gc,
@@ -132,8 +175,8 @@ impl KeyTaoHandler {
         }
     }
 
-    fn show_panel(&mut self, state: &ImeState, spot_x: i16, spot_y: i16) {
-        if state.candidates.is_empty() && state.preedit.is_empty() {
+    fn show_panel(&mut self, user_ic: &UserInputContext<IcData>, state: &ImeState) {
+        if state.candidates.is_empty() {
             self.hide_panel();
             return;
         }
@@ -141,13 +184,27 @@ impl KeyTaoHandler {
             return;
         };
         let (pixels, w, h) = renderer.render(state);
+        let spot = user_ic.ic.preedit_spot();
+        let anchor = user_ic
+            .ic
+            .app_focus_win()
+            .or_else(|| user_ic.ic.app_win())
+            .map(|window| window.get())
+            .unwrap_or_else(|| user_ic.ic.client_win());
+        let (root_x, root_y) = self
+            .conn
+            .translate_coordinates(anchor, self.root, spot.x, spot.y)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| (reply.dst_x as i32, reply.dst_y as i32))
+            .unwrap_or((spot.x as i32, spot.y as i32));
 
         self.conn
             .configure_window(
                 self.panel_win,
                 &ConfigureWindowAux::new()
-                    .x(spot_x as i32)
-                    .y(spot_y as i32 - h as i32 - 4)
+                    .x(root_x)
+                    .y(root_y + 4)
                     .width(w)
                     .height(h),
             )
@@ -188,20 +245,26 @@ impl KeyTaoHandler {
 
 impl ServerHandler<MyServer> for KeyTaoHandler {
     type InputContextData = IcData;
-    type InputStyleArray = [InputStyle; 2];
+    type InputStyleArray = [InputStyle; 4];
 
     fn new_ic_data(
         &mut self,
         _server: &mut MyServer,
         _style: InputStyle,
     ) -> Result<IcData, ServerError> {
-        Ok(IcData)
+        let session = self
+            .engine
+            .create_session()
+            .map_err(ServerError::Internal)?;
+        Ok(IcData { session })
     }
 
     fn input_styles(&self) -> Self::InputStyleArray {
         [
             InputStyle::PREEDIT_CALLBACKS | InputStyle::STATUS_NOTHING,
             InputStyle::PREEDIT_POSITION | InputStyle::STATUS_NOTHING,
+            InputStyle::PREEDIT_NOTHING | InputStyle::STATUS_NOTHING,
+            InputStyle::PREEDIT_NONE | InputStyle::STATUS_NONE,
         ]
     }
 
@@ -224,9 +287,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     fn handle_destroy_ic(
         &mut self,
         _server: &mut MyServer,
-        _user_ic: UserInputContext<IcData>,
+        user_ic: UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
-        self.engine.reset();
+        user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(())
     }
@@ -234,9 +297,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     fn handle_reset_ic(
         &mut self,
         _server: &mut MyServer,
-        _user_ic: &mut UserInputContext<IcData>,
+        user_ic: &mut UserInputContext<IcData>,
     ) -> Result<String, ServerError> {
-        self.engine.reset();
+        user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(String::new())
     }
@@ -261,9 +324,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     fn handle_unset_focus(
         &mut self,
         _server: &mut MyServer,
-        _user_ic: &mut UserInputContext<IcData>,
+        user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
-        self.engine.reset();
+        user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(())
     }
@@ -299,8 +362,37 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         }
 
         let mods = u32::from(xev.state);
+        let before_state = user_ic.user_data.session.state();
+        if should_bypass_empty_composition(keysym, mods, &before_state) {
+            self.hide_panel();
+            return Ok(false);
+        }
+        if is_enter_key(keysym) && !before_state.preedit.is_empty() {
+            commit_text(server, &user_ic.ic, &before_state.preedit)?;
+            server.preedit_draw(&mut user_ic.ic, "")?;
+            user_ic.user_data.session.reset();
+            self.hide_panel();
+            return Ok(true);
+        }
+        if is_candidate_select_key(keysym) && !before_state.candidates.is_empty() {
+            let index = before_state
+                .highlighted_candidate_index
+                .min(before_state.candidates.len().saturating_sub(1));
+            if let Some(ime_state) = user_ic.user_data.session.select_candidate(index) {
+                if let Some(text) = &ime_state.committed {
+                    commit_text(server, &user_ic.ic, text)?;
+                }
+                server.preedit_draw(&mut user_ic.ic, "")?;
+                if ime_state.candidates.is_empty() {
+                    self.hide_panel();
+                } else {
+                    self.show_panel(user_ic, &ime_state);
+                }
+                return Ok(true);
+            }
+        }
 
-        let result = match self.engine.process_key_result(keysym, mods) {
+        let result = match user_ic.user_data.session.process_key_result(keysym, mods) {
             Some(r) => r,
             None => return Ok(false),
         };
@@ -310,7 +402,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         let consumed = result.accepted;
 
         if let Some(text) = &ime_state.committed {
-            server.commit(&user_ic.ic, text)?;
+            commit_text(server, &user_ic.ic, text)?;
         }
 
         if !ime_state.preedit.is_empty() {
@@ -319,11 +411,10 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
             server.preedit_draw(&mut user_ic.ic, "")?;
         }
 
-        let spot = user_ic.ic.preedit_spot();
-        if ime_state.committed.is_some() && ime_state.preedit.is_empty() {
+        if ime_state.candidates.is_empty() {
             self.hide_panel();
         } else {
-            self.show_panel(&ime_state, spot.x, spot.y);
+            self.show_panel(user_ic, &ime_state);
         }
 
         Ok(consumed)

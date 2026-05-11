@@ -22,6 +22,7 @@ jobs:
             librsvg2-dev patchelf libssl-dev pkg-config \
             libsoup-3.0-dev libharfbuzz-dev libbz2-dev liblzma-dev \
             librime-dev libclang-dev clang \
+            libfreetype6-dev \
             libxdo-dev xdg-utils \
             gcc libc6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
@@ -54,6 +55,7 @@ jobs:
         run: |
           cargo build -p keytao-linux-ime --release
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> $GITHUB_ENV
+          echo 'TAURI_CONFIG={"bundle":{"externalBin":["binaries/keytao-ime"]}}' >> $GITHUB_ENV
 
       - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -70,7 +72,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
           tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
-            -C target/release keytao-installer
+            -C target/release keytao-installer keytao-ime
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

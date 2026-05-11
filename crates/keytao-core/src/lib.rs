@@ -148,6 +148,10 @@ mod desktop {
             }
         }
 
+        pub fn state(&self) -> ImeState {
+            extract_state(&self.session)
+        }
+
         pub fn select_candidate(&self, index: usize) -> ImeState {
             if index < 9 {
                 let kc = b'1' as u32 + index as u32;

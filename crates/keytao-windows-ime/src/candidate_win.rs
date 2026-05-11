@@ -13,9 +13,8 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, ReleaseDC,
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
             SelectObject, SetBitmapBits, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
-            GetDC,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
@@ -64,11 +63,16 @@ impl CandidateWindow {
         }
 
         let hwnd = unsafe { Self::create_window() }.unwrap_or(HWND(std::ptr::null_mut()));
-        Self { hwnd, renderer, visible: false }
+        Self {
+            hwnd,
+            renderer,
+            visible: false,
+        }
     }
 
     unsafe fn create_window() -> Result<HWND> {
-        let hinstance: HMODULE = *DLL_INSTANCE.get()
+        let hinstance: HMODULE = *DLL_INSTANCE
+            .get()
             .unwrap_or(&GetModuleHandleW(None).unwrap_or_default());
 
         let class_name = class_name_wide();
@@ -88,8 +92,10 @@ impl CandidateWindow {
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::PCWSTR(std::ptr::null()),
             WS_POPUP,
-            CW_USEDEFAULT, CW_USEDEFAULT,
-            1, 1,         // initial size — overwritten by redraw
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            1,
+            1, // initial size — overwritten by redraw
             HWND(std::ptr::null_mut()),
             None,
             hinstance,
@@ -131,14 +137,18 @@ impl CandidateWindow {
         }
 
         if !self.visible {
-            unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE); }
+            unsafe {
+                ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
             self.visible = true;
         }
     }
 
     pub fn hide(&mut self) {
         if self.visible && !self.hwnd.0.is_null() {
-            unsafe { ShowWindow(self.hwnd, SW_HIDE); }
+            unsafe {
+                ShowWindow(self.hwnd, SW_HIDE);
+            }
             self.visible = false;
         }
     }
@@ -161,7 +171,10 @@ impl CandidateWindow {
         };
         let pt_dst = POINT { x, y };
         let pt_src = POINT { x: 0, y: 0 };
-        let sz = SIZE { cx: w as i32, cy: h as i32 };
+        let sz = SIZE {
+            cx: w as i32,
+            cy: h as i32,
+        };
 
         let _ = UpdateLayeredWindow(
             self.hwnd,
@@ -185,7 +198,9 @@ impl CandidateWindow {
 impl Drop for CandidateWindow {
     fn drop(&mut self) {
         if !self.hwnd.0.is_null() {
-            unsafe { let _ = DestroyWindow(self.hwnd); }
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
         }
     }
 }

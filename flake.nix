@@ -11,7 +11,7 @@
       flake-utils,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
+    (flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
@@ -47,7 +47,7 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.7-alpha";
+        version = "0.0.8-alpha";
 
         binaryPkg = pkgs.stdenv.mkDerivation {
           pname = "keytao-installer-bin";
@@ -55,7 +55,7 @@
 
           src = pkgs.fetchurl {
             url = "https://github.com/xkinput/keytao-installer/releases/download/v${version}/keytao-installer-${version}-linux-x86_64.tar.gz";
-            hash = "sha256-UZZSgy6paNMLx5R/nkSHviSnVHLA3Ne1fy8DVaiFEhA=";
+            hash = "sha256-rXcH/fxASFyuEz7xibLP6HpBaWZYCZMJnoM5LeQs2Ck=";
           };
 
           dontUnpack = true;
@@ -89,6 +89,7 @@
               xz
               libxkbcommon
               libsoup_3
+              freetype
               xorg.libX11
               xorg.libxcb
               wayland
@@ -144,20 +145,29 @@
             libsoup_3
             webkitgtk_4_1
             openssl
+            freetype
           ];
           doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
           RIME_LIB_DIR = "${pkgs.librime}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
+
+        keytaoBundlePkg = pkgs.symlinkJoin {
+          name = "keytao-installer";
+          paths = [
+            keytaoInstallerPkg
+            keytaoLinuxIme
+          ];
+        };
       in
       {
-        packages.default = keytaoInstallerPkg;
+        packages.default = keytaoBundlePkg;
         packages.keytao-linux-ime = keytaoLinuxIme;
 
         apps.default = {
           type = "app";
-          program = "${keytaoInstallerPkg}/bin/keytao-installer";
+          program = "${keytaoBundlePkg}/bin/keytao-installer";
         };
 
         devShells.default = pkgs.mkShell {
@@ -195,6 +205,7 @@
             cairo
             harfbuzz
             harfbuzz.dev
+            freetype
             bzip2
             bzip2.dev
             xz
@@ -231,6 +242,7 @@
               atk
               cairo
               harfbuzz
+              freetype
               bzip2
               xz
               openssl
@@ -262,6 +274,7 @@
               cairo
               pango
               harfbuzz
+              freetype
               xz
               libayatana-appindicator
             ]
@@ -339,6 +352,7 @@
                                           atk
                                           cairo
                                           harfbuzz
+                                          freetype
                                           bzip2
                                           openssl
                                           libsoup_3
@@ -369,5 +383,9 @@
           '';
         };
       }
-    );
+    ))
+    // {
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+      nixosModules.default = import ./nix/nixos.nix { inherit self; };
+    };
 }

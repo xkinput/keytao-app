@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libayatana-appindicator3-dev \
         librsvg2-dev \
         librime-dev \
+        libfreetype6-dev \
         libxdo-dev \
         squashfs-tools \
         patchelf \

@@ -36,8 +36,7 @@ impl TsfState {
     }
 
     pub fn init_engine(&mut self) -> Result<(), String> {
-        let user_dir = default_user_data_dir()
-            .ok_or("cannot determine keytao data directory")?;
+        let user_dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
         let shared = default_shared_data_dir();
         deploy(user_dir.to_string_lossy().into_owned(), shared)?;
         self.engine = Some(Engine::new()?);

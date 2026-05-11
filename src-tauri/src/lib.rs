@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
@@ -12,8 +12,8 @@ use keytao_core;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod rime;
 
-#[cfg(target_os = "linux")]
-mod ime;
+// Linux protocol frontends live in the keytao-ime daemon. The GUI only deploys
+// assets and starts the daemon when needed.
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
@@ -97,17 +97,47 @@ fn stop_managed_ime_helper(app: &tauri::AppHandle) {
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_keytao_ime_command() -> (std::process::Command, String) {
+fn linux_target_triple() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        "aarch64-unknown-linux-gnu"
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        "unknown-linux-gnu"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_keytao_ime_command(app: &tauri::AppHandle) -> (std::process::Command, String) {
     if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
         return (std::process::Command::new(&path), path);
     }
 
-    if cfg!(debug_assertions) {
-        if let Ok(current_exe) = std::env::current_exe() {
-            let sibling = current_exe.with_file_name("keytao-ime");
-            if sibling.is_file() {
-                let display = sibling.display().to_string();
-                return (std::process::Command::new(&sibling), display);
+    if let Ok(current_exe) = std::env::current_exe() {
+        let sibling = current_exe.with_file_name("keytao-ime");
+        if sibling.is_file() {
+            let display = sibling.display().to_string();
+            return (std::process::Command::new(&sibling), display);
+        }
+    }
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let target = linux_target_triple();
+        for candidate in [
+            resource_dir.join("keytao-ime"),
+            resource_dir.join(format!("keytao-ime-{target}")),
+            resource_dir
+                .join("binaries")
+                .join(format!("keytao-ime-{target}")),
+        ] {
+            if candidate.is_file() {
+                let display = candidate.display().to_string();
+                return (std::process::Command::new(candidate), display);
             }
         }
     }
@@ -120,26 +150,37 @@ fn resolve_keytao_ime_command() -> (std::process::Command, String) {
 
 #[cfg(target_os = "linux")]
 fn is_same_keytao_ime_running(expected: &str) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-af", "keytao-ime"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line.contains(expected))
-        })
-        .unwrap_or(false)
+    if expected == "keytao-ime" {
+        return is_any_keytao_ime_running();
+    }
+
+    keytao_ime_process_lines()
+        .into_iter()
+        .any(|line| line.contains(expected))
 }
 
 #[cfg(target_os = "linux")]
 fn is_any_keytao_ime_running() -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-x", "keytao-ime"])
+    !keytao_ime_process_lines().is_empty()
+}
+
+#[cfg(target_os = "linux")]
+fn keytao_ime_process_lines() -> Vec<String> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-af", "keytao-ime"])
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+        .ok();
+
+    output
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.contains("keytao-ime"))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
@@ -1460,32 +1501,18 @@ pub fn run() {
                 })?;
             #[cfg(target_os = "linux")]
             {
-                use ime::{TrayArc, TrayShared};
-                use std::sync::{Arc, RwLock};
                 use tauri::menu::{MenuBuilder, MenuItemBuilder};
                 use tauri::tray::TrayIconBuilder;
 
-                let tray_shared: TrayArc = Arc::new(RwLock::new(TrayShared {
-                    schema_name: "KeyTao".to_string(),
-                    redeploy_requested: false,
-                }));
-
-                let tray_arc_menu = tray_shared.clone();
-                let schema_item = MenuItemBuilder::with_id("schema", "方案: 初始化中...")
-                    .enabled(false)
-                    .build(app)?;
                 let mem_item = MenuItemBuilder::with_id("mem", "内存: ...")
                     .enabled(false)
                     .build(app)?;
-                let redeploy_item = MenuItemBuilder::with_id("redeploy", "重新部署").build(app)?;
                 let open_item = MenuItemBuilder::with_id("open", "打开主窗口").build(app)?;
                 let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
                 let menu = MenuBuilder::new(app)
-                    .item(&schema_item)
                     .item(&mem_item)
                     .separator()
                     .item(&open_item)
-                    .item(&redeploy_item)
                     .separator()
                     .item(&quit_item)
                     .build()?;
@@ -1495,16 +1522,10 @@ pub fn run() {
                     .menu(&menu)
                     .tooltip("KeyTao 输入法")
                     .on_menu_event({
-                        let tray_arc = tray_arc_menu.clone();
-                        let schema_item_cl = schema_item.clone();
                         let mem_item_cl = mem_item.clone();
                         move |app, event| {
                             let id = event.id().as_ref();
-                            if id == "redeploy" {
-                                if let Ok(mut t) = tray_arc.write() {
-                                    t.redeploy_requested = true;
-                                }
-                            } else if id == "quit" {
+                            if id == "quit" {
                                 app.exit(0);
                             } else if id == "open" {
                                 if let Some(w) = app.get_webview_window("main") {
@@ -1512,11 +1533,6 @@ pub fn run() {
                                     let _ = w.set_focus();
                                 }
                             }
-                            let schema = tray_arc
-                                .read()
-                                .map(|t| t.schema_name.clone())
-                                .unwrap_or_default();
-                            let _ = schema_item_cl.set_text(format!("方案: {schema}"));
                             use sysinfo::System;
                             let mut sys = System::new();
                             sys.refresh_memory();
@@ -1525,17 +1541,9 @@ pub fn run() {
                         }
                     })
                     .on_tray_icon_event({
-                        let tray_arc2 = tray_arc_menu.clone();
-                        let schema_item_tray = schema_item.clone();
                         let mem_item_tray = mem_item.clone();
                         move |_tray, event| {
-                            // Refresh when the tray icon is right-clicked (menu about to open).
                             if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                                let schema = tray_arc2
-                                    .read()
-                                    .map(|t| t.schema_name.clone())
-                                    .unwrap_or_default();
-                                let _ = schema_item_tray.set_text(format!("方案: {schema}"));
                                 use sysinfo::System;
                                 let mut sys = System::new();
                                 sys.refresh_memory();
@@ -1547,27 +1555,12 @@ pub fn run() {
                     .build(app)?;
                 drop(tray);
 
-                // Listen for schema-changed events from the IME thread to update the tray item.
-                let schema_item_listen = schema_item.clone();
-                app.handle()
-                    .listen("schema-changed", move |event: tauri::Event| {
-                        if let Ok(name) = serde_json::from_str::<String>(event.payload()) {
-                            let _ = schema_item_listen.set_text(format!("方案: {name}"));
-                        }
-                    });
-
-                ime::spawn(app.handle().clone(), tray_shared);
-
-                // Ensure keytao-ime is running for X11/XIM and IBus (WeChat etc.).
-                // Always remove WAYLAND_DISPLAY here so the standalone process does
-                // not register another zwp_input_method_v2 client and break global
-                // key handling. The Tauri app's embedded IME owns the Wayland path,
-                // so the helper auto-selects XIM + IBus without extra flags.
-                let (mut ime_cmd, ime_display) = resolve_keytao_ime_command();
+                // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
+                let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());
                 let same_binary_running = is_same_keytao_ime_running(&ime_display);
                 let any_ime_running = is_any_keytao_ime_running();
                 if !any_ime_running {
-                    match ime_cmd.env_remove("WAYLAND_DISPLAY").spawn() {
+                    match ime_cmd.spawn() {
                         Ok(child) => {
                             let pid = child.id();
                             if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {

@@ -6,10 +6,7 @@
 //!   preedit text    → manage ITfComposition
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
 
-use std::{
-    cell::UnsafeCell,
-    sync::Arc,
-};
+use std::{cell::UnsafeCell, sync::Arc};
 
 use windows::{
     core::{implement, Interface, Result, GUID},
@@ -145,7 +142,10 @@ fn caret_screen_pos(ec: u32, context: &ITfContext) -> (i32, i32) {
 
         let mut rect = RECT::default();
         let mut clipped = BOOL::default();
-        if view.GetTextExt(ec, &range, &mut rect, &mut clipped).is_err() {
+        if view
+            .GetTextExt(ec, &range, &mut rect, &mut clipped)
+            .is_err()
+        {
             return (100, 100);
         }
         (rect.left, rect.bottom)
@@ -281,8 +281,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let (cx, cy) = caret_screen_pos(ec, ctx);
             st.ime_state = Some(ime_state_clone.clone());
 
-            let show = !ime_state_clone.candidates.is_empty()
-                || !ime_state_clone.preedit.is_empty();
+            let show =
+                !ime_state_clone.candidates.is_empty() || !ime_state_clone.preedit.is_empty();
             if show {
                 st.candidate_win.show(&ime_state_clone, cx, cy);
             } else {
@@ -324,7 +324,11 @@ pub(crate) struct CompositionSink {
 }
 
 impl ITfCompositionSink_Impl for CompositionSink_Impl {
-    fn OnCompositionTerminated(&self, _ecwrite: u32, _pcomposition: windows::core::Ref<ITfComposition>) -> Result<()> {
+    fn OnCompositionTerminated(
+        &self,
+        _ecwrite: u32,
+        _pcomposition: windows::core::Ref<ITfComposition>,
+    ) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.composition = None;
         st.ime_state = None;

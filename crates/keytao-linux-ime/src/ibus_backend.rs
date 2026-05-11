@@ -4,7 +4,8 @@
 //! (e.g. WeChatAppEx) can use keytao as their IME without requiring a real
 //! IBus daemon.
 
-use crate::engine::CoreEngine;
+use crate::engine::{CoreEngine, ImeSession};
+use keytao_core::{Candidate, ImeState};
 use std::{
     fs,
     sync::{
@@ -16,11 +17,41 @@ use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
 // ── IBus text helper ─────────────────────────────────────────────────────────
 
-/// Build an IBusText structure as an OwnedValue (variant).
+const IBUS_ORIENTATION_SYSTEM: i32 = 2;
+const MOD_CONTROL: u32 = 0x0004;
+const MOD_MOD1: u32 = 0x0008;
+const RELEASE_MASK: u32 = 1 << 30;
+
+fn is_shift_key(sym: u32) -> bool {
+    matches!(sym, 0xffe1 | 0xffe2)
+}
+
+fn is_candidate_select_key(sym: u32) -> bool {
+    sym == 0x0020
+}
+
+fn is_enter_key(sym: u32) -> bool {
+    matches!(sym, 0xff0d | 0xff8d)
+}
+
+fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
+    if !state.preedit.is_empty() || !state.candidates.is_empty() {
+        return false;
+    }
+    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
+        return true;
+    }
+    matches!(
+        sym,
+        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
+    )
+}
+
+/// Build an IBusText structure as a variant.
 /// IBus D-Bus type: v containing (sa{sv}sv)
 ///   ("IBusText", {}, text_string, v:("IBusAttrList",{},[]))
-fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
-    use zvariant::{Array, Dict, OwnedValue, Signature, StructureBuilder, Value};
+fn ibus_text_variant(text: &str) -> zvariant::Value<'static> {
+    use zvariant::{Array, Dict, Signature, StructureBuilder, Value};
 
     // Build IBusAttrList: ("IBusAttrList", {}, [])
     let sig_s = Signature::try_from("s").unwrap();
@@ -46,14 +77,81 @@ fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
         .build();
 
     // Wrap as variant (signals take `v`)
-    let outer = Value::Value(Box::new(Value::Structure(ibus_text_struct)));
-    OwnedValue::try_from(outer).expect("ibus_text_value")
+    Value::Value(Box::new(Value::Structure(ibus_text_struct)))
+}
+
+fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
+    zvariant::OwnedValue::try_from(ibus_text_variant(text)).expect("ibus_text_value")
+}
+
+fn candidate_display_text(candidate: &Candidate) -> String {
+    match candidate
+        .comment
+        .as_deref()
+        .filter(|comment| !comment.is_empty())
+    {
+        Some(comment) => format!("{} {}", candidate.text, comment),
+        None => candidate.text.clone(),
+    }
+}
+
+fn candidate_label(index: usize, select_keys: Option<&str>) -> String {
+    select_keys
+        .and_then(|keys| keys.chars().nth(index))
+        .or_else(|| "1234567890".chars().nth(index))
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| (index + 1).to_string())
+}
+
+/// Build an IBusLookupTable value.
+/// Serialized shape: ("IBusLookupTable", a{sv}, u, u, b, b, i, av, av).
+fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
+    use zvariant::{Array, Dict, Signature, StructureBuilder, Value};
+
+    let sig_s = Signature::try_from("s").unwrap();
+    let sig_v = Signature::try_from("v").unwrap();
+    let empty_dict = Dict::new(sig_s, sig_v.clone());
+
+    let mut candidates = Array::new(sig_v.clone());
+    for candidate in &state.candidates {
+        candidates
+            .append(ibus_text_variant(&candidate_display_text(candidate)))
+            .expect("append IBus lookup candidate");
+    }
+
+    let mut labels = Array::new(sig_v);
+    let select_keys = state.select_keys.as_deref();
+    for index in 0..state.candidates.len() {
+        labels
+            .append(ibus_text_variant(&candidate_label(index, select_keys)))
+            .expect("append IBus lookup label");
+    }
+
+    let page_size = state.candidates.len().clamp(1, 16) as u32;
+    let cursor_pos = state
+        .highlighted_candidate_index
+        .min(state.candidates.len().saturating_sub(1)) as u32;
+
+    let table = StructureBuilder::new()
+        .add_field("IBusLookupTable".to_owned())
+        .append_field(Value::Dict(empty_dict))
+        .add_field(page_size)
+        .add_field(cursor_pos)
+        .add_field(true)
+        .add_field(false)
+        .add_field(IBUS_ORIENTATION_SYSTEM)
+        .append_field(Value::Array(candidates))
+        .append_field(Value::Array(labels))
+        .build();
+
+    zvariant::OwnedValue::try_from(Value::Value(Box::new(Value::Structure(table))))
+        .expect("ibus_lookup_table_value")
 }
 
 // ── InputContext D-Bus object ─────────────────────────────────────────────────
 
 struct InputContext {
-    engine: CoreEngine,
+    session: ImeSession,
 }
 
 #[interface(name = "org.freedesktop.IBus.InputContext")]
@@ -62,19 +160,36 @@ impl InputContext {
         tracing::debug!("IBus InputContext: FocusIn");
     }
 
-    async fn focus_out(&self) {
+    async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: FocusOut");
-        self.engine.reset();
+        self.session.reset();
+        clear_input_context_ui(&ctxt).await;
     }
 
-    async fn reset(&self) {
+    async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: Reset");
-        self.engine.reset();
+        self.session.reset();
+        clear_input_context_ui(&ctxt).await;
     }
 
     async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
     async fn set_cursor_location_relative(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
     async fn set_capabilities(&self, _caps: u32) {}
+
+    async fn destroy(
+        &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+    ) -> zbus::fdo::Result<()> {
+        tracing::debug!("IBus InputContext: Destroy");
+        self.session.reset();
+        clear_input_context_ui(&ctxt).await;
+        server
+            .remove::<InputContext, _>(ctxt.path().to_owned())
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        Ok(())
+    }
 
     /// Process a key event. Returns true if consumed by the IME.
     async fn process_key_event(
@@ -84,14 +199,54 @@ impl InputContext {
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> bool {
-        // Ignore key-release events (IBUS_RELEASE_MASK = bit 30)
-        if state & (1 << 30) != 0 {
+        if state & RELEASE_MASK != 0 {
+            if is_shift_key(keyval) {
+                if let Some(result) = self.session.process_key_result(keyval, RELEASE_MASK) {
+                    tracing::debug!(
+                        "IBus mode after Shift release: ascii_mode={}",
+                        result.state.ascii_mode
+                    );
+                    return result.accepted;
+                }
+            }
             return false;
         }
 
         tracing::debug!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
-        let result = match self.engine.process_key_result(keyval, state) {
+        let before_state = self.session.state();
+        if should_bypass_empty_composition(keyval, state, &before_state) {
+            clear_input_context_ui(&ctxt).await;
+            return false;
+        }
+        if is_enter_key(keyval) && !before_state.preedit.is_empty() {
+            let ov = ibus_text_value(&before_state.preedit);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = Self::commit_text(&ctxt, v).await;
+            }
+            self.session.reset();
+            clear_input_context_ui(&ctxt).await;
+            return true;
+        }
+        if is_candidate_select_key(keyval) && !before_state.candidates.is_empty() {
+            let index = before_state
+                .highlighted_candidate_index
+                .min(before_state.candidates.len().saturating_sub(1));
+            if let Some(ime_state) = self.session.select_candidate(index) {
+                if let Some(ref text) = ime_state.committed {
+                    if !text.is_empty() {
+                        let ov = ibus_text_value(text);
+                        if let Ok(v) = zvariant::Value::try_from(&ov) {
+                            let _ = Self::commit_text(&ctxt, v).await;
+                        }
+                    }
+                }
+                clear_input_context_ui(&ctxt).await;
+                return true;
+            }
+        }
+
+        let result = match self.session.process_key_result(keyval, state) {
             Some(r) => r,
             None => return false,
         };
@@ -117,6 +272,15 @@ impl InputContext {
             let ov = ibus_text_value(&ime_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = Self::update_preedit_text(&ctxt, v, cursor, true).await;
+            }
+        }
+
+        if ime_state.candidates.is_empty() {
+            let _ = Self::hide_lookup_table(&ctxt).await;
+        } else {
+            let ov = ibus_lookup_table_value(&ime_state);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = Self::update_lookup_table(&ctxt, v, true).await;
             }
         }
 
@@ -153,6 +317,11 @@ impl InputContext {
     async fn hide_lookup_table(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
 }
 
+async fn clear_input_context_ui(ctxt: &SignalContext<'_>) {
+    let _ = InputContext::hide_preedit_text(ctxt).await;
+    let _ = InputContext::hide_lookup_table(ctxt).await;
+}
+
 // ── IBusBus D-Bus object ──────────────────────────────────────────────────────
 
 struct IBusBus {
@@ -173,11 +342,13 @@ impl IBusBus {
         let path = zbus::zvariant::OwnedObjectPath::try_from(path_str.clone())
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        tracing::info!("IBus CreateInputContext client={client_name:?} → {path_str}");
+        tracing::debug!("IBus CreateInputContext client={client_name:?} -> {path_str}");
 
-        let ctx = InputContext {
-            engine: self.engine.clone(),
-        };
+        let session = self
+            .engine
+            .create_session()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        let ctx = InputContext { session };
         server
             .at(path.clone(), ctx)
             .await
@@ -247,7 +418,7 @@ fn write_ibus_address_files(dbus_address: &str) {
         if let Err(e) = fs::write(&path, &content) {
             tracing::warn!("failed to write {}: {e}", path.display());
         } else {
-            tracing::info!("wrote IBus address file: {}", path.display());
+            tracing::debug!("wrote IBus address file: {}", path.display());
         }
     }
 }

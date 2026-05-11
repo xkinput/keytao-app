@@ -87,35 +87,35 @@ pub fn vk_to_keysym(vk: u16) -> Option<u32> {
         VK_NUMPAD9 => 0x0039,
 
         // --- Control keys ---
-        VK_BACK   => 0xFF08, // XK_BackSpace
-        VK_TAB    => 0xFF09, // XK_Tab
+        VK_BACK => 0xFF08,   // XK_BackSpace
+        VK_TAB => 0xFF09,    // XK_Tab
         VK_RETURN => 0xFF0D, // XK_Return
         VK_ESCAPE => 0xFF1B, // XK_Escape
-        VK_SPACE  => 0x0020, // XK_space
+        VK_SPACE => 0x0020,  // XK_space
         VK_DELETE => 0xFFFF, // XK_Delete
 
         // --- Navigation ---
-        VK_LEFT  => 0xFF51, // XK_Left
-        VK_UP    => 0xFF52, // XK_Up
+        VK_LEFT => 0xFF51,  // XK_Left
+        VK_UP => 0xFF52,    // XK_Up
         VK_RIGHT => 0xFF53, // XK_Right
-        VK_DOWN  => 0xFF54, // XK_Down
-        VK_HOME  => 0xFF50, // XK_Home
-        VK_END   => 0xFF57, // XK_End
+        VK_DOWN => 0xFF54,  // XK_Down
+        VK_HOME => 0xFF50,  // XK_Home
+        VK_END => 0xFF57,   // XK_End
         VK_PRIOR => 0xFF55, // XK_Prior (Page Up)
-        VK_NEXT  => 0xFF56, // XK_Next  (Page Down)
+        VK_NEXT => 0xFF56,  // XK_Next  (Page Down)
 
         // --- OEM punctuation (US layout) ---
-        VK_OEM_MINUS  => 0x002D, // '-'
-        VK_OEM_PLUS   => 0x003D, // '='
-        VK_OEM_COMMA  => 0x002C, // ','
+        VK_OEM_MINUS => 0x002D,  // '-'
+        VK_OEM_PLUS => 0x003D,   // '='
+        VK_OEM_COMMA => 0x002C,  // ','
         VK_OEM_PERIOD => 0x002E, // '.'
-        VK_OEM_1      => 0x003B, // ';'
-        VK_OEM_2      => 0x002F, // '/'
-        VK_OEM_3      => 0x0060, // '`'
-        VK_OEM_4      => 0x005B, // '['
-        VK_OEM_5      => 0x005C, // '\'
-        VK_OEM_6      => 0x005D, // ']'
-        VK_OEM_7      => 0x0027, // '\''
+        VK_OEM_1 => 0x003B,      // ';'
+        VK_OEM_2 => 0x002F,      // '/'
+        VK_OEM_3 => 0x0060,      // '`'
+        VK_OEM_4 => 0x005B,      // '['
+        VK_OEM_5 => 0x005C,      // '\'
+        VK_OEM_6 => 0x005D,      // ']'
+        VK_OEM_7 => 0x0027,      // '\''
 
         // Anything else (function keys, media keys, etc.) — don't intercept
         _ => return None,
@@ -139,12 +139,30 @@ pub fn should_eat_key(vk: u16, has_preedit: bool, mods: u32) -> bool {
         // With active preedit: eat navigation + selection keys too
         matches!(
             vk,
-            VK_BACK | VK_ESCAPE | VK_RETURN | VK_SPACE
-            | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN
-            | VK_PRIOR | VK_NEXT
-            | VK_0 | VK_1 | VK_2 | VK_3 | VK_4
-            | VK_5 | VK_6 | VK_7 | VK_8 | VK_9
-            | VK_OEM_MINUS | VK_OEM_PLUS | VK_OEM_COMMA | VK_OEM_PERIOD
+            VK_BACK
+                | VK_ESCAPE
+                | VK_RETURN
+                | VK_SPACE
+                | VK_LEFT
+                | VK_RIGHT
+                | VK_UP
+                | VK_DOWN
+                | VK_PRIOR
+                | VK_NEXT
+                | VK_0
+                | VK_1
+                | VK_2
+                | VK_3
+                | VK_4
+                | VK_5
+                | VK_6
+                | VK_7
+                | VK_8
+                | VK_9
+                | VK_OEM_MINUS
+                | VK_OEM_PLUS
+                | VK_OEM_COMMA
+                | VK_OEM_PERIOD
         ) || is_letter_vk(vk)
     } else {
         // Without preedit: only eat unshifted/shifted letters that start composition

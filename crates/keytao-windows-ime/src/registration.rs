@@ -13,12 +13,12 @@ use windows::{
     Win32::{
         System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
         System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY,
-            HKEY_CLASSES_ROOT, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
+            KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
         },
         UI::TextServices::{
-            ITfCategoryMgr, ITfInputProcessorProfiles, CLSID_TF_CategoryMgr,
-            CLSID_TF_InputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
+            CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
+            ITfInputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
         },
     },
 };
@@ -34,9 +34,17 @@ fn to_wide(s: &str) -> Vec<u16> {
 fn guid_to_string(guid: &windows::core::GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        guid.data1, guid.data2, guid.data3,
-        guid.data4[0], guid.data4[1], guid.data4[2], guid.data4[3],
-        guid.data4[4], guid.data4[5], guid.data4[6], guid.data4[7],
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7],
     )
 }
 
@@ -44,18 +52,8 @@ fn guid_to_string(guid: &windows::core::GUID) -> String {
 unsafe fn reg_set_sz(hkey: HKEY, name: &str, value: &str) -> Result<()> {
     let name_w = to_wide(name);
     let val_w = to_wide(value);
-    let bytes = std::slice::from_raw_parts(
-        val_w.as_ptr() as *const u8,
-        val_w.len() * 2,
-    );
-    RegSetValueExW(
-        hkey,
-        PCWSTR(name_w.as_ptr()),
-        0,
-        REG_SZ,
-        Some(bytes),
-    )
-    .ok()
+    let bytes = std::slice::from_raw_parts(val_w.as_ptr() as *const u8, val_w.len() * 2);
+    RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), 0, REG_SZ, Some(bytes)).ok()
 }
 
 /// Create (or open) a registry key under HKCR and return its HKEY.
@@ -98,8 +96,7 @@ pub fn register() -> Result<()> {
 
     unsafe {
         // 1. HKCR\CLSID\{...}
-        let key_clsid =
-            reg_create(HKEY_CLASSES_ROOT, &format!("CLSID\\{}", clsid_str))?;
+        let key_clsid = reg_create(HKEY_CLASSES_ROOT, &format!("CLSID\\{}", clsid_str))?;
         reg_set_sz(key_clsid, "", "KeyTao Input Method")?;
         RegCloseKey(key_clsid).ok();
 
@@ -159,11 +156,9 @@ pub fn unregister() -> Result<()> {
             let _ = profiles.Unregister(&CLSID_TEXT_SERVICE);
         }
 
-        if let Ok(cat_mgr) = CoCreateInstance::<ITfCategoryMgr>(
-            &CLSID_TF_CategoryMgr,
-            None,
-            CLSCTX_INPROC_SERVER,
-        ) {
+        if let Ok(cat_mgr) =
+            CoCreateInstance::<ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+        {
             let _ = cat_mgr.UnregisterCategory(
                 &CLSID_TEXT_SERVICE,
                 &GUID_TFCAT_TIP_KEYBOARD,

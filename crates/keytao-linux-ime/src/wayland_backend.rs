@@ -7,7 +7,13 @@
 //!   zwp_input_popup_surface_v2       — auto-positioned candidate panel at cursor
 //!   wl_shm                           — shared-memory pixel buffers
 
-use std::{fs::File, io::Write, os::fd::AsFd};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{Seek, SeekFrom, Write},
+    os::fd::{AsFd, AsRawFd},
+    time::{Duration, Instant},
+};
 
 use keytao_core::ImeState;
 use wayland_client::{
@@ -31,28 +37,67 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_v2::{self, ZwpInputMethodV2},
     zwp_input_popup_surface_v2::{self, ZwpInputPopupSurfaceV2},
 };
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
+    zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
+    zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+};
 use xkbcommon::xkb;
 
 use crate::{
-    engine::CoreEngine,
+    engine::{CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
 };
 
 const MOD_SHIFT: u32 = 0x0001;
 const MOD_CONTROL: u32 = 0x0004;
 const MOD_MOD1: u32 = 0x0008;
+const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
+const WL_KEY_RELEASED: u32 = 0;
+const WL_KEY_PRESSED: u32 = 1;
+const RELEASE_MASK: u32 = 1 << 30;
+const MODE_HINT_DURATION: Duration = Duration::from_secs(3);
+
+fn is_shift_key(sym: u32) -> bool {
+    sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
+}
+
+fn is_candidate_select_key(sym: u32) -> bool {
+    sym == 0x0020
+}
+
+fn is_enter_key(sym: u32) -> bool {
+    matches!(sym, 0xff0d | 0xff8d)
+}
+
+fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
+    if !state.preedit.is_empty() || !state.candidates.is_empty() {
+        return false;
+    }
+    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
+        return true;
+    }
+    matches!(
+        sym,
+        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
+    )
+}
 
 struct App {
-    engine: CoreEngine,
+    session: ImeSession,
     renderer: Option<PanelRenderer>,
 
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     seat: Option<WlSeat>,
     ime_manager: Option<ZwpInputMethodManagerV2>,
+    virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
 
     input_method: Option<ZwpInputMethodV2>,
     keyboard_grab: Option<ZwpInputMethodKeyboardGrabV2>,
+    virtual_keyboard: Option<ZwpVirtualKeyboardV1>,
+    virtual_keymap: Option<File>,
+    forwarded_keys: HashSet<u32>,
+    started_at: Instant,
     serial: u32,
     active: bool,
 
@@ -68,23 +113,30 @@ struct App {
     panel_visible: bool,
 
     ime_state: Option<ImeState>,
+    ascii_mode: bool,
+    mode_hint_until: Option<Instant>,
 }
 
 impl App {
-    fn new(engine: CoreEngine) -> Self {
-        let renderer = load_font().map(PanelRenderer::new);
+    fn new(session: ImeSession) -> Self {
+        let renderer = load_font().and_then(PanelRenderer::new);
         if renderer.is_none() {
             tracing::warn!("panel renderer unavailable: no font found");
         }
         Self {
-            engine,
+            session,
             renderer,
             compositor: None,
             shm: None,
             seat: None,
             ime_manager: None,
+            virtual_keyboard_manager: None,
             input_method: None,
             keyboard_grab: None,
+            virtual_keyboard: None,
+            virtual_keymap: None,
+            forwarded_keys: HashSet::new(),
+            started_at: Instant::now(),
             serial: 0,
             active: false,
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
@@ -96,6 +148,8 @@ impl App {
             panel_buffer: None,
             panel_visible: false,
             ime_state: None,
+            ascii_mode: false,
+            mode_hint_until: None,
         }
     }
 
@@ -105,7 +159,43 @@ impl App {
         };
         let im = manager.get_input_method(seat, qh, ());
         self.input_method = Some(im);
-        tracing::info!("input method registered");
+        tracing::debug!("input method registered");
+    }
+
+    fn setup_virtual_keyboard(&mut self, qh: &QueueHandle<Self>) {
+        let (Some(manager), Some(seat)) = (&self.virtual_keyboard_manager, &self.seat) else {
+            tracing::warn!("Wayland virtual-keyboard unavailable; shortcuts may not pass through");
+            return;
+        };
+        self.virtual_keyboard = Some(manager.create_virtual_keyboard(seat, qh, ()));
+        tracing::debug!("virtual keyboard registered for unhandled key forwarding");
+    }
+
+    fn install_virtual_keymap(&mut self, keymap: &[u8]) {
+        let Some(vk) = &self.virtual_keyboard else {
+            return;
+        };
+
+        let mut file = match tempfile() {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("failed to create virtual keyboard keymap fd: {e}");
+                return;
+            }
+        };
+        if file
+            .set_len(keymap.len() as u64)
+            .and_then(|_| file.write_all(keymap))
+            .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .is_err()
+        {
+            tracing::warn!("failed to write virtual keyboard keymap");
+            return;
+        }
+
+        vk.keymap(WL_KEYMAP_FORMAT_XKB_V1, file.as_fd(), keymap.len() as u32);
+        self.virtual_keymap = Some(file);
+        tracing::debug!("virtual keyboard keymap installed ({} bytes)", keymap.len());
     }
 
     fn create_panel_popup(&mut self, qh: &QueueHandle<Self>) {
@@ -133,8 +223,7 @@ impl App {
     }
 
     fn redraw_panel(&mut self, qh: &QueueHandle<Self>) {
-        let (Some(state), Some(renderer), Some(shm), Some(surface)) = (
-            self.ime_state.as_ref(),
+        let (Some(renderer), Some(shm), Some(surface)) = (
             self.renderer.as_ref(),
             self.shm.as_ref(),
             self.panel_surface.as_ref(),
@@ -142,7 +231,18 @@ impl App {
             return;
         };
 
-        let (pixels, w, h) = renderer.render(state);
+        let show_hint = self.mode_hint_active();
+        let (pixels, w, h) = if let Some(state) = self
+            .ime_state
+            .as_ref()
+            .filter(|state| !state.candidates.is_empty())
+        {
+            renderer.render(state)
+        } else if show_hint {
+            renderer.render_mode_hint(self.ascii_mode)
+        } else {
+            return;
+        };
         if w == 0 || h == 0 {
             return;
         }
@@ -173,9 +273,12 @@ impl App {
     }
 
     fn show_panel(&mut self, state: ImeState, qh: &QueueHandle<Self>) {
-        let has_content = !state.candidates.is_empty() || !state.preedit.is_empty();
+        // The application already renders preedit through set_preedit_string.
+        // Keep the popup for actual candidate menus and short mode hints only.
+        let has_content = !state.candidates.is_empty();
+        let show_hint = self.mode_hint_active();
         self.ime_state = Some(state);
-        if has_content {
+        if has_content || show_hint {
             if self.panel_surface.is_none() {
                 self.create_panel_popup(qh);
             }
@@ -186,8 +289,43 @@ impl App {
         }
     }
 
-    fn handle_key_press(&mut self, keycode: u32, qh: &QueueHandle<Self>) {
-        tracing::info!(
+    fn mode_hint_active(&self) -> bool {
+        self.mode_hint_until
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    fn update_ascii_mode(&mut self, ascii_mode: bool, qh: &QueueHandle<Self>) {
+        if ascii_mode == self.ascii_mode {
+            return;
+        }
+        self.ascii_mode = ascii_mode;
+        self.mode_hint_until = Some(Instant::now() + MODE_HINT_DURATION);
+        self.show_panel(ImeState::empty(), qh);
+        tracing::info!("IME mode changed: {}", if ascii_mode { "EN" } else { "CN" });
+    }
+
+    fn key_sym(&self, evdev_keycode: u32) -> u32 {
+        let keycode = evdev_keycode + 8;
+        self.xkb_state
+            .as_ref()
+            .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
+            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
+            .into()
+    }
+
+    fn handle_key_event(
+        &mut self,
+        evdev_keycode: u32,
+        key_state: wl_keyboard::KeyState,
+        qh: &QueueHandle<Self>,
+    ) {
+        if key_state == wl_keyboard::KeyState::Released {
+            self.handle_key_release(evdev_keycode, qh);
+            return;
+        }
+
+        let keycode = evdev_keycode + 8;
+        tracing::trace!(
             "key press: keycode={keycode} xkb_state={}",
             if self.xkb_state.is_some() {
                 "ok"
@@ -195,25 +333,56 @@ impl App {
                 "NONE"
             }
         );
-        let keysym = self
-            .xkb_state
-            .as_ref()
-            .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
-            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol));
-
-        let sym_raw: u32 = keysym.into();
-        tracing::info!("key sym: {sym_raw:#x}");
+        let sym_raw = self.key_sym(evdev_keycode);
+        tracing::trace!("key sym: {sym_raw:#x}");
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
             tracing::warn!("key dropped: NoSymbol (xkb_state likely None)");
             return;
         }
 
-        let result = match self.engine.process_key_result(sym_raw, self.mods) {
+        let effective_mods = if is_shift_key(sym_raw) {
+            self.mods & !MOD_SHIFT
+        } else {
+            self.mods
+        };
+
+        let before_state = self.session.state();
+        if should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
+            self.forward_unhandled_key(evdev_keycode, sym_raw);
+            return;
+        }
+        if is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
+            if let Some(im) = &self.input_method {
+                im.commit_string(before_state.preedit.clone());
+                im.set_preedit_string(String::new(), 0, 0);
+                im.commit(self.serial);
+            }
+            self.session.reset();
+            self.show_panel(ImeState::empty(), qh);
+            return;
+        }
+        if is_candidate_select_key(sym_raw) && !before_state.candidates.is_empty() {
+            let index = before_state
+                .highlighted_candidate_index
+                .min(before_state.candidates.len().saturating_sub(1));
+            if let Some(ime_state) = self.session.select_candidate(index) {
+                if let Some(im) = &self.input_method {
+                    if let Some(committed) = &ime_state.committed {
+                        im.commit_string(committed.clone());
+                    }
+                    im.set_preedit_string(String::new(), 0, 0);
+                    im.commit(self.serial);
+                }
+                self.show_panel(ime_state, qh);
+                return;
+            }
+        }
+
+        let result = match self.session.process_key_result(sym_raw, effective_mods) {
             Some(r) => r,
             None => {
                 // librime says it cannot process this key at all.
-                // Forward functional keys to the app as text or via protocol.
-                self.forward_key(sym_raw);
+                self.forward_unhandled_key(evdev_keycode, sym_raw);
                 return;
             }
         };
@@ -221,8 +390,9 @@ impl App {
         let ime_state = result.state;
 
         let consumed = result.accepted;
+        self.update_ascii_mode(ime_state.ascii_mode, qh);
 
-        tracing::info!(
+        tracing::trace!(
             "ime state: consumed={} ascii_mode={} commit={:?} preedit={:?} candidates={}",
             consumed,
             ime_state.ascii_mode,
@@ -242,12 +412,41 @@ impl App {
                 im.commit(self.serial);
             } else {
                 // librime processed the key but produced nothing — forward it.
-                self.forward_key(sym_raw);
+                self.forward_unhandled_key(evdev_keycode, sym_raw);
                 return;
             }
         }
 
         self.show_panel(ime_state, qh);
+    }
+
+    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
+        let sym_raw = self.key_sym(evdev_keycode);
+        if is_shift_key(sym_raw) {
+            if let Some(result) = self.session.process_key_result(sym_raw, RELEASE_MASK) {
+                self.update_ascii_mode(result.state.ascii_mode, qh);
+            }
+        }
+        if self.forwarded_keys.remove(&evdev_keycode) {
+            self.forward_physical_key(evdev_keycode, WL_KEY_RELEASED);
+        }
+    }
+
+    fn forward_unhandled_key(&mut self, evdev_keycode: u32, sym: u32) {
+        if self.virtual_keyboard.is_some() && self.virtual_keymap.is_some() {
+            self.forwarded_keys.insert(evdev_keycode);
+            self.forward_physical_key(evdev_keycode, WL_KEY_PRESSED);
+        } else {
+            self.forward_text_key(sym);
+        }
+    }
+
+    fn forward_physical_key(&self, evdev_keycode: u32, state: u32) {
+        let Some(vk) = &self.virtual_keyboard else {
+            return;
+        };
+        let time = self.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        vk.key(time, evdev_keycode, state);
     }
 
     // Forward a key to the application when IME does not consume it.
@@ -256,7 +455,7 @@ impl App {
     // delete/backspace.  Arrow/cursor keys cannot be forwarded this way —
     // the keyboard grab must release them; wlroots-based compositors do
     // this automatically for keys the IME commits nothing for.
-    fn forward_key(&self, sym: u32) {
+    fn forward_text_key(&self, sym: u32) {
         let Some(im) = &self.input_method else { return };
         match sym {
             // Space
@@ -322,6 +521,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
                 "zwp_input_method_manager_v2" => {
                     state.ime_manager = Some(registry.bind(name, 1, qh, ()));
                 }
+                "zwp_virtual_keyboard_manager_v1" => {
+                    state.virtual_keyboard_manager = Some(registry.bind(name, 1, qh, ()));
+                }
                 _ => {}
             }
         }
@@ -343,15 +545,16 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 // Always replace any existing grab so we don't accumulate stale proxies.
                 state.keyboard_grab = None;
                 let grab = proxy.grab_keyboard(qh, ());
-                tracing::info!("IME activated — keyboard grab requested");
+                tracing::debug!("IME activated; keyboard grab requested");
                 state.keyboard_grab = Some(grab);
             }
             zwp_input_method_v2::Event::Deactivate => {
                 state.active = false;
                 let had_grab = state.keyboard_grab.take().is_some();
-                state.engine.reset();
+                state.session.reset();
+                state.mode_hint_until = None;
                 state.destroy_panel_popup();
-                tracing::info!("IME deactivated (had_grab={had_grab})");
+                tracing::debug!("IME deactivated (had_grab={had_grab})");
             }
             zwp_input_method_v2::Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
@@ -379,35 +582,34 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
     ) {
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { format, fd, size } => {
-                tracing::info!("keyboard grab: Keymap received format={format:?} size={size}");
+                tracing::debug!("keyboard grab: keymap received format={format:?} size={size}");
                 if format != WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
                     tracing::warn!("keyboard grab: unexpected keymap format {format:?}, skipping");
                     return;
                 }
-                let mmap = unsafe {
-                    memmap2::MmapOptions::new()
-                        .len(size as usize)
-                        .map_raw_read_only(&fd)
-                };
+                let mmap = memmap2::MmapOptions::new()
+                    .len(size as usize)
+                    .map_raw_read_only(&fd);
                 if let Ok(mmap) = mmap {
-                    let s = unsafe {
-                        let bytes = std::slice::from_raw_parts(mmap.as_ptr(), size as usize - 1);
-                        std::str::from_utf8_unchecked(bytes).to_string()
-                    };
+                    let keymap_bytes =
+                        unsafe { std::slice::from_raw_parts(mmap.as_ptr(), size as usize) };
+                    let keymap_text = keymap_bytes.strip_suffix(&[0]).unwrap_or(keymap_bytes);
+                    let s = String::from_utf8_lossy(keymap_text).into_owned();
                     if let Some(km) = xkb::Keymap::new_from_string(
                         &state.xkb_context,
-                        s,
+                        s.clone(),
                         xkb::KEYMAP_FORMAT_TEXT_V1,
                         xkb::KEYMAP_COMPILE_NO_FLAGS,
                     ) {
                         state.xkb_state = Some(xkb::State::new(&km));
                         state.xkb_keymap = Some(km);
+                        state.install_virtual_keymap(keymap_bytes);
                     }
                 }
             }
             zwp_input_method_keyboard_grab_v2::Event::Key { key, state: ks, .. } => {
-                if ks == WEnum::Value(wl_keyboard::KeyState::Pressed) {
-                    state.handle_key_press(key + 8, qh);
+                if let WEnum::Value(key_state) = ks {
+                    state.handle_key_event(key, key_state, qh);
                 }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
@@ -431,6 +633,9 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                         m |= MOD_MOD1;
                     }
                     state.mods = m;
+                }
+                if let (Some(vk), Some(_)) = (&state.virtual_keyboard, &state.virtual_keymap) {
+                    vk.modifiers(mods_depressed, mods_latched, mods_locked, group);
                 }
             }
             _ => {}
@@ -467,10 +672,20 @@ delegate_noop!(App: ignore WlSurface);
 delegate_noop!(App: ignore WlSeat);
 delegate_noop!(App: ignore WlKeyboard);
 delegate_noop!(App: ignore ZwpInputMethodManagerV2);
+delegate_noop!(App: ignore ZwpVirtualKeyboardManagerV1);
+delegate_noop!(App: ignore ZwpVirtualKeyboardV1);
 
 // ── Entry point ────────────────────────────────────────────────────────────────
 
 pub fn run(engine: CoreEngine) {
+    let session = match engine.create_session() {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::error!("failed to create Wayland Rime session: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let conn = Connection::connect_to_env().expect("Wayland connection");
     let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("registry");
     let qh = queue.handle();
@@ -489,19 +704,56 @@ pub fn run(engine: CoreEngine) {
         );
         std::process::exit(1);
     });
+    let virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1> = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| {
+            tracing::warn!(
+                "compositor does not advertise zwp_virtual_keyboard_manager_v1; \
+                 shortcut forwarding will be limited: {e}"
+            );
+            e
+        })
+        .ok();
 
-    let mut app = App::new(engine);
+    let mut app = App::new(session);
     app.compositor = Some(compositor);
     app.shm = Some(shm);
     app.seat = Some(seat);
     app.ime_manager = Some(ime_manager);
+    app.virtual_keyboard_manager = virtual_keyboard_manager;
 
     app.setup_ime(&qh);
+    app.setup_virtual_keyboard(&qh);
     queue.roundtrip(&mut app).expect("initial roundtrip");
 
     tracing::info!("Wayland IME running (popup-surface positioning)");
     loop {
-        queue.blocking_dispatch(&mut app).expect("dispatch");
+        if app
+            .mode_hint_until
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            app.mode_hint_until = None;
+            app.show_panel(ImeState::empty(), &qh);
+        }
+
+        queue.flush().expect("flush");
+        let timeout_ms = if app.mode_hint_until.is_some() {
+            100
+        } else {
+            -1
+        };
+        let raw_fd = conn.as_fd().as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd: raw_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, timeout_ms) };
+        if ready > 0 {
+            queue.blocking_dispatch(&mut app).expect("dispatch");
+        } else if ready < 0 {
+            tracing::warn!("Wayland poll failed");
+        }
     }
 }
 

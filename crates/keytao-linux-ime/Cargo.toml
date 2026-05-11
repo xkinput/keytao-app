@@ -2,7 +2,7 @@
 name = "keytao-linux-ime"
 version = "0.1.0"
 edition = "2021"
-description = "KeyTao standalone Linux IME — Wayland input-method-v2 + X11 XIM, no ibus/fcitx5 required"
+description = "KeyTao Linux IME daemon with Wayland input-method-v2, XIM, and IBus-compatible frontends"
 
 [[bin]]
 name = "keytao-ime"
@@ -31,7 +31,7 @@ dirs = "5"
 
 # Candidate panel rendering (software rasteriser, no GPU required)
 tiny-skia = "0.11"
-fontdue = "0.9"
+freetype-rs = "0.38"
 
 # SHM pool helper (anonymous fd for Wayland shm)
 memmap2 = "0.9"

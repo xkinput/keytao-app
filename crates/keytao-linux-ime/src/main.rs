@@ -74,11 +74,7 @@ impl BackendSelection {
     fn for_session(has_wayland: bool, has_x11: bool) -> Self {
         match (has_wayland, has_x11) {
             (true, true) => Self {
-                // In mixed Wayland + XWayland sessions, keep the standalone helper
-                // on XIM + IBus by default. The Wayland path should be owned by the
-                // compositor-integrated frontend, otherwise the keyboard grab steals
-                // shortcuts from the whole desktop.
-                wayland: false,
+                wayland: true,
                 xim: true,
                 ibus: true,
             },

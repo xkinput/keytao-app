@@ -16,7 +16,7 @@
 |------|-----------|----------|
 | macOS | 鼠须管（Squirrel） | `~/Library/Rime` |
 | Windows | 小狼毫（Weasel） | `%APPDATA%\Rime` |
-| Linux | 内置 IME（zwp_input_method_v2 + XIM） | `~/.local/share/rime` |
+| Linux | `keytao-ime`（Wayland input-method-v2 + XIM + IBus 兼容） | `~/.local/share/rime` |
 | Android | 同文输入法（Trime） | `/sdcard/rime`（SAF） |
 | iOS | iRime | 需手动导入，仅提供下载链接 |
 
@@ -50,33 +50,43 @@ inputs.keytao-installer = {
 };
 ```
 
-**2. 安装两个包**
+**2. 使用 Home Manager 一句安装**
+
+```nix
+imports = [ inputs.keytao-installer.homeManagerModules.default ];
+```
+
+模块会安装 GUI + `keytao-ime` daemon，并在支持 `programs.niri` 的配置中自动加入启动项和输入法环境变量。
+
+如果只想手动安装包，也可以直接引用默认包：
 
 ```nix
 # home.packages（或 environment.systemPackages）
-inputs.keytao-installer.packages.${pkgs.stdenv.hostPlatform.system}.default      # GUI 安装器 + Wayland IME
-inputs.keytao-installer.packages.${pkgs.stdenv.hostPlatform.system}.keytao-linux-ime  # 独立 XIM 服务器（XWayland 应用需要）
+inputs.keytao-installer.packages.${pkgs.stdenv.hostPlatform.system}.default
 ```
 
 ---
 
 ## Linux IME 架构
 
-Linux 下有两个互补的 IME 进程，分别服务不同的应用类型：
+Linux 下只有一个协议入口：`keytao-ime`。GUI 安装器只负责下载、合并和部署 Rime 配置，并在启动时确保 `keytao-ime` 已运行。
 
 ```
 keytao-installer（Tauri GUI）
-  └── 内嵌 Wayland 后端 ──→ zwp_input_method_v2 ──→ 原生 Wayland 应用（GTK / Electron / …）
+  └── 部署 Rime 资源并启动 keytao-ime
 
-keytao-ime（独立守护进程）
-  └── X11/XIM 服务器 ──────→ XIM 协议 ─────────→ XWayland 应用（微信 / 旧版 Qt / …）
+keytao-ime（Linux IME daemon）
+  ├── Wayland frontend ──→ zwp_input_method_v2 ──→ 原生 Wayland 应用
+  ├── X11 frontend ──────→ XIM ──────────────────→ X11 / XWayland 应用
+  └── IBus frontend ─────→ org.freedesktop.IBus ─→ GTK / Chromium / CEF 兼容路径
+                           └─ preedit / lookup table / commit signals
 ```
 
-两者不能合并为一个进程，因为 Wayland compositor 每个 seat 只允许**一个进程**注册 `zwp_input_method_v2`；`keytao-installer` 已占用该位置，`keytao-ime` 必须以 X11-only 模式运行（不设置 `WAYLAND_DISPLAY`）。
+`keytao-ime` 会为每个输入上下文创建独立 librime session，避免多个应用或窗口共享同一个 composition 状态。
 
 ### Wayland（原生应用）
 
-启动 `keytao-installer`，无需额外配置。GTK 应用会通过 `text-input-v3` 协议自动连接；Electron 应用需要设置以下环境变量：
+启动 `keytao-installer` 或直接启动 `keytao-ime`。GTK 应用会通过 `text-input-v3` 协议自动连接；Electron 应用需要设置以下环境变量：
 
 ```
 NIXOS_OZONE_WL=1
@@ -85,17 +95,10 @@ ELECTRON_OZONE_PLATFORM_HINT=wayland
 
 ### XWayland（XIM）
 
-针对使用 X11/XCB 的应用（如微信、旧版 Qt 应用），需要启动 `keytao-ime` 作为 XIM 服务器，并在应用环境中设置 `XMODIFIERS`：
+针对使用 X11/XCB 的应用（如微信、旧版 Qt 应用），需要在应用环境中设置 `XMODIFIERS`：
 
 ```bash
 XMODIFIERS=@im=keytao <your-app>
-```
-
-`keytao-ime` 必须在**不设置 `WAYLAND_DISPLAY`** 的情况下启动，以避免与 `keytao-installer` 冲突：
-
-```bash
-unset WAYLAND_DISPLAY
-exec keytao-ime
 ```
 
 #### niri（Wayland compositor）配置示例
@@ -104,11 +107,6 @@ exec keytao-ime
 programs.niri.settings = {
   spawn-at-startup = [
     { command = [ "keytao-installer" ]; }
-    # X11-only mode: WAYLAND_DISPLAY must be unset so keytao-ime does not try
-    # to register a second zwp_input_method_v2 (only one allowed per seat).
-    {
-      command = [ "sh" "-c" "unset WAYLAND_DISPLAY; exec keytao-ime" ];
-    }
   ];
 
   environment = {
@@ -119,10 +117,11 @@ programs.niri.settings = {
     "GDK_BACKEND" = "wayland,x11";
     # Qt: prefer Wayland, fall back to xcb (XWayland)
     "QT_QPA_PLATFORM" = "wayland;xcb";
-    # XWayland display — niri always assigns :0.
-    # Required so startup processes (e.g. keytao-ime) can connect to XWayland
-    # even before the first X11 client triggers its lazy initialization.
+    # XWayland display — niri usually assigns :0.
     "DISPLAY" = ":0";
+    "XMODIFIERS" = "@im=keytao";
+    "GTK_IM_MODULE" = "xim";
+    "QT_IM_MODULE" = "xim";
   };
 };
 ```
@@ -157,6 +156,15 @@ pnpm tauri dev
 
 ```bash
 pnpm tauri build
+```
+
+Linux 下如果要让 Tauri 包内嵌 `keytao-ime` sidecar，需要先构建 daemon 并注入 Linux-only Tauri 配置：
+
+```bash
+cargo build -p keytao-linux-ime --release
+KEYTAO_IME_PATH="$PWD/target/release/keytao-ime" \
+TAURI_CONFIG='{"bundle":{"externalBin":["binaries/keytao-ime"]}}' \
+pnpm tauri build --bundles deb
 ```
 
 Linux 打包（deb + tar.gz）：

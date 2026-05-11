@@ -1,26 +1,25 @@
 # keytao-linux-ime
 
-Standalone Linux IME binary for KeyTao. No IBus or Fcitx5 required.
-Works directly over Wayland (`zwp_input_method_v2`) and X11 (XIM protocol).
+Standalone Linux IME daemon for KeyTao. No Fcitx5 process is required.
+Works directly over Wayland (`zwp_input_method_v2`), X11 (XIM protocol), and an IBus-compatible D-Bus frontend.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        keytao-linux-ime                             │
+│                           keytao-ime                                │
 │                                                                     │
 │  main.rs                                                            │
 │  ├─ init CoreEngine (deploy librime, load schemas)                  │
 │  ├─ detect display server                                           │
 │  │    WAYLAND_DISPLAY set? ──► wayland_backend::run()              │
 │  │    DISPLAY set?         ──► x11_backend::run()                  │
+│  │    session bus set?     ──► ibus_backend::run()                 │
 │  └─ load font for panel renderer (NotoSansCJK / wqy / fc-match)    │
 │                                                                     │
-│  engine.rs  (CoreEngine)                                            │
-│  └─ wraps keytao-core::{Engine, deploy}                             │
-│       process_key(keycode, mask) → ImeState                         │
-│       select_candidate(index)   → ImeState                         │
-│       change_page(backward)     → ImeState                         │
+│  engine.rs  (CoreEngine + ImeSession)                               │
+│  └─ deploys once, creates one librime session per input context      │
+│       process_key_result(keycode, mask) → KeyProcessResult          │
 │       reset()                   → ImeState                         │
 │                                                                     │
 │  panel.rs  (PanelRenderer)                                          │
@@ -40,6 +39,11 @@ Works directly over Wayland (`zwp_input_method_v2`) and X11 (XIM protocol).
 │  ├─ XIM server (@server=keytao, set XMODIFIERS=@im=keytao)        │
 │  ├─ xim crate (x11rb) — handle IC create/destroy/key events       │
 │  └─ XCB overlay window  — upload BGRA buffer via XCBImage         │
+│                                                                     │
+│  ibus_backend.rs                                                    │
+│  ├─ org.freedesktop.IBus-compatible D-Bus input contexts           │
+│  ├─ UpdatePreeditText / UpdateLookupTable / CommitText signals     │
+│  └─ per-client CreateInputContext / Destroy lifecycle              │
 └─────────────────────────────────────────────────────────────────────┘
          │                                │
          ▼                                ▼
@@ -58,12 +62,12 @@ Works directly over Wayland (`zwp_input_method_v2`) and X11 (XIM protocol).
 
 ```
 App (any GUI app)
-  │  key event via Wayland/XIM protocol
+  │  key event via Wayland/XIM/IBus-compatible protocol
   ▼
-keytao-linux-ime
+keytao-ime
   │  keycode + modifier mask
   ▼
-CoreEngine::process_key()
+ImeSession::process_key_result()
   │  forwards to librime via keytao-core
   ▼
 ImeState { preedit, candidates, committed, ... }
@@ -74,6 +78,7 @@ ImeState { preedit, candidates, committed, ... }
                                │
                          Wayland: wl_surface (popup)
                          X11:     XCB overlay window
+                         IBus:    LookupTable / preedit D-Bus signals
 ```
 
 ## Wayland setup
@@ -82,7 +87,7 @@ The compositor must support `zwp_input_method_v2` (KDE Plasma ≥ 5.24, Sway ≥
 
 ```sh
 # Launch (usually handled by the installer's autostart entry)
-keytao-linux-ime
+keytao-ime
 ```
 
 ## X11 setup
@@ -91,7 +96,7 @@ keytao-linux-ime
 export XMODIFIERS=@im=keytao
 export GTK_IM_MODULE=xim
 export QT_IM_MODULE=xim
-keytao-linux-ime &
+keytao-ime &
 ```
 
 ## Schema init
@@ -113,3 +118,4 @@ schema database before starting the event loop.
 | `xkbcommon` | keymap + modifier state on Wayland |
 | `x11rb` | XCB connection for X11 backend |
 | `xim` | XIM server implementation on top of x11rb |
+| `zbus` | IBus-compatible D-Bus frontend |
