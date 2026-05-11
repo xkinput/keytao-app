@@ -35,6 +35,7 @@ result
 result-*
 
 # Rust / Cargo build outputs
+dist/
 target/
 **/*.rs.bk
 
