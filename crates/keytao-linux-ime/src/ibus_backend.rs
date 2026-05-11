@@ -84,6 +84,40 @@ fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
     zvariant::OwnedValue::try_from(ibus_text_variant(text)).expect("ibus_text_value")
 }
 
+/// Build an IBusEngineDesc value for the "keytao" engine.
+/// Structure: (sa{sv} name longname description language license author icon layout rank hotkeys symbol setup layout_variant layout_option version textdomain)
+fn ibus_engine_desc_value() -> zvariant::OwnedValue {
+    use zvariant::{Dict, Signature, StructureBuilder, Value};
+
+    let sig_s = Signature::try_from("s").unwrap();
+    let sig_v = Signature::try_from("v").unwrap();
+    let empty_dict = Dict::new(sig_s, sig_v);
+
+    let engine = StructureBuilder::new()
+        .add_field("IBusEngineDesc".to_owned())
+        .append_field(Value::Dict(empty_dict))
+        .add_field("keytao".to_owned()) // name
+        .add_field("KeyTao".to_owned()) // longname
+        .add_field("KeyTao Input Method".to_owned()) // description
+        .add_field("zh".to_owned()) // language
+        .add_field("".to_owned()) // license
+        .add_field("".to_owned()) // author
+        .add_field("".to_owned()) // icon
+        .add_field("default".to_owned()) // layout
+        .add_field(0u32) // rank
+        .add_field("".to_owned()) // hotkeys
+        .add_field("键".to_owned()) // symbol
+        .add_field("".to_owned()) // setup
+        .add_field("".to_owned()) // layout_variant
+        .add_field("".to_owned()) // layout_option
+        .add_field("".to_owned()) // version
+        .add_field("".to_owned()) // textdomain
+        .build();
+
+    zvariant::OwnedValue::try_from(Value::Value(Box::new(Value::Structure(engine))))
+        .expect("ibus_engine_desc_value")
+}
+
 fn candidate_display_text(candidate: &Candidate) -> String {
     match candidate
         .comment
@@ -370,7 +404,7 @@ impl IBusBus {
     }
 
     async fn get_global_engine(&self) -> zbus::fdo::Result<zvariant::OwnedValue> {
-        Err(zbus::fdo::Error::Failed("no global engine".into()))
+        Ok(ibus_engine_desc_value())
     }
 
     #[zbus(signal)]
@@ -486,7 +520,7 @@ pub async fn run(engine: CoreEngine) {
         }
     };
 
-    let _conn = match builder.build().await {
+    let conn = match builder.build().await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("IBus D-Bus backend failed to connect: {e}");
@@ -499,7 +533,16 @@ pub async fn run(engine: CoreEngine) {
 
     write_ibus_address_files(&dbus_address);
 
+    // Notify any already-connected IBus clients that the keytao engine is active.
+    // Chromium/CEF clients that connected before this signal can use GetGlobalEngine instead.
+    if let Ok(signal_ctx) = SignalContext::new(&conn, "/org/freedesktop/IBus") {
+        IBusBus::global_engine_changed(&signal_ctx, "keytao")
+            .await
+            .ok();
+    }
+
     tracing::info!("IBus D-Bus backend ready ({})", dbus_address);
+    let _conn = conn; // keep connection alive
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
