@@ -28,6 +28,12 @@ in
       description = "Package providing keytao-installer and keytao-ime.";
     };
 
+    kde = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable KDE Plasma IBus integration (sets QT_IM_MODULE and GTK_IM_MODULE to ibus).";
+    };
+
     setInputMethodEnvironment = lib.mkOption {
       type = lib.types.bool;
       default = pkgs.stdenv.isLinux;
@@ -57,6 +63,10 @@ in
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
+        // lib.optionalAttrs cfg.kde {
+          QT_IM_MODULE = "ibus";
+          GTK_IM_MODULE = "ibus";
+        }
         // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
@@ -64,6 +74,10 @@ in
 
         systemd.user.sessionVariables = {
           XMODIFIERS = "@im=keytao";
+        }
+        // lib.optionalAttrs cfg.kde {
+          QT_IM_MODULE = "ibus";
+          GTK_IM_MODULE = "ibus";
         }
         // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
