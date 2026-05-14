@@ -217,7 +217,15 @@ fn main() {
         }
         tracing::info!("librime ready");
 
-        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        // When KWin launches us as a Virtual Keyboard (via the WAYLAND_SOCKET desktop entry),
+        // it passes a private Wayland socket fd via WAYLAND_SOCKET.  In that case we must use
+        // the Wayland backend directly — Connection::connect_to_env() picks up WAYLAND_SOCKET
+        // automatically.  Skip the KDE IBus fallback in this mode.
+        let kwin_socket = std::env::var("WAYLAND_SOCKET").ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .is_some();
+
+        let has_wayland = kwin_socket || std::env::var_os("WAYLAND_DISPLAY").is_some();
         let has_x11 = std::env::var_os("DISPLAY").is_some();
 
         let desktop = std::env::var("XDG_CURRENT_DESKTOP")
@@ -226,15 +234,28 @@ fn main() {
         let is_gnome = desktop
             .split(':')
             .any(|s| matches!(s, "gnome" | "unity" | "budgie" | "pantheon" | "x-cinnamon"));
-        let is_kde = desktop.split(':').any(|s| s == "kde");
+        // When launched via WAYLAND_SOCKET (KWin Virtual Keyboard), treat as plain Wayland
+        // so the wayland backend is selected even on KDE.
+        let is_kde = !kwin_socket && desktop.split(':').any(|s| s == "kde");
 
-        // --ibus-engine flag means we were launched by ibus-daemon itself — skip
-        // auto-detection and run only as an IBus engine.
-        if is_kde && !requested_backends.any() {
+        // Write the plasma-workspace env file so Qt/GTK3 apps use IBus on KDE,
+        // but only when running as the ordinary (non-KWin-spawned) daemon.
+        if is_kde && !kwin_socket && !requested_backends.any() {
             write_kde_env_file();
         }
 
-        let selected = if requested_backends.ibus_engine {
+        if kwin_socket {
+            tracing::info!("KWin Virtual Keyboard mode: using WAYLAND_SOCKET for zwp_input_method_v2");
+        }
+
+        let selected = if kwin_socket {
+            // Launched by KWin as its registered Virtual Keyboard.  The private
+            // WAYLAND_SOCKET is the only display we should use; don't start IBus/XIM.
+            BackendSelection {
+                wayland: true,
+                ..Default::default()
+            }
+        } else if requested_backends.ibus_engine {
             requested_backends
         } else if requested_backends.any() {
             requested_backends
