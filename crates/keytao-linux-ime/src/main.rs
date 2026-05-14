@@ -221,7 +221,8 @@ fn main() {
         // it passes a private Wayland socket fd via WAYLAND_SOCKET.  In that case we must use
         // the Wayland backend directly — Connection::connect_to_env() picks up WAYLAND_SOCKET
         // automatically.  Skip the KDE IBus fallback in this mode.
-        let kwin_socket = std::env::var("WAYLAND_SOCKET").ok()
+        let kwin_socket = std::env::var("WAYLAND_SOCKET")
+            .ok()
             .and_then(|s| s.parse::<i32>().ok())
             .is_some();
 
@@ -245,7 +246,9 @@ fn main() {
         }
 
         if kwin_socket {
-            tracing::info!("KWin Virtual Keyboard mode: using WAYLAND_SOCKET for zwp_input_method_v2");
+            tracing::info!(
+                "KWin Virtual Keyboard mode: using WAYLAND_SOCKET for zwp_input_method_v2"
+            );
         }
 
         let selected = if kwin_socket {
