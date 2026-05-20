@@ -520,7 +520,7 @@ export default function App() {
           <img src="/logo.png" alt="KeyTao" className="h-12 w-12" />
           <div>
             <h1 className="text-xl font-bold tracking-tight leading-tight">
-              KeyTao
+              KeyTao 键道
               {appVersion && <span className="ml-2 text-sm font-normal text-muted-foreground">v{appVersion}</span>}
             </h1>
             <p className="text-xs text-muted-foreground">键道，基于 librime 的跨平台原生输入法</p>
