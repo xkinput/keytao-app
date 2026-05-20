@@ -12,6 +12,7 @@ let
   system = pkgs.stdenv.hostPlatform.system;
   package = self.packages.${system}.default;
   hasNiri = options ? programs && options.programs ? niri && options.programs.niri ? settings;
+  kdeVirtualKeyboardDesktop = "keytao-wayland-launcher.desktop";
 in
 {
   options.programs.keytao-app = {
@@ -31,7 +32,13 @@ in
     kde = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Enable KDE Plasma IBus integration (sets QT_IM_MODULE and GTK_IM_MODULE to ibus).";
+      description = "Enable KDE Plasma Wayland virtual-keyboard integration for keytao-ime.";
+    };
+
+    kdeAutoConfigureVirtualKeyboard = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Configure Plasma KWin to use KeyTao as the Wayland Virtual Keyboard.";
     };
 
     setInputMethodEnvironment = lib.mkOption {
@@ -63,10 +70,6 @@ in
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
-        // lib.optionalAttrs cfg.kde {
-          QT_IM_MODULE = "ibus";
-          GTK_IM_MODULE = "ibus";
-        }
         // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
@@ -75,14 +78,40 @@ in
         systemd.user.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
-        // lib.optionalAttrs cfg.kde {
-          QT_IM_MODULE = "ibus";
-          GTK_IM_MODULE = "ibus";
-        }
         // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
         };
+      })
+
+      (lib.mkIf cfg.kde {
+        home.packages = [ pkgs.kdePackages.kconfig ];
+      })
+
+      (lib.mkIf (cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard) {
+        home.file.".config/plasma-workspace/env/keytao-virtual-keyboard.sh" = {
+          executable = true;
+          text = ''
+          #!/bin/sh
+          if [ -x "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" ]; then
+            "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
+              --file "$HOME/.config/kwinrc" \
+              --group Wayland \
+              --key InputMethod \
+              "${kdeVirtualKeyboardDesktop}"
+          fi
+          '';
+        };
+
+        home.activation.configureKeytaoKdeVirtualKeyboard = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+          if [ -x "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" ]; then
+            "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
+              --file "$HOME/.config/kwinrc" \
+              --group Wayland \
+              --key InputMethod \
+              "${kdeVirtualKeyboardDesktop}"
+          fi
+        '';
       })
 
       (lib.mkIf (cfg.autostart && hasNiri) {
