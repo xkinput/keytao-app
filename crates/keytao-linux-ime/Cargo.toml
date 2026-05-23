@@ -38,3 +38,6 @@ memmap2 = "0.9"
 
 # IBus D-Bus protocol for Chromium/CEF apps (e.g. WeChatAppEx)
 zbus = { version = "4", features = ["tokio"] }
+
+# System tray icon for the daemon
+ksni = "0.2"

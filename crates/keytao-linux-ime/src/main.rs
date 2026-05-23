@@ -9,7 +9,10 @@ mod ibus_backend;
 #[cfg(target_os = "linux")]
 mod panel;
 #[cfg(target_os = "linux")]
+mod tray;
+#[cfg(target_os = "linux")]
 mod wayland_backend;
+#[cfg(target_os = "linux")]
 #[cfg(target_os = "linux")]
 mod x11_backend;
 
@@ -294,6 +297,8 @@ fn main() {
             std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
             selected.describe(),
         );
+
+        tray::spawn_tray();
 
         if selected.ibus_engine {
             // Run as an IBus engine connecting to the existing ibus-daemon.
