@@ -73,9 +73,6 @@ in
       }
 
       (lib.mkIf cfg.setInputMethodEnvironment {
-        home.sessionVariables = {
-          XMODIFIERS = "@im=keytao";
-        }
         # On KDE Plasma 6 Wayland, KWin only supports zwp_input_method_v1.
         # Since keytao-ime implements zwp_input_method_v2, it cannot function as a native
         # KWin Virtual Keyboard. Therefore, we MUST use the IBus backend and Kimpanel.
