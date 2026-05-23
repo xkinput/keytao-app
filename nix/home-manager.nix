@@ -76,20 +76,19 @@ in
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
-        # When KDE Virtual Keyboard is configured, KWin handles ALL input
-        # (including XWayland) via zwp_text_input_v3 → zwp_input_method_v2.
-        # Setting GTK_IM_MODULE/QT_IM_MODULE would bypass KWin's routing.
-        // lib.optionalAttrs (cfg.forceXimToolkitEnvironment && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
-          GTK_IM_MODULE = lib.mkDefault "xim";
-          QT_IM_MODULE = lib.mkDefault "xim";
+        # On KDE Plasma 6 Wayland, KWin only supports zwp_input_method_v1.
+        # Since keytao-ime implements zwp_input_method_v2, it cannot function as a native
+        # KWin Virtual Keyboard. Therefore, we MUST use the IBus backend and Kimpanel.
+        home.sessionVariables = {
+          XMODIFIERS = "@im=keytao";
+          GTK_IM_MODULE = lib.mkDefault "ibus";
+          QT_IM_MODULE = lib.mkDefault "ibus";
         };
 
         systemd.user.sessionVariables = {
           XMODIFIERS = "@im=keytao";
-        }
-        // lib.optionalAttrs (cfg.forceXimToolkitEnvironment && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
-          GTK_IM_MODULE = lib.mkDefault "xim";
-          QT_IM_MODULE = lib.mkDefault "xim";
+          GTK_IM_MODULE = lib.mkDefault "ibus";
+          QT_IM_MODULE = lib.mkDefault "ibus";
         };
       })
 
@@ -98,27 +97,15 @@ in
       })
 
       (lib.mkIf (cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard) {
-        home.file.".config/plasma-workspace/env/keytao-virtual-keyboard.sh" = {
-          executable = true;
-          text = ''
-          #!/bin/sh
-          if [ -x "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" ]; then
-            "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
-              --file "$HOME/.config/kwinrc" \
-              --group Wayland \
-              --key InputMethod \
-              "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}"
-          fi
-          '';
-        };
-
+        # Unset the InputMethod in kwinrc since we cannot use the Wayland Virtual Keyboard
+        # protocol natively. If the user previously had it set, we remove it to prevent
+        # KWin from auto-spawning a conflicting instance of keytao-ime.
         home.activation.configureKeytaoKdeVirtualKeyboard = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-          if [ -x "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" ]; then
-            "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
-              --file "$HOME/.config/kwinrc" \
-              --group Wayland \
-              --key InputMethod \
-              "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}"
+          if [ -x "${pkgs.kdePackages.kconfig}/bin/kreadconfig6" ]; then
+            CURRENT_IM=$("${pkgs.kdePackages.kconfig}/bin/kreadconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod || true)
+            if [ "$CURRENT_IM" = "${cfg.package}/share/applications/${kdeVirtualKeyboardDesktop}" ] || [ "$CURRENT_IM" = "keytao-wayland-launcher.desktop" ]; then
+              "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" --file "$HOME/.config/kwinrc" --group Wayland --key InputMethod ""
+            fi
           fi
         '';
       })
@@ -134,11 +121,9 @@ in
           "${cfg.package}/share/applications/keytao-app.desktop";
       })
 
-      # When KDE Virtual Keyboard is configured, KWin launches keytao-ime
-      # itself via WAYLAND_SOCKET. A separate autostart daemon would race
-      # for the org.freedesktop.IBus D-Bus name and cause the KWin-launched
-      # instance's IBus backend to fail.
-      (lib.mkIf (cfg.autostartDaemon && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
+      # Because KWin Virtual Keyboard is NOT used, we MUST start the daemon
+      # automatically so the IBus backend is available for QT_IM_MODULE=ibus.
+      (lib.mkIf (cfg.autostartDaemon || cfg.kde) {
         xdg.configFile."autostart/keytao-ime.desktop".text = ''
           [Desktop Entry]
           Name=KeyTao IME Daemon

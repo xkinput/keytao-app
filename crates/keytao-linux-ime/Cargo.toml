@@ -5,6 +5,10 @@ edition = "2021"
 description = "KeyTao Linux IME daemon with Wayland input-method-v2, XIM, and IBus-compatible frontends"
 
 [[bin]]
+name = "print_globals"
+path = "src/print_globals.rs"
+
+[[bin]]
 name = "keytao-ime"
 path = "src/main.rs"
 

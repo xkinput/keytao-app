@@ -5,7 +5,7 @@ members = [
   "crates/keytao-core",
   "crates/keytao-core-ffi",
   "crates/keytao-linux-ime",
-  "crates/keytao-windows-ime",
+  "crates/keytao-windows-ime", "print_globals",
 ]
 
 # Shared version pinning across all workspace members
