@@ -1482,6 +1482,19 @@ async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<Instal
     Err("Not supported on mobile".into())
 }
 
+#[derive(Serialize)]
+pub struct DebugLogs {
+    pub ime: String,
+    pub app: String,
+}
+
+#[tauri::command]
+async fn read_debug_logs() -> Result<DebugLogs, String> {
+    let ime = std::fs::read_to_string("/tmp/keytao-ime.log").unwrap_or_else(|_| "No keytao-ime.log found".to_string());
+    let app = std::fs::read_to_string("/tmp/keytao-app.log").unwrap_or_else(|_| "No keytao-app.log found".to_string());
+    Ok(DebugLogs { ime, app })
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1596,6 +1609,7 @@ pub fn run() {
             android_smart_extract,
             check_local_schema,
             rime_deploy_default,
+            read_debug_logs,
             // ── IME engine commands (desktop only) ──
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_setup,

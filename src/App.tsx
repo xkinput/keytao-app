@@ -32,9 +32,10 @@ import {
   Loader2,
   XCircle,
 } from "lucide-react"
+import DebugTab from "@/components/DebugTab"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
-type Tab = "install" | "extension" | "about"
+type Tab = "install" | "extension" | "about" | "debug"
 
 interface AppUpdateInfo {
   current_version: string
@@ -553,6 +554,7 @@ export default function App() {
             { id: "install", label: "安装", icon: Download },
             { id: "extension", label: "扩展", icon: Settings },
             { id: "about", label: "关于", icon: Info },
+            { id: "debug", label: "调试", icon: ScrollText },
           ] as const).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -888,6 +890,15 @@ export default function App() {
             <Button onClick={() => setShowLogs(false)} className="w-full mt-2">关闭</Button>
           </DialogContent>
         </Dialog>
+
+        {/* ══ Debug Tab ══════════════════════════════════════════════════════ */}
+        {activeTab === "debug" && (
+          <Card>
+            <CardContent className="pt-6">
+              <DebugTab />
+            </CardContent>
+          </Card>
+        )}
 
         {/* ── 更新内容弹窗 ──────────────────────────────────────────────── */}
         <Dialog open={showChangelog} onOpenChange={setShowChangelog}>
