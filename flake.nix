@@ -271,6 +271,7 @@
             libsoup_3
             xdotool
             libayatana-appindicator
+            ibus # Added for IBus IM module
           ];
 
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
@@ -306,6 +307,7 @@
               libsoup_3
               xdotool
               libayatana-appindicator
+              ibus
             ]
           );
 
@@ -334,6 +336,7 @@
               freetype
               xz
               libayatana-appindicator
+              ibus
             ]
           );
 
@@ -342,6 +345,12 @@
                         export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
                         export MOLD_PATH="${pkgs.mold}/bin/mold"
                         export CARGO_INCREMENTAL=0
+
+                        # Generate GTK IM Modules cache so Tauri (WebKitGTK) can actually load xim/ibus/wayland modules
+                        export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
+                        _immodules_cache="$HOME/.cache/keytao-immodules.cache"
+                        ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "$_immodules_cache" 2>/dev/null
+                        export GTK_IM_MODULE_FILE="$_immodules_cache"
 
                         # Add Android platform-tools (adb) and cmdline-tools to PATH
                         export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
@@ -414,6 +423,7 @@
                                           openssl
                                           libsoup_3
                                           libayatana-appindicator
+                                          ibus
                                         ]
                                       )
                                     }"
