@@ -82,6 +82,18 @@ fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> boo
     )
 }
 
+/// Shortcuts that rime "consumes" (returns accepted=true) but the app also
+/// needs to see. Example: Ctrl+` triggers quake-style terminal dropdown.
+/// Must exactly match the original linux.rs implementation.
+fn should_forward_consumed_shortcut(sym_raw: u32, effective_mods: u32) -> bool {
+    let ctrl_held = effective_mods & MOD_CONTROL != 0;
+    ctrl_held
+        && matches!(
+            sym_raw,
+            xkb::keysyms::KEY_grave | xkb::keysyms::KEY_asciitilde
+        )
+}
+
 struct App {
     session: ImeSession,
     renderer: Option<PanelRenderer>,
@@ -353,6 +365,13 @@ impl App {
             return;
         }
 
+        // When inactive (e.g. during debounce window after deactivate), forward
+        // all keys directly to the application instead of processing them.
+        if !self.active {
+            self.forward_unhandled_key(evdev_keycode, self.key_sym(evdev_keycode));
+            return;
+        }
+
         let keycode = evdev_keycode + 8;
         tracing::trace!(
             "key press: keycode={keycode} xkb_state={}",
@@ -440,7 +459,10 @@ impl App {
                 im.set_preedit_string(preedit, len, len);
                 im.commit(self.serial);
                 
-                if (effective_mods & MOD_CONTROL) != 0 && (sym_raw >= 0x0020 && sym_raw <= 0x007e) {
+                // Forward consumed Ctrl shortcuts that the app should still
+                // receive (e.g. Ctrl+` for terminal quake toggle). Match the
+                // precise list from the original linux.rs implementation.
+                if should_forward_consumed_shortcut(sym_raw, effective_mods) {
                     self.forward_unhandled_key(evdev_keycode, sym_raw);
                 }
             } else {
