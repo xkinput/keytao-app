@@ -76,7 +76,10 @@ in
         home.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
-        // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
+        # When KDE Virtual Keyboard is configured, KWin handles ALL input
+        # (including XWayland) via zwp_text_input_v3 → zwp_input_method_v2.
+        # Setting GTK_IM_MODULE/QT_IM_MODULE would bypass KWin's routing.
+        // lib.optionalAttrs (cfg.forceXimToolkitEnvironment && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
         };
@@ -84,7 +87,7 @@ in
         systemd.user.sessionVariables = {
           XMODIFIERS = "@im=keytao";
         }
-        // lib.optionalAttrs cfg.forceXimToolkitEnvironment {
+        // lib.optionalAttrs (cfg.forceXimToolkitEnvironment && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
           GTK_IM_MODULE = lib.mkDefault "xim";
           QT_IM_MODULE = lib.mkDefault "xim";
         };
@@ -131,7 +134,11 @@ in
           "${cfg.package}/share/applications/keytao-app.desktop";
       })
 
-      (lib.mkIf cfg.autostartDaemon {
+      # When KDE Virtual Keyboard is configured, KWin launches keytao-ime
+      # itself via WAYLAND_SOCKET. A separate autostart daemon would race
+      # for the org.freedesktop.IBus D-Bus name and cause the KWin-launched
+      # instance's IBus backend to fail.
+      (lib.mkIf (cfg.autostartDaemon && !(cfg.kde && cfg.kdeAutoConfigureVirtualKeyboard)) {
         xdg.configFile."autostart/keytao-ime.desktop".text = ''
           [Desktop Entry]
           Name=KeyTao IME Daemon
