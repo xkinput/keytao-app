@@ -200,7 +200,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         use tracing_subscriber::EnvFilter;
+        let file_appender = tracing_appender::rolling::never("/tmp", "keytao-ime.log");
         tracing_subscriber::fmt()
+            .with_writer(file_appender)
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )

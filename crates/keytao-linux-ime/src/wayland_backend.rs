@@ -11,7 +11,7 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{Seek, SeekFrom, Write},
-    os::fd::{AsFd, AsRawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd},
     time::{Duration, Instant},
 };
 
@@ -229,7 +229,10 @@ impl App {
         
         // 1x1 transparent dummy buffer to make surface valid for KWin
         // KWin drops surfaces without buffers, so it won't send TextInputRectangle.
-        let mut file = tempfile().expect("tempfile");
+        let fd = unsafe { libc::memfd_create(b"keytao-shm\0".as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+        if fd < 0 { panic!("memfd_create failed"); }
+        unsafe { libc::ftruncate(fd, 4); }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         file.write_all(&[0u8; 4]).expect("write dummy buffer");
         let fd = std::os::fd::AsFd::as_fd(&file);
         let pool = shm.create_pool(fd, 4, qh, ());
