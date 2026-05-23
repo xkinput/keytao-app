@@ -244,10 +244,14 @@ fn main() {
         }
 
         let selected = if kwin_socket {
-            // Launched by KWin as its registered Virtual Keyboard.  The private
-            // WAYLAND_SOCKET is the only display we should use; don't start IBus/XIM.
+            // Launched by KWin as its registered Virtual Keyboard. The private
+            // WAYLAND_SOCKET is used for Wayland IM. We ALSO start IBus and XIM
+            // so that GTK/Tauri apps (which struggle with Wayland text-input)
+            // and XWayland apps can connect directly.
             BackendSelection {
                 wayland: true,
+                ibus: true,
+                xim: true,
                 ..Default::default()
             }
         } else if requested_backends.ibus_engine {
