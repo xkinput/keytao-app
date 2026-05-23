@@ -98,6 +98,7 @@ struct App {
     virtual_keyboard: Option<ZwpVirtualKeyboardV1>,
     virtual_keymap: Option<File>,
     forwarded_keys: HashSet<u32>,
+    last_key_time: u32,
     started_at: Instant,
     serial: u32,
     active: bool,
@@ -137,6 +138,7 @@ impl App {
             virtual_keyboard: None,
             virtual_keymap: None,
             forwarded_keys: HashSet::new(),
+            last_key_time: 0,
             started_at: Instant::now(),
             serial: 0,
             active: false,
@@ -447,8 +449,7 @@ impl App {
         let Some(vk) = &self.virtual_keyboard else {
             return;
         };
-        let time = self.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
-        vk.key(time, evdev_keycode, state);
+        vk.key(self.last_key_time, evdev_keycode, state);
     }
 
     // Forward a key to the application when IME does not consume it.
@@ -616,7 +617,8 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                     }
                 }
             }
-            zwp_input_method_keyboard_grab_v2::Event::Key { key, state: ks, .. } => {
+            zwp_input_method_keyboard_grab_v2::Event::Key { key, time, state: ks, .. } => {
+                state.last_key_time = time;
                 if let WEnum::Value(key_state) = ks {
                     state.handle_key_event(key, key_state, qh);
                 }

@@ -1536,59 +1536,7 @@ pub fn run() {
                 })?;
             #[cfg(target_os = "linux")]
             {
-                use tauri::menu::{MenuBuilder, MenuItemBuilder};
-                use tauri::tray::TrayIconBuilder;
-
-                let mem_item = MenuItemBuilder::with_id("mem", "内存: ...")
-                    .enabled(false)
-                    .build(app)?;
-                let open_item = MenuItemBuilder::with_id("open", "打开主窗口").build(app)?;
-                let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-                let menu = MenuBuilder::new(app)
-                    .item(&mem_item)
-                    .separator()
-                    .item(&open_item)
-                    .separator()
-                    .item(&quit_item)
-                    .build()?;
-
-                let tray = TrayIconBuilder::new()
-                    .icon(app.default_window_icon().unwrap().clone())
-                    .menu(&menu)
-                    .tooltip("KeyTao 输入法")
-                    .on_menu_event({
-                        let mem_item_cl = mem_item.clone();
-                        move |app, event| {
-                            let id = event.id().as_ref();
-                            if id == "quit" {
-                                app.exit(0);
-                            } else if id == "open" {
-                                if let Some(w) = app.get_webview_window("main") {
-                                    let _ = w.show();
-                                    let _ = w.set_focus();
-                                }
-                            }
-                            use sysinfo::System;
-                            let mut sys = System::new();
-                            sys.refresh_memory();
-                            let mb = sys.used_memory() / 1024 / 1024;
-                            let _ = mem_item_cl.set_text(format!("内存: {mb} MB"));
-                        }
-                    })
-                    .on_tray_icon_event({
-                        let mem_item_tray = mem_item.clone();
-                        move |_tray, event| {
-                            if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                                use sysinfo::System;
-                                let mut sys = System::new();
-                                sys.refresh_memory();
-                                let mb = sys.used_memory() / 1024 / 1024;
-                                let _ = mem_item_tray.set_text(format!("内存: {mb} MB"));
-                            }
-                        }
-                    })
-                    .build(app)?;
-                drop(tray);
+                // Linux tray is handled by keytao-ime daemon now.
 
                 #[cfg(target_os = "linux")]
                 cleanup_kde_legacy_ime_files();
