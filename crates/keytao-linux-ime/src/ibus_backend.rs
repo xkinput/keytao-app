@@ -9,7 +9,7 @@ use keytao_core::{Candidate, ImeState};
 use std::{
     fs,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicI32, Ordering},
         Arc,
     },
 };
