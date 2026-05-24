@@ -1,8 +1,20 @@
-use wayland_client::{Connection, Dispatch, QueueHandle, protocol::wl_registry};
+use wayland_client::{protocol::wl_registry, Connection, Dispatch, QueueHandle};
 struct App;
 impl Dispatch<wl_registry::WlRegistry, ()> for App {
-    fn event(_state: &mut Self, _proxy: &wl_registry::WlRegistry, event: wl_registry::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             println!("global: {} {} {}", name, interface, version);
         }
     }

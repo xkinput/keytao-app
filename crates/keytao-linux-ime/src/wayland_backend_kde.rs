@@ -25,7 +25,10 @@ use wayland_protocols::wp::input_method::zv1::client::{
 };
 use xkbcommon::xkb;
 
-use crate::engine::{CoreEngine, ImeSession};
+use crate::{
+    engine::{CoreEngine, ImeSession},
+    kimpanel::KimpanelHandle,
+};
 
 const MOD_SHIFT: u32 = 0x0001;
 const MOD_CONTROL: u32 = 0x0004;
@@ -82,10 +85,14 @@ struct App {
     mods: u32,
     last_key_time: u32,
     ascii_mode: bool,
+    kimpanel: Option<KimpanelHandle>,
+    pending_kimpanel_state: Option<ImeState>,
+    clear_kimpanel: bool,
+    globals_seen: Vec<String>,
 }
 
 impl App {
-    fn new(session: ImeSession) -> Self {
+    fn new(session: ImeSession, kimpanel: Option<KimpanelHandle>) -> Self {
         Self {
             session,
             seat: None,
@@ -101,6 +108,10 @@ impl App {
             mods: 0,
             last_key_time: 0,
             ascii_mode: false,
+            kimpanel,
+            pending_kimpanel_state: None,
+            clear_kimpanel: true,
+            globals_seen: Vec::new(),
         }
     }
 
@@ -119,6 +130,8 @@ impl App {
         self.keyboard = None;
         self.context = None;
         self.session.reset();
+        self.pending_kimpanel_state = None;
+        self.clear_kimpanel = true;
     }
 
     fn commit_state_to_context(&self, state: &ImeState) {
@@ -139,7 +152,18 @@ impl App {
         }
     }
 
+    fn update_kimpanel(&mut self, state: &ImeState) {
+        self.pending_kimpanel_state = Some(state.clone());
+        self.clear_kimpanel = false;
+    }
+
+    fn clear_kimpanel(&mut self) {
+        self.pending_kimpanel_state = None;
+        self.clear_kimpanel = true;
+    }
+
     fn forward_key(&self, evdev_keycode: u32, state: u32) {
+        tracing::info!("KDE forwarding key: key={evdev_keycode}, state={state}");
         if let Some(ctx) = &self.context {
             ctx.key(self.serial, self.last_key_time, evdev_keycode, state);
         }
@@ -164,6 +188,7 @@ impl App {
         key_state: wl_keyboard::KeyState,
         qh: &QueueHandle<Self>,
     ) {
+        tracing::info!("KDE handling key event: key={evdev_keycode}, state={key_state:?}, active={}", self.active);
         if key_state == wl_keyboard::KeyState::Released {
             self.handle_key_release(evdev_keycode);
             return;
@@ -197,6 +222,7 @@ impl App {
                 ctx.commit_string(self.serial, before_state.preedit.clone());
             }
             self.clear_context_preedit();
+            self.clear_kimpanel();
             self.session.reset();
             return;
         }
@@ -207,6 +233,7 @@ impl App {
                 .min(before_state.candidates.len().saturating_sub(1));
             if let Some(ime_state) = self.session.select_candidate(index) {
                 self.commit_state_to_context(&ime_state);
+                self.update_kimpanel(&ime_state);
                 return;
             }
         }
@@ -227,11 +254,13 @@ impl App {
 
         if result.accepted {
             self.commit_state_to_context(&ime_state);
+            self.update_kimpanel(&ime_state);
             if should_forward_consumed_shortcut(sym_raw, effective_mods) {
                 self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
             }
         } else {
             self.clear_context_preedit();
+            self.clear_kimpanel();
             self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
         }
 
@@ -270,6 +299,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
             version,
         } = event
         {
+            state.globals_seen.push(format!("{interface}@{version}#{name}"));
             match interface.as_str() {
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(7), qh, ())),
                 "zwp_input_method_v1" => {
@@ -292,19 +322,23 @@ impl Dispatch<ZwpInputMethodV1, ()> for App {
     ) {
         match event {
             zwp_input_method_v1::Event::Activate { id } => {
-                tracing::debug!("KDE input-method-v1 activated");
+                tracing::info!("KDE input-method-v1 context activated!");
                 state.reset_context_state();
                 state.keyboard = Some(id.grab_keyboard(qh, ()));
                 state.context = Some(id);
                 state.active = true;
             }
             zwp_input_method_v1::Event::Deactivate { context: _ } => {
-                tracing::debug!("KDE input-method-v1 deactivate pending");
+                tracing::info!("KDE input-method-v1 context deactivated!");
                 state.deactivate_deadline = Some(Instant::now() + DEACTIVATE_DEBOUNCE);
             }
             _ => {}
         }
     }
+
+    wayland_client::event_created_child!(App, ZwpInputMethodV1, [
+        0 => (ZwpInputMethodContextV1, ()),
+    ]);
 }
 
 impl Dispatch<ZwpInputMethodContextV1, ()> for App {
@@ -323,6 +357,7 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for App {
             zwp_input_method_context_v1::Event::Reset => {
                 state.session.reset();
                 state.clear_context_preedit();
+                state.clear_kimpanel();
             }
             _ => {}
         }
@@ -364,12 +399,13 @@ impl Dispatch<WlKeyboard, ()> for App {
                     state.xkb_keymap = Some(km);
                 }
             }
-            wl_keyboard::Event::Key {
+             wl_keyboard::Event::Key {
                 serial,
                 time,
                 key,
                 state: ks,
             } => {
+                tracing::info!("KDE keyboard Event::Key: key={key}, state={ks:?}");
                 state.serial = serial;
                 state.last_key_time = time;
                 if let WEnum::Value(key_state) = ks {
@@ -383,6 +419,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                 mods_locked,
                 group,
             } => {
+                tracing::info!("KDE keyboard Event::Modifiers");
                 if let Some(xkb_state) = &mut state.xkb_state {
                     xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                     let mut m = 0u32;
@@ -412,16 +449,26 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
         .create_session()
         .map_err(|e| format!("failed to create KDE Wayland Rime session: {e}"))?;
     let conn = Connection::connect_to_env().map_err(|e| format!("KDE Wayland connection: {e}"))?;
-    let (_globals, mut queue) =
+    let (globals, mut queue) =
         registry_queue_init::<App>(&conn).map_err(|e| format!("KDE Wayland registry: {e}"))?;
+    let qh = queue.handle();
 
-    let mut app = App::new(session);
+    let seat: WlSeat = globals
+        .bind(&qh, 1..=7, ())
+        .map_err(|e| format!("wl_seat not advertised: {e}"))?;
+    let input_method: ZwpInputMethodV1 = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| format!("zwp_input_method_v1 not advertised: {e}"))?;
+
+    let kimpanel_runtime =
+        tokio::runtime::Runtime::new().map_err(|e| format!("Kimpanel runtime: {e}"))?;
+    let kimpanel = kimpanel_runtime.block_on(KimpanelHandle::new());
+
+    let mut app = App::new(session, kimpanel);
+    app.seat = Some(seat);
+    app.input_method = Some(input_method);
     queue.roundtrip(&mut app).expect("initial KDE roundtrip");
-    if app.input_method.is_none() {
-        return Err(
-            "KWin did not advertise zwp_input_method_v1 on the WAYLAND_SOCKET connection".into(),
-        );
-    }
+
 
     tracing::info!("KDE Wayland IME running (input-method-v1)");
     loop {
@@ -435,6 +482,14 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
 
         if let Err(e) = queue.flush() {
             tracing::warn!("KDE Wayland flush error: {e}");
+        }
+        if let Some(kimpanel) = &app.kimpanel {
+            if app.clear_kimpanel {
+                kimpanel_runtime.block_on(kimpanel.clear());
+                app.clear_kimpanel = false;
+            } else if let Some(state) = app.pending_kimpanel_state.take() {
+                kimpanel_runtime.block_on(kimpanel.update_state(&state));
+            }
         }
         let timeout_ms = if app.deactivate_deadline.is_some() {
             100

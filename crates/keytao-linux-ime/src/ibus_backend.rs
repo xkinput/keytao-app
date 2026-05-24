@@ -9,7 +9,7 @@ use keytao_core::{Candidate, ImeState};
 use std::{
     fs,
     sync::{
-        atomic::{AtomicU32, AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicU32, Ordering},
         Arc,
     },
 };
@@ -384,9 +384,15 @@ impl InputContext {
                     &attrs,
                     false, // has_prev
                     false, // has_next
-                ).await;
+                )
+                .await;
                 let _ = Kimpanel::show_lookup_table(kctxt, true).await;
-                let _ = Kimpanel::update_spot_location(kctxt, self.cursor_x.load(Ordering::Relaxed), self.cursor_y.load(Ordering::Relaxed)).await;
+                let _ = Kimpanel::update_spot_location(
+                    kctxt,
+                    self.cursor_x.load(Ordering::Relaxed),
+                    self.cursor_y.load(Ordering::Relaxed),
+                )
+                .await;
             }
         }
 
@@ -470,7 +476,11 @@ impl Kimpanel {
     async fn show_lookup_table(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn update_preedit_text(ctxt: &SignalContext<'_>, text: &str, attr: &str) -> zbus::Result<()>;
+    async fn update_preedit_text(
+        ctxt: &SignalContext<'_>,
+        text: &str,
+        attr: &str,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn show_preedit_text(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
@@ -623,21 +633,6 @@ pub async fn run(engine: CoreEngine) {
             return;
         }
     };
-    let builder = match builder.name("org.freedesktop.IBus") {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("IBus: failed to request IBus name: {e}");
-            return;
-        }
-    };
-    let builder = match builder.name("org.kde.kimpanel.inputmethod") {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("Kimpanel: failed to request Kimpanel name: {e}");
-            return;
-        }
-    };
-    
     let engine_clone = engine.clone();
     let builder = match builder.serve_at("/org/kde/kimpanel/inputmethod", Kimpanel) {
         Ok(b) => b,
@@ -670,25 +665,43 @@ pub async fn run(engine: CoreEngine) {
         }
     };
 
+    if let Err(e) = conn.request_name("org.freedesktop.IBus").await {
+        tracing::error!("IBus: failed to request IBus name: {e}");
+        return;
+    }
+
+    if let Err(e) = conn.request_name("org.kde.kimpanel.inputmethod").await {
+        tracing::warn!("Kimpanel: failed to request Kimpanel name (running as secondary?): {e}");
+    }
+
     let dbus_address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
         .unwrap_or_else(|_| "unix:path=/run/user/1000/bus".to_owned());
 
     write_ibus_address_files(&dbus_address);
 
     let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
-    
+
     // We need to update the IBusBus instance with the kimpanel_ctxt.
     // However, IBusBus is owned by the ObjectServer. Instead of mutating it, we just set
     // it properly before serving if possible, or use a shared state.
     // Actually, we can just create the SignalContext from `conn` and share it!
-    
+
     // Let's re-register IBusBus with the valid kimpanel_ctxt.
-    let _ = conn.object_server().remove::<IBusBus, _>("/org/freedesktop/IBus").await;
-    let _ = conn.object_server().at("/org/freedesktop/IBus", IBusBus {
-        engine: engine_clone,
-        ctx_counter: Arc::new(AtomicU32::new(1)),
-        kimpanel_ctxt,
-    }).await;
+    let _ = conn
+        .object_server()
+        .remove::<IBusBus, _>("/org/freedesktop/IBus")
+        .await;
+    let _ = conn
+        .object_server()
+        .at(
+            "/org/freedesktop/IBus",
+            IBusBus {
+                engine: engine_clone,
+                ctx_counter: Arc::new(AtomicU32::new(1)),
+                kimpanel_ctxt,
+            },
+        )
+        .await;
 
     // Notify any already-connected IBus clients that the keytao engine is active.
     // Chromium/CEF clients that connected before this signal can use GetGlobalEngine instead.

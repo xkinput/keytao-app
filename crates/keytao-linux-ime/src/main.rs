@@ -7,6 +7,8 @@ mod gnome_ibus_engine;
 #[cfg(target_os = "linux")]
 mod ibus_backend;
 #[cfg(target_os = "linux")]
+mod kimpanel;
+#[cfg(target_os = "linux")]
 mod panel;
 #[cfg(target_os = "linux")]
 mod tray;
@@ -243,13 +245,14 @@ fn main() {
         }
 
         let selected = if kwin_socket {
-            // Launched by KWin as its registered Virtual Keyboard. The private
-            // WAYLAND_SOCKET is used for KDE input-method-v1. We also start IBus
-            // and XIM so fallback clients can connect directly.
+            // Launched by KWin as its registered Virtual Keyboard. This process
+            // owns KDE's private input-method-v1 socket only; the normal session
+            // daemon owns XIM/IBus fallback frontends.
+            tracing::info!(
+                "KWin Virtual Keyboard mode: using WAYLAND_SOCKET for KDE input-method-v1 only"
+            );
             BackendSelection {
                 wayland: true,
-                ibus: true,
-                xim: true,
                 ..Default::default()
             }
         } else if requested_backends.ibus_engine {

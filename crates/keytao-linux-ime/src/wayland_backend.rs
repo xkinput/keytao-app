@@ -226,29 +226,30 @@ impl App {
         };
         let surface = compositor.create_surface(qh, ());
         let popup = im.get_input_popup_surface(&surface, qh, ());
-        
+
         // 1x1 transparent dummy buffer to make surface valid for KWin
         // KWin drops surfaces without buffers, so it won't send TextInputRectangle.
-        let fd = unsafe { libc::memfd_create(b"keytao-shm\0".as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
-        if fd < 0 { panic!("memfd_create failed"); }
-        unsafe { libc::ftruncate(fd, 4); }
+        let fd = unsafe {
+            libc::memfd_create(
+                b"keytao-shm\0".as_ptr() as *const libc::c_char,
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        if fd < 0 {
+            panic!("memfd_create failed");
+        }
+        unsafe {
+            libc::ftruncate(fd, 4);
+        }
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         file.write_all(&[0u8; 4]).expect("write dummy buffer");
         let fd = std::os::fd::AsFd::as_fd(&file);
         let pool = shm.create_pool(fd, 4, qh, ());
-        let buf = pool.create_buffer(
-            0,
-            1,
-            1,
-            4,
-            wl_shm::Format::Argb8888,
-            qh,
-            (),
-        );
+        let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
         surface.attach(Some(&buf), 0, 0);
         surface.damage_buffer(0, 0, 1, 1);
         surface.commit();
-        
+
         self.panel_buffer = Some(buf);
         self.panel_surface = Some(surface);
         self.panel_popup = Some(popup);
@@ -461,7 +462,7 @@ impl App {
                 let len = preedit.len() as i32;
                 im.set_preedit_string(preedit, len, len);
                 im.commit(self.serial);
-                
+
                 // Forward consumed Ctrl shortcuts that the app should still
                 // receive (e.g. Ctrl+` for terminal quake toggle). Match the
                 // precise list from the original linux.rs implementation.
@@ -616,9 +617,8 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                         state.active = true;
                         tracing::debug!("IME activated");
                     } else {
-                        state.deactivate_deadline = Some(
-                            Instant::now() + Duration::from_millis(180),
-                        );
+                        state.deactivate_deadline =
+                            Some(Instant::now() + Duration::from_millis(180));
                         tracing::debug!("IME deactivation deferred for debounce");
                     }
                 }
@@ -678,7 +678,12 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                     }
                 }
             }
-            zwp_input_method_keyboard_grab_v2::Event::Key { key, time, state: ks, .. } => {
+            zwp_input_method_keyboard_grab_v2::Event::Key {
+                key,
+                time,
+                state: ks,
+                ..
+            } => {
                 state.last_key_time = time;
                 if let WEnum::Value(key_state) = ks {
                     state.handle_key_event(key, key_state, qh);
@@ -734,7 +739,10 @@ impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
             tracing::trace!("cursor hint: {x},{y} {width}x{height}");
             // KWin (and other Wayland compositors) often require a re-commit of the surface
             // after sending TextInputRectangle, otherwise the popup might not be mapped or updated.
-            let has_content = state.ime_state.as_ref().map_or(false, |s| !s.candidates.is_empty());
+            let has_content = state
+                .ime_state
+                .as_ref()
+                .map_or(false, |s| !s.candidates.is_empty());
             let show_mode_hint = state.mode_hint_active();
             if state.panel_surface.is_some() && (has_content || show_mode_hint) {
                 tracing::debug!("rerender_panel_after_rectangle");
