@@ -1530,7 +1530,8 @@ pub fn run() {
             };
             let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
             let handle = app.handle().clone();
-            app.handle()
+            if let Err(e) = app
+                .handle()
                 .global_shortcut()
                 .on_shortcut(shortcut, move |_app, _sc, event| {
                     if event.state() == ShortcutState::Pressed {
@@ -1546,7 +1547,13 @@ pub fn run() {
                             }
                         }
                     }
-                })?;
+                })
+            {
+                eprintln!(
+                    "Ctrl+Shift+Space global shortcut is already registered or unavailable; \
+                     continuing without the overlay hotkey: {e}"
+                );
+            }
             #[cfg(target_os = "linux")]
             {
                 // Linux tray is handled by keytao-ime daemon now.
