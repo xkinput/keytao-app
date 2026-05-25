@@ -224,6 +224,15 @@ fn main() {
             .and_then(|s| s.parse::<i32>().ok())
             .is_some();
 
+        if !kwin_socket {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(async {
+                if let Err(e) = enforce_single_instance().await {
+                    tracing::warn!("Failed to enforce single instance check: {e}");
+                }
+            });
+        }
+
         let has_wayland = kwin_socket || std::env::var_os("WAYLAND_DISPLAY").is_some();
         let has_x11 = std::env::var_os("DISPLAY").is_some();
 
@@ -332,4 +341,55 @@ fn main() {
             std::thread::park();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
+    use zbus::fdo::DBusProxy;
+    use zbus::Connection;
+    let conn = Connection::session().await?;
+    let dbus_proxy = DBusProxy::new(&conn).await?;
+    let name = "org.xkinput.keytao.ime.Daemon";
+
+    let reply = dbus_proxy
+        .request_name(
+            name.try_into()?,
+            zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+        )
+        .await?;
+
+    match reply {
+        zbus::fdo::RequestNameReply::PrimaryOwner => {
+            Box::leak(Box::new(conn));
+            tracing::info!("Claimed D-Bus name {name} successfully.");
+        }
+        _ => {
+            tracing::info!("D-Bus name {name} is already owned. Attempting to kill existing daemon...");
+            if let Ok(owner) = dbus_proxy.get_name_owner(name.try_into()?).await {
+                if let Ok(pid) = dbus_proxy.get_connection_unix_process_id(owner.into()).await {
+                    tracing::info!("Existing daemon PID is {pid}. Sending SIGTERM...");
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+            }
+            let reply_retry = dbus_proxy
+                .request_name(
+                    name.try_into()?,
+                    zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+                )
+                .await?;
+            match reply_retry {
+                zbus::fdo::RequestNameReply::PrimaryOwner => {
+                    Box::leak(Box::new(conn));
+                    tracing::info!("Claimed D-Bus name {name} on retry.");
+                }
+                _ => {
+                    tracing::warn!("Could not claim D-Bus name {name} on retry. Continuing anyway.");
+                }
+            }
+        }
+    }
+    Ok(())
 }

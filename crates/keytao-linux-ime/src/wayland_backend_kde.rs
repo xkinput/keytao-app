@@ -18,6 +18,7 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_keyboard::{self, WlKeyboard},
+        wl_region::WlRegion,
         wl_registry,
         wl_seat::WlSeat,
         wl_shm::{self, WlShm},
@@ -176,14 +177,27 @@ impl App {
         let popup = panel_manager.get_input_panel_surface(&surface, qh, ());
         popup.set_overlay_panel();
 
+        // Set input region to empty so clicks pass through the candidate window.
+        let region = compositor.create_region(qh, ());
+        surface.set_input_region(Some(&region));
+        region.destroy();
+
         // 1x1 transparent dummy buffer to make surface valid for KWin
-        let fd = match tempfile() {
+        let mut fd = match tempfile() {
             Ok(file) => file,
             Err(e) => {
                 tracing::warn!("failed to create dummy SHM file: {e}");
                 return;
             }
         };
+        if fd.set_len(4).is_err() {
+            tracing::warn!("failed to truncate dummy SHM file");
+            return;
+        }
+        if fd.write_all(&[0u8; 4]).is_err() {
+            tracing::warn!("failed to write dummy SHM buffer");
+            return;
+        }
         let pool = shm.create_pool(fd.as_fd(), 4, qh, ());
         let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
         surface.attach(Some(&buf), 0, 0);
@@ -239,6 +253,10 @@ impl App {
                 return;
             }
         };
+        if tmp.set_len(pool_size as u64).is_err() {
+            tracing::warn!("failed to truncate SHM tempfile");
+            return;
+        }
         if tmp.write_all(&pixels).is_err() {
             tracing::warn!("failed to write SHM buffer");
             return;
@@ -605,6 +623,7 @@ delegate_noop!(App: ignore WlBuffer);
 delegate_noop!(App: ignore WlSurface);
 delegate_noop!(App: ignore ZwpInputPanelV1);
 delegate_noop!(App: ignore ZwpInputPanelSurfaceV1);
+delegate_noop!(App: ignore WlRegion);
 
 pub fn run(engine: CoreEngine) -> Result<(), String> {
     let session = engine
@@ -694,7 +713,12 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
 fn tempfile() -> std::io::Result<File> {
     use std::os::unix::io::FromRawFd;
     let name = c"keytao-shm";
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    let fd = unsafe {
+        libc::memfd_create(
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }

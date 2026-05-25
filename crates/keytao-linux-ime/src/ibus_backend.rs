@@ -5,6 +5,7 @@
 //! IBus daemon.
 
 use crate::engine::{CoreEngine, ImeSession};
+use crate::panel::{load_font, PanelRenderer};
 use keytao_core::{Candidate, ImeState};
 use std::{
     fs,
@@ -13,7 +14,123 @@ use std::{
         Arc,
     },
 };
+use x11rb::{
+    connection::Connection as _,
+    protocol::xproto::{
+        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat,
+        WindowClass,
+    },
+    rust_connection::RustConnection,
+};
 use zbus::{connection, interface, object_server::SignalContext, zvariant};
+
+enum ImePanelMessage {
+    Show {
+        state: ImeState,
+        x: i32,
+        y: i32,
+    },
+    Hide,
+}
+
+struct X11Panel {
+    conn: RustConnection,
+    panel_win: u32,
+    gc: u32,
+    depth: u8,
+    visible: bool,
+    renderer: PanelRenderer,
+}
+
+impl X11Panel {
+    fn new() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None).ok()?;
+        let setup = conn.setup();
+        let screen = setup.roots.get(screen_num)?;
+        let root = screen.root;
+        let visual = screen.root_visual;
+        let depth = screen.root_depth;
+
+        let panel_win = conn.generate_id().ok()?;
+        conn.create_window(
+            depth,
+            panel_win,
+            root,
+            0,
+            0,
+            300,
+            46,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new()
+                .override_redirect(1)
+                .background_pixel(0x1e1e2e)
+                .event_mask(EventMask::EXPOSURE),
+        ).ok()?;
+
+        let gc = conn.generate_id().ok()?;
+        conn.create_gc(gc, panel_win, &Default::default()).ok()?;
+
+        let renderer = load_font().and_then(PanelRenderer::new)?;
+
+        Some(Self {
+            conn,
+            panel_win,
+            gc,
+            depth,
+            visible: false,
+            renderer,
+        })
+    }
+
+    fn show(&mut self, state: &ImeState, x: i32, y: i32) {
+        let (pixels, w, h) = self.renderer.render(state);
+        self.conn.configure_window(
+            self.panel_win,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(w)
+                .height(h),
+        ).ok();
+
+        if !self.visible {
+            self.conn.map_window(self.panel_win).ok();
+            self.visible = true;
+        }
+
+        self.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            self.panel_win,
+            self.gc,
+            w as u16,
+            h as u16,
+            0,
+            0,
+            0,
+            self.depth,
+            &pixels,
+        ).ok();
+        self.conn.flush().ok();
+    }
+
+    fn hide(&mut self) {
+        if self.visible {
+            self.conn.unmap_window(self.panel_win).ok();
+            self.conn.flush().ok();
+            self.visible = false;
+        }
+    }
+}
+
+impl Drop for X11Panel {
+    fn drop(&mut self) {
+        self.conn.destroy_window(self.panel_win).ok();
+        self.conn.free_gc(self.gc).ok();
+        self.conn.flush().ok();
+    }
+}
 
 // ── IBus text helper ─────────────────────────────────────────────────────────
 
@@ -206,6 +323,19 @@ struct InputContext {
     kimpanel_ctxt: Option<SignalContext<'static>>,
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
+    x11_panel_tx: std::sync::mpsc::Sender<ImePanelMessage>,
+}
+
+impl InputContext {
+    async fn clear_ui(&self, ctxt: &SignalContext<'_>) {
+        let _ = Self::hide_preedit_text(ctxt).await;
+        let _ = Self::hide_lookup_table(ctxt).await;
+        if let Some(kc) = &self.kimpanel_ctxt {
+            let _ = Kimpanel::show_preedit_text(kc, false).await;
+            let _ = Kimpanel::show_lookup_table(kc, false).await;
+        }
+        let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+    }
 }
 
 #[interface(name = "org.freedesktop.IBus.InputContext")]
@@ -217,13 +347,13 @@ impl InputContext {
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: FocusOut");
         self.session.reset();
-        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
+        self.clear_ui(&ctxt).await;
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         tracing::debug!("IBus InputContext: Reset");
         self.session.reset();
-        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
+        self.clear_ui(&ctxt).await;
     }
 
     async fn set_cursor_location(&self, x: i32, y: i32, _w: i32, _h: i32) {
@@ -243,7 +373,7 @@ impl InputContext {
     ) -> zbus::fdo::Result<()> {
         tracing::debug!("IBus InputContext: Destroy");
         self.session.reset();
-        clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
+        self.clear_ui(&ctxt).await;
         server
             .remove::<InputContext, _>(ctxt.path().to_owned())
             .await
@@ -276,7 +406,7 @@ impl InputContext {
 
         let before_state = self.session.state();
         if should_bypass_empty_composition(keyval, state, &before_state) {
-            clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
+            self.clear_ui(&ctxt).await;
             return false;
         }
         if is_enter_key(keyval) && !before_state.preedit.is_empty() {
@@ -290,6 +420,7 @@ impl InputContext {
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
+            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
             return true;
         }
         let candidate_select_index = if is_candidate_select_key(keyval) {
@@ -313,7 +444,7 @@ impl InputContext {
                             }
                         }
                     }
-                    clear_input_context_ui(&ctxt, &self.kimpanel_ctxt).await;
+                    self.clear_ui(&ctxt).await;
                     return true;
                 }
             }
@@ -345,6 +476,9 @@ impl InputContext {
                 let _ = Kimpanel::show_preedit_text(kctxt, false).await;
             }
         } else {
+            // ALWAYS clear preedit first to prevent ghosting/afterimages in Electron/Chromium apps
+            clear_preedit(&ctxt, &None).await;
+
             let cursor = ime_state.cursor as u32;
             let ov = ibus_text_value(&ime_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
@@ -361,6 +495,7 @@ impl InputContext {
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
+            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
         } else {
             let ov = ibus_lookup_table_value(&ime_state);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
@@ -394,6 +529,15 @@ impl InputContext {
                 )
                 .await;
             }
+
+            // Draw the X11 candidate window
+            let cx = self.cursor_x.load(Ordering::Relaxed);
+            let cy = self.cursor_y.load(Ordering::Relaxed);
+            let _ = self.x11_panel_tx.send(ImePanelMessage::Show {
+                state: ime_state,
+                x: cx,
+                y: cy + 24,
+            });
         }
 
         consumed
@@ -427,15 +571,6 @@ impl InputContext {
 
     #[zbus(signal)]
     async fn hide_lookup_table(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
-}
-
-async fn clear_input_context_ui(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'static>>) {
-    let _ = InputContext::hide_preedit_text(ctxt).await;
-    let _ = InputContext::hide_lookup_table(ctxt).await;
-    if let Some(kc) = kctxt {
-        let _ = Kimpanel::show_preedit_text(kc, false).await;
-        let _ = Kimpanel::show_lookup_table(kc, false).await;
-    }
 }
 
 /// Send an empty UpdatePreeditText to tell the client the composition ended
@@ -490,6 +625,7 @@ struct IBusBus {
     engine: CoreEngine,
     ctx_counter: Arc<AtomicU32>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
+    x11_panel_tx: std::sync::mpsc::Sender<ImePanelMessage>,
 }
 
 #[interface(name = "org.freedesktop.IBus")]
@@ -516,6 +652,7 @@ impl IBusBus {
             kimpanel_ctxt: self.kimpanel_ctxt.clone(),
             cursor_x: Arc::new(AtomicI32::new(0)),
             cursor_y: Arc::new(AtomicI32::new(0)),
+            x11_panel_tx: self.x11_panel_tx.clone(),
         };
         server
             .at(path.clone(), ctx)
@@ -642,12 +779,31 @@ pub async fn run(engine: CoreEngine) {
         }
     };
 
+    let (tx, rx) = std::sync::mpsc::channel::<ImePanelMessage>();
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        let mut panel = X11Panel::new();
+        while let Ok(msg) = rx.recv() {
+            if let Some(panel) = panel.as_mut() {
+                match msg {
+                    ImePanelMessage::Show { state, x, y } => {
+                        panel.show(&state, x, y);
+                    }
+                    ImePanelMessage::Hide => {
+                        panel.hide();
+                    }
+                }
+            }
+        }
+    });
+
     let builder = match builder.serve_at(
         "/org/freedesktop/IBus",
         IBusBus {
             engine,
             ctx_counter: Arc::new(AtomicU32::new(1)),
             kimpanel_ctxt: None, // Will fill after build
+            x11_panel_tx: tx,
         },
     ) {
         Ok(b) => b,
@@ -699,6 +855,7 @@ pub async fn run(engine: CoreEngine) {
                 engine: engine_clone,
                 ctx_counter: Arc::new(AtomicU32::new(1)),
                 kimpanel_ctxt,
+                x11_panel_tx: tx_clone,
             },
         )
         .await;
