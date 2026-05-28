@@ -54,7 +54,7 @@ fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> boo
 }
 
 fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(), ServerError> {
-    tracing::debug!("XIM commit text: {text:?}");
+    tracing::info!("XIM commit text: {text:?}");
     server.send_req(
         ic.client_win(),
         Request::Commit {
@@ -273,6 +273,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     }
 
     fn handle_connect(&mut self, _server: &mut MyServer) -> Result<(), ServerError> {
+        tracing::info!("XIM client connected");
         Ok(())
     }
 
@@ -281,6 +282,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         server: &mut MyServer,
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
+        tracing::info!("XIM CreateIC client_win={}", user_ic.ic.client_win());
         server.set_event_mask(&user_ic.ic, 1, 0)
     }
 
@@ -289,6 +291,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         _server: &mut MyServer,
         user_ic: UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
+        tracing::info!("XIM DestroyIC client_win={}", user_ic.ic.client_win());
         user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(())
@@ -299,6 +302,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         _server: &mut MyServer,
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<String, ServerError> {
+        tracing::info!("XIM ResetIC client_win={}", user_ic.ic.client_win());
         user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(String::new())
@@ -316,8 +320,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     fn handle_set_focus(
         &mut self,
         _server: &mut MyServer,
-        _user_ic: &mut UserInputContext<IcData>,
+        user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
+        tracing::info!("XIM SetFocus client_win={}", user_ic.ic.client_win());
         Ok(())
     }
 
@@ -326,6 +331,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         _server: &mut MyServer,
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
+        tracing::info!("XIM UnsetFocus client_win={}", user_ic.ic.client_win());
         user_ic.user_data.session.reset();
         self.hide_panel();
         Ok(())
@@ -362,6 +368,12 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         }
 
         let mods = u32::from(xev.state);
+        tracing::info!(
+            "XIM ForwardEvent client_win={} keycode={} keysym={keysym:#x} mods={mods:#x}",
+            user_ic.ic.client_win(),
+            xev.detail
+        );
+
         let before_state = user_ic.user_data.session.state();
         if should_bypass_empty_composition(keysym, mods, &before_state) {
             self.hide_panel();
