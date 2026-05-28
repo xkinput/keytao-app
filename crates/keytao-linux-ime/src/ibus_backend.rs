@@ -25,11 +25,7 @@ use x11rb::{
 use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
 enum ImePanelMessage {
-    Show {
-        state: ImeState,
-        x: i32,
-        y: i32,
-    },
+    Show { state: ImeState, x: i32, y: i32 },
     Hide,
 }
 
@@ -67,7 +63,8 @@ impl X11Panel {
                 .override_redirect(1)
                 .background_pixel(0x1e1e2e)
                 .event_mask(EventMask::EXPOSURE),
-        ).ok()?;
+        )
+        .ok()?;
 
         let gc = conn.generate_id().ok()?;
         conn.create_gc(gc, panel_win, &Default::default()).ok()?;
@@ -86,32 +83,32 @@ impl X11Panel {
 
     fn show(&mut self, state: &ImeState, x: i32, y: i32) {
         let (pixels, w, h) = self.renderer.render(state);
-        self.conn.configure_window(
-            self.panel_win,
-            &ConfigureWindowAux::new()
-                .x(x)
-                .y(y)
-                .width(w)
-                .height(h),
-        ).ok();
+        self.conn
+            .configure_window(
+                self.panel_win,
+                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
+            )
+            .ok();
 
         if !self.visible {
             self.conn.map_window(self.panel_win).ok();
             self.visible = true;
         }
 
-        self.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            self.panel_win,
-            self.gc,
-            w as u16,
-            h as u16,
-            0,
-            0,
-            0,
-            self.depth,
-            &pixels,
-        ).ok();
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                self.panel_win,
+                self.gc,
+                w as u16,
+                h as u16,
+                0,
+                0,
+                0,
+                self.depth,
+                &pixels,
+            )
+            .ok();
         self.conn.flush().ok();
     }
 
@@ -341,17 +338,17 @@ impl InputContext {
 #[interface(name = "org.freedesktop.IBus.InputContext")]
 impl InputContext {
     async fn focus_in(&self) {
-        tracing::debug!("IBus InputContext: FocusIn");
+        tracing::info!("IBus InputContext: FocusIn");
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
-        tracing::debug!("IBus InputContext: FocusOut");
+        tracing::info!("IBus InputContext: FocusOut");
         self.session.reset();
         self.clear_ui(&ctxt).await;
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
-        tracing::debug!("IBus InputContext: Reset");
+        tracing::info!("IBus InputContext: Reset");
         self.session.reset();
         self.clear_ui(&ctxt).await;
     }
@@ -365,13 +362,42 @@ impl InputContext {
     }
     async fn set_cursor_location_relative(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
     async fn set_capabilities(&self, _caps: u32) {}
+    async fn set_surrounding_text(&self, _text: zvariant::Value<'_>, _cursor: u32, _anchor: u32) {}
+    async fn set_content_type(&self, _purpose: u32, _hints: u32) {}
+
+    async fn enable(&self) {
+        tracing::info!("IBus InputContext: Enable");
+    }
+
+    async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        tracing::info!("IBus InputContext: Disable");
+        self.session.reset();
+        self.clear_ui(&ctxt).await;
+    }
+
+    async fn page_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn page_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn cursor_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn cursor_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn candidate_clicked(
+        &self,
+        _index: u32,
+        _button: u32,
+        _state: u32,
+        #[zbus(signal_context)] _ctxt: SignalContext<'_>,
+    ) {
+    }
+
+    async fn property_activate(&self, _name: &str, _state: u32) {}
+    async fn property_show(&self, _name: &str) {}
+    async fn property_hide(&self, _name: &str) {}
 
     async fn destroy(
         &self,
         #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
-        tracing::debug!("IBus InputContext: Destroy");
+        tracing::info!("IBus InputContext: Destroy");
         self.session.reset();
         self.clear_ui(&ctxt).await;
         server
@@ -402,7 +428,7 @@ impl InputContext {
             return false;
         }
 
-        tracing::debug!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
+        tracing::info!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
         let before_state = self.session.state();
         if should_bypass_empty_composition(keyval, state, &before_state) {
@@ -438,6 +464,7 @@ impl InputContext {
                     if let Some(ref text) = ime_state.committed {
                         if !text.is_empty() {
                             clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
+                            tracing::info!("IBus CommitText(candidate): {text:?}");
                             let ov = ibus_text_value(text);
                             if let Ok(v) = zvariant::Value::try_from(&ov) {
                                 let _ = Self::commit_text(&ctxt, v).await;
@@ -461,7 +488,7 @@ impl InputContext {
 
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
-                tracing::debug!("IBus CommitText: {text:?}");
+                tracing::info!("IBus CommitText: {text:?}");
                 clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
                 let ov = ibus_text_value(text);
                 if let Ok(v) = zvariant::Value::try_from(&ov) {
@@ -641,7 +668,7 @@ impl IBusBus {
         let path = zbus::zvariant::OwnedObjectPath::try_from(path_str.clone())
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
-        tracing::debug!("IBus CreateInputContext client={client_name:?} -> {path_str}");
+        tracing::info!("IBus CreateInputContext client={client_name:?} -> {path_str}");
 
         let session = self
             .engine
@@ -663,19 +690,33 @@ impl IBusBus {
     }
 
     async fn is_global_engine(&self) -> bool {
-        false
+        true
     }
 
     async fn get_engines(&self) -> Vec<zvariant::OwnedValue> {
-        vec![]
+        vec![ibus_engine_desc_value()]
     }
 
     async fn list_active_engines(&self) -> Vec<zvariant::OwnedValue> {
-        vec![]
+        vec![ibus_engine_desc_value()]
     }
 
     async fn get_global_engine(&self) -> zbus::fdo::Result<zvariant::OwnedValue> {
         Ok(ibus_engine_desc_value())
+    }
+
+    async fn set_global_engine(&self, name: &str) -> zbus::fdo::Result<()> {
+        tracing::info!("IBus SetGlobalEngine: {name}");
+        Ok(())
+    }
+
+    async fn register_component(&self, _component: zvariant::Value<'_>) -> zbus::fdo::Result<()> {
+        tracing::info!("IBus RegisterComponent");
+        Ok(())
+    }
+
+    async fn exit(&self, restart: bool) {
+        tracing::info!("IBus Exit requested restart={restart}");
     }
 
     #[zbus(signal)]

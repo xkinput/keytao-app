@@ -87,7 +87,9 @@ impl KimpanelHandle {
             }
         };
         if let Err(e) = conn.request_name(KIMPANEL_BUS_NAME).await {
-            tracing::warn!("Kimpanel: failed to request Kimpanel name (running as secondary?): {e}");
+            tracing::warn!(
+                "Kimpanel: failed to request Kimpanel name (running as secondary?): {e}"
+            );
         }
         let ctxt = match SignalContext::new(&conn, KIMPANEL_OBJECT_PATH) {
             Ok(ctxt) => ctxt,
@@ -113,7 +115,11 @@ impl KimpanelHandle {
     }
 
     pub async fn update_state(&self, state: &ImeState) {
-        tracing::info!("Kimpanel: updating state, preedit={}, candidates_len={}", state.preedit, state.candidates.len());
+        tracing::info!(
+            "Kimpanel: updating state, preedit={}, candidates_len={}",
+            state.preedit,
+            state.candidates.len()
+        );
         if state.preedit.is_empty() {
             if let Err(e) = Kimpanel::show_preedit_text(&self.ctxt, false).await {
                 tracing::warn!("Kimpanel: show_preedit_text(false) failed: {e}");
@@ -216,7 +222,8 @@ impl KimpanelHandle {
         has_next: bool,
         cursor: i32,
     ) -> zbus::Result<()> {
-        self._conn
+        match self
+            ._conn
             .call_method(
                 Some(IMPANEL_BUS_NAME),
                 IMPANEL_OBJECT_PATH,
@@ -233,7 +240,16 @@ impl KimpanelHandle {
                 ),
             )
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("ServiceUnknown") => {
+                tracing::debug!(
+                    "Kimpanel impanel2 service is not available; using compositor/X11 fallback panel"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

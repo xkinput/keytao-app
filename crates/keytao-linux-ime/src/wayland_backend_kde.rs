@@ -5,9 +5,9 @@
 
 use std::{
     fs::File,
+    io::Write,
     os::fd::{AsFd, AsRawFd},
     time::{Duration, Instant},
-    io::Write,
 };
 
 use keytao_core::ImeState;
@@ -299,6 +299,7 @@ impl App {
     fn commit_state_to_context(&self, state: &ImeState) {
         let Some(ctx) = &self.context else { return };
         if let Some(committed) = &state.committed {
+            tracing::info!("KDE commit_string: {committed:?}");
             ctx.commit_string(self.serial, committed.clone());
         }
         let preedit = state.preedit.clone();
@@ -350,7 +351,10 @@ impl App {
         key_state: wl_keyboard::KeyState,
         qh: &QueueHandle<Self>,
     ) {
-        tracing::info!("KDE handling key event: key={evdev_keycode}, state={key_state:?}, active={}", self.active);
+        tracing::info!(
+            "KDE handling key event: key={evdev_keycode}, state={key_state:?}, active={}",
+            self.active
+        );
         if key_state == wl_keyboard::KeyState::Released {
             self.handle_key_release(evdev_keycode);
             return;
@@ -381,6 +385,7 @@ impl App {
 
         if is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
             if let Some(ctx) = &self.context {
+                tracing::info!("KDE commit_string(preedit): {:?}", before_state.preedit);
                 ctx.commit_string(self.serial, before_state.preedit.clone());
             }
             self.clear_context_preedit();
@@ -465,7 +470,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
             version,
         } = event
         {
-            state.globals_seen.push(format!("{interface}@{version}#{name}"));
+            state
+                .globals_seen
+                .push(format!("{interface}@{version}#{name}"));
             match interface.as_str() {
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(7), qh, ())),
                 "wl_compositor" => {
@@ -664,7 +671,6 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
         tracing::info!("KDE Wayland global: {} v{}", g.interface, g.version);
     }
 
-
     tracing::info!("KDE Wayland IME running (input-method-v1)");
     loop {
         if app
@@ -712,12 +718,8 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
 fn tempfile() -> std::io::Result<File> {
     use std::os::unix::io::FromRawFd;
     let name = c"keytao-shm";
-    let fd = unsafe {
-        libc::memfd_create(
-            name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
+    let fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
