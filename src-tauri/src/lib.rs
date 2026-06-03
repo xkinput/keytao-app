@@ -218,6 +218,20 @@ fn keytao_ime_process_lines() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+fn write_keytao_ime_reload_stamp() -> Result<(), String> {
+    let dir =
+        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let stamp = dir.join("keytao-ime.reload");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::fs::write(&stamp, format!("{now}\n"))
+        .map_err(|e| format!("写入 keytao-ime 重载标记失败 {}: {e}", stamp.display()))
+}
+
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
@@ -1444,6 +1458,17 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
             if let Ok(engine) = keytao_core::Engine::new() {
                 let state: tauri::State<rime::RimeEngine> = app.state();
                 *state.engine.lock().unwrap() = Some(engine);
+            }
+            #[cfg(target_os = "linux")]
+            match write_keytao_ime_reload_stamp() {
+                Ok(()) => {
+                    let _ = app.emit("deploy-progress", "已通知 keytao-ime 重载");
+                    tracing::info!("keytao-ime reload stamp written after deploy");
+                }
+                Err(e) => {
+                    let _ = app.emit("deploy-progress", format!("keytao-ime 重载通知失败：{e}"));
+                    tracing::warn!("keytao-ime reload stamp failed after deploy: {e}");
+                }
             }
             Ok(DeployResult {
                 success: true,

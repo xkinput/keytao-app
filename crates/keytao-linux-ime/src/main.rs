@@ -174,6 +174,42 @@ fn remove_legacy_kde_env_file() {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn reload_stamp_path() -> Option<std::path::PathBuf> {
+    keytao_core::default_user_data_dir().map(|dir| dir.join("keytao-ime.reload"))
+}
+
+#[cfg(target_os = "linux")]
+fn install_reload_watcher(engine: engine::CoreEngine) {
+    let Some(path) = reload_stamp_path() else {
+        tracing::warn!("cannot determine reload stamp path; dictionary reload watcher disabled");
+        return;
+    };
+
+    if let Err(e) = std::thread::Builder::new()
+        .name("reload-watcher".into())
+        .spawn(move || {
+            let mut last_seen = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                if current.is_none() || current == last_seen {
+                    continue;
+                }
+
+                last_seen = current;
+                tracing::info!("reload stamp changed: {}", path.display());
+                match engine.reload() {
+                    Ok(()) => tracing::info!("librime redeployed after reload stamp change"),
+                    Err(e) => tracing::error!("librime reload failed: {e}"),
+                }
+            }
+        })
+    {
+        tracing::warn!("failed to spawn reload watcher: {e}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -215,6 +251,7 @@ fn main() {
             std::process::exit(1);
         }
         tracing::info!("librime ready");
+        install_reload_watcher(engine.clone());
 
         // KWin launches the configured Virtual Keyboard with a private
         // WAYLAND_SOCKET. On KDE this socket advertises input-method-v1, not the
