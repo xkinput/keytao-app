@@ -770,6 +770,15 @@ export default function App() {
                   <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg px-3 py-2">
                     <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
                     <code className="text-xs font-mono text-muted-foreground break-all flex-1 min-w-0">{selectedDir}</code>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0"
+                      onClick={() => openPath(selectedDir!)}
+                      title="在文件管理器中打开"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
                   {localSchemas !== null && (
                     <div className="flex items-start gap-2 text-xs bg-muted/40 border border-border rounded-lg px-3 py-2">

@@ -12,13 +12,13 @@
 
 ## 支持平台
 
-| 平台 | Rime 前端 | 配置目录 |
-|------|-----------|----------|
-| macOS | 鼠须管（Squirrel） | `~/Library/Rime` |
-| Windows | 小狼毫（Weasel） | `%APPDATA%\Rime` |
-| Linux | `keytao-ime`（Wayland input-method-v2 + XIM + IBus 兼容） | `~/.local/share/rime` |
-| Android | 同文输入法（Trime） | `/sdcard/rime`（SAF） |
-| iOS | iRime | 需手动导入，仅提供下载链接 |
+| 平台    | Rime 前端              | keytao-ime 前端                                          | 配置目录                   |
+| ------- | ---------------------- | -------------------------------------------------------- | -------------------------- |
+| macOS   | 鼠须管（Squirrel）     | 待实现                                                   | `~/Library/Rime`         |
+| Windows | 小狼毫（Weasel）       | 待实现                                                   | `%APPDATA%\Rime`         |
+| Linux   | Fcitx / IBus           | 已支持（Wayland input-method-v1/v2 + XIM + IBus）        | `~/.local/share/keytao`  |
+| Android | 同文输入法（Trime）    | 待实现                                                   | `/sdcard/rime`（SAF）    |
+| iOS     | iRime                  | 待实现                                                   | 需手动导入，仅提供下载链接 |
 
 ## 下载
 
@@ -28,13 +28,12 @@
 
 ## Linux 安装
 
-### AppImage / deb
+### deb
 
-从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载后直接运行（AppImage 无需安装）：
+从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载 `.deb` 包后安装：
 
 ```bash
-chmod +x keytao-app_*.AppImage
-./keytao-app_*.AppImage
+sudo dpkg -i keytao-app_*.deb
 ```
 
 ### NixOS / nix-darwin（推荐）
@@ -126,14 +125,106 @@ programs.niri.settings = {
 };
 ```
 
-#### 微信（wechat-uos）启动脚本示例
+#### KDE Plasma 配置示例
 
-```bash
-export XMODIFIERS="@im=keytao"
-exec wechat
+KDE Plasma 的 Wayland 输入法通过 KWin Virtual Keyboard 接口驱动，配合 XDG autostart 同时启动 IBus 后端，覆盖原生 Wayland 和 XWayland 两条路径。
+
+```nix
+let
+  keytaoPackage = inputs.keytao-app.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  kdeVirtualKeyboardDesktop = "keytao-wayland-launcher.desktop";
+in
+{
+  home.packages = [ keytaoPackage ];
+
+  # XWayland apps read this for XIM
+  home.sessionVariables.XMODIFIERS = "@im=keytao";
+  systemd.user.sessionVariables.XMODIFIERS = "@im=keytao";
+
+  # Register as KDE Virtual Keyboard (Wayland input-method-v2)
+  xdg.dataFile."applications/${kdeVirtualKeyboardDesktop}".text = ''
+    [Desktop Entry]
+    Name=KeyTao Input Method (Wayland)
+    Exec=${keytaoPackage}/bin/keytao-ime
+    Icon=input-keyboard
+    Type=Application
+    NoDisplay=true
+    OnlyShowIn=KDE;
+    X-KDE-Wayland-VirtualKeyboard=true
+  '';
+
+  # Autostart daemon with both xim and ibus backends
+  xdg.configFile."autostart/keytao-ime.desktop".text = ''
+    [Desktop Entry]
+    Name=KeyTao IME Daemon
+    Exec=${keytaoPackage}/bin/keytao-ime --backend=xim,ibus
+    Type=Application
+    NoDisplay=true
+    X-KDE-autostart-phase=1
+  '';
+
+  # Point KWin at keytao as the active input method
+  home.activation.configureKeytaoKdeVirtualKeyboard =
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      if [ -x "${pkgs.kdePackages.kconfig}/bin/kreadconfig6" ]; then
+        "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
+          --file "$HOME/.config/kwinrc" \
+          --group Wayland \
+          --key InputMethod \
+          "${kdeVirtualKeyboardDesktop}"
+      fi
+    '';
+}
 ```
 
-微信是 Qt 应用，在 Wayland 会话中通过 XWayland（xcb）运行，不支持 `zwp_input_method_v2`，只能通过 XIM 输入中文。
+---
+
+### QQ / WeChat 中文输入修复
+
+QQ 和微信在 Wayland 会话下均强制运行于 XWayland（xcb），不支持原生 Wayland 输入协议。需要通过 keytao-ime 的 **IBus 后端**桥接，而不是直接裸用 XIM。
+
+> **为什么不能只用 XIM？**
+> Chromium/Electron（QQ）和 wechat-uos 的 XIM 实现会在未完成 XIM 握手的情况下直接截获按键，导致退格、回车等普通按键在候选词状态下失效。通过 IBus D-Bus 信号通道则没有此问题。
+
+确保 `keytao-ime --backend=xim,ibus` 已在后台运行，然后以如下环境变量启动 QQ 或微信：
+
+```bash
+unset WAYLAND_DISPLAY
+export DISPLAY="${DISPLAY:-:0}"
+export QT_QPA_PLATFORM=xcb
+export GDK_BACKEND=x11
+export XMODIFIERS="@im=keytao"
+export QT_IM_MODULE=ibus
+export GTK_IM_MODULE=ibus
+# Forward IBus listen address from D-Bus session
+export IBUS_ADDRESS="${IBUS_ADDRESS:-${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
+
+exec qq "$@"         # or: exec wechat "$@"
+```
+
+**微信额外步骤**：wechat-uos 是内嵌 GTK 的 AppImage，打包时不含 IBus immodule，需要手动注入：
+
+```bash
+# One-time: generate a cache that includes the ibus immodule
+IBUS_SO=$(nix build nixpkgs#ibus --no-link --print-out-paths)/lib/gtk-3.0/3.0.0/immodules/im-ibus.so
+gtk-query-immodules-3.0 "$IBUS_SO" > ~/.cache/keytao-gtk-immodules.cache
+
+export GTK_PATH="$(dirname $(dirname $IBUS_SO))"
+export GTK_IM_MODULE_FILE="$HOME/.cache/keytao-gtk-immodules.cache"
+exec wechat "$@"
+```
+
+#### NixOS / Home Manager 完整可复现封装
+
+用 Nix derivation 可以把 immodules cache 构建、wrapProgram 和 AppImage 重新打包全部固化到 Nix store，做到零运行时副作用。完整实现参考：
+
+👉 [`nix-config/home/rea/linux.nix`](https://github.com/reaink/nix-config/blob/main/home/rea/linux.nix)
+
+核心思路：
+
+1. `pkgs.runCommand` 预构建 `gtkIbusImModulesCache`（`gtk-query-immodules-3.0 im-ibus.so`）
+2. `makeWrapper` 给 wechat/qq 的二进制加上上述所有环境变量和 `--set GTK_IM_MODULE_FILE`
+3. 微信：`pkgs.appimageTools.wrapAppImage` 在 `extraBuildCommands` 里追加 ibus 到内嵌 `immodules.cache`，确保沙箱内也能找到
 
 ---
 
