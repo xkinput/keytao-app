@@ -8,6 +8,15 @@ use std::sync::{
     Arc, Mutex,
 };
 
+const MOD_SHIFT: u32 = 0x0001;
+const MOD_CONTROL: u32 = 0x0004;
+const MOD_MOD1: u32 = 0x0008;
+const RELEASE_MASK: u32 = 1 << 30;
+
+pub fn rime_modifier_mask(mask: u32) -> u32 {
+    mask & (MOD_SHIFT | MOD_CONTROL | MOD_MOD1 | RELEASE_MASK)
+}
+
 #[derive(Clone)]
 pub struct CoreEngine(Arc<CoreEngineState>);
 
@@ -90,7 +99,11 @@ impl ImeSession {
     pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
         let mut inner = self.inner.lock().unwrap();
         self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.process_key_result(keycode, mask))
+        Some(
+            inner
+                .engine
+                .process_key_result(keycode, rime_modifier_mask(mask)),
+        )
     }
 
     pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
@@ -114,5 +127,17 @@ impl ImeSession {
         inner.generation = current;
         tracing::info!("Rime session refreshed after dictionary reload");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rime_modifier_mask;
+
+    #[test]
+    fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {
+        assert_eq!(rime_modifier_mask(0x10), 0);
+        assert_eq!(rime_modifier_mask(0x10 | 0x0001 | 0x0004), 0x0001 | 0x0004);
+        assert_eq!(rime_modifier_mask((1 << 30) | 0x10), 1 << 30);
     }
 }

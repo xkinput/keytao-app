@@ -148,6 +148,16 @@ fn is_enter_key(sym: u32) -> bool {
     matches!(sym, 0xff0d | 0xff8d)
 }
 
+fn surrounding_delete_for_key(sym: u32) -> Option<(i32, u32)> {
+    match sym {
+        // IBus DeleteSurroundingText uses offset-from-cursor, so BackSpace
+        // deletes one character before the cursor.
+        0xff08 => Some((-1, 1)),
+        0xffff => Some((0, 1)),
+        _ => None,
+    }
+}
+
 fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
     if !state.preedit.is_empty() || !state.candidates.is_empty() {
         return false;
@@ -431,6 +441,13 @@ impl InputContext {
         tracing::info!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
         let before_state = self.session.state();
+        if before_state.preedit.is_empty() && before_state.candidates.is_empty() {
+            if let Some((offset, n_chars)) = surrounding_delete_for_key(keyval) {
+                self.clear_ui(&ctxt).await;
+                let _ = Self::delete_surrounding_text(&ctxt, offset, n_chars).await;
+                return true;
+            }
+        }
         if should_bypass_empty_composition(keyval, state, &before_state) {
             self.clear_ui(&ctxt).await;
             return false;
@@ -598,6 +615,13 @@ impl InputContext {
 
     #[zbus(signal)]
     async fn hide_lookup_table(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn delete_surrounding_text(
+        ctxt: &SignalContext<'_>,
+        offset_from_cursor: i32,
+        n_chars: u32,
+    ) -> zbus::Result<()>;
 }
 
 /// Send an empty UpdatePreeditText to tell the client the composition ended
@@ -914,5 +938,17 @@ pub async fn run(engine: CoreEngine) {
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::surrounding_delete_for_key;
+
+    #[test]
+    fn surrounding_delete_for_key_maps_backspace_and_delete() {
+        assert_eq!(surrounding_delete_for_key(0xff08), Some((-1, 1)));
+        assert_eq!(surrounding_delete_for_key(0xffff), Some((0, 1)));
+        assert_eq!(surrounding_delete_for_key(0x66), None);
     }
 }

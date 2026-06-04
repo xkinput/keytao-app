@@ -10,7 +10,7 @@
 //!   │  1.候选  2.候选  3.候选  ...         ‹ page ›       │  ← 24px row
 //!   └──────────────────────────────────────────────────────┘
 
-use std::{collections::HashSet, path::Path as StdPath};
+use std::{collections::HashSet, path::Path as StdPath, process::Command};
 
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
@@ -288,15 +288,72 @@ fn load_symbol_fonts() -> Vec<FontSource> {
     sources
 }
 
+fn clamp_panel_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(0.75, 4.0)
+    } else {
+        1.0
+    }
+}
+
+fn parse_scale_value(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    value.parse::<f32>().ok().map(clamp_panel_scale)
+}
+
+fn xft_dpi_scale() -> Option<f32> {
+    let out = Command::new("xrdb").arg("-query").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    for line in stdout.lines() {
+        let Some(value) = line.strip_prefix("Xft.dpi:") else {
+            continue;
+        };
+        let dpi = value.trim().parse::<f32>().ok()?;
+        if dpi > 0.0 {
+            return Some(clamp_panel_scale(dpi / 96.0));
+        }
+    }
+    None
+}
+
+fn detect_panel_scale() -> f32 {
+    for key in [
+        "KEYTAO_IME_PANEL_SCALE",
+        "GDK_SCALE",
+        "QT_SCALE_FACTOR",
+        "QT_SCREEN_SCALE_FACTORS",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            let first = value.split([';', ':']).next().unwrap_or_default();
+            let scale_text = first.rsplit('=').next().unwrap_or(first);
+            if let Some(scale) = parse_scale_value(scale_text) {
+                return scale;
+            }
+        }
+    }
+    xft_dpi_scale().unwrap_or(1.0)
+}
+
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
 pub struct PanelRenderer {
     faces: Vec<Face>,
     _library: Library,
+    scale: f32,
 }
 
 impl PanelRenderer {
     pub fn new(source: FontSource) -> Option<Self> {
+        Self::with_scale(source, detect_panel_scale())
+    }
+
+    fn with_scale(source: FontSource, scale: f32) -> Option<Self> {
         let library = Library::init().ok()?;
         let face = library.new_face(&source.path, source.index).ok()?;
         let mut faces = vec![face];
@@ -308,11 +365,22 @@ impl PanelRenderer {
         Some(Self {
             faces,
             _library: library,
+            scale: clamp_panel_scale(scale),
         })
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
     pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
+        let font_size = self.s(FONT_SIZE);
+        let label_size = self.s(LABEL_SIZE);
+        let comment_size = self.s(COMMENT_SIZE);
+        let preedit_size = self.s(PREEDIT_SIZE);
+        let padding = self.s(PADDING);
+        let cand_gap = self.s(CAND_GAP);
+        let height = self.s(HEIGHT as f32).ceil() as u32;
+        let min_width = self.s(MIN_WIDTH as f32).ceil() as u32;
+        let nav_width = self.s(NAV_WIDTH);
+
         let cand_width: f32 = state
             .candidates
             .iter()
@@ -320,88 +388,95 @@ impl PanelRenderer {
             .map(|(i, c)| {
                 let label = self.candidate_label(state, i);
                 let comment = c.comment.as_deref().unwrap_or_default();
-                self.text_width(&format!("{label}. "), LABEL_SIZE)
-                    + self.text_width(&c.text, FONT_SIZE)
+                self.text_width(&format!("{label}. "), label_size)
+                    + self.text_width(&c.text, font_size)
                     + if comment.is_empty() {
                         0.0
                     } else {
-                        6.0 + self.text_width(comment, COMMENT_SIZE)
+                        self.s(6.0) + self.text_width(comment, comment_size)
                     }
-                    + CAND_GAP
+                    + cand_gap
             })
             .sum();
         let preedit_width = if state.preedit.is_empty() {
             0.0
         } else {
-            self.text_width(&state.preedit, PREEDIT_SIZE) + PADDING * 2.0
+            self.text_width(&state.preedit, preedit_size) + padding * 2.0
         };
         let nav_width = if state.candidates.is_empty() {
             0.0
         } else {
-            NAV_WIDTH
+            nav_width
         };
-        let width = (MIN_WIDTH as f32)
-            .max(cand_width + PADDING * 2.0 + nav_width)
+        let width = (min_width as f32)
+            .max(cand_width + padding * 2.0 + nav_width)
             .max(preedit_width) as u32;
 
-        let mut pm = Pixmap::new(width, HEIGHT).expect("pixmap alloc");
+        let mut pm = Pixmap::new(width, height).expect("pixmap alloc");
 
         // Background
         pm.fill(Color::from_rgba8(BG[2], BG[1], BG[0], 255));
 
         // Preedit
         let cand_y = if state.preedit.is_empty() {
-            HEIGHT as f32 / 2.0 + FONT_SIZE / 2.0 - 4.0
+            height as f32 / 2.0 + font_size / 2.0 - self.s(4.0)
         } else {
             self.draw_text(
                 &mut pm,
                 &state.preedit,
-                PADDING,
-                14.0,
+                padding,
+                self.s(14.0),
                 PREEDIT_COLOR,
-                PREEDIT_SIZE,
+                preedit_size,
             );
-            HEIGHT as f32 - 10.0
+            height as f32 - self.s(10.0)
         };
 
         // Candidates
-        let mut x = PADDING;
+        let mut x = padding;
         let selected_index = state
             .highlighted_candidate_index
             .min(state.candidates.len().saturating_sub(1));
         for (i, cand) in state.candidates.iter().enumerate() {
             let label = format!("{}. ", self.candidate_label(state, i));
             let color = if i == selected_index { ACCENT } else { FG };
-            self.draw_text(&mut pm, &label, x, cand_y, DIM, LABEL_SIZE);
-            x += self.text_width(&label, LABEL_SIZE);
-            self.draw_text(&mut pm, &cand.text, x, cand_y, color, FONT_SIZE);
-            x += self.text_width(&cand.text, FONT_SIZE);
+            self.draw_text(&mut pm, &label, x, cand_y, DIM, label_size);
+            x += self.text_width(&label, label_size);
+            self.draw_text(&mut pm, &cand.text, x, cand_y, color, font_size);
+            x += self.text_width(&cand.text, font_size);
             if let Some(comment) = cand
                 .comment
                 .as_deref()
                 .filter(|comment| !comment.is_empty())
             {
-                x += 6.0;
-                self.draw_text(&mut pm, comment, x, cand_y, COMMENT, COMMENT_SIZE);
-                x += self.text_width(comment, COMMENT_SIZE);
+                x += self.s(6.0);
+                self.draw_text(&mut pm, comment, x, cand_y, COMMENT, comment_size);
+                x += self.text_width(comment, comment_size);
             }
-            x += CAND_GAP;
+            x += cand_gap;
         }
 
         // Page arrows
         if !state.candidates.is_empty() {
-            let ax = width as f32 - nav_width + 4.0;
+            let ax = width as f32 - nav_width + self.s(4.0);
             let prev_color = if state.page == 0 { DIM } else { FG };
-            self.draw_text(&mut pm, "‹", ax, cand_y, prev_color, FONT_SIZE);
+            self.draw_text(&mut pm, "‹", ax, cand_y, prev_color, font_size);
             let next_color = if state.is_last_page { DIM } else { FG };
-            self.draw_text(&mut pm, "›", ax + 18.0, cand_y, next_color, FONT_SIZE);
+            self.draw_text(
+                &mut pm,
+                "›",
+                ax + self.s(18.0),
+                cand_y,
+                next_color,
+                font_size,
+            );
         }
 
         // Bottom separator
         let mut paint = Paint::default();
         paint.set_color_rgba8(SEP[2], SEP[1], SEP[0], 255);
         pm.fill_rect(
-            Rect::from_xywh(0.0, HEIGHT as f32 - 1.0, width as f32, 1.0).unwrap(),
+            Rect::from_xywh(0.0, height as f32 - 1.0, width as f32, 1.0).unwrap(),
             &paint,
             Transform::identity(),
             None,
@@ -413,7 +488,7 @@ impl PanelRenderer {
             px.swap(0, 2); // R↔B
         }
 
-        (out, width, HEIGHT)
+        (out, width, height)
     }
 
     fn candidate_label(&self, state: &ImeState, index: usize) -> String {
@@ -427,10 +502,14 @@ impl PanelRenderer {
     }
 
     pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
+        let hint_size = self.s(HINT_SIZE);
+        let hint_pad_x = self.s(HINT_PAD_X);
+        let hint_height = self.s(HINT_HEIGHT as f32).ceil() as u32;
+        let hint_min_width = self.s(HINT_MIN_WIDTH as f32).ceil() as u32;
         let label = if ascii_mode { "英" } else { "中" };
-        let text_width = self.text_width(label, HINT_SIZE);
-        let width = HINT_MIN_WIDTH.max((text_width + HINT_PAD_X * 2.0).ceil() as u32);
-        let mut pm = Pixmap::new(width, HINT_HEIGHT).expect("pixmap alloc");
+        let text_width = self.text_width(label, hint_size);
+        let width = hint_min_width.max((text_width + hint_pad_x * 2.0).ceil() as u32);
+        let mut pm = Pixmap::new(width, hint_height).expect("pixmap alloc");
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
 
         let bg = if ascii_mode {
@@ -449,9 +528,13 @@ impl PanelRenderer {
             [0x83, 0x7b, 0x48, 0xb8]
         };
 
-        if let Some(path) =
-            rounded_rect_path(0.5, 0.5, width as f32 - 1.0, HINT_HEIGHT as f32 - 1.0, 8.0)
-        {
+        if let Some(path) = rounded_rect_path(
+            0.5,
+            0.5,
+            width as f32 - 1.0,
+            hint_height as f32 - 1.0,
+            self.s(8.0),
+        ) {
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(bg[2], bg[1], bg[0], bg[3]));
             paint.anti_alias = true;
@@ -467,20 +550,24 @@ impl PanelRenderer {
                 border[2], border[1], border[0], border[3],
             ));
             let mut stroke = Stroke::default();
-            stroke.width = 1.0;
+            stroke.width = self.s(1.0).max(1.0);
             pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
 
         let x = (width as f32 - text_width) * 0.5;
-        let baseline = (HINT_HEIGHT as f32 + HINT_SIZE) * 0.5 - 3.0;
-        self.draw_text(&mut pm, label, x, baseline, fg, HINT_SIZE);
+        let baseline = (hint_height as f32 + hint_size) * 0.5 - self.s(3.0);
+        self.draw_text(&mut pm, label, x, baseline, fg, hint_size);
 
         let mut out = pm.data().to_vec();
         for px in out.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
 
-        (out, width, HINT_HEIGHT)
+        (out, width, hint_height)
+    }
+
+    fn s(&self, value: f32) -> f32 {
+        value * self.scale
     }
 
     fn draw_text(
@@ -786,5 +873,34 @@ mod tests {
             visible_text_pixels > 0,
             "mode hint rendered no visible pixels"
         );
+    }
+
+    #[test]
+    fn explicit_panel_scale_expands_candidate_panel() {
+        let Some(source) = load_font() else {
+            eprintln!("skipping panel scale test: no CJK font found");
+            return;
+        };
+        let Some(normal) = PanelRenderer::with_scale(source.clone(), 1.0) else {
+            eprintln!("skipping panel scale test: font source could not be reopened");
+            return;
+        };
+        let Some(scaled) = PanelRenderer::with_scale(source, 2.0) else {
+            eprintln!("skipping panel scale test: font source could not be reopened");
+            return;
+        };
+
+        let mut state = ImeState::empty();
+        state.preedit = "fan".to_string();
+        state.candidates = vec![Candidate {
+            text: "这".to_string(),
+            comment: Some("~a".to_string()),
+        }];
+
+        let (_, normal_width, normal_height) = normal.render(&state);
+        let (_, scaled_width, scaled_height) = scaled.render(&state);
+
+        assert!(scaled_width > normal_width);
+        assert!(scaled_height > normal_height);
     }
 }
