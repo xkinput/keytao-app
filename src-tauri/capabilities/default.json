@@ -8,7 +8,41 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "opener:allow-open-path",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$HOME/.local/share/keytao"
+        },
+        {
+          "path": "$HOME/.local/share/keytao/**"
+        },
+        {
+          "path": "$HOME/.local/share/fcitx5/rime"
+        },
+        {
+          "path": "$HOME/.local/share/fcitx5/rime/**"
+        },
+        {
+          "path": "$HOME/.config/ibus/rime"
+        },
+        {
+          "path": "$HOME/.config/ibus/rime/**"
+        },
+        {
+          "path": "$HOME/Library/Rime"
+        },
+        {
+          "path": "$HOME/Library/Rime/**"
+        },
+        {
+          "path": "$APPDATA/Rime"
+        },
+        {
+          "path": "$APPDATA/Rime/**"
+        }
+      ]
+    },
     "dialog:allow-open",
     "os:default"
   ]

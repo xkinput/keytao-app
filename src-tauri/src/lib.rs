@@ -85,6 +85,19 @@ const DEBUG_LOG_MAX_LINES: usize = 20_000;
 struct ManagedImeHelper(Mutex<Option<std::process::Child>>);
 
 #[cfg(target_os = "linux")]
+#[derive(Serialize, Clone)]
+pub struct LinuxImeStatus {
+    pub supported: bool,
+    pub kde_session: bool,
+    pub kde_configured: bool,
+    pub running: bool,
+    pub managed_pid: Option<u32>,
+    pub command: String,
+    pub processes: Vec<String>,
+    pub message: String,
+}
+
+#[cfg(target_os = "linux")]
 fn stop_managed_ime_helper(app: &tauri::AppHandle) {
     let state = app.state::<ManagedImeHelper>();
     let Ok(mut child_slot) = state.0.lock() else {
@@ -98,6 +111,32 @@ fn stop_managed_ime_helper(app: &tauri::AppHandle) {
         }
         let _ = child.wait();
         tracing::info!("managed keytao-ime pid={pid} stopped");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_managed_ime_helper(app: &tauri::AppHandle) -> Option<u32> {
+    let state = app.state::<ManagedImeHelper>();
+    let Ok(mut child_slot) = state.0.lock() else {
+        tracing::warn!("failed to lock managed IME helper state");
+        return None;
+    };
+
+    let Some(child) = child_slot.as_mut() else {
+        return None;
+    };
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::info!("managed keytao-ime exited with {status}");
+            *child_slot = None;
+            None
+        }
+        Ok(None) => Some(child.id()),
+        Err(e) => {
+            tracing::warn!("failed to inspect managed keytao-ime: {e}");
+            Some(child.id())
+        }
     }
 }
 
@@ -149,6 +188,75 @@ fn cleanup_kde_legacy_ime_files() {
                 desktop_file.display()
             ),
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kde_input_method_config() -> Option<String> {
+    for command in ["kreadconfig6", "kreadconfig5"] {
+        let output = std::process::Command::new(command)
+            .args([
+                "--file",
+                "kwinrc",
+                "--group",
+                "Wayland",
+                "--key",
+                "InputMethod",
+            ])
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    let home = std::env::var_os("HOME")?;
+    let kwinrc = std::path::Path::new(&home).join(".config").join("kwinrc");
+    let content = std::fs::read_to_string(kwinrc).ok()?;
+    let mut in_wayland_group = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_wayland_group = trimmed == "[Wayland]";
+            continue;
+        }
+        if in_wayland_group {
+            if let Some(value) = trimmed.strip_prefix("InputMethod=") {
+                let value = value.trim().to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn is_kde_input_method_configured() -> bool {
+    kde_input_method_config()
+        .as_deref()
+        .is_some_and(|value| value == "keytao-wayland-launcher.desktop")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ime_status_with_message(app: &tauri::AppHandle, message: String) -> LinuxImeStatus {
+    let (_, command) = resolve_keytao_ime_command(app);
+    let managed_pid = refresh_managed_ime_helper(app);
+    let processes = keytao_ime_process_lines();
+    LinuxImeStatus {
+        supported: true,
+        kde_session: is_kde_session(),
+        kde_configured: is_kde_input_method_configured(),
+        running: !processes.is_empty(),
+        managed_pid,
+        command,
+        processes,
+        message,
     }
 }
 
@@ -235,6 +343,161 @@ fn write_keytao_ime_reload_stamp() -> Result<(), String> {
         .as_nanos();
     std::fs::write(&stamp, format!("{now}\n"))
         .map_err(|e| format!("写入 keytao-ime 重载标记失败 {}: {e}", stamp.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn stop_external_keytao_ime_processes() {
+    let output = std::process::Command::new("pkill")
+        .args(["-x", "keytao-ime"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            tracing::info!("requested external keytao-ime processes to stop");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                tracing::warn!("pkill keytao-ime returned {}: {stderr}", output.status);
+            }
+        }
+        Err(e) => tracing::warn!("failed to run pkill for keytao-ime: {e}"),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+}
+
+#[cfg(target_os = "linux")]
+fn launch_keytao_ime(app: &tauri::AppHandle, restart: bool) -> Result<LinuxImeStatus, String> {
+    cleanup_kde_legacy_ime_files();
+    let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app);
+
+    if restart {
+        stop_managed_ime_helper(app);
+        stop_external_keytao_ime_processes();
+    } else if is_any_keytao_ime_running() {
+        let message = if is_same_keytao_ime_running(&ime_display) {
+            format!("keytao-ime 已在运行：{ime_display}")
+        } else {
+            format!("已有其他 keytao-ime 进程在运行，当前 app 期望使用：{ime_display}")
+        };
+        return Ok(linux_ime_status_with_message(app, message));
+    }
+
+    let child = ime_cmd
+        .spawn()
+        .map_err(|e| format!("启动 keytao-ime 失败（{ime_display}）：{e}"))?;
+    let pid = child.id();
+    if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {
+        *slot = Some(child);
+    }
+    tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
+
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    Ok(linux_ime_status_with_message(
+        app,
+        format!("已启动 keytao-ime pid={pid}"),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_exec_value(command: &str) -> String {
+    if command.contains(char::is_whitespace) {
+        format!(
+            "\"{}\"",
+            command
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('$', "\\$")
+                .replace('`', "\\`")
+        )
+    } else {
+        command.to_string()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_kde_virtual_keyboard_desktop(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("无法确定 HOME 目录")?;
+    let applications_dir = std::path::Path::new(&home)
+        .join(".local")
+        .join("share")
+        .join("applications");
+    std::fs::create_dir_all(&applications_dir)
+        .map_err(|e| format!("创建 KDE desktop 目录失败: {e}"))?;
+
+    let (_, ime_display) = resolve_keytao_ime_command(app);
+    let desktop_file = applications_dir.join("keytao-wayland-launcher.desktop");
+    let content = format!(
+        "[Desktop Entry]\n\
+         Name=KeyTao Input Method (Wayland)\n\
+         Name[zh_CN]=键道输入法 (Wayland)\n\
+         GenericName=Input Method\n\
+         GenericName[zh_CN]=输入法\n\
+         Comment=KeyTao Chinese Input Method Engine (KDE Virtual Keyboard)\n\
+         Comment[zh_CN]=键道中文输入法引擎（KDE 虚拟键盘）\n\
+         Exec={}\n\
+         Icon=input-keyboard\n\
+         Terminal=false\n\
+         Type=Application\n\
+         Categories=System;Utility;\n\
+         StartupNotify=false\n\
+         NoDisplay=true\n\
+         OnlyShowIn=KDE\n\
+         X-KDE-StartupNotify=false\n\
+         X-KDE-Wayland-VirtualKeyboard=true\n",
+        desktop_exec_value(&ime_display)
+    );
+    std::fs::write(&desktop_file, content)
+        .map_err(|e| format!("写入 KDE desktop 文件失败 {}: {e}", desktop_file.display()))?;
+    Ok(desktop_file)
+}
+
+#[cfg(target_os = "linux")]
+fn run_first_available_command(commands: &[&str], args: &[&str]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for command in commands {
+        match std::process::Command::new(command).args(args).output() {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => errors.push(format!(
+                "{command}: {} {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(e) => errors.push(format!("{command}: {e}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+#[cfg(target_os = "linux")]
+fn configure_kde_virtual_keyboard(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
+    if !is_kde_session() {
+        return Err("当前不是 KDE 会话，无法配置 KDE 虚拟键盘输入法".into());
+    }
+
+    let desktop_file = ensure_kde_virtual_keyboard_desktop(app)?;
+    run_first_available_command(
+        &["kwriteconfig6", "kwriteconfig5"],
+        &[
+            "--file",
+            "kwinrc",
+            "--group",
+            "Wayland",
+            "--key",
+            "InputMethod",
+            "keytao-wayland-launcher.desktop",
+        ],
+    )
+    .map_err(|e| format!("写入 KDE 输入法配置失败: {e}"))?;
+
+    let _ = run_first_available_command(
+        &["qdbus6", "qdbus"],
+        &["org.kde.KWin", "/KWin", "reconfigure"],
+    );
+
+    Ok(vec![
+        format!("已写入 {}", desktop_file.display()),
+        "已设置 KWin Wayland/InputMethod=keytao-wayland-launcher.desktop".into(),
+    ])
 }
 
 fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
@@ -1509,6 +1772,34 @@ async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<Instal
     Err("Not supported on mobile".into())
 }
 
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
+    linux_ime_status_with_message(&app, "已刷新 keytao-ime 状态".into())
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_start_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
+    launch_keytao_ime(&app, false)
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_restart_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
+    launch_keytao_ime(&app, true)
+}
+
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn linux_enable_kde_support(app: AppHandle) -> Result<LinuxImeStatus, String> {
+    let mut messages = configure_kde_virtual_keyboard(&app)?;
+    let mut status = launch_keytao_ime(&app, false)?;
+    messages.push(status.message);
+    status.message = messages.join("；");
+    Ok(status)
+}
+
 #[derive(Serialize)]
 pub struct DebugLogFile {
     pub lines: Vec<String>,
@@ -1689,7 +1980,8 @@ pub fn run() {
     let builder = builder.manage(ManagedImeHelper::default());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.on_window_event(|window, event| {
+    let builder = builder
+        .on_window_event(|window, event| {
             #[cfg(target_os = "linux")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
@@ -1702,24 +1994,24 @@ pub fn run() {
             };
             let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
             let handle = app.handle().clone();
-            if let Err(e) = app
-                .handle()
-                .global_shortcut()
-                .on_shortcut(shortcut, move |_app, _sc, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        let pid = rime::get_frontmost_pid();
-                        rime::set_injection_target(pid);
-                        if let Some(w) = handle.get_webview_window("ime-overlay") {
-                            if w.is_visible().unwrap_or(false) {
-                                let _ = w.hide();
-                            } else {
-                                let _ = w.center();
-                                let _ = w.show();
-                                let _ = w.set_focus();
+            if let Err(e) =
+                app.handle()
+                    .global_shortcut()
+                    .on_shortcut(shortcut, move |_app, _sc, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            let pid = rime::get_frontmost_pid();
+                            rime::set_injection_target(pid);
+                            if let Some(w) = handle.get_webview_window("ime-overlay") {
+                                if w.is_visible().unwrap_or(false) {
+                                    let _ = w.hide();
+                                } else {
+                                    let _ = w.center();
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
                             }
                         }
-                    }
-                })
+                    })
             {
                 eprintln!(
                     "Ctrl+Shift+Space global shortcut is already registered or unavailable; \
@@ -1730,37 +2022,10 @@ pub fn run() {
             {
                 // Linux tray is handled by keytao-ime daemon now.
 
-                #[cfg(target_os = "linux")]
-                cleanup_kde_legacy_ime_files();
-
                 // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
-                if false {
-                    tracing::info!("Disabled KDE check");
-                } else {
-                    let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(app.handle());
-                    let same_binary_running = is_same_keytao_ime_running(&ime_display);
-                    let any_ime_running = is_any_keytao_ime_running();
-                    if !any_ime_running {
-                        match ime_cmd.spawn() {
-                            Ok(child) => {
-                                let pid = child.id();
-                                if let Ok(mut slot) = app.state::<ManagedImeHelper>().0.lock() {
-                                    *slot = Some(child);
-                                }
-                                tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
-                            }
-                            Err(e) => tracing::warn!(
-                                "keytao-ime failed to spawn from {ime_display}: {e}"
-                            ),
-                        }
-                    } else if same_binary_running {
-                        tracing::info!("keytao-ime already running from {ime_display}");
-                    } else {
-                        tracing::warn!(
-                            "a different keytao-ime is already running; expected {ime_display}. \
-                             Stop the existing IME if you want nr tauri dev to exercise the local binary."
-                        );
-                    }
+                match launch_keytao_ime(app.handle(), false) {
+                    Ok(status) => tracing::info!("{}", status.message),
+                    Err(e) => tracing::warn!("{e}"),
                 }
             }
 
@@ -1789,6 +2054,14 @@ pub fn run() {
             check_local_schema,
             rime_deploy_default,
             read_debug_logs,
+            #[cfg(target_os = "linux")]
+            linux_ime_status,
+            #[cfg(target_os = "linux")]
+            linux_start_ime,
+            #[cfg(target_os = "linux")]
+            linux_restart_ime,
+            #[cfg(target_os = "linux")]
+            linux_enable_kde_support,
             // ── IME engine commands (desktop only) ──
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             rime::rime_setup,

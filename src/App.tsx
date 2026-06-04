@@ -114,6 +114,17 @@ interface ComponentVersions {
   data_dir: string | null
 }
 
+interface LinuxImeStatus {
+  supported: boolean
+  kde_session: boolean
+  kde_configured: boolean
+  running: boolean
+  managed_pid: number | null
+  command: string
+  processes: string[]
+  message: string
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -199,6 +210,14 @@ export default function App() {
   const [isInstallingIme, setIsInstallingIme] = useState(false)
   const [imeInstallError, setImeInstallError] = useState<string | null>(null)
 
+  // Linux IME daemon
+  const [linuxImeStatus, setLinuxImeStatus] = useState<LinuxImeStatus | null>(null)
+  const [linuxImeError, setLinuxImeError] = useState<string | null>(null)
+  const [isRefreshingLinuxIme, setIsRefreshingLinuxIme] = useState(false)
+  const [isStartingLinuxIme, setIsStartingLinuxIme] = useState(false)
+  const [isRestartingLinuxIme, setIsRestartingLinuxIme] = useState(false)
+  const [isEnablingKdeSupport, setIsEnablingKdeSupport] = useState(false)
+
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
 
@@ -281,6 +300,12 @@ export default function App() {
         .catch(() => { })
     }
 
+    if (os === "linux") {
+      invoke<LinuxImeStatus>("linux_ime_status")
+        .then(setLinuxImeStatus)
+        .catch((e) => setLinuxImeError(String(e)))
+    }
+
     listen<InstallProgress>("install-progress", (e) => {
       setInstallProgress(e.payload)
       setExtProgress(e.payload)
@@ -295,6 +320,7 @@ export default function App() {
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
+  const isLinuxImeBusy = isRefreshingLinuxIme || isStartingLinuxIme || isRestartingLinuxIme || isEnablingKdeSupport
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -398,6 +424,61 @@ export default function App() {
       setImeInstalled(false)
     } catch (e) {
       setImeInstallError(String(e))
+    }
+  }
+
+  async function refreshLinuxImeStatus() {
+    setIsRefreshingLinuxIme(true)
+    setLinuxImeError(null)
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_ime_status")
+      setLinuxImeStatus(status)
+    } catch (e) {
+      setLinuxImeError(String(e))
+    } finally {
+      setIsRefreshingLinuxIme(false)
+    }
+  }
+
+  async function handleStartLinuxIme() {
+    setIsStartingLinuxIme(true)
+    setLinuxImeError(null)
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_start_ime")
+      setLinuxImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setLinuxImeError(String(e))
+    } finally {
+      setIsStartingLinuxIme(false)
+    }
+  }
+
+  async function handleRestartLinuxIme() {
+    setIsRestartingLinuxIme(true)
+    setLinuxImeError(null)
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_restart_ime")
+      setLinuxImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setLinuxImeError(String(e))
+    } finally {
+      setIsRestartingLinuxIme(false)
+    }
+  }
+
+  async function handleEnableKdeSupport() {
+    setIsEnablingKdeSupport(true)
+    setLinuxImeError(null)
+    try {
+      const status = await invoke<LinuxImeStatus>("linux_enable_kde_support")
+      setLinuxImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setLinuxImeError(String(e))
+    } finally {
+      setIsEnablingKdeSupport(false)
     }
   }
 
@@ -634,6 +715,100 @@ export default function App() {
                       如未出现「键道」，请前往<strong>系统设置 → 键盘 → 输入来源</strong>手动添加。
                     </p>
                   )}
+                </CardContent>
+              </Card>
+            )}
+
+            {osType === "linux" && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-muted-foreground" />
+                    Linux 系统输入法
+                    <span className="ml-auto">
+                      {linuxImeStatus?.running
+                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />运行中</Badge>
+                        : <Badge variant="outline" className="text-xs">未启动</Badge>
+                      }
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {linuxImeStatus && (
+                    <div className="grid gap-2 text-xs">
+                      <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">命令：</span>
+                        <code className="font-mono truncate">{linuxImeStatus.command}</code>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary" className="text-xs">
+                          {linuxImeStatus.kde_session ? "KDE 会话" : "非 KDE 会话"}
+                        </Badge>
+                        <Badge variant={linuxImeStatus.kde_configured ? "default" : "outline"} className="text-xs">
+                          KDE {linuxImeStatus.kde_configured ? "已配置" : "未配置"}
+                        </Badge>
+                        {linuxImeStatus.managed_pid && (
+                          <Badge variant="outline" className="text-xs font-mono">pid {linuxImeStatus.managed_pid}</Badge>
+                        )}
+                        {linuxImeStatus.processes.length > 0 && (
+                          <Badge variant="outline" className="text-xs">{linuxImeStatus.processes.length} 个进程</Badge>
+                        )}
+                      </div>
+                      {linuxImeStatus.message && (
+                        <div className="text-xs text-muted-foreground rounded-lg border border-border bg-muted/20 px-3 py-2">
+                          {linuxImeStatus.message}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {linuxImeError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{linuxImeError}</span>
+                    </div>
+                  )}
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshLinuxImeStatus}
+                      disabled={isLinuxImeBusy}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingLinuxIme ? "animate-spin" : ""}`} />
+                      刷新状态
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleStartLinuxIme}
+                      disabled={isLinuxImeBusy || linuxImeStatus?.running}
+                      className="gap-1.5"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      启动 IME
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRestartLinuxIme}
+                      disabled={isLinuxImeBusy}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRestartingLinuxIme ? "animate-spin" : ""}`} />
+                      重启 IME
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleEnableKdeSupport}
+                      disabled={isLinuxImeBusy || !linuxImeStatus?.kde_session}
+                      className="gap-1.5"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                      启用 KDE 支持
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             )}
