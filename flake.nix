@@ -178,8 +178,8 @@
           export DISPLAY="''${DISPLAY:-:0}"
           export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
           
-          export GTK_IM_MODULE="''${GTK_IM_MODULE:-wayland}"
-          export QT_IM_MODULE="''${QT_IM_MODULE:-wayland}"
+          export GTK_IM_MODULE="wayland"
+          export QT_IM_MODULE="wayland"
 
           export GDK_BACKEND="''${GDK_BACKEND:-wayland}"
           export WEBKIT_DISABLE_DMABUF_RENDERER="''${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"

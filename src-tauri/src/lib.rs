@@ -94,7 +94,17 @@ pub struct LinuxImeStatus {
     pub managed_pid: Option<u32>,
     pub command: String,
     pub processes: Vec<String>,
+    pub kde_native_processes: usize,
+    pub fallback_processes: usize,
     pub message: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct KeytaoImeProcess {
+    pid: u32,
+    line: String,
+    kde_native: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -247,15 +257,20 @@ fn is_kde_input_method_configured() -> bool {
 fn linux_ime_status_with_message(app: &tauri::AppHandle, message: String) -> LinuxImeStatus {
     let (_, command) = resolve_keytao_ime_command(app);
     let managed_pid = refresh_managed_ime_helper(app);
-    let processes = keytao_ime_process_lines();
+    let process_entries = keytao_ime_process_entries();
+    let kde_native_processes = process_entries.iter().filter(|p| p.kde_native).count();
+    let fallback_processes = process_entries.iter().filter(|p| !p.kde_native).count();
+    let processes = process_entries.into_iter().map(|p| p.line).collect();
     LinuxImeStatus {
         supported: true,
         kde_session: is_kde_session(),
         kde_configured: is_kde_input_method_configured(),
-        running: !processes.is_empty(),
+        running: kde_native_processes + fallback_processes > 0,
         managed_pid,
         command,
         processes,
+        kde_native_processes,
+        fallback_processes,
         message,
     }
 }
@@ -313,22 +328,67 @@ fn is_any_keytao_ime_running() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn is_fallback_keytao_ime_running() -> bool {
+    keytao_ime_process_entries()
+        .into_iter()
+        .any(|process| !process.kde_native)
+}
+
+#[cfg(target_os = "linux")]
 fn keytao_ime_process_lines() -> Vec<String> {
+    keytao_ime_process_entries()
+        .into_iter()
+        .map(|process| process.line)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
     let output = std::process::Command::new("pgrep")
         .args(["-af", "keytao-ime"])
         .output()
         .ok();
 
+    let current_pid = std::process::id();
     output
         .filter(|output| output.status.success())
         .map(|output| {
             String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .filter(|line| line.contains("keytao-ime"))
-                .map(str::to_owned)
+                .filter_map(|line| {
+                    let (pid_text, _) = line.split_once(' ')?;
+                    let pid = pid_text.parse::<u32>().ok()?;
+                    if pid == current_pid || !is_keytao_ime_executable(pid) {
+                        return None;
+                    }
+                    Some(KeytaoImeProcess {
+                        pid,
+                        line: line.to_owned(),
+                        kde_native: process_has_wayland_socket(pid),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn is_keytao_ime_executable(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_os_string()))
+        .and_then(|name| name.into_string().ok())
+        .is_some_and(|name| name.starts_with("keytao-ime"))
+}
+
+#[cfg(target_os = "linux")]
+fn process_has_wayland_socket(pid: u32) -> bool {
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    environ
+        .split(|byte| *byte == 0)
+        .any(|item| item.starts_with(b"WAYLAND_SOCKET="))
 }
 
 #[cfg(target_os = "linux")]
@@ -346,23 +406,58 @@ fn write_keytao_ime_reload_stamp() -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn stop_external_keytao_ime_processes() {
-    let output = std::process::Command::new("pkill")
-        .args(["-x", "keytao-ime"])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            tracing::info!("requested external keytao-ime processes to stop");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                tracing::warn!("pkill keytao-ime returned {}: {stderr}", output.status);
-            }
-        }
-        Err(e) => tracing::warn!("failed to run pkill for keytao-ime: {e}"),
+fn stop_external_keytao_ime_processes(include_kde_native: bool) {
+    let processes: Vec<KeytaoImeProcess> = keytao_ime_process_entries()
+        .into_iter()
+        .filter(|process| include_kde_native || !process.kde_native)
+        .collect();
+    if processes.is_empty() {
+        return;
     }
-    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    for process in &processes {
+        match std::process::Command::new("kill")
+            .args(["-TERM", &process.pid.to_string()])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                tracing::info!("requested keytao-ime pid={} to stop", process.pid);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    "kill -TERM keytao-ime pid={} returned {}: {}",
+                    process.pid,
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            Err(e) => tracing::warn!("failed to run kill for keytao-ime pid={}: {e}", process.pid),
+        }
+    }
+
+    let requested_pids: Vec<u32> = processes.iter().map(|process| process.pid).collect();
+    for _ in 0..20 {
+        if requested_pids.iter().all(|pid| !process_exists(*pid)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    for pid in requested_pids
+        .into_iter()
+        .filter(|pid| process_exists(*pid))
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output();
+        tracing::warn!("force-killed lingering keytao-ime pid={pid}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_exists(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 #[cfg(target_os = "linux")]
@@ -372,12 +467,12 @@ fn launch_keytao_ime(app: &tauri::AppHandle, restart: bool) -> Result<LinuxImeSt
 
     if restart {
         stop_managed_ime_helper(app);
-        stop_external_keytao_ime_processes();
-    } else if is_any_keytao_ime_running() {
+        stop_external_keytao_ime_processes(false);
+    } else if is_fallback_keytao_ime_running() {
         let message = if is_same_keytao_ime_running(&ime_display) {
-            format!("keytao-ime 已在运行：{ime_display}")
+            format!("keytao-ime XIM+IBUS 已在运行：{ime_display}")
         } else {
-            format!("已有其他 keytao-ime 进程在运行，当前 app 期望使用：{ime_display}")
+            format!("已有其他 keytao-ime XIM+IBUS 进程在运行，当前 app 期望使用：{ime_display}")
         };
         return Ok(linux_ime_status_with_message(app, message));
     }

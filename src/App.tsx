@@ -122,6 +122,8 @@ interface LinuxImeStatus {
   managed_pid: number | null
   command: string
   processes: string[]
+  kde_native_processes: number
+  fallback_processes: number
   message: string
 }
 
@@ -204,11 +206,6 @@ export default function App() {
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
   const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
-
-  // macOS IME
-  const [imeInstalled, setImeInstalled] = useState(false)
-  const [isInstallingIme, setIsInstallingIme] = useState(false)
-  const [imeInstallError, setImeInstallError] = useState<string | null>(null)
 
   // Linux IME daemon
   const [linuxImeStatus, setLinuxImeStatus] = useState<LinuxImeStatus | null>(null)
@@ -293,12 +290,6 @@ export default function App() {
     invoke<ComponentVersions>("get_component_versions")
       .then(setComponentVersions)
       .catch(() => { })
-
-    if (os === "macos") {
-      invoke<{ installed: boolean }>("macos_ime_status")
-        .then((s) => setImeInstalled(s.installed))
-        .catch(() => { })
-    }
 
     if (os === "linux") {
       invoke<LinuxImeStatus>("linux_ime_status")
@@ -403,28 +394,6 @@ export default function App() {
     }
     setIsInstalling(false)
     await handleDeploy()
-  }
-
-  async function handleInstallIme() {
-    setIsInstallingIme(true)
-    setImeInstallError(null)
-    try {
-      await invoke("macos_install_ime")
-      setImeInstalled(true)
-    } catch (e) {
-      setImeInstallError(String(e))
-    } finally {
-      setIsInstallingIme(false)
-    }
-  }
-
-  async function handleUninstallIme() {
-    try {
-      await invoke("macos_uninstall_ime")
-      setImeInstalled(false)
-    } catch (e) {
-      setImeInstallError(String(e))
-    }
   }
 
   async function refreshLinuxImeStatus() {
@@ -676,45 +645,21 @@ export default function App() {
         {/* ══ 安装 Tab ══════════════════════════════════════════════════════ */}
         {activeTab === "install" && (
           <div className="space-y-4">
-            {osType === "macos" && (
+            {osType !== "linux" && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
                     <Cpu className="h-4 w-4 text-muted-foreground" />
-                    安装 KeyTao 系统输入法
+                    KeyTao 系统输入法
                     <span className="ml-auto">
-                      {imeInstalled
-                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已安装</Badge>
-                        : <Badge variant="outline" className="text-xs">未安装</Badge>
-                      }
+                      <Badge variant="outline" className="text-xs">开发中</Badge>
                     </span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <p className="text-sm text-muted-foreground">
-                    将 KeyTao.app 安装到 <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">~/Library/Input Methods/</code>，成为 macOS 原生系统输入法。
+                    开发中，快好了。当前版本已先支持 Linux 的完整 keytao-ime 输入法功能，其他平台会在后续版本接入对应的系统输入法能力。
                   </p>
-                  {imeInstallError && (
-                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
-                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>{imeInstallError}</span>
-                    </div>
-                  )}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button size="sm" onClick={handleInstallIme} disabled={isInstallingIme} className="gap-1.5">
-                      <Cpu className="h-4 w-4" />
-                      {isInstallingIme ? "安装中..." : imeInstalled ? "重新安装" : "安装输入法"}
-                    </Button>
-                    {imeInstalled && (
-                      <Button variant="outline" size="sm" onClick={handleUninstallIme}
-                        className="gap-1.5 text-destructive hover:text-destructive">卸载</Button>
-                    )}
-                  </div>
-                  {imeInstalled && (
-                    <p className="text-xs text-muted-foreground">
-                      如未出现「键道」，请前往<strong>系统设置 → 键盘 → 输入来源</strong>手动添加。
-                    </p>
-                  )}
                 </CardContent>
               </Card>
             )}
@@ -751,8 +696,11 @@ export default function App() {
                         {linuxImeStatus.managed_pid && (
                           <Badge variant="outline" className="text-xs font-mono">pid {linuxImeStatus.managed_pid}</Badge>
                         )}
-                        {linuxImeStatus.processes.length > 0 && (
-                          <Badge variant="outline" className="text-xs">{linuxImeStatus.processes.length} 个进程</Badge>
+                        {linuxImeStatus.kde_native_processes > 0 && (
+                          <Badge variant="outline" className="text-xs">KWIN_WAYLAND {linuxImeStatus.kde_native_processes}</Badge>
+                        )}
+                        {linuxImeStatus.fallback_processes > 0 && (
+                          <Badge variant="outline" className="text-xs">XIM+IBUS {linuxImeStatus.fallback_processes}</Badge>
                         )}
                       </div>
                       {linuxImeStatus.message && (
@@ -782,11 +730,11 @@ export default function App() {
                     <Button
                       size="sm"
                       onClick={handleStartLinuxIme}
-                      disabled={isLinuxImeBusy || linuxImeStatus?.running}
+                      disabled={isLinuxImeBusy || (linuxImeStatus?.fallback_processes ?? 0) > 0}
                       className="gap-1.5"
                     >
                       <Play className="h-3.5 w-3.5" />
-                      启动 IME
+                      启动 XIM+IBUS
                     </Button>
                     <Button
                       variant="outline"
@@ -796,18 +744,20 @@ export default function App() {
                       className="gap-1.5"
                     >
                       <RefreshCw className={`h-3.5 w-3.5 ${isRestartingLinuxIme ? "animate-spin" : ""}`} />
-                      重启 IME
+                      重启 XIM+IBUS
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleEnableKdeSupport}
-                      disabled={isLinuxImeBusy || !linuxImeStatus?.kde_session}
-                      className="gap-1.5"
-                    >
-                      <Settings className="h-3.5 w-3.5" />
-                      启用 KDE 支持
-                    </Button>
+                    {linuxImeStatus?.kde_session && !linuxImeStatus.kde_configured && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleEnableKdeSupport}
+                        disabled={isLinuxImeBusy}
+                        className="gap-1.5"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                        启用 KDE 支持
+                      </Button>
+                    )}
                   </div>
                 </CardContent>
               </Card>

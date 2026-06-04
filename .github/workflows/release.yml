@@ -38,11 +38,11 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: --bundles deb
+            args: --bundles deb,rpm,appimage
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
-            args: ''
+            args: --bundles nsis
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -50,7 +50,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -69,29 +69,39 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+          sudo apt-get install -y --no-install-recommends \
+            file ca-certificates unzip \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev pkg-config \
+            libsoup-3.0-dev libharfbuzz-dev libbz2-dev liblzma-dev \
             librime-dev libclang-dev clang \
-            libxkbcommon-dev libxcb1-dev libx11-dev \
             libfreetype6-dev \
-            librsvg2-dev \
-            patchelf
+            libxdo-dev xdg-utils \
+            gcc libc6-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            rpm fakeroot dpkg-dev libfuse2 \
+            mold
 
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json
-          mv tmp.json src-tauri/tauri.conf.json
+          node <<'NODE'
+          const fs = require('fs')
+          const version = process.env.GITHUB_REF_NAME.replace(/^v/, '')
+          const path = 'src-tauri/tauri.conf.json'
+          const config = JSON.parse(fs.readFileSync(path, 'utf8'))
+          config.version = version
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`)
+          NODE
 
       - name: Pre-build keytao-linux-ime
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         run: |
           cargo build -p keytao-linux-ime --release
+          test -x "$PWD/target/release/keytao-ime"
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> "$GITHUB_ENV"
           echo 'TAURI_CONFIG={"bundle":{"externalBin":["binaries/keytao-ime"]}}' >> "$GITHUB_ENV"
 
@@ -102,14 +112,44 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release-id }}
           args: ${{ matrix.args }}
 
+      - name: Verify Linux bundles include keytao-ime
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sidecar="src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu"
+          test -s "$sidecar"
+
+          deb="$(find target/release/bundle/deb -name '*.deb' -print -quit)"
+          test -n "$deb"
+          dpkg-deb -c "$deb" | grep -E 'keytao-ime(-x86_64-unknown-linux-gnu)?'
+
+          rpm_pkg="$(find target/release/bundle/rpm -name '*.rpm' -print -quit)"
+          test -n "$rpm_pkg"
+          rpm -qpl "$rpm_pkg" | grep -E 'keytao-ime(-x86_64-unknown-linux-gnu)?'
+
+          appimage="$(find target/release/bundle/appimage -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          rm -rf squashfs-root
+          "$appimage" --appimage-extract >/dev/null
+          find squashfs-root -name '*keytao-ime*' -print -quit | grep keytao-ime
+          rm -rf squashfs-root
+
       - name: Upload Linux tar.gz to release
         if: matrix.platform == 'ubuntu-22.04'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
+          app_bin="$(find target/release -maxdepth 1 -type f -perm -111 \
+            ! -name 'keytao-ime' ! -name '*.so' -print -quit)"
+          test -n "$app_bin"
+          app_name="$(basename "$app_bin")"
           tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
-            -C target/release keytao-installer keytao-ime
+            -C target/release "$app_name" keytao-ime
           gh release upload ${{ github.ref_name }} \
             "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
             --clobber
@@ -122,7 +162,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: latest
+          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -146,21 +186,26 @@ jobs:
 
       - run: sdkmanager "ndk;27.0.12077973"
 
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json
-          mv tmp.json src-tauri/tauri.conf.json
+          node <<'NODE'
+          const fs = require('fs')
+          const version = process.env.GITHUB_REF_NAME.replace(/^v/, '')
+          const path = 'src-tauri/tauri.conf.json'
+          const config = JSON.parse(fs.readFileSync(path, 'utf8'))
+          config.version = version
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`)
+          NODE
 
       - name: Setup Android signing
         run: |
           cd src-tauri/gen/android
-          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > $RUNNER_TEMP/keystore_orig.jks
+          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > "$RUNNER_TEMP/keystore_orig.jks"
           keytool -importkeystore \
-            -srckeystore $RUNNER_TEMP/keystore_orig.jks \
-            -destkeystore $RUNNER_TEMP/keystore.jks \
+            -srckeystore "$RUNNER_TEMP/keystore_orig.jks" \
+            -destkeystore "$RUNNER_TEMP/keystore.jks" \
             -deststoretype JKS \
             -srcstorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
             -deststorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
