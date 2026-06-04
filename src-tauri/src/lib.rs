@@ -12,7 +12,7 @@ use std::sync::Mutex;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use keytao_core;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "linux")]
 mod rime;
 
 // Linux protocol frontends live in the keytao-ime daemon. The GUI only deploys
@@ -1802,7 +1802,7 @@ pub struct DeployResult {
 }
 
 #[tauri::command]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "linux")]
 async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
@@ -1841,9 +1841,9 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(not(target_os = "linux"))]
 async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
-    Err("Not supported on mobile".into())
+    Err("librime deployment is only supported on Linux for now".into())
 }
 
 // ─── Install schemas to default keytao data dir ───────────────────────────────
@@ -2063,21 +2063,17 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(scoped_storage_plugin());
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(target_os = "linux")]
     let builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::default().build())
         .manage(rime::RimeEngine::default());
 
-    #[cfg(all(
-        not(any(target_os = "android", target_os = "ios")),
-        target_os = "linux"
-    ))]
+    #[cfg(target_os = "linux")]
     let builder = builder.manage(ManagedImeHelper::default());
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(target_os = "linux")]
     let builder = builder
         .on_window_event(|window, event| {
-            #[cfg(target_os = "linux")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
@@ -2113,15 +2109,12 @@ pub fn run() {
                      continuing without the overlay hotkey: {e}"
                 );
             }
-            #[cfg(target_os = "linux")]
-            {
-                // Linux tray is handled by keytao-ime daemon now.
+            // Linux tray is handled by keytao-ime daemon now.
 
-                // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
-                match launch_keytao_ime(app.handle(), false) {
-                    Ok(status) => tracing::info!("{}", status.message),
-                    Err(e) => tracing::warn!("{e}"),
-                }
+            // Ensure the single Linux IME daemon owns Wayland, XIM, and IBus frontends.
+            match launch_keytao_ime(app.handle(), false) {
+                Ok(status) => tracing::info!("{}", status.message),
+                Err(e) => tracing::warn!("{e}"),
             }
 
             Ok(())
@@ -2157,26 +2150,26 @@ pub fn run() {
             linux_restart_ime,
             #[cfg(target_os = "linux")]
             linux_enable_kde_support,
-            // ── IME engine commands (desktop only) ──
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            // ── IME engine commands (Linux only for now) ──
+            #[cfg(target_os = "linux")]
             rime::rime_setup,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_process_key,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_select_candidate,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_change_page,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_reset,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_is_ready,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_memory_usage,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_inject_text,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_get_data_dir,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(target_os = "linux")]
             rime::rime_has_schemas,
         ])
         .build(tauri::generate_context!())

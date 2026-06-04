@@ -1,4 +1,4 @@
-package ink.rea.keytao_installer
+package ink.rea.keytao_app
 
 data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
 data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)

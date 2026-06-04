@@ -52,6 +52,7 @@ impl ImeState {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
     let staging_dir = user_data_dir.join("build");
     let prebuilt_dir = if user_data_dir == shared_data_dir {
@@ -62,13 +63,14 @@ fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, Pa
     (staging_dir, prebuilt_dir)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
-// ── Desktop-only engine (guarded at the module level) ────────────────────────
+// ── Linux-only engine (guarded at the module level) ──────────────────────────
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "linux")]
 mod desktop {
     use super::*;
     use rime_api::{
@@ -226,7 +228,7 @@ mod desktop {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "linux")]
 pub use desktop::{deploy, Engine};
 
 fn is_default_custom(filename: &str) -> bool {
@@ -239,6 +241,7 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
+#[cfg(target_os = "linux")]
 fn has_base_default_yaml(dir: &Path) -> bool {
     dir.join("default.yaml").is_file()
 }

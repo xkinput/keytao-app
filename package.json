@@ -1,7 +1,7 @@
 {
   "name": "keytao-app",
   "private": true,
-  "version": "0.0.12-alpha",
+  "version": "0.0.16-alpha",
   "type": "module",
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -13,6 +13,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "sync-version": "node scripts/sync-version.mjs",
     "build:linux": "bash scripts/build-linux.sh"
   },
   "dependencies": {

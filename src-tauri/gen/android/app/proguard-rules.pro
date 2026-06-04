@@ -1,5 +1,5 @@
 # Keep Tauri JNI bridge and plugin classes
--keep class ink.rea.keytao_installer.** { *; }
+-keep class ink.rea.keytao_app.** { *; }
 -keep class app.tauri.** { *; }
 -keepclassmembers class * {
     @app.tauri.annotation.Command <methods>;

@@ -47,12 +47,12 @@
         androidSdk = androidComposition.androidsdk;
       in
       let
-        version = "0.0.12-alpha";
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
           pname = "keytao-linux-ime";
-          version = "0.1.0";
+          inherit version;
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [

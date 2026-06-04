@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "0.1.0"
+version = "0.0.16-alpha"
 dependencies = [
  "dirs 5.0.1",
  "freetype-rs",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "0.1.0"
+version = "0.0.16-alpha"
 dependencies = [
  "fontdue",
  "keytao-core",

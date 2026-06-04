@@ -1,6 +1,6 @@
 [package]
 name = "keytao-windows-ime"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "KeyTao IME — Windows TSF (Text Services Framework) front-end, no ibus/fcitx required"
 

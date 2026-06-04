@@ -8,6 +8,9 @@ members = [
   "crates/keytao-windows-ime", "print_globals",
 ]
 
+[workspace.package]
+version = "0.0.16-alpha"
+
 # Shared version pinning across all workspace members
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

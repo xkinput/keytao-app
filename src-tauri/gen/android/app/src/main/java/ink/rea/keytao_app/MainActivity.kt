@@ -1,4 +1,4 @@
-package ink.rea.keytao_installer
+package ink.rea.keytao_app
 
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge

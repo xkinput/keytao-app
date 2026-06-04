@@ -1,4 +1,4 @@
-package ink.rea.keytao_installer
+package ink.rea.keytao_app
 
 import android.app.Activity
 import android.content.Intent
