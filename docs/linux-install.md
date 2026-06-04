@@ -136,11 +136,24 @@ in
 
 ## QQ / WeChat
 
-QQ 和微信在很多 Wayland 会话中运行于 XWayland，需要走 keytao-ime 的 IBus fallback，而不是只依赖 XIM。
+QQ 和微信在很多 Wayland 会话中运行于 XWayland，需要走 `keytao-ime` 的 `XIM+IBUS` 进程，而不是只依赖 `KWIN_WAYLAND`。
 
-推荐环境：
+启动前先确认 `XIM+IBUS` 已经运行：
 
 ```bash
+pgrep -a keytao-ime
+```
+
+app 中应显示 `XIM+IBUS 1`。如果没有，点击“启动 XIM+IBUS”。
+
+### 标准 Linux wrapper
+
+不要直接从桌面菜单启动原始 QQ / WeChat。用 wrapper 固定环境变量：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 unset WAYLAND_DISPLAY
 export DISPLAY="${DISPLAY:-:0}"
 export QT_QPA_PLATFORM=xcb
@@ -149,9 +162,96 @@ export XMODIFIERS="@im=keytao"
 export QT_IM_MODULE=ibus
 export GTK_IM_MODULE=ibus
 export IBUS_ADDRESS="${IBUS_ADDRESS:-${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
+
+exec qq --ozone-platform-hint=x11 "$@"
 ```
 
-如果 GTK/Electron 应用仍然看不到 IBus immodule，还需要让 wrapper 暴露 `GTK_PATH` 和 `GTK_IM_MODULE_FILE`。NixOS 上可以用 derivation 预生成 `gtk-query-immodules-3.0` cache，再通过 `makeWrapper` 注入到应用环境。
+微信可以把最后一行换成：
+
+```bash
+exec wechat "$@"
+```
+
+这些变量的作用：
+
+- `unset WAYLAND_DISPLAY`：强制目标应用走 XWayland。
+- `QT_QPA_PLATFORM=xcb` / `GDK_BACKEND=x11`：避免 Qt/GTK 误走 Wayland。
+- `XMODIFIERS=@im=keytao`：提供 XIM 标识。
+- `QT_IM_MODULE=ibus` / `GTK_IM_MODULE=ibus`：让 Qt/GTK/Electron 走 IBus。
+- `IBUS_ADDRESS=...`：把 IBus D-Bus 地址指向当前用户 session bus。
+
+### GTK IBus immodule
+
+如果 QQ / WeChat 仍然没有任何 `IBus ProcessKeyEvent` 日志，通常是 GTK/Electron 看不到 IBus immodule。此时 wrapper 还需要提供：
+
+```bash
+IBUS_SO="/usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
+mkdir -p "$HOME/.cache"
+gtk-query-immodules-3.0 "$IBUS_SO" > "$HOME/.cache/keytao-gtk-immodules.cache"
+
+export GTK_PATH="$(dirname "$(dirname "$IBUS_SO")")${GTK_PATH:+:$GTK_PATH}"
+export GTK_IM_MODULE_FILE="$HOME/.cache/keytao-gtk-immodules.cache"
+```
+
+不同发行版的 `im-ibus.so` 路径可能不同，可以用下面命令查找：
+
+```bash
+find /usr /lib /lib64 -path '*gtk-3.0*immodules*im-ibus.so' 2>/dev/null | head -1
+```
+
+### NixOS / Home Manager wrapper
+
+NixOS 上推荐在 derivation 中预生成 `GTK_IM_MODULE_FILE`，再包装 QQ / WeChat：
+
+```nix
+{ pkgs, lib, ... }:
+
+let
+  gtkIbusImModulesCache = pkgs.runCommand "keytao-gtk-immodules.cache" { } ''
+    ${pkgs.gtk3.dev}/bin/gtk-query-immodules-3.0 \
+      ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so > "$out"
+  '';
+in
+{
+  home.packages = [
+    (lib.hiPrio (pkgs.writeShellScriptBin "qq" ''
+      unset WAYLAND_DISPLAY
+      export DISPLAY="''${DISPLAY:-:0}"
+      export GDK_BACKEND=x11
+      export QT_QPA_PLATFORM=xcb
+      export XMODIFIERS="@im=keytao"
+      export QT_IM_MODULE=ibus
+      export GTK_IM_MODULE=ibus
+      export IBUS_ADDRESS="''${IBUS_ADDRESS:-''${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
+      export GTK_PATH="${pkgs.ibus}/lib/gtk-3.0/3.0.0''${GTK_PATH:+:$GTK_PATH}"
+      export GTK_IM_MODULE_FILE="${gtkIbusImModulesCache}"
+      export ELECTRON_OZONE_PLATFORM_HINT=x11
+      export NIXOS_OZONE_WL=0
+
+      exec ${pkgs.qq}/bin/qq --ozone-platform-hint=x11 "$@"
+    ''))
+
+    (lib.hiPrio (pkgs.writeShellScriptBin "wechat" ''
+      unset WAYLAND_DISPLAY
+      export DISPLAY="''${DISPLAY:-:0}"
+      export QT_QPA_PLATFORM=xcb
+      export GDK_BACKEND=x11
+      export XMODIFIERS="@im=keytao"
+      export QT_IM_MODULE=ibus
+      export GTK_IM_MODULE=ibus
+      export IBUS_ADDRESS="''${IBUS_ADDRESS:-''${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
+      export GTK_PATH="${pkgs.ibus}/lib/gtk-3.0/3.0.0''${GTK_PATH:+:$GTK_PATH}"
+      export GTK_IM_MODULE_FILE="${gtkIbusImModulesCache}"
+
+      exec ${pkgs.wechat}/bin/wechat "$@"
+    ''))
+  ];
+}
+```
+
+微信 AppImage 版本可能带有自己的 GTK runtime，仅 wrapper 外层变量还不够。更稳妥的 Nix 做法是用 `pkgs.appimageTools.wrapAppImage`，并在 `extraBuildCommands` 中把 `im-ibus.so` 追加进 AppImage 内部的 `immodules.cache`。
+
+完整实现可参考本地 Nix 配置中的 `wechat-keytao-input` / `keytaoWechat` 封装思路。
 
 ## 验证
 
