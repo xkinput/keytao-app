@@ -34,6 +34,7 @@ reqwest = { version = "0.12", features = [
 ], default-features = false }
 futures-util = "0.3"
 zip = "2"
+bzip2 = { version = "0.5", features = ["static"] }
 tokio = { version = "1", features = ["full"] }
 dirs = "5"
 time = { version = "0.3", features = ["parsing"] }

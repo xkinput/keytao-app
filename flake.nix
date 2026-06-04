@@ -29,7 +29,7 @@
           cmdLineToolsVersion = cmdLineToolsVer;
           platformToolsVersion = "35.0.2";
           buildToolsVersions = [ "35.0.0" ];
-          platformVersions = [ "35" ];
+          platformVersions = [ "36" ];
           includeNDK = true;
           ndkVersions = [ ndkVersion ];
           abiVersions = [
@@ -177,7 +177,7 @@
         keytaoAppLauncher = pkgs.writeShellScriptBin "keytao-app" ''
           export DISPLAY="''${DISPLAY:-:0}"
           export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
-          
+
           export GTK_IM_MODULE="wayland"
           export QT_IM_MODULE="wayland"
 

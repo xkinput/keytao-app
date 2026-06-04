@@ -487,12 +487,17 @@ export default function App() {
     setIsLoadingFiles(true)
     try {
       if (osType === "android" && uri) {
-        const [items, schemas] = await Promise.all([
+        const [items, info] = await Promise.all([
           invoke<FileItem[]>("android_list_files", { treeUri: uri }),
-          invoke<string[]>("android_read_local_schemas", { treeUri: uri }).catch(() => null),
+          invoke<LocalSchemaInfo>("android_read_local_schemas", { treeUri: uri }).catch(() => null),
         ])
         setFiles(items)
-        setLocalSchemas(schemas)
+        if (info) {
+          setLocalSchemas(info.schemas)
+          setLocalSchemaInfo(info)
+        } else {
+          setLocalSchemas(null)
+        }
       } else if (path) {
         const [items, schemas] = await Promise.all([
           invoke<FileItem[]>("list_dir", { path }),

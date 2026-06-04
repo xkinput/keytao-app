@@ -104,9 +104,20 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
             val arr = JSONArray()
             parseSchemas(content).forEach { arr.put(it) }
 
-            invoke.resolve(JSObject().apply { put("schemas", arr) })
+            val version = readFileFromTree(root, "version.txt")?.trim()?.takeIf { it.isNotEmpty() }
+            val installed = arr.length() > 0
+                || root.findFile("keytao.schema.yaml") != null
+
+            invoke.resolve(JSObject().apply {
+                put("schemas", arr)
+                if (version != null) put("version", version)
+                put("installed", installed)
+            })
         } catch (ex: Exception) {
-            invoke.resolve(JSObject().apply { put("schemas", JSONArray()) })
+            invoke.resolve(JSObject().apply {
+                put("schemas", JSONArray())
+                put("installed", false)
+            })
         }
     }
 

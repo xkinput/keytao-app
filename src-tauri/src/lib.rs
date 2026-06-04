@@ -1391,7 +1391,7 @@ async fn android_list_files<R: tauri::Runtime>(
 async fn android_read_local_schemas<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     tree_uri: String,
-) -> Result<Vec<String>, String> {
+) -> Result<LocalSchemaInfo, String> {
     #[cfg(target_os = "android")]
     {
         let result: serde_json::Value = app
@@ -1412,7 +1412,13 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
             })
             .unwrap_or_default();
 
-        Ok(schemas)
+        let version = result["version"]
+            .as_str()
+            .map(String::from);
+
+        let installed = result["installed"].as_bool().unwrap_or(false);
+
+        Ok(LocalSchemaInfo { installed, version, schemas })
     }
     #[cfg(not(target_os = "android"))]
     {

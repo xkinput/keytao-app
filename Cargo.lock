@@ -2597,6 +2597,7 @@ dependencies = [
 name = "keytao-app"
 version = "0.0.16-alpha"
 dependencies = [
+ "bzip2",
  "cosmic-text",
  "dirs 5.0.1",
  "enigo",

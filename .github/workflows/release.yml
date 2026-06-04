@@ -178,10 +178,10 @@ jobs:
             ! -name 'keytao-ime' ! -name '*.so' -print -quit)"
           test -n "$app_bin"
           app_name="$(basename "$app_bin")"
-          tar -czf "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
+          tar -czf "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
             -C target/release "$app_name" keytao-ime
           gh release upload ${{ github.ref_name }} \
-            "target/release/bundle/keytao-installer-${VERSION}-linux-x86_64.tar.gz" \
+            "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
             --clobber
 
   build-android:
@@ -237,9 +237,15 @@ jobs:
           echo "password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> keystore.properties
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
+      - name: Init Android project
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          pnpm tauri android init
+
       - name: Build Android APK
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          unset BZIP2_LIB_DIR BZIP2_INCLUDE_DIR
           pnpm tauri android build --apk
 
       - name: Upload APK to release
@@ -248,6 +254,6 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           APK=$(find src-tauri/gen/android -name "*.apk" | grep -v "/test/" | head -1)
-          RENAMED="keytao-installer_${VERSION}_android.apk"
+          RENAMED="keytao-app_${VERSION}_android.apk"
           cp "$APK" "$RENAMED"
           gh release upload ${{ github.ref_name }} "$RENAMED" --clobber
