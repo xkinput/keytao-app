@@ -11,9 +11,13 @@ ls -lah /root/.cache/tauri/ 2>/dev/null || echo "(empty)"
 chmod -R u+w target/release/bundle/ 2>/dev/null || true
 pnpm install --frozen-lockfile
 cargo build -p keytao-linux-ime --release
+target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+sidecar="src-tauri/binaries/keytao-ime-${target_triple}"
+mkdir -p "$(dirname "$sidecar")"
+cp /app/target/release/keytao-ime "$sidecar"
+chmod +x "$sidecar"
 export KEYTAO_IME_PATH=/app/target/release/keytao-ime
-export TAURI_CONFIG='{"bundle":{"externalBin":["binaries/keytao-ime"]}}'
-pnpm tauri build --bundles deb
+pnpm tauri build --bundles deb --config src-tauri/tauri.linux.conf.json
 VERSION=$(node -p "require('./package.json').version")
 tar -czf "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
   -C target/release keytao-app keytao-ime

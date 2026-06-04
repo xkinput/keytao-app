@@ -51,7 +51,9 @@ Linux 下如果要让 Tauri 包内嵌 `keytao-ime` sidecar：
 
 ```bash
 cargo build -p keytao-linux-ime --release
-KEYTAO_IME_PATH="$PWD/target/release/keytao-ime" \
-TAURI_CONFIG='{"bundle":{"externalBin":["binaries/keytao-ime"]}}' \
-pnpm tauri build --bundles deb,rpm,appimage
+target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+mkdir -p src-tauri/binaries
+cp target/release/keytao-ime "src-tauri/binaries/keytao-ime-${target_triple}"
+chmod +x "src-tauri/binaries/keytao-ime-${target_triple}"
+KEYTAO_IME_PATH="$PWD/target/release/keytao-ime" pnpm tauri build --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
 ```

@@ -38,7 +38,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: --bundles deb,rpm
+            args: --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
           - platform: macos-latest
             args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
@@ -103,7 +103,6 @@ jobs:
           chmod +x "$sidecar"
           ls -lh "$sidecar"
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> "$GITHUB_ENV"
-          echo 'TAURI_CONFIG={"bundle":{"externalBin":["binaries/keytao-ime"]}}' >> "$GITHUB_ENV"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -155,6 +154,8 @@ jobs:
             exit 1
           fi
           ls -lh "$sidecar"
+          echo "Tauri Linux config:"
+          sed -n '1,80p' src-tauri/tauri.linux.conf.json
           show_bundle_tree
 
           find_one deb target/release/bundle/deb '*.deb' 'deb bundle'

@@ -5,7 +5,7 @@ KeyTao Linux 版本包含两个组件：
 - `keytao-app`：图形安装器，负责下载、合并、部署键道 Rime 方案。
 - `keytao-ime`：系统输入法 daemon，负责 Wayland、XIM、IBus 输入前端。
 
-从 GitHub Release 下载的 Linux 包会包含完整 `keytao-ime`，不需要额外单独安装输入法二进制。
+从 GitHub Release 下载的 Linux deb/rpm 包会包含完整 `keytao-ime`，不需要额外单独安装输入法二进制。
 
 ## 标准 Linux 安装
 
@@ -14,21 +14,22 @@ KeyTao Linux 版本包含两个组件：
 ### Debian / Ubuntu
 
 ```bash
-sudo apt install ./keytao-app_*_amd64.deb
+sudo apt install ./KeyTao_*_amd64.deb
 ```
 
 ### Fedora / openSUSE / RHEL
 
 ```bash
-sudo rpm -i ./keytao-app-*.x86_64.rpm
+sudo dnf install ./KeyTao-*.x86_64.rpm
 ```
 
-### AppImage
+没有 `dnf` 的发行版可以直接用 rpm：
 
 ```bash
-chmod +x ./KeyTao_*.AppImage
-./KeyTao_*.AppImage
+sudo rpm -Uvh ./KeyTao-*.x86_64.rpm
 ```
+
+deb/rpm 安装的是一个完整包：图形 app 和内置的 `keytao-ime` 会一起安装。用户正常从桌面菜单启动 KeyTao，不需要单独下载或手动安装 `keytao-ime`。app 会从包内资源解析 `keytao-ime`；点击“启动 XIM+IBUS”或“启用 KDE 支持”时，会使用这个随包安装的 daemon。
 
 首次启动后，在 app 的“安装”页中：
 
