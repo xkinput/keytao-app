@@ -283,7 +283,7 @@ export default function App() {
     }
     const os = map[p] ?? "unknown"
     setOsType(os)
-    if (os === "android" || os === "ios") {
+    if (os !== "linux") {
       setActiveTab("extension")
     }
     getVersion().then(setAppVersion).catch(() => { })
