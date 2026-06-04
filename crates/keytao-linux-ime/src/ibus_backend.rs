@@ -69,7 +69,7 @@ impl X11Panel {
         let gc = conn.generate_id().ok()?;
         conn.create_gc(gc, panel_win, &Default::default()).ok()?;
 
-        let renderer = load_font().and_then(PanelRenderer::new)?;
+        let renderer = load_font().and_then(PanelRenderer::new_x11)?;
 
         Some(Self {
             conn,
@@ -146,16 +146,6 @@ fn is_candidate_select_key(sym: u32) -> bool {
 
 fn is_enter_key(sym: u32) -> bool {
     matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn surrounding_delete_for_key(sym: u32) -> Option<(i32, u32)> {
-    match sym {
-        // IBus DeleteSurroundingText uses offset-from-cursor, so BackSpace
-        // deletes one character before the cursor.
-        0xff08 => Some((-1, 1)),
-        0xffff => Some((0, 1)),
-        _ => None,
-    }
 }
 
 fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
@@ -441,13 +431,6 @@ impl InputContext {
         tracing::info!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
         let before_state = self.session.state();
-        if before_state.preedit.is_empty() && before_state.candidates.is_empty() {
-            if let Some((offset, n_chars)) = surrounding_delete_for_key(keyval) {
-                self.clear_ui(&ctxt).await;
-                let _ = Self::delete_surrounding_text(&ctxt, offset, n_chars).await;
-                return true;
-            }
-        }
         if should_bypass_empty_composition(keyval, state, &before_state) {
             self.clear_ui(&ctxt).await;
             return false;
@@ -615,13 +598,6 @@ impl InputContext {
 
     #[zbus(signal)]
     async fn hide_lookup_table(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn delete_surrounding_text(
-        ctxt: &SignalContext<'_>,
-        offset_from_cursor: i32,
-        n_chars: u32,
-    ) -> zbus::Result<()>;
 }
 
 /// Send an empty UpdatePreeditText to tell the client the composition ended
@@ -943,12 +919,12 @@ pub async fn run(engine: CoreEngine) {
 
 #[cfg(test)]
 mod tests {
-    use super::surrounding_delete_for_key;
+    use super::should_bypass_empty_composition;
+    use keytao_core::ImeState;
 
     #[test]
-    fn surrounding_delete_for_key_maps_backspace_and_delete() {
-        assert_eq!(surrounding_delete_for_key(0xff08), Some((-1, 1)));
-        assert_eq!(surrounding_delete_for_key(0xffff), Some((0, 1)));
-        assert_eq!(surrounding_delete_for_key(0x66), None);
+    fn empty_composition_backspace_bypasses_to_client() {
+        let state = ImeState::empty();
+        assert!(should_bypass_empty_composition(0xff08, 0x10, &state));
     }
 }

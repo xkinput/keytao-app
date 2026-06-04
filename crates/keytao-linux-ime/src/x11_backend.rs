@@ -105,7 +105,7 @@ struct KeyTaoHandler {
 
 impl KeyTaoHandler {
     fn new(engine: CoreEngine, conn: Arc<XCBConnection>, screen_num: usize) -> Self {
-        let renderer = load_font().and_then(PanelRenderer::new);
+        let renderer = load_font().and_then(PanelRenderer::new_x11);
         let setup = conn.setup();
         let screen = &setup.roots[screen_num];
         let root = screen.root;

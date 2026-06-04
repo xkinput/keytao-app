@@ -322,7 +322,7 @@ fn xft_dpi_scale() -> Option<f32> {
     None
 }
 
-fn detect_panel_scale() -> f32 {
+fn detect_explicit_panel_scale() -> Option<f32> {
     for key in [
         "KEYTAO_IME_PANEL_SCALE",
         "GDK_SCALE",
@@ -333,11 +333,21 @@ fn detect_panel_scale() -> f32 {
             let first = value.split([';', ':']).next().unwrap_or_default();
             let scale_text = first.rsplit('=').next().unwrap_or(first);
             if let Some(scale) = parse_scale_value(scale_text) {
-                return scale;
+                return Some(scale);
             }
         }
     }
-    xft_dpi_scale().unwrap_or(1.0)
+    None
+}
+
+fn detect_panel_scale() -> f32 {
+    detect_explicit_panel_scale().unwrap_or(1.0)
+}
+
+fn detect_x11_panel_scale() -> f32 {
+    detect_explicit_panel_scale()
+        .or_else(xft_dpi_scale)
+        .unwrap_or(1.0)
 }
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
@@ -351,6 +361,10 @@ pub struct PanelRenderer {
 impl PanelRenderer {
     pub fn new(source: FontSource) -> Option<Self> {
         Self::with_scale(source, detect_panel_scale())
+    }
+
+    pub fn new_x11(source: FontSource) -> Option<Self> {
+        Self::with_scale(source, detect_x11_panel_scale())
     }
 
     fn with_scale(source: FontSource, scale: f32) -> Option<Self> {
