@@ -16,6 +16,7 @@ import org.json.JSONArray
 import app.tauri.plugin.Channel
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipInputStream
 
@@ -208,8 +209,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 fun writeToDir(dir: DocumentFile, filename: String, content: ByteArray, relative: String, merged: Boolean = false) {
                     val outUri = getOrCreateFileUri(dir, filename)
                         ?: throw Exception("Failed to create: $filename")
-                    val ok = activity.contentResolver.openOutputStream(outUri, "rwt")?.use { it.write(content); true } ?: false
-                    if (!ok) throw Exception("Failed to open output stream: $filename")
+                    val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                        ?: throw Exception("Failed to open: $filename")
+                    pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(content) } }
                     logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
                 }
 
@@ -301,11 +303,10 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                                 }
                                 val outUri = getOrCreateFileUri(dir, filename)
                                     ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread invoke.reject("Failed to create: $filename") }
-                                val ok = activity.contentResolver.openOutputStream(outUri, "rwt")?.use { rawOut ->
-                                    zip.getInputStream(entry).copyTo(BufferedOutputStream(rawOut, 65536), 65536); true
-                                } ?: false
-                                if (ok) { logs.add("[OK] $relative"); processed++; emitProgress(filename) }
-                                else { logs.add("[ERROR] openOutputStream: $relative"); return@Thread invoke.reject("Failed to open output stream: $relative") }
+                                val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                                if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread invoke.reject("Failed to open output stream: $relative") }
+                                pfd.use { FileOutputStream(it.fileDescriptor).buffered(65536).use { out -> zip.getInputStream(entry).copyTo(out, 65536) } }
+                                logs.add("[OK] $relative"); processed++; emitProgress(filename)
                             }
                         }
                     }
@@ -321,9 +322,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                             val outUri = if (existing != null) existing.uri
                             else luaDir.createFile("application/octet-stream", fname)?.uri
                             if (outUri == null) { logs.add("[ERROR] createFile for renamed: lua/$fname"); continue }
-                            val ok = activity.contentResolver.openOutputStream(outUri, "rwt")?.use { it.write(bytes); true } ?: false
-                            if (ok) logs.add("[RENAMED] lua/$fname")
-                            else logs.add("[ERROR] openOutputStream for renamed: lua/$fname")
+                            val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                            if (pfd != null) { pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(bytes) } }; logs.add("[RENAMED] lua/$fname") }
+                            else logs.add("[ERROR] openFileDescriptor for renamed: lua/$fname")
                         }
                     }
 
@@ -402,10 +403,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         val outUri = if (existing != null) existing.uri
         else dir.createFile("application/octet-stream", filename)?.uri
             ?: throw Exception("Failed to create: $filename")
-        val ok = activity.contentResolver.openOutputStream(outUri, "rwt")?.use {
-            it.write(content); true
-        } ?: false
-        if (!ok) throw Exception("Failed to open output stream: $filename")
+        val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+            ?: throw Exception("Failed to open: $filename")
+        pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(content) } }
         logs.add(if (merged) "[MERGED] $relativePath" else "[OK] $relativePath")
     }
 
@@ -416,7 +416,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         val existing = dir.findFile(filename)
         val outUri = if (existing != null) existing.uri
         else dir.createFile("application/octet-stream", filename)?.uri ?: return
-        activity.contentResolver.openOutputStream(outUri, "rwt")?.use { it.write(content.toByteArray()) }
+        activity.contentResolver.openFileDescriptor(outUri, "rwt")?.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(content.toByteArray()) } }
     }
 
     private fun ensureDir(root: DocumentFile, path: String): DocumentFile {
