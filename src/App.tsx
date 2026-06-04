@@ -15,6 +15,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
+import VirtualLogViewer from "@/components/VirtualLogViewer"
 import {
   FolderOpen,
   Download,
@@ -120,6 +121,14 @@ function safUriToDisplayPath(uri: string): string {
   } catch {
     return uri
   }
+}
+
+function logLineClassName(line: string): string {
+  if (line.includes("[DEPLOY ERROR]") || line.includes("[ERROR]")) return "text-destructive"
+  if (line.includes("[WARN]")) return "text-yellow-400"
+  if (line.includes("[DEPLOY]")) return "text-green-400"
+  if (line.includes("[MERGED]") || line.includes("[RENAMED]")) return "text-primary"
+  return "text-muted-foreground"
 }
 
 function FileList({
@@ -812,15 +821,12 @@ export default function App() {
                     <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none py-1">
                       安装日志（{extResult.logs.length} 条）
                     </summary>
-                    <div className="mt-1 max-h-48 overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
-                      {extResult.logs.map((line, i) => (
-                        <div key={i} className={`font-mono text-[11px] leading-5 ${line.startsWith("[ERROR]") ? "text-destructive"
-                          : line.startsWith("[WARN]") ? "text-yellow-400"
-                            : line.startsWith("[MERGED]") || line.startsWith("[RENAMED]") ? "text-primary"
-                              : "text-muted-foreground"
-                          }`}>{line}</div>
-                      ))}
-                    </div>
+                    <VirtualLogViewer
+                      lines={extResult.logs}
+                      height={192}
+                      className="mt-1 rounded-md bg-muted/60"
+                      getLineClassName={logLineClassName}
+                    />
                   </details>
                 </div>
               )}
@@ -872,17 +878,17 @@ export default function App() {
                       清空日志
                     </button>
                   </div>
-                  <div className="max-h-[60vh] overflow-y-auto rounded-md bg-muted/60 border border-border p-2 space-y-0.5">
+                  <div className="rounded-md bg-muted/60">
                     {logBuffer.length === 0
                       ? <p className="text-xs text-muted-foreground py-4 text-center">暂无日志</p>
-                      : logBuffer.map((line, i) => (
-                        <div key={i} className={`font-mono text-[11px] leading-5 ${line.includes("[DEPLOY ERROR]") || line.includes("[ERROR]") ? "text-destructive"
-                          : line.includes("[WARN]") ? "text-yellow-400"
-                            : line.includes("[DEPLOY]") ? "text-green-400"
-                              : line.includes("[MERGED]") || line.includes("[RENAMED]") ? "text-primary"
-                                : "text-muted-foreground"
-                          }`}>{line}</div>
-                      ))}
+                      : (
+                        <VirtualLogViewer
+                          lines={logBuffer}
+                          height={360}
+                          className="max-h-[60vh]"
+                          getLineClassName={logLineClassName}
+                        />
+                      )}
                   </div>
                 </div>
               </DialogDescription>

@@ -154,6 +154,13 @@ impl BackendSelection {
 }
 
 #[cfg(target_os = "linux")]
+const LOG_DIR: &str = "/tmp";
+#[cfg(target_os = "linux")]
+const LOG_PREFIX: &str = "keytao-ime.log";
+#[cfg(target_os = "linux")]
+const LOG_RETENTION_DAYS: i64 = 3;
+
+#[cfg(target_os = "linux")]
 fn remove_legacy_kde_env_file() {
     let Some(home) = std::env::var_os("HOME") else {
         return;
@@ -237,7 +244,14 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         use tracing_subscriber::EnvFilter;
-        let file_appender = tracing_appender::rolling::never("/tmp", "keytao-ime.log");
+        prepare_rolling_log_files();
+        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix(LOG_PREFIX)
+            .latest_symlink(LOG_PREFIX)
+            .max_log_files(LOG_RETENTION_DAYS as usize)
+            .build(LOG_DIR)
+            .expect("failed to initialise keytao-ime rolling log");
         tracing_subscriber::fmt()
             .with_writer(file_appender)
             .with_env_filter(
@@ -381,6 +395,103 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
+fn prepare_rolling_log_files() {
+    use std::path::Path;
+    use time::OffsetDateTime;
+
+    let legacy_path = Path::new(LOG_DIR).join(LOG_PREFIX);
+    let Ok(metadata) = std::fs::symlink_metadata(&legacy_path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return;
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let date = now.date();
+    let rotated_name = format!(
+        "{LOG_PREFIX}.{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+    );
+    let rotated_path = Path::new(LOG_DIR).join(rotated_name);
+    let cutoff = now - time::Duration::days(LOG_RETENTION_DAYS);
+
+    let _ = append_recent_log_lines(&legacy_path, &rotated_path, cutoff);
+    let _ = std::fs::remove_file(legacy_path);
+}
+
+#[cfg(target_os = "linux")]
+fn append_recent_log_lines(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    cutoff: time::OffsetDateTime,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+
+    let input = std::fs::File::open(source)?;
+    let output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(destination)?;
+    let mut writer = BufWriter::new(output);
+    let mut keep_following = true;
+
+    for line in BufReader::new(input).lines().map_while(Result::ok) {
+        if let Some(timestamp) = parse_log_timestamp(&strip_ansi_codes(&line)) {
+            keep_following = timestamp >= cutoff;
+        }
+        if keep_following {
+            writeln!(writer, "{line}")?;
+        }
+    }
+    writer.flush()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_log_timestamp(line: &str) -> Option<time::OffsetDateTime> {
+    use time::format_description::well_known::Rfc3339;
+
+    let bytes = line.as_bytes();
+    for index in 0..bytes.len().saturating_sub(20) {
+        if bytes[index].is_ascii_digit()
+            && bytes.get(index + 4) == Some(&b'-')
+            && bytes.get(index + 7) == Some(&b'-')
+            && bytes.get(index + 10) == Some(&b'T')
+        {
+            let end = line[index..]
+                .find(char::is_whitespace)
+                .map(|offset| index + offset)
+                .unwrap_or(line.len());
+            if let Ok(timestamp) = time::OffsetDateTime::parse(&line[index..end], &Rfc3339) {
+                return Some(timestamp);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn strip_ansi_codes(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+#[cfg(target_os = "linux")]
 async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
     use zbus::fdo::DBusProxy;
     use zbus::Connection;
@@ -401,9 +512,14 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("Claimed D-Bus name {name} successfully.");
         }
         _ => {
-            tracing::info!("D-Bus name {name} is already owned. Attempting to kill existing daemon...");
+            tracing::info!(
+                "D-Bus name {name} is already owned. Attempting to kill existing daemon..."
+            );
             if let Ok(owner) = dbus_proxy.get_name_owner(name.try_into()?).await {
-                if let Ok(pid) = dbus_proxy.get_connection_unix_process_id(owner.into()).await {
+                if let Ok(pid) = dbus_proxy
+                    .get_connection_unix_process_id(owner.into())
+                    .await
+                {
                     tracing::info!("Existing daemon PID is {pid}. Sending SIGTERM...");
                     unsafe {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
@@ -423,7 +539,9 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::info!("Claimed D-Bus name {name} on retry.");
                 }
                 _ => {
-                    tracing::warn!("Could not claim D-Bus name {name} on retry. Continuing anyway.");
+                    tracing::warn!(
+                        "Could not claim D-Bus name {name} on retry. Continuing anyway."
+                    );
                 }
             }
         }

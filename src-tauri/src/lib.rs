@@ -1,7 +1,10 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
@@ -74,6 +77,8 @@ pub struct InstallResult {
 }
 
 const API_BASE: &str = "https://keytao.rea.ink";
+const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
+const DEBUG_LOG_MAX_LINES: usize = 20_000;
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
@@ -1196,10 +1201,7 @@ async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
             e.to_string()
         })?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    tracing::info!(
-        "[check_app_update] done in {}ms",
-        t0.elapsed().as_millis()
-    );
+    tracing::info!("[check_app_update] done in {}ms", t0.elapsed().as_millis());
     let latest_tag = json["tag_name"].as_str().unwrap_or("").to_string();
     let latest = latest_tag.trim_start_matches('v').to_string();
     let release_url = json["html_url"].as_str().unwrap_or("").to_string();
@@ -1508,16 +1510,161 @@ async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<Instal
 }
 
 #[derive(Serialize)]
+pub struct DebugLogFile {
+    pub lines: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
 pub struct DebugLogs {
-    pub ime: String,
-    pub app: String,
+    pub ime: DebugLogFile,
+    pub app: DebugLogFile,
 }
 
 #[tauri::command]
 async fn read_debug_logs() -> Result<DebugLogs, String> {
-    let ime = std::fs::read_to_string("/tmp/keytao-ime.log").unwrap_or_else(|_| "No keytao-ime.log found".to_string());
-    let app = std::fs::read_to_string("/tmp/keytao-app.log").unwrap_or_else(|_| "No keytao-app.log found".to_string());
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
+    let ime = read_tmp_logs("keytao-ime.log", "No keytao-ime.log found", cutoff);
+    let app = read_tmp_logs("keytao-app.log", "No keytao-app.log found", cutoff);
     Ok(DebugLogs { ime, app })
+}
+
+fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) -> DebugLogFile {
+    let paths = collect_tmp_log_paths(prefix);
+    if paths.is_empty() {
+        return DebugLogFile {
+            lines: vec![missing_message.to_string()],
+            truncated: false,
+        };
+    }
+
+    let mut lines = VecDeque::with_capacity(DEBUG_LOG_MAX_LINES);
+    let mut kept = 0usize;
+
+    for path in paths {
+        if path.file_name().is_some_and(|name| name == prefix) {
+            let _ = prune_plain_log_file(&path, cutoff);
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut keep_following = true;
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let display_line = strip_ansi_codes(&line);
+            if let Some(timestamp) = parse_log_timestamp(&display_line) {
+                keep_following = timestamp >= cutoff;
+            }
+            if keep_following {
+                if lines.len() == DEBUG_LOG_MAX_LINES {
+                    lines.pop_front();
+                }
+                lines.push_back(display_line);
+                kept += 1;
+            }
+        }
+    }
+
+    DebugLogFile {
+        lines: lines.into_iter().collect(),
+        truncated: kept > DEBUG_LOG_MAX_LINES,
+    }
+}
+
+fn collect_tmp_log_paths(prefix: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir("/tmp") else {
+        return Vec::new();
+    };
+    let rotated_prefix = format!("{prefix}.");
+    let mut seen = HashSet::new();
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == prefix || (name.starts_with(&rotated_prefix) && !name.ends_with(".tmp")) {
+                let path = entry.path();
+                let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if seen.insert(identity) {
+                    Some((name, path))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|(left, _), (right, _)| left.cmp(right));
+    paths.into_iter().map(|(_, path)| path).collect()
+}
+
+fn prune_plain_log_file(path: &Path, cutoff: OffsetDateTime) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(());
+    }
+
+    let input = std::fs::File::open(path)?;
+    let temp_path = path.with_extension("tmp");
+    let mut writer = BufWriter::new(std::fs::File::create(&temp_path)?);
+    let mut saw_timestamp = false;
+    let mut keep_following = true;
+
+    for line in BufReader::new(input).lines().map_while(Result::ok) {
+        if let Some(timestamp) = parse_log_timestamp(&strip_ansi_codes(&line)) {
+            saw_timestamp = true;
+            keep_following = timestamp >= cutoff;
+        }
+        if keep_following {
+            writeln!(writer, "{line}")?;
+        }
+    }
+    writer.flush()?;
+
+    if saw_timestamp {
+        std::fs::rename(temp_path, path)?;
+    } else {
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    Ok(())
+}
+
+fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
+    let bytes = line.as_bytes();
+    for index in 0..bytes.len().saturating_sub(20) {
+        if bytes[index].is_ascii_digit()
+            && bytes.get(index + 4) == Some(&b'-')
+            && bytes.get(index + 7) == Some(&b'-')
+            && bytes.get(index + 10) == Some(&b'T')
+        {
+            let end = line[index..]
+                .find(char::is_whitespace)
+                .map(|offset| index + offset)
+                .unwrap_or(line.len());
+            if let Ok(timestamp) = OffsetDateTime::parse(&line[index..end], &Rfc3339) {
+                return Some(timestamp);
+            }
+        }
+    }
+    None
+}
+
+fn strip_ansi_codes(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
