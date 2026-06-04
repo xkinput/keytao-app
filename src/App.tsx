@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { getVersion } from "@tauri-apps/api/app"
 import { listen } from "@tauri-apps/api/event"
 import { platform } from "@tauri-apps/plugin-os"
-import { openPath } from "@tauri-apps/plugin-opener"
+import { openPath, openUrl } from "@tauri-apps/plugin-opener"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
@@ -37,6 +37,8 @@ import DebugTab from "@/components/DebugTab"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
 type Tab = "install" | "extension" | "about" | "debug"
+
+const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 
 interface AppUpdateInfo {
   current_version: string
@@ -142,6 +144,19 @@ function logLineClassName(line: string): string {
   if (line.includes("[DEPLOY]")) return "text-green-400"
   if (line.includes("[MERGED]") || line.includes("[RENAMED]")) return "text-primary"
   return "text-muted-foreground"
+}
+
+function GitHubIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={className}
+      fill="currentColor"
+    >
+      <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.73-1.54-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.04 0 0 .97-.31 3.17 1.18.92-.26 1.9-.38 2.88-.39.98 0 1.96.13 2.88.39 2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.8 1.19 1.83 1.19 3.08 0 4.42-2.69 5.4-5.26 5.69.41.36.78 1.06.78 2.14 0 1.54-.01 2.78-.01 3.16 0 .31.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+    </svg>
+  )
 }
 
 function FileList({
@@ -343,6 +358,14 @@ export default function App() {
       addLogs([`[OPEN DIR ERROR] ${String(e)}`])
     } finally {
       setIsOpeningExtDir(false)
+    }
+  }
+
+  async function handleOpenGitHubRepository() {
+    try {
+      await openUrl(GITHUB_REPOSITORY_URL)
+    } catch (e) {
+      addLogs([`[OPEN URL ERROR] ${String(e)}`])
     }
   }
 
@@ -1001,6 +1024,18 @@ export default function App() {
                     <code className="text-xs font-mono text-right break-all">{value}</code>
                   </div>
                 ))}
+                <div className="flex items-center justify-between gap-4 px-3 py-2">
+                  <span className="text-sm text-muted-foreground shrink-0">GitHub</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleOpenGitHubRepository}
+                    className="h-7 gap-1.5 px-2 text-xs font-mono"
+                  >
+                    <GitHubIcon className="h-3.5 w-3.5" />
+                    xkinput/keytao-app
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>

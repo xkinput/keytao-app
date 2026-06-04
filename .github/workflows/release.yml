@@ -38,7 +38,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: --bundles deb,rpm,appimage
+            args: --bundles deb,rpm
           - platform: macos-latest
             args: --target universal-apple-darwin --bundles dmg
           - platform: windows-latest
@@ -79,7 +79,7 @@ jobs:
             libxdo-dev xdg-utils \
             gcc libc6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            rpm fakeroot dpkg-dev libfuse2 \
+            rpm fakeroot dpkg-dev \
             mold
 
       - run: pnpm install --frozen-lockfile
@@ -93,8 +93,15 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         run: |
+          set -euo pipefail
           cargo build -p keytao-linux-ime --release
           test -x "$PWD/target/release/keytao-ime"
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          sidecar="src-tauri/binaries/keytao-ime-${target_triple}"
+          mkdir -p "$(dirname "$sidecar")"
+          cp "$PWD/target/release/keytao-ime" "$sidecar"
+          chmod +x "$sidecar"
+          ls -lh "$sidecar"
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> "$GITHUB_ENV"
           echo 'TAURI_CONFIG={"bundle":{"externalBin":["binaries/keytao-ime"]}}' >> "$GITHUB_ENV"
 
@@ -110,24 +117,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ime_pattern='(^|/)keytao-ime(-x86_64-unknown-linux-gnu)?$'
+
+          show_bundle_tree() {
+            echo "Bundle files:"
+            find target/release/bundle -maxdepth 4 -type f -print 2>/dev/null | sort || true
+          }
+
+          find_one() {
+            local result_var="$1"
+            local dir="$2"
+            local pattern="$3"
+            local label="$4"
+            local path
+            path="$(find "$dir" -name "$pattern" -print -quit 2>/dev/null || true)"
+            if [[ -z "$path" ]]; then
+              echo "::error::Missing $label in $dir"
+              show_bundle_tree
+              exit 1
+            fi
+            printf -v "$result_var" '%s' "$path"
+          }
+
+          require_match() {
+            local label="$1"
+            local listing="$2"
+            if ! printf '%s\n' "$listing" | grep -E "$ime_pattern"; then
+              echo "::error::$label does not include keytao-ime"
+              exit 1
+            fi
+          }
+
           sidecar="src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu"
-          test -s "$sidecar"
+          if [[ ! -x "$sidecar" ]]; then
+            echo "::error::Missing executable Linux keytao-ime sidecar at $sidecar"
+            find src-tauri/binaries -maxdepth 1 -type f -print 2>/dev/null | sort || true
+            exit 1
+          fi
+          ls -lh "$sidecar"
+          show_bundle_tree
 
-          deb="$(find target/release/bundle/deb -name '*.deb' -print -quit)"
-          test -n "$deb"
-          dpkg-deb -c "$deb" | grep -E 'keytao-ime(-x86_64-unknown-linux-gnu)?'
+          find_one deb target/release/bundle/deb '*.deb' 'deb bundle'
+          echo "Inspecting deb: $deb"
+          require_match "deb bundle" "$(dpkg-deb -c "$deb")"
 
-          rpm_pkg="$(find target/release/bundle/rpm -name '*.rpm' -print -quit)"
-          test -n "$rpm_pkg"
-          rpm -qpl "$rpm_pkg" | grep -E 'keytao-ime(-x86_64-unknown-linux-gnu)?'
-
-          appimage="$(find target/release/bundle/appimage -name '*.AppImage' -print -quit)"
-          test -n "$appimage"
-          chmod +x "$appimage"
-          rm -rf squashfs-root
-          "$appimage" --appimage-extract >/dev/null
-          find squashfs-root -name '*keytao-ime*' -print -quit | grep keytao-ime
-          rm -rf squashfs-root
+          find_one rpm_pkg target/release/bundle/rpm '*.rpm' 'rpm bundle'
+          echo "Inspecting rpm: $rpm_pkg"
+          require_match "rpm bundle" "$(rpm -qpl "$rpm_pkg")"
 
       - name: Upload Linux tar.gz to release
         if: matrix.platform == 'ubuntu-22.04'
