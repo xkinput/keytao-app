@@ -654,20 +654,20 @@ export default function App() {
         {/* Tab nav */}
         <div className="flex border-b border-border">
           {([
-            { id: "install", label: osType === "android" || osType === "ios" ? "输入法" : "安装", icon: Download },
-            { id: "extension", label: osType === "android" || osType === "ios" ? "扩展安装" : "扩展", icon: Settings },
+            { id: "install", label: "输入法", icon: Download },
+            { id: "extension", label: "扩展安装", icon: Settings },
             { id: "about", label: "关于", icon: Info },
             { id: "debug", label: "调试", icon: ScrollText },
           ] as { id: Tab; label: string; icon: typeof Download }[]).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
-              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px ${activeTab === id
+              className={`flex items-center gap-1 px-2.5 py-2.5 text-xs font-medium border-b-2 transition-colors -mb-px whitespace-nowrap ${activeTab === id
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
                 }`}
             >
-              <Icon className="h-3.5 w-3.5" />
+              <Icon className="h-3.5 w-3.5 shrink-0" />
               {label}
             </button>
           ))}
