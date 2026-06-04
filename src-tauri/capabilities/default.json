@@ -8,20 +8,7 @@
   "permissions": [
     "core:default",
     "opener:default",
-    {
-      "identifier": "opener:allow-open-path",
-      "allow": [
-        {
-          "path": "$HOME/.local/share/keytao"
-        },
-        {
-          "path": "$HOME/.local/share/keytao/**"
-        },
-        {
-          "path": "$HOME/**"
-        }
-      ]
-    },
+    "opener:allow-open-path",
     "dialog:allow-open",
     "os:default"
   ]
