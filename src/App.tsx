@@ -283,6 +283,9 @@ export default function App() {
     }
     const os = map[p] ?? "unknown"
     setOsType(os)
+    if (os === "android" || os === "ios") {
+      setActiveTab("extension")
+    }
     getVersion().then(setAppVersion).catch(() => { })
 
     invoke<ReleaseInfo>("fetch_latest_release")
@@ -651,11 +654,11 @@ export default function App() {
         {/* Tab nav */}
         <div className="flex border-b border-border">
           {([
-            { id: "install", label: "安装", icon: Download },
-            { id: "extension", label: "扩展", icon: Settings },
+            { id: "install", label: osType === "android" || osType === "ios" ? "输入法" : "安装", icon: Download },
+            { id: "extension", label: osType === "android" || osType === "ios" ? "扩展安装" : "扩展", icon: Settings },
             { id: "about", label: "关于", icon: Info },
             { id: "debug", label: "调试", icon: ScrollText },
-          ] as const).map(({ id, label, icon: Icon }) => (
+          ] as { id: Tab; label: string; icon: typeof Download }[]).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
