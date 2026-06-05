@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app"
-version = "0.0.16-alpha"
+version = "1.2.0"
 dependencies = [
  "bzip2",
  "cosmic-text",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "0.0.16-alpha"
+version = "1.2.0"
 dependencies = [
  "dirs 5.0.1",
  "freetype-rs",
@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "0.0.16-alpha"
+version = "1.2.0"
 dependencies = [
  "fontdue",
  "keytao-core",

@@ -5,7 +5,8 @@ members = [
   "crates/keytao-core",
   "crates/keytao-core-ffi",
   "crates/keytao-linux-ime",
-  "crates/keytao-windows-ime", "print_globals",
+  "crates/keytao-windows-ime",
+  "print_globals",
 ]
 
 [workspace.package]
