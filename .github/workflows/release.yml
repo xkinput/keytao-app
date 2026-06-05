@@ -116,12 +116,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="target/universal-apple-darwin/release/bundle/macos/KeyTao.app"
-          if [[ ! -d "$app" ]]; then
-            app="$(find target -path '*/release/bundle/macos/KeyTao.app' -print -quit)"
+          dmg="$(find target -path '*/release/bundle/dmg/*.dmg' -print -quit)"
+          if [[ -z "$dmg" ]]; then
+            echo "::error::Missing macOS DMG bundle"
+            find target -path '*/release/bundle/*' -print 2>/dev/null | sort || true
+            exit 1
           fi
-          test -n "$app"
+
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet 2>/dev/null || true
+            rmdir "$mount_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          echo "Inspecting DMG: $dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg" -quiet
+          app="$mount_dir/KeyTao.app"
+          if [[ ! -d "$app" ]]; then
+            echo "::error::Missing KeyTao.app inside DMG"
+            find "$mount_dir" -maxdepth 3 -print | sort
+            exit 1
+          fi
+
+          find "$app/Contents" -maxdepth 3 -print | sort
           test -x "$app/Contents/MacOS/keytao-app"
+          test -f "$app/Contents/_CodeSignature/CodeResources"
           codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Verify Linux bundles include keytao-ime
