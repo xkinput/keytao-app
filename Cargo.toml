@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.16-alpha"
+version = "1.2.0"
 
 # Shared version pinning across all workspace members
 [workspace.dependencies]

@@ -1,7 +1,7 @@
 {
   "name": "keytao-app",
   "private": true,
-  "version": "0.0.16-alpha",
+  "version": "1.2.0",
   "type": "module",
   "pnpm": {
     "onlyBuiltDependencies": [
