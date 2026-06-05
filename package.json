@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "sync-version": "node scripts/sync-version.mjs",
+    "build:macos": "tauri build --bundles dmg --config src-tauri/tauri.macos.conf.json",
     "build:linux": "bash scripts/build-linux.sh"
   },
   "dependencies": {

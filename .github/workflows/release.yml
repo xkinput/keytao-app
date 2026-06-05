@@ -40,7 +40,7 @@ jobs:
           - platform: ubuntu-22.04
             args: --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
           - platform: macos-latest
-            args: --target universal-apple-darwin --bundles dmg
+            args: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
           - platform: windows-latest
             args: --bundles nsis
 
@@ -110,6 +110,19 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release-id }}
           args: ${{ matrix.args }}
+
+      - name: Verify macOS bundle
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/universal-apple-darwin/release/bundle/macos/KeyTao.app"
+          if [[ ! -d "$app" ]]; then
+            app="$(find target -path '*/release/bundle/macos/KeyTao.app' -print -quit)"
+          fi
+          test -n "$app"
+          test -x "$app/Contents/MacOS/keytao-app"
+          codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Verify Linux bundles include keytao-ime
         if: matrix.platform == 'ubuntu-22.04'
