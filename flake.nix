@@ -139,6 +139,9 @@
           ];
           preBuild = ''
             pnpm build
+            mkdir -p src-tauri/binaries
+            cp ${keytaoLinuxIme}/bin/keytao-ime \
+              src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu
           '';
           doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
