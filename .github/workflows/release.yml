@@ -142,6 +142,11 @@ jobs:
           find "$app/Contents" -maxdepth 3 -print | sort
           test -x "$app/Contents/MacOS/keytao-app"
           test -f "$app/Contents/_CodeSignature/CodeResources"
+          otool -L "$app/Contents/MacOS/keytao-app" | tee /tmp/keytao-macos-libraries.txt
+          if grep -E '/opt/homebrew|/usr/local|/nix/store' /tmp/keytao-macos-libraries.txt; then
+            echo "::error::macOS bundle references external package-manager libraries"
+            exit 1
+          fi
           codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Verify Linux bundles include keytao-ime
