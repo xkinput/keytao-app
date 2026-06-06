@@ -511,11 +511,17 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_normal_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+}
+
+#[cfg(target_os = "windows")]
 fn windows_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
     windows_ime_runtime_dir(app)
         .map(|dir| dir.join("rime-data"))
         .filter(|dir| dir.join("default.yaml").is_file())
-        .map(|dir| dir.to_string_lossy().into_owned())
+        .map(|dir| windows_normal_path(&dir))
 }
 
 #[cfg(target_os = "windows")]
@@ -567,8 +573,8 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         supported: true,
         packaged,
         registered,
-        runtime_dir: runtime_dir.map(|p| p.to_string_lossy().into_owned()),
-        dll_path: dll_path.map(|p| p.to_string_lossy().into_owned()),
+        runtime_dir: runtime_dir.map(|p| windows_normal_path(&p)),
+        dll_path: dll_path.map(|p| windows_normal_path(&p)),
         registered_path,
         message,
     }
@@ -581,20 +587,78 @@ fn powershell_quote(value: &str) -> String {
 
 #[cfg(target_os = "windows")]
 fn run_regsvr32_elevated(dll_path: &Path, unregister: bool) -> Result<(), String> {
-    let mut args = Vec::new();
-    if unregister {
-        args.push("/u".to_string());
-    }
-    args.push("/s".to_string());
-    args.push(dll_path.to_string_lossy().into_owned());
-
-    let args_literal = args
-        .iter()
-        .map(|arg| powershell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let dll_path = std::fs::canonicalize(dll_path).unwrap_or_else(|_| dll_path.to_path_buf());
+    let dll_dir = dll_path
+        .parent()
+        .ok_or("invalid keytao_windows_ime.dll path")?;
+    let temp_dir = std::env::temp_dir();
+    let stamp = format!(
+        "keytao-ime-register-{}-{}",
+        std::process::id(),
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
+    );
+    let script_path = temp_dir.join(format!("{stamp}.ps1"));
+    let result_path = temp_dir.join(format!("{stamp}.txt"));
+    let proc_name = if unregister {
+        "DllUnregisterServer"
+    } else {
+        "DllRegisterServer"
+    };
     let script = format!(
-        "Start-Process -FilePath regsvr32.exe -ArgumentList @({args_literal}) -Verb RunAs -Wait"
+        r#"
+$ErrorActionPreference = 'Stop'
+$dir = {dir}
+$dll = {dll}
+$procName = {proc_name}
+$resultFile = {result}
+$source = @"
+using System;
+using System.Runtime.InteropServices;
+public static class KeyTaoNativeRegister {{
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool SetDllDirectory(string lpPathName);
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr LoadLibrary(string lpFileName);
+  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+  [DllImport("kernel32", SetLastError=true)] public static extern bool FreeLibrary(IntPtr hModule);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int RegisterDelegate();
+}}
+"@
+try {{
+  Add-Type -TypeDefinition $source
+  [KeyTaoNativeRegister]::SetDllDirectory($dir) | Out-Null
+  $module = [KeyTaoNativeRegister]::LoadLibrary($dll)
+  if ($module -eq [IntPtr]::Zero) {{
+    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    "LoadLibrary failed: $code" | Set-Content -Encoding UTF8 -Path $resultFile
+    exit 3
+  }}
+  $proc = [KeyTaoNativeRegister]::GetProcAddress($module, $procName)
+  if ($proc -eq [IntPtr]::Zero) {{
+    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    "GetProcAddress $procName failed: $code" | Set-Content -Encoding UTF8 -Path $resultFile
+    [KeyTaoNativeRegister]::FreeLibrary($module) | Out-Null
+    exit 4
+  }}
+  $delegate = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($proc, [KeyTaoNativeRegister+RegisterDelegate])
+  $hr = $delegate.Invoke()
+  [KeyTaoNativeRegister]::FreeLibrary($module) | Out-Null
+  ("{{0}} HRESULT=0x{{1:X8}}" -f $procName, ($hr -band 0xffffffff)) | Set-Content -Encoding UTF8 -Path $resultFile
+  if ($hr -eq 0) {{ exit 0 }}
+  exit 5
+}} catch {{
+  ("PowerShell registration failed: " + $_.Exception.Message) | Set-Content -Encoding UTF8 -Path $resultFile
+  exit 9
+}}
+"#,
+        dir = powershell_quote(&windows_normal_path(dll_dir)),
+        dll = powershell_quote(&windows_normal_path(&dll_path)),
+        proc_name = powershell_quote(proc_name),
+        result = powershell_quote(&windows_normal_path(&result_path)),
+    );
+    std::fs::write(&script_path, script).map_err(|e| format!("write registration script: {e}"))?;
+
+    let elevated_script = format!(
+        "$p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', {}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
+        powershell_quote(&windows_normal_path(&script_path))
     );
     let output = std::process::Command::new("powershell")
         .args([
@@ -602,16 +666,31 @@ fn run_regsvr32_elevated(dll_path: &Path, unregister: bool) -> Result<(), String
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            &script,
+            &elevated_script,
         ])
         .output()
         .map_err(|e| format!("start regsvr32: {e}"))?;
+    let detail = std::fs::read_to_string(&result_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_file(&result_path);
     if output.status.success() {
         Ok(())
     } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let process_detail = [detail.as_str(), stdout.trim(), stderr.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         Err(format!(
-            "regsvr32 failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "TSF registration failed with exit code {}{}{}",
+            output.status.code().unwrap_or(-1),
+            if process_detail.is_empty() { "" } else { ": " },
+            process_detail
         ))
     }
 }
@@ -629,10 +708,12 @@ fn windows_register_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
         windows_ime_runtime_dir(&app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
     let dll = runtime_dir.join("keytao_windows_ime.dll");
     run_regsvr32_elevated(&dll, false)?;
-    Ok(windows_ime_status_with_message(
-        &app,
-        "已注册 KeyTao Windows IME".into(),
-    ))
+    let status = windows_ime_status_with_message(&app, "已注册 KeyTao Windows IME".into());
+    if status.registered {
+        Ok(status)
+    } else {
+        Err("regsvr32 已结束，但 TSF 注册表中仍未找到 KeyTao；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
+    }
 }
 
 #[tauri::command]
@@ -657,10 +738,12 @@ fn windows_restart_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
     let dll = runtime_dir.join("keytao_windows_ime.dll");
     let _ = run_regsvr32_elevated(&dll, true);
     run_regsvr32_elevated(&dll, false)?;
-    Ok(windows_ime_status_with_message(
-        &app,
-        "已重新注册 KeyTao Windows IME".into(),
-    ))
+    let status = windows_ime_status_with_message(&app, "已重新注册 KeyTao Windows IME".into());
+    if status.registered {
+        Ok(status)
+    } else {
+        Err("regsvr32 已结束，但 TSF 注册表中仍未找到 KeyTao；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
+    }
 }
 
 #[cfg(target_os = "linux")]

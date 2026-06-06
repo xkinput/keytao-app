@@ -34,6 +34,23 @@ if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "l
     throw "LIBCLANG_PATH does not point to libclang.dll. Install LLVM, e.g. 'scoop install llvm', then retry."
 }
 
+function Find-WindowsRuntimeDll($Name) {
+    $candidates = @()
+    $whereResult = & where.exe $Name 2>$null
+    if ($whereResult) {
+        $candidates += $whereResult
+    }
+    if ($env:WINDIR) {
+        $candidates += (Join-Path $env:WINDIR "System32\$Name")
+    }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+    return $null
+}
+
 $target = if ($Arch -eq "x64") { "x86_64-pc-windows-msvc" } else { "i686-pc-windows-msvc" }
 $cargoArgs = @("build", "-p", "keytao-windows-ime", "--target", $target)
 if (-not $DebugBuild) {
@@ -61,6 +78,14 @@ Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Desti
 $appRuntimeDir = Join-Path $repoRoot "target\keytao-windows-app-runtime"
 New-Item -ItemType Directory -Force -Path $appRuntimeDir | Out-Null
 Copy-Item -Force -LiteralPath (Join-Path $vendorDir "bin\rime.dll") -Destination $appRuntimeDir
+
+foreach ($runtimeDll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+    $source = Find-WindowsRuntimeDll $runtimeDll
+    if ($source) {
+        Copy-Item -Force -LiteralPath $source -Destination $runtimeDir
+        Copy-Item -Force -LiteralPath $source -Destination $appRuntimeDir
+    }
+}
 
 Write-Host ""
 Write-Host "Windows IME runtime is ready:"

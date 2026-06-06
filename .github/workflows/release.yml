@@ -135,6 +135,9 @@ jobs:
           if (-not (Test-Path (Join-Path $runtimeDir "rime-data\default.yaml"))) {
             throw "Missing bundled rime-data in $runtimeDir"
           }
+          if (-not (Test-Path (Join-Path $runtimeDir "vcruntime140.dll"))) {
+            throw "Missing vcruntime140.dll in $runtimeDir"
+          }
           if (-not (Test-Path (Join-Path $appRuntimeDir "rime.dll"))) {
             throw "Missing app startup rime.dll in $appRuntimeDir"
           }
@@ -205,6 +208,7 @@ jobs:
           $rimeData = Get-ChildItem -Path "target\release" -Recurse -Filter "default.yaml" -File |
             Where-Object { $_.FullName -like "*rime-data*" } |
             Select-Object -First 1
+          $vcRuntime = Get-ChildItem -Path "target\release" -Recurse -Filter "vcruntime140.dll" -File | Select-Object -First 1
           $installerScript = "target\release\nsis\x64\installer.nsi"
 
           if (-not $imeDll) {
@@ -215,6 +219,9 @@ jobs:
           }
           if (-not $rimeData) {
             throw "Windows bundle does not include rime-data\default.yaml"
+          }
+          if (-not $vcRuntime) {
+            throw "Windows bundle does not include vcruntime140.dll"
           }
           if (-not (Test-Path $installerScript)) {
             throw "Missing generated NSIS installer script"
@@ -227,6 +234,7 @@ jobs:
           Write-Host "IME DLL: $($imeDll.FullName)"
           Write-Host "Rime DLL: $($rimeDll.FullName)"
           Write-Host "Rime data: $($rimeData.FullName)"
+          Write-Host "VC Runtime: $($vcRuntime.FullName)"
 
       - name: Verify Linux bundles include keytao-ime
         if: matrix.platform == 'ubuntu-22.04'
