@@ -13,6 +13,8 @@ dist
 dist-ssr
 *.local
 scripts/cache/
+.cache/
+vendor/librime/
 
 # Editor directories and files
 .vscode/*

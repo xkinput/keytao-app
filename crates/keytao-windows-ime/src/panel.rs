@@ -65,7 +65,12 @@ impl PanelRenderer {
             .candidates
             .iter()
             .enumerate()
-            .map(|(i, c)| self.text_width(&format!("{}. {}", i + 1, c.text), FONT_SIZE) + CAND_GAP)
+            .map(|(i, c)| {
+                self.text_width(
+                    &format!("{} {}", candidate_label(state, i), c.text),
+                    FONT_SIZE,
+                ) + CAND_GAP
+            })
             .sum();
         let preedit_width = if state.preedit.is_empty() {
             0.0
@@ -103,7 +108,7 @@ impl PanelRenderer {
             .highlighted_candidate_index
             .min(state.candidates.len().saturating_sub(1));
         for (i, cand) in state.candidates.iter().enumerate() {
-            let label = format!("{}. ", i + 1);
+            let label = format!("{} ", candidate_label(state, i));
             let color = if i == selected { ACCENT } else { FG };
             self.draw_text(&mut pm, &label, x, cand_y, DIM, FONT_SIZE);
             x += self.text_width(&label, FONT_SIZE);
@@ -183,4 +188,13 @@ impl PanelRenderer {
 #[inline]
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
+}
+
+fn candidate_label(state: &ImeState, index: usize) -> String {
+    state
+        .select_keys
+        .as_deref()
+        .and_then(|keys| keys.chars().nth(index))
+        .map(|key| format!("{key}."))
+        .unwrap_or_else(|| format!("{}.", index + 1))
 }

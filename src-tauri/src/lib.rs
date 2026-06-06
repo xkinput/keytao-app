@@ -460,6 +460,209 @@ fn process_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
+#[cfg(target_os = "windows")]
+const WINDOWS_TEXT_SERVICE_CLSID: &str = "{4A5C6D7E-8F90-1A2B-3C4D-5E6F7A8B9C0D}";
+
+#[cfg(target_os = "windows")]
+fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("x64"),
+            resource_dir.join("keytao-windows-ime-runtime").join("x64"),
+            resource_dir
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("x64"),
+            resource_dir
+                .join("_up_")
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("x64"),
+        ]);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.extend([
+                dir.join("x64"),
+                dir.join("keytao-windows-ime-runtime").join("x64"),
+                dir.join("resources").join("x64"),
+                dir.join("resources")
+                    .join("keytao-windows-ime-runtime")
+                    .join("x64"),
+                dir.join("_up_")
+                    .join("target")
+                    .join("keytao-windows-ime-runtime")
+                    .join("x64"),
+                dir.join("resources")
+                    .join("_up_")
+                    .join("target")
+                    .join("keytao-windows-ime-runtime")
+                    .join("x64"),
+            ]);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("keytao_windows_ime.dll").is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
+    windows_ime_runtime_dir(app)
+        .map(|dir| dir.join("rime-data"))
+        .filter(|dir| dir.join("default.yaml").is_file())
+        .map(|dir| dir.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registered_ime_path() -> Option<String> {
+    let key = format!(r"HKCR\CLSID\{}\InprocServer32", WINDOWS_TEXT_SERVICE_CLSID);
+    let output = std::process::Command::new("reg")
+        .args(["query", &key, "/ve"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let marker = "REG_SZ";
+        let (_, value) = trimmed.split_once(marker)?;
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> WindowsImeStatus {
+    let runtime_dir = windows_ime_runtime_dir(app);
+    let dll_path = runtime_dir
+        .as_ref()
+        .map(|dir| dir.join("keytao_windows_ime.dll"));
+    let registered_path = windows_registered_ime_path();
+    let packaged = dll_path.as_ref().is_some_and(|path| path.is_file())
+        && runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("rime.dll").is_file());
+    let registered = match (&dll_path, &registered_path) {
+        (Some(dll), Some(path)) => {
+            let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
+            let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            lhs.to_string_lossy()
+                .eq_ignore_ascii_case(&rhs.to_string_lossy())
+        }
+        _ => false,
+    };
+
+    WindowsImeStatus {
+        supported: true,
+        packaged,
+        registered,
+        runtime_dir: runtime_dir.map(|p| p.to_string_lossy().into_owned()),
+        dll_path: dll_path.map(|p| p.to_string_lossy().into_owned()),
+        registered_path,
+        message,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_regsvr32_elevated(dll_path: &Path, unregister: bool) -> Result<(), String> {
+    let mut args = Vec::new();
+    if unregister {
+        args.push("/u".to_string());
+    }
+    args.push("/s".to_string());
+    args.push(dll_path.to_string_lossy().into_owned());
+
+    let args_literal = args
+        .iter()
+        .map(|arg| powershell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "Start-Process -FilePath regsvr32.exe -ArgumentList @({args_literal}) -Verb RunAs -Wait"
+    );
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|e| format!("start regsvr32: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "regsvr32 failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+fn windows_ime_status(app: AppHandle) -> WindowsImeStatus {
+    windows_ime_status_with_message(&app, "已刷新 KeyTao Windows IME 状态".into())
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+fn windows_register_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
+    let runtime_dir =
+        windows_ime_runtime_dir(&app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
+    let dll = runtime_dir.join("keytao_windows_ime.dll");
+    run_regsvr32_elevated(&dll, false)?;
+    Ok(windows_ime_status_with_message(
+        &app,
+        "已注册 KeyTao Windows IME".into(),
+    ))
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+fn windows_unregister_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
+    let dll = windows_ime_runtime_dir(&app)
+        .map(|dir| dir.join("keytao_windows_ime.dll"))
+        .or_else(|| windows_registered_ime_path().map(PathBuf::from))
+        .ok_or("未找到可卸载的 KeyTao Windows IME DLL")?;
+    run_regsvr32_elevated(&dll, true)?;
+    Ok(windows_ime_status_with_message(
+        &app,
+        "已卸载 KeyTao Windows IME".into(),
+    ))
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+fn windows_restart_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
+    let runtime_dir =
+        windows_ime_runtime_dir(&app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
+    let dll = runtime_dir.join("keytao_windows_ime.dll");
+    let _ = run_regsvr32_elevated(&dll, true);
+    run_regsvr32_elevated(&dll, false)?;
+    Ok(windows_ime_status_with_message(
+        &app,
+        "已重新注册 KeyTao Windows IME".into(),
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn launch_keytao_ime(app: &tauri::AppHandle, restart: bool) -> Result<LinuxImeStatus, String> {
     cleanup_kde_legacy_ime_files();
@@ -1412,13 +1615,15 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
             })
             .unwrap_or_default();
 
-        let version = result["version"]
-            .as_str()
-            .map(String::from);
+        let version = result["version"].as_str().map(String::from);
 
         let installed = result["installed"].as_bool().unwrap_or(false);
 
-        Ok(LocalSchemaInfo { installed, version, schemas })
+        Ok(LocalSchemaInfo {
+            installed,
+            version,
+            schemas,
+        })
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -1808,11 +2013,15 @@ pub struct DeployResult {
 }
 
 #[tauri::command]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     let user = dest.to_string_lossy().into_owned();
+    #[cfg(target_os = "windows")]
+    let shared =
+        windows_app_shared_data_dir(&app).unwrap_or_else(keytao_core::default_shared_data_dir);
+    #[cfg(not(target_os = "windows"))]
     let shared = keytao_core::default_shared_data_dir();
 
     let _ = app.emit("deploy-progress", "正在部署 librime...");
@@ -1821,6 +2030,7 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
         Ok(Ok(())) => {
             let _ = app.emit("deploy-progress", "部署完成");
             // Refresh the test-input Rime session so the new schemas take effect immediately.
+            #[cfg(target_os = "linux")]
             if let Ok(engine) = keytao_core::Engine::new() {
                 let state: tauri::State<rime::RimeEngine> = app.state();
                 *state.engine.lock().unwrap() = Some(engine);
@@ -1847,9 +2057,21 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
-    Err("librime deployment is only supported on Linux for now".into())
+    Err("librime deployment is not supported on this platform yet".into())
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Serialize, Clone)]
+pub struct WindowsImeStatus {
+    pub supported: bool,
+    pub packaged: bool,
+    pub registered: bool,
+    pub runtime_dir: Option<String>,
+    pub dll_path: Option<String>,
+    pub registered_path: Option<String>,
+    pub message: String,
 }
 
 // ─── Install schemas to default keytao data dir ───────────────────────────────
@@ -2156,6 +2378,14 @@ pub fn run() {
             linux_restart_ime,
             #[cfg(target_os = "linux")]
             linux_enable_kde_support,
+            #[cfg(target_os = "windows")]
+            windows_ime_status,
+            #[cfg(target_os = "windows")]
+            windows_register_ime,
+            #[cfg(target_os = "windows")]
+            windows_unregister_ime,
+            #[cfg(target_os = "windows")]
+            windows_restart_ime,
             // ── IME engine commands (Linux only for now) ──
             #[cfg(target_os = "linux")]
             rime::rime_setup,

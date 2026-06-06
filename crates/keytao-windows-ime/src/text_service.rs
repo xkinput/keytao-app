@@ -6,13 +6,11 @@
 //!   3. ITfKeyEventSink::OnKeyDown (via KeyEventSink) → process keystrokes
 //!   4. ITfTextInputProcessor::Deactivate → unadvise, cleanup
 
-use std::sync::Mutex;
-
 use windows::{
     core::{implement, IUnknown, Interface, Result, GUID},
     Win32::{
-        Foundation::{BOOL, CLASS_E_NOAGGREGATION, S_OK},
-        System::Com::IClassFactory,
+        Foundation::{BOOL, CLASS_E_NOAGGREGATION},
+        System::Com::{IClassFactory, IClassFactory_Impl},
         UI::TextServices::*,
     },
 };
@@ -31,18 +29,18 @@ pub(crate) struct ClassFactory;
 impl IClassFactory_Impl for ClassFactory_Impl {
     fn CreateInstance(
         &self,
-        punkouter: windows::core::Ref<IUnknown>,
+        punkouter: Option<&IUnknown>,
         riid: *const GUID,
-    ) -> Result<IUnknown> {
+        ppvobject: *mut *mut std::ffi::c_void,
+    ) -> Result<()> {
         if punkouter.is_some() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
         let state = new_shared_state();
         let ts: ITfTextInputProcessor = TextService { state }.into();
         unsafe {
-            let mut out: *mut std::ffi::c_void = std::ptr::null_mut();
-            ts.query_interface(riid, &mut out).ok()?;
-            Ok(IUnknown::from_raw(out))
+            ts.query(riid, ppvobject).ok()?;
+            Ok(())
         }
     }
 
@@ -60,7 +58,7 @@ pub(crate) struct TextService {
 }
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
-    fn Activate(&self, ptim: windows::core::Ref<ITfThreadMgr>, tid: u32) -> Result<()> {
+    fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
         let thread_mgr = ptim.ok_or(windows::core::Error::from(
             windows::Win32::Foundation::E_INVALIDARG,
         ))?;

@@ -11,18 +11,18 @@ use keytao_core::ImeState;
 use windows::{
     core::Result,
     Win32::{
-        Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
+        Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-            SelectObject, SetBitmapBits, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+            SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+            BLENDFUNCTION, DIB_RGB_COLORS,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, MoveWindow,
-            RegisterClassExW, SetLayeredWindowAttributes, ShowWindow, UpdateLayeredWindow,
-            CW_USEDEFAULT, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
-            ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, RegisterClassExW,
+            ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
+            SW_SHOWNOACTIVATE, ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -71,9 +71,10 @@ impl CandidateWindow {
     }
 
     unsafe fn create_window() -> Result<HWND> {
-        let hinstance: HMODULE = *DLL_INSTANCE
+        let hinstance: HMODULE = DLL_INSTANCE
             .get()
-            .unwrap_or(&GetModuleHandleW(None).unwrap_or_default());
+            .map(|raw| HMODULE(*raw as _))
+            .unwrap_or_else(|| GetModuleHandleW(None).unwrap_or_default());
 
         let class_name = class_name_wide();
 
@@ -125,7 +126,13 @@ impl CandidateWindow {
         }
 
         // Position: below caret, nudge up if off-screen
+        let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let x = if caret_x + w as i32 > screen_w {
+            (screen_w - w as i32 - 4).max(0)
+        } else {
+            caret_x.max(0)
+        };
         let y = if caret_y + h as i32 > screen_h {
             caret_y - h as i32 - 4
         } else {
@@ -133,12 +140,12 @@ impl CandidateWindow {
         };
 
         unsafe {
-            self.upload_pixels(&pixels, w, h, caret_x, y);
+            self.upload_pixels(&pixels, w, h, x, y.max(0));
         }
 
         if !self.visible {
             unsafe {
-                ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.visible = true;
         }
@@ -147,7 +154,7 @@ impl CandidateWindow {
     pub fn hide(&mut self) {
         if self.visible && !self.hwnd.0.is_null() {
             unsafe {
-                ShowWindow(self.hwnd, SW_HIDE);
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
             self.visible = false;
         }
@@ -157,11 +164,35 @@ impl CandidateWindow {
     unsafe fn upload_pixels(&self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
         let screen_dc = GetDC(HWND(std::ptr::null_mut()));
         let mem_dc = CreateCompatibleDC(screen_dc);
-        let bitmap = CreateCompatibleBitmap(screen_dc, w as i32, h as i32);
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32), // top-down BGRA
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bitmap = match CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(bitmap) => bitmap,
+            Err(_) => {
+                let _ = DeleteDC(mem_dc);
+                ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+                return;
+            }
+        };
+        if bitmap.0.is_null() || bits.is_null() {
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+            return;
+        }
         let old_bmp = SelectObject(mem_dc, bitmap);
 
-        // Copy pixels into the DIB
-        SetBitmapBits(bitmap, pixels.len() as u32, pixels.as_ptr() as *const _);
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len());
 
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
@@ -189,8 +220,8 @@ impl CandidateWindow {
         );
 
         SelectObject(mem_dc, old_bmp);
-        DeleteObject(bitmap);
-        DeleteDC(mem_dc);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(mem_dc);
         ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
     }
 }

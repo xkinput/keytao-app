@@ -23,12 +23,11 @@ mod state;
 mod text_service;
 
 use windows::{
-    core::{IUnknown, Result, GUID, HRESULT},
+    core::{Interface, GUID, HRESULT},
     Win32::{
         Foundation::{BOOL, HMODULE, S_FALSE, S_OK},
         System::Com::IClassFactory,
         System::LibraryLoader::DisableThreadLibraryCalls,
-        UI::TextServices::*,
     },
 };
 
@@ -62,7 +61,7 @@ pub const LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
 extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL {
     const DLL_PROCESS_ATTACH: u32 = 1;
     if reason == DLL_PROCESS_ATTACH {
-        let _ = DLL_INSTANCE.set(hinstance);
+        let _ = DLL_INSTANCE.set(hinstance.0 as isize);
         unsafe {
             let _ = DisableThreadLibraryCalls(hinstance);
         }
@@ -71,7 +70,8 @@ extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL 
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             )
-            .init();
+            .try_init()
+            .ok();
     }
     BOOL::from(true)
 }
@@ -90,7 +90,7 @@ extern "system" fn DllGetClassObject(
             return windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE;
         }
         let factory: IClassFactory = ClassFactory.into();
-        factory.QueryInterface(riid, ppv as *mut _)
+        factory.query(riid, ppv as *mut _)
     }
 }
 

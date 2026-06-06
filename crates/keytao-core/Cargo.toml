@@ -9,6 +9,6 @@ serde = { workspace = true }
 serde_yaml = "0.9"
 dirs = { workspace = true }
 
-# The Rust librime API is only linked in the Linux app/IME builds for now.
-[target.'cfg(target_os = "linux")'.dependencies]
+# The Rust librime API is linked by native desktop IME frontends.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 rime-api = { version = "0.12.2", features = ["serde"] }

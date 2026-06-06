@@ -32,6 +32,8 @@ import {
   Play,
   Loader2,
   XCircle,
+  Keyboard,
+  type LucideIcon,
 } from "lucide-react"
 import DebugTab from "@/components/DebugTab"
 
@@ -126,6 +128,16 @@ interface LinuxImeStatus {
   processes: string[]
   kde_native_processes: number
   fallback_processes: number
+  message: string
+}
+
+interface WindowsImeStatus {
+  supported: boolean
+  packaged: boolean
+  registered: boolean
+  runtime_dir: string | null
+  dll_path: string | null
+  registered_path: string | null
   message: string
 }
 
@@ -229,6 +241,12 @@ export default function App() {
   const [isStartingLinuxIme, setIsStartingLinuxIme] = useState(false)
   const [isRestartingLinuxIme, setIsRestartingLinuxIme] = useState(false)
   const [isEnablingKdeSupport, setIsEnablingKdeSupport] = useState(false)
+  const [windowsImeStatus, setWindowsImeStatus] = useState<WindowsImeStatus | null>(null)
+  const [windowsImeError, setWindowsImeError] = useState<string | null>(null)
+  const [isRefreshingWindowsIme, setIsRefreshingWindowsIme] = useState(false)
+  const [isRegisteringWindowsIme, setIsRegisteringWindowsIme] = useState(false)
+  const [isRestartingWindowsIme, setIsRestartingWindowsIme] = useState(false)
+  const [isUnregisteringWindowsIme, setIsUnregisteringWindowsIme] = useState(false)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -269,6 +287,7 @@ export default function App() {
 
   const unlistenInstallRef = useRef<(() => void) | null>(null)
   const unlistenDeployRef = useRef<(() => void) | null>(null)
+  const windowsAutoRegisterAttemptedRef = useRef(false)
 
   function addLogs(lines: string[]) {
     const ts = new Date().toLocaleTimeString()
@@ -283,7 +302,9 @@ export default function App() {
     }
     const os = map[p] ?? "unknown"
     setOsType(os)
-    if (os !== "linux") {
+    if (os === "windows" || os === "linux") {
+      setActiveTab("install")
+    } else {
       setActiveTab("extension")
     }
     getVersion().then(setAppVersion).catch(() => { })
@@ -314,6 +335,21 @@ export default function App() {
         .then(setLinuxImeStatus)
         .catch((e) => setLinuxImeError(String(e)))
     }
+    if (os === "windows") {
+      invoke<WindowsImeStatus>("windows_ime_status")
+        .then((status) => {
+          setWindowsImeStatus(status)
+          if (status.packaged && !status.registered && !windowsAutoRegisterAttemptedRef.current) {
+            windowsAutoRegisterAttemptedRef.current = true
+            setIsRegisteringWindowsIme(true)
+            invoke<WindowsImeStatus>("windows_register_ime")
+              .then(setWindowsImeStatus)
+              .catch((e) => setWindowsImeError(String(e)))
+              .finally(() => setIsRegisteringWindowsIme(false))
+          }
+        })
+        .catch((e) => setWindowsImeError(String(e)))
+    }
 
     listen<InstallProgress>("install-progress", (e) => {
       setInstallProgress(e.payload)
@@ -330,6 +366,7 @@ export default function App() {
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
   const isLinuxImeBusy = isRefreshingLinuxIme || isStartingLinuxIme || isRestartingLinuxIme || isEnablingKdeSupport
+  const isWindowsImeBusy = isRefreshingWindowsIme || isRegisteringWindowsIme || isRestartingWindowsIme || isUnregisteringWindowsIme
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -474,6 +511,61 @@ export default function App() {
       setLinuxImeError(String(e))
     } finally {
       setIsEnablingKdeSupport(false)
+    }
+  }
+
+  async function refreshWindowsImeStatus() {
+    setIsRefreshingWindowsIme(true)
+    setWindowsImeError(null)
+    try {
+      const status = await invoke<WindowsImeStatus>("windows_ime_status")
+      setWindowsImeStatus(status)
+    } catch (e) {
+      setWindowsImeError(String(e))
+    } finally {
+      setIsRefreshingWindowsIme(false)
+    }
+  }
+
+  async function handleRegisterWindowsIme() {
+    setIsRegisteringWindowsIme(true)
+    setWindowsImeError(null)
+    try {
+      const status = await invoke<WindowsImeStatus>("windows_register_ime")
+      setWindowsImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setWindowsImeError(String(e))
+    } finally {
+      setIsRegisteringWindowsIme(false)
+    }
+  }
+
+  async function handleRestartWindowsIme() {
+    setIsRestartingWindowsIme(true)
+    setWindowsImeError(null)
+    try {
+      const status = await invoke<WindowsImeStatus>("windows_restart_ime")
+      setWindowsImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setWindowsImeError(String(e))
+    } finally {
+      setIsRestartingWindowsIme(false)
+    }
+  }
+
+  async function handleUnregisterWindowsIme() {
+    setIsUnregisteringWindowsIme(true)
+    setWindowsImeError(null)
+    try {
+      const status = await invoke<WindowsImeStatus>("windows_unregister_ime")
+      setWindowsImeStatus(status)
+      addLogs([`[IME] ${status.message}`])
+    } catch (e) {
+      setWindowsImeError(String(e))
+    } finally {
+      setIsUnregisteringWindowsIme(false)
     }
   }
 
@@ -654,11 +746,11 @@ export default function App() {
         {/* Tab nav */}
         <div className="flex border-b border-border">
           {([
-            { id: "install", label: "输入法", icon: Download },
+            { id: "install", label: "输入法", icon: Keyboard },
             { id: "extension", label: "扩展安装", icon: Settings },
             { id: "about", label: "关于", icon: Info },
             { id: "debug", label: "调试", icon: ScrollText },
-          ] as { id: Tab; label: string; icon: typeof Download }[]).map(({ id, label, icon: Icon }) => (
+          ] as { id: Tab; label: string; icon: LucideIcon }[]).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
@@ -676,7 +768,104 @@ export default function App() {
         {/* ══ 安装 Tab ══════════════════════════════════════════════════════ */}
         {activeTab === "install" && (
           <div className="space-y-4">
-            {osType !== "linux" && (
+            {osType === "windows" && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Keyboard className="h-4 w-4 text-muted-foreground" />
+                    Windows 系统输入法
+                    <span className="ml-auto">
+                      {windowsImeStatus?.registered
+                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已注册</Badge>
+                        : <Badge variant="outline" className="text-xs">未注册</Badge>
+                      }
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {windowsImeStatus && (
+                    <div className="grid gap-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={windowsImeStatus.packaged ? "default" : "outline"} className="text-xs">
+                          安装包 {windowsImeStatus.packaged ? "完整" : "缺少 IME 运行时"}
+                        </Badge>
+                        <Badge variant={windowsImeStatus.registered ? "default" : "outline"} className="text-xs">
+                          TSF {windowsImeStatus.registered ? "已注册" : "未注册"}
+                        </Badge>
+                      </div>
+                      {windowsImeStatus.runtime_dir && (
+                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                          <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-muted-foreground">运行时：</span>
+                          <code className="font-mono truncate">{windowsImeStatus.runtime_dir}</code>
+                        </div>
+                      )}
+                      {windowsImeStatus.registered_path && (
+                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                          <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-muted-foreground">已注册：</span>
+                          <code className="font-mono truncate">{windowsImeStatus.registered_path}</code>
+                        </div>
+                      )}
+                      {windowsImeStatus.message && (
+                        <div className="text-xs text-muted-foreground rounded-lg border border-border bg-muted/20 px-3 py-2">
+                          {windowsImeStatus.message}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {windowsImeError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{windowsImeError}</span>
+                    </div>
+                  )}
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshWindowsImeStatus}
+                      disabled={isWindowsImeBusy}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingWindowsIme ? "animate-spin" : ""}`} />
+                      刷新状态
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleRegisterWindowsIme}
+                      disabled={isWindowsImeBusy || !windowsImeStatus?.packaged}
+                      className="gap-1.5"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      注册输入法
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRestartWindowsIme}
+                      disabled={isWindowsImeBusy || !windowsImeStatus?.packaged}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRestartingWindowsIme ? "animate-spin" : ""}`} />
+                      重启输入法
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleUnregisterWindowsIme}
+                      disabled={isWindowsImeBusy}
+                      className="gap-1.5"
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      卸载输入法
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {osType !== "linux" && osType !== "windows" && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">

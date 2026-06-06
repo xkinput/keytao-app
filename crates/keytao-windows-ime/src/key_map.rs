@@ -5,9 +5,9 @@
 //! Windows VK codes directly.
 
 // X11 modifier bitmask — matches what Linux wayland_backend passes to librime.
-pub const MOD_SHIFT: u32 = 0x0001;
-pub const MOD_CONTROL: u32 = 0x0004;
-pub const MOD_ALT: u32 = 0x0008; // Mod1 / Alt
+pub const RIME_MOD_SHIFT: u32 = 0x0001;
+pub const RIME_MOD_CONTROL: u32 = 0x0004;
+pub const RIME_MOD_ALT: u32 = 0x0008; // Mod1 / Alt
 
 /// Read the current state of Shift, Control, Alt and return an X11 modifier mask.
 pub fn current_mod_mask() -> u32 {
@@ -15,13 +15,13 @@ pub fn current_mod_mask() -> u32 {
     unsafe {
         use windows::Win32::UI::Input::KeyboardAndMouse::*;
         if GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 {
-            mask |= MOD_SHIFT;
+            mask |= RIME_MOD_SHIFT;
         }
         if GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 {
-            mask |= MOD_CONTROL;
+            mask |= RIME_MOD_CONTROL;
         }
         if GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 {
-            mask |= MOD_ALT;
+            mask |= RIME_MOD_ALT;
         }
     }
     mask
@@ -129,7 +129,7 @@ pub fn should_eat_key(vk: u16, has_preedit: bool, mods: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     // Never eat keys with Ctrl/Alt (let application handle shortcuts)
-    if mods & (MOD_CONTROL | MOD_ALT) != 0 {
+    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
         return false;
     }
 
@@ -140,6 +140,8 @@ pub fn should_eat_key(vk: u16, has_preedit: bool, mods: u32) -> bool {
         matches!(
             vk,
             VK_BACK
+                | VK_TAB
+                | VK_DELETE
                 | VK_ESCAPE
                 | VK_RETURN
                 | VK_SPACE
@@ -147,6 +149,8 @@ pub fn should_eat_key(vk: u16, has_preedit: bool, mods: u32) -> bool {
                 | VK_RIGHT
                 | VK_UP
                 | VK_DOWN
+                | VK_HOME
+                | VK_END
                 | VK_PRIOR
                 | VK_NEXT
                 | VK_0
@@ -170,6 +174,8 @@ pub fn should_eat_key(vk: u16, has_preedit: bool, mods: u32) -> bool {
     }
 }
 
-fn is_letter_vk(vk: VIRTUAL_KEY) -> bool {
+fn is_letter_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_A, VK_Z};
+
     (VK_A.0..=VK_Z.0).contains(&vk.0)
 }

@@ -1,29 +1,50 @@
-//! DllRegisterServer / DllUnregisterServer — TSF TIP registration.
+//! DllRegisterServer / DllUnregisterServer - TSF TIP registration.
 //!
 //! Registration steps (mirrors what regsvr32 does for TSF TIPs):
-//!   1. Write CLSID → InprocServer32 in HKCR
-//!   2. ITfInputProcessorProfiles::Register  → tells TSF about us
-//!   3. ITfCategoryMgr::RegisterCategory     → marks us as a keyboard TIP
+//!   1. Write CLSID to InprocServer32 in HKCR
+//!   2. ITfInputProcessorProfiles::Register tells TSF about us
+//!   3. ITfCategoryMgr::RegisterCategory marks us as a keyboard TIP
 //!
 //! Run: regsvr32 keytao_windows_ime.dll
 //! Undo: regsvr32 /u keytao_windows_ime.dll
 
 use windows::{
-    core::{Result, PCWSTR},
+    core::{IUnknown, Result, PCWSTR},
     Win32::{
-        System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+        System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        },
         System::Registry::{
             RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
-            KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+            KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_SZ,
         },
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
-            ITfInputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
+            ITfInputProcessorProfiles, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+            GUID_TFCAT_TIPCAP_UIELEMENTENABLED, GUID_TFCAT_TIP_KEYBOARD,
         },
     },
 };
 
 use crate::{CLSID_TEXT_SERVICE, GUID_PROFILE, LANGID_CHINESE_SIMPLIFIED};
+
+struct ComApartment(bool);
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+fn init_com_apartment() -> ComApartment {
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+    ComApartment(initialized)
+}
 
 fn to_wide(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
@@ -60,7 +81,7 @@ unsafe fn reg_set_sz(hkey: HKEY, name: &str, value: &str) -> Result<()> {
 unsafe fn reg_create(parent: HKEY, subkey: &str) -> Result<HKEY> {
     let subkey_w = to_wide(subkey);
     let mut hkey = HKEY::default();
-    let mut disposition = 0u32;
+    let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
     RegCreateKeyExW(
         parent,
         PCWSTR(subkey_w.as_ptr()),
@@ -70,7 +91,7 @@ unsafe fn reg_create(parent: HKEY, subkey: &str) -> Result<HKEY> {
         KEY_WRITE,
         None,
         &mut hkey,
-        Some(&mut disposition),
+        Some(&mut disposition as *mut _),
     )
     .ok()?;
     Ok(hkey)
@@ -81,16 +102,17 @@ fn dll_path() -> Result<String> {
     use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
     let hmod = crate::globals::DLL_INSTANCE
         .get()
-        .copied()
+        .map(|raw| windows::Win32::Foundation::HMODULE(*raw as _))
         .unwrap_or_default();
     let mut buf = vec![0u16; 260];
     let len = unsafe { GetModuleFileNameW(hmod, &mut buf) } as usize;
     Ok(String::from_utf16_lossy(&buf[..len]))
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// Public API
 
 pub fn register() -> Result<()> {
+    let _com = init_com_apartment();
     let dll = dll_path()?;
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
@@ -98,7 +120,7 @@ pub fn register() -> Result<()> {
         // 1. HKCR\CLSID\{...}
         let key_clsid = reg_create(HKEY_CLASSES_ROOT, &format!("CLSID\\{}", clsid_str))?;
         reg_set_sz(key_clsid, "", "KeyTao Input Method")?;
-        RegCloseKey(key_clsid).ok();
+        let _ = RegCloseKey(key_clsid).ok();
 
         // 2. HKCR\CLSID\{...}\InprocServer32
         let key_inproc = reg_create(
@@ -107,31 +129,41 @@ pub fn register() -> Result<()> {
         )?;
         reg_set_sz(key_inproc, "", &dll)?;
         reg_set_sz(key_inproc, "ThreadingModel", "Apartment")?;
-        RegCloseKey(key_inproc).ok();
+        let _ = RegCloseKey(key_inproc).ok();
 
         // 3. Register with TSF via ITfInputProcessorProfiles
-        let profiles: ITfInputProcessorProfiles =
-            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
+        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
+            &CLSID_TF_InputProcessorProfiles,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        )?;
 
         profiles.Register(&CLSID_TEXT_SERVICE)?;
+        let profile_desc = to_wide("KeyTao");
+        let icon_path = to_wide(&dll);
         profiles.AddLanguageProfile(
             &CLSID_TEXT_SERVICE,
             LANGID_CHINESE_SIMPLIFIED,
             &GUID_PROFILE,
-            &to_wide("键道输入法")[..to_wide("键道输入法").len() - 1], // strip null
+            &profile_desc[..profile_desc.len() - 1],
             // Icon: use the DLL itself at resource index 0 (can be updated later)
-            &to_wide(&dll)[..to_wide(&dll).len() - 1],
+            &icon_path[..icon_path.len() - 1],
             0,
         )?;
 
         // 4. Register category: keyboard TIP
-        let cat_mgr: ITfCategoryMgr =
-            CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
-        cat_mgr.RegisterCategory(
-            &CLSID_TEXT_SERVICE,
-            &GUID_TFCAT_TIP_KEYBOARD,
-            &CLSID_TEXT_SERVICE,
+        let cat_mgr: ITfCategoryMgr = CoCreateInstance(
+            &CLSID_TF_CategoryMgr,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
         )?;
+        for category in [
+            GUID_TFCAT_TIP_KEYBOARD,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+            GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+        ] {
+            cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE)?;
+        }
     }
 
     tracing::info!("KeyTao TSF registered (CLSID={})", clsid_str);
@@ -139,15 +171,17 @@ pub fn register() -> Result<()> {
 }
 
 pub fn unregister() -> Result<()> {
+    let _com = init_com_apartment();
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
     unsafe {
         // Remove TSF registrations first
-        if let Ok(profiles) = CoCreateInstance::<ITfInputProcessorProfiles>(
+        let profiles: windows::core::Result<ITfInputProcessorProfiles> = CoCreateInstance(
             &CLSID_TF_InputProcessorProfiles,
-            None,
+            None::<&IUnknown>,
             CLSCTX_INPROC_SERVER,
-        ) {
+        );
+        if let Ok(profiles) = profiles {
             let _ = profiles.RemoveLanguageProfile(
                 &CLSID_TEXT_SERVICE,
                 LANGID_CHINESE_SIMPLIFIED,
@@ -156,14 +190,20 @@ pub fn unregister() -> Result<()> {
             let _ = profiles.Unregister(&CLSID_TEXT_SERVICE);
         }
 
-        if let Ok(cat_mgr) =
-            CoCreateInstance::<ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
-        {
-            let _ = cat_mgr.UnregisterCategory(
-                &CLSID_TEXT_SERVICE,
-                &GUID_TFCAT_TIP_KEYBOARD,
-                &CLSID_TEXT_SERVICE,
-            );
+        let cat_mgr: windows::core::Result<ITfCategoryMgr> = CoCreateInstance(
+            &CLSID_TF_CategoryMgr,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        );
+        if let Ok(cat_mgr) = cat_mgr {
+            for category in [
+                GUID_TFCAT_TIP_KEYBOARD,
+                GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+            ] {
+                let _ =
+                    cat_mgr.UnregisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE);
+            }
         }
 
         // Remove HKCR\CLSID\{...} tree

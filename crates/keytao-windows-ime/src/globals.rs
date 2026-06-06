@@ -1,13 +1,10 @@
 //! Global DLL state: HMODULE handle + reference counters.
 
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HMODULE;
-
-#[cfg(target_os = "windows")]
-pub static DLL_INSTANCE: OnceLock<HMODULE> = OnceLock::new();
+pub static DLL_INSTANCE: OnceLock<isize> = OnceLock::new();
 
 /// Counts active COM object instances (AddRef-tracked by ClassFactory).
 static DLL_OBJ_COUNT: AtomicI32 = AtomicI32::new(0);

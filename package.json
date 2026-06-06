@@ -15,7 +15,10 @@
     "tauri": "tauri",
     "sync-version": "node scripts/sync-version.mjs",
     "build:macos": "tauri build --bundles dmg --config src-tauri/tauri.macos.conf.json",
-    "build:linux": "bash scripts/build-linux.sh"
+    "build:linux": "bash scripts/build-linux.sh",
+    "fetch:librime:windows": "powershell -ExecutionPolicy Bypass -File scripts/fetch-librime-windows.ps1",
+    "build:windows-ime": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-ime.ps1",
+    "build:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

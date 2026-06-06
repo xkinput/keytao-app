@@ -52,7 +52,7 @@ impl ImeState {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
     let staging_dir = user_data_dir.join("build");
     let prebuilt_dir = if user_data_dir == shared_data_dir {
@@ -63,14 +63,14 @@ fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, Pa
     (staging_dir, prebuilt_dir)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
 // ── Linux-only engine (guarded at the module level) ──────────────────────────
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod desktop {
     use super::*;
     use rime_api::{
@@ -143,7 +143,9 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
-            let status = self.session.process_key(KeyEvent::new(keycode, mask));
+            let status = self
+                .session
+                .process_key(KeyEvent::new(keycode as i32, mask as i32));
             KeyProcessResult {
                 state: extract_state(&self.session),
                 accepted: matches!(status, KeyStatus::Accept),
@@ -156,20 +158,20 @@ mod desktop {
 
         pub fn select_candidate(&self, index: usize) -> ImeState {
             if index < 9 {
-                let kc = b'1' as u32 + index as u32;
+                let kc = b'1' as i32 + index as i32;
                 self.session.process_key(KeyEvent::new(kc, 0));
             }
             extract_state(&self.session)
         }
 
         pub fn change_page(&self, backward: bool) -> ImeState {
-            let kc = if backward { b'-' as u32 } else { b'=' as u32 };
+            let kc = if backward { b'-' as i32 } else { b'=' as i32 };
             self.session.process_key(KeyEvent::new(kc, 0));
             extract_state(&self.session)
         }
 
         pub fn reset(&self) -> ImeState {
-            self.session.process_key(KeyEvent::new(0xff1b_u32, 0)); // XK_Escape
+            self.session.process_key(KeyEvent::new(0xff1b, 0)); // XK_Escape
             ImeState::empty()
         }
 
@@ -228,7 +230,7 @@ mod desktop {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use desktop::{deploy, Engine};
 
 fn is_default_custom(filename: &str) -> bool {
@@ -708,9 +710,83 @@ pub fn default_shared_data_dir() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        return std::env::var("WEASEL_ROOT")
-            .map(|r| format!("{r}\\data"))
-            .unwrap_or_else(|_| r"C:\Program Files\Rime\weasel-data".to_string());
+        let mut candidates = Vec::new();
+
+        for key in [
+            "KEYTAO_RIME_SHARED_DATA_DIR",
+            "RIME_SHARED_DATA_DIR",
+            "RIME_DATA_DIR",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    candidates.push(PathBuf::from(value));
+                }
+            }
+        }
+
+        if let Ok(root) = std::env::var("WEASEL_ROOT") {
+            candidates.push(PathBuf::from(root).join("data"));
+        }
+
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            candidates.push(
+                PathBuf::from(&program_files)
+                    .join("KeyTao")
+                    .join("rime-data"),
+            );
+            candidates.push(
+                PathBuf::from(&program_files)
+                    .join("KeyTao")
+                    .join("share")
+                    .join("rime-data"),
+            );
+        }
+
+        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+            candidates.push(
+                PathBuf::from(&program_files_x86)
+                    .join("KeyTao")
+                    .join("rime-data"),
+            );
+            candidates.push(
+                PathBuf::from(&program_files_x86)
+                    .join("KeyTao")
+                    .join("share")
+                    .join("rime-data"),
+            );
+        }
+
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("Rime")
+                    .join("weasel-data"),
+            );
+        }
+
+        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+            candidates.push(
+                PathBuf::from(program_files_x86)
+                    .join("Rime")
+                    .join("weasel-data"),
+            );
+        }
+
+        candidates.extend([
+            PathBuf::from(r"C:\Program Files\KeyTao\rime-data"),
+            PathBuf::from(r"C:\Program Files\KeyTao\share\rime-data"),
+            PathBuf::from(r"C:\Program Files\Rime\weasel-data"),
+            PathBuf::from(r"C:\Program Files (x86)\Rime\weasel-data"),
+        ]);
+
+        for path in candidates {
+            if path.join("default.yaml").is_file() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+
+        return r"C:\Program Files\Rime\weasel-data".to_string();
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

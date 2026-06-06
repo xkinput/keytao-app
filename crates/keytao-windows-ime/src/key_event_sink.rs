@@ -11,7 +11,7 @@ use std::{cell::UnsafeCell, sync::Arc};
 use windows::{
     core::{implement, Interface, Result, GUID},
     Win32::{
-        Foundation::{BOOL, E_FAIL, E_INVALIDARG, POINT, RECT, S_OK},
+        Foundation::{BOOL, E_INVALIDARG, LPARAM, RECT, WPARAM},
         UI::TextServices::*,
     },
 };
@@ -55,12 +55,11 @@ fn with_write_session(
         f: UnsafeCell::new(Some(Box::new(f))),
     };
     let iface: ITfEditSession = session.into();
-    let mut hr_session = S_OK;
-    // TF_ES_SYNC = 0x0001, TF_ES_READWRITE = 0x0006
+    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
     unsafe {
-        context.RequestEditSession(client_id, &iface, 0x0001 | 0x0006, &mut hr_session)?;
+        let hr_session = context.RequestEditSession(client_id, &iface, flags)?;
+        hr_session.ok()
     }
-    hr_session.ok()
 }
 
 // ── Composition helpers ───────────────────────────────────────────────────────
@@ -73,15 +72,13 @@ fn to_wide(s: &str) -> Vec<u16> {
 fn start_composition(
     ec: u32,
     context: &ITfContext,
-    client_id: u32,
     preedit: &str,
     comp_sink: &ITfCompositionSink,
 ) -> Result<ITfComposition> {
     unsafe {
         // Get insertion point (query only — don't insert yet)
         let ins: ITfInsertAtSelection = context.cast()?;
-        // TF_IAS_QUERYONLY = 0x0001
-        let range = ins.InsertTextAtSelection(ec, 0x0001, &[])?;
+        let range = ins.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])?;
 
         let ctx_comp: ITfContextComposition = context.cast()?;
         let comp = ctx_comp.StartComposition(ec, &range, comp_sink)?;
@@ -126,16 +123,16 @@ fn caret_screen_pos(ec: u32, context: &ITfContext) -> (i32, i32) {
         };
 
         // Get default selection range
-        let mut sel = TF_SELECTION::default();
+        let mut selections = [TF_SELECTION::default()];
         let mut count: u32 = 0;
         // TF_DEFAULT_SELECTION = 0xFFFFFFFF
         if context
-            .GetSelection(ec, 0xFFFFFFFF, 1, &mut sel, &mut count)
+            .GetSelection(ec, 0xFFFFFFFF, &mut selections, &mut count)
             .is_err()
         {
             return (100, 100);
         }
-        let range = match sel.range.as_ref() {
+        let range = match selections[0].range.as_ref() {
             Some(r) => r.clone(),
             None => return (100, 100),
         };
@@ -154,7 +151,7 @@ fn caret_screen_pos(ec: u32, context: &ITfContext) -> (i32, i32) {
 
 // ── KeyEventSink + CompositionSink (one COM object, shared state) ─────────────
 
-#[implement(ITfKeyEventSink, ITfCompositionSink)]
+#[implement(ITfKeyEventSink)]
 pub(crate) struct KeyEventSink {
     pub(crate) state: SharedState,
 }
@@ -166,39 +163,34 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
 
     fn OnTestKeyDown(
         &self,
-        _pic: windows::core::Ref<ITfContext>,
+        _pic: Option<&ITfContext>,
         wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
-        let has_preedit = self
+        let is_composing = self
             .state
             .lock()
             .unwrap()
             .ime_state
             .as_ref()
-            .map(|s| !s.preedit.is_empty())
+            .map(|s| !s.preedit.is_empty() || !s.candidates.is_empty())
             .unwrap_or(false);
-        Ok(BOOL::from(should_eat_key(vk, has_preedit, mods)))
+        Ok(BOOL::from(should_eat_key(vk, is_composing, mods)))
     }
 
     fn OnTestKeyUp(
         &self,
-        _pic: windows::core::Ref<ITfContext>,
+        _pic: Option<&ITfContext>,
         _wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
         Ok(BOOL::from(false))
     }
 
-    fn OnKeyDown(
-        &self,
-        pic: windows::core::Ref<ITfContext>,
-        wparam: WPARAM,
-        _lparam: LPARAM,
-    ) -> Result<BOOL> {
-        let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?;
+    fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
 
@@ -207,19 +199,19 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             None => return Ok(BOOL::from(false)),
         };
 
-        // Call librime engine
-        let ime_state = {
+        // Call librime engine. Use Rime's accepted flag as the source of truth,
+        // matching the Linux frontends.
+        let result = {
             let st = self.state.lock().unwrap();
-            st.engine().map(|e| e.process_key(keysym, mods))
+            st.engine().map(|e| e.process_key_result(keysym, mods))
         };
-        let ime_state = match ime_state {
-            Some(s) => s,
+        let result = match result {
+            Some(r) => r,
             None => return Ok(BOOL::from(false)),
         };
+        let ime_state = result.state;
 
-        let consumed = ime_state.committed.is_some()
-            || !ime_state.preedit.is_empty()
-            || !ime_state.candidates.is_empty();
+        let consumed = result.accepted;
 
         if !consumed {
             return Ok(BOOL::from(false));
@@ -250,9 +242,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     // No composition — insert text directly at selection
                     unsafe {
                         let ins: ITfInsertAtSelection = ctx.cast()?;
-                        // TF_IAS_NOQUERY = 0x0002
                         let wide = to_wide(committed);
-                        ins.InsertTextAtSelection(ec, 0x0002, &wide)?;
+                        ins.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide)?;
                     }
                 }
             }
@@ -261,13 +252,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 if let Some(comp) = &st.composition {
                     update_composition_text(ec, comp, &ime_state_clone.preedit)?;
                 } else {
-                    let comp = start_composition(
-                        ec,
-                        ctx,
-                        client_id,
-                        &ime_state_clone.preedit,
-                        &comp_sink_iface,
-                    )?;
+                    let comp =
+                        start_composition(ec, ctx, &ime_state_clone.preedit, &comp_sink_iface)?;
                     st.composition = Some(comp);
                 }
             } else if st.composition.is_some() && ime_state_clone.committed.is_none() {
@@ -295,20 +281,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         Ok(BOOL::from(consumed))
     }
 
-    fn OnKeyUp(
-        &self,
-        _pic: windows::core::Ref<ITfContext>,
-        _wparam: WPARAM,
-        _lparam: LPARAM,
-    ) -> Result<BOOL> {
+    fn OnKeyUp(&self, _pic: Option<&ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
         Ok(BOOL::from(false))
     }
 
-    fn OnPreservedKey(
-        &self,
-        _pic: windows::core::Ref<ITfContext>,
-        _rguid: *const GUID,
-    ) -> Result<BOOL> {
+    fn OnPreservedKey(&self, _pic: Option<&ITfContext>, _rguid: *const GUID) -> Result<BOOL> {
         Ok(BOOL::from(false))
     }
 }
@@ -327,7 +304,7 @@ impl ITfCompositionSink_Impl for CompositionSink_Impl {
     fn OnCompositionTerminated(
         &self,
         _ecwrite: u32,
-        _pcomposition: windows::core::Ref<ITfComposition>,
+        _pcomposition: Option<&ITfComposition>,
     ) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.composition = None;

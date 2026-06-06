@@ -42,7 +42,7 @@ jobs:
           - platform: macos-latest
             args: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
           - platform: windows-latest
-            args: --bundles nsis
+            args: --bundles nsis --config src-tauri/tauri.windows.conf.json
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -82,6 +82,14 @@ jobs:
             rpm fakeroot dpkg-dev \
             mold
 
+      - name: Install Windows system deps
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install llvm 7zip -y --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
@@ -103,6 +111,39 @@ jobs:
           chmod +x "$sidecar"
           ls -lh "$sidecar"
           echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> "$GITHUB_ENV"
+
+      - name: Pre-build keytao-windows-ime
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1
+
+          $vendorDir = (Resolve-Path "vendor\librime\windows-x64").Path
+          $includeDir = Join-Path $vendorDir "include"
+          $libDir = Join-Path $vendorDir "lib"
+          $binDir = Join-Path $vendorDir "bin"
+          $runtimeDir = (Resolve-Path "target\keytao-windows-ime-runtime\x64").Path
+          $appRuntimeDir = (Resolve-Path "target\keytao-windows-app-runtime").Path
+
+          if (-not (Test-Path (Join-Path $runtimeDir "keytao_windows_ime.dll"))) {
+            throw "Missing keytao_windows_ime.dll in $runtimeDir"
+          }
+          if (-not (Test-Path (Join-Path $runtimeDir "rime.dll"))) {
+            throw "Missing rime.dll in $runtimeDir"
+          }
+          if (-not (Test-Path (Join-Path $runtimeDir "rime-data\default.yaml"))) {
+            throw "Missing bundled rime-data in $runtimeDir"
+          }
+          if (-not (Test-Path (Join-Path $appRuntimeDir "rime.dll"))) {
+            throw "Missing app startup rime.dll in $appRuntimeDir"
+          }
+
+          "RIME_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RIME_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Get-ChildItem $runtimeDir
+          Get-ChildItem $appRuntimeDir
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -148,6 +189,44 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Verify Windows bundle includes keytao-windows-ime
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem -Path "target\release\bundle\nsis" -Filter "*.exe" -File | Select-Object -First 1
+          if (-not $installer) {
+            throw "Missing Windows NSIS installer"
+          }
+
+          $imeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "keytao_windows_ime.dll" -File | Select-Object -First 1
+          $rimeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "rime.dll" -File | Select-Object -First 1
+          $rimeData = Get-ChildItem -Path "target\release" -Recurse -Filter "default.yaml" -File |
+            Where-Object { $_.FullName -like "*rime-data*" } |
+            Select-Object -First 1
+          $installerScript = "target\release\nsis\x64\installer.nsi"
+
+          if (-not $imeDll) {
+            throw "Windows bundle does not include keytao_windows_ime.dll"
+          }
+          if (-not $rimeDll) {
+            throw "Windows bundle does not include rime.dll"
+          }
+          if (-not $rimeData) {
+            throw "Windows bundle does not include rime-data\default.yaml"
+          }
+          if (-not (Test-Path $installerScript)) {
+            throw "Missing generated NSIS installer script"
+          }
+          if (-not (Select-String -Path $installerScript -Pattern '/oname=rime\.dll' -Quiet)) {
+            throw "Windows installer does not install rime.dll next to keytao-app.exe"
+          }
+
+          Write-Host "Installer: $($installer.FullName)"
+          Write-Host "IME DLL: $($imeDll.FullName)"
+          Write-Host "Rime DLL: $($rimeDll.FullName)"
+          Write-Host "Rime data: $($rimeData.FullName)"
 
       - name: Verify Linux bundles include keytao-ime
         if: matrix.platform == 'ubuntu-22.04'
