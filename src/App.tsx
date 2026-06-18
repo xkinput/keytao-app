@@ -141,6 +141,12 @@ interface WindowsImeStatus {
   message: string
 }
 
+interface MacosImeStatus {
+  installed: boolean
+  app_path: string | null
+  message: string
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -247,6 +253,9 @@ export default function App() {
   const [isRegisteringWindowsIme, setIsRegisteringWindowsIme] = useState(false)
   const [isRestartingWindowsIme, setIsRestartingWindowsIme] = useState(false)
   const [isUnregisteringWindowsIme, setIsUnregisteringWindowsIme] = useState(false)
+  const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
+  const [macosImeError, setMacosImeError] = useState<string | null>(null)
+  const [isRefreshingMacosIme, setIsRefreshingMacosIme] = useState(false)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -302,7 +311,7 @@ export default function App() {
     }
     const os = map[p] ?? "unknown"
     setOsType(os)
-    if (os === "windows" || os === "linux") {
+    if (os === "windows" || os === "linux" || os === "macos") {
       setActiveTab("install")
     } else {
       setActiveTab("extension")
@@ -349,6 +358,11 @@ export default function App() {
           }
         })
         .catch((e) => setWindowsImeError(String(e)))
+    }
+    if (os === "macos") {
+      invoke<MacosImeStatus>("macos_ime_status")
+        .then(setMacosImeStatus)
+        .catch((e) => setMacosImeError(String(e)))
     }
 
     listen<InstallProgress>("install-progress", (e) => {
@@ -566,6 +580,19 @@ export default function App() {
       setWindowsImeError(String(e))
     } finally {
       setIsUnregisteringWindowsIme(false)
+    }
+  }
+
+  async function refreshMacosImeStatus() {
+    setIsRefreshingMacosIme(true)
+    setMacosImeError(null)
+    try {
+      const status = await invoke<MacosImeStatus>("macos_ime_status")
+      setMacosImeStatus(status)
+    } catch (e) {
+      setMacosImeError(String(e))
+    } finally {
+      setIsRefreshingMacosIme(false)
     }
   }
 
@@ -865,7 +892,51 @@ export default function App() {
               </Card>
             )}
 
-            {osType !== "linux" && osType !== "windows" && (
+            {osType === "macos" && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Keyboard className="h-4 w-4 text-muted-foreground" />
+                    macOS 系统输入法
+                    <span className="ml-auto">
+                      {macosImeStatus?.installed
+                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已安装</Badge>
+                        : <Badge variant="outline" className="text-xs">未安装</Badge>
+                      }
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {macosImeStatus?.app_path && (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+                      <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">系统位置：</span>
+                      <code className="font-mono truncate">{macosImeStatus.app_path}</code>
+                    </div>
+                  )}
+                  {macosImeError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{macosImeError}</span>
+                    </div>
+                  )}
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshMacosImeStatus}
+                      disabled={isRefreshingMacosIme}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingMacosIme ? "animate-spin" : ""}`} />
+                      刷新状态
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {osType !== "linux" && osType !== "windows" && osType !== "macos" && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">

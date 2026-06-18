@@ -1,10 +1,16 @@
 {
   "bundle": {
     "targets": [
-      "dmg"
+      "app"
     ],
+    "resources": {
+      "../target/keytao-macos-app-runtime/rime-data": "rime-data"
+    },
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "frameworks": [
+        "../target/keytao-macos-app-runtime/Frameworks/librime.1.dylib"
+      ]
     }
   }
 }

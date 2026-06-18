@@ -58,6 +58,7 @@ class CandidatePanel: NSPanel {
     // MARK: – Update
 
     func update(texts: [String], comments: [String],
+                highlightedIndex: Int,
                 page: Int, isLastPage: Bool, selectKeys: String,
                 near cursorRect: NSRect) {
 
@@ -69,7 +70,8 @@ class CandidatePanel: NSPanel {
         for (i, text) in texts.enumerated() {
             let btn = makeButton(
                 label: "\(keys[safe: i] ?? Character("?"))\u{fe0e}.\(text)",
-                comment: comments[safe: i] ?? ""
+                comment: comments[safe: i] ?? "",
+                highlighted: i == highlightedIndex
             )
             let idx = i
             btn.target = self
@@ -114,14 +116,21 @@ class CandidatePanel: NSPanel {
         let winSize = NSSize(width: max(fittingSize.width + 16, 80),
                              height: fittingSize.height + 12)
 
-        if cursorRect != .zero {
-            guard let screen = NSScreen.main else { return }
-            var origin = NSPoint(x: cursorRect.minX, y: cursorRect.minY - winSize.height - 4)
-            // Keep within screen bounds
-            origin.x = max(0, min(origin.x, screen.visibleFrame.maxX - winSize.width))
-            origin.y = max(screen.visibleFrame.minY, origin.y)
-            setFrame(NSRect(origin: origin, size: winSize), display: true, animate: false)
+        let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let maxWidth = max(80, visibleFrame.width - 16)
+        let finalSize = NSSize(width: min(winSize.width, maxWidth), height: winSize.height)
+        let anchor = cursorRect.isUsableTextInputRect
+            ? cursorRect
+            : NSRect(origin: NSEvent.mouseLocation, size: .zero)
+
+        var origin = NSPoint(x: anchor.minX, y: anchor.minY - finalSize.height - 4)
+        if origin.y < visibleFrame.minY + 4 {
+            origin.y = anchor.maxY + 4
         }
+        origin.x = min(max(origin.x, visibleFrame.minX + 4), visibleFrame.maxX - finalSize.width - 4)
+        origin.y = min(max(origin.y, visibleFrame.minY + 4), visibleFrame.maxY - finalSize.height - 4)
+        setFrame(NSRect(origin: origin, size: finalSize), display: true, animate: false)
 
         orderFront(nil)
     }
@@ -137,9 +146,9 @@ class CandidatePanel: NSPanel {
 
     // MARK: – Button factories
 
-    private func makeButton(label: String, comment: String) -> NSButton {
+    private func makeButton(label: String, comment: String, highlighted: Bool) -> NSButton {
         let btn = NSButton()
-        btn.isBordered = false
+        btn.isBordered = highlighted
         btn.bezelStyle = .rounded
         let title = NSMutableAttributedString()
         title.append(NSAttributedString(string: label, attributes: [

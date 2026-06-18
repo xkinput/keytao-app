@@ -6,11 +6,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleIdentifier</key>
-    <string>ink.rea.keytao-ime</string>
+    <string>ink.rea.inputmethod.keytao</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>KeyTao</string>
+    <string>KeyTao Input Method</string>
+    <key>CFBundleDisplayName</key>
+    <string>KeyTao Input Method</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
@@ -22,21 +24,21 @@
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleIconFile</key>
-    <string>KeyTao</string>
+    <string>KeyTaoInputSource</string>
     <key>CFBundleSupportedPlatforms</key>
     <array>
         <string>MacOSX</string>
     </array>
 
     <key>TISInputSourceID</key>
-    <string>ink.rea.keytao-ime</string>
+    <string>ink.rea.inputmethod.keytao</string>
 
     <key>InputMethodConnectionName</key>
     <string>KeyTao_Connection</string>
     <key>InputMethodServerControllerClass</key>
-    <string>KeyTaoInputController</string>
+    <string>KeyTaoIME.KeyTaoInputController</string>
     <key>InputMethodServerDelegateClass</key>
-    <string>KeyTaoInputController</string>
+    <string>KeyTaoIME.KeyTaoInputController</string>
 
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
@@ -55,10 +57,10 @@
     <dict>
         <key>tsInputModeListKey</key>
         <dict>
-            <key>ink.rea.keytao-ime.Hans</key>
+            <key>ink.rea.inputmethod.keytao.Hans</key>
             <dict>
                 <key>TISInputSourceID</key>
-                <string>ink.rea.keytao-ime.Hans</string>
+                <string>ink.rea.inputmethod.keytao.Hans</string>
                 <key>TISIntendedLanguage</key>
                 <string>zh-Hans</string>
                 <key>tsInputModeCharacterRepertoireKey</key>
@@ -70,6 +72,14 @@
                 <true/>
                 <key>tsInputModeIsVisibleKey</key>
                 <true/>
+                <key>tsInputModeKeyEquivalentModifiersKey</key>
+                <integer>4608</integer>
+                <key>tsInputModeMenuIconFileKey</key>
+                <string>keytao-menu-icon.pdf</string>
+                <key>tsInputModeAlternateMenuIconFileKey</key>
+                <string>keytao-menu-icon.pdf</string>
+                <key>tsInputModePaletteIconFileKey</key>
+                <string>keytao-menu-icon.pdf</string>
                 <key>tsInputModePrimaryInScriptKey</key>
                 <true/>
                 <key>tsInputModeScriptKey</key>
@@ -78,7 +88,7 @@
         </dict>
         <key>tsVisibleInputModeOrderedArrayKey</key>
         <array>
-            <string>ink.rea.keytao-ime.Hans</string>
+            <string>ink.rea.inputmethod.keytao.Hans</string>
         </array>
     </dict>
 </dict>

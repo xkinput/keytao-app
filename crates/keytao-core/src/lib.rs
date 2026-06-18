@@ -52,7 +52,7 @@ impl ImeState {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
     let staging_dir = user_data_dir.join("build");
     let prebuilt_dir = if user_data_dir == shared_data_dir {
@@ -63,20 +63,22 @@ fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, Pa
     (staging_dir, prebuilt_dir)
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
-// ── Linux-only engine (guarded at the module level) ──────────────────────────
+// ── Native desktop engine (guarded at the module level) ──────────────────────
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod desktop {
     use super::*;
+    use librime_sys::rime_get_api;
     use rime_api::{
         create_session, full_deploy_and_wait, initialize, setup, DeployResult, KeyEvent, KeyStatus,
         Traits,
     };
+    use std::ffi::CString;
     use std::sync::OnceLock;
 
     // librime setup+initialize must run exactly once per process.
@@ -143,9 +145,7 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
-            let status = self
-                .session
-                .process_key(KeyEvent::new(keycode as i32, mask as i32));
+            let status = self.session.process_key(KeyEvent::new(keycode, mask));
             KeyProcessResult {
                 state: extract_state(&self.session),
                 accepted: matches!(status, KeyStatus::Accept),
@@ -158,21 +158,21 @@ mod desktop {
 
         pub fn select_candidate(&self, index: usize) -> ImeState {
             if index < 9 {
-                let kc = b'1' as i32 + index as i32;
+                let kc = b'1' as u32 + index as u32;
                 self.session.process_key(KeyEvent::new(kc, 0));
             }
             extract_state(&self.session)
         }
 
         pub fn change_page(&self, backward: bool) -> ImeState {
-            let kc = if backward { b'-' as i32 } else { b'=' as i32 };
+            let kc = if backward { b'-' as u32 } else { b'=' as u32 };
             self.session.process_key(KeyEvent::new(kc, 0));
             extract_state(&self.session)
         }
 
         pub fn reset(&self) -> ImeState {
             self.session.process_key(KeyEvent::new(0xff1b, 0)); // XK_Escape
-            ImeState::empty()
+            extract_state(&self.session)
         }
 
         pub fn current_schema_name(&self) -> String {
@@ -187,6 +187,17 @@ mod desktop {
                 .status()
                 .map(|s| s.is_ascii_mode)
                 .unwrap_or(false)
+        }
+
+        pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
+            let option = CString::new("ascii_mode").expect("static string is valid CString");
+            unsafe {
+                let api = rime_get_api();
+                if let Some(set_option) = (*api).set_option {
+                    set_option(self.session.session_id, option.as_ptr(), i32::from(enabled));
+                }
+            }
+            extract_state(&self.session)
         }
     }
 
@@ -230,7 +241,7 @@ mod desktop {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub use desktop::{deploy, Engine};
 
 fn is_default_custom(filename: &str) -> bool {
@@ -243,7 +254,7 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn has_base_default_yaml(dir: &Path) -> bool {
     dir.join("default.yaml").is_file()
 }
@@ -645,15 +656,28 @@ pub fn default_user_data_dir() -> Option<PathBuf> {
 pub fn default_shared_data_dir() -> String {
     #[cfg(target_os = "macos")]
     {
+        for key in [
+            "KEYTAO_RIME_SHARED_DATA_DIR",
+            "RIME_SHARED_DATA_DIR",
+            "RIME_DATA_DIR",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                if !value.is_empty() && has_base_default_yaml(Path::new(value)) {
+                    return value.to_string();
+                }
+            }
+        }
+
         let squirrel = "/Library/Input Methods/Squirrel.app/Contents/SharedSupport";
-        if Path::new(squirrel).exists() {
+        if has_base_default_yaml(Path::new(squirrel)) {
             return squirrel.to_string();
         }
         for p in [
             "/opt/homebrew/share/rime-data",
             "/usr/local/share/rime-data",
         ] {
-            if Path::new(p).exists() {
+            if has_base_default_yaml(Path::new(p)) {
                 return p.to_string();
             }
         }

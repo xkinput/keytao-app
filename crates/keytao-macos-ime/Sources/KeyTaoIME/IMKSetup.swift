@@ -10,7 +10,7 @@ func keytaoIMKSetup() {
     ?? "KeyTao_Connection"
   let server = IMKServer(
     name: name,
-    bundleIdentifier: Bundle.main.bundleIdentifier ?? "ink.rea.keytao-ime"
+    bundleIdentifier: Bundle.main.bundleIdentifier ?? "ink.rea.inputmethod.keytao"
   )
   if server == nil {
     NSLog("KeyTao: Warning — IMKServer returned nil")

@@ -391,7 +391,7 @@ fn process_has_wayland_socket(pid: u32) -> bool {
         .any(|item| item.starts_with(b"WAYLAND_SOCKET="))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn write_keytao_ime_reload_stamp() -> Result<(), String> {
     let dir =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
@@ -522,6 +522,58 @@ fn windows_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
         .map(|dir| dir.join("rime-data"))
         .filter(|dir| dir.join("default.yaml").is_file())
         .map(|dir| windows_normal_path(&dir))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("rime-data"),
+            resource_dir.join("SharedSupport"),
+            resource_dir
+                .join("KeyTao.app")
+                .join("Contents")
+                .join("Resources")
+                .join("rime-data"),
+            resource_dir
+                .join("KeyTao.app")
+                .join("Contents")
+                .join("SharedSupport"),
+        ]);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                let resources_dir = contents_dir.join("Resources");
+                candidates.extend([
+                    resources_dir.join("rime-data"),
+                    resources_dir.join("SharedSupport"),
+                    resources_dir
+                        .join("KeyTao.app")
+                        .join("Contents")
+                        .join("Resources")
+                        .join("rime-data"),
+                    resources_dir
+                        .join("KeyTao.app")
+                        .join("Contents")
+                        .join("SharedSupport"),
+                ]);
+            }
+        }
+    }
+
+    candidates.extend([
+        PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/Resources/rime-data"),
+        PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/SharedSupport"),
+    ]);
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("default.yaml").is_file())
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -1020,7 +1072,7 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
 fn rime_default_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        dirs::home_dir().map(|h| h.join("Library/Rime"))
+        keytao_core::default_user_data_dir()
     }
     #[cfg(target_os = "windows")]
     {
@@ -1871,11 +1923,53 @@ async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
 #[derive(Serialize)]
 pub struct MacosImeStatus {
     pub installed: bool,
+    pub app_path: Option<String>,
+    pub message: String,
 }
 
 #[cfg(target_os = "macos")]
-fn macos_ime_app_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join("Library/Input Methods/KeyTao.app"))
+fn macos_ime_app_path() -> PathBuf {
+    PathBuf::from("/Library/Input Methods/KeyTao.app")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_install_script_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("KEYTAO_MACOS_IME_INSTALL_SCRIPT").map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_dir = manifest_dir.parent()?;
+    let path = workspace_dir.join("crates/keytao-macos-ime/install.sh");
+    path.is_file().then_some(path)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ime_status_inner() -> MacosImeStatus {
+    let path = macos_ime_app_path();
+    let installed = path.join("Contents/MacOS/KeyTaoIME").is_file();
+    MacosImeStatus {
+        installed,
+        app_path: Some(path.to_string_lossy().into_owned()),
+        message: if installed {
+            "KeyTao macOS input method is installed".into()
+        } else {
+            "KeyTao macOS input method is not installed".into()
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn command_output_tail(output: &[u8]) -> String {
+    let text = String::from_utf8_lossy(output).trim().to_string();
+    let count = text.chars().count();
+    if count <= 4000 {
+        text
+    } else {
+        text.chars().skip(count - 4000).collect()
+    }
 }
 
 /// Check whether the KeyTao.app input method is installed.
@@ -1883,64 +1977,87 @@ fn macos_ime_app_path() -> Option<std::path::PathBuf> {
 fn macos_ime_status() -> MacosImeStatus {
     #[cfg(target_os = "macos")]
     {
-        let installed = macos_ime_app_path().map(|p| p.exists()).unwrap_or(false);
-        MacosImeStatus { installed }
+        macos_ime_status_inner()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        MacosImeStatus { installed: false }
+        MacosImeStatus {
+            installed: false,
+            app_path: None,
+            message: "macOS only".into(),
+        }
     }
 }
 
-/// Copy KeyTao.app from Tauri resources to ~/Library/Input Methods/
-/// and open System Settings → Input Sources so the user can enable it.
+/// Run the repository install script for local macOS IME testing.
 #[tauri::command]
 #[cfg(target_os = "macos")]
-async fn macos_install_ime(app: AppHandle) -> Result<(), String> {
-    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-    let src = resource_dir.join("KeyTao.app");
+async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
+    let script = macos_install_script_path().ok_or(
+        "macOS IME install script not found; build and install target/keytao-macos-pkg/KeyTao.pkg instead",
+    )?;
+    let workspace_dir = script
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .ok_or("Cannot determine workspace directory for install script")?;
+    let build_dir = workspace_dir.join("target/keytao-macos-ime");
 
-    if !src.exists() {
-        return Err(
-            "IME bundle (KeyTao.app) not found in resources — run `crates/keytao-macos-ime/build.sh` first and rebuild the app".into(),
-        );
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/bin/bash")
+            .arg(&script)
+            .arg("--release")
+            .current_dir(&workspace_dir)
+            .env("KEYTAO_MACOS_BUILD_DIR", build_dir)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("install task failed: {e}"))?
+    .map_err(|e| format!("run install script: {e}"))?;
+
+    if !output.status.success() {
+        let stdout = command_output_tail(&output.stdout);
+        let stderr = command_output_tail(&output.stderr);
+        return Err(format!(
+            "install script failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        ));
     }
 
-    let dst = macos_ime_app_path().ok_or("Cannot determine home directory")?;
-    if dst.exists() {
-        std::fs::remove_dir_all(&dst).map_err(|e| format!("Remove old bundle: {e}"))?;
-    }
-    copy_dir_all(&src, &dst)?;
-
-    // Tell the OS about the new input source
-    std::process::Command::new("killall")
-        .args(["-HUP", "cfprefsd"])
-        .output()
-        .ok();
-
-    // Open Keyboard / Input Sources settings so the user can add KeyTao
     std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.keyboard?InputSources")
         .output()
         .map_err(|e| format!("open System Settings: {e}"))?;
 
-    Ok(())
+    Ok(macos_ime_status_inner())
 }
 
 #[tauri::command]
 #[cfg(not(target_os = "macos"))]
-async fn macos_install_ime(_app: AppHandle) -> Result<(), String> {
+async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
     Err("macOS only".into())
 }
 
-/// Remove KeyTao.app from ~/Library/Input Methods/.
+/// Remove KeyTao.app from /Library/Input Methods/.
 #[tauri::command]
 async fn macos_uninstall_ime() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let dst = macos_ime_app_path().ok_or("Cannot determine home directory")?;
+        let dst = macos_ime_app_path();
         if dst.exists() {
-            std::fs::remove_dir_all(&dst).map_err(|e| format!("Remove: {e}"))?;
+            let output = std::process::Command::new("sudo")
+                .args(["rm", "-rf"])
+                .arg(&dst)
+                .output()
+                .map_err(|e| format!("run sudo rm: {e}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "remove failed with status {}\n{}",
+                    output.status,
+                    command_output_tail(&output.stderr)
+                ));
+            }
         }
         Ok(())
     }
@@ -1948,23 +2065,6 @@ async fn macos_uninstall_ime() -> Result<(), String> {
     {
         Err("macOS only".into())
     }
-}
-
-/// Recursively copy a directory tree (src → dst).
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("readdir {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy {}: {e}", src_path.display()))?;
-        }
-    }
-    Ok(())
 }
 
 // ─── Local schema info ───────────────────────────────────────────────────────
@@ -2096,7 +2196,7 @@ pub struct DeployResult {
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
@@ -2104,7 +2204,10 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     #[cfg(target_os = "windows")]
     let shared =
         windows_app_shared_data_dir(&app).unwrap_or_else(keytao_core::default_shared_data_dir);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let shared =
+        macos_app_shared_data_dir(&app).unwrap_or_else(keytao_core::default_shared_data_dir);
+    #[cfg(target_os = "linux")]
     let shared = keytao_core::default_shared_data_dir();
 
     let _ = app.emit("deploy-progress", "正在部署 librime...");
@@ -2118,15 +2221,15 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
                 let state: tauri::State<rime::RimeEngine> = app.state();
                 *state.engine.lock().unwrap() = Some(engine);
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             match write_keytao_ime_reload_stamp() {
                 Ok(()) => {
-                    let _ = app.emit("deploy-progress", "已通知 keytao-ime 重载");
-                    tracing::info!("keytao-ime reload stamp written after deploy");
+                    let _ = app.emit("deploy-progress", "已通知系统输入法重载");
+                    tracing::info!("IME reload stamp written after deploy");
                 }
                 Err(e) => {
-                    let _ = app.emit("deploy-progress", format!("keytao-ime 重载通知失败：{e}"));
-                    tracing::warn!("keytao-ime reload stamp failed after deploy: {e}");
+                    let _ = app.emit("deploy-progress", format!("系统输入法重载通知失败：{e}"));
+                    tracing::warn!("IME reload stamp failed after deploy: {e}");
                 }
             }
             Ok(DeployResult {
@@ -2140,7 +2243,7 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 }
 
 #[tauri::command]
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
     Err("librime deployment is not supported on this platform yet".into())
 }
