@@ -71,7 +71,7 @@ KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，不构建 dmg。
 - Linux 只构建 `deb` 和 `rpm`，不构建 AppImage 或 tarball。deb/rpm 同时安装图形 App、`keytao-ime` 和包内 runtime，保证可以作为系统输入法安装。
-- Windows 只构建 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/x64` 资源目录。
+- Windows release 只构建 x64 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/current` 资源目录。官方 librime Windows 发布包目前没有 ARM64 SDK，Windows ARM64 包需要另做实验性源码构建链路后再开启。
 - macOS、Linux 和 Windows 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
 
 ### 通用准备
@@ -94,6 +94,8 @@ pnpm sync-version
 pnpm build:macos
 scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
 ```
+
+`pnpm build:macos` 构建当前机器的原生 macOS 架构。librime 直接获取官方 `macOS-universal` SDK；Release CI 分别在 Intel 和 Apple Silicon runner 上构建 `macos-x86_64` 与 `macos-arm64` 两个 pkg。
 
 产物：
 
@@ -122,6 +124,8 @@ Linux 发行包通过 Docker builder 构建，需要本机可运行 Docker：
 pnpm build:linux
 ```
 
+`pnpm build:linux` 构建当前 Docker builder 的原生 Linux 架构。当前 Linux 路径不从 librime GitHub release 获取预编译 SDK；builder 镜像安装发行版提供的 `librime-dev`、`librime-plugin-lua` 等 native 包，再把 `librime*.so*`、插件、OpenCC 数据和基础 `rime-data` staged 到包内 runtime。Release CI 分别构建 `linux-x64` 和 `linux-arm64` 包。
+
 产物在 `target/release/bundle/` 下，包含：
 
 - `deb`
@@ -129,11 +133,19 @@ pnpm build:linux
 
 ### Windows
 
-Windows 需要在 Windows 开发环境中执行，推荐从 PowerShell 运行。构建机需要 MSVC Rust target、LLVM/libclang 和可用的 `pnpm`；脚本会按需下载 librime Windows SDK。
+Windows 需要在 Windows 开发环境中执行，推荐从 PowerShell 运行。构建机需要 MSVC Rust target、LLVM/libclang 和可用的 `pnpm`；脚本会按需下载官方 librime Windows SDK。
 
 ```powershell
 pnpm install
 pnpm build:windows
+```
+
+`pnpm build:windows` 构建当前机器的原生 Windows 架构，但只在官方 librime SDK 支持的架构上继续执行。目前正式支持 x64 release；脚本也保留 x86 SDK 获取能力。Windows ARM64 会早期失败并提示需要先补一条实验性源码构建 librime ARM64 的链路。Release CI 只发布 `windows-x64` 安装包。
+
+如果在 Windows ARM64 机器上只想构建可通过系统 x64 兼容层运行的 x64 安装包，可以直接调用底层脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64
 ```
 
 该命令会先构建 Windows TSF 输入法 runtime，再构建 Tauri NSIS 安装包。只构建输入法 runtime 时使用：
@@ -144,6 +156,7 @@ pnpm build:windows-ime
 
 产物通常位于：
 
+- `target\keytao-windows-ime-runtime\current`
 - `target\keytao-windows-ime-runtime\x64`
 - `target\release\bundle\nsis`
 

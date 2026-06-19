@@ -87,6 +87,11 @@ fi
 
 case "$WINDOWS_ARCH" in
     x64|x86) ;;
+    arm|arm64|aarch64)
+        echo "ERROR: rime/librime does not publish Windows ARM64 SDK release assets." >&2
+        echo "       Official Windows SDK fetch supports x64 and x86 only; ARM64 needs an experimental source-built librime pipeline." >&2
+        exit 2
+        ;;
     *) echo "ERROR: --windows-arch must be x64 or x86" >&2; exit 2 ;;
 esac
 case "$WINDOWS_TOOLSET" in
@@ -181,8 +186,12 @@ def is_match(asset):
 
 asset = next((item for item in release.get("assets", []) if is_match(item)), None)
 if not asset:
+    windows_assets = [item.get("name", "") for item in release.get("assets", []) if "Windows" in item.get("name", "")]
+    suffix = ""
+    if windows_assets:
+        suffix = "; available Windows assets: " + ", ".join(windows_assets)
     raise SystemExit(
-        f"missing {kind} asset containing {asset_substring!r} in {release.get('tag_name', '<unknown>')}"
+        f"missing {kind} asset containing {asset_substring!r} in {release.get('tag_name', '<unknown>')}{suffix}"
     )
 
 print("\t".join([
@@ -456,7 +465,7 @@ EOF
     echo "librime Linux data is ready:"
     echo "  $destination"
     if [ -z "$include_dir" ] || [ -z "$lib_dir" ]; then
-        echo "  note: no official Linux SDK asset is published by rime/librime; install librime-dev or use Nix for native libraries."
+        echo "  note: no official Linux SDK asset is published by rime/librime; install your distro's librime-dev/librime-plugin packages for native libraries."
     fi
 }
 

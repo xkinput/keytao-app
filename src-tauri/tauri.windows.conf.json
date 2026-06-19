@@ -4,8 +4,14 @@
       "nsis"
     ],
     "resources": {
-      "../target/keytao-windows-ime-runtime/x64": "keytao-windows-ime-runtime/x64",
-      "../target/keytao-windows-app-runtime/rime.dll": "rime.dll"
+      "../target/keytao-windows-ime-runtime/current": "keytao-windows-ime-runtime/current",
+      "../target/keytao-windows-app-runtime/*.dll": ""
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows/nsis-hooks.nsh"
+      }
     }
   }
 }

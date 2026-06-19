@@ -1,6 +1,5 @@
 param(
     [string]$Version = "latest",
-    [ValidateSet("x64", "x86")]
     [string]$Arch = "x64",
     [ValidateSet("msvc", "clang")]
     [string]$Toolset = "msvc",
@@ -9,6 +8,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+function Assert-SupportedWindowsLibrimeArch([string]$RequestedArch) {
+    if ($RequestedArch -in @("arm", "arm64", "aarch64")) {
+        throw "Windows ARM64 librime SDK assets are not published by rime/librime. Official Windows SDK fetch supports x64 and x86 only; ARM64 requires an experimental source-built librime pipeline before KeyTao can package it."
+    }
+    if ($RequestedArch -notin @("x64", "x86")) {
+        throw "Unsupported Windows librime SDK arch '$RequestedArch'. Supported values: x64, x86."
+    }
+}
 
 function Resolve-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
@@ -78,6 +86,7 @@ function Save-GitHubContentFile($Repo, $Path, $DestinationFile) {
 }
 
 $repoRoot = Resolve-RepoRoot
+Assert-SupportedWindowsLibrimeArch $Arch
 if (-not $Destination) {
     $Destination = Join-Path $repoRoot "vendor\librime\windows-$Arch"
 }
@@ -98,10 +107,12 @@ $depsAsset = $release.assets |
     Select-Object -First 1
 
 if (-not $mainAsset) {
-    throw "No librime asset matching $assetPattern in release $($release.tag_name)"
+    $windowsAssets = ($release.assets | Where-Object { $_.name -like "*Windows*" } | Select-Object -ExpandProperty name) -join ", "
+    throw "No librime asset matching $assetPattern in release $($release.tag_name). Available Windows assets: $windowsAssets"
 }
 if (-not $depsAsset) {
-    throw "No librime dependency asset matching $assetPattern in release $($release.tag_name)"
+    $windowsAssets = ($release.assets | Where-Object { $_.name -like "*Windows*" } | Select-Object -ExpandProperty name) -join ", "
+    throw "No librime dependency asset matching $assetPattern in release $($release.tag_name). Available Windows assets: $windowsAssets"
 }
 
 $cacheDir = Join-Path $repoRoot ".cache\librime\$($release.tag_name)\windows-$Toolset-$Arch"
@@ -164,7 +175,7 @@ Save-GitHubContentFile "rime/rime-essay" "essay.txt" (Join-Path $rimeDataDest "e
 $envFile = Join-Path $Destination "env.ps1"
 @"
 if (-not `$env:LIBCLANG_PATH) {
-    `$libclang = & where.exe libclang.dll 2>`$null | Select-Object -First 1
+    `$libclang = & cmd.exe /d /c "where `"libclang.dll`" 2>nul" | Select-Object -First 1
     if (`$libclang) {
         `$env:LIBCLANG_PATH = Split-Path -Parent `$libclang
     }

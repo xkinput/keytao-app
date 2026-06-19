@@ -38,11 +38,21 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: linux-docker
-          - platform: macos-latest
-            args: macos-pkg
+            os_name: linux
+            package_arch: x64
+          - platform: ubuntu-24.04-arm
+            os_name: linux
+            package_arch: arm64
+          - platform: macos-15-intel
+            os_name: macos
+            package_arch: x86_64
+          - platform: macos-15
+            os_name: macos
+            package_arch: arm64
           - platform: windows-latest
-            args: --bundles nsis --config src-tauri/tauri.windows.conf.json
+            os_name: windows
+            package_arch: x64
+            windows_arch: x64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -58,31 +68,37 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.platform != 'ubuntu-22.04'
+        if: matrix.os_name == 'macos'
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os_name == 'windows'
 
       - uses: Swatinem/rust-cache@v2
-        if: matrix.platform != 'ubuntu-22.04'
+        if: matrix.os_name != 'linux'
         with:
           workspaces: src-tauri
 
       - name: Install Linux verification deps
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.os_name == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             dpkg-dev patchelf rpm
 
       - name: Install Windows system deps
-        if: matrix.platform == 'windows-latest'
+        if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
-          choco install llvm 7zip -y --no-progress
-          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $ErrorActionPreference = "Stop"
+          choco install 7zip -y --no-progress
+          choco install llvm -y --no-progress
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - if: matrix.platform != 'ubuntu-22.04'
+      - if: matrix.os_name != 'linux'
         run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
@@ -91,91 +107,51 @@ jobs:
           node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
 
       - name: Build Linux packages
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.os_name == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           scripts/build-linux.sh
 
-      - name: Pre-build keytao-windows-ime
-        if: matrix.platform == 'windows-latest'
+      - name: Build Windows installer
+        if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1
-
-          $vendorDir = (Resolve-Path "vendor\librime\windows-x64").Path
-          $includeDir = Join-Path $vendorDir "include"
-          $libDir = Join-Path $vendorDir "lib"
-          $binDir = Join-Path $vendorDir "bin"
-          $runtimeDir = (Resolve-Path "target\keytao-windows-ime-runtime\x64").Path
-          $appRuntimeDir = (Resolve-Path "target\keytao-windows-app-runtime").Path
-
-          if (-not (Test-Path (Join-Path $runtimeDir "keytao_windows_ime.dll"))) {
-            throw "Missing keytao_windows_ime.dll in $runtimeDir"
-          }
-          if (-not (Test-Path (Join-Path $runtimeDir "rime.dll"))) {
-            throw "Missing rime.dll in $runtimeDir"
-          }
-          if (-not (Test-Path (Join-Path $runtimeDir "rime-data\default.yaml"))) {
-            throw "Missing bundled rime-data in $runtimeDir"
-          }
-          if (-not (Test-Path (Join-Path $runtimeDir "vcruntime140.dll"))) {
-            throw "Missing vcruntime140.dll in $runtimeDir"
-          }
-          if (-not (Test-Path (Join-Path $appRuntimeDir "rime.dll"))) {
-            throw "Missing app startup rime.dll in $appRuntimeDir"
-          }
-
-          "RIME_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RIME_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Get-ChildItem $runtimeDir
-          Get-ChildItem $appRuntimeDir
+          powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch ${{ matrix.windows_arch }}
 
       - name: Build macOS pkg
-        if: matrix.platform == 'macos-latest'
+        if: matrix.os_name == 'macos'
         shell: bash
         run: |
           set -euo pipefail
           pnpm build:macos
 
-      - uses: tauri-apps/tauri-action@v0
-        if: matrix.platform == 'windows-latest'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          releaseId: ${{ needs.create-release.outputs.release-id }}
-          args: ${{ matrix.args }}
-
       - name: Verify macOS pkg
-        if: matrix.platform == 'macos-latest'
+        if: matrix.os_name == 'macos'
         shell: bash
         run: |
           set -euo pipefail
           scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
 
       - name: Upload macOS pkg to release
-        if: matrix.platform == 'macos-latest'
+        if: matrix.os_name == 'macos'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          case "${RUNNER_ARCH:-$(uname -m)}" in
-            X64|x64|x86_64) mac_arch="x86_64" ;;
-            ARM64|arm64|aarch64) mac_arch="arm64" ;;
-            *) mac_arch="$(uname -m)" ;;
-          esac
           pkg="target/keytao-macos-pkg/KeyTao.pkg"
-          renamed="target/keytao-macos-pkg/keytao-app-${VERSION}-macos-${mac_arch}.pkg"
+          renamed="target/keytao-macos-pkg/keytao-app-${VERSION}-macos-${{ matrix.package_arch }}.pkg"
           test -f "$pkg"
           cp "$pkg" "$renamed"
           gh release upload ${{ github.ref_name }} "$renamed" --clobber
 
-      - name: Verify Windows bundle includes keytao-windows-ime
-        if: matrix.platform == 'windows-latest'
+      - name: Upload Windows installer to release
+        if: startsWith(matrix.platform, 'windows')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -183,60 +159,34 @@ jobs:
           if (-not $installer) {
             throw "Missing Windows NSIS installer"
           }
-          $forbiddenInstallers = Get-ChildItem -Path "target\release\bundle" -Recurse -File |
-            Where-Object { $_.Extension -in @(".msi", ".zip", ".appx", ".msix", ".msixbundle") }
-          if ($forbiddenInstallers) {
-            throw "Windows build must only produce the NSIS .exe installer. Unexpected artifacts: $($forbiddenInstallers.FullName -join ', ')"
-          }
-
-          $imeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "keytao_windows_ime.dll" -File | Select-Object -First 1
-          $rimeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "rime.dll" -File | Select-Object -First 1
-          $rimeData = Get-ChildItem -Path "target\release" -Recurse -Filter "default.yaml" -File |
-            Where-Object { $_.FullName -like "*rime-data*" } |
-            Select-Object -First 1
-          $vcRuntime = Get-ChildItem -Path "target\release" -Recurse -Filter "vcruntime140.dll" -File | Select-Object -First 1
-          $installerScript = "target\release\nsis\x64\installer.nsi"
-
-          if (-not $imeDll) {
-            throw "Windows bundle does not include keytao_windows_ime.dll"
-          }
-          if (-not $rimeDll) {
-            throw "Windows bundle does not include rime.dll"
-          }
-          if (-not $rimeData) {
-            throw "Windows bundle does not include rime-data\default.yaml"
-          }
-          if (-not $vcRuntime) {
-            throw "Windows bundle does not include vcruntime140.dll"
-          }
-          if (-not (Test-Path $installerScript)) {
-            throw "Missing generated NSIS installer script"
-          }
-          if (-not (Select-String -Path $installerScript -Pattern '/oname=rime\.dll' -Quiet)) {
-            throw "Windows installer does not install rime.dll next to keytao-app.exe"
-          }
-
-          Write-Host "Installer: $($installer.FullName)"
-          Write-Host "IME DLL: $($imeDll.FullName)"
-          Write-Host "Rime DLL: $($rimeDll.FullName)"
-          Write-Host "Rime data: $($rimeData.FullName)"
-          Write-Host "VC Runtime: $($vcRuntime.FullName)"
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $renamed = Join-Path $installer.DirectoryName "keytao-app-$version-windows-${{ matrix.windows_arch }}-setup.exe"
+          Copy-Item -Force -LiteralPath $installer.FullName -Destination $renamed
+          gh release upload $env:GITHUB_REF_NAME $renamed --clobber
 
       - name: Verify Linux bundles
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.os_name == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           scripts/verify-linux-bundles.sh target/release/bundle
 
       - name: Upload Linux artifacts to release
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.os_name == 'linux'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t artifacts < <(find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/release-upload
+          rm -f dist/release-upload/*
+          while IFS= read -r artifact; do
+            ext="${artifact##*.}"
+            renamed="dist/release-upload/keytao-app-${VERSION}-linux-${{ matrix.package_arch }}.${ext}"
+            cp "$artifact" "$renamed"
+          done < <(find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
+          mapfile -t artifacts < <(find dist/release-upload -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
           if [[ "${#artifacts[@]}" -eq 0 ]]; then
             echo "::error::No Linux artifacts found in dist"
             find target/release/bundle -maxdepth 4 -type f -print 2>/dev/null | sort || true

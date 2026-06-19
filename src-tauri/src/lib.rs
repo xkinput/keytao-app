@@ -790,8 +790,18 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.extend([
+            resource_dir.join("current"),
             resource_dir.join("x64"),
+            resource_dir.join("x86"),
+            resource_dir
+                .join("keytao-windows-ime-runtime")
+                .join("current"),
             resource_dir.join("keytao-windows-ime-runtime").join("x64"),
+            resource_dir.join("keytao-windows-ime-runtime").join("x86"),
+            resource_dir
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("current"),
             resource_dir
                 .join("target")
                 .join("keytao-windows-ime-runtime")
@@ -799,7 +809,16 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
             resource_dir
                 .join("resources")
                 .join("keytao-windows-ime-runtime")
+                .join("current"),
+            resource_dir
+                .join("resources")
+                .join("keytao-windows-ime-runtime")
                 .join("x64"),
+            resource_dir
+                .join("_up_")
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("current"),
             resource_dir
                 .join("_up_")
                 .join("target")
@@ -811,16 +830,33 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.extend([
+                dir.join("current"),
                 dir.join("x64"),
+                dir.join("x86"),
+                dir.join("keytao-windows-ime-runtime").join("current"),
                 dir.join("keytao-windows-ime-runtime").join("x64"),
+                dir.join("keytao-windows-ime-runtime").join("x86"),
+                dir.join("resources").join("current"),
                 dir.join("resources").join("x64"),
+                dir.join("resources")
+                    .join("keytao-windows-ime-runtime")
+                    .join("current"),
                 dir.join("resources")
                     .join("keytao-windows-ime-runtime")
                     .join("x64"),
                 dir.join("_up_")
                     .join("target")
                     .join("keytao-windows-ime-runtime")
+                    .join("current"),
+                dir.join("_up_")
+                    .join("target")
+                    .join("keytao-windows-ime-runtime")
                     .join("x64"),
+                dir.join("resources")
+                    .join("_up_")
+                    .join("target")
+                    .join("keytao-windows-ime-runtime")
+                    .join("current"),
                 dir.join("resources")
                     .join("_up_")
                     .join("target")
