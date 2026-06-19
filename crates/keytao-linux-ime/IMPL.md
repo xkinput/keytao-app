@@ -43,8 +43,8 @@ Linux 自绘候选窗已经接入 `crates/keytao-theme`，通过 FreeType + tiny
 - Wayland input-method-v2：`PanelRenderer::render()` / `render_mode_hint()` 输出 SHM buffer，模式提示的颜色、尺寸、圆角和时长来自 `modeHint`。
 - KDE Wayland：overlay panel 使用 `PanelRenderer::render()` / `render_mode_hint()`；Kimpanel/impanel2 同时收到结构化候选。
 - X11 XIM：XCB overlay 使用同一个 `PanelRenderer`。
-- IBus D-Bus shim：系统 lookup table + Kimpanel + X11 overlay fallback；X11 fallback 的模式提示也走 `render_mode_hint()`。
-- GNOME IBus engine：主要依赖 GNOME/IBus 系统候选 UI，不走自绘 panel。
+- IBus D-Bus shim：系统 lookup table + Kimpanel + 共享 X11 overlay fallback；X11 fallback 的模式提示也走 `render_mode_hint()`。
+- GNOME IBus engine：IBus lookup table 负责协议兼容；当会话提供 `DISPLAY` 时，同时启动共享 X11 overlay fallback，候选窗和模式提示使用同一个 `PanelRenderer`。
 
 Linux 把“可完全主题化”和“受系统限制”的通道分开：
 
@@ -54,7 +54,7 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
 | KDE input panel overlay | 完整控制自绘 overlay | Kimpanel/impanel2 系统候选服务只能表达 label/candidate/page/cursor |
 | X11 overlay | 完整控制颜色、字体、间距、圆角、尺寸 | 位置来自 XIM spot location，窗口管理器行为可能不同 |
 | IBus D-Bus shim overlay | X11 fallback overlay 可主题化 | IBus lookup table 和 Kimpanel 样式由桌面环境决定 |
-| GNOME IBus engine | 基本只控制候选文本、label、preedit、lookup table 数据 | GNOME Shell/IBus 决定视觉样式，`theme.yaml` 不能保证完全呈现 |
+| GNOME IBus engine | X11 overlay fallback 可主题化；系统 lookup table 保持结构兼容 | 纯 Wayland 且无 `DISPLAY` 时只能使用 GNOME/IBus 系统候选 UI |
 
 当前落成三层：
 
@@ -267,7 +267,7 @@ GNOME/mutter 不提供 `zwp_input_method_manager_v2`，所以 KeyTao 作为 IBus
 - 正文优先使用 `KEYTAO_IME_FONT`，否则通过 fontconfig 查找中文字体，再尝试常见 CJK 字体路径。
 - 符号/emoji 优先使用 `KEYTAO_IME_SYMBOL_FONT`，否则查找 Noto Symbols/Emoji。
 - 缩放读取 `KEYTAO_IME_PANEL_SCALE`、`GDK_SCALE`、`QT_SCALE_FACTOR`、`QT_SCREEN_SCALE_FACTORS`；X11 还会读取 `xrdb -query` 的 `Xft.dpi`。
-- `render_mode_hint()` 渲染 `英`/`中` 模式提示，目前由 input-method-v2、KDE Wayland overlay 和 IBus X11 fallback 使用。
+- `render_mode_hint()` 渲染 `英`/`中` 模式提示，目前由 input-method-v2、KDE Wayland overlay、IBus X11 fallback 和 GNOME IBus X11 fallback 使用。
 
 ## 与 macOS 实现的关键差异
 

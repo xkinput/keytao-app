@@ -14,14 +14,17 @@
 //!   7. Our engine emits CommitText / UpdatePreeditText / UpdateLookupTable
 //!      signals which the daemon proxies to the focused application.
 
-use crate::engine::{CoreEngine, ImeSession};
+use crate::{
+    engine::{CoreEngine, ImeSession},
+    panel::{spawn_x11_overlay_panel, OverlayPanelMessage},
+};
 use keytao_core::{key_policy, ImeState, RIME_RELEASE_MASK};
 use keytao_theme::{
     CandidateOptionModel, CandidatePanelInput, CandidatePanelModel, ThemeCandidate, ThemeResolver,
     UiCapabilities,
 };
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
     Arc,
 };
 use zbus::{interface, object_server::SignalContext, proxy, zvariant};
@@ -218,6 +221,7 @@ pub struct IBusFactory {
     engine: CoreEngine,
     counter: Arc<AtomicU32>,
     theme_resolver: Arc<ThemeResolver>,
+    x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
 }
 
 #[interface(name = "org.freedesktop.IBus.Factory")]
@@ -240,6 +244,10 @@ impl IBusFactory {
                 IBusEngine {
                     session,
                     theme_resolver: self.theme_resolver.clone(),
+                    cursor_x: Arc::new(AtomicI32::new(0)),
+                    cursor_y: Arc::new(AtomicI32::new(0)),
+                    ascii_mode: Arc::new(AtomicBool::new(false)),
+                    x11_panel_tx: self.x11_panel_tx.clone(),
                 },
             )
             .await
@@ -254,15 +262,37 @@ impl IBusFactory {
 pub struct IBusEngine {
     session: ImeSession,
     theme_resolver: Arc<ThemeResolver>,
+    cursor_x: Arc<AtomicI32>,
+    cursor_y: Arc<AtomicI32>,
+    ascii_mode: Arc<AtomicBool>,
+    x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
 }
 
 impl IBusEngine {
-    async fn clear_ui(ctxt: &SignalContext<'_>) {
+    async fn clear_ui(&self, ctxt: &SignalContext<'_>) {
         let _ = IBusEngine::hide_preedit_text(ctxt).await;
         let _ = IBusEngine::hide_lookup_table(ctxt).await;
+        let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
+    }
+
+    async fn update_mode_hint(&self, ascii_mode: bool) {
+        let previous = self.ascii_mode.swap(ascii_mode, Ordering::Relaxed);
+        if previous == ascii_mode {
+            return;
+        }
+        let cx = self.cursor_x.load(Ordering::Relaxed);
+        let cy = self.cursor_y.load(Ordering::Relaxed);
+        let _ = self.x11_panel_tx.send(OverlayPanelMessage::ModeHint {
+            ascii_mode,
+            x: cx,
+            y: cy + 24,
+        });
     }
 
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
+        let ascii_mode = ime_state.ascii_mode;
+        let has_candidates = !ime_state.candidates.is_empty();
+        let mode_changed = self.ascii_mode.load(Ordering::Relaxed) != ascii_mode;
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus Engine CommitText: {text:?}");
@@ -287,12 +317,26 @@ impl IBusEngine {
 
         if ime_state.candidates.is_empty() {
             let _ = IBusEngine::hide_lookup_table(ctxt).await;
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
             let ov = ibus_lookup_table_value(&model);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = IBusEngine::update_lookup_table(ctxt, v, true).await;
             }
+            let cx = self.cursor_x.load(Ordering::Relaxed);
+            let cy = self.cursor_y.load(Ordering::Relaxed);
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Show {
+                state: ime_state.clone(),
+                x: cx,
+                y: cy + 24,
+            });
+        }
+
+        if mode_changed && !has_candidates {
+            self.update_mode_hint(ascii_mode).await;
+        } else {
+            self.ascii_mode.store(ascii_mode, Ordering::Relaxed);
         }
     }
 
@@ -381,6 +425,7 @@ impl IBusEngine {
         if state & RIME_RELEASE_MASK != 0 {
             if is_shift_key(keyval) {
                 if let Some(result) = self.session.process_key_result(keyval, RIME_RELEASE_MASK) {
+                    self.update_mode_hint(result.state.ascii_mode).await;
                     return result.accepted;
                 }
             }
@@ -391,8 +436,7 @@ impl IBusEngine {
 
         let before_state = self.session.state();
         if key_policy::should_bypass_empty_composition(keyval, state, &before_state) {
-            let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-            let _ = IBusEngine::hide_lookup_table(&ctxt).await;
+            self.clear_ui(&ctxt).await;
             return false;
         }
 
@@ -405,6 +449,7 @@ impl IBusEngine {
             }
             self.session.reset();
             let _ = IBusEngine::hide_lookup_table(&ctxt).await;
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
             return true;
         }
 
@@ -435,12 +480,12 @@ impl IBusEngine {
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        Self::clear_ui(&ctxt).await;
+        self.clear_ui(&ctxt).await;
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        Self::clear_ui(&ctxt).await;
+        self.clear_ui(&ctxt).await;
     }
 
     async fn enable(&self) {
@@ -449,10 +494,13 @@ impl IBusEngine {
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        Self::clear_ui(&ctxt).await;
+        self.clear_ui(&ctxt).await;
     }
 
-    async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
+    async fn set_cursor_location(&self, x: i32, y: i32, _w: i32, _h: i32) {
+        self.cursor_x.store(x, Ordering::Relaxed);
+        self.cursor_y.store(y, Ordering::Relaxed);
+    }
     async fn set_capabilities(&self, _caps: u32) {}
     async fn set_surrounding_text(&self, _text: zvariant::Value<'_>, _cursor: u32, _anchor: u32) {}
     async fn set_content_type(&self, _purpose: u32, _hints: u32) {}
@@ -496,10 +544,14 @@ impl IBusEngine {
 pub async fn run(engine: CoreEngine) {
     tracing::info!("IBus engine backend starting (GNOME mode)");
 
+    let (x11_panel_tx, x11_panel_rx) = std::sync::mpsc::channel::<OverlayPanelMessage>();
+    spawn_x11_overlay_panel(x11_panel_rx);
+
     let factory = IBusFactory {
         engine,
         counter: Arc::new(AtomicU32::new(0)),
         theme_resolver: Arc::new(ThemeResolver::from_default_locations()),
+        x11_panel_tx,
     };
 
     let conn = match zbus::connection::Builder::session()

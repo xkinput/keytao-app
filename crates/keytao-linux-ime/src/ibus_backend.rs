@@ -5,7 +5,7 @@
 //! IBus daemon.
 
 use crate::engine::{CoreEngine, ImeSession};
-use crate::panel::{load_font, PanelRenderer};
+use crate::panel::{spawn_x11_overlay_panel, OverlayPanelMessage};
 use keytao_core::{key_policy, ImeState, RIME_RELEASE_MASK};
 use keytao_theme::{
     CandidateOptionModel, CandidatePanelInput, CandidatePanelModel, ThemeCandidate, ThemeResolver,
@@ -17,156 +17,8 @@ use std::{
         atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
         Arc,
     },
-    time::Instant,
-};
-use x11rb::{
-    connection::Connection as _,
-    protocol::xproto::{
-        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat,
-        WindowClass,
-    },
-    rust_connection::RustConnection,
 };
 use zbus::{connection, interface, object_server::SignalContext, zvariant};
-
-enum ImePanelMessage {
-    Show { state: ImeState, x: i32, y: i32 },
-    ModeHint { ascii_mode: bool, x: i32, y: i32 },
-    Hide,
-}
-
-struct X11Panel {
-    conn: RustConnection,
-    panel_win: u32,
-    gc: u32,
-    depth: u8,
-    visible: bool,
-    renderer: PanelRenderer,
-}
-
-impl X11Panel {
-    fn new() -> Option<Self> {
-        let (conn, screen_num) = RustConnection::connect(None).ok()?;
-        let setup = conn.setup();
-        let screen = setup.roots.get(screen_num)?;
-        let root = screen.root;
-        let visual = screen.root_visual;
-        let depth = screen.root_depth;
-
-        let panel_win = conn.generate_id().ok()?;
-        conn.create_window(
-            depth,
-            panel_win,
-            root,
-            0,
-            0,
-            300,
-            46,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            visual,
-            &CreateWindowAux::new()
-                .override_redirect(1)
-                .background_pixel(0x1e1e2e)
-                .event_mask(EventMask::EXPOSURE),
-        )
-        .ok()?;
-
-        let gc = conn.generate_id().ok()?;
-        conn.create_gc(gc, panel_win, &Default::default()).ok()?;
-
-        let renderer = load_font().and_then(PanelRenderer::new_x11)?;
-
-        Some(Self {
-            conn,
-            panel_win,
-            gc,
-            depth,
-            visible: false,
-            renderer,
-        })
-    }
-
-    fn show(&mut self, state: &ImeState, x: i32, y: i32) {
-        let (pixels, w, h) = self.renderer.render(state);
-        self.conn
-            .configure_window(
-                self.panel_win,
-                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
-            )
-            .ok();
-
-        if !self.visible {
-            self.conn.map_window(self.panel_win).ok();
-            self.visible = true;
-        }
-
-        self.conn
-            .put_image(
-                ImageFormat::Z_PIXMAP,
-                self.panel_win,
-                self.gc,
-                w as u16,
-                h as u16,
-                0,
-                0,
-                0,
-                self.depth,
-                &pixels,
-            )
-            .ok();
-        self.conn.flush().ok();
-    }
-
-    fn show_mode_hint(&mut self, ascii_mode: bool, x: i32, y: i32) -> Option<Instant> {
-        let (pixels, w, h) = self.renderer.render_mode_hint(ascii_mode);
-        let x = (x - w as i32 / 2).max(0);
-        self.conn
-            .configure_window(
-                self.panel_win,
-                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
-            )
-            .ok();
-
-        if !self.visible {
-            self.conn.map_window(self.panel_win).ok();
-            self.visible = true;
-        }
-
-        self.conn
-            .put_image(
-                ImageFormat::Z_PIXMAP,
-                self.panel_win,
-                self.gc,
-                w as u16,
-                h as u16,
-                0,
-                0,
-                0,
-                self.depth,
-                &pixels,
-            )
-            .ok();
-        self.conn.flush().ok();
-        Some(Instant::now() + self.renderer.mode_hint_duration())
-    }
-
-    fn hide(&mut self) {
-        if self.visible {
-            self.conn.unmap_window(self.panel_win).ok();
-            self.conn.flush().ok();
-            self.visible = false;
-        }
-    }
-}
-
-impl Drop for X11Panel {
-    fn drop(&mut self) {
-        self.conn.destroy_window(self.panel_win).ok();
-        self.conn.free_gc(self.gc).ok();
-        self.conn.flush().ok();
-    }
-}
 
 // ── IBus text helper ─────────────────────────────────────────────────────────
 
@@ -339,7 +191,7 @@ struct InputContext {
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
     ascii_mode: Arc<AtomicBool>,
-    x11_panel_tx: std::sync::mpsc::Sender<ImePanelMessage>,
+    x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
     theme_resolver: Arc<ThemeResolver>,
 }
 
@@ -351,7 +203,7 @@ impl InputContext {
             let _ = Kimpanel::show_preedit_text(kc, false).await;
             let _ = Kimpanel::show_lookup_table(kc, false).await;
         }
-        let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+        let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
     }
 
     async fn update_mode_hint(&self, ascii_mode: bool) {
@@ -361,7 +213,7 @@ impl InputContext {
         }
         let cx = self.cursor_x.load(Ordering::Relaxed);
         let cy = self.cursor_y.load(Ordering::Relaxed);
-        let _ = self.x11_panel_tx.send(ImePanelMessage::ModeHint {
+        let _ = self.x11_panel_tx.send(OverlayPanelMessage::ModeHint {
             ascii_mode,
             x: cx,
             y: cy + 24,
@@ -407,7 +259,7 @@ impl InputContext {
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
-            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
             let ov = ibus_lookup_table_value(&model);
@@ -448,7 +300,7 @@ impl InputContext {
 
             let cx = self.cursor_x.load(Ordering::Relaxed);
             let cy = self.cursor_y.load(Ordering::Relaxed);
-            let _ = self.x11_panel_tx.send(ImePanelMessage::Show {
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Show {
                 state: ime_state,
                 x: cx,
                 y: cy + 24,
@@ -612,7 +464,7 @@ impl InputContext {
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;
             }
-            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+            let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
             return true;
         }
         if let Some(index) =
@@ -718,7 +570,7 @@ struct IBusBus {
     engine: CoreEngine,
     ctx_counter: Arc<AtomicU32>,
     kimpanel_ctxt: Option<SignalContext<'static>>,
-    x11_panel_tx: std::sync::mpsc::Sender<ImePanelMessage>,
+    x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
     theme_resolver: Arc<ThemeResolver>,
 }
 
@@ -915,50 +767,9 @@ pub async fn run(engine: CoreEngine) {
         }
     };
 
-    let (tx, rx) = std::sync::mpsc::channel::<ImePanelMessage>();
+    let (tx, rx) = std::sync::mpsc::channel::<OverlayPanelMessage>();
     let tx_clone = tx.clone();
-    std::thread::spawn(move || {
-        let mut panel = X11Panel::new();
-        let mut mode_hint_until: Option<Instant> = None;
-        loop {
-            let msg = match mode_hint_until {
-                Some(deadline) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        if let Some(panel) = panel.as_mut() {
-                            panel.hide();
-                        }
-                        mode_hint_until = None;
-                        continue;
-                    }
-                    rx.recv_timeout(deadline.saturating_duration_since(now))
-                        .ok()
-                }
-                None => rx.recv().ok(),
-            };
-            let Some(msg) = msg else {
-                if mode_hint_until.is_some() {
-                    continue;
-                }
-                break;
-            };
-            if let Some(panel) = panel.as_mut() {
-                match msg {
-                    ImePanelMessage::Show { state, x, y } => {
-                        mode_hint_until = None;
-                        panel.show(&state, x, y);
-                    }
-                    ImePanelMessage::ModeHint { ascii_mode, x, y } => {
-                        mode_hint_until = panel.show_mode_hint(ascii_mode, x, y);
-                    }
-                    ImePanelMessage::Hide => {
-                        mode_hint_until = None;
-                        panel.hide();
-                    }
-                }
-            }
-        }
-    });
+    spawn_x11_overlay_panel(rx);
 
     let builder = match builder.serve_at(
         "/org/freedesktop/IBus",

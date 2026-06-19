@@ -3,7 +3,14 @@
 //! Renders the shared keytao-theme model to a raw BGRA pixel buffer suitable
 //! for both X11 XCB image upload and Wayland wl_shm.
 
-use std::{collections::HashSet, path::Path as StdPath, process::Command, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path as StdPath,
+    process::Command,
+    sync::mpsc::Receiver,
+    thread,
+    time::{Duration, Instant},
+};
 
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
@@ -11,6 +18,14 @@ use keytao_theme::{
     CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use tiny_skia::*;
+use x11rb::{
+    connection::Connection as _,
+    protocol::xproto::{
+        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat,
+        WindowClass,
+    },
+    rust_connection::RustConnection,
+};
 
 const FONT_PROBE_SIZE: f32 = 22.0;
 const COLOR_GLYPH_HEIGHT_FACTOR: f32 = 1.05;
@@ -331,6 +346,193 @@ pub struct PanelRenderer {
     _library: Library,
     scale: f32,
     theme_resolver: ThemeResolver,
+}
+
+pub enum OverlayPanelMessage {
+    Show { state: ImeState, x: i32, y: i32 },
+    ModeHint { ascii_mode: bool, x: i32, y: i32 },
+    Hide,
+}
+
+pub struct X11OverlayPanel {
+    conn: RustConnection,
+    panel_win: u32,
+    gc: u32,
+    depth: u8,
+    visible: bool,
+    renderer: PanelRenderer,
+}
+
+impl X11OverlayPanel {
+    pub fn new() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None).ok()?;
+        let setup = conn.setup();
+        let screen = setup.roots.get(screen_num)?;
+        let root = screen.root;
+        let visual = screen.root_visual;
+        let depth = screen.root_depth;
+
+        let panel_win = conn.generate_id().ok()?;
+        conn.create_window(
+            depth,
+            panel_win,
+            root,
+            0,
+            0,
+            300,
+            46,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new()
+                .override_redirect(1)
+                .background_pixel(0x1e1e2e)
+                .event_mask(EventMask::EXPOSURE),
+        )
+        .ok()?;
+
+        let gc = conn.generate_id().ok()?;
+        conn.create_gc(gc, panel_win, &Default::default()).ok()?;
+
+        let renderer = load_font().and_then(PanelRenderer::new_x11)?;
+
+        Some(Self {
+            conn,
+            panel_win,
+            gc,
+            depth,
+            visible: false,
+            renderer,
+        })
+    }
+
+    pub fn show(&mut self, state: &ImeState, x: i32, y: i32) {
+        let (pixels, w, h) = self.renderer.render(state);
+        self.conn
+            .configure_window(
+                self.panel_win,
+                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
+            )
+            .ok();
+
+        if !self.visible {
+            self.conn.map_window(self.panel_win).ok();
+            self.visible = true;
+        }
+
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                self.panel_win,
+                self.gc,
+                w as u16,
+                h as u16,
+                0,
+                0,
+                0,
+                self.depth,
+                &pixels,
+            )
+            .ok();
+        self.conn.flush().ok();
+    }
+
+    pub fn show_mode_hint(&mut self, ascii_mode: bool, x: i32, y: i32) -> Option<Instant> {
+        let (pixels, w, h) = self.renderer.render_mode_hint(ascii_mode);
+        let x = (x - w as i32 / 2).max(0);
+        self.conn
+            .configure_window(
+                self.panel_win,
+                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
+            )
+            .ok();
+
+        if !self.visible {
+            self.conn.map_window(self.panel_win).ok();
+            self.visible = true;
+        }
+
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                self.panel_win,
+                self.gc,
+                w as u16,
+                h as u16,
+                0,
+                0,
+                0,
+                self.depth,
+                &pixels,
+            )
+            .ok();
+        self.conn.flush().ok();
+        Some(Instant::now() + self.renderer.mode_hint_duration())
+    }
+
+    pub fn hide(&mut self) {
+        if self.visible {
+            self.conn.unmap_window(self.panel_win).ok();
+            self.conn.flush().ok();
+            self.visible = false;
+        }
+    }
+}
+
+impl Drop for X11OverlayPanel {
+    fn drop(&mut self) {
+        self.conn.destroy_window(self.panel_win).ok();
+        self.conn.free_gc(self.gc).ok();
+        self.conn.flush().ok();
+    }
+}
+
+pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) {
+    thread::spawn(move || {
+        let mut panel = X11OverlayPanel::new();
+        if panel.is_none() {
+            tracing::warn!("X11 overlay panel unavailable; falling back to system lookup UI");
+        }
+        let mut mode_hint_until: Option<Instant> = None;
+        loop {
+            let msg = match mode_hint_until {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        if let Some(panel) = panel.as_mut() {
+                            panel.hide();
+                        }
+                        mode_hint_until = None;
+                        continue;
+                    }
+                    rx.recv_timeout(deadline.saturating_duration_since(now))
+                        .ok()
+                }
+                None => rx.recv().ok(),
+            };
+            let Some(msg) = msg else {
+                if mode_hint_until.is_some() {
+                    continue;
+                }
+                break;
+            };
+            if let Some(panel) = panel.as_mut() {
+                match msg {
+                    OverlayPanelMessage::Show { state, x, y } => {
+                        mode_hint_until = None;
+                        panel.show(&state, x, y);
+                    }
+                    OverlayPanelMessage::ModeHint { ascii_mode, x, y } => {
+                        mode_hint_until = panel.show_mode_hint(ascii_mode, x, y);
+                    }
+                    OverlayPanelMessage::Hide => {
+                        mode_hint_until = None;
+                        panel.hide();
+                    }
+                }
+            }
+        }
+    });
 }
 
 impl PanelRenderer {
