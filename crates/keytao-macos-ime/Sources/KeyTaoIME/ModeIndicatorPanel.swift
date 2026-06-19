@@ -83,14 +83,13 @@ final class ModeIndicatorPanel: NSPanel {
 }
 
 extension NSScreen {
-    static var globalMaxY: CGFloat {
-        screens.map(\.frame.maxY).max() ?? (main?.frame.maxY ?? 0)
-    }
-
     static func screen(containing rect: NSRect) -> NSScreen? {
         guard rect.isUsableTextInputRect else {
             return nil
         }
-        return screens.first { $0.frame.intersects(rect) }
+        let lookup = rect.textInputLookupRect
+        return screens.first {
+            $0.frame.intersects(lookup) || $0.frame.contains(NSPoint(x: rect.minX, y: rect.minY))
+        }
     }
 }

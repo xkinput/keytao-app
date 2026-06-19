@@ -431,8 +431,9 @@ KeyTao App 的理想操作方式：
 
 ## 当前已知差异与收敛点
 
-- macOS `commitComposition` 当前传 Carbon keycode，而普通路径传 `XK_Return`；应收敛到 `0xff0d`。
-- Linux 仍有旧的 `src-tauri/src/ime/linux.rs` 内嵌 Wayland IME 代码；系统输入法维护应以 `crates/keytao-linux-ime` daemon 为准。
+- `keytao-core::key_policy` 已收敛 Enter、空 composition bypass、Space/`select_keys` 候选选择和 Ctrl+grave 转发规则；Linux/Windows 前端应优先复用它，Swift 侧保持同名常量和行为对齐。
+- macOS `commitComposition` 和普通 Return 路径都使用 `XK_Return`/`0xff0d`。
+- Linux 旧的 `src-tauri/src/ime/linux.rs` 内嵌 Wayland IME 代码已清理；系统输入法维护以 `crates/keytao-linux-ime` daemon 为准。
 - Linux GNOME/IBus/Kimpanel 视觉不能完整受 `theme.yaml` 控制；文档和 UI 设置页需要明确“结构生效，视觉受系统限制”。
 - Windows TSF 已接入 reload stamp、solo Shift release、候选选择和 Enter direct commit；后续仍需要补更多真实 Windows 桌面回归测试。
 - macOS reload stamp 检测仍在 Swift 层；后续可以把 stamp path、mtime/content 检测和 reload request 也收敛到通用 runtime。

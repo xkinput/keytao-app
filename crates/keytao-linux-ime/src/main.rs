@@ -279,7 +279,8 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async {
                 if let Err(e) = enforce_single_instance().await {
-                    tracing::warn!("Failed to enforce single instance check: {e}");
+                    tracing::warn!("Another keytao-ime daemon is already running: {e}");
+                    std::process::exit(0);
                 }
             });
         }
@@ -511,39 +512,13 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
             Box::leak(Box::new(conn));
             tracing::info!("Claimed D-Bus name {name} successfully.");
         }
-        _ => {
-            tracing::info!(
-                "D-Bus name {name} is already owned. Attempting to kill existing daemon..."
-            );
-            if let Ok(owner) = dbus_proxy.get_name_owner(name.try_into()?).await {
-                if let Ok(pid) = dbus_proxy
-                    .get_connection_unix_process_id(owner.into())
-                    .await
-                {
-                    tracing::info!("Existing daemon PID is {pid}. Sending SIGTERM...");
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-            }
-            let reply_retry = dbus_proxy
-                .request_name(
-                    name.try_into()?,
-                    zbus::fdo::RequestNameFlags::DoNotQueue.into(),
-                )
-                .await?;
-            match reply_retry {
-                zbus::fdo::RequestNameReply::PrimaryOwner => {
-                    Box::leak(Box::new(conn));
-                    tracing::info!("Claimed D-Bus name {name} on retry.");
-                }
-                _ => {
-                    tracing::warn!(
-                        "Could not claim D-Bus name {name} on retry. Continuing anyway."
-                    );
-                }
-            }
+        other => {
+            let owner = dbus_proxy
+                .get_name_owner(name.try_into()?)
+                .await
+                .map(|owner| owner.to_string())
+                .unwrap_or_else(|_| "unknown owner".to_owned());
+            return Err(format!("D-Bus name {name} is already owned by {owner}: {other:?}").into());
         }
     }
     Ok(())

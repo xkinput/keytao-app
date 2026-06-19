@@ -49,9 +49,6 @@
     <false/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>TICapsLockLanguageSwitchCapable</key>
-    <true/>
-
     <!-- ComponentInputModeDict structure mirrored from working IMEs (e.g. Squirrel) -->
     <key>ComponentInputModeDict</key>
     <dict>

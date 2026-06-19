@@ -15,7 +15,7 @@
 //!      signals which the daemon proxies to the focused application.
 
 use crate::engine::{CoreEngine, ImeSession};
-use keytao_core::ImeState;
+use keytao_core::{key_policy, RIME_RELEASE_MASK};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -25,38 +25,9 @@ use zbus::{interface, object_server::SignalContext, proxy, zvariant};
 // ── IBus constants ────────────────────────────────────────────────────────────
 
 const IBUS_ORIENTATION_SYSTEM: i32 = 2;
-const MOD_CONTROL: u32 = 0x0004;
-const MOD_MOD1: u32 = 0x0008;
-const RELEASE_MASK: u32 = 1 << 30;
 
 fn is_shift_key(sym: u32) -> bool {
     matches!(sym, 0xffe1 | 0xffe2)
-}
-
-fn is_enter_key(sym: u32) -> bool {
-    matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
-        return true;
-    }
-    matches!(
-        sym,
-        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
-    )
-}
-
-fn candidate_index_for_select_key(sym: u32, state: &ImeState) -> Option<usize> {
-    if state.candidates.is_empty() {
-        return None;
-    }
-    let keys = state.select_keys.as_deref().unwrap_or("1234567890");
-    let ch = char::from_u32(sym)?;
-    keys.chars().position(|k| k == ch)
 }
 
 // ── IBus type builders ────────────────────────────────────────────────────────
@@ -380,9 +351,9 @@ impl IBusEngine {
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> bool {
-        if state & RELEASE_MASK != 0 {
+        if state & RIME_RELEASE_MASK != 0 {
             if is_shift_key(keyval) {
-                if let Some(result) = self.session.process_key_result(keyval, RELEASE_MASK) {
+                if let Some(result) = self.session.process_key_result(keyval, RIME_RELEASE_MASK) {
                     return result.accepted;
                 }
             }
@@ -392,13 +363,13 @@ impl IBusEngine {
         tracing::debug!("IBus Engine ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
         let before_state = self.session.state();
-        if should_bypass_empty_composition(keyval, state, &before_state) {
+        if key_policy::should_bypass_empty_composition(keyval, state, &before_state) {
             let _ = IBusEngine::hide_preedit_text(&ctxt).await;
             let _ = IBusEngine::hide_lookup_table(&ctxt).await;
             return false;
         }
 
-        if is_enter_key(keyval) && !before_state.preedit.is_empty() {
+        if key_policy::is_enter_key(keyval) && !before_state.preedit.is_empty() {
             let ov = ibus_text_value(&before_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ =
@@ -410,23 +381,9 @@ impl IBusEngine {
             return true;
         }
 
-        // Candidate selection via space or number keys
-        let candidate_select_index = if keyval == 0x0020 {
-            // space: select highlighted candidate
-            if !before_state.candidates.is_empty() {
-                Some(
-                    before_state
-                        .highlighted_candidate_index
-                        .min(before_state.candidates.len().saturating_sub(1)),
-                )
-            } else {
-                None
-            }
-        } else {
-            candidate_index_for_select_key(keyval, &before_state)
-        };
-
-        if let Some(index) = candidate_select_index {
+        if let Some(index) =
+            key_policy::candidate_index_for_space_or_select_key(keyval, &before_state)
+        {
             if self.select_candidate_at(index, &ctxt).await {
                 return true;
             }

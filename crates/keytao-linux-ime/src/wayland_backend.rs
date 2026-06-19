@@ -15,7 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use keytao_core::ImeState;
+use keytao_core::{
+    key_policy, ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+};
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -48,49 +50,12 @@ use crate::{
     panel::{load_font, PanelRenderer},
 };
 
-const MOD_SHIFT: u32 = 0x0001;
-const MOD_CONTROL: u32 = 0x0004;
-const MOD_MOD1: u32 = 0x0008;
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 const WL_KEY_RELEASED: u32 = 0;
 const WL_KEY_PRESSED: u32 = 1;
-const RELEASE_MASK: u32 = 1 << 30;
 
 fn is_shift_key(sym: u32) -> bool {
     sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
-}
-
-fn is_candidate_select_key(sym: u32) -> bool {
-    sym == 0x0020
-}
-
-fn is_enter_key(sym: u32) -> bool {
-    matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
-        return true;
-    }
-    matches!(
-        sym,
-        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
-    )
-}
-
-/// Shortcuts that rime "consumes" (returns accepted=true) but the app also
-/// needs to see. Example: Ctrl+` triggers quake-style terminal dropdown.
-/// Must exactly match the original linux.rs implementation.
-fn should_forward_consumed_shortcut(sym_raw: u32, effective_mods: u32) -> bool {
-    let ctrl_held = effective_mods & MOD_CONTROL != 0;
-    ctrl_held
-        && matches!(
-            sym_raw,
-            xkb::keysyms::KEY_grave | xkb::keysyms::KEY_asciitilde
-        )
 }
 
 struct App {
@@ -397,17 +362,17 @@ impl App {
         }
 
         let effective_mods = if is_shift_key(sym_raw) {
-            self.mods & !MOD_SHIFT
+            self.mods & !RIME_MOD_SHIFT
         } else {
             self.mods
         };
 
         let before_state = self.session.state();
-        if should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
+        if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
         }
-        if is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
+        if key_policy::is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
             if let Some(im) = &self.input_method {
                 im.commit_string(before_state.preedit.clone());
                 im.set_preedit_string(String::new(), 0, 0);
@@ -417,10 +382,10 @@ impl App {
             self.show_panel(ImeState::empty(), qh);
             return;
         }
-        if is_candidate_select_key(sym_raw) && !before_state.candidates.is_empty() {
-            let index = before_state
-                .highlighted_candidate_index
-                .min(before_state.candidates.len().saturating_sub(1));
+        if let Some(index) = key_policy::is_space_key(sym_raw)
+            .then(|| key_policy::highlighted_candidate_index(&before_state))
+            .flatten()
+        {
             if let Some(ime_state) = self.session.select_candidate(index) {
                 if let Some(im) = &self.input_method {
                     if let Some(committed) = &ime_state.committed {
@@ -470,7 +435,7 @@ impl App {
                 // Forward consumed Ctrl shortcuts that the app should still
                 // receive (e.g. Ctrl+` for terminal quake toggle). Match the
                 // precise list from the original linux.rs implementation.
-                if should_forward_consumed_shortcut(sym_raw, effective_mods) {
+                if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
                     self.forward_unhandled_key(evdev_keycode, sym_raw);
                 }
             } else {
@@ -486,7 +451,7 @@ impl App {
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
         let sym_raw = self.key_sym(evdev_keycode);
         if is_shift_key(sym_raw) {
-            if let Some(result) = self.session.process_key_result(sym_raw, RELEASE_MASK) {
+            if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
                 self.update_ascii_mode(result.state.ascii_mode, qh);
             }
         }
@@ -705,13 +670,13 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                     let mut m = 0u32;
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
                     {
-                        m |= MOD_SHIFT;
+                        m |= RIME_MOD_SHIFT;
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE) {
-                        m |= MOD_CONTROL;
+                        m |= RIME_MOD_CONTROL;
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE) {
-                        m |= MOD_MOD1;
+                        m |= RIME_MOD_ALT;
                     }
                     state.mods = m;
                 }

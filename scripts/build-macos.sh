@@ -226,6 +226,8 @@ find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
 find "$PKG_SCRIPTS" \( -name '._*' -o -name '.DS_Store' \) -delete
 xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
 xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
+find "$PKG_PAYLOAD" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
+find "$PKG_SCRIPTS" -exec xattr -d com.apple.provenance {} \; 2>/dev/null || true
 
 cat > "$PKG_COMPONENTS" << 'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>

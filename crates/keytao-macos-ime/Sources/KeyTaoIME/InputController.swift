@@ -7,6 +7,7 @@ private let rimeModifierShift: UInt32 = 0x0001
 private let rimeModifierControl: UInt32 = 0x0004
 private let rimeModifierAlt: UInt32 = 0x0008
 private let rimeReleaseMask: UInt32 = 1 << 30
+private let rimeKeyReturn: UInt32 = 0xff0d
 
 /// KeyTao's IMKInputController subclass.
 /// macOS creates one controller per client context and routes key events here.
@@ -19,6 +20,8 @@ final class KeyTaoInputController: IMKInputController {
     private var shiftPressedWithoutKey = false
     private var hasComposition = false
     private var asciiMode = false
+    private var lastPreeditCursor = 0
+    private var lastCursorRect = NSRect.zero
 
     // MARK: Lifecycle
 
@@ -112,7 +115,7 @@ final class KeyTaoInputController: IMKInputController {
             return
         }
 
-        if let statePtr = keytao_session_process_key(session, UInt32(kVK_Return), 0) {
+        if let statePtr = keytao_session_process_key(session, rimeKeyReturn, 0) {
             defer { keytao_free_state(statePtr) }
             apply(KeyTaoStateView(statePtr.pointee), to: sender)
         }
@@ -142,6 +145,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func apply(_ state: KeyTaoStateView, to sender: Any?) {
         let client = sender as? IMKTextInput
+        rememberCursorRect(for: client, reason: "beforeApply")
 
         if !state.committed.isEmpty {
             if hasComposition {
@@ -165,7 +169,10 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func clearMarkedText(client: IMKTextInput?) {
-        defer { hasComposition = false }
+        defer {
+            hasComposition = false
+            lastPreeditCursor = 0
+        }
         guard let client else { return }
         client.setMarkedText(
             "",
@@ -175,6 +182,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func updateMarkedText(_ preedit: String, cursor: Int, client: IMKTextInput?) {
+        lastPreeditCursor = min(max(cursor, 0), preedit.utf16.count)
         guard let client else { return }
 
         if preedit.isEmpty {
@@ -186,7 +194,7 @@ final class KeyTaoInputController: IMKInputController {
 
         let markedRange = NSRange(location: 0, length: preedit.utf16.count)
         let selection = NSRange(
-            location: min(max(cursor, 0), preedit.utf16.count),
+            location: lastPreeditCursor,
             length: 0
         )
         let attrs = mark(forStyle: kTSMHiliteSelectedRawText, at: markedRange)
@@ -262,110 +270,86 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func cursorRect(for client: IMKTextInput?) -> NSRect {
-        guard let client else { return .zero }
-
-        var lineRect = NSRect.zero
-        _ = client.attributes(forCharacterIndex: 0, lineHeightRectangle: &lineRect)
-        let normalizedLineRect = normalizeTextInputRect(lineRect, source: "lineHeight")
-        if normalizedLineRect.isUsableTextInputRect {
-            return normalizedLineRect
+        if let rect = resolveCursorRect(for: client) {
+            lastCursorRect = rect
+            return rect
         }
 
-        var actualRange = NSRange(location: NSNotFound, length: 0)
-        let firstRect = client.firstRect(
-            forCharacterRange: NSRange(location: 0, length: 0),
-            actualRange: &actualRange
-        )
-        let normalizedFirstRect = normalizeTextInputRect(firstRect, source: "firstRect")
-        if normalizedFirstRect.isUsableTextInputRect {
-            return normalizedFirstRect
+        if lastCursorRect.isUsableTextInputRect {
+            NSLog("KeyTao: using last cursor rect %@", NSStringFromRect(lastCursorRect))
+            return lastCursorRect
         }
 
-        NSLog("KeyTao: no usable client cursor rect, line=%@ first=%@", NSStringFromRect(lineRect), NSStringFromRect(firstRect))
         return .zero
     }
 
-    private func normalizeTextInputRect(_ rect: NSRect, source: String) -> NSRect {
-        guard rect.isUsableTextInputRect else { return .zero }
-
-        if NSScreen.screen(containing: rect) != nil {
-            NSLog("KeyTao: cursor rect %@ %@", source, NSStringFromRect(rect))
-            return rect
-        }
-
-        guard let windowFrame = frontmostWindowFrame() else {
-            NSLog("KeyTao: cursor rect %@ %@ without front window", source, NSStringFromRect(rect))
-            return rect
-        }
-
-        let bottomLeftConverted = NSRect(
-            x: windowFrame.minX + rect.minX,
-            y: windowFrame.minY + rect.minY,
-            width: rect.width,
-            height: rect.height
-        )
-        if NSScreen.screen(containing: bottomLeftConverted) != nil {
-            NSLog("KeyTao: cursor rect %@ %@ -> %@", source, NSStringFromRect(rect), NSStringFromRect(bottomLeftConverted))
-            return bottomLeftConverted
-        }
-
-        let topLeftConverted = NSRect(
-            x: windowFrame.minX + rect.minX,
-            y: windowFrame.maxY - rect.maxY,
-            width: rect.width,
-            height: rect.height
-        )
-        if NSScreen.screen(containing: topLeftConverted) != nil {
-            NSLog("KeyTao: cursor rect %@ %@ -> %@", source, NSStringFromRect(rect), NSStringFromRect(topLeftConverted))
-            return topLeftConverted
-        }
-
-        NSLog("KeyTao: cursor rect %@ %@ not normalized with window %@", source, NSStringFromRect(rect), NSStringFromRect(windowFrame))
-        return rect
+    private func rememberCursorRect(for client: IMKTextInput?, reason: String) {
+        guard let rect = resolveCursorRect(for: client) else { return }
+        lastCursorRect = rect
+        NSLog("KeyTao: remembered cursor rect %@ %@", reason, NSStringFromRect(rect))
     }
 
-    private func frontmostWindowFrame() -> NSRect? {
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            return nil
-        }
-        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+    private func resolveCursorRect(for client: IMKTextInput?) -> NSRect? {
+        guard let client else { return nil }
+
+        var attemptedRects: [String] = []
+        var lineRect = NSRect.zero
+        _ = client.attributes(forCharacterIndex: lastPreeditCursor, lineHeightRectangle: &lineRect)
+        attemptedRects.append("lineHeight=\(NSStringFromRect(lineRect))")
+        if let normalizedLineRect = normalizeTextInputRect(lineRect, source: "lineHeight") {
+            return normalizedLineRect
         }
 
-        for info in windowList {
-            guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid else { continue }
-            guard (info[kCGWindowLayer as String] as? Int) == 0 else { continue }
-            guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
-            guard let x = bounds["X"], let y = bounds["Y"], let width = bounds["Width"], let height = bounds["Height"] else {
-                continue
+        for query in cursorRectQueries(for: client) {
+            var actualRange = NSRange(location: NSNotFound, length: 0)
+            let rect = client.firstRect(forCharacterRange: query.range, actualRange: &actualRange)
+            attemptedRects.append("\(query.source)=\(NSStringFromRect(rect)) actual=\(NSStringFromRange(actualRange))")
+            if let normalizedRect = normalizeTextInputRect(rect, source: query.source) {
+                return normalizedRect
             }
-            guard width > 0, height > 0 else { continue }
-
-            let cgRect = NSRect(x: x, y: y, width: width, height: height)
-            return cgWindowRectToAppKitRect(cgRect)
         }
 
+        NSLog("KeyTao: no usable client cursor rect, tried=%@", attemptedRects.joined(separator: " | "))
         return nil
     }
 
-    private func cgWindowRectToAppKitRect(_ rect: NSRect) -> NSRect {
-        let screen = NSScreen.screens.first { screen in
-            let cgScreenRect = NSRect(
-                x: screen.frame.minX,
-                y: NSScreen.globalMaxY - screen.frame.maxY,
-                width: screen.frame.width,
-                height: screen.frame.height
-            )
-            return cgScreenRect.intersects(rect)
-        } ?? NSScreen.main
+    private func cursorRectQueries(for client: IMKTextInput) -> [(source: String, range: NSRange)] {
+        var queries: [(source: String, range: NSRange)] = []
 
-        guard let screen else { return rect }
-        return NSRect(
-            x: rect.minX,
-            y: screen.frame.maxY - (rect.minY - (NSScreen.globalMaxY - screen.frame.maxY)) - rect.height,
-            width: rect.width,
-            height: rect.height
-        )
+        let markedRange = client.markedRange()
+        if markedRange.location != NSNotFound {
+            let cursor = min(lastPreeditCursor, max(markedRange.length, 0))
+            queries.append((
+                source: "markedRange",
+                range: NSRange(location: markedRange.location + cursor, length: 0)
+            ))
+        }
+
+        let selectedRange = client.selectedRange()
+        if selectedRange.location != NSNotFound {
+            queries.append((
+                source: "selectedRange",
+                range: NSRange(location: selectedRange.location, length: 0)
+            ))
+        }
+
+        queries.append((source: "firstRect", range: NSRange(location: 0, length: 0)))
+        return queries
+    }
+
+    private func normalizeTextInputRect(_ rect: NSRect, source: String) -> NSRect? {
+        guard rect.isUsableTextInputRect else { return nil }
+        guard NSScreen.screen(containing: rect) != nil else {
+            NSLog("KeyTao: rejected cursor rect %@ %@ outside screens", source, NSStringFromRect(rect))
+            return nil
+        }
+        guard !rect.isLikelyMissingTextInputRect else {
+            NSLog("KeyTao: rejected cursor rect %@ %@ near screen corner", source, NSStringFromRect(rect))
+            return nil
+        }
+
+        NSLog("KeyTao: cursor rect %@ %@", source, NSStringFromRect(rect))
+        return rect
     }
 
     // MARK: Session helpers
@@ -547,7 +531,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func rimeKeyValue(from event: NSEvent) -> UInt32 {
         switch Int(event.keyCode) {
-        case kVK_Return:        return 0xff0d
+        case kVK_Return:        return rimeKeyReturn
         case kVK_Delete:        return 0xff08
         case kVK_ForwardDelete: return 0xffff
         case kVK_Escape:        return 0xff1b
@@ -609,7 +593,7 @@ final class KeyTaoInputController: IMKInputController {
             || keyval == 0xff08
             || keyval == 0xffff
             || keyval == 0xff09
-            || keyval == 0xff0d
+            || keyval == rimeKeyReturn
             || keyval == 0xff1b
             || (keyval >= 0xff50 && keyval <= 0xff58)
     }
@@ -658,12 +642,33 @@ private struct KeyTaoStateView {
 extension NSRect {
     var isUsableTextInputRect: Bool {
         !isNull
-            && !isEmpty
             && origin.x.isFinite
             && origin.y.isFinite
             && size.width.isFinite
             && size.height.isFinite
+            && size.width >= 0
+            && size.height > 0
             && abs(origin.x) < 100_000
             && abs(origin.y) < 100_000
+    }
+
+    var textInputLookupRect: NSRect {
+        NSRect(
+            x: minX,
+            y: minY,
+            width: max(width, 1),
+            height: max(height, 1)
+        )
+    }
+
+    var isLikelyMissingTextInputRect: Bool {
+        guard let screen = NSScreen.screen(containing: self) else { return false }
+        let frame = screen.frame
+        let tolerance: CGFloat = 4
+        let nearLeft = abs(minX - frame.minX) <= tolerance
+        let nearRight = abs(maxX - frame.maxX) <= tolerance
+        let nearBottom = abs(minY - frame.minY) <= tolerance
+        let nearTop = abs(maxY - frame.maxY) <= tolerance || abs(minY - frame.maxY) <= tolerance
+        return (nearLeft || nearRight) && (nearBottom || nearTop)
     }
 }

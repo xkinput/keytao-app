@@ -4,7 +4,7 @@
       "nsis"
     ],
     "resources": {
-      "../target/keytao-windows-ime-runtime/x64": "_up_/target/keytao-windows-ime-runtime/x64",
+      "../target/keytao-windows-ime-runtime/x64": "keytao-windows-ime-runtime/x64",
       "../target/keytao-windows-app-runtime/rime.dll": "rime.dll"
     }
   }

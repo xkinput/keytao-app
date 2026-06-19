@@ -71,7 +71,82 @@ KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，不构建 dmg。
 - Linux 构建 `deb`、`rpm` 和 `tar.gz`，不构建 AppImage。
-- macOS 和 Linux 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
+- Windows 构建 NSIS 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/x64` 资源目录。
+- macOS、Linux 和 Windows 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
+
+### 通用准备
+
+```bash
+pnpm install
+```
+
+如需同步版本号，先改 `package.json` 的版本，再执行：
+
+```bash
+pnpm sync-version
+```
+
+### macOS
+
+完整发行包从仓库根目录构建：
+
+```bash
+pnpm build:macos
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
+```
+
+产物：
+
+- `target/keytao-macos-pkg/KeyTao.pkg`
+
+本机安装测试需要管理员权限，安装动作单独执行：
+
+```bash
+sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
+```
+
+安装后快速检查：
+
+```bash
+test -d "/Applications/KeyTao.app"
+test -x "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
+"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --list-input-sources
+open -a KeyTao
+```
+
+### Linux
+
+Linux 发行包通过 Docker builder 构建，需要本机可运行 Docker：
+
+```bash
+pnpm build:linux
+```
+
+产物在 `target/release/bundle/` 下，包含：
+
+- `deb`
+- `rpm`
+- `tar.gz`
+
+### Windows
+
+Windows 需要在 Windows 开发环境中执行，推荐从 PowerShell 运行。构建机需要 MSVC Rust target、LLVM/libclang 和可用的 `pnpm`；脚本会按需下载 librime Windows SDK。
+
+```powershell
+pnpm install
+pnpm build:windows
+```
+
+该命令会先构建 Windows TSF 输入法 runtime，再构建 Tauri NSIS 安装包。只构建输入法 runtime 时使用：
+
+```powershell
+pnpm build:windows-ime
+```
+
+产物通常位于：
+
+- `target\keytao-windows-ime-runtime\x64`
+- `target\release\bundle\nsis`
 
 ## 开发
 
@@ -94,25 +169,4 @@ pnpm tauri dev
 pnpm build
 ```
 
-macOS 完整发行包：
-
-```bash
-pnpm build:macos
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
-sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
-```
-
-安装后快速检查：
-
-```bash
-test -d "/Applications/KeyTao.app"
-test -x "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
-"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --list-input-sources
-open -a KeyTao
-```
-
-Linux 完整发行包：
-
-```bash
-pnpm build:linux
-```
+发行包构建命令见上面的“发行打包”。

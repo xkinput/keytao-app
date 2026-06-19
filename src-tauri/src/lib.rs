@@ -79,6 +79,68 @@ pub struct InstallResult {
 const API_BASE: &str = "https://keytao.rea.ink";
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
+const IME_RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn path_string(path: PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn default_user_data_dir_string() -> Option<String> {
+    keytao_core::default_user_data_dir().map(path_string)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn reload_stamp_path() -> Option<PathBuf> {
+    keytao_core::default_user_data_dir().map(|dir| dir.join(IME_RELOAD_STAMP_FILE))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn file_signature(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{}", metadata.len(), modified)
+        }
+        Err(_) => "missing".into(),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn reload_stamp_status() -> (Option<String>, Option<String>) {
+    let Some(path) = reload_stamp_path() else {
+        return (None, None);
+    };
+    let signature = file_signature(&path);
+    (Some(path_string(path)), Some(signature))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn shared_data_status(packaged: Option<String>) -> (Option<String>, String) {
+    if let Some(path) = packaged {
+        (Some(path), "packaged".into())
+    } else {
+        (
+            non_empty_string(keytao_core::default_shared_data_dir()),
+            "default_fallback".into(),
+        )
+    }
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
@@ -92,10 +154,16 @@ pub struct LinuxImeStatus {
     pub kde_configured: bool,
     pub running: bool,
     pub managed_pid: Option<u32>,
+    pub daemon_owner_pid: Option<u32>,
     pub command: String,
     pub processes: Vec<String>,
     pub kde_native_processes: usize,
     pub fallback_processes: usize,
+    pub user_data_dir: Option<String>,
+    pub shared_data_dir: Option<String>,
+    pub shared_data_source: String,
+    pub reload_stamp_path: Option<String>,
+    pub reload_stamp_signature: Option<String>,
     pub message: String,
 }
 
@@ -261,18 +329,49 @@ fn linux_ime_status_with_message(app: &tauri::AppHandle, message: String) -> Lin
     let kde_native_processes = process_entries.iter().filter(|p| p.kde_native).count();
     let fallback_processes = process_entries.iter().filter(|p| !p.kde_native).count();
     let processes = process_entries.into_iter().map(|p| p.line).collect();
+    let (shared_data_dir, shared_data_source) = shared_data_status(linux_app_shared_data_dir(app));
+    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
     LinuxImeStatus {
         supported: true,
         kde_session: is_kde_session(),
         kde_configured: is_kde_input_method_configured(),
         running: kde_native_processes + fallback_processes > 0,
         managed_pid,
+        daemon_owner_pid: linux_ime_daemon_owner_pid(),
         command,
         processes,
         kde_native_processes,
         fallback_processes,
+        user_data_dir: default_user_data_dir_string(),
+        shared_data_dir,
+        shared_data_source,
+        reload_stamp_path,
+        reload_stamp_signature,
         message,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ime_daemon_owner_pid() -> Option<u32> {
+    let output = std::process::Command::new("busctl")
+        .args([
+            "--user",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetConnectionUnixProcessID",
+            "s",
+            "org.xkinput.keytao.ime.Daemon",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(|part| part.parse::<u32>().ok())
 }
 
 #[cfg(target_os = "linux")]
@@ -476,12 +575,12 @@ fn process_has_wayland_socket(pid: u32) -> bool {
         .any(|item| item.starts_with(b"WAYLAND_SOCKET="))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn write_keytao_ime_reload_stamp() -> Result<(), String> {
     let dir =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    let stamp = dir.join("keytao-ime.reload");
+    let stamp = dir.join(IME_RELOAD_STAMP_FILE);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -558,6 +657,10 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
             resource_dir.join("keytao-windows-ime-runtime").join("x64"),
             resource_dir
                 .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("x64"),
+            resource_dir
+                .join("resources")
                 .join("keytao-windows-ime-runtime")
                 .join("x64"),
             resource_dir
@@ -705,6 +808,9 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         }
         _ => false,
     };
+    let (shared_data_dir, shared_data_source) =
+        shared_data_status(windows_app_shared_data_dir(app));
+    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
 
     WindowsImeStatus {
         supported: true,
@@ -713,6 +819,11 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         runtime_dir: runtime_dir.map(|p| windows_normal_path(&p)),
         dll_path: dll_path.map(|p| windows_normal_path(&p)),
         registered_path,
+        user_data_dir: default_user_data_dir_string(),
+        shared_data_dir,
+        shared_data_source,
+        reload_stamp_path,
+        reload_stamp_signature,
         message,
     }
 }
@@ -2009,6 +2120,12 @@ async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
 pub struct MacosImeStatus {
     pub installed: bool,
     pub app_path: Option<String>,
+    pub user_data_dir: Option<String>,
+    pub shared_data_dir: Option<String>,
+    pub shared_data_source: String,
+    pub reload_stamp_path: Option<String>,
+    pub reload_stamp_signature: Option<String>,
+    pub log_dir: Option<String>,
     pub message: String,
 }
 
@@ -2017,7 +2134,7 @@ fn macos_ime_app_path() -> PathBuf {
     PathBuf::from("/Library/Input Methods/KeyTao.app")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn macos_install_script_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KEYTAO_MACOS_IME_INSTALL_SCRIPT").map(PathBuf::from) {
         if path.is_file() {
@@ -2032,12 +2149,20 @@ fn macos_install_script_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_ime_status_inner() -> MacosImeStatus {
+fn macos_ime_status_inner(app: &AppHandle) -> MacosImeStatus {
     let path = macos_ime_app_path();
     let installed = path.join("Contents/MacOS/KeyTaoIME").is_file();
+    let (shared_data_dir, shared_data_source) = shared_data_status(macos_app_shared_data_dir(app));
+    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
     MacosImeStatus {
         installed,
         app_path: Some(path.to_string_lossy().into_owned()),
+        user_data_dir: default_user_data_dir_string(),
+        shared_data_dir,
+        shared_data_source,
+        reload_stamp_path,
+        reload_stamp_signature,
+        log_dir: keytao_core::default_user_data_dir().map(|dir| path_string(dir.join("log"))),
         message: if installed {
             "KeyTao macOS input method is installed".into()
         } else {
@@ -2046,7 +2171,7 @@ fn macos_ime_status_inner() -> MacosImeStatus {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn command_output_tail(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output).trim().to_string();
     let count = text.chars().count();
@@ -2059,16 +2184,23 @@ fn command_output_tail(output: &[u8]) -> String {
 
 /// Check whether the KeyTao.app input method is installed.
 #[tauri::command]
-fn macos_ime_status() -> MacosImeStatus {
+fn macos_ime_status(app: AppHandle) -> MacosImeStatus {
     #[cfg(target_os = "macos")]
     {
-        macos_ime_status_inner()
+        macos_ime_status_inner(&app)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         MacosImeStatus {
             installed: false,
             app_path: None,
+            user_data_dir: None,
+            shared_data_dir: None,
+            shared_data_source: "unsupported".into(),
+            reload_stamp_path: None,
+            reload_stamp_signature: None,
+            log_dir: None,
             message: "macOS only".into(),
         }
     }
@@ -2078,44 +2210,52 @@ fn macos_ime_status() -> MacosImeStatus {
 #[tauri::command]
 #[cfg(target_os = "macos")]
 async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
-    let script = macos_install_script_path().ok_or(
-        "macOS IME install script not found; build and install target/keytao-macos-pkg/KeyTao.pkg instead",
-    )?;
-    let workspace_dir = script
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf)
-        .ok_or("Cannot determine workspace directory for install script")?;
-    let build_dir = workspace_dir.join("target/keytao-macos-ime");
-
-    let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("/bin/bash")
-            .arg(&script)
-            .arg("--release")
-            .current_dir(&workspace_dir)
-            .env("KEYTAO_MACOS_BUILD_DIR", build_dir)
-            .output()
-    })
-    .await
-    .map_err(|e| format!("install task failed: {e}"))?
-    .map_err(|e| format!("run install script: {e}"))?;
-
-    if !output.status.success() {
-        let stdout = command_output_tail(&output.stdout);
-        let stderr = command_output_tail(&output.stderr);
-        return Err(format!(
-            "install script failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status, stdout, stderr
-        ));
+    #[cfg(not(debug_assertions))]
+    {
+        return Err("macOS IME install script is only available in development builds".into());
     }
 
-    std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.keyboard?InputSources")
-        .output()
-        .map_err(|e| format!("open System Settings: {e}"))?;
+    #[cfg(debug_assertions)]
+    {
+        let script = macos_install_script_path().ok_or(
+        "macOS IME install script not found; build and install target/keytao-macos-pkg/KeyTao.pkg instead",
+    )?;
+        let workspace_dir = script
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .ok_or("Cannot determine workspace directory for install script")?;
+        let build_dir = workspace_dir.join("target/keytao-macos-ime");
 
-    Ok(macos_ime_status_inner())
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("/bin/bash")
+                .arg(&script)
+                .arg("--release")
+                .current_dir(&workspace_dir)
+                .env("KEYTAO_MACOS_BUILD_DIR", build_dir)
+                .output()
+        })
+        .await
+        .map_err(|e| format!("install task failed: {e}"))?
+        .map_err(|e| format!("run install script: {e}"))?;
+
+        if !output.status.success() {
+            let stdout = command_output_tail(&output.stdout);
+            let stderr = command_output_tail(&output.stderr);
+            return Err(format!(
+                "install script failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status, stdout, stderr
+            ));
+        }
+
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.keyboard?InputSources")
+            .output()
+            .map_err(|e| format!("open System Settings: {e}"))?;
+
+        Ok(macos_ime_status_inner(&_app))
+    }
 }
 
 #[tauri::command]
@@ -2129,22 +2269,32 @@ async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
 async fn macos_uninstall_ime() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let dst = macos_ime_app_path();
-        if dst.exists() {
-            let output = std::process::Command::new("sudo")
-                .args(["rm", "-rf"])
-                .arg(&dst)
-                .output()
-                .map_err(|e| format!("run sudo rm: {e}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "remove failed with status {}\n{}",
-                    output.status,
-                    command_output_tail(&output.stderr)
-                ));
-            }
+        #[cfg(not(debug_assertions))]
+        {
+            return Err(
+                "macOS IME uninstall script is only available in development builds".into(),
+            );
         }
-        Ok(())
+
+        #[cfg(debug_assertions)]
+        {
+            let dst = macos_ime_app_path();
+            if dst.exists() {
+                let output = std::process::Command::new("sudo")
+                    .args(["rm", "-rf"])
+                    .arg(&dst)
+                    .output()
+                    .map_err(|e| format!("run sudo rm: {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "remove failed with status {}\n{}",
+                        output.status,
+                        command_output_tail(&output.stderr)
+                    ));
+                }
+            }
+            Ok(())
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -2187,6 +2337,20 @@ fn command_version(command: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+fn non_empty_version(value: impl Into<String>) -> Option<String> {
+    let value = value.into();
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn env_version(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(non_empty_version)
+}
+
 fn nix_store_package_version(package: &str) -> Option<String> {
     let entries = std::fs::read_dir("/nix/store").ok()?;
     entries
@@ -2201,18 +2365,94 @@ fn nix_store_package_version(package: &str) -> Option<String> {
         .max()
 }
 
-fn librime_version() -> Option<String> {
-    command_version("pkg-config", &["--modversion", "rime"]).or_else(|| {
-        std::env::var("RIME_LIB_DIR").ok().and_then(|path| {
-            let marker = "-librime-";
-            let version = path.split_once(marker)?.1.split('/').next()?.to_string();
-            if version.is_empty() {
-                None
+fn pkg_config_file_version(lib_dir: &Path) -> Option<String> {
+    ["rime.pc", "librime.pc"].iter().find_map(|name| {
+        let path = lib_dir.join("pkgconfig").join(name);
+        let content = std::fs::read_to_string(path).ok()?;
+        content.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key.trim() == "Version" {
+                non_empty_version(value)
             } else {
-                Some(version)
+                None
             }
         })
     })
+}
+
+fn rime_filename_version(name: &str) -> Option<String> {
+    let version = name
+        .strip_prefix("librime.")
+        .and_then(|value| value.strip_suffix(".dylib"))
+        .or_else(|| name.strip_prefix("librime.so."))?;
+    version
+        .chars()
+        .next()
+        .filter(|ch| ch.is_ascii_digit())
+        .and_then(|_| non_empty_version(version))
+}
+
+fn rime_lib_dir_version(path: &Path) -> Option<String> {
+    if path.is_file() {
+        return path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(rime_filename_version);
+    }
+
+    pkg_config_file_version(path).or_else(|| {
+        std::fs::read_dir(path)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| rime_filename_version(&name))
+            .max()
+    })
+}
+
+fn bundled_librime_version(app: &AppHandle) -> Option<String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.clone(),
+            resource_dir.join("Frameworks"),
+            resource_dir
+                .parent()
+                .map(|contents| contents.join("Frameworks"))
+                .unwrap_or_else(|| resource_dir.join("..").join("Frameworks")),
+        ]);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.extend([
+                exe_dir.to_path_buf(),
+                exe_dir.join("Frameworks"),
+                exe_dir
+                    .parent()
+                    .map(|contents| contents.join("Frameworks"))
+                    .unwrap_or_else(|| exe_dir.join("..").join("Frameworks")),
+            ]);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|dir| rime_lib_dir_version(&dir))
+}
+
+fn librime_version(app: &AppHandle) -> Option<String> {
+    option_env!("RIME_VERSION")
+        .and_then(non_empty_version)
+        .or_else(|| env_version("RIME_VERSION"))
+        .or_else(|| {
+            env_version("RIME_LIB_DIR").and_then(|path| rime_lib_dir_version(Path::new(&path)))
+        })
+        .or_else(|| bundled_librime_version(app))
+        .or_else(|| command_version("pkg-config", &["--modversion", "rime"]))
+        .or_else(|| command_version("pkg-config", &["--modversion", "librime"]))
+        .or_else(|| nix_store_package_version("librime"))
 }
 
 fn opencc_version() -> Option<String> {
@@ -2228,7 +2468,7 @@ fn get_component_versions(app: AppHandle) -> ComponentVersions {
     ComponentVersions {
         app_version: app.package_info().version.to_string(),
         tauri_version: tauri::VERSION.to_string(),
-        librime_version: librime_version(),
+        librime_version: librime_version(&app),
         opencc_version: opencc_version(),
         data_dir: keytao_core::default_user_data_dir().map(|p| p.to_string_lossy().into_owned()),
     }
@@ -2307,7 +2547,7 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
                 let state: tauri::State<rime::RimeEngine> = app.state();
                 *state.engine.lock().unwrap() = Some(engine);
             }
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             match write_keytao_ime_reload_stamp() {
                 Ok(()) => {
                     let _ = app.emit("deploy-progress", "已通知系统输入法重载");
@@ -2343,6 +2583,11 @@ pub struct WindowsImeStatus {
     pub runtime_dir: Option<String>,
     pub dll_path: Option<String>,
     pub registered_path: Option<String>,
+    pub user_data_dir: Option<String>,
+    pub shared_data_dir: Option<String>,
+    pub shared_data_source: String,
+    pub reload_stamp_path: Option<String>,
+    pub reload_stamp_signature: Option<String>,
     pub message: String,
 }
 
@@ -2405,6 +2650,7 @@ pub struct DebugLogFile {
 pub struct DebugLogs {
     pub ime: DebugLogFile,
     pub app: DebugLogFile,
+    pub macos_ime: Option<DebugLogFile>,
 }
 
 #[tauri::command]
@@ -2412,11 +2658,45 @@ async fn read_debug_logs() -> Result<DebugLogs, String> {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
     let ime = read_tmp_logs("keytao-ime.log", "No keytao-ime.log found", cutoff);
     let app = read_tmp_logs("keytao-app.log", "No keytao-app.log found", cutoff);
-    Ok(DebugLogs { ime, app })
+    #[cfg(target_os = "macos")]
+    let macos_ime = Some(read_macos_ime_logs(cutoff));
+    #[cfg(not(target_os = "macos"))]
+    let macos_ime = None;
+    Ok(DebugLogs {
+        ime,
+        app,
+        macos_ime,
+    })
 }
 
 fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) -> DebugLogFile {
     let paths = collect_tmp_log_paths(prefix);
+    read_log_paths(paths, missing_message, cutoff, Some(prefix))
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_ime_logs(cutoff: OffsetDateTime) -> DebugLogFile {
+    let Some(log_dir) = keytao_core::default_user_data_dir().map(|dir| dir.join("log")) else {
+        return DebugLogFile {
+            lines: vec!["Cannot determine ~/Library/keytao/log".into()],
+            truncated: false,
+        };
+    };
+    let paths = collect_dir_log_paths(&log_dir);
+    read_log_paths(
+        paths,
+        "No macOS librime logs found in ~/Library/keytao/log",
+        cutoff,
+        None,
+    )
+}
+
+fn read_log_paths(
+    paths: Vec<PathBuf>,
+    missing_message: &str,
+    cutoff: OffsetDateTime,
+    prune_plain_prefix: Option<&str>,
+) -> DebugLogFile {
     if paths.is_empty() {
         return DebugLogFile {
             lines: vec![missing_message.to_string()],
@@ -2428,7 +2708,9 @@ fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) ->
     let mut kept = 0usize;
 
     for path in paths {
-        if path.file_name().is_some_and(|name| name == prefix) {
+        if prune_plain_prefix
+            .is_some_and(|prefix| path.file_name().is_some_and(|name| name == prefix))
+        {
             let _ = prune_plain_log_file(&path, cutoff);
         }
         let Ok(file) = std::fs::File::open(&path) else {
@@ -2454,6 +2736,20 @@ fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) ->
         lines: lines.into_iter().collect(),
         truncated: kept > DEBUG_LOG_MAX_LINES,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn collect_dir_log_paths(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    paths
 }
 
 fn collect_tmp_log_paths(prefix: &str) -> Vec<PathBuf> {
@@ -2696,6 +2992,36 @@ mod tests {
     use std::collections::HashSet;
 
     // ── parse_rime_lua_requires ───────────────────────────────────────────────
+
+    #[test]
+    fn test_rime_filename_version() {
+        assert_eq!(
+            rime_filename_version("librime.1.17.0.dylib"),
+            Some("1.17.0".to_owned())
+        );
+        assert_eq!(
+            rime_filename_version("librime.so.1.17.0"),
+            Some("1.17.0".to_owned())
+        );
+        assert_eq!(rime_filename_version("librime-lua.dylib"), None);
+    }
+
+    #[test]
+    fn test_rime_lib_dir_version_prefers_pkg_config() {
+        let dir =
+            std::env::temp_dir().join(format!("keytao-rime-version-test-{}", std::process::id()));
+        let pkgconfig_dir = dir.join("pkgconfig");
+        std::fs::create_dir_all(&pkgconfig_dir).expect("create pkgconfig dir");
+        std::fs::write(
+            pkgconfig_dir.join("rime.pc"),
+            "Name: Rime\nVersion: 9.8.7\n",
+        )
+        .expect("write rime.pc");
+        std::fs::write(dir.join("librime.1.dylib"), "").expect("write dylib marker");
+
+        assert_eq!(rime_lib_dir_version(&dir), Some("9.8.7".to_owned()));
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn test_parse_requires_basic() {

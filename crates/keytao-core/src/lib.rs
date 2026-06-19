@@ -254,13 +254,108 @@ pub const RIME_MOD_CONTROL: u32 = 0x0004;
 pub const RIME_MOD_ALT: u32 = 0x0008;
 pub const RIME_RELEASE_MASK: u32 = 1 << 30;
 
+pub mod key_policy {
+    use super::{ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL};
+
+    pub const XK_SPACE: u32 = 0x0020;
+    pub const XK_BACK_SPACE: u32 = 0xff08;
+    pub const XK_TAB: u32 = 0xff09;
+    pub const XK_RETURN: u32 = 0xff0d;
+    pub const XK_ESCAPE: u32 = 0xff1b;
+    pub const XK_HOME: u32 = 0xff50;
+    pub const XK_LEFT: u32 = 0xff51;
+    pub const XK_UP: u32 = 0xff52;
+    pub const XK_RIGHT: u32 = 0xff53;
+    pub const XK_DOWN: u32 = 0xff54;
+    pub const XK_PAGE_UP: u32 = 0xff55;
+    pub const XK_PAGE_DOWN: u32 = 0xff56;
+    pub const XK_END: u32 = 0xff57;
+    pub const XK_DELETE: u32 = 0xffff;
+    pub const XK_KP_ENTER: u32 = 0xff8d;
+
+    pub fn is_enter_key(sym: u32) -> bool {
+        matches!(sym, XK_RETURN | XK_KP_ENTER)
+    }
+
+    pub fn is_space_key(sym: u32) -> bool {
+        sym == XK_SPACE
+    }
+
+    pub fn is_nonstarter_key(sym: u32) -> bool {
+        matches!(
+            sym,
+            XK_SPACE | XK_BACK_SPACE | XK_DELETE | XK_TAB | XK_RETURN | XK_ESCAPE | XK_HOME
+                ..=XK_END | XK_KP_ENTER
+        )
+    }
+
+    pub fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
+        should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
+    }
+
+    pub fn should_bypass_empty_composition_key(
+        is_nonstarter: bool,
+        mods: u32,
+        state: &ImeState,
+    ) -> bool {
+        if !state.preedit.is_empty() || !state.candidates.is_empty() {
+            return false;
+        }
+        if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
+            return true;
+        }
+        is_nonstarter
+    }
+
+    pub fn highlighted_candidate_index(state: &ImeState) -> Option<usize> {
+        if state.candidates.is_empty() {
+            None
+        } else {
+            Some(
+                state
+                    .highlighted_candidate_index
+                    .min(state.candidates.len().saturating_sub(1)),
+            )
+        }
+    }
+
+    pub fn candidate_index_for_char(ch: char, state: &ImeState) -> Option<usize> {
+        if state.candidates.is_empty() {
+            return None;
+        }
+        let keys = state.select_keys.as_deref().unwrap_or("1234567890");
+        keys.chars().position(|candidate_key| candidate_key == ch)
+    }
+
+    pub fn candidate_index_for_select_key(sym: u32, state: &ImeState) -> Option<usize> {
+        let ch = char::from_u32(sym)?;
+        candidate_index_for_char(ch, state)
+    }
+
+    pub fn candidate_index_for_space_or_select_key(sym: u32, state: &ImeState) -> Option<usize> {
+        if is_space_key(sym) {
+            highlighted_candidate_index(state)
+        } else {
+            candidate_index_for_select_key(sym, state)
+        }
+    }
+
+    pub fn should_forward_consumed_shortcut(sym: u32, mods: u32) -> bool {
+        let ctrl_held = mods & RIME_MOD_CONTROL != 0;
+        ctrl_held && matches!(sym, 0x0060 | 0x007e)
+    }
+}
+
 pub fn rime_modifier_mask(mask: u32) -> u32 {
     mask & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_RELEASE_MASK)
 }
 
 #[cfg(test)]
 mod ime_runtime_tests {
-    use super::{rime_modifier_mask, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
+    use super::{
+        key_policy, rime_modifier_mask, Candidate, ImeState, RIME_MOD_CONTROL, RIME_MOD_SHIFT,
+        RIME_RELEASE_MASK,
+    };
 
     #[test]
     fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {
@@ -273,6 +368,75 @@ mod ime_runtime_tests {
             rime_modifier_mask(RIME_RELEASE_MASK | 0x10),
             RIME_RELEASE_MASK
         );
+    }
+
+    #[test]
+    fn key_policy_bypasses_only_empty_composition_nonstarters() {
+        let empty = ImeState::empty();
+        assert!(key_policy::should_bypass_empty_composition(
+            key_policy::XK_BACK_SPACE,
+            0,
+            &empty
+        ));
+        assert!(key_policy::should_bypass_empty_composition(
+            b'a' as u32,
+            RIME_MOD_CONTROL,
+            &empty
+        ));
+
+        let mut composing = ImeState::empty();
+        composing.preedit = "abc".to_owned();
+        assert!(!key_policy::should_bypass_empty_composition(
+            key_policy::XK_SPACE,
+            0,
+            &composing
+        ));
+    }
+
+    #[test]
+    fn key_policy_candidate_selection_requires_candidates() {
+        let mut state = ImeState::empty();
+        state.preedit = "ab".to_owned();
+        assert_eq!(
+            key_policy::candidate_index_for_space_or_select_key(key_policy::XK_SPACE, &state),
+            None
+        );
+
+        state.candidates = vec![
+            Candidate {
+                text: "first".to_owned(),
+                comment: None,
+            },
+            Candidate {
+                text: "second".to_owned(),
+                comment: None,
+            },
+        ];
+        state.highlighted_candidate_index = 9;
+        assert_eq!(
+            key_policy::candidate_index_for_space_or_select_key(key_policy::XK_SPACE, &state),
+            Some(1)
+        );
+        assert_eq!(
+            key_policy::candidate_index_for_select_key(b'2' as u32, &state),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn key_policy_forward_consumed_ctrl_grave() {
+        assert!(key_policy::should_forward_consumed_shortcut(
+            b'`' as u32,
+            RIME_MOD_CONTROL
+        ));
+        assert!(key_policy::should_forward_consumed_shortcut(
+            b'~' as u32,
+            RIME_MOD_CONTROL
+        ));
+        assert!(!key_policy::should_forward_consumed_shortcut(
+            b'a' as u32,
+            RIME_MOD_CONTROL
+        ));
     }
 }
 

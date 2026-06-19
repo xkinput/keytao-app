@@ -18,6 +18,18 @@
           "path": "$HOME/.local/share/keytao/**"
         },
         {
+          "path": "$HOME/Library/keytao"
+        },
+        {
+          "path": "$HOME/Library/keytao/**"
+        },
+        {
+          "path": "$APPDATA/keytao"
+        },
+        {
+          "path": "$APPDATA/keytao/**"
+        },
+        {
           "path": "$HOME/.local/share/fcitx5/rime"
         },
         {

@@ -6,7 +6,7 @@
 
 use crate::engine::{CoreEngine, ImeSession};
 use crate::panel::{load_font, PanelRenderer};
-use keytao_core::{Candidate, ImeState};
+use keytao_core::{key_policy, Candidate, ImeState, RIME_RELEASE_MASK};
 use std::{
     fs,
     sync::{
@@ -167,45 +167,13 @@ impl Drop for X11Panel {
 // ── IBus text helper ─────────────────────────────────────────────────────────
 
 const IBUS_ORIENTATION_SYSTEM: i32 = 2;
-const MOD_CONTROL: u32 = 0x0004;
-const MOD_MOD1: u32 = 0x0008;
-const RELEASE_MASK: u32 = 1 << 30;
 
 fn is_shift_key(sym: u32) -> bool {
     matches!(sym, 0xffe1 | 0xffe2)
 }
 
-fn is_candidate_select_key(sym: u32) -> bool {
-    sym == 0x0020
-}
-
-fn is_enter_key(sym: u32) -> bool {
-    matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
-        return true;
-    }
-    matches!(
-        sym,
-        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
-    )
-}
-
-/// Map a keyval to a candidate index based on the engine's select_keys config.
-/// Returns None if the key is not a candidate selection key for the current state.
-fn candidate_index_for_select_key(sym: u32, state: &ImeState) -> Option<usize> {
-    if state.candidates.is_empty() {
-        return None;
-    }
-    let keys = state.select_keys.as_deref().unwrap_or("1234567890");
-    // Convert keysym to the char it represents (basic ASCII range only).
-    let ch = char::from_u32(sym)?;
-    keys.chars().position(|k| k == ch)
+fn highlighted_candidate_index(state: &ImeState) -> Option<usize> {
+    key_policy::highlighted_candidate_index(state)
 }
 
 /// Build an IBusText structure as a variant.
@@ -592,9 +560,9 @@ impl InputContext {
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> bool {
-        if state & RELEASE_MASK != 0 {
+        if state & RIME_RELEASE_MASK != 0 {
             if is_shift_key(keyval) {
-                if let Some(result) = self.session.process_key_result(keyval, RELEASE_MASK) {
+                if let Some(result) = self.session.process_key_result(keyval, RIME_RELEASE_MASK) {
                     tracing::debug!(
                         "IBus mode after Shift release: ascii_mode={}",
                         result.state.ascii_mode
@@ -609,11 +577,11 @@ impl InputContext {
         tracing::info!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
 
         let before_state = self.session.state();
-        if should_bypass_empty_composition(keyval, state, &before_state) {
+        if key_policy::should_bypass_empty_composition(keyval, state, &before_state) {
             self.clear_ui(&ctxt).await;
             return false;
         }
-        if is_enter_key(keyval) && !before_state.preedit.is_empty() {
+        if key_policy::is_enter_key(keyval) && !before_state.preedit.is_empty() {
             clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
             let ov = ibus_text_value(&before_state.preedit);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
@@ -627,16 +595,9 @@ impl InputContext {
             let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
             return true;
         }
-        let candidate_select_index = if is_candidate_select_key(keyval) {
-            Some(
-                before_state
-                    .highlighted_candidate_index
-                    .min(before_state.candidates.len().saturating_sub(1)),
-            )
-        } else {
-            candidate_index_for_select_key(keyval, &before_state)
-        };
-        if let Some(index) = candidate_select_index {
+        if let Some(index) =
+            key_policy::candidate_index_for_space_or_select_key(keyval, &before_state)
+        {
             if self.select_candidate_at(index, &ctxt).await {
                 return true;
             }
@@ -855,6 +816,30 @@ fn write_ibus_address_files(dbus_address: &str) {
     }
 }
 
+fn session_bus_address() -> String {
+    let uid = unsafe { libc::geteuid() };
+    session_bus_address_from(
+        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+        uid,
+    )
+}
+
+fn session_bus_address_from(
+    dbus_session_bus_address: Option<String>,
+    xdg_runtime_dir: Option<String>,
+    uid: u32,
+) -> String {
+    dbus_session_bus_address
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            xdg_runtime_dir
+                .filter(|value| !value.trim().is_empty())
+                .map(|runtime_dir| format!("unix:path={runtime_dir}/bus"))
+        })
+        .unwrap_or_else(|| format!("unix:path=/run/user/{uid}/bus"))
+}
+
 fn read_machine_id() -> String {
     for path in &["/etc/machine-id", "/var/lib/dbus/machine-id"] {
         if let Ok(s) = fs::read_to_string(path) {
@@ -984,9 +969,7 @@ pub async fn run(engine: CoreEngine) {
         tracing::warn!("Kimpanel: failed to request Kimpanel name (running as secondary?): {e}");
     }
 
-    let dbus_address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
-        .unwrap_or_else(|_| "unix:path=/run/user/1000/bus".to_owned());
-
+    let dbus_address = session_bus_address();
     write_ibus_address_files(&dbus_address);
 
     let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
@@ -1032,12 +1015,44 @@ pub async fn run(engine: CoreEngine) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_bypass_empty_composition;
-    use keytao_core::ImeState;
+    use super::{highlighted_candidate_index, session_bus_address_from};
+    use keytao_core::{Candidate, ImeState};
 
     #[test]
     fn empty_composition_backspace_bypasses_to_client() {
         let state = ImeState::empty();
-        assert!(should_bypass_empty_composition(0xff08, 0x10, &state));
+        assert!(key_policy::should_bypass_empty_composition(
+            0xff08, 0x10, &state
+        ));
+    }
+
+    #[test]
+    fn highlighted_candidate_requires_candidates() {
+        let state = ImeState::empty();
+        assert_eq!(highlighted_candidate_index(&state), None);
+
+        let mut state = ImeState::empty();
+        state.candidates = vec![Candidate {
+            text: "first".to_owned(),
+            comment: None,
+        }];
+        state.highlighted_candidate_index = 9;
+        assert_eq!(highlighted_candidate_index(&state), Some(0));
+    }
+
+    #[test]
+    fn session_bus_address_uses_current_uid_fallback() {
+        assert_eq!(
+            session_bus_address_from(None, None, 501),
+            "unix:path=/run/user/501/bus"
+        );
+        assert_eq!(
+            session_bus_address_from(None, Some("/run/user/502".to_owned()), 501),
+            "unix:path=/run/user/502/bus"
+        );
+        assert_eq!(
+            session_bus_address_from(Some("unix:path=/tmp/bus".to_owned()), None, 501),
+            "unix:path=/tmp/bus"
+        );
     }
 }

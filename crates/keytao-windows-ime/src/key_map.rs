@@ -4,7 +4,9 @@
 //! The Wayland backend converts hardware keycodes via xkbcommon; here we convert
 //! Windows VK codes directly.
 
-pub use keytao_core::{RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
+pub use keytao_core::{
+    key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+};
 
 /// Read the current state of Shift, Control, Alt and return an X11 modifier mask.
 pub fn current_mod_mask() -> u32 {
@@ -125,31 +127,16 @@ pub fn is_enter_vk(vk: u16) -> bool {
 }
 
 pub fn candidate_index_for_select_key(vk: u16, state: &keytao_core::ImeState) -> Option<usize> {
-    if state.candidates.is_empty() {
-        return None;
-    }
-
     if is_space_vk(vk) {
-        return Some(
-            state
-                .highlighted_candidate_index
-                .min(state.candidates.len().saturating_sub(1)),
-        );
+        return key_policy::highlighted_candidate_index(state);
     }
 
     let ch = ascii_char_for_vk(vk)?;
-    let keys = state.select_keys.as_deref().unwrap_or("1234567890");
-    keys.chars().position(|candidate_key| candidate_key == ch)
+    key_policy::candidate_index_for_char(ch, state)
 }
 
 pub fn should_bypass_empty_composition(vk: u16, mods: u32, state: &keytao_core::ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
-        return true;
-    }
-    is_nonstarter_vk(vk)
+    key_policy::should_bypass_empty_composition_key(is_nonstarter_vk(vk), mods, state)
 }
 
 /// Returns true for keys the IME should intercept.

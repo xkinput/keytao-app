@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use keytao_core::ImeState;
+use keytao_core::{
+    key_policy, ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+};
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -41,44 +43,10 @@ use crate::{
     panel::{load_font, PanelRenderer},
 };
 
-const MOD_SHIFT: u32 = 0x0001;
-const MOD_CONTROL: u32 = 0x0004;
-const MOD_MOD1: u32 = 0x0008;
-const RELEASE_MASK: u32 = 1 << 30;
 const DEACTIVATE_DEBOUNCE: Duration = Duration::from_millis(180);
 
 fn is_shift_key(sym: u32) -> bool {
     sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
-}
-
-fn is_candidate_select_key(sym: u32) -> bool {
-    sym == 0x0020
-}
-
-fn is_enter_key(sym: u32) -> bool {
-    matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
-        return true;
-    }
-    matches!(
-        sym,
-        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
-    )
-}
-
-fn should_forward_consumed_shortcut(sym_raw: u32, effective_mods: u32) -> bool {
-    let ctrl_held = effective_mods & MOD_CONTROL != 0;
-    ctrl_held
-        && matches!(
-            sym_raw,
-            xkb::keysyms::KEY_grave | xkb::keysyms::KEY_asciitilde
-        )
 }
 
 struct App {
@@ -399,18 +367,18 @@ impl App {
         }
 
         let effective_mods = if is_shift_key(sym_raw) {
-            self.mods & !MOD_SHIFT
+            self.mods & !RIME_MOD_SHIFT
         } else {
             self.mods
         };
 
         let before_state = self.session.state();
-        if should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
+        if key_policy::should_bypass_empty_composition(sym_raw, effective_mods, &before_state) {
             self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
             return;
         }
 
-        if is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
+        if key_policy::is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
             if let Some(ctx) = &self.context {
                 tracing::info!("KDE commit_string(preedit): {:?}", before_state.preedit);
                 ctx.commit_string(self.serial, before_state.preedit.clone());
@@ -422,10 +390,10 @@ impl App {
             return;
         }
 
-        if is_candidate_select_key(sym_raw) && !before_state.candidates.is_empty() {
-            let index = before_state
-                .highlighted_candidate_index
-                .min(before_state.candidates.len().saturating_sub(1));
+        if let Some(index) = key_policy::is_space_key(sym_raw)
+            .then(|| key_policy::highlighted_candidate_index(&before_state))
+            .flatten()
+        {
             if let Some(ime_state) = self.session.select_candidate(index) {
                 self.commit_state_to_context(&ime_state);
                 self.update_kimpanel(&ime_state);
@@ -446,7 +414,7 @@ impl App {
             self.commit_state_to_context(&ime_state);
             self.update_kimpanel(&ime_state);
             self.show_panel(ime_state, qh);
-            if should_forward_consumed_shortcut(sym_raw, effective_mods) {
+            if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
                 self.forward_key(evdev_keycode, wl_keyboard::KeyState::Pressed as u32);
             }
         } else {
@@ -462,7 +430,7 @@ impl App {
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
         let sym_raw = self.key_sym(evdev_keycode);
         if is_shift_key(sym_raw) {
-            if let Some(result) = self.session.process_key_result(sym_raw, RELEASE_MASK) {
+            if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
                 self.update_ascii_mode(result.state.ascii_mode, qh);
             }
         }
@@ -619,13 +587,13 @@ impl Dispatch<WlKeyboard, ()> for App {
                     let mut m = 0u32;
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
                     {
-                        m |= MOD_SHIFT;
+                        m |= RIME_MOD_SHIFT;
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE) {
-                        m |= MOD_CONTROL;
+                        m |= RIME_MOD_CONTROL;
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE) {
-                        m |= MOD_MOD1;
+                        m |= RIME_MOD_ALT;
                     }
                     state.mods = m;
                 }

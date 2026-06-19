@@ -37,6 +37,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
         let state = new_shared_state();
+        obj_add();
         let ts: ITfTextInputProcessor = TextService { state }.into();
         unsafe {
             ts.query(riid, ppvobject).ok()?;
@@ -55,6 +56,12 @@ impl IClassFactory_Impl for ClassFactory_Impl {
 #[implement(ITfTextInputProcessor)]
 pub(crate) struct TextService {
     state: SharedState,
+}
+
+impl Drop for TextService {
+    fn drop(&mut self) {
+        obj_release();
+    }
 }
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
@@ -92,7 +99,6 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         // Advise ThreadMgrEventSink (optional but good practice for focus tracking)
         // We skip this for now to keep the implementation minimal.
 
-        obj_add();
         tracing::info!("KeyTao TSF activated (client_id={})", tid);
         Ok(())
     }
@@ -118,7 +124,6 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         st.thread_mgr = None;
         st.ime_state = None;
 
-        obj_release();
         tracing::info!("KeyTao TSF deactivated");
         Ok(())
     }

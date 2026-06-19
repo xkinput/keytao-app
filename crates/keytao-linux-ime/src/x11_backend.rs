@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use keytao_core::ImeState;
+use keytao_core::{key_policy, ImeState};
 use x11rb::{
     connection::Connection as _,
     protocol::{
@@ -28,30 +28,6 @@ use crate::{
     engine::{CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
 };
-
-const MOD_CONTROL: u32 = 0x0004;
-const MOD_MOD1: u32 = 0x0008;
-
-fn is_candidate_select_key(sym: u32) -> bool {
-    sym == 0x0020
-}
-
-fn is_enter_key(sym: u32) -> bool {
-    matches!(sym, 0xff0d | 0xff8d)
-}
-
-fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
-    if !state.preedit.is_empty() || !state.candidates.is_empty() {
-        return false;
-    }
-    if mods & (MOD_CONTROL | MOD_MOD1) != 0 {
-        return true;
-    }
-    matches!(
-        sym,
-        0x0020 | 0xff08 | 0xffff | 0xff09 | 0xff0d | 0xff1b | 0xff50..=0xff58 | 0xff8d
-    )
-}
 
 fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(), ServerError> {
     tracing::info!("XIM commit text: {text:?}");
@@ -387,22 +363,22 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         );
 
         let before_state = user_ic.user_data.session.state();
-        if should_bypass_empty_composition(keysym, mods, &before_state) {
+        if key_policy::should_bypass_empty_composition(keysym, mods, &before_state) {
             self.hide_panel();
             draw_client_preedit(server, &mut user_ic.ic, "")?;
             return Ok(false);
         }
-        if is_enter_key(keysym) && !before_state.preedit.is_empty() {
+        if key_policy::is_enter_key(keysym) && !before_state.preedit.is_empty() {
             draw_client_preedit(server, &mut user_ic.ic, "")?;
             commit_text(server, &user_ic.ic, &before_state.preedit)?;
             user_ic.user_data.session.reset();
             self.hide_panel();
             return Ok(true);
         }
-        if is_candidate_select_key(keysym) && !before_state.candidates.is_empty() {
-            let index = before_state
-                .highlighted_candidate_index
-                .min(before_state.candidates.len().saturating_sub(1));
+        if let Some(index) = key_policy::is_space_key(keysym)
+            .then(|| key_policy::highlighted_candidate_index(&before_state))
+            .flatten()
+        {
             if let Some(ime_state) = user_ic.user_data.session.select_candidate(index) {
                 if let Some(text) = &ime_state.committed {
                     draw_client_preedit(server, &mut user_ic.ic, "")?;

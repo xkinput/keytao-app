@@ -128,10 +128,16 @@ interface LinuxImeStatus {
   kde_configured: boolean
   running: boolean
   managed_pid: number | null
+  daemon_owner_pid: number | null
   command: string
   processes: string[]
   kde_native_processes: number
   fallback_processes: number
+  user_data_dir: string | null
+  shared_data_dir: string | null
+  shared_data_source: string
+  reload_stamp_path: string | null
+  reload_stamp_signature: string | null
   message: string
 }
 
@@ -142,12 +148,23 @@ interface WindowsImeStatus {
   runtime_dir: string | null
   dll_path: string | null
   registered_path: string | null
+  user_data_dir: string | null
+  shared_data_dir: string | null
+  shared_data_source: string
+  reload_stamp_path: string | null
+  reload_stamp_signature: string | null
   message: string
 }
 
 interface MacosImeStatus {
   installed: boolean
   app_path: string | null
+  user_data_dir: string | null
+  shared_data_dir: string | null
+  shared_data_source: string
+  reload_stamp_path: string | null
+  reload_stamp_signature: string | null
+  log_dir: string | null
   message: string
 }
 

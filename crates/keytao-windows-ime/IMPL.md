@@ -144,7 +144,7 @@ stamp 的 mtime/size 签名变化后，`TsfState::check_reload_stamp()` 调用 `
 
 ## 排查入口
 
-- `windows_ime_status` 的 `packaged`、`registered`、`dll_path`、`registered_path`。
+- `windows_ime_status` 的 `packaged`、`registered`、`runtime_dir`、`dll_path`、`registered_path`、`user_data_dir`、`shared_data_dir`、`shared_data_source`、`reload_stamp_path`、`reload_stamp_signature`。
 - 注册表：`HKCR\CLSID\{4A5C6D7E-8F90-1A2B-3C4D-5E6F7A8B9C0D}\InprocServer32`。
 - DLL 同级是否有 `rime.dll`。
 - 运行时目录是否有 `rime-data/default.yaml`。

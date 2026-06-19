@@ -104,8 +104,11 @@ fn dll_path() -> Result<String> {
         .get()
         .map(|raw| windows::Win32::Foundation::HMODULE(*raw as _))
         .unwrap_or_default();
-    let mut buf = vec![0u16; 260];
+    let mut buf = vec![0u16; 32768];
     let len = unsafe { GetModuleFileNameW(hmod, &mut buf) } as usize;
+    if len == 0 || len >= buf.len() {
+        return Err(windows::core::Error::from_win32());
+    }
     Ok(String::from_utf16_lossy(&buf[..len]))
 }
 
