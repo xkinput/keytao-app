@@ -120,6 +120,8 @@ Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 
 3. `panel.rs` 把 `ascii_mode` 转成 `ModeHintModel`，统一 `中`/`英` 文案、背景色、前景色、字号、尺寸、圆角和显示时长。
 4. Windows renderer 把 `ResolvedImeTheme + CandidatePanelModel / ModeHintModel` 渲染到 layered window 像素 buffer。
 
+`theme.yaml` v2 支持 `ui.colorScheme: auto | light | dark`、`ui.accentColor` 和 `light:` / `dark:` 模式变体；`auto` 跟随系统主题，Windows 自绘候选窗会消费解析后的最终主题。
+
 用户主题路径跟随 `keytao_core::default_user_data_dir()`，即 `%APPDATA%/keytao/theme.yaml`；开发覆盖可用 `KEYTAO_IME_THEME_PATH`。
 
 ## key map

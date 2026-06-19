@@ -64,7 +64,7 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
    - 自绘通道把 `ResolvedImeTheme + Model` 渲染成 BGRA buffer。
    - IBus/Kimpanel 通道只映射候选结构、label、cursor、page 能力，不假装能控制系统主题。
 
-`theme.yaml` 第一版应只表达跨平台可落地语义：字体族、字号、padding、gap、圆角、边框、阴影、最大宽度、背景/前景/注释/label/highlight/separator/preedit 颜色、模式提示尺寸/持续时间/文案/颜色。缩放仍应保留平台 fallback：Linux 可以继续读取 `KEYTAO_IME_PANEL_SCALE`、`GDK_SCALE`、`QT_SCALE_FACTOR`、`QT_SCREEN_SCALE_FACTORS` 和 X11 `Xft.dpi`，但这些应只影响最终 scale，不覆盖主题语义。
+`theme.yaml` v2 表达跨平台可落地语义：`ui.colorScheme: auto | light | dark`、`ui.accentColor`、`light:`/`dark:` 模式变体、字体族、字号、padding、gap、圆角、边框、阴影、最大宽度、横竖排、背景/前景/注释/label/highlight/separator/preedit 颜色、模式提示尺寸/持续时间/文案/颜色。`auto` 会跟随系统主题并解析出最终 `effectiveColorScheme`。缩放仍应保留平台 fallback：Linux 可以继续读取 `KEYTAO_IME_PANEL_SCALE`、`GDK_SCALE`、`QT_SCALE_FACTOR`、`QT_SCREEN_SCALE_FACTORS` 和 X11 `Xft.dpi`，但这些应只影响最终 scale，不覆盖主题语义。
 
 `panel.rs` 不再持有业务意义的固定颜色常量；它只持有字体 fallback、缩放检测和像素渲染算法。各后端也不应直接拼接颜色、间距或模式提示尺寸。
 

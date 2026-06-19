@@ -8,10 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
-pub const THEME_SCHEMA_VERSION: u32 = 1;
+pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,21 @@ pub enum FontWeight {
     Black,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiColorScheme {
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffectiveColorScheme {
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RgbaColor {
@@ -48,11 +64,20 @@ pub struct RgbaColor {
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedImeTheme {
     pub version: u32,
+    pub ui: UiTheme,
     pub font: FontTheme,
     pub panel: PanelTheme,
     pub candidate: CandidateTheme,
     pub navigation: NavigationTheme,
     pub mode_hint: ModeHintTheme,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiTheme {
+    pub color_scheme: UiColorScheme,
+    pub effective_color_scheme: EffectiveColorScheme,
+    pub accent_color: Option<RgbaColor>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -282,15 +307,19 @@ impl ThemeResolver {
     }
 
     fn signature(&self) -> String {
-        [
+        let mut parts = [
             self.default_theme_path.as_deref(),
             self.user_theme_path.as_deref(),
         ]
         .into_iter()
         .flatten()
         .map(path_signature)
-        .collect::<Vec<_>>()
-        .join("|")
+        .collect::<Vec<_>>();
+        parts.push(format!(
+            "system:{:?}",
+            cached_system_effective_color_scheme()
+        ));
+        parts.join("|")
     }
 }
 
@@ -324,9 +353,21 @@ pub fn resolve_theme_from_paths(
     default_theme_path: Option<&Path>,
     user_theme_path: Option<&Path>,
 ) -> ResolvedImeTheme {
-    let mut theme = ResolvedImeTheme::default();
+    resolve_theme_from_paths_with_system(
+        default_theme_path,
+        user_theme_path,
+        cached_system_effective_color_scheme(),
+    )
+}
+
+fn resolve_theme_from_paths_with_system(
+    default_theme_path: Option<&Path>,
+    user_theme_path: Option<&Path>,
+    system_scheme: EffectiveColorScheme,
+) -> ResolvedImeTheme {
+    let mut partials = Vec::new();
     if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
-        theme.apply(partial);
+        partials.push(partial);
     }
     for path in [default_theme_path, user_theme_path].into_iter().flatten() {
         let Ok(content) = fs::read_to_string(path) else {
@@ -335,8 +376,40 @@ pub fn resolve_theme_from_paths(
         let Ok(partial) = serde_yaml::from_str::<PartialTheme>(&content) else {
             continue;
         };
-        theme.apply(partial);
+        partials.push(partial);
     }
+
+    let mut ui = UiTheme::default();
+    for partial in &partials {
+        if let Some(partial_ui) = partial.ui.clone() {
+            ui.apply(partial_ui);
+        }
+    }
+    ui.effective_color_scheme = match ui.color_scheme {
+        UiColorScheme::Auto => system_scheme,
+        UiColorScheme::Light => EffectiveColorScheme::Light,
+        UiColorScheme::Dark => EffectiveColorScheme::Dark,
+    };
+
+    let mut theme = ResolvedImeTheme {
+        ui: ui.clone(),
+        ..ResolvedImeTheme::default()
+    };
+    for partial in partials {
+        theme.apply(partial.clone());
+        if ui.effective_color_scheme == EffectiveColorScheme::Light {
+            if let Some(light) = partial.light {
+                theme.apply_variant(light);
+            }
+        } else if let Some(dark) = partial.dark {
+            theme.apply_variant(dark);
+        }
+    }
+    theme.ui = ui.clone();
+    if let Some(accent_color) = ui.accent_color {
+        theme.apply_accent_color(accent_color);
+    }
+
     theme.sanitized()
 }
 
@@ -417,6 +490,19 @@ impl ResolvedImeTheme {
         if let Some(version) = partial.version {
             self.version = version;
         }
+        if let Some(ui) = partial.ui {
+            self.ui.apply(ui);
+        }
+        self.apply_variant(PartialThemeVariant {
+            font: partial.font,
+            panel: partial.panel,
+            candidate: partial.candidate,
+            navigation: partial.navigation,
+            mode_hint: partial.mode_hint,
+        });
+    }
+
+    fn apply_variant(&mut self, partial: PartialThemeVariant) {
         if let Some(font) = partial.font {
             self.font.apply(font);
         }
@@ -432,6 +518,24 @@ impl ResolvedImeTheme {
         if let Some(mode_hint) = partial.mode_hint {
             self.mode_hint.apply(mode_hint);
         }
+    }
+
+    fn apply_accent_color(&mut self, accent: RgbaColor) {
+        let panel_background = self.panel.background;
+        let is_dark = self.ui.effective_color_scheme == EffectiveColorScheme::Dark;
+        let selected_weight = if is_dark { 0.42 } else { 0.18 };
+        let hover_weight = if is_dark { 0.22 } else { 0.09 };
+        let hint_weight = if is_dark { 0.32 } else { 0.14 };
+
+        self.candidate.selected_label_color = opaque(accent);
+        self.candidate.selected_border_color = opaque(accent);
+        self.candidate.selected_background =
+            with_alpha(mix_color(panel_background, accent, selected_weight), 0xff);
+        self.candidate.hover_background =
+            with_alpha(mix_color(panel_background, accent, hover_weight), 0xff);
+        self.mode_hint.foreground = opaque(accent);
+        self.mode_hint.background =
+            with_alpha(mix_color(panel_background, accent, hint_weight), 0xf2);
     }
 
     fn sanitized(mut self) -> Self {
@@ -471,6 +575,7 @@ impl Default for ResolvedImeTheme {
     fn default() -> Self {
         Self {
             version: THEME_SCHEMA_VERSION,
+            ui: UiTheme::default(),
             font: FontTheme {
                 family: None,
                 size: 18.0,
@@ -540,10 +645,35 @@ impl Default for ResolvedImeTheme {
     }
 }
 
-#[derive(Default, Deserialize)]
+impl Default for UiTheme {
+    fn default() -> Self {
+        Self {
+            color_scheme: UiColorScheme::Auto,
+            effective_color_scheme: EffectiveColorScheme::Light,
+            accent_color: None,
+        }
+    }
+}
+
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialTheme {
     version: Option<u32>,
+    ui: Option<PartialUiTheme>,
+    font: Option<PartialFontTheme>,
+    panel: Option<PartialPanelTheme>,
+    candidate: Option<PartialCandidateTheme>,
+    navigation: Option<PartialNavigationTheme>,
+    #[serde(alias = "mode_hint")]
+    mode_hint: Option<PartialModeHintTheme>,
+    light: Option<PartialThemeVariant>,
+    #[serde(alias = "night")]
+    dark: Option<PartialThemeVariant>,
+}
+
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialThemeVariant {
     font: Option<PartialFontTheme>,
     panel: Option<PartialPanelTheme>,
     candidate: Option<PartialCandidateTheme>,
@@ -552,7 +682,18 @@ struct PartialTheme {
     mode_hint: Option<PartialModeHintTheme>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialUiTheme {
+    #[serde(alias = "color_scheme")]
+    color_scheme: Option<UiColorScheme>,
+    #[serde(alias = "night_mode")]
+    night_mode: Option<bool>,
+    #[serde(default, deserialize_with = "optional_color")]
+    accent_color: Option<RgbaColor>,
+}
+
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialFontTheme {
     family: Option<String>,
@@ -563,7 +704,7 @@ struct PartialFontTheme {
     weight: Option<FontWeight>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialPanelTheme {
     orientation: Option<PanelOrientation>,
@@ -583,7 +724,7 @@ struct PartialPanelTheme {
     shadow: Option<bool>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialCandidateTheme {
     #[serde(default, deserialize_with = "optional_color")]
@@ -621,7 +762,7 @@ struct PartialCandidateTheme {
     label_suffix: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialNavigationTheme {
     #[serde(default, deserialize_with = "optional_color")]
@@ -634,7 +775,7 @@ struct PartialNavigationTheme {
     corner_radius: Option<f32>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialModeHintTheme {
     #[serde(default, deserialize_with = "optional_color")]
@@ -649,6 +790,23 @@ struct PartialModeHintTheme {
     shadow: Option<bool>,
     chinese_text: Option<String>,
     english_text: Option<String>,
+}
+
+impl UiTheme {
+    fn apply(&mut self, partial: PartialUiTheme) {
+        if let Some(color_scheme) = partial.color_scheme {
+            self.color_scheme = color_scheme;
+        } else if let Some(night_mode) = partial.night_mode {
+            self.color_scheme = if night_mode {
+                UiColorScheme::Dark
+            } else {
+                UiColorScheme::Light
+            };
+        }
+        if let Some(accent_color) = partial.accent_color {
+            self.accent_color = Some(accent_color);
+        }
+    }
 }
 
 impl FontTheme {
@@ -831,6 +989,155 @@ fn path_signature(path: &Path) -> String {
     format!("{}:{mtime}:{}", path.display(), meta.len())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SystemSchemeCache {
+    checked_at: Instant,
+    scheme: EffectiveColorScheme,
+}
+
+fn cached_system_effective_color_scheme() -> EffectiveColorScheme {
+    static CACHE: OnceLock<Mutex<Option<SystemSchemeCache>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut cache) = cache.lock() else {
+        return detect_system_effective_color_scheme();
+    };
+    let now = Instant::now();
+    if let Some(entry) = *cache {
+        if now.duration_since(entry.checked_at) < Duration::from_secs(1) {
+            return entry.scheme;
+        }
+    }
+    let scheme = detect_system_effective_color_scheme();
+    *cache = Some(SystemSchemeCache {
+        checked_at: now,
+        scheme,
+    });
+    scheme
+}
+
+fn detect_system_effective_color_scheme() -> EffectiveColorScheme {
+    if let Ok(value) = std::env::var("KEYTAO_IME_SYSTEM_COLOR_SCHEME") {
+        if let Some(scheme) = parse_effective_color_scheme(&value) {
+            return scheme;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(scheme) = command_output_scheme(
+            "defaults",
+            &["read", "-g", "AppleInterfaceStyle"],
+            |output| {
+                if output.to_ascii_lowercase().contains("dark") {
+                    Some(EffectiveColorScheme::Dark)
+                } else {
+                    None
+                }
+            },
+        ) {
+            return scheme;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(scheme) = command_output_scheme(
+            "reg",
+            &[
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "/v",
+                "AppsUseLightTheme",
+            ],
+            |output| {
+                let lower = output.to_ascii_lowercase();
+                if lower.contains("0x0") {
+                    Some(EffectiveColorScheme::Dark)
+                } else if lower.contains("0x1") {
+                    Some(EffectiveColorScheme::Light)
+                } else {
+                    None
+                }
+            },
+        ) {
+            return scheme;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(value) = std::env::var("GTK_THEME") {
+            if value.to_ascii_lowercase().contains("dark") {
+                return EffectiveColorScheme::Dark;
+            }
+        }
+        if let Some(scheme) = command_output_scheme(
+            "gsettings",
+            &["get", "org.gnome.desktop.interface", "color-scheme"],
+            |output| {
+                let lower = output.to_ascii_lowercase();
+                if lower.contains("prefer-dark") {
+                    Some(EffectiveColorScheme::Dark)
+                } else if lower.contains("prefer-light") || lower.contains("default") {
+                    Some(EffectiveColorScheme::Light)
+                } else {
+                    None
+                }
+            },
+        ) {
+            return scheme;
+        }
+    }
+
+    EffectiveColorScheme::Light
+}
+
+fn parse_effective_color_scheme(value: &str) -> Option<EffectiveColorScheme> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "dark" | "night" => Some(EffectiveColorScheme::Dark),
+        "light" | "day" => Some(EffectiveColorScheme::Light),
+        _ => None,
+    }
+}
+
+fn command_output_scheme(
+    command: &str,
+    args: &[&str],
+    parse: impl FnOnce(&str) -> Option<EffectiveColorScheme>,
+) -> Option<EffectiveColorScheme> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse(&format!("{stdout}\n{stderr}"))
+}
+
+fn mix_color(base: RgbaColor, accent: RgbaColor, accent_weight: f32) -> RgbaColor {
+    let weight = accent_weight.clamp(0.0, 1.0);
+    rgba(
+        mix_channel(base.red, accent.red, weight),
+        mix_channel(base.green, accent.green, weight),
+        mix_channel(base.blue, accent.blue, weight),
+        0xff,
+    )
+}
+
+fn mix_channel(base: u8, accent: u8, accent_weight: f32) -> u8 {
+    (base as f32 * (1.0 - accent_weight) + accent as f32 * accent_weight)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn opaque(color: RgbaColor) -> RgbaColor {
+    with_alpha(color, 0xff)
+}
+
+fn with_alpha(color: RgbaColor, alpha: u8) -> RgbaColor {
+    rgba(color.red, color.green, color.blue, alpha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +1146,7 @@ mod tests {
     fn default_theme_yaml_resolves() {
         let theme = resolve_theme_from_paths(None, None);
         assert_eq!(theme.version, THEME_SCHEMA_VERSION);
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
         assert_eq!(theme.candidate.label_suffix, ".");
     }
@@ -858,6 +1166,72 @@ mod tests {
             theme.candidate.selected_background,
             rgba(0x11, 0x22, 0x33, 0x44)
         );
+    }
+
+    #[test]
+    fn dark_ui_scheme_applies_dark_variant() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-dark-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "ui:\n  colorScheme: dark\ndark:\n  candidate:\n    foreground: '#010203'\n",
+        )
+        .unwrap();
+
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Dark);
+        assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
+        assert_eq!(theme.candidate.foreground, rgba(0x01, 0x02, 0x03, 0xff));
+    }
+
+    #[test]
+    fn auto_ui_scheme_uses_system_variant() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-auto-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "ui:\n  colorScheme: auto\ndark:\n  candidate:\n    foreground: '#0A0B0C'\n",
+        )
+        .unwrap();
+
+        let theme =
+            resolve_theme_from_paths_with_system(None, Some(&path), EffectiveColorScheme::Dark);
+        fs::remove_file(path).ok();
+
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
+        assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
+        assert_eq!(theme.candidate.foreground, rgba(0x0a, 0x0b, 0x0c, 0xff));
+    }
+
+    #[test]
+    fn night_mode_alias_selects_dark_scheme() {
+        let mut theme = ResolvedImeTheme::default();
+        let partial = serde_yaml::from_str::<PartialTheme>("ui:\n  nightMode: true\n").unwrap();
+        theme.apply(partial);
+
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Dark);
+    }
+
+    #[test]
+    fn accent_color_derives_highlight_colors() {
+        let theme = resolve_theme_from_paths_with_system(None, None, EffectiveColorScheme::Light);
+        let mut theme = theme;
+        theme.ui.accent_color = Some(rgba(0x12, 0x34, 0x56, 0xff));
+        theme.apply_accent_color(rgba(0x12, 0x34, 0x56, 0xff));
+
+        assert_eq!(
+            theme.candidate.selected_label_color,
+            rgba(0x12, 0x34, 0x56, 0xff)
+        );
+        assert_eq!(theme.mode_hint.foreground, rgba(0x12, 0x34, 0x56, 0xff));
     }
 
     #[test]

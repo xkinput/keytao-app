@@ -41,6 +41,17 @@ enum ThemeFontWeight: String, Codable {
     }
 }
 
+enum ThemeColorScheme: String, Codable {
+    case auto
+    case light
+    case dark
+}
+
+enum EffectiveThemeColorScheme: String, Codable {
+    case light
+    case dark
+}
+
 struct ThemeColor: Codable {
     var red: Int
     var green: Int
@@ -62,6 +73,12 @@ struct ThemeColor: Codable {
 }
 
 struct ImeTheme: Codable {
+    struct Ui: Codable {
+        var colorScheme: ThemeColorScheme
+        var effectiveColorScheme: EffectiveThemeColorScheme
+        var accentColor: ThemeColor?
+    }
+
     struct Font: Codable {
         var family: String?
         var size: CGFloat
@@ -133,6 +150,7 @@ struct ImeTheme: Codable {
     }
 
     var version: Int
+    var ui: Ui
     var font: Font
     var panel: Panel
     var candidate: CandidateOption
@@ -141,7 +159,12 @@ struct ImeTheme: Codable {
 
     static var `default`: ImeTheme {
         ImeTheme(
-            version: 1,
+            version: 2,
+            ui: Ui(
+                colorScheme: .auto,
+                effectiveColorScheme: .light,
+                accentColor: nil
+            ),
             font: Font(
                 family: nil,
                 size: 18,
@@ -224,9 +247,10 @@ final class ImeThemeManager {
 
         let defaultURL = defaultThemeURL()
         let userURL = userThemeURL()
-        let signature = [defaultURL, userURL]
+        let signatureParts = [defaultURL, userURL]
             .compactMap { $0 }
             .map { "\($0.path):\(fileSignature(for: $0))" }
+        let signature = (signatureParts + ["system:\(systemAppearanceSignature())"])
             .joined(separator: "|")
 
         if signature == cachedSignature {
@@ -301,6 +325,14 @@ final class ImeThemeManager {
         let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
         return "\(modified):\(size)"
+    }
+
+    private func systemAppearanceSignature() -> String {
+        let environment = ProcessInfo.processInfo.environment
+        if let override = environment["KEYTAO_IME_SYSTEM_COLOR_SCHEME"], !override.isEmpty {
+            return override.lowercased()
+        }
+        return UserDefaults.standard.string(forKey: "AppleInterfaceStyle")?.lowercased() ?? "light"
     }
 }
 

@@ -6,6 +6,7 @@
 
 ```text
 theme.yaml
+  -> auto/light/dark UI selection + accent color
   -> ResolvedImeTheme
 
 ImeState-like input + platform capabilities
@@ -38,7 +39,11 @@ KEYTAO_IME_THEME_PATH=/path/to/theme.yaml
 用户主题只需要写要覆盖的字段：
 
 ```yaml
-version: 1
+version: 2
+
+ui:
+  colorScheme: auto
+  accentColor: "#3B73D9"
 
 panel:
   orientation: vertical
@@ -60,6 +65,31 @@ modeHint:
   background: "#E6F0FFF2"
   foreground: "#2F5FB8"
   duration: 0.75
+```
+
+`ui.colorScheme` 支持：
+
+| 值 | 效果 |
+| --- | --- |
+| `auto` | 跟随系统明暗主题 |
+| `light` | 使用明亮 UI 配置 |
+| `dark` | 使用夜间 UI 配置 |
+
+`ui.accentColor` 可写 `#RRGGBB` 或 `#RRGGBBAA`，解析后会派生候选高亮、hover 和模式提示的强调色。
+
+主题可以提供模式变体，根级字段作为通用配置，`light:` 和 `dark:` 下的字段只在对应实际模式生效：
+
+```yaml
+ui:
+  colorScheme: auto
+  accentColor: "#46A0FF"
+
+dark:
+  panel:
+    background: "#171A20F2"
+  candidate:
+    selectedBackground: "#2D4B63"
+    foreground: "#EEF3F7"
 ```
 
 ## 平台接入

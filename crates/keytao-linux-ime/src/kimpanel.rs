@@ -1,4 +1,6 @@
-use keytao_core::{Candidate, ImeState};
+use keytao_core::ImeState;
+use keytao_theme::{CandidatePanelInput, ThemeCandidate, ThemeResolver, UiCapabilities};
+use std::sync::Arc;
 use zbus::{connection, interface, object_server::SignalContext, Connection};
 
 const KIMPANEL_BUS_NAME: &str = "org.kde.kimpanel.inputmethod";
@@ -61,6 +63,7 @@ impl Kimpanel {
 pub struct KimpanelHandle {
     ctxt: SignalContext<'static>,
     _conn: Connection,
+    theme_resolver: Arc<ThemeResolver>,
 }
 
 impl KimpanelHandle {
@@ -99,7 +102,11 @@ impl KimpanelHandle {
             }
         };
         tracing::info!("Kimpanel D-Bus panel ready");
-        let handle = Self { ctxt, _conn: conn };
+        let handle = Self {
+            ctxt,
+            _conn: conn,
+            theme_resolver: Arc::new(ThemeResolver::from_default_locations()),
+        };
         handle.register_status().await;
         Some(handle)
     }
@@ -147,14 +154,17 @@ impl KimpanelHandle {
             return;
         }
 
-        let select_keys = state.select_keys.as_deref();
-        let labels: Vec<String> = state
+        let theme = self.theme_resolver.current();
+        let model = theme.candidate_panel_model(
+            state_to_panel_input(state),
+            &UiCapabilities::system_lookup_table(),
+        );
+        let labels: Vec<String> = model
             .candidates
             .iter()
-            .enumerate()
-            .map(|(index, _)| candidate_label(index, select_keys))
+            .map(|candidate| candidate.label.clone())
             .collect();
-        let candidates: Vec<String> = state
+        let candidates: Vec<String> = model
             .candidates
             .iter()
             .map(candidate_display_text)
@@ -162,17 +172,19 @@ impl KimpanelHandle {
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
         let attrs: Vec<&str> = Vec::new();
-        let cursor = state
-            .highlighted_candidate_index
-            .min(state.candidates.len().saturating_sub(1)) as i32;
+        let cursor = model
+            .candidates
+            .iter()
+            .position(|candidate| candidate.selected)
+            .unwrap_or(0) as i32;
 
         if let Err(e) = self
             .set_lookup_table(
                 &label_refs,
                 &candidate_refs,
                 &attrs,
-                state.page > 0,
-                !state.is_last_page,
+                model.navigation.can_go_previous,
+                model.navigation.can_go_next,
                 cursor,
             )
             .await
@@ -184,8 +196,8 @@ impl KimpanelHandle {
             &label_refs,
             &candidate_refs,
             &attrs,
-            state.page > 0,
-            !state.is_last_page,
+            model.navigation.can_go_previous,
+            model.navigation.can_go_next,
         )
         .await
         {
@@ -253,21 +265,27 @@ impl KimpanelHandle {
     }
 }
 
-fn candidate_display_text(candidate: &Candidate) -> String {
-    match candidate
-        .comment
-        .as_deref()
-        .filter(|comment| !comment.is_empty())
-    {
+fn candidate_display_text(candidate: &keytao_theme::CandidateOptionModel) -> String {
+    match candidate.comment.as_deref() {
         Some(comment) => format!("{} {}", candidate.text, comment),
         None => candidate.text.clone(),
     }
 }
 
-fn candidate_label(index: usize, select_keys: Option<&str>) -> String {
-    select_keys
-        .and_then(|keys| keys.chars().nth(index))
-        .or_else(|| "1234567890".chars().nth(index))
-        .map(|ch| ch.to_string())
-        .unwrap_or_else(|| (index + 1).to_string())
+fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
+    CandidatePanelInput {
+        preedit: state.preedit.clone(),
+        candidates: state
+            .candidates
+            .iter()
+            .map(|candidate| ThemeCandidate {
+                text: candidate.text.clone(),
+                comment: candidate.comment.clone(),
+            })
+            .collect(),
+        highlighted_candidate_index: state.highlighted_candidate_index,
+        page: state.page,
+        is_last_page: state.is_last_page,
+        select_keys: state.select_keys.clone(),
+    }
 }

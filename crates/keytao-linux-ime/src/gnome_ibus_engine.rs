@@ -15,7 +15,11 @@
 //!      signals which the daemon proxies to the focused application.
 
 use crate::engine::{CoreEngine, ImeSession};
-use keytao_core::{key_policy, RIME_RELEASE_MASK};
+use keytao_core::{key_policy, ImeState, RIME_RELEASE_MASK};
+use keytao_theme::{
+    CandidateOptionModel, CandidatePanelInput, CandidatePanelModel, ThemeCandidate, ThemeResolver,
+    UiCapabilities,
+};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -58,44 +62,58 @@ fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
     zvariant::OwnedValue::try_from(ibus_text_variant(text)).expect("ibus_text_value")
 }
 
-fn candidate_display_text(c: &keytao_core::Candidate) -> String {
-    match c.comment.as_deref().filter(|s| !s.is_empty()) {
-        Some(comment) => format!("{} {}", c.text, comment),
-        None => c.text.clone(),
+fn candidate_display_text(candidate: &CandidateOptionModel) -> String {
+    match candidate.comment.as_deref() {
+        Some(comment) => format!("{} {}", candidate.text, comment),
+        None => candidate.text.clone(),
     }
 }
 
-fn candidate_label(index: usize, select_keys: Option<&str>) -> String {
-    select_keys
-        .and_then(|keys| keys.chars().nth(index))
-        .or_else(|| "1234567890".chars().nth(index))
-        .map(|ch| ch.to_string())
-        .unwrap_or_else(|| (index + 1).to_string())
+fn state_to_panel_model(state: &ImeState, theme_resolver: &ThemeResolver) -> CandidatePanelModel {
+    let theme = theme_resolver.current();
+    theme.candidate_panel_model(
+        CandidatePanelInput {
+            preedit: state.preedit.clone(),
+            candidates: state
+                .candidates
+                .iter()
+                .map(|candidate| ThemeCandidate {
+                    text: candidate.text.clone(),
+                    comment: candidate.comment.clone(),
+                })
+                .collect(),
+            highlighted_candidate_index: state.highlighted_candidate_index,
+            page: state.page,
+            is_last_page: state.is_last_page,
+            select_keys: state.select_keys.clone(),
+        },
+        &UiCapabilities::system_lookup_table(),
+    )
 }
 
-fn ibus_lookup_table_value(state: &ImeState) -> zvariant::OwnedValue {
+fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::OwnedValue {
     use zvariant::{Array, Dict, Signature, StructureBuilder, Value};
     let sig_s = Signature::try_from("s").unwrap();
     let sig_v = Signature::try_from("v").unwrap();
     let empty_dict = Dict::new(sig_s, sig_v.clone());
     let mut candidates = Array::new(sig_v.clone());
-    for c in &state.candidates {
-        let wrapped = Value::Value(Box::new(ibus_text_variant(&candidate_display_text(c))));
+    for candidate in &model.candidates {
+        let wrapped = Value::Value(Box::new(ibus_text_variant(&candidate_display_text(
+            candidate,
+        ))));
         candidates.append(wrapped).ok();
     }
     let mut labels = Array::new(sig_v);
-    let select_keys = state.select_keys.as_deref();
-    for i in 0..state.candidates.len() {
-        let wrapped = Value::Value(Box::new(ibus_text_variant(&candidate_label(
-            i,
-            select_keys,
-        ))));
+    for candidate in &model.candidates {
+        let wrapped = Value::Value(Box::new(ibus_text_variant(&candidate.label)));
         labels.append(wrapped).ok();
     }
-    let page_size = state.candidates.len().clamp(1, 16) as u32;
-    let cursor_pos = state
-        .highlighted_candidate_index
-        .min(state.candidates.len().saturating_sub(1)) as u32;
+    let page_size = model.candidates.len().clamp(1, 16) as u32;
+    let cursor_pos = model
+        .candidates
+        .iter()
+        .position(|candidate| candidate.selected)
+        .unwrap_or(0) as u32;
     let table = StructureBuilder::new()
         .add_field("IBusLookupTable".to_owned())
         .append_field(Value::Dict(empty_dict))
@@ -199,6 +217,7 @@ trait IBusBusDaemon {
 pub struct IBusFactory {
     engine: CoreEngine,
     counter: Arc<AtomicU32>,
+    theme_resolver: Arc<ThemeResolver>,
 }
 
 #[interface(name = "org.freedesktop.IBus.Factory")]
@@ -216,7 +235,13 @@ impl IBusFactory {
             .create_session()
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         server
-            .at(path.clone(), IBusEngine { session })
+            .at(
+                path.clone(),
+                IBusEngine {
+                    session,
+                    theme_resolver: self.theme_resolver.clone(),
+                },
+            )
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         zvariant::OwnedObjectPath::try_from(path)
@@ -228,6 +253,7 @@ impl IBusFactory {
 
 pub struct IBusEngine {
     session: ImeSession,
+    theme_resolver: Arc<ThemeResolver>,
 }
 
 impl IBusEngine {
@@ -262,7 +288,8 @@ impl IBusEngine {
         if ime_state.candidates.is_empty() {
             let _ = IBusEngine::hide_lookup_table(ctxt).await;
         } else {
-            let ov = ibus_lookup_table_value(&ime_state);
+            let model = state_to_panel_model(&ime_state, &self.theme_resolver);
+            let ov = ibus_lookup_table_value(&model);
             if let Ok(v) = zvariant::Value::try_from(&ov) {
                 let _ = IBusEngine::update_lookup_table(ctxt, v, true).await;
             }
@@ -472,6 +499,7 @@ pub async fn run(engine: CoreEngine) {
     let factory = IBusFactory {
         engine,
         counter: Arc::new(AtomicU32::new(0)),
+        theme_resolver: Arc::new(ThemeResolver::from_default_locations()),
     };
 
     let conn = match zbus::connection::Builder::session()

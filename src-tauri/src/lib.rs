@@ -130,6 +130,143 @@ fn reload_stamp_status() -> (Option<String>, Option<String>) {
     (Some(path_string(path)), Some(signature))
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImeUiSettings {
+    pub color_scheme: keytao_theme::UiColorScheme,
+    pub effective_color_scheme: keytao_theme::EffectiveColorScheme,
+    pub orientation: keytao_theme::PanelOrientation,
+    pub accent_color: String,
+    pub theme_path: Option<String>,
+    pub theme_exists: bool,
+    pub reload_stamp_path: Option<String>,
+    pub reload_stamp_signature: Option<String>,
+    pub message: String,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ime_theme_path() -> Result<PathBuf, String> {
+    keytao_theme::default_user_theme_path().ok_or("Cannot determine keytao data directory".into())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String> {
+    let theme_path = ime_theme_path()?;
+    let theme = keytao_theme::ThemeResolver::new(None, Some(theme_path.clone())).current();
+    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
+    let accent_color = theme
+        .ui
+        .accent_color
+        .unwrap_or(theme.candidate.selected_label_color);
+    Ok(ImeUiSettings {
+        color_scheme: theme.ui.color_scheme,
+        effective_color_scheme: theme.ui.effective_color_scheme,
+        orientation: theme.panel.orientation,
+        accent_color: color_to_hex(accent_color),
+        theme_exists: theme_path.is_file(),
+        theme_path: Some(path_string(theme_path)),
+        reload_stamp_path,
+        reload_stamp_signature,
+        message,
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_ui_settings(
+    color_scheme: keytao_theme::UiColorScheme,
+    orientation: keytao_theme::PanelOrientation,
+    accent_color: String,
+) -> Result<(), String> {
+    let theme_path = ime_theme_path()?;
+    if let Some(parent) = theme_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
+    }
+    let accent_color = normalize_hex_color(&accent_color)?;
+
+    let mut root = if theme_path.is_file() {
+        let content = std::fs::read_to_string(&theme_path)
+            .map_err(|e| format!("读取主题配置失败 {}: {e}", theme_path.display()))?;
+        serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map_err(|e| format!("主题配置无法解析 {}: {e}", theme_path.display()))?
+    } else {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    };
+
+    if !matches!(root, serde_yaml::Value::Mapping(_)) {
+        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let mapping = root
+        .as_mapping_mut()
+        .ok_or("主题配置根节点必须是 YAML mapping")?;
+    mapping
+        .entry(serde_yaml::Value::String("version".into()))
+        .or_insert_with(|| {
+            serde_yaml::Value::Number(serde_yaml::Number::from(keytao_theme::THEME_SCHEMA_VERSION))
+        });
+
+    let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
+    let color_scheme = match color_scheme {
+        keytao_theme::UiColorScheme::Auto => "auto",
+        keytao_theme::UiColorScheme::Light => "light",
+        keytao_theme::UiColorScheme::Dark => "dark",
+    };
+    ui_mapping.insert(
+        serde_yaml::Value::String("colorScheme".into()),
+        serde_yaml::Value::String(color_scheme.into()),
+    );
+    ui_mapping.insert(
+        serde_yaml::Value::String("accentColor".into()),
+        serde_yaml::Value::String(accent_color),
+    );
+
+    let panel_mapping = yaml_child_mapping(mapping, "panel", "主题面板配置必须是 YAML mapping")?;
+    let orientation = match orientation {
+        keytao_theme::PanelOrientation::Horizontal => "horizontal",
+        keytao_theme::PanelOrientation::Vertical => "vertical",
+    };
+    panel_mapping.insert(
+        serde_yaml::Value::String("orientation".into()),
+        serde_yaml::Value::String(orientation.into()),
+    );
+
+    let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
+    std::fs::write(&theme_path, content)
+        .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_ui_color_scheme(color_scheme: keytao_theme::UiColorScheme) -> Result<(), String> {
+    let current = ime_ui_settings_with_message(String::new())?;
+    write_ime_ui_settings(color_scheme, current.orientation, current.accent_color)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn yaml_child_mapping<'a>(
+    mapping: &'a mut serde_yaml::Mapping,
+    key: &str,
+    error: &str,
+) -> Result<&'a mut serde_yaml::Mapping, String> {
+    let value = mapping
+        .entry(serde_yaml::Value::String(key.into()))
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !matches!(value, serde_yaml::Value::Mapping(_)) {
+        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    value.as_mapping_mut().ok_or_else(|| error.to_string())
+}
+
+fn color_to_hex(color: keytao_theme::RgbaColor) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.red, color.green, color.blue)
+}
+
+fn normalize_hex_color(value: &str) -> Result<String, String> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("主题色必须是 #RRGGBB 格式".into());
+    }
+    Ok(format!("#{}", hex.to_ascii_uppercase()))
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn shared_data_status(packaged: Option<String>) -> (Option<String>, String) {
     if let Some(path) = packaged {
@@ -2574,6 +2711,64 @@ async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
     Err("librime deployment is not supported on this platform yet".into())
 }
 
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn get_ime_ui_settings() -> Result<ImeUiSettings, String> {
+    ime_ui_settings_with_message("已读取输入法 UI 配置".into())
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn get_ime_ui_settings() -> Result<ImeUiSettings, String> {
+    Err("IME UI settings are not supported on mobile".into())
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn set_ime_ui_color_scheme(
+    color_scheme: keytao_theme::UiColorScheme,
+) -> Result<ImeUiSettings, String> {
+    write_ime_ui_color_scheme(color_scheme)?;
+    let reload_message = match write_keytao_ime_reload_stamp() {
+        Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
+        Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_with_message(reload_message)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn set_ime_ui_settings(
+    color_scheme: keytao_theme::UiColorScheme,
+    orientation: keytao_theme::PanelOrientation,
+    accent_color: String,
+) -> Result<ImeUiSettings, String> {
+    write_ime_ui_settings(color_scheme, orientation, accent_color)?;
+    let reload_message = match write_keytao_ime_reload_stamp() {
+        Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
+        Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_with_message(reload_message)
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn set_ime_ui_color_scheme(
+    _color_scheme: keytao_theme::UiColorScheme,
+) -> Result<ImeUiSettings, String> {
+    Err("IME UI settings are not supported on mobile".into())
+}
+
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn set_ime_ui_settings(
+    _color_scheme: keytao_theme::UiColorScheme,
+    _orientation: keytao_theme::PanelOrientation,
+    _accent_color: String,
+) -> Result<ImeUiSettings, String> {
+    Err("IME UI settings are not supported on mobile".into())
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Serialize, Clone)]
 pub struct WindowsImeStatus {
@@ -2937,6 +3132,9 @@ pub fn run() {
             android_smart_extract,
             check_local_schema,
             rime_deploy_default,
+            get_ime_ui_settings,
+            set_ime_ui_color_scheme,
+            set_ime_ui_settings,
             read_debug_logs,
             #[cfg(target_os = "linux")]
             linux_ime_status,

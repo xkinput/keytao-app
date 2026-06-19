@@ -299,8 +299,11 @@ macOS 候选窗和模式提示接入了通用 `keytao-theme` 主题层：
 2. FFI adapter：`keytao-core-ffi` 暴露 `keytao_resolve_theme_json()`，Swift 通过 `Codable` 解成 DTO。
 3. AppKit renderer：把 `ResolvedImeTheme + KeyTaoStateView` 映射到 `NSColor`、`NSFont`、spacing、padding、corner radius、shadow、highlight、comment、mode hint。
 
-`theme.yaml` 第一版应只表达跨平台可落地的语义，不把 AppKit 或 Linux SHM 细节写进配置：
+`theme.yaml` v2 应只表达跨平台可落地的语义，不把 AppKit 或 Linux SHM 细节写进配置：
 
+- UI 模式：`ui.colorScheme: auto | light | dark`；`auto` 跟随系统主题并在 resolved JSON 中给出最终 `effectiveColorScheme`。
+- 主题强调色：`ui.accentColor`，用于派生候选高亮、hover 和模式提示强调色。
+- 模式变体：`light:` / `dark:` 下的字体、面板、候选、导航和模式提示覆盖项。
 - 字体族、字号、字体粗细。
 - 候选窗方向、padding、gap、圆角、边框、阴影、最大宽度。
 - 背景、前景、注释、label、highlight、hover、separator 颜色。

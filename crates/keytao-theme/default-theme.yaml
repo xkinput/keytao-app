@@ -2,7 +2,10 @@
 # Copy this file to the platform user data directory as theme.yaml and edit it
 # to override the bundled style.
 
-version: 1
+version: 2
+
+ui:
+  colorScheme: auto
 
 font:
   family: ""
@@ -68,3 +71,31 @@ modeHint:
   shadow: true
   chineseText: "中"
   englishText: "英"
+
+dark:
+  panel:
+    background: "#171A20F2"
+    borderColor: "#373D48"
+    shadow: true
+
+  candidate:
+    hoverBackground: "#222A33"
+    selectedBackground: "#2D4B63"
+    foreground: "#EEF3F7"
+    selectedForeground: "#FFFFFF"
+    labelColor: "#9AA8B5"
+    selectedLabelColor: "#B6E3FF"
+    commentColor: "#94A0AA"
+    selectedCommentColor: "#D3E4EE"
+    borderColor: transparent
+    selectedBorderColor: "#5DA7D7"
+    separatorColor: "#343C47"
+
+  navigation:
+    foreground: "#C8D2DA"
+    disabledForeground: "#66717C"
+    hoverBackground: "#242D36"
+
+  modeHint:
+    background: "#25384AF2"
+    foreground: "#D5F0FF"

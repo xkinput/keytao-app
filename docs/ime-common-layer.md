@@ -335,6 +335,7 @@ reload 时必须：
 
 ```text
 theme.yaml
+  -> UI color scheme + accent color + mode variant
   -> keytao-theme::ResolvedImeTheme
 ImeState-like input + backend capabilities
   -> CandidatePanelModel / ModeHintModel
@@ -342,8 +343,11 @@ ResolvedImeTheme + Model
   -> platform renderer
 ```
 
-`theme.yaml` 第一版只表达跨平台可落地语义：
+`theme.yaml` v2 只表达跨平台可落地语义：
 
+- `ui.colorScheme`：`auto`、`light` 或 `dark`；`auto` 会跟随系统主题，resolved theme 会带上最终 `effectiveColorScheme`。
+- `ui.accentColor`：主题强调色，用于派生候选高亮、hover 和模式提示强调色。
+- `dark:` / `light:` 模式变体，根级字段仍作为通用配置。
 - font family、font size、font weight。
 - panel padding、gap、radius、border、shadow、max width、orientation。
 - background、foreground、comment、label、highlight、hover、separator、preedit color。

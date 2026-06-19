@@ -33,14 +33,25 @@ import {
   Loader2,
   XCircle,
   Keyboard,
+  Monitor,
+  Sun,
+  Moon,
+  Palette,
+  Paintbrush,
+  Columns3,
+  Rows3,
   type LucideIcon,
 } from "lucide-react"
 import DebugTab from "@/components/DebugTab"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
 type Tab = "ime" | "extension" | "about" | "debug"
+type ImeUiColorScheme = "auto" | "light" | "dark"
+type ImeEffectiveColorScheme = "light" | "dark"
+type ImeCandidateOrientation = "horizontal" | "vertical"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
+const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
 
 function hasSystemIme(os: OSType): boolean {
   return os === "linux" || os === "macos" || os === "windows"
@@ -168,6 +179,18 @@ interface MacosImeStatus {
   message: string
 }
 
+interface ImeUiSettings {
+  colorScheme: ImeUiColorScheme
+  effectiveColorScheme: ImeEffectiveColorScheme
+  orientation: ImeCandidateOrientation
+  accentColor: string
+  themePath: string | null
+  themeExists: boolean
+  reloadStampPath: string | null
+  reloadStampSignature: string | null
+  message: string
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -268,6 +291,9 @@ export default function App() {
   const [windowsImeError, setWindowsImeError] = useState<string | null>(null)
   const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
   const [macosImeError, setMacosImeError] = useState<string | null>(null)
+  const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
+  const [imeUiError, setImeUiError] = useState<string | null>(null)
+  const [isSavingImeUiSettings, setIsSavingImeUiSettings] = useState(false)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -365,6 +391,11 @@ export default function App() {
         .then(setMacosImeStatus)
         .catch((e) => setMacosImeError(String(e)))
     }
+    if (hasSystemIme(os)) {
+      invoke<ImeUiSettings>("get_ime_ui_settings")
+        .then(setImeUiSettings)
+        .catch((e) => setImeUiError(String(e)))
+    }
 
     listen<InstallProgress>("install-progress", (e) => {
       setInstallProgress(e.payload)
@@ -381,6 +412,7 @@ export default function App() {
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
   const systemImeAvailable = hasSystemIme(osType)
+  const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -412,6 +444,15 @@ export default function App() {
       addLogs([`[OPEN DIR ERROR] ${String(e)}`])
     } finally {
       setIsOpeningExtDir(false)
+    }
+  }
+
+  async function handleOpenImeTheme() {
+    if (!imeUiSettings?.themePath) return
+    try {
+      await openPath(imeUiSettings.themePath)
+    } catch (e) {
+      addLogs([`[OPEN THEME ERROR] ${String(e)}`])
     }
   }
 
@@ -447,6 +488,37 @@ export default function App() {
       addLogs([`[DEPLOY ERROR] ${msg}`])
     } finally {
       setIsDeploying(false)
+    }
+  }
+
+  async function handleUpdateImeUiSettings(
+    patch: Partial<Pick<ImeUiSettings, "colorScheme" | "orientation" | "accentColor">>,
+  ) {
+    if (isSavingImeUiSettings) return
+    const current = {
+      colorScheme: imeUiSettings?.colorScheme ?? "auto",
+      orientation: imeUiSettings?.orientation ?? "horizontal",
+      accentColor: imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR,
+    }
+    const next = { ...current, ...patch }
+    if (
+      imeUiSettings &&
+      next.colorScheme === imeUiSettings.colorScheme &&
+      next.orientation === imeUiSettings.orientation &&
+      next.accentColor === imeUiSettings.accentColor
+    ) {
+      return
+    }
+    setIsSavingImeUiSettings(true)
+    setImeUiError(null)
+    try {
+      const settings = await invoke<ImeUiSettings>("set_ime_ui_settings", next)
+      setImeUiSettings(settings)
+      addLogs([`[IME UI] ${settings.message}`])
+    } catch (e) {
+      setImeUiError(String(e))
+    } finally {
+      setIsSavingImeUiSettings(false)
     }
   }
 
@@ -810,6 +882,111 @@ export default function App() {
                     <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                       <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                       <span>{linuxImeError}</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {systemImeAvailable && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <Palette className="h-4 w-4 text-muted-foreground" />
+                    输入法外观
+                    {isSavingImeUiSettings && (
+                      <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/30 p-1">
+                    {([
+                      { id: "auto" as const, label: "自动", icon: Monitor },
+                      { id: "light" as const, label: "白天", icon: Sun },
+                      { id: "dark" as const, label: "夜间", icon: Moon },
+                    ]).map(({ id, label, icon: Icon }) => {
+                      const selected = (imeUiSettings?.colorScheme ?? "auto") === id
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => handleUpdateImeUiSettings({ colorScheme: id })}
+                          disabled={isSavingImeUiSettings}
+                          className={`h-9 rounded-md text-xs font-medium transition-colors inline-flex items-center justify-center gap-1.5 ${selected
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground hover:bg-background/50"
+                            } disabled:opacity-60`}
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                          {label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1">
+                    {([
+                      { id: "horizontal" as const, label: "横排", icon: Columns3 },
+                      { id: "vertical" as const, label: "竖排", icon: Rows3 },
+                    ]).map(({ id, label, icon: Icon }) => {
+                      const selected = (imeUiSettings?.orientation ?? "horizontal") === id
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => handleUpdateImeUiSettings({ orientation: id })}
+                          disabled={isSavingImeUiSettings}
+                          className={`h-9 rounded-md text-xs font-medium transition-colors inline-flex items-center justify-center gap-1.5 ${selected
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground hover:bg-background/50"
+                            } disabled:opacity-60`}
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                          {label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Paintbrush className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">主题色</span>
+                      {imeUiSettings && (
+                        <Badge variant="outline" className="text-xs">
+                          {imeUiSettings.effectiveColorScheme === "dark" ? "当前夜间" : "当前白天"}
+                        </Badge>
+                      )}
+                    </div>
+                    <input
+                      type="color"
+                      value={imeAccentColor}
+                      onChange={(event) => handleUpdateImeUiSettings({ accentColor: event.currentTarget.value })}
+                      disabled={isSavingImeUiSettings}
+                      className="h-9 w-14 shrink-0 cursor-pointer rounded-md border border-border bg-transparent p-1 disabled:cursor-not-allowed disabled:opacity-60"
+                      title="选择主题色"
+                    />
+                  </div>
+                  {imeUiSettings?.themePath && (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+                      <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">主题：</span>
+                      <code className="font-mono truncate flex-1 min-w-0">{imeUiSettings.themePath}</code>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={handleOpenImeTheme}
+                        disabled={!imeUiSettings.themeExists}
+                        className="h-6 w-6 shrink-0"
+                        title="打开主题配置"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  )}
+                  {imeUiError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{imeUiError}</span>
                     </div>
                   )}
                 </CardContent>
