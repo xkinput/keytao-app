@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keytao-core = { path = "../keytao-core" }
+keytao-theme = { path = "../keytao-theme" }
 serde = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

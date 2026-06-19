@@ -1,0 +1,11 @@
+[package]
+name = "keytao-theme"
+version = "0.1.0"
+edition = "2021"
+description = "Shared KeyTao IME theme schema, resolver, and UI model adapter"
+
+[dependencies]
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+serde_yaml = "0.9"

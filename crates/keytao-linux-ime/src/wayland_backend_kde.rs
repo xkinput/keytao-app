@@ -90,6 +90,7 @@ struct App {
     serial: u32,
     active: bool,
     deactivate_deadline: Option<Instant>,
+    mode_hint_until: Option<Instant>,
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
@@ -124,6 +125,7 @@ impl App {
             serial: 0,
             active: false,
             deactivate_deadline: None,
+            mode_hint_until: None,
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
@@ -159,6 +161,7 @@ impl App {
     fn reset_context_state(&mut self) {
         self.active = false;
         self.deactivate_deadline = None;
+        self.mode_hint_until = None;
         self.keyboard = None;
         self.context = None;
         self.session.reset();
@@ -231,12 +234,15 @@ impl App {
             return;
         };
 
+        let show_hint = self.mode_hint_active();
         let (pixels, w, h) = if let Some(state) = self
             .ime_state
             .as_ref()
             .filter(|state| !state.candidates.is_empty())
         {
             renderer.render(state)
+        } else if show_hint {
+            renderer.render_mode_hint(self.ascii_mode)
         } else {
             return;
         };
@@ -284,8 +290,9 @@ impl App {
 
     fn show_panel(&mut self, state: ImeState, qh: &QueueHandle<Self>) {
         let has_content = !state.candidates.is_empty();
+        let show_hint = self.mode_hint_active();
         self.ime_state = Some(state);
-        if has_content {
+        if has_content || show_hint {
             if self.panel_surface.is_none() {
                 self.create_panel_popup(qh);
             }
@@ -294,6 +301,26 @@ impl App {
         } else {
             self.hide_panel_popup();
         }
+    }
+
+    fn mode_hint_active(&self) -> bool {
+        self.mode_hint_until
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    fn update_ascii_mode(&mut self, ascii_mode: bool, qh: &QueueHandle<Self>) {
+        if ascii_mode == self.ascii_mode {
+            return;
+        }
+        self.ascii_mode = ascii_mode;
+        let duration = self
+            .renderer
+            .as_ref()
+            .map(PanelRenderer::mode_hint_duration)
+            .unwrap_or_else(|| Duration::from_millis(750));
+        self.mode_hint_until = Some(Instant::now() + duration);
+        self.show_panel(ImeState::empty(), qh);
+        tracing::info!("IME mode changed: {}", if ascii_mode { "EN" } else { "CN" });
     }
 
     fn commit_state_to_context(&self, state: &ImeState) {
@@ -356,7 +383,7 @@ impl App {
             self.active
         );
         if key_state == wl_keyboard::KeyState::Released {
-            self.handle_key_release(evdev_keycode);
+            self.handle_key_release(evdev_keycode, qh);
             return;
         }
 
@@ -413,13 +440,7 @@ impl App {
         };
         let ime_state = result.state;
 
-        if ime_state.ascii_mode != self.ascii_mode {
-            self.ascii_mode = ime_state.ascii_mode;
-            tracing::info!(
-                "IME mode changed: {}",
-                if self.ascii_mode { "EN" } else { "CN" }
-            );
-        }
+        self.update_ascii_mode(ime_state.ascii_mode, qh);
 
         if result.accepted {
             self.commit_state_to_context(&ime_state);
@@ -438,17 +459,11 @@ impl App {
         let _ = qh;
     }
 
-    fn handle_key_release(&mut self, evdev_keycode: u32) {
+    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
         let sym_raw = self.key_sym(evdev_keycode);
         if is_shift_key(sym_raw) {
             if let Some(result) = self.session.process_key_result(sym_raw, RELEASE_MASK) {
-                if result.state.ascii_mode != self.ascii_mode {
-                    self.ascii_mode = result.state.ascii_mode;
-                    tracing::info!(
-                        "IME mode changed: {}",
-                        if self.ascii_mode { "EN" } else { "CN" }
-                    );
-                }
+                self.update_ascii_mode(result.state.ascii_mode, qh);
             }
         }
         self.forward_key(evdev_keycode, wl_keyboard::KeyState::Released as u32);
@@ -674,6 +689,14 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
     tracing::info!("KDE Wayland IME running (input-method-v1)");
     loop {
         if app
+            .mode_hint_until
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            app.mode_hint_until = None;
+            app.show_panel(ImeState::empty(), &qh);
+        }
+
+        if app
             .deactivate_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
@@ -692,7 +715,7 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
                 kimpanel_runtime.block_on(kimpanel.update_state(&state));
             }
         }
-        let timeout_ms = if app.deactivate_deadline.is_some() {
+        let timeout_ms = if app.mode_hint_until.is_some() || app.deactivate_deadline.is_some() {
             100
         } else {
             -1

@@ -1,13 +1,14 @@
 //! ITfKeyEventSink + ITfCompositionSink — the hot path for all keystrokes.
 //!
 //! Key handling mirrors keytao-linux-ime/src/wayland_backend.rs:
-//!   VK → X11 keysym → engine.process_key() → ImeState
+//!   VK → X11 keysym → ImeRuntimeSession::process_key_result() → ImeState
 //!   committed text  → write via TSF edit session (ITfInsertAtSelection)
 //!   preedit text    → manage ITfComposition
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
 
 use std::{cell::UnsafeCell, sync::Arc};
 
+use keytao_core::ImeState;
 use windows::{
     core::{implement, Interface, Result, GUID},
     Win32::{
@@ -17,7 +18,11 @@ use windows::{
 };
 
 use crate::{
-    key_map::{current_mod_mask, should_eat_key, vk_to_keysym},
+    key_map::{
+        candidate_index_for_select_key, current_mod_mask, is_enter_vk, is_shift_vk,
+        shift_keysym_for_vk, should_bypass_empty_composition, should_eat_key, vk_to_keysym,
+        RIME_RELEASE_MASK,
+    },
     state::SharedState,
 };
 
@@ -149,6 +154,81 @@ fn caret_screen_pos(ec: u32, context: &ITfContext) -> (i32, i32) {
     }
 }
 
+fn apply_ime_state(
+    context: &ITfContext,
+    client_id: u32,
+    shared_state: &SharedState,
+    ime_state: ImeState,
+    show_mode_hint_on_change: bool,
+) -> Result<()> {
+    let state_arc = Arc::clone(shared_state);
+    let ime_state_clone = ime_state.clone();
+    let comp_sink_obj = CompositionSink {
+        state: Arc::clone(shared_state),
+    };
+    let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
+
+    with_write_session(context, client_id, move |ec, ctx| {
+        let mut st = state_arc.lock().unwrap();
+
+        let committed = ime_state_clone
+            .committed
+            .as_deref()
+            .filter(|text| !text.is_empty());
+        let has_commit = committed.is_some();
+        if let Some(committed) = committed {
+            if let Some(comp) = st.composition.take() {
+                end_composition(ec, &comp, Some(committed))?;
+            } else {
+                unsafe {
+                    let ins: ITfInsertAtSelection = ctx.cast()?;
+                    let wide = to_wide(committed);
+                    ins.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide)?;
+                }
+            }
+        }
+
+        if !ime_state_clone.preedit.is_empty() {
+            if let Some(comp) = &st.composition {
+                update_composition_text(ec, comp, &ime_state_clone.preedit)?;
+            } else {
+                let comp = start_composition(ec, ctx, &ime_state_clone.preedit, &comp_sink_iface)?;
+                st.composition = Some(comp);
+            }
+        } else if st.composition.is_some() && !has_commit {
+            if let Some(comp) = st.composition.take() {
+                end_composition(ec, &comp, None)?;
+            }
+        }
+
+        let (cx, cy) = caret_screen_pos(ec, ctx);
+        let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
+        st.ascii_mode = ime_state_clone.ascii_mode;
+        st.ime_state = Some(ime_state_clone.clone());
+
+        let show = !ime_state_clone.candidates.is_empty() || !ime_state_clone.preedit.is_empty();
+        if show {
+            st.candidate_win.show(&ime_state_clone, cx, cy);
+        } else {
+            st.candidate_win.hide();
+        }
+        if show_mode_hint_on_change && mode_changed {
+            st.mode_hint_win
+                .show_mode_hint(ime_state_clone.ascii_mode, cx, cy);
+        }
+
+        Ok(())
+    })
+}
+
+fn clear_after_reload(
+    context: &ITfContext,
+    client_id: u32,
+    shared_state: &SharedState,
+) -> Result<()> {
+    apply_ime_state(context, client_id, shared_state, ImeState::empty(), false)
+}
+
 // ── KeyEventSink + CompositionSink (one COM object, shared state) ─────────────
 
 #[implement(ITfKeyEventSink)]
@@ -158,6 +238,12 @@ pub(crate) struct KeyEventSink {
 
 impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
     fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if st.check_reload_stamp() {
+            st.ime_state = None;
+            st.candidate_win.hide();
+            st.mode_hint_win.hide();
+        }
         Ok(())
     }
 
@@ -169,11 +255,16 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
     ) -> Result<BOOL> {
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
-        let is_composing = self
-            .state
-            .lock()
-            .unwrap()
-            .ime_state
+        let mut st = self.state.lock().unwrap();
+        if is_shift_vk(vk) {
+            st.shift_pressed_without_key = true;
+            return Ok(BOOL::from(false));
+        }
+        if st.shift_pressed_without_key {
+            st.shift_pressed_without_key = false;
+        }
+        let state = st.ime_state.clone().or_else(|| st.current_state());
+        let is_composing = state
             .as_ref()
             .map(|s| !s.preedit.is_empty() || !s.candidates.is_empty())
             .unwrap_or(false);
@@ -183,10 +274,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
     fn OnTestKeyUp(
         &self,
         _pic: Option<&ITfContext>,
-        _wparam: WPARAM,
+        wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
-        Ok(BOOL::from(false))
+        let vk = (wparam.0 & 0xFFFF) as u16;
+        if !is_shift_vk(vk) {
+            return Ok(BOOL::from(false));
+        }
+        let st = self.state.lock().unwrap();
+        Ok(BOOL::from(st.shift_pressed_without_key))
     }
 
     fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
@@ -194,16 +290,67 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
 
-        let keysym = match vk_to_keysym(vk) {
+        if is_shift_vk(vk) {
+            return Ok(BOOL::from(false));
+        }
+
+        let client_id = {
+            let mut st = self.state.lock().unwrap();
+            st.shift_pressed_without_key = false;
+            let _ = st.check_reload_stamp();
+            let should_clear_reload = st.take_reload_clear_pending();
+            let client_id = st.client_id;
+            drop(st);
+            if should_clear_reload {
+                clear_after_reload(&context, client_id, &self.state)?;
+            }
+            client_id
+        };
+
+        let before_state = self
+            .state
+            .lock()
+            .unwrap()
+            .current_state()
+            .unwrap_or_else(ImeState::empty);
+
+        if should_bypass_empty_composition(vk, mods, &before_state) {
+            self.state.lock().unwrap().candidate_win.hide();
+            return Ok(BOOL::from(false));
+        }
+
+        if is_enter_vk(vk) && !before_state.preedit.is_empty() {
+            let mut commit_state = before_state.clone();
+            commit_state.committed = Some(before_state.preedit.clone());
+            commit_state.preedit.clear();
+            commit_state.cursor = 0;
+            commit_state.candidates.clear();
+            commit_state.highlighted_candidate_index = 0;
+            commit_state.page = 0;
+            commit_state.is_last_page = true;
+            let _ = self.state.lock().unwrap().reset_session();
+            apply_ime_state(&context, client_id, &self.state, commit_state, true)?;
+            return Ok(BOOL::from(true));
+        }
+
+        if let Some(index) = candidate_index_for_select_key(vk, &before_state) {
+            let ime_state = self.state.lock().unwrap().select_candidate(index);
+            if let Some(ime_state) = ime_state {
+                apply_ime_state(&context, client_id, &self.state, ime_state, true)?;
+                return Ok(BOOL::from(true));
+            }
+        }
+
+        let keysym = match vk_to_keysym(vk, mods) {
             Some(k) => k,
             None => return Ok(BOOL::from(false)),
         };
 
-        // Call librime engine. Use Rime's accepted flag as the source of truth,
-        // matching the Linux frontends.
+        // Call the shared runtime session. Use Rime's accepted flag as the
+        // source of truth, matching the Linux frontends.
         let result = {
             let st = self.state.lock().unwrap();
-            st.engine().map(|e| e.process_key_result(keysym, mods))
+            st.process_key_result(keysym, mods)
         };
         let result = match result {
             Some(r) => r,
@@ -217,72 +364,45 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             return Ok(BOOL::from(false));
         }
 
-        // Write committed / preedit to the document via edit session
-        let client_id = self.state.lock().unwrap().client_id;
-        let state_arc = Arc::clone(&self.state);
-        let ime_state_clone = ime_state.clone();
-
-        // Obtain ITfCompositionSink interface pointer for StartComposition
-        // We need to pass it to ctx_comp.StartComposition(ec, range, sink).
-        // The sink is *this* COM object (KeyEventSink also implements ITfCompositionSink).
-        // We create a throw-away CompositionSink object that shares state.
-        let comp_sink_obj = CompositionSink {
-            state: Arc::clone(&self.state),
-        };
-        let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
-
-        with_write_session(&context, client_id, move |ec, ctx| {
-            let mut st = state_arc.lock().unwrap();
-
-            if let Some(committed) = &ime_state_clone.committed {
-                // End existing composition and commit text
-                if let Some(comp) = st.composition.take() {
-                    end_composition(ec, &comp, Some(committed))?;
-                } else {
-                    // No composition — insert text directly at selection
-                    unsafe {
-                        let ins: ITfInsertAtSelection = ctx.cast()?;
-                        let wide = to_wide(committed);
-                        ins.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide)?;
-                    }
-                }
-            }
-
-            if !ime_state_clone.preedit.is_empty() {
-                if let Some(comp) = &st.composition {
-                    update_composition_text(ec, comp, &ime_state_clone.preedit)?;
-                } else {
-                    let comp =
-                        start_composition(ec, ctx, &ime_state_clone.preedit, &comp_sink_iface)?;
-                    st.composition = Some(comp);
-                }
-            } else if st.composition.is_some() && ime_state_clone.committed.is_none() {
-                // Preedit cleared without commit (e.g. Escape)
-                if let Some(comp) = st.composition.take() {
-                    end_composition(ec, &comp, None)?;
-                }
-            }
-
-            // Update caret position for candidate window
-            let (cx, cy) = caret_screen_pos(ec, ctx);
-            st.ime_state = Some(ime_state_clone.clone());
-
-            let show =
-                !ime_state_clone.candidates.is_empty() || !ime_state_clone.preedit.is_empty();
-            if show {
-                st.candidate_win.show(&ime_state_clone, cx, cy);
-            } else {
-                st.candidate_win.hide();
-            }
-
-            Ok(())
-        })?;
+        apply_ime_state(&context, client_id, &self.state, ime_state, true)?;
 
         Ok(BOOL::from(consumed))
     }
 
-    fn OnKeyUp(&self, _pic: Option<&ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        Ok(BOOL::from(false))
+    fn OnKeyUp(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        let vk = (wparam.0 & 0xFFFF) as u16;
+        let Some(keysym) = shift_keysym_for_vk(vk) else {
+            return Ok(BOOL::from(false));
+        };
+
+        let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
+        let client_id = {
+            let mut st = self.state.lock().unwrap();
+            if !st.shift_pressed_without_key {
+                return Ok(BOOL::from(false));
+            }
+            st.shift_pressed_without_key = false;
+            let _ = st.check_reload_stamp();
+            let should_clear_reload = st.take_reload_clear_pending();
+            let client_id = st.client_id;
+            drop(st);
+            if should_clear_reload {
+                clear_after_reload(&context, client_id, &self.state)?;
+            }
+            client_id
+        };
+
+        let result = {
+            let st = self.state.lock().unwrap();
+            st.process_key_result(keysym, RIME_RELEASE_MASK)
+        };
+        let Some(result) = result else {
+            return Ok(BOOL::from(false));
+        };
+        if result.accepted {
+            apply_ime_state(&context, client_id, &self.state, result.state, true)?;
+        }
+        Ok(BOOL::from(result.accepted))
     }
 
     fn OnPreservedKey(&self, _pic: Option<&ITfContext>, _rguid: *const GUID) -> Result<BOOL> {
@@ -310,10 +430,9 @@ impl ITfCompositionSink_Impl for CompositionSink_Impl {
         st.composition = None;
         st.ime_state = None;
         st.candidate_win.hide();
-        // Reset librime so next keypress starts fresh
-        if let Some(e) = &st.engine {
-            e.reset();
-        }
+        st.mode_hint_win.hide();
+        // Reset the runtime session so the next keypress starts fresh.
+        let _ = st.reset_session();
         Ok(())
     }
 }

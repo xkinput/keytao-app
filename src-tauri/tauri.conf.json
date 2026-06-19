@@ -24,11 +24,9 @@
   "bundle": {
     "active": true,
     "targets": [
-      "dmg",
       "nsis",
       "deb",
-      "rpm",
-      "appimage"
+      "rpm"
     ],
     "externalBin": [],
     "icon": [

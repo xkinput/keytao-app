@@ -1,9 +1,12 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use keytao_core::{deploy, Engine, ImeState, KeyProcessResult};
+use keytao_core::{ImeRuntime, ImeRuntimeSession, ImeState, KeyProcessResult};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use keytao_theme::{resolve_theme_from_paths, resolved_theme_json};
 
 // ── C-compatible state struct ─────────────────────────────────────────────────
 
@@ -25,28 +28,30 @@ pub struct KeytaoState {
     pub accepted: bool,
 }
 
-// ── Module-level singleton engine ─────────────────────────────────────────────
+// ── Module-level singleton runtime session ────────────────────────────────────
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct Global {
     initialized: bool,
-    engine: Option<Engine>,
+    runtime: Option<ImeRuntime>,
+    singleton_session: Option<ImeRuntimeSession>,
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 static GLOBAL: Mutex<Global> = Mutex::new(Global {
     initialized: false,
-    engine: None,
+    runtime: None,
+    singleton_session: None,
 });
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct SessionHandle {
-    engine: Mutex<Engine>,
+    session: ImeRuntimeSession,
 }
 
 // ── Public C API ──────────────────────────────────────────────────────────────
 
-/// Initialize the Rime engine. Must be called once before any other function.
+/// Initialize the Rime runtime. Must be called once before any other function.
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.
 #[no_mangle]
@@ -67,21 +72,23 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         }
     };
 
-    if let Err(e) = deploy(user, shared) {
-        eprintln!("keytao_init: deploy failed: {e}");
+    let runtime = ImeRuntime::with_dirs(user, shared);
+    if let Err(e) = runtime.init() {
+        eprintln!("keytao_init: runtime init failed: {e}");
         return false;
     }
-    match Engine::new() {
-        Ok(engine) => {
+    match runtime.create_session() {
+        Ok(singleton_session) => {
             let Ok(mut g) = GLOBAL.lock() else {
                 return false;
             };
             g.initialized = true;
-            g.engine = Some(engine);
+            g.runtime = Some(runtime);
+            g.singleton_session = Some(singleton_session);
             true
         }
         Err(e) => {
-            eprintln!("keytao_init: Engine::new failed: {e}");
+            eprintln!("keytao_init: runtime.create_session failed: {e}");
             false
         }
     }
@@ -91,6 +98,33 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub extern "C" fn keytao_is_initialized() -> bool {
     GLOBAL.lock().map(|g| g.initialized).unwrap_or(false)
+}
+
+/// Redeploy Rime data through the shared runtime. Existing sessions refresh
+/// lazily on their next operation.
+#[no_mangle]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub extern "C" fn keytao_reload() -> bool {
+    let runtime = {
+        let Ok(g) = GLOBAL.lock() else {
+            return false;
+        };
+        if !g.initialized {
+            return false;
+        }
+        let Some(runtime) = g.runtime.clone() else {
+            return false;
+        };
+        runtime
+    };
+
+    match runtime.reload() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("keytao_reload: runtime reload failed: {e}");
+            false
+        }
+    }
 }
 
 /// Create a per-client input session. Returns null if keytao_init() has not
@@ -104,14 +138,15 @@ pub extern "C" fn keytao_create_session() -> *mut c_void {
     if !g.initialized {
         return std::ptr::null_mut();
     }
+    let Some(runtime) = g.runtime.clone() else {
+        return std::ptr::null_mut();
+    };
     drop(g);
 
-    match Engine::new() {
-        Ok(engine) => Box::into_raw(Box::new(SessionHandle {
-            engine: Mutex::new(engine),
-        })) as *mut c_void,
+    match runtime.create_session() {
+        Ok(session) => Box::into_raw(Box::new(SessionHandle { session })) as *mut c_void,
         Err(e) => {
-            eprintln!("keytao_create_session: Engine::new failed: {e}");
+            eprintln!("keytao_create_session: runtime.create_session failed: {e}");
             std::ptr::null_mut()
         }
     }
@@ -136,10 +171,7 @@ pub extern "C" fn keytao_session_state(session: *mut c_void) -> *mut KeytaoState
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
-        return std::ptr::null_mut();
-    };
-    Box::into_raw(Box::new(state_to_c(engine.state(), false)))
+    Box::into_raw(Box::new(state_to_c(handle.session.state(), false)))
 }
 
 /// Process a key event on a per-client session.
@@ -153,10 +185,9 @@ pub extern "C" fn keytao_session_process_key(
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
+    let Some(result) = handle.session.process_key_result(keyval, modifiers) else {
         return std::ptr::null_mut();
     };
-    let result = engine.process_key_result(keyval, modifiers);
     Box::into_raw(Box::new(result_to_c(result)))
 }
 
@@ -170,10 +201,9 @@ pub extern "C" fn keytao_session_select_candidate(
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
+    let Some(state) = handle.session.select_candidate(index as usize) else {
         return std::ptr::null_mut();
     };
-    let state = engine.select_candidate(index as usize);
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -187,10 +217,9 @@ pub extern "C" fn keytao_session_change_page(
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
+    let Some(state) = handle.session.change_page(backward) else {
         return std::ptr::null_mut();
     };
-    let state = engine.change_page(backward);
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -201,10 +230,9 @@ pub extern "C" fn keytao_session_reset(session: *mut c_void) -> *mut KeytaoState
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
+    let Some(state) = handle.session.reset() else {
         return std::ptr::null_mut();
     };
-    let state = engine.reset();
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -215,10 +243,7 @@ pub extern "C" fn keytao_session_get_ascii_mode(session: *mut c_void) -> bool {
     let Some(handle) = session_handle(session) else {
         return false;
     };
-    let Ok(engine) = handle.engine.lock() else {
-        return false;
-    };
-    engine.is_ascii_mode()
+    handle.session.is_ascii_mode()
 }
 
 /// Set ASCII mode on a per-client session and return the updated state.
@@ -231,25 +256,53 @@ pub extern "C" fn keytao_session_set_ascii_mode(
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
     };
-    let Ok(engine) = handle.engine.lock() else {
+    let Some(state) = handle.session.set_ascii_mode(enabled) else {
         return std::ptr::null_mut();
     };
-    let state = engine.set_ascii_mode(enabled);
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
+/// Resolve theme YAML from the optional default and user paths and return a
+/// normalized JSON theme. The caller must free the string with
+/// keytao_free_string().
+#[no_mangle]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub extern "C" fn keytao_resolve_theme_json(
+    default_theme_path: *const c_char,
+    user_theme_path: *const c_char,
+) -> *mut c_char {
+    let default_path = optional_path_arg(default_theme_path);
+    let user_path = optional_path_arg(user_theme_path);
+    let theme = resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref());
+    match resolved_theme_json(&theme) {
+        Ok(json) => to_cstring(&json),
+        Err(e) => {
+            eprintln!("keytao_resolve_theme_json: serialize failed: {e}");
+            to_cstring("{}")
+        }
+    }
+}
+
+/// Free a UTF-8 string returned by keytao-core-ffi.
+#[no_mangle]
+pub extern "C" fn keytao_free_string(ptr: *mut c_char) {
+    unsafe { free_cstring(ptr) };
+}
+
 /// Process a key event. Returns heap-allocated KeytaoState; caller must free
-/// with keytao_free_state(). Returns null if the engine is not initialized.
+/// with keytao_free_state(). Returns null if the runtime is not initialized.
 #[no_mangle]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub extern "C" fn keytao_process_key(keyval: u32, modifiers: u32) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
     };
-    let Some(ref engine) = g.engine else {
+    let Some(ref session) = g.singleton_session else {
         return std::ptr::null_mut();
     };
-    let result = engine.process_key_result(keyval, modifiers);
+    let Some(result) = session.process_key_result(keyval, modifiers) else {
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(result_to_c(result)))
 }
 
@@ -260,10 +313,12 @@ pub extern "C" fn keytao_select_candidate(index: u32) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
     };
-    let Some(ref engine) = g.engine else {
+    let Some(ref session) = g.singleton_session else {
         return std::ptr::null_mut();
     };
-    let state = engine.select_candidate(index as usize);
+    let Some(state) = session.select_candidate(index as usize) else {
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -274,10 +329,12 @@ pub extern "C" fn keytao_change_page(backward: bool) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
     };
-    let Some(ref engine) = g.engine else {
+    let Some(ref session) = g.singleton_session else {
         return std::ptr::null_mut();
     };
-    let state = engine.change_page(backward);
+    let Some(state) = session.change_page(backward) else {
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -288,10 +345,12 @@ pub extern "C" fn keytao_reset() -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
     };
-    let Some(ref engine) = g.engine else {
+    let Some(ref session) = g.singleton_session else {
         return std::ptr::null_mut();
     };
-    let state = engine.reset();
+    let Some(state) = session.reset() else {
+        return std::ptr::null_mut();
+    };
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
@@ -391,6 +450,17 @@ fn c_string_arg(ptr: *const c_char, name: &str) -> Result<String, String> {
         .to_str()
         .map(str::to_string)
         .map_err(|e| format!("{name} is not UTF-8: {e}"))
+}
+
+fn optional_path_arg(ptr: *const c_char) -> Option<PathBuf> {
+    if ptr.is_null() {
+        return None;
+    }
+    let Ok(value) = (unsafe { CStr::from_ptr(ptr) }).to_str() else {
+        return None;
+    };
+    let value = value.trim();
+    (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
 fn to_cstring(s: &str) -> *mut c_char {

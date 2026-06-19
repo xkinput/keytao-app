@@ -101,3 +101,8 @@ private var _engineInitialized: Bool = {
 func ensureEngineReady() {
     _ = _engineInitialized
 }
+
+func reloadEngine() -> Bool {
+    ensureEngineReady()
+    return keytao_reload()
+}

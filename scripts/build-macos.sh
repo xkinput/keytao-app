@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build a macOS pkg containing the main KeyTao app and the system IME bundle.
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IME_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-ime"
@@ -81,6 +82,7 @@ if [ -z "$RIME_DATA_DIR" ]; then
 fi
 
 echo "==> Building macOS IME runtime..."
+export KEYTAO_RIME_SHARED_DATA_DIR="$RIME_DATA_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \
     "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg
 
@@ -159,6 +161,25 @@ if [ "$IME_BUNDLE_ID" != "ink.rea.inputmethod.keytao" ]; then
     exit 1
 fi
 
+echo "==> Completing KeyTao macOS app runtime..."
+MAIN_FRAMEWORKS_DIR="$MAIN_APP/Contents/Frameworks"
+mkdir -p "$MAIN_FRAMEWORKS_DIR"
+while IFS= read -r -d '' dylib; do
+    base="$(basename "$dylib")"
+    cp -f "$dylib" "$MAIN_FRAMEWORKS_DIR/$base"
+    chmod u+w "$MAIN_FRAMEWORKS_DIR/$base"
+done < <(find "$APP_FRAMEWORKS_DIR" -maxdepth 1 -type f -name '*.dylib' -print0)
+if [ -d "$APP_FRAMEWORKS_DIR/rime-plugins" ]; then
+    rm -rf "$MAIN_FRAMEWORKS_DIR/rime-plugins"
+    ditto "$APP_FRAMEWORKS_DIR/rime-plugins" "$MAIN_FRAMEWORKS_DIR/rime-plugins"
+    find "$MAIN_FRAMEWORKS_DIR/rime-plugins" \( -name '._*' -o -name '.DS_Store' \) -delete
+    xattr -cr "$MAIN_FRAMEWORKS_DIR/rime-plugins" 2>/dev/null || true
+fi
+if [ -d "$RIME_LIB_DIR/rime-plugins" ] && [ ! -f "$MAIN_FRAMEWORKS_DIR/rime-plugins/librime-lua.dylib" ]; then
+    echo "ERROR: macOS main app bundle is missing rime-plugins/librime-lua.dylib" >&2
+    exit 1
+fi
+
 echo "==> Re-signing KeyTao macOS app bundle..."
 ENTITLEMENTS="$PKG_BUILD_DIR/app.entitlements.plist"
 mkdir -p "$PKG_BUILD_DIR"
@@ -202,7 +223,9 @@ mkdir -p "$PKG_SCRIPTS"
 ditto --noextattr --norsrc "$MAIN_APP" "$PKG_PAYLOAD/Applications/KeyTao.app"
 ditto --noextattr --norsrc "$IME_APP" "$PKG_PAYLOAD/Library/Input Methods/KeyTao.app"
 find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
+find "$PKG_SCRIPTS" \( -name '._*' -o -name '.DS_Store' \) -delete
 xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
+xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
 
 cat > "$PKG_COMPONENTS" << 'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -262,7 +285,7 @@ SCRIPTEOF
 chmod +x "$PKG_SCRIPTS/postinstall"
 
 PACKAGE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
-pkgbuild \
+COPYFILE_DISABLE=1 pkgbuild \
     --root "$PKG_PAYLOAD" \
     --component-plist "$PKG_COMPONENTS" \
     --scripts "$PKG_SCRIPTS" \

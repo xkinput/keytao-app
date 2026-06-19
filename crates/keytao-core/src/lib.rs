@@ -7,6 +7,10 @@ use serde_yaml::{Mapping, Value};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -157,9 +161,10 @@ mod desktop {
         }
 
         pub fn select_candidate(&self, index: usize) -> ImeState {
-            if index < 9 {
-                let kc = b'1' as u32 + index as u32;
-                self.session.process_key(KeyEvent::new(kc, 0));
+            let state = extract_state(&self.session);
+            let select_keys = state.select_keys.as_deref().unwrap_or("1234567890");
+            if let Some(key) = select_keys.chars().nth(index) {
+                self.session.process_key(KeyEvent::new(key as u32, 0));
             }
             extract_state(&self.session)
         }
@@ -243,6 +248,204 @@ mod desktop {
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub use desktop::{deploy, Engine};
+
+pub const RIME_MOD_SHIFT: u32 = 0x0001;
+pub const RIME_MOD_CONTROL: u32 = 0x0004;
+pub const RIME_MOD_ALT: u32 = 0x0008;
+pub const RIME_RELEASE_MASK: u32 = 1 << 30;
+
+pub fn rime_modifier_mask(mask: u32) -> u32 {
+    mask & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_RELEASE_MASK)
+}
+
+#[cfg(test)]
+mod ime_runtime_tests {
+    use super::{rime_modifier_mask, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
+
+    #[test]
+    fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {
+        assert_eq!(rime_modifier_mask(0x10), 0);
+        assert_eq!(
+            rime_modifier_mask(0x10 | RIME_MOD_SHIFT | RIME_MOD_CONTROL),
+            RIME_MOD_SHIFT | RIME_MOD_CONTROL
+        );
+        assert_eq!(
+            rime_modifier_mask(RIME_RELEASE_MASK | 0x10),
+            RIME_RELEASE_MASK
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[derive(Clone)]
+pub struct ImeRuntime(Arc<ImeRuntimeState>);
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[derive(Clone)]
+pub struct ImeRuntimeSession {
+    shared: Arc<ImeRuntimeState>,
+    inner: Arc<Mutex<ImeRuntimeSessionInner>>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+struct ImeRuntimeState {
+    initialized: Mutex<bool>,
+    generation: AtomicU64,
+    user_data_dir: Option<PathBuf>,
+    shared_data_dir: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+struct ImeRuntimeSessionInner {
+    engine: Engine,
+    generation: u64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+impl ImeRuntime {
+    pub fn new() -> Self {
+        Self::with_optional_dirs(None, None)
+    }
+
+    pub fn with_dirs(
+        user_data_dir: impl Into<PathBuf>,
+        shared_data_dir: impl Into<String>,
+    ) -> Self {
+        Self::with_optional_dirs(Some(user_data_dir.into()), Some(shared_data_dir.into()))
+    }
+
+    fn with_optional_dirs(user_data_dir: Option<PathBuf>, shared_data_dir: Option<String>) -> Self {
+        Self(Arc::new(ImeRuntimeState {
+            initialized: Mutex::new(false),
+            generation: AtomicU64::new(0),
+            user_data_dir,
+            shared_data_dir,
+        }))
+    }
+
+    pub fn init(&self) -> Result<(), String> {
+        let mut initialized = self.0.initialized.lock().unwrap();
+        if *initialized {
+            return Ok(());
+        }
+
+        self.deploy_locked()?;
+        *initialized = true;
+        Ok(())
+    }
+
+    pub fn reload(&self) -> Result<(), String> {
+        let mut initialized = self.0.initialized.lock().unwrap();
+        self.deploy_locked()?;
+        *initialized = true;
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn deploy_locked(&self) -> Result<(), String> {
+        let user_dir = self
+            .0
+            .user_data_dir
+            .clone()
+            .or_else(default_user_data_dir)
+            .ok_or("cannot determine keytao data directory")?;
+        let shared = self
+            .0
+            .shared_data_dir
+            .clone()
+            .unwrap_or_else(default_shared_data_dir);
+
+        deploy(user_dir.to_string_lossy().into_owned(), shared)
+    }
+
+    pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
+        let initialized = *self.0.initialized.lock().unwrap();
+        if !initialized {
+            self.init()?;
+        }
+        let generation = self.0.generation.load(Ordering::SeqCst);
+        Ok(ImeRuntimeSession {
+            shared: self.0.clone(),
+            inner: Arc::new(Mutex::new(ImeRuntimeSessionInner {
+                engine: Engine::new()?,
+                generation,
+            })),
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+impl Default for ImeRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+impl ImeRuntimeSession {
+    pub fn state(&self) -> ImeState {
+        let mut inner = self.inner.lock().unwrap();
+        if self.refresh_if_needed(&mut inner).is_err() {
+            return ImeState::empty();
+        }
+        inner.engine.state()
+    }
+
+    pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(
+            inner
+                .engine
+                .process_key_result(keycode, rime_modifier_mask(mask)),
+        )
+    }
+
+    pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.select_candidate(index))
+    }
+
+    pub fn change_page(&self, backward: bool) -> Option<ImeState> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.change_page(backward))
+    }
+
+    pub fn reset(&self) -> Option<ImeState> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.reset())
+    }
+
+    pub fn is_ascii_mode(&self) -> bool {
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(_) => return false,
+        };
+        if self.refresh_if_needed(&mut inner).is_err() {
+            return false;
+        }
+        inner.engine.is_ascii_mode()
+    }
+
+    pub fn set_ascii_mode(&self, enabled: bool) -> Option<ImeState> {
+        let mut inner = self.inner.lock().ok()?;
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.set_ascii_mode(enabled))
+    }
+
+    fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
+        let current = self.shared.generation.load(Ordering::SeqCst);
+        if inner.generation == current {
+            return Ok(());
+        }
+        inner.engine = Engine::new()?;
+        inner.generation = current;
+        Ok(())
+    }
+}
 
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
@@ -705,6 +908,18 @@ pub fn default_shared_data_dir() -> String {
             let lib_dir = PathBuf::from(lib_dir);
             if let Some(prefix) = lib_dir.parent() {
                 candidates.push(prefix.join("share/rime-data"));
+            }
+        }
+
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(bin_dir) = current_exe.parent() {
+                candidates.extend([
+                    bin_dir.join("runtime/rime-data"),
+                    bin_dir.join("resources/runtime/rime-data"),
+                    bin_dir.join("../runtime/rime-data"),
+                    bin_dir.join("../lib/keytao-app/runtime/rime-data"),
+                    bin_dir.join("../lib/keytao-app/resources/runtime/rime-data"),
+                ]);
             }
         }
 

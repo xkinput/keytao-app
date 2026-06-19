@@ -1,0 +1,70 @@
+# KeyTao IME default theme.
+# Copy this file to the platform user data directory as theme.yaml and edit it
+# to override the bundled style.
+
+version: 1
+
+font:
+  family: ""
+  size: 18
+  labelSize: 14
+  commentSize: 13
+  preeditSize: 15
+  weight: medium
+
+panel:
+  orientation: horizontal
+  background: "#F8FAFFF2"
+  borderColor: "#D8E2F1"
+  borderWidth: 1
+  cornerRadius: 14
+  paddingX: 8
+  paddingY: 7
+  gap: 6
+  minWidth: 96
+  maxWidth: 820
+  maxHeight: 460
+  screenMargin: 8
+  shadow: true
+
+candidate:
+  background: transparent
+  hoverBackground: "#F1F6FF"
+  selectedBackground: "#E6F0FF"
+  foreground: "#1F2933"
+  selectedForeground: "#14233B"
+  labelColor: "#6B7785"
+  selectedLabelColor: "#3B73D9"
+  commentColor: "#7A8790"
+  selectedCommentColor: "#526A91"
+  borderColor: transparent
+  selectedBorderColor: "#A8C7FA"
+  borderWidth: 0
+  cornerRadius: 9
+  paddingX: 11
+  paddingY: 6
+  inlineGap: 5
+  minHeight: 32
+  maxWidth: 210
+  separatorVisible: false
+  separatorColor: "#DCE7F7"
+  labelSuffix: "."
+
+navigation:
+  foreground: "#4A5966"
+  disabledForeground: "#A5B0B8"
+  hoverBackground: "#F1F6FF"
+  buttonSize: 28
+  cornerRadius: 8
+
+modeHint:
+  background: "#E6F0FFF2"
+  foreground: "#2F5FB8"
+  fontSize: 24
+  width: 72
+  height: 48
+  cornerRadius: 14
+  duration: 0.75
+  shadow: true
+  chineseText: "中"
+  englishText: "英"

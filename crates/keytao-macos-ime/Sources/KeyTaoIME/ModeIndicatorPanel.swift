@@ -1,6 +1,7 @@
 import Cocoa
 
 final class ModeIndicatorPanel: NSPanel {
+    private let containerView = NSView()
     private let label = NSTextField(labelWithString: "")
     private var hideTimer: Timer?
 
@@ -15,8 +16,11 @@ final class ModeIndicatorPanel: NSPanel {
     }
 
     func show(asciiMode: Bool, near cursorRect: NSRect) {
-        label.stringValue = asciiMode ? "英" : "中"
-        let size = frame.size
+        let theme = ImeThemeManager.shared.theme()
+        apply(theme)
+
+        label.stringValue = asciiMode ? theme.modeHint.englishText : theme.modeHint.chineseText
+        let size = NSSize(width: theme.modeHint.width, height: theme.modeHint.height)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let anchor = cursorRect.isUsableTextInputRect
@@ -34,7 +38,7 @@ final class ModeIndicatorPanel: NSPanel {
         orderFront(nil)
 
         hideTimer?.invalidate()
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: false) { [weak self] _ in
+        hideTimer = Timer.scheduledTimer(withTimeInterval: theme.modeHint.duration, repeats: false) { [weak self] _ in
             self?.orderOut(nil)
         }
     }
@@ -50,31 +54,31 @@ final class ModeIndicatorPanel: NSPanel {
         level = .popUpMenu
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
         isMovable = false
         hidesOnDeactivate = false
 
-        let container = NSVisualEffectView()
-        container.material = .hudWindow
-        container.blendingMode = .behindWindow
-        container.state = .active
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 12
-        container.layer?.masksToBounds = true
+        containerView.wantsLayer = true
+        containerView.layer?.masksToBounds = true
 
         label.alignment = .center
-        label.font = .systemFont(ofSize: 24, weight: .semibold)
-        label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
+        containerView.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            label.topAnchor.constraint(equalTo: container.topAnchor),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            label.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            label.topAnchor.constraint(equalTo: containerView.topAnchor),
+            label.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
         ])
 
-        contentView = container
+        contentView = containerView
+    }
+
+    private func apply(_ theme: ImeTheme) {
+        hasShadow = theme.modeHint.shadow
+        containerView.layer?.backgroundColor = theme.modeHint.background.cgColor
+        containerView.layer?.cornerRadius = theme.modeHint.cornerRadius
+        label.font = .systemFont(ofSize: theme.modeHint.fontSize, weight: .semibold)
+        label.textColor = theme.modeHint.foreground.nsColor
     }
 }
 

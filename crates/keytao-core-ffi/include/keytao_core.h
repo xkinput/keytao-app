@@ -26,13 +26,19 @@ typedef struct KeytaoState {
 } KeytaoState;
 
 /**
- * Initialize the Rime engine. Must be called once before any other function.
+ * Initialize the Rime runtime. Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.
  */
 bool keytao_init(const char *user_dir, const char *shared_dir);
 
 bool keytao_is_initialized(void);
+
+/**
+ * Redeploy Rime data through the shared runtime. Existing sessions refresh
+ * lazily on their next operation.
+ */
+bool keytao_reload(void);
 
 /**
  * Create a per-client input session. Returns null if keytao_init() has not
@@ -81,8 +87,20 @@ bool keytao_session_get_ascii_mode(void *session);
 struct KeytaoState *keytao_session_set_ascii_mode(void *session, bool enabled);
 
 /**
+ * Resolve theme YAML from the optional default and user paths and return a
+ * normalized JSON theme. The caller must free the string with
+ * keytao_free_string().
+ */
+char *keytao_resolve_theme_json(const char *default_theme_path, const char *user_theme_path);
+
+/**
+ * Free a UTF-8 string returned by keytao-core-ffi.
+ */
+void keytao_free_string(char *ptr);
+
+/**
  * Process a key event. Returns heap-allocated KeytaoState; caller must free
- * with keytao_free_state(). Returns null if the engine is not initialized.
+ * with keytao_free_state(). Returns null if the runtime is not initialized.
  */
 struct KeytaoState *keytao_process_key(uint32_t keyval, uint32_t modifiers);
 

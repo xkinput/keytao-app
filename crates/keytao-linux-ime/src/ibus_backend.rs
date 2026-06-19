@@ -10,9 +10,10 @@ use keytao_core::{Candidate, ImeState};
 use std::{
     fs,
     sync::{
-        atomic::{AtomicI32, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
         Arc,
     },
+    time::Instant,
 };
 use x11rb::{
     connection::Connection as _,
@@ -26,6 +27,7 @@ use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
 enum ImePanelMessage {
     Show { state: ImeState, x: i32, y: i32 },
+    ModeHint { ascii_mode: bool, x: i32, y: i32 },
     Hide,
 }
 
@@ -110,6 +112,39 @@ impl X11Panel {
             )
             .ok();
         self.conn.flush().ok();
+    }
+
+    fn show_mode_hint(&mut self, ascii_mode: bool, x: i32, y: i32) -> Option<Instant> {
+        let (pixels, w, h) = self.renderer.render_mode_hint(ascii_mode);
+        let x = (x - w as i32 / 2).max(0);
+        self.conn
+            .configure_window(
+                self.panel_win,
+                &ConfigureWindowAux::new().x(x).y(y).width(w).height(h),
+            )
+            .ok();
+
+        if !self.visible {
+            self.conn.map_window(self.panel_win).ok();
+            self.visible = true;
+        }
+
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                self.panel_win,
+                self.gc,
+                w as u16,
+                h as u16,
+                0,
+                0,
+                0,
+                self.depth,
+                &pixels,
+            )
+            .ok();
+        self.conn.flush().ok();
+        Some(Instant::now() + self.renderer.mode_hint_duration())
     }
 
     fn hide(&mut self) {
@@ -320,6 +355,7 @@ struct InputContext {
     kimpanel_ctxt: Option<SignalContext<'static>>,
     cursor_x: Arc<AtomicI32>,
     cursor_y: Arc<AtomicI32>,
+    ascii_mode: Arc<AtomicBool>,
     x11_panel_tx: std::sync::mpsc::Sender<ImePanelMessage>,
 }
 
@@ -332,6 +368,134 @@ impl InputContext {
             let _ = Kimpanel::show_lookup_table(kc, false).await;
         }
         let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+    }
+
+    async fn update_mode_hint(&self, ascii_mode: bool) {
+        let previous = self.ascii_mode.swap(ascii_mode, Ordering::Relaxed);
+        if previous == ascii_mode {
+            return;
+        }
+        let cx = self.cursor_x.load(Ordering::Relaxed);
+        let cy = self.cursor_y.load(Ordering::Relaxed);
+        let _ = self.x11_panel_tx.send(ImePanelMessage::ModeHint {
+            ascii_mode,
+            x: cx,
+            y: cy + 24,
+        });
+    }
+
+    async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
+        let ascii_mode = ime_state.ascii_mode;
+        let has_candidates = !ime_state.candidates.is_empty();
+        let mode_changed = self.ascii_mode.load(Ordering::Relaxed) != ascii_mode;
+        if let Some(ref text) = ime_state.committed {
+            if !text.is_empty() {
+                tracing::info!("IBus CommitText: {text:?}");
+                clear_preedit(ctxt, &self.kimpanel_ctxt).await;
+                let ov = ibus_text_value(text);
+                if let Ok(v) = zvariant::Value::try_from(&ov) {
+                    let _ = Self::commit_text(ctxt, v).await;
+                }
+            }
+        }
+
+        if ime_state.preedit.is_empty() {
+            let _ = Self::hide_preedit_text(ctxt).await;
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::show_preedit_text(kctxt, false).await;
+            }
+        } else {
+            clear_preedit(ctxt, &None).await;
+
+            let cursor = ime_state.cursor as u32;
+            let ov = ibus_text_value(&ime_state.preedit);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = Self::update_preedit_text(ctxt, v, cursor, true).await;
+            }
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::update_preedit_text(kctxt, &ime_state.preedit, "").await;
+                let _ = Kimpanel::show_preedit_text(kctxt, true).await;
+            }
+        }
+
+        if ime_state.candidates.is_empty() {
+            let _ = Self::hide_lookup_table(ctxt).await;
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let _ = Kimpanel::show_lookup_table(kctxt, false).await;
+            }
+            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
+        } else {
+            let ov = ibus_lookup_table_value(&ime_state);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = Self::update_lookup_table(ctxt, v, true).await;
+            }
+            if let Some(kctxt) = &self.kimpanel_ctxt {
+                let mut labels = Vec::new();
+                let mut cands = Vec::new();
+                let select_keys = ime_state.select_keys.as_deref();
+                for (i, c) in ime_state.candidates.iter().enumerate() {
+                    labels.push(candidate_label(i, select_keys));
+                    cands.push(candidate_display_text(c));
+                }
+                let labels_ref: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                let cands_ref: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
+                let attrs: Vec<&str> = vec![];
+                let _ = Kimpanel::update_lookup_table(
+                    kctxt,
+                    &labels_ref,
+                    &cands_ref,
+                    &attrs,
+                    ime_state.page > 0,
+                    !ime_state.is_last_page,
+                )
+                .await;
+                let _ = Kimpanel::show_lookup_table(kctxt, true).await;
+                let _ = Kimpanel::update_spot_location(
+                    kctxt,
+                    self.cursor_x.load(Ordering::Relaxed),
+                    self.cursor_y.load(Ordering::Relaxed),
+                )
+                .await;
+            }
+
+            let cx = self.cursor_x.load(Ordering::Relaxed);
+            let cy = self.cursor_y.load(Ordering::Relaxed);
+            let _ = self.x11_panel_tx.send(ImePanelMessage::Show {
+                state: ime_state,
+                x: cx,
+                y: cy + 24,
+            });
+        }
+
+        if mode_changed && !has_candidates {
+            self.update_mode_hint(ascii_mode).await;
+        } else {
+            self.ascii_mode.store(ascii_mode, Ordering::Relaxed);
+        }
+    }
+
+    async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) -> bool {
+        match self.session.select_candidate(index) {
+            Some(ime_state) => {
+                self.apply_ime_state(ime_state, ctxt).await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    async fn change_page(&self, backward: bool, ctxt: &SignalContext<'_>) {
+        if let Some(ime_state) = self.session.change_page(backward) {
+            self.apply_ime_state(ime_state, ctxt).await;
+        }
+    }
+
+    async fn process_navigation_key(&self, keyval: u32, ctxt: &SignalContext<'_>) {
+        if let Some(result) = self.session.process_key_result(keyval, 0) {
+            if result.accepted {
+                self.apply_ime_state(result.state, ctxt).await;
+            }
+        }
     }
 }
 
@@ -375,17 +539,30 @@ impl InputContext {
         self.clear_ui(&ctxt).await;
     }
 
-    async fn page_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn page_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn cursor_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn cursor_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn page_up(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.change_page(true, &ctxt).await;
+    }
+
+    async fn page_down(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.change_page(false, &ctxt).await;
+    }
+
+    async fn cursor_up(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.process_navigation_key(0xff52, &ctxt).await;
+    }
+
+    async fn cursor_down(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.process_navigation_key(0xff54, &ctxt).await;
+    }
+
     async fn candidate_clicked(
         &self,
-        _index: u32,
+        index: u32,
         _button: u32,
         _state: u32,
-        #[zbus(signal_context)] _ctxt: SignalContext<'_>,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) {
+        let _ = self.select_candidate_at(index as usize, &ctxt).await;
     }
 
     async fn property_activate(&self, _name: &str, _state: u32) {}
@@ -422,6 +599,7 @@ impl InputContext {
                         "IBus mode after Shift release: ascii_mode={}",
                         result.state.ascii_mode
                     );
+                    self.update_mode_hint(result.state.ascii_mode).await;
                     return result.accepted;
                 }
             }
@@ -459,21 +637,8 @@ impl InputContext {
             candidate_index_for_select_key(keyval, &before_state)
         };
         if let Some(index) = candidate_select_index {
-            if !before_state.candidates.is_empty() {
-                if let Some(ime_state) = self.session.select_candidate(index) {
-                    if let Some(ref text) = ime_state.committed {
-                        if !text.is_empty() {
-                            clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
-                            tracing::info!("IBus CommitText(candidate): {text:?}");
-                            let ov = ibus_text_value(text);
-                            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                                let _ = Self::commit_text(&ctxt, v).await;
-                            }
-                        }
-                    }
-                    self.clear_ui(&ctxt).await;
-                    return true;
-                }
+            if self.select_candidate_at(index, &ctxt).await {
+                return true;
             }
         }
 
@@ -483,89 +648,9 @@ impl InputContext {
         };
 
         let ime_state = result.state;
-
         let consumed = result.accepted;
 
-        if let Some(ref text) = ime_state.committed {
-            if !text.is_empty() {
-                tracing::info!("IBus CommitText: {text:?}");
-                clear_preedit(&ctxt, &self.kimpanel_ctxt).await;
-                let ov = ibus_text_value(text);
-                if let Ok(v) = zvariant::Value::try_from(&ov) {
-                    let _ = Self::commit_text(&ctxt, v).await;
-                }
-            }
-        }
-
-        if ime_state.preedit.is_empty() {
-            let _ = Self::hide_preedit_text(&ctxt).await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::show_preedit_text(kctxt, false).await;
-            }
-        } else {
-            // ALWAYS clear preedit first to prevent ghosting/afterimages in Electron/Chromium apps
-            clear_preedit(&ctxt, &None).await;
-
-            let cursor = ime_state.cursor as u32;
-            let ov = ibus_text_value(&ime_state.preedit);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = Self::update_preedit_text(&ctxt, v, cursor, true).await;
-            }
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::update_preedit_text(kctxt, &ime_state.preedit, "").await;
-                let _ = Kimpanel::show_preedit_text(kctxt, true).await;
-            }
-        }
-
-        if ime_state.candidates.is_empty() {
-            let _ = Self::hide_lookup_table(&ctxt).await;
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::show_lookup_table(kctxt, false).await;
-            }
-            let _ = self.x11_panel_tx.send(ImePanelMessage::Hide);
-        } else {
-            let ov = ibus_lookup_table_value(&ime_state);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = Self::update_lookup_table(&ctxt, v, true).await;
-            }
-            if let Some(kctxt) = &self.kimpanel_ctxt {
-                let mut labels = Vec::new();
-                let mut cands = Vec::new();
-                let select_keys = ime_state.select_keys.as_deref();
-                for (i, c) in ime_state.candidates.iter().enumerate() {
-                    labels.push(candidate_label(i, select_keys));
-                    cands.push(candidate_display_text(c));
-                }
-                let labels_ref: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                let cands_ref: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
-                let attrs: Vec<&str> = vec![];
-                let _ = Kimpanel::update_lookup_table(
-                    kctxt,
-                    &labels_ref,
-                    &cands_ref,
-                    &attrs,
-                    false, // has_prev
-                    false, // has_next
-                )
-                .await;
-                let _ = Kimpanel::show_lookup_table(kctxt, true).await;
-                let _ = Kimpanel::update_spot_location(
-                    kctxt,
-                    self.cursor_x.load(Ordering::Relaxed),
-                    self.cursor_y.load(Ordering::Relaxed),
-                )
-                .await;
-            }
-
-            // Draw the X11 candidate window
-            let cx = self.cursor_x.load(Ordering::Relaxed);
-            let cy = self.cursor_y.load(Ordering::Relaxed);
-            let _ = self.x11_panel_tx.send(ImePanelMessage::Show {
-                state: ime_state,
-                x: cx,
-                y: cy + 24,
-            });
-        }
+        self.apply_ime_state(ime_state, &ctxt).await;
 
         consumed
     }
@@ -679,6 +764,7 @@ impl IBusBus {
             kimpanel_ctxt: self.kimpanel_ctxt.clone(),
             cursor_x: Arc::new(AtomicI32::new(0)),
             cursor_y: Arc::new(AtomicI32::new(0)),
+            ascii_mode: Arc::new(AtomicBool::new(false)),
             x11_panel_tx: self.x11_panel_tx.clone(),
         };
         server
@@ -824,13 +910,40 @@ pub async fn run(engine: CoreEngine) {
     let tx_clone = tx.clone();
     std::thread::spawn(move || {
         let mut panel = X11Panel::new();
-        while let Ok(msg) = rx.recv() {
+        let mut mode_hint_until: Option<Instant> = None;
+        loop {
+            let msg = match mode_hint_until {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        if let Some(panel) = panel.as_mut() {
+                            panel.hide();
+                        }
+                        mode_hint_until = None;
+                        continue;
+                    }
+                    rx.recv_timeout(deadline.saturating_duration_since(now))
+                        .ok()
+                }
+                None => rx.recv().ok(),
+            };
+            let Some(msg) = msg else {
+                if mode_hint_until.is_some() {
+                    continue;
+                }
+                break;
+            };
             if let Some(panel) = panel.as_mut() {
                 match msg {
                     ImePanelMessage::Show { state, x, y } => {
+                        mode_hint_until = None;
                         panel.show(&state, x, y);
                     }
+                    ImePanelMessage::ModeHint { ascii_mode, x, y } => {
+                        mode_hint_until = panel.show_mode_hint(ascii_mode, x, y);
+                    }
                     ImePanelMessage::Hide => {
+                        mode_hint_until = None;
                         panel.hide();
                     }
                 }

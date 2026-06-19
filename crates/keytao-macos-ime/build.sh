@@ -2,6 +2,7 @@
 # build.sh - builds KeyTao.app and, by default, an IME-only KeyTao.pkg package.
 # Usage: ./build.sh [--release | --debug] [--skip-pkg]
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -123,7 +124,8 @@ XML_EOF
 if { [ -z "${RIME_INCLUDE_DIR:-}" ] || [ -z "${RIME_LIB_DIR:-}" ]; } &&
     { [ ! -f "$VENDOR_ENV" ] ||
         [ ! -f "$VENDOR_DIR/include/rime_api.h" ] ||
-        [ ! -e "$VENDOR_DIR/lib/librime.1.dylib" ]; }; then
+        [ ! -e "$VENDOR_DIR/lib/librime.1.dylib" ] ||
+        [ ! -f "$VENDOR_DIR/rime-data/default.yaml" ]; }; then
     "$WORKSPACE_DIR/scripts/fetch-librime.sh" \
         --platform macos \
         --version "${LIBRIME_VERSION:-latest}" \
@@ -161,6 +163,32 @@ fi
 
 export BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} -I$RIME_INCLUDE_DIR"
 
+find_rime_data_dir() {
+    for dir in \
+        "${KEYTAO_RIME_SHARED_DATA_DIR:-}" \
+        "${RIME_SHARED_DATA_DIR:-}" \
+        "${RIME_DATA_DIR:-}" \
+        "$VENDOR_DIR/rime-data" \
+        "$WORKSPACE_DIR/vendor/rime-data" \
+        "/Library/Input Methods/Squirrel.app/Contents/SharedSupport" \
+        "/opt/homebrew/share/rime-data" \
+        "/usr/local/share/rime-data"; do
+        [ -n "$dir" ] || continue
+        if [ -f "$dir/default.yaml" ]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+RIME_DATA_DIR_RESOLVED="$(find_rime_data_dir || true)"
+if [ -z "$RIME_DATA_DIR_RESOLVED" ]; then
+    echo "ERROR: rime-data was not found." >&2
+    echo "Set KEYTAO_RIME_SHARED_DATA_DIR or run scripts/fetch-librime.sh --platform macos." >&2
+    exit 1
+fi
+
 echo "==> Generating input source icons..."
 "$SCRIPT_DIR/generate-icons.sh"
 
@@ -188,6 +216,8 @@ mkdir -p "$APP/Contents/Resources"
 cp "$SCRIPT_DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$SCRIPT_DIR/Resources/keytao-menu-icon.pdf" "$APP/Contents/Resources/"
 cp "$SCRIPT_DIR/Resources/KeyTaoInputSource.icns" "$APP/Contents/Resources/"
+cp "$WORKSPACE_DIR/crates/keytao-theme/default-theme.yaml" "$APP/Contents/Resources/"
+ditto "$RIME_DATA_DIR_RESOLVED" "$APP/Contents/Resources/rime-data"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 mkdir -p "$APP/Contents/Resources/en.lproj"
@@ -319,7 +349,11 @@ rm -rf "$PKG_PAYLOAD" "$PKG_SCRIPTS"
 mkdir -p "$PKG_PAYLOAD/Library/Input Methods"
 mkdir -p "$PKG_SCRIPTS"
 
-ditto --norsrc "$APP" "$PKG_PAYLOAD/Library/Input Methods/KeyTao.app"
+ditto --noextattr --norsrc "$APP" "$PKG_PAYLOAD/Library/Input Methods/KeyTao.app"
+find "$PKG_PAYLOAD" \( -name '._*' -o -name '.DS_Store' \) -delete
+find "$PKG_SCRIPTS" \( -name '._*' -o -name '.DS_Store' \) -delete
+xattr -cr "$PKG_PAYLOAD" 2>/dev/null || true
+xattr -cr "$PKG_SCRIPTS" 2>/dev/null || true
 
 cat > "$PKG_COMPONENTS" << 'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -365,7 +399,7 @@ exit 0
 SCRIPTEOF
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-pkgbuild \
+COPYFILE_DISABLE=1 pkgbuild \
     --root "$PKG_PAYLOAD" \
     --component-plist "$PKG_COMPONENTS" \
     --scripts "$PKG_SCRIPTS" \

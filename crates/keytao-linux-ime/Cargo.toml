@@ -15,6 +15,7 @@ path = "src/main.rs"
 # ── Linux-only dependencies ───────────────────────────────────────────────────
 [target.'cfg(target_os = "linux")'.dependencies]
 keytao-core = { path = "../keytao-core" }
+keytao-theme = { path = "../keytao-theme" }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = "0.1"

@@ -1,47 +1,21 @@
 //! Candidate panel renderer.
 //!
-//! Fixed dark theme (Catppuccin Mocha).  Renders to a raw BGRA pixel buffer
-//! suitable for both X11 XCB image upload and Wayland wl_shm.
-//!
-//! Layout (single horizontal bar):
-//!
-//!   ┌──────────────────────────────────────────────────────┐
-//!   │  [preedit]                                           │  ← 18px row
-//!   │  1.候选  2.候选  3.候选  ...         ‹ page ›       │  ← 24px row
-//!   └──────────────────────────────────────────────────────┘
+//! Renders the shared keytao-theme model to a raw BGRA pixel buffer suitable
+//! for both X11 XCB image upload and Wayland wl_shm.
 
-use std::{collections::HashSet, path::Path as StdPath, process::Command};
+use std::{collections::HashSet, path::Path as StdPath, process::Command, time::Duration};
 
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
+use keytao_theme::{
+    CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+};
 use tiny_skia::*;
 
-// ── Catppuccin Mocha ──────────────────────────────────────────────────────────
-
-const BG: [u8; 4] = [0x2e, 0x1e, 0x1e, 0xff]; // BGRA 0x1e1e2e
-const FG: [u8; 4] = [0xfb, 0xf7, 0xf4, 0xff]; // 0xf4f7fb
-const ACCENT: [u8; 4] = [0xd5, 0xe2, 0x94, 0xff]; // 0x94e2d5
-const PREEDIT_COLOR: [u8; 4] = [0xeb, 0xdc, 0x89, 0xff]; // 0x89dceb
-const DIM: [u8; 4] = [0xc8, 0xad, 0xa6, 0xff]; // 0xa6adc8
-const COMMENT: [u8; 4] = [0xaf, 0xe2, 0xf9, 0xff]; // 0xf9e2af
-const SEP: [u8; 4] = [0x50, 0x48, 0x45, 0xff]; // surface1 0x45475a → darker
-
-const FONT_SIZE: f32 = 22.0;
-const LABEL_SIZE: f32 = 15.0;
-const COMMENT_SIZE: f32 = 15.0;
-const PREEDIT_SIZE: f32 = 15.0;
+const FONT_PROBE_SIZE: f32 = 22.0;
 const COLOR_GLYPH_HEIGHT_FACTOR: f32 = 1.05;
 const COLOR_GLYPH_WIDTH_FACTOR: f32 = 1.35;
-const PADDING: f32 = 12.0;
-const CAND_GAP: f32 = 20.0;
-const HEIGHT: u32 = 60;
-const MIN_WIDTH: u32 = 260;
-const NAV_WIDTH: f32 = 42.0;
 const MAX_COLLECTION_FACES: isize = 32;
-const HINT_HEIGHT: u32 = 36;
-const HINT_MIN_WIDTH: u32 = 48;
-const HINT_SIZE: f32 = 20.0;
-const HINT_PAD_X: f32 = 14.0;
 const TEXT_FONT_ENV: &str = "KEYTAO_IME_FONT";
 const SYMBOL_FONT_ENV: &str = "KEYTAO_IME_SYMBOL_FONT";
 const TEXT_FALLBACK_PATTERNS: &[&str] = &[
@@ -68,7 +42,7 @@ fn font_is_usable(face: &Face) -> bool {
             continue;
         }
         if face
-            .set_pixel_sizes(0, FONT_SIZE.ceil() as u32)
+            .set_pixel_sizes(0, FONT_PROBE_SIZE.ceil() as u32)
             .and_then(|_| {
                 face.load_char(sample as usize, LoadFlag::RENDER | LoadFlag::TARGET_NORMAL)
             })
@@ -356,6 +330,7 @@ pub struct PanelRenderer {
     faces: Vec<Face>,
     _library: Library,
     scale: f32,
+    theme_resolver: ThemeResolver,
 }
 
 impl PanelRenderer {
@@ -380,121 +355,185 @@ impl PanelRenderer {
             faces,
             _library: library,
             scale: clamp_panel_scale(scale),
+            theme_resolver: ThemeResolver::from_default_locations(),
         })
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
     pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
-        let font_size = self.s(FONT_SIZE);
-        let label_size = self.s(LABEL_SIZE);
-        let comment_size = self.s(COMMENT_SIZE);
-        let preedit_size = self.s(PREEDIT_SIZE);
-        let padding = self.s(PADDING);
-        let cand_gap = self.s(CAND_GAP);
-        let height = self.s(HEIGHT as f32).ceil() as u32;
-        let min_width = self.s(MIN_WIDTH as f32).ceil() as u32;
-        let nav_width = self.s(NAV_WIDTH);
-
-        let cand_width: f32 = state
+        let theme = self.theme_resolver.current();
+        let model = theme
+            .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
+        let font_size = self.s(theme.font.size);
+        let label_size = self.s(theme.font.label_size);
+        let comment_size = self.s(theme.font.comment_size);
+        let preedit_size = self.s(theme.font.preedit_size);
+        let panel_pad_x = self.s(theme.panel.padding_x);
+        let panel_pad_y = self.s(theme.panel.padding_y);
+        let panel_gap = self.s(theme.panel.gap);
+        let option_pad_x = self.s(theme.candidate.padding_x);
+        let option_pad_y = self.s(theme.candidate.padding_y);
+        let inline_gap = self.s(theme.candidate.inline_gap);
+        let option_gap = panel_gap;
+        let option_height = self
+            .s(theme.candidate.min_height)
+            .max(font_size.max(label_size).max(comment_size) + option_pad_y * 2.0);
+        let nav_button = self.s(theme.navigation.button_size);
+        let preedit_height = model
+            .preedit
+            .as_ref()
+            .map(|_| preedit_size + panel_gap)
+            .unwrap_or(0.0);
+        let option_widths: Vec<f32> = model
             .candidates
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let label = self.candidate_label(state, i);
-                let comment = c.comment.as_deref().unwrap_or_default();
-                self.text_width(&format!("{label}. "), label_size)
-                    + self.text_width(&c.text, font_size)
-                    + if comment.is_empty() {
-                        0.0
-                    } else {
-                        self.s(6.0) + self.text_width(comment, comment_size)
-                    }
-                    + cand_gap
+            .map(|candidate| {
+                option_pad_x * 2.0
+                    + self.text_width(&candidate.label, label_size)
+                    + inline_gap
+                    + self.text_width(&candidate.text, font_size)
+                    + candidate.comment.as_ref().map_or(0.0, |comment| {
+                        inline_gap + self.text_width(comment, comment_size)
+                    })
             })
-            .sum();
-        let preedit_width = if state.preedit.is_empty() {
+            .collect();
+        let nav_count = usize::from(model.navigation.can_go_previous)
+            + usize::from(model.navigation.can_go_next);
+        let nav_width = if nav_count == 0 {
             0.0
         } else {
-            self.text_width(&state.preedit, preedit_size) + padding * 2.0
+            nav_count as f32 * nav_button + nav_count.saturating_sub(1) as f32 * panel_gap
         };
-        let nav_width = if state.candidates.is_empty() {
-            0.0
+        let preedit_width = model
+            .preedit
+            .as_ref()
+            .map(|preedit| self.text_width(preedit, preedit_size) + panel_pad_x * 2.0)
+            .unwrap_or(0.0);
+
+        let (content_width, content_height) = if model.orientation == PanelOrientation::Vertical {
+            let max_option_width = option_widths.iter().copied().fold(0.0, f32::max);
+            let candidate_height = model.candidates.len() as f32 * option_height
+                + model.candidates.len().saturating_sub(1) as f32 * option_gap;
+            (
+                max_option_width.max(nav_width).max(preedit_width),
+                preedit_height
+                    + candidate_height
+                    + if nav_count > 0 {
+                        panel_gap + nav_button
+                    } else {
+                        0.0
+                    },
+            )
         } else {
-            nav_width
+            let candidate_width = option_widths.iter().sum::<f32>()
+                + model.candidates.len().saturating_sub(1) as f32 * option_gap;
+            let nav_extra = if nav_count > 0 {
+                panel_gap + nav_width
+            } else {
+                0.0
+            };
+            (
+                (candidate_width + nav_extra).max(preedit_width),
+                preedit_height + option_height,
+            )
         };
-        let width = (min_width as f32)
-            .max(cand_width + padding * 2.0 + nav_width)
-            .max(preedit_width) as u32;
+        let width = self
+            .s(theme.panel.min_width)
+            .max(content_width + panel_pad_x * 2.0)
+            .max(preedit_width)
+            .min(self.s(theme.panel.max_width))
+            .ceil() as u32;
+        let height = (content_height + panel_pad_y * 2.0)
+            .min(self.s(theme.panel.max_height))
+            .ceil()
+            .max(1.0) as u32;
 
         let mut pm = Pixmap::new(width, height).expect("pixmap alloc");
+        pm.fill(Color::from_rgba8(0, 0, 0, 0));
+        draw_rounded_rect(
+            &mut pm,
+            0.5,
+            0.5,
+            width as f32 - 1.0,
+            height as f32 - 1.0,
+            self.s(theme.panel.corner_radius),
+            theme.panel.background,
+            theme.panel.border_color,
+            self.s(theme.panel.border_width),
+        );
 
-        // Background
-        pm.fill(Color::from_rgba8(BG[2], BG[1], BG[0], 255));
-
-        // Preedit
-        let cand_y = if state.preedit.is_empty() {
-            height as f32 / 2.0 + font_size / 2.0 - self.s(4.0)
-        } else {
+        let mut y = panel_pad_y;
+        if let Some(preedit) = model.preedit.as_ref() {
+            let baseline = y + preedit_size;
             self.draw_text(
                 &mut pm,
-                &state.preedit,
-                padding,
-                self.s(14.0),
-                PREEDIT_COLOR,
+                preedit,
+                panel_pad_x,
+                baseline,
+                bgra(theme.candidate.selected_label_color),
                 preedit_size,
             );
-            height as f32 - self.s(10.0)
-        };
+            y += preedit_height;
+        }
 
-        // Candidates
-        let mut x = padding;
-        let selected_index = state
-            .highlighted_candidate_index
-            .min(state.candidates.len().saturating_sub(1));
-        for (i, cand) in state.candidates.iter().enumerate() {
-            let label = format!("{}. ", self.candidate_label(state, i));
-            let color = if i == selected_index { ACCENT } else { FG };
-            self.draw_text(&mut pm, &label, x, cand_y, DIM, label_size);
-            x += self.text_width(&label, label_size);
-            self.draw_text(&mut pm, &cand.text, x, cand_y, color, font_size);
-            x += self.text_width(&cand.text, font_size);
-            if let Some(comment) = cand
-                .comment
-                .as_deref()
-                .filter(|comment| !comment.is_empty())
-            {
-                x += self.s(6.0);
-                self.draw_text(&mut pm, comment, x, cand_y, COMMENT, comment_size);
-                x += self.text_width(comment, comment_size);
+        if model.orientation == PanelOrientation::Vertical {
+            let mut row_y = y;
+            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
+                self.draw_candidate_option(
+                    &mut pm,
+                    candidate,
+                    panel_pad_x,
+                    row_y,
+                    *option_width,
+                    option_height,
+                    label_size,
+                    font_size,
+                    comment_size,
+                    &theme,
+                );
+                row_y += option_height + option_gap;
             }
-            x += cand_gap;
+            if nav_count > 0 {
+                self.draw_navigation_row(
+                    &mut pm,
+                    panel_pad_x,
+                    row_y,
+                    nav_button,
+                    font_size,
+                    &model.navigation,
+                    &theme,
+                );
+            }
+        } else {
+            let mut x = panel_pad_x;
+            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
+                self.draw_candidate_option(
+                    &mut pm,
+                    candidate,
+                    x,
+                    y,
+                    *option_width,
+                    option_height,
+                    label_size,
+                    font_size,
+                    comment_size,
+                    &theme,
+                );
+                x += option_width + option_gap;
+            }
+            if nav_count > 0 {
+                x += panel_gap;
+                self.draw_navigation_row(
+                    &mut pm,
+                    x,
+                    y,
+                    nav_button,
+                    font_size,
+                    &model.navigation,
+                    &theme,
+                );
+            }
         }
-
-        // Page arrows
-        if !state.candidates.is_empty() {
-            let ax = width as f32 - nav_width + self.s(4.0);
-            let prev_color = if state.page == 0 { DIM } else { FG };
-            self.draw_text(&mut pm, "‹", ax, cand_y, prev_color, font_size);
-            let next_color = if state.is_last_page { DIM } else { FG };
-            self.draw_text(
-                &mut pm,
-                "›",
-                ax + self.s(18.0),
-                cand_y,
-                next_color,
-                font_size,
-            );
-        }
-
-        // Bottom separator
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(SEP[2], SEP[1], SEP[0], 255);
-        pm.fill_rect(
-            Rect::from_xywh(0.0, height as f32 - 1.0, width as f32, 1.0).unwrap(),
-            &paint,
-            Transform::identity(),
-            None,
-        );
 
         // Convert RGBA (tiny-skia) → BGRA (platform native)
         let mut out: Vec<u8> = pm.data().to_vec();
@@ -505,52 +544,27 @@ impl PanelRenderer {
         (out, width, height)
     }
 
-    fn candidate_label(&self, state: &ImeState, index: usize) -> String {
-        state
-            .select_keys
-            .as_deref()
-            .and_then(|keys| keys.chars().nth(index))
-            .or_else(|| "1234567890".chars().nth(index))
-            .map(|ch| ch.to_string())
-            .unwrap_or_else(|| (index + 1).to_string())
-    }
-
     pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
-        let hint_size = self.s(HINT_SIZE);
-        let hint_pad_x = self.s(HINT_PAD_X);
-        let hint_height = self.s(HINT_HEIGHT as f32).ceil() as u32;
-        let hint_min_width = self.s(HINT_MIN_WIDTH as f32).ceil() as u32;
-        let label = if ascii_mode { "英" } else { "中" };
-        let text_width = self.text_width(label, hint_size);
-        let width = hint_min_width.max((text_width + hint_pad_x * 2.0).ceil() as u32);
+        let theme = self.theme_resolver.current();
+        let model = theme.mode_hint_model(ascii_mode);
+        let hint_size = self.s(theme.mode_hint.font_size);
+        let hint_height = self.s(theme.mode_hint.height).ceil() as u32;
+        let hint_min_width = self.s(theme.mode_hint.width).ceil() as u32;
+        let label = model.text;
+        let text_width = self.text_width(&label, hint_size);
+        let width = hint_min_width.max((text_width + self.s(20.0) * 2.0).ceil() as u32);
         let mut pm = Pixmap::new(width, hint_height).expect("pixmap alloc");
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
-
-        let bg = if ascii_mode {
-            [0x1f, 0x44, 0x5f, 0xee]
-        } else {
-            [0x57, 0x52, 0x30, 0xee]
-        };
-        let fg = if ascii_mode {
-            [0x8a, 0xc8, 0xff, 0xff]
-        } else {
-            [0xd7, 0xf3, 0x9c, 0xff]
-        };
-        let border = if ascii_mode {
-            [0x35, 0x76, 0xa5, 0xb8]
-        } else {
-            [0x83, 0x7b, 0x48, 0xb8]
-        };
 
         if let Some(path) = rounded_rect_path(
             0.5,
             0.5,
             width as f32 - 1.0,
             hint_height as f32 - 1.0,
-            self.s(8.0),
+            self.s(theme.mode_hint.corner_radius),
         ) {
             let mut paint = Paint::default();
-            paint.set_color(Color::from_rgba8(bg[2], bg[1], bg[0], bg[3]));
+            paint.set_color(tiny_color(theme.mode_hint.background));
             paint.anti_alias = true;
             pm.fill_path(
                 &path,
@@ -560,17 +574,24 @@ impl PanelRenderer {
                 None,
             );
 
-            paint.set_color(Color::from_rgba8(
-                border[2], border[1], border[0], border[3],
-            ));
-            let mut stroke = Stroke::default();
-            stroke.width = self.s(1.0).max(1.0);
-            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            if theme.panel.border_width > 0.0 {
+                paint.set_color(tiny_color(theme.panel.border_color));
+                let mut stroke = Stroke::default();
+                stroke.width = self.s(1.0).max(1.0);
+                pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
         }
 
         let x = (width as f32 - text_width) * 0.5;
         let baseline = (hint_height as f32 + hint_size) * 0.5 - self.s(3.0);
-        self.draw_text(&mut pm, label, x, baseline, fg, hint_size);
+        self.draw_text(
+            &mut pm,
+            &label,
+            x,
+            baseline,
+            bgra(theme.mode_hint.foreground),
+            hint_size,
+        );
 
         let mut out = pm.data().to_vec();
         for px in out.chunks_exact_mut(4) {
@@ -578,6 +599,138 @@ impl PanelRenderer {
         }
 
         (out, width, hint_height)
+    }
+
+    pub fn mode_hint_duration(&self) -> Duration {
+        let theme = self.theme_resolver.current();
+        Duration::from_secs_f32(theme.mode_hint.duration)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_candidate_option(
+        &self,
+        pm: &mut Pixmap,
+        candidate: &keytao_theme::CandidateOptionModel,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        label_size: f32,
+        font_size: f32,
+        comment_size: f32,
+        theme: &keytao_theme::ResolvedImeTheme,
+    ) {
+        let candidate_theme = &theme.candidate;
+        let background = if candidate.selected {
+            candidate_theme.selected_background
+        } else {
+            candidate_theme.background
+        };
+        let border = if candidate.selected {
+            candidate_theme.selected_border_color
+        } else {
+            candidate_theme.border_color
+        };
+        let border_width = if candidate.selected {
+            self.s(candidate_theme.border_width.max(1.0))
+        } else {
+            self.s(candidate_theme.border_width)
+        };
+        draw_rounded_rect(
+            pm,
+            x,
+            y,
+            width,
+            height,
+            self.s(candidate_theme.corner_radius),
+            background,
+            border,
+            border_width,
+        );
+
+        let option_pad_x = self.s(candidate_theme.padding_x);
+        let inline_gap = self.s(candidate_theme.inline_gap);
+        let baseline = y + (height + font_size) * 0.5 - self.s(4.0);
+        let mut text_x = x + option_pad_x;
+        let label_color = if candidate.selected {
+            candidate_theme.selected_label_color
+        } else {
+            candidate_theme.label_color
+        };
+        let text_color = if candidate.selected {
+            candidate_theme.selected_foreground
+        } else {
+            candidate_theme.foreground
+        };
+        let comment_color = if candidate.selected {
+            candidate_theme.selected_comment_color
+        } else {
+            candidate_theme.comment_color
+        };
+        self.draw_text(
+            pm,
+            &candidate.label,
+            text_x,
+            baseline,
+            bgra(label_color),
+            label_size,
+        );
+        text_x += self.text_width(&candidate.label, label_size) + inline_gap;
+        self.draw_text(
+            pm,
+            &candidate.text,
+            text_x,
+            baseline,
+            bgra(text_color),
+            font_size,
+        );
+        text_x += self.text_width(&candidate.text, font_size);
+        if let Some(comment) = candidate.comment.as_ref() {
+            text_x += inline_gap;
+            self.draw_text(
+                pm,
+                comment,
+                text_x,
+                baseline,
+                bgra(comment_color),
+                comment_size,
+            );
+        }
+    }
+
+    fn draw_navigation_row(
+        &self,
+        pm: &mut Pixmap,
+        x: f32,
+        y: f32,
+        button_size: f32,
+        font_size: f32,
+        navigation: &keytao_theme::PageNavigationModel,
+        theme: &keytao_theme::ResolvedImeTheme,
+    ) {
+        let mut nav_x = x;
+        let baseline = y + (button_size + font_size) * 0.5 - self.s(4.0);
+        if navigation.can_go_previous {
+            self.draw_text(
+                pm,
+                "‹",
+                nav_x + button_size * 0.35,
+                baseline,
+                bgra(theme.navigation.foreground),
+                font_size,
+            );
+            nav_x += button_size + self.s(theme.panel.gap);
+        }
+        if navigation.can_go_next {
+            self.draw_text(
+                pm,
+                "›",
+                nav_x + button_size * 0.35,
+                baseline,
+                bgra(theme.navigation.foreground),
+                font_size,
+            );
+        }
     }
 
     fn s(&self, value: f32) -> f32 {
@@ -754,6 +907,66 @@ fn is_zero_width_selector(ch: char) -> bool {
     matches!(ch, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
 }
 
+fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
+    CandidatePanelInput {
+        preedit: state.preedit.clone(),
+        candidates: state
+            .candidates
+            .iter()
+            .map(|candidate| ThemeCandidate {
+                text: candidate.text.clone(),
+                comment: candidate.comment.clone(),
+            })
+            .collect(),
+        highlighted_candidate_index: state.highlighted_candidate_index,
+        page: state.page,
+        is_last_page: state.is_last_page,
+        select_keys: state.select_keys.clone(),
+    }
+}
+
+fn bgra(color: RgbaColor) -> [u8; 4] {
+    [color.blue, color.green, color.red, color.alpha]
+}
+
+fn tiny_color(color: RgbaColor) -> Color {
+    Color::from_rgba8(color.red, color.green, color.blue, color.alpha)
+}
+
+fn draw_rounded_rect(
+    pm: &mut Pixmap,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    fill: RgbaColor,
+    border: RgbaColor,
+    border_width: f32,
+) {
+    let Some(path) = rounded_rect_path(x, y, width.max(1.0), height.max(1.0), radius) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    if fill.alpha > 0 {
+        paint.set_color(tiny_color(fill));
+        pm.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    if border_width > 0.0 && border.alpha > 0 {
+        paint.set_color(tiny_color(border));
+        let mut stroke = Stroke::default();
+        stroke.width = border_width.max(1.0);
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
 fn blend_pixel(pm: &mut Pixmap, px: i32, py: i32, r: u8, g: u8, b: u8, alpha: f32) {
     if alpha <= 0.0 || px < 0 || py < 0 || px >= pm.width() as i32 || py >= pm.height() as i32 {
         return;
@@ -812,13 +1025,15 @@ mod tests {
         }];
 
         let (pixels, _, _) = renderer.render(&state);
-        let visible_text_pixels = pixels
+        let visible_colors = pixels
             .chunks_exact(4)
-            .filter(|pixel| *pixel != BG && *pixel != SEP)
-            .count();
+            .filter(|pixel| pixel[3] > 0)
+            .copied()
+            .collect::<HashSet<_>>()
+            .len();
 
         assert!(
-            visible_text_pixels > 0,
+            visible_colors > 2,
             "candidate panel text rendered no visible pixels"
         );
     }

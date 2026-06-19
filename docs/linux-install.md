@@ -7,6 +7,10 @@ KeyTao Linux 版本包含两个组件：
 
 从 GitHub Release 下载的 Linux deb/rpm 包会包含完整 `keytao-ime`，不需要额外单独安装输入法二进制。
 
+KeyTao Linux 发行包只提供 `deb`、`rpm` 和 `tar.gz`。不提供 AppImage，因为系统输入法需要稳定安装 sidecar daemon、runtime library、桌面环境配置和 reload 通知路径，AppImage 的挂载式运行模型不适合作为主发行格式。
+
+deb/rpm/tar.gz 都应包含完整 KeyTao runtime：`librime`、OpenCC 数据、`rime-plugins`、基础 `rime-data` 和 `keytao-ime`。用户不需要额外安装系统 `librime` 才能运行 KeyTao 输入法。
+
 ## 标准 Linux 安装
 
 从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载适合发行版的包。
@@ -29,14 +33,14 @@ sudo dnf install ./KeyTao-*.x86_64.rpm
 sudo rpm -Uvh ./KeyTao-*.x86_64.rpm
 ```
 
-deb/rpm 安装的是一个完整包：图形 app 和内置的 `keytao-ime` 会一起安装。用户正常从桌面菜单启动 KeyTao，不需要单独下载或手动安装 `keytao-ime`。app 会从包内资源解析 `keytao-ime`；点击“启动 XIM+IBUS”或“启用 KDE 支持”时，会使用这个随包安装的 daemon。
+deb/rpm 安装的是一个完整包：图形 app 和内置的 `keytao-ime` 会一起安装。用户正常从桌面菜单启动 KeyTao，不需要单独下载或手动安装 `keytao-ime`。app 会从包内资源解析 `keytao-ime`，但普通 UI 不再提供启动、重启、注册、卸载或 KDE 配置这类系统输入法操作按钮。
 
-首次启动后，在 app 的“安装”页中：
+首次启动后，在 app 的“输入法”页中：
 
 1. 安装或更新键道方案。
 2. 点击“部署”。
-3. 在“Linux 系统输入法”卡片中检查或启动 `keytao-ime`。
-4. KDE 用户点击“启用 KDE 支持”，然后重新登录或重启 KWin 会话让 Virtual Keyboard 配置生效。
+3. 在“Linux 系统输入法”卡片中查看当前 `keytao-ime` 状态。
+4. KDE 用户通过包管理配置或下面的可复现配置启用 KWin Virtual Keyboard，然后重新登录或重启 KWin 会话让配置生效。
 
 ## Nix / NixOS 安装
 
@@ -82,7 +86,7 @@ Home Manager 用户也可以放到 `home.packages`。
 
 KDE Plasma Wayland 的原生输入法路径由 KWin Virtual Keyboard 启动。普通应用里手动运行 `keytao-ime` 只能启动 XIM/IBus fallback，不能替代 KWin 的私有 `WAYLAND_SOCKET` 实例。
 
-标准包用户可以在 app 中点击“启用 KDE 支持”。它会写入：
+KDE 原生 Wayland 需要 KWin Virtual Keyboard 指向 KeyTao launcher。标准包或系统配置应写入：
 
 - `~/.local/share/applications/keytao-wayland-launcher.desktop`
 - `~/.config/kwinrc` 的 `Wayland/InputMethod=keytao-wayland-launcher.desktop`
@@ -145,7 +149,7 @@ QQ 和微信在很多 Wayland 会话中运行于 XWayland，需要走 `keytao-im
 pgrep -a keytao-ime
 ```
 
-app 中应显示 `XIM+IBUS 1`。如果没有，点击“启动 XIM+IBUS”。
+app 中应显示 `XIM+IBUS 1`。如果没有，先确认当前会话已经启动 `keytao-ime`，或从终端手动运行 `keytao-ime` 做诊断。
 
 ### 标准 Linux wrapper
 

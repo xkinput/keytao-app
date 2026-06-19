@@ -1,5 +1,10 @@
+#[cfg(target_os = "linux")]
 use wayland_client::{protocol::wl_registry, Connection, Dispatch, QueueHandle};
+
+#[cfg(target_os = "linux")]
 struct App;
+
+#[cfg(target_os = "linux")]
 impl Dispatch<wl_registry::WlRegistry, ()> for App {
     fn event(
         _state: &mut Self,
@@ -19,6 +24,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
 fn main() {
     let conn = Connection::connect_to_env().unwrap();
     let display = conn.display();
@@ -27,4 +34,9 @@ fn main() {
     let _registry = display.get_registry(&qh, ());
     let mut app = App;
     event_queue.roundtrip(&mut app).unwrap();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("print_globals is only available on Linux Wayland sessions");
 }

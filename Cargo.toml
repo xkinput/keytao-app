@@ -4,6 +4,7 @@ members = [
   "src-tauri",
   "crates/keytao-core",
   "crates/keytao-core-ffi",
+  "crates/keytao-theme",
   "crates/keytao-linux-ime",
   "crates/keytao-windows-ime",
   "print_globals",

@@ -389,20 +389,18 @@ final class KeyTaoInputController: IMKInputController {
             return false
         }
 
-        NSLog("KeyTao: external deploy detected, reloading engine and session")
+        NSLog("KeyTao: external deploy detected, reloading runtime and session")
         if hasComposition {
             clearMarkedText(client: client)
         }
         hideCandidates()
         hideModeIndicator()
-        if let session {
-            keytao_destroy_session(session)
+        guard reloadEngine() else {
+            NSLog("KeyTao: runtime reload failed")
+            return false
         }
-        session = nil
         hasComposition = false
 
-        initializeEngine()
-        ensureSession()
         refreshSessionState(from: client)
         return true
     }
@@ -522,11 +520,10 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     @objc private func redeployKeyTao() {
-        initializeEngine()
-        if let session {
-            keytao_destroy_session(session)
+        guard reloadEngine() else {
+            NSLog("KeyTao: manual runtime reload failed")
+            return
         }
-        session = nil
         hasComposition = false
         hideCandidates()
         refreshSessionState(from: nil)

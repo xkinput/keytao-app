@@ -276,16 +276,101 @@ fn linux_ime_status_with_message(app: &tauri::AppHandle, message: String) -> Lin
 }
 
 #[cfg(target_os = "linux")]
+fn linux_runtime_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("runtime"),
+            resource_dir.join("resources").join("runtime"),
+        ]);
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(bin_dir) = current_exe.parent() {
+            candidates.extend([
+                bin_dir.join("runtime"),
+                bin_dir.join("resources").join("runtime"),
+                bin_dir.join("..").join("runtime"),
+                bin_dir
+                    .join("..")
+                    .join("lib")
+                    .join("keytao-app")
+                    .join("runtime"),
+                bin_dir
+                    .join("..")
+                    .join("lib")
+                    .join("keytao-app")
+                    .join("resources")
+                    .join("runtime"),
+            ]);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
+    linux_runtime_dirs(app)
+        .into_iter()
+        .map(|dir| dir.join("rime-data"))
+        .find(|dir| dir.join("default.yaml").is_file())
+        .map(|dir| dir.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_runtime_lib_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    linux_runtime_dirs(app)
+        .into_iter()
+        .map(|dir| dir.join("lib"))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_runtime_env(app: &tauri::AppHandle, command: &mut std::process::Command) {
+    if let Some(shared) = linux_app_shared_data_dir(app) {
+        command.env("KEYTAO_RIME_SHARED_DATA_DIR", &shared);
+        command.env("RIME_SHARED_DATA_DIR", shared);
+    }
+
+    let mut lib_dirs = linux_runtime_lib_dirs(app);
+    if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+        lib_dirs.extend(std::env::split_paths(&existing));
+    }
+    if !lib_dirs.is_empty() {
+        if let Ok(joined) = std::env::join_paths(lib_dirs) {
+            command.env("LD_LIBRARY_PATH", joined);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn keytao_ime_command(
+    app: &tauri::AppHandle,
+    program: impl AsRef<std::ffi::OsStr>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    configure_linux_runtime_env(app, &mut command);
+    command
+}
+
+#[cfg(target_os = "linux")]
 fn resolve_keytao_ime_command(app: &tauri::AppHandle) -> (std::process::Command, String) {
     if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
-        return (std::process::Command::new(&path), path);
+        return (keytao_ime_command(app, &path), path);
     }
 
     if let Ok(current_exe) = std::env::current_exe() {
         let sibling = current_exe.with_file_name("keytao-ime");
         if sibling.is_file() {
             let display = sibling.display().to_string();
-            return (std::process::Command::new(&sibling), display);
+            return (keytao_ime_command(app, &sibling), display);
         }
     }
 
@@ -300,13 +385,13 @@ fn resolve_keytao_ime_command(app: &tauri::AppHandle) -> (std::process::Command,
         ] {
             if candidate.is_file() {
                 let display = candidate.display().to_string();
-                return (std::process::Command::new(candidate), display);
+                return (keytao_ime_command(app, candidate), display);
             }
         }
     }
 
     (
-        std::process::Command::new("keytao-ime"),
+        keytao_ime_command(app, "keytao-ime"),
         "keytao-ime".to_string(),
     )
 }
@@ -2208,7 +2293,8 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     let shared =
         macos_app_shared_data_dir(&app).unwrap_or_else(keytao_core::default_shared_data_dir);
     #[cfg(target_os = "linux")]
-    let shared = keytao_core::default_shared_data_dir();
+    let shared =
+        linux_app_shared_data_dir(&app).unwrap_or_else(keytao_core::default_shared_data_dir);
 
     let _ = app.emit("deploy-progress", "正在部署 librime...");
 

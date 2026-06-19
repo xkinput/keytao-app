@@ -40,7 +40,7 @@ jobs:
           - platform: ubuntu-22.04
             args: --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
           - platform: macos-latest
-            args: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
+            args: macos-pkg
           - platform: windows-latest
             args: --bundles nsis --config src-tauri/tauri.windows.conf.json
 
@@ -148,50 +148,46 @@ jobs:
           Get-ChildItem $runtimeDir
           Get-ChildItem $appRuntimeDir
 
+      - name: Build macOS pkg
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm build:macos
+
       - uses: tauri-apps/tauri-action@v0
+        if: matrix.platform != 'macos-latest'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release-id }}
           args: ${{ matrix.args }}
 
-      - name: Verify macOS bundle
+      - name: Verify macOS pkg
         if: matrix.platform == 'macos-latest'
         shell: bash
         run: |
           set -euo pipefail
-          dmg="$(find target -path '*/release/bundle/dmg/*.dmg' -print -quit)"
-          if [[ -z "$dmg" ]]; then
-            echo "::error::Missing macOS DMG bundle"
-            find target -path '*/release/bundle/*' -print 2>/dev/null | sort || true
-            exit 1
-          fi
+          scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
 
-          mount_dir="$(mktemp -d)"
-          cleanup() {
-            hdiutil detach "$mount_dir" -quiet 2>/dev/null || true
-            rmdir "$mount_dir" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          echo "Inspecting DMG: $dmg"
-          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg" -quiet
-          app="$mount_dir/KeyTao.app"
-          if [[ ! -d "$app" ]]; then
-            echo "::error::Missing KeyTao.app inside DMG"
-            find "$mount_dir" -maxdepth 3 -print | sort
-            exit 1
-          fi
-
-          find "$app/Contents" -maxdepth 3 -print | sort
-          test -x "$app/Contents/MacOS/keytao-app"
-          test -f "$app/Contents/_CodeSignature/CodeResources"
-          otool -L "$app/Contents/MacOS/keytao-app" | tee /tmp/keytao-macos-libraries.txt
-          if grep -E '/opt/homebrew|/usr/local|/nix/store' /tmp/keytao-macos-libraries.txt; then
-            echo "::error::macOS bundle references external package-manager libraries"
-            exit 1
-          fi
-          codesign --verify --deep --strict --verbose=2 "$app"
+      - name: Upload macOS pkg to release
+        if: matrix.platform == 'macos-latest'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "${RUNNER_ARCH:-$(uname -m)}" in
+            X64|x64|x86_64) mac_arch="x86_64" ;;
+            ARM64|arm64|aarch64) mac_arch="arm64" ;;
+            *) mac_arch="$(uname -m)" ;;
+          esac
+          pkg="target/keytao-macos-pkg/KeyTao.pkg"
+          renamed="target/keytao-macos-pkg/keytao-app-${VERSION}-macos-${mac_arch}.pkg"
+          test -f "$pkg"
+          cp "$pkg" "$renamed"
+          gh release upload ${{ github.ref_name }} "$renamed" --clobber
 
       - name: Verify Windows bundle includes keytao-windows-ime
         if: matrix.platform == 'windows-latest'

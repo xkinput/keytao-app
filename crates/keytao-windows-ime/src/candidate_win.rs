@@ -19,10 +19,10 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, RegisterClassExW,
-            ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
-            SW_SHOWNOACTIVATE, ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer,
+            RegisterClassExW, SetTimer, ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT,
+            SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_TIMER, WNDCLASSEXW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -30,6 +30,7 @@ use windows::{
 use crate::{globals::DLL_INSTANCE, panel::PanelRenderer};
 
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
+const MODE_HINT_TIMER_ID: usize = 1;
 
 fn class_name_wide() -> Vec<u16> {
     CLASS_NAME.encode_utf16().collect()
@@ -41,6 +42,11 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_TIMER && wparam.0 == MODE_HINT_TIMER_ID {
+        let _ = KillTimer(hwnd, MODE_HINT_TIMER_ID);
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        return LRESULT(0);
+    }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
@@ -154,10 +160,47 @@ impl CandidateWindow {
     pub fn hide(&mut self) {
         if self.visible && !self.hwnd.0.is_null() {
             unsafe {
+                let _ = KillTimer(self.hwnd, MODE_HINT_TIMER_ID);
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
             self.visible = false;
         }
+    }
+
+    pub fn show_mode_hint(&mut self, ascii_mode: bool, caret_x: i32, caret_y: i32) {
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+
+        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let x = (caret_x - w as i32 / 2).clamp(0, (screen_w - w as i32 - 4).max(0));
+        let y = if caret_y + h as i32 > screen_h {
+            caret_y - h as i32 - 8
+        } else {
+            caret_y + 8
+        }
+        .max(0);
+
+        unsafe {
+            self.upload_pixels(&pixels, w, h, x, y);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetTimer(
+                self.hwnd,
+                MODE_HINT_TIMER_ID,
+                renderer.mode_hint_duration_ms(),
+                None,
+            );
+        }
+        self.visible = true;
     }
 
     /// Upload BGRA pixel buffer via UpdateLayeredWindow (per-pixel alpha).

@@ -2,7 +2,7 @@
 //!
 //! Activate sequence:
 //!   1. IClassFactory::CreateInstance  → TextService
-//!   2. ITfTextInputProcessor::Activate → init engine, advise sinks
+//!   2. ITfTextInputProcessor::Activate → init runtime session, advise sinks
 //!   3. ITfKeyEventSink::OnKeyDown (via KeyEventSink) → process keystrokes
 //!   4. ITfTextInputProcessor::Deactivate → unadvise, cleanup
 
@@ -65,8 +65,8 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         let mut st = self.state.lock().unwrap();
 
-        // Init librime engine (blocking; acceptable in Activate which runs once)
-        if st.engine.is_none() {
+        // Init the shared IME runtime (blocking; acceptable in Activate which runs once).
+        if st.session.is_none() {
             st.init_engine().map_err(|e| {
                 tracing::error!("librime init failed: {e}");
                 windows::core::Error::from(windows::Win32::Foundation::E_FAIL)
@@ -113,6 +113,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         // there may be no active context, so we just drop the handle.)
         st.composition = None;
         st.candidate_win.hide();
+        st.mode_hint_win.hide();
         st.key_sink = None;
         st.thread_mgr = None;
         st.ime_state = None;

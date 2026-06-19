@@ -16,7 +16,7 @@ mkdir -p "$DIST_DIR"
 echo "==> Building builder image..."
 docker build -f "$SCRIPT_DIR/Dockerfile.linux-builder" -t "$IMAGE" "$PROJECT_DIR"
 
-echo "==> Building deb + tar.gz inside container..."
+echo "==> Building deb + rpm + tar.gz inside container..."
 _uid=$(id -u)
 _gid=$(id -g)
 docker run --rm \
@@ -30,8 +30,9 @@ docker run --rm \
 
 echo ""
 echo "==> Artifacts:"
-ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.tar.gz 2>/dev/null \
+ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm "$DIST_DIR"/*.tar.gz 2>/dev/null \
   || ls -lh "$PROJECT_DIR"/target/release/bundle/deb/*.deb \
+            "$PROJECT_DIR"/target/release/bundle/rpm/*.rpm \
             "$PROJECT_DIR"/target/release/bundle/*.tar.gz 2>/dev/null \
   || echo "(check target/release/bundle/)"
 

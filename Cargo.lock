@@ -2563,6 +2563,8 @@ version = "0.1.0"
 dependencies = [
  "cbindgen",
  "keytao-core",
+ "keytao-theme",
+ "serde_json",
 ]
 
 [[package]]
@@ -2572,6 +2574,7 @@ dependencies = [
  "dirs 5.0.1",
  "freetype-rs",
  "keytao-core",
+ "keytao-theme",
  "ksni",
  "libc",
  "memmap2 0.9.10",
@@ -2592,11 +2595,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keytao-theme"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "keytao-windows-ime"
 version = "1.2.0"
 dependencies = [
  "fontdue",
  "keytao-core",
+ "keytao-theme",
  "serde",
  "tiny-skia",
  "tracing",

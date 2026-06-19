@@ -259,6 +259,70 @@ pub struct IBusEngine {
     session: ImeSession,
 }
 
+impl IBusEngine {
+    async fn clear_ui(ctxt: &SignalContext<'_>) {
+        let _ = IBusEngine::hide_preedit_text(ctxt).await;
+        let _ = IBusEngine::hide_lookup_table(ctxt).await;
+    }
+
+    async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
+        if let Some(ref text) = ime_state.committed {
+            if !text.is_empty() {
+                tracing::debug!("IBus Engine CommitText: {text:?}");
+                let _ =
+                    IBusEngine::update_preedit_text(ctxt, ibus_text_variant(""), 0, false).await;
+                let ov = ibus_text_value(text);
+                if let Ok(v) = zvariant::Value::try_from(&ov) {
+                    let _ = IBusEngine::commit_text(ctxt, v).await;
+                }
+            }
+        }
+
+        if ime_state.preedit.is_empty() {
+            let _ = IBusEngine::hide_preedit_text(ctxt).await;
+        } else {
+            let cursor = ime_state.cursor as u32;
+            let ov = ibus_text_value(&ime_state.preedit);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = IBusEngine::update_preedit_text(ctxt, v, cursor, true).await;
+            }
+        }
+
+        if ime_state.candidates.is_empty() {
+            let _ = IBusEngine::hide_lookup_table(ctxt).await;
+        } else {
+            let ov = ibus_lookup_table_value(&ime_state);
+            if let Ok(v) = zvariant::Value::try_from(&ov) {
+                let _ = IBusEngine::update_lookup_table(ctxt, v, true).await;
+            }
+        }
+    }
+
+    async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) -> bool {
+        match self.session.select_candidate(index) {
+            Some(ime_state) => {
+                self.apply_ime_state(ime_state, ctxt).await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    async fn change_page(&self, backward: bool, ctxt: &SignalContext<'_>) {
+        if let Some(ime_state) = self.session.change_page(backward) {
+            self.apply_ime_state(ime_state, ctxt).await;
+        }
+    }
+
+    async fn process_navigation_key(&self, keyval: u32, ctxt: &SignalContext<'_>) {
+        if let Some(result) = self.session.process_key_result(keyval, 0) {
+            if result.accepted {
+                self.apply_ime_state(result.state, ctxt).await;
+            }
+        }
+    }
+}
+
 #[interface(name = "org.freedesktop.IBus.Engine")]
 impl IBusEngine {
     // ── Signals (emitted by our engine to the daemon) ─────────────────────
@@ -363,27 +427,8 @@ impl IBusEngine {
         };
 
         if let Some(index) = candidate_select_index {
-            if !before_state.candidates.is_empty() {
-                if let Some(ime_state) = self.session.select_candidate(index) {
-                    if let Some(ref text) = ime_state.committed {
-                        if !text.is_empty() {
-                            let _ = IBusEngine::update_preedit_text(
-                                &ctxt,
-                                ibus_text_variant(""),
-                                0,
-                                false,
-                            )
-                            .await;
-                            let ov = ibus_text_value(text);
-                            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                                let _ = IBusEngine::commit_text(&ctxt, v).await;
-                            }
-                        }
-                    }
-                    let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-                    let _ = IBusEngine::hide_lookup_table(&ctxt).await;
-                    return true;
-                }
+            if self.select_candidate_at(index, &ctxt).await {
+                return true;
             }
         }
 
@@ -395,36 +440,7 @@ impl IBusEngine {
         let ime_state = result.state;
         let consumed = result.accepted;
 
-        if let Some(ref text) = ime_state.committed {
-            if !text.is_empty() {
-                tracing::debug!("IBus Engine CommitText: {text:?}");
-                let _ =
-                    IBusEngine::update_preedit_text(&ctxt, ibus_text_variant(""), 0, false).await;
-                let ov = ibus_text_value(text);
-                if let Ok(v) = zvariant::Value::try_from(&ov) {
-                    let _ = IBusEngine::commit_text(&ctxt, v).await;
-                }
-            }
-        }
-
-        if ime_state.preedit.is_empty() {
-            let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-        } else {
-            let cursor = ime_state.cursor as u32;
-            let ov = ibus_text_value(&ime_state.preedit);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = IBusEngine::update_preedit_text(&ctxt, v, cursor, true).await;
-            }
-        }
-
-        if ime_state.candidates.is_empty() {
-            let _ = IBusEngine::hide_lookup_table(&ctxt).await;
-        } else {
-            let ov = ibus_lookup_table_value(&ime_state);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = IBusEngine::update_lookup_table(&ctxt, v, true).await;
-            }
-        }
+        self.apply_ime_state(ime_state, &ctxt).await;
 
         consumed
     }
@@ -435,14 +451,12 @@ impl IBusEngine {
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-        let _ = IBusEngine::hide_lookup_table(&ctxt).await;
+        Self::clear_ui(&ctxt).await;
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-        let _ = IBusEngine::hide_lookup_table(&ctxt).await;
+        Self::clear_ui(&ctxt).await;
     }
 
     async fn enable(&self) {
@@ -451,8 +465,7 @@ impl IBusEngine {
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.reset();
-        let _ = IBusEngine::hide_preedit_text(&ctxt).await;
-        let _ = IBusEngine::hide_lookup_table(&ctxt).await;
+        Self::clear_ui(&ctxt).await;
     }
 
     async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
@@ -460,17 +473,30 @@ impl IBusEngine {
     async fn set_surrounding_text(&self, _text: zvariant::Value<'_>, _cursor: u32, _anchor: u32) {}
     async fn set_content_type(&self, _purpose: u32, _hints: u32) {}
 
-    async fn page_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn page_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn cursor_up(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
-    async fn cursor_down(&self, #[zbus(signal_context)] _ctxt: SignalContext<'_>) {}
+    async fn page_up(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.change_page(true, &ctxt).await;
+    }
+
+    async fn page_down(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.change_page(false, &ctxt).await;
+    }
+
+    async fn cursor_up(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.process_navigation_key(0xff52, &ctxt).await;
+    }
+
+    async fn cursor_down(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        self.process_navigation_key(0xff54, &ctxt).await;
+    }
+
     async fn candidate_clicked(
         &self,
-        _index: u32,
+        index: u32,
         _button: u32,
         _state: u32,
-        #[zbus(signal_context)] _ctxt: SignalContext<'_>,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) {
+        let _ = self.select_candidate_at(index as usize, &ctxt).await;
     }
 
     #[zbus(property)]

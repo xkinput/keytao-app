@@ -55,7 +55,6 @@ const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 const WL_KEY_RELEASED: u32 = 0;
 const WL_KEY_PRESSED: u32 = 1;
 const RELEASE_MASK: u32 = 1 << 30;
-const MODE_HINT_DURATION: Duration = Duration::from_secs(3);
 
 fn is_shift_key(sym: u32) -> bool {
     sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
@@ -344,7 +343,12 @@ impl App {
             return;
         }
         self.ascii_mode = ascii_mode;
-        self.mode_hint_until = Some(Instant::now() + MODE_HINT_DURATION);
+        let duration = self
+            .renderer
+            .as_ref()
+            .map(PanelRenderer::mode_hint_duration)
+            .unwrap_or_else(|| Duration::from_millis(750));
+        self.mode_hint_until = Some(Instant::now() + duration);
         self.show_panel(ImeState::empty(), qh);
         tracing::info!("IME mode changed: {}", if ascii_mode { "EN" } else { "CN" });
     }

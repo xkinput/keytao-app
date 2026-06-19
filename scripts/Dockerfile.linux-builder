@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl file git \
         gcc g++ pkg-config \
         python3 \
+        rpm \
         mold \
         clang libclang-dev \
         libwebkit2gtk-4.1-dev \
@@ -19,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         librime-dev \
         libfreetype6-dev \
         libxdo-dev \
-        squashfs-tools \
         patchelf \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -47,23 +47,3 @@ registry = "sparse+https://rsproxy.cn/index/"
 [registries.rsproxy]
 index = "https://rsproxy.cn/index/"
 EOF
-
-# Cache real linuxdeploy AppImages and shell plugins to avoid re-download at build time.
-# Tauri validates cached AppImages by size/magic; real files pass, shell wrappers do not.
-RUN mkdir -p /root/.cache/tauri
-COPY scripts/cache/linuxdeploy-x86_64.AppImage /root/.cache/tauri/linuxdeploy-x86_64.AppImage
-COPY scripts/cache/linuxdeploy-plugin-appimage-x86_64.AppImage /root/.cache/tauri/linuxdeploy-plugin-appimage-x86_64.AppImage
-COPY scripts/cache/linuxdeploy-plugin-gtk.sh /root/.cache/tauri/linuxdeploy-plugin-gtk.sh
-COPY scripts/cache/linuxdeploy-plugin-gstreamer.sh /root/.cache/tauri/linuxdeploy-plugin-gstreamer.sh
-COPY scripts/cache/AppRun-x86_64 /root/.cache/tauri/AppRun-x86_64
-RUN chmod 755 /root/.cache/tauri/linuxdeploy-x86_64.AppImage \
-              /root/.cache/tauri/linuxdeploy-plugin-appimage-x86_64.AppImage \
-              /root/.cache/tauri/linuxdeploy-plugin-gtk.sh \
-              /root/.cache/tauri/linuxdeploy-plugin-gstreamer.sh \
-              /root/.cache/tauri/AppRun-x86_64
-
-# AppImage binfmt runner — build-linux.sh copies this to /run/binfmt/appimage_type_{1,2}
-# at container startup so the kernel can find the interpreter when executing AppImages.
-# /run is a tmpfs at runtime, so we stage the script at /opt and copy at startup.
-COPY scripts/appimage-runner.sh /opt/appimage-runner
-RUN chmod 755 /opt/appimage-runner

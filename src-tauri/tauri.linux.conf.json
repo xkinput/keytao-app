@@ -4,6 +4,9 @@
       "deb",
       "rpm"
     ],
+    "resources": {
+      "../target/keytao-linux-runtime": "runtime"
+    },
     "externalBin": [
       "binaries/keytao-ime"
     ]

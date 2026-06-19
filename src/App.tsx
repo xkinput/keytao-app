@@ -38,9 +38,13 @@ import {
 import DebugTab from "@/components/DebugTab"
 
 type OSType = "windows" | "macos" | "linux" | "android" | "ios" | "unknown"
-type Tab = "install" | "extension" | "about" | "debug"
+type Tab = "ime" | "extension" | "about" | "debug"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
+
+function hasSystemIme(os: OSType): boolean {
+  return os === "linux" || os === "macos" || os === "windows"
+}
 
 interface AppUpdateInfo {
   current_version: string
@@ -232,7 +236,7 @@ function FileList({
 export default function App() {
   const [osType, setOsType] = useState<OSType>("unknown")
   const [appVersion, setAppVersion] = useState<string>("")
-  const [activeTab, setActiveTab] = useState<Tab>("install")
+  const [activeTab, setActiveTab] = useState<Tab>("extension")
 
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
@@ -243,19 +247,10 @@ export default function App() {
   // Linux IME daemon
   const [linuxImeStatus, setLinuxImeStatus] = useState<LinuxImeStatus | null>(null)
   const [linuxImeError, setLinuxImeError] = useState<string | null>(null)
-  const [isRefreshingLinuxIme, setIsRefreshingLinuxIme] = useState(false)
-  const [isStartingLinuxIme, setIsStartingLinuxIme] = useState(false)
-  const [isRestartingLinuxIme, setIsRestartingLinuxIme] = useState(false)
-  const [isEnablingKdeSupport, setIsEnablingKdeSupport] = useState(false)
   const [windowsImeStatus, setWindowsImeStatus] = useState<WindowsImeStatus | null>(null)
   const [windowsImeError, setWindowsImeError] = useState<string | null>(null)
-  const [isRefreshingWindowsIme, setIsRefreshingWindowsIme] = useState(false)
-  const [isRegisteringWindowsIme, setIsRegisteringWindowsIme] = useState(false)
-  const [isRestartingWindowsIme, setIsRestartingWindowsIme] = useState(false)
-  const [isUnregisteringWindowsIme, setIsUnregisteringWindowsIme] = useState(false)
   const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
   const [macosImeError, setMacosImeError] = useState<string | null>(null)
-  const [isRefreshingMacosIme, setIsRefreshingMacosIme] = useState(false)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -296,7 +291,6 @@ export default function App() {
 
   const unlistenInstallRef = useRef<(() => void) | null>(null)
   const unlistenDeployRef = useRef<(() => void) | null>(null)
-  const windowsAutoRegisterAttemptedRef = useRef(false)
 
   function addLogs(lines: string[]) {
     const ts = new Date().toLocaleTimeString()
@@ -311,8 +305,8 @@ export default function App() {
     }
     const os = map[p] ?? "unknown"
     setOsType(os)
-    if (os === "windows" || os === "linux" || os === "macos") {
-      setActiveTab("install")
+    if (hasSystemIme(os)) {
+      setActiveTab("ime")
     } else {
       setActiveTab("extension")
     }
@@ -346,17 +340,7 @@ export default function App() {
     }
     if (os === "windows") {
       invoke<WindowsImeStatus>("windows_ime_status")
-        .then((status) => {
-          setWindowsImeStatus(status)
-          if (status.packaged && !status.registered && !windowsAutoRegisterAttemptedRef.current) {
-            windowsAutoRegisterAttemptedRef.current = true
-            setIsRegisteringWindowsIme(true)
-            invoke<WindowsImeStatus>("windows_register_ime")
-              .then(setWindowsImeStatus)
-              .catch((e) => setWindowsImeError(String(e)))
-              .finally(() => setIsRegisteringWindowsIme(false))
-          }
-        })
+        .then(setWindowsImeStatus)
         .catch((e) => setWindowsImeError(String(e)))
     }
     if (os === "macos") {
@@ -379,8 +363,7 @@ export default function App() {
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
-  const isLinuxImeBusy = isRefreshingLinuxIme || isStartingLinuxIme || isRestartingLinuxIme || isEnablingKdeSupport
-  const isWindowsImeBusy = isRefreshingWindowsIme || isRegisteringWindowsIme || isRestartingWindowsIme || isUnregisteringWindowsIme
+  const systemImeAvailable = hasSystemIme(osType)
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -471,129 +454,6 @@ export default function App() {
     }
     setIsInstalling(false)
     await handleDeploy()
-  }
-
-  async function refreshLinuxImeStatus() {
-    setIsRefreshingLinuxIme(true)
-    setLinuxImeError(null)
-    try {
-      const status = await invoke<LinuxImeStatus>("linux_ime_status")
-      setLinuxImeStatus(status)
-    } catch (e) {
-      setLinuxImeError(String(e))
-    } finally {
-      setIsRefreshingLinuxIme(false)
-    }
-  }
-
-  async function handleStartLinuxIme() {
-    setIsStartingLinuxIme(true)
-    setLinuxImeError(null)
-    try {
-      const status = await invoke<LinuxImeStatus>("linux_start_ime")
-      setLinuxImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setLinuxImeError(String(e))
-    } finally {
-      setIsStartingLinuxIme(false)
-    }
-  }
-
-  async function handleRestartLinuxIme() {
-    setIsRestartingLinuxIme(true)
-    setLinuxImeError(null)
-    try {
-      const status = await invoke<LinuxImeStatus>("linux_restart_ime")
-      setLinuxImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setLinuxImeError(String(e))
-    } finally {
-      setIsRestartingLinuxIme(false)
-    }
-  }
-
-  async function handleEnableKdeSupport() {
-    setIsEnablingKdeSupport(true)
-    setLinuxImeError(null)
-    try {
-      const status = await invoke<LinuxImeStatus>("linux_enable_kde_support")
-      setLinuxImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setLinuxImeError(String(e))
-    } finally {
-      setIsEnablingKdeSupport(false)
-    }
-  }
-
-  async function refreshWindowsImeStatus() {
-    setIsRefreshingWindowsIme(true)
-    setWindowsImeError(null)
-    try {
-      const status = await invoke<WindowsImeStatus>("windows_ime_status")
-      setWindowsImeStatus(status)
-    } catch (e) {
-      setWindowsImeError(String(e))
-    } finally {
-      setIsRefreshingWindowsIme(false)
-    }
-  }
-
-  async function handleRegisterWindowsIme() {
-    setIsRegisteringWindowsIme(true)
-    setWindowsImeError(null)
-    try {
-      const status = await invoke<WindowsImeStatus>("windows_register_ime")
-      setWindowsImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setWindowsImeError(String(e))
-    } finally {
-      setIsRegisteringWindowsIme(false)
-    }
-  }
-
-  async function handleRestartWindowsIme() {
-    setIsRestartingWindowsIme(true)
-    setWindowsImeError(null)
-    try {
-      const status = await invoke<WindowsImeStatus>("windows_restart_ime")
-      setWindowsImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setWindowsImeError(String(e))
-    } finally {
-      setIsRestartingWindowsIme(false)
-    }
-  }
-
-  async function handleUnregisterWindowsIme() {
-    setIsUnregisteringWindowsIme(true)
-    setWindowsImeError(null)
-    try {
-      const status = await invoke<WindowsImeStatus>("windows_unregister_ime")
-      setWindowsImeStatus(status)
-      addLogs([`[IME] ${status.message}`])
-    } catch (e) {
-      setWindowsImeError(String(e))
-    } finally {
-      setIsUnregisteringWindowsIme(false)
-    }
-  }
-
-  async function refreshMacosImeStatus() {
-    setIsRefreshingMacosIme(true)
-    setMacosImeError(null)
-    try {
-      const status = await invoke<MacosImeStatus>("macos_ime_status")
-      setMacosImeStatus(status)
-    } catch (e) {
-      setMacosImeError(String(e))
-    } finally {
-      setIsRefreshingMacosIme(false)
-    }
   }
 
   async function handleRefetchRelease() {
@@ -773,7 +633,7 @@ export default function App() {
         {/* Tab nav */}
         <div className="flex border-b border-border">
           {([
-            { id: "install", label: "输入法", icon: Keyboard },
+            ...(systemImeAvailable ? [{ id: "ime" as const, label: "输入法", icon: Keyboard }] : []),
             { id: "extension", label: "扩展安装", icon: Settings },
             { id: "about", label: "关于", icon: Info },
             { id: "debug", label: "调试", icon: ScrollText },
@@ -792,8 +652,8 @@ export default function App() {
           ))}
         </div>
 
-        {/* ══ 安装 Tab ══════════════════════════════════════════════════════ */}
-        {activeTab === "install" && (
+        {/* ══ 输入法 Tab ════════════════════════════════════════════════════ */}
+        {activeTab === "ime" && systemImeAvailable && (
           <div className="space-y-4">
             {osType === "windows" && (
               <Card>
@@ -847,47 +707,6 @@ export default function App() {
                       <span>{windowsImeError}</span>
                     </div>
                   )}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={refreshWindowsImeStatus}
-                      disabled={isWindowsImeBusy}
-                      className="gap-1.5"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingWindowsIme ? "animate-spin" : ""}`} />
-                      刷新状态
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleRegisterWindowsIme}
-                      disabled={isWindowsImeBusy || !windowsImeStatus?.packaged}
-                      className="gap-1.5"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      注册输入法
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleRestartWindowsIme}
-                      disabled={isWindowsImeBusy || !windowsImeStatus?.packaged}
-                      className="gap-1.5"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRestartingWindowsIme ? "animate-spin" : ""}`} />
-                      重启输入法
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleUnregisterWindowsIme}
-                      disabled={isWindowsImeBusy}
-                      className="gap-1.5"
-                    >
-                      <XCircle className="h-3.5 w-3.5" />
-                      卸载输入法
-                    </Button>
-                  </div>
                 </CardContent>
               </Card>
             )}
@@ -920,37 +739,6 @@ export default function App() {
                       <span>{macosImeError}</span>
                     </div>
                   )}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={refreshMacosImeStatus}
-                      disabled={isRefreshingMacosIme}
-                      className="gap-1.5"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingMacosIme ? "animate-spin" : ""}`} />
-                      刷新状态
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {osType !== "linux" && osType !== "windows" && osType !== "macos" && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                    <Cpu className="h-4 w-4 text-muted-foreground" />
-                    KeyTao 系统输入法
-                    <span className="ml-auto">
-                      <Badge variant="outline" className="text-xs">开发中</Badge>
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    开发中，快好了。当前版本已先支持 Linux 的完整 keytao-ime 输入法功能，其他平台会在后续版本接入对应的系统输入法能力。
-                  </p>
                 </CardContent>
               </Card>
             )}
@@ -1007,56 +795,13 @@ export default function App() {
                       <span>{linuxImeError}</span>
                     </div>
                   )}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={refreshLinuxImeStatus}
-                      disabled={isLinuxImeBusy}
-                      className="gap-1.5"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingLinuxIme ? "animate-spin" : ""}`} />
-                      刷新状态
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleStartLinuxIme}
-                      disabled={isLinuxImeBusy || (linuxImeStatus?.fallback_processes ?? 0) > 0}
-                      className="gap-1.5"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      启动 XIM+IBUS
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleRestartLinuxIme}
-                      disabled={isLinuxImeBusy}
-                      className="gap-1.5"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRestartingLinuxIme ? "animate-spin" : ""}`} />
-                      重启 XIM+IBUS
-                    </Button>
-                    {linuxImeStatus?.kde_session && !linuxImeStatus.kde_configured && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleEnableKdeSupport}
-                        disabled={isLinuxImeBusy}
-                        className="gap-1.5"
-                      >
-                        <Settings className="h-3.5 w-3.5" />
-                        启用 KDE 支持
-                      </Button>
-                    )}
-                  </div>
                 </CardContent>
               </Card>
             )}
 
 
 
-            {osType !== "android" && osType !== "ios" && (
+            {systemImeAvailable && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
