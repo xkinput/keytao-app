@@ -5,11 +5,11 @@ KeyTao Linux 版本包含两个组件：
 - `keytao-app`：图形安装器，负责下载、合并、部署键道 Rime 方案。
 - `keytao-ime`：系统输入法 daemon，负责 Wayland、XIM、IBus 输入前端。
 
-从 GitHub Release 下载的 Linux deb/rpm 包会包含完整 `keytao-ime`，不需要额外单独安装输入法二进制。
+从 GitHub Release 下载的 Linux deb/rpm 包会同时包含 `keytao-app`、完整 `keytao-ime` 和包内 runtime，不需要额外单独安装输入法二进制。
 
-KeyTao Linux 发行包只提供 `deb`、`rpm` 和 `tar.gz`。不提供 AppImage，因为系统输入法需要稳定安装 sidecar daemon、runtime library、桌面环境配置和 reload 通知路径，AppImage 的挂载式运行模型不适合作为主发行格式。
+KeyTao Linux 发行包只提供 `deb` 和 `rpm`。不提供 AppImage 或 tarball，因为系统输入法需要稳定安装 sidecar daemon、runtime library、桌面环境配置和 reload 通知路径，挂载式或解压式运行模型不适合作为主发行格式。
 
-deb/rpm/tar.gz 都应包含完整 KeyTao runtime：`librime`、OpenCC 数据、`rime-plugins`、基础 `rime-data` 和 `keytao-ime`。用户不需要额外安装系统 `librime` 才能运行 KeyTao 输入法。
+deb/rpm 都应包含完整 KeyTao runtime：`librime`、OpenCC 数据、`rime-plugins`、基础 `rime-data` 和 `keytao-ime`。用户不需要额外安装系统 `librime` 才能运行 KeyTao 输入法。
 
 ## 标准 Linux 安装
 

@@ -12,11 +12,12 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 mkdir -p "$DIST_DIR"
+find "$DIST_DIR" -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -iname '*.appimage' \) -delete
 
 echo "==> Building builder image..."
 docker build -f "$SCRIPT_DIR/Dockerfile.linux-builder" -t "$IMAGE" "$PROJECT_DIR"
 
-echo "==> Building deb + rpm + tar.gz inside container..."
+echo "==> Building deb + rpm inside container..."
 _uid=$(id -u)
 _gid=$(id -g)
 docker run --rm \
@@ -30,10 +31,10 @@ docker run --rm \
 
 echo ""
 echo "==> Artifacts:"
-ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm "$DIST_DIR"/*.tar.gz 2>/dev/null \
-  || ls -lh "$PROJECT_DIR"/target/release/bundle/deb/*.deb \
-            "$PROJECT_DIR"/target/release/bundle/rpm/*.rpm \
-            "$PROJECT_DIR"/target/release/bundle/*.tar.gz 2>/dev/null \
+find "$DIST_DIR" -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -iname '*.appimage' \) -delete
+find "$PROJECT_DIR/target/release/bundle" -type f \( -name '*.deb' -o -name '*.rpm' \) \
+  -exec cp -f {} "$DIST_DIR/" \;
+ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm 2>/dev/null \
   || echo "(check target/release/bundle/)"
 
 exit 0

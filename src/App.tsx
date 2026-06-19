@@ -289,6 +289,7 @@ export default function App() {
   const [linuxImeError, setLinuxImeError] = useState<string | null>(null)
   const [windowsImeStatus, setWindowsImeStatus] = useState<WindowsImeStatus | null>(null)
   const [windowsImeError, setWindowsImeError] = useState<string | null>(null)
+  const [isManagingWindowsIme, setIsManagingWindowsIme] = useState(false)
   const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
   const [macosImeError, setMacosImeError] = useState<string | null>(null)
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
@@ -488,6 +489,29 @@ export default function App() {
       addLogs([`[DEPLOY ERROR] ${msg}`])
     } finally {
       setIsDeploying(false)
+    }
+  }
+
+  async function handleWindowsImeAction(action: "refresh" | "register" | "unregister" | "restart") {
+    if (isManagingWindowsIme) return
+    setIsManagingWindowsIme(true)
+    setWindowsImeError(null)
+    const command = {
+      refresh: "windows_ime_status",
+      register: "windows_register_ime",
+      unregister: "windows_unregister_ime",
+      restart: "windows_restart_ime",
+    }[action]
+    try {
+      const status = await invoke<WindowsImeStatus>(command)
+      setWindowsImeStatus(status)
+      addLogs([`[WINDOWS IME] ${status.message}`])
+    } catch (e) {
+      const message = String(e)
+      setWindowsImeError(message)
+      addLogs([`[WINDOWS IME ERROR] ${message}`])
+    } finally {
+      setIsManagingWindowsIme(false)
     }
   }
 
@@ -788,6 +812,39 @@ export default function App() {
                           {windowsImeStatus.message}
                         </div>
                       )}
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleWindowsImeAction("refresh")}
+                          disabled={isManagingWindowsIme}
+                          className="gap-1.5"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${isManagingWindowsIme ? "animate-spin" : ""}`} />
+                          刷新
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => handleWindowsImeAction(windowsImeStatus.registered ? "restart" : "register")}
+                          disabled={isManagingWindowsIme || !windowsImeStatus.packaged}
+                          className="gap-1.5"
+                        >
+                          <Keyboard className="h-3.5 w-3.5" />
+                          {windowsImeStatus.registered ? "重新注册" : "注册输入法"}
+                        </Button>
+                        {windowsImeStatus.registered && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleWindowsImeAction("unregister")}
+                            disabled={isManagingWindowsIme}
+                            className="gap-1.5"
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            取消注册
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   )}
                   {windowsImeError && (

@@ -70,8 +70,8 @@ Linux 安装方式见 [docs/linux-install.md](docs/linux-install.md)。
 KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，不构建 dmg。
-- Linux 构建 `deb`、`rpm` 和 `tar.gz`，不构建 AppImage。
-- Windows 构建 NSIS 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/x64` 资源目录。
+- Linux 只构建 `deb` 和 `rpm`，不构建 AppImage 或 tarball。deb/rpm 同时安装图形 App、`keytao-ime` 和包内 runtime，保证可以作为系统输入法安装。
+- Windows 只构建 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/x64` 资源目录。
 - macOS、Linux 和 Windows 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
 
 ### 通用准备
@@ -126,7 +126,6 @@ pnpm build:linux
 
 - `deb`
 - `rpm`
-- `tar.gz`
 
 ### Windows
 

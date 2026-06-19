@@ -110,6 +110,6 @@ pgrep -af keytao-ime
 tail -f /tmp/keytao-ime.log
 ```
 
-正式发行走仓库根目录的 `scripts/build-linux.sh`，产物是 deb、rpm 和 tar.gz，不产出 AppImage。发行包内置 `runtime/`，包含 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
+正式发行走仓库根目录的 `scripts/build-linux.sh`，产物只包含 deb 和 rpm，不产出 AppImage 或 tarball。发行包内置 `runtime/`，包含 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
 
 KDE 原生 Wayland 由 App 写入 `~/.local/share/applications/keytao-wayland-launcher.desktop` 并配置 `kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop`。普通 daemon 仍负责 XIM/IBus fallback；KWin 私有进程只负责 KDE 原生 Wayland 输入法槽位。

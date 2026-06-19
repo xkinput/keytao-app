@@ -9,7 +9,14 @@ LINUX_RUNTIME_LIB_DIR="$LINUX_RUNTIME_DIR/lib"
 LINUX_RUNTIME_RIME_DATA_DIR="$LINUX_RUNTIME_DIR/rime-data"
 LINUX_RUNTIME_RPATH='$ORIGIN/lib:$ORIGIN/runtime/lib:$ORIGIN/resources/runtime/lib:$ORIGIN/../runtime/lib:$ORIGIN/../lib:$ORIGIN/../lib/keytao-app/runtime/lib:$ORIGIN/../lib/keytao-app/resources/runtime/lib'
 
+restore_host_ownership() {
+  chown -R "$UID_GID" /app/target /app/dist 2>/dev/null || true
+}
+
+trap restore_host_ownership EXIT
+
 export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,$LINUX_RUNTIME_RPATH"
+export CI="${CI:-true}"
 
 echo "=== Cache contents ==="
 ls -lah /root/.cache/tauri/ 2>/dev/null || echo "(empty)"
@@ -130,6 +137,8 @@ prepare_linux_runtime() {
 }
 
 chmod -R u+w target/release/bundle/ 2>/dev/null || true
+find target/release/bundle -type f \( -name '*.tar.gz' -o -iname '*.appimage' \) -delete 2>/dev/null || true
+rm -rf target/release/bundle/appimage target/release/bundle/appimage* 2>/dev/null || true
 pnpm install --frozen-lockfile
 cargo build -p keytao-linux-ime --release
 prepare_linux_runtime
@@ -142,11 +151,8 @@ patchelf --set-rpath "$LINUX_RUNTIME_RPATH" /app/target/release/keytao-ime
 patchelf --set-rpath "$LINUX_RUNTIME_RPATH" "$sidecar"
 export KEYTAO_IME_PATH=/app/target/release/keytao-ime
 pnpm tauri build --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
-VERSION=$(node -p "require('./package.json').version")
 patchelf --set-rpath "$LINUX_RUNTIME_RPATH" target/release/keytao-app 2>/dev/null || true
 patchelf --set-rpath "$LINUX_RUNTIME_RPATH" target/release/keytao-ime 2>/dev/null || true
 rm -rf target/release/runtime
 cp -a "$LINUX_RUNTIME_DIR" target/release/runtime
-tar -czf "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
-  -C target/release keytao-app keytao-ime runtime
-chown -R "$UID_GID" /app/target /app/dist 2>/dev/null || true
+/app/scripts/verify-linux-bundles.sh /app/target/release/bundle

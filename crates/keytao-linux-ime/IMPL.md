@@ -97,7 +97,6 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
 发行包里的共享数据目录优先来自包内 runtime：
 
 - deb/rpm：Tauri resource 中的 `runtime/rime-data`。
-- tar.gz：可执行文件同级 `runtime/rime-data`。
 - fallback：显式环境变量、Nix/system profile、`/usr/local/share/rime-data`、`/usr/share/rime-data`。
 
 `CoreEngine` 是 `keytao_core::ImeRuntime` 的 Linux 侧别名，真实 runtime 行为在 `crates/keytao-core/src/lib.rs`：
@@ -315,11 +314,11 @@ kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 
 - `scripts/build-linux.sh` 通过 Docker builder 生成 Linux 包。
 - `scripts/container-build.sh` 在容器里构建 Tauri 包和 `keytao-ime`。
-- Linux 发行目标只包含 `deb`、`rpm` 和 `tar.gz`，不构建 AppImage。
-- deb/rpm 通过 Tauri resource 打入 `target/keytao-linux-runtime`，tar.gz 则把同一目录复制为 `runtime/`。
+- Linux 发行目标只包含 `deb` 和 `rpm`，不构建 AppImage 或 tarball。
+- deb/rpm 通过 Tauri resource 打入 `target/keytao-linux-runtime`，并同时包含 `keytao-app`、`keytao-ime` 和 runtime。
 - runtime 必须包含 `librime.so.*`、OpenCC 数据、`rime-plugins`、基础 `rime-data`，以及 librime/OpenCC 需要的非系统依赖。
 - `keytao-app` 和 `keytao-ime` 构建时写入 RUNPATH，覆盖 `$ORIGIN/runtime/lib`、Tauri resource runtime、deb/rpm 的 `/usr/lib/keytao-app/...` 布局。
-- 构建镜像安装 `librime-dev` 只作为编译来源；打包阶段会把构建镜像里的 librime runtime 闭包复制进 KeyTao runtime。用户安装 deb/rpm/tar.gz 后不应再依赖系统预装 `librime` 或 `opencc` 才能运行 KeyTao 输入法。
+- 构建镜像安装 `librime-dev` 只作为编译来源；打包阶段会把构建镜像里的 librime runtime 闭包复制进 KeyTao runtime。用户安装 deb/rpm 后不应再依赖系统预装 `librime` 或 `opencc` 才能运行 KeyTao 输入法。
 - 开发时也可以直接运行 `cargo build -p keytao-linux-ime --release`。
 
 ## 排查入口

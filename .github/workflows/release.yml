@@ -38,7 +38,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            args: --bundles deb,rpm --config src-tauri/tauri.linux.conf.json
+            args: linux-docker
           - platform: macos-latest
             args: macos-pkg
           - platform: windows-latest
@@ -58,29 +58,21 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.platform != 'ubuntu-22.04'
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
+        if: matrix.platform != 'ubuntu-22.04'
         with:
           workspaces: src-tauri
 
-      - name: Install Linux system deps
+      - name: Install Linux verification deps
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            file ca-certificates unzip \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf libssl-dev pkg-config \
-            libsoup-3.0-dev libharfbuzz-dev libbz2-dev liblzma-dev \
-            librime-dev libclang-dev clang \
-            libfreetype6-dev \
-            libxdo-dev xdg-utils \
-            gcc libc6-dev \
-            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            rpm fakeroot dpkg-dev \
-            mold
+            dpkg-dev patchelf rpm
 
       - name: Install Windows system deps
         if: matrix.platform == 'windows-latest'
@@ -90,27 +82,20 @@ jobs:
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - run: pnpm install --frozen-lockfile
+      - if: matrix.platform != 'ubuntu-22.04'
+        run: pnpm install --frozen-lockfile
 
       - name: Set version from tag
         shell: bash
         run: |
           node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
 
-      - name: Pre-build keytao-linux-ime
+      - name: Build Linux packages
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         run: |
           set -euo pipefail
-          cargo build -p keytao-linux-ime --release
-          test -x "$PWD/target/release/keytao-ime"
-          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
-          sidecar="src-tauri/binaries/keytao-ime-${target_triple}"
-          mkdir -p "$(dirname "$sidecar")"
-          cp "$PWD/target/release/keytao-ime" "$sidecar"
-          chmod +x "$sidecar"
-          ls -lh "$sidecar"
-          echo "KEYTAO_IME_PATH=$PWD/target/release/keytao-ime" >> "$GITHUB_ENV"
+          scripts/build-linux.sh
 
       - name: Pre-build keytao-windows-ime
         if: matrix.platform == 'windows-latest'
@@ -156,7 +141,7 @@ jobs:
           pnpm build:macos
 
       - uses: tauri-apps/tauri-action@v0
-        if: matrix.platform != 'macos-latest'
+        if: matrix.platform == 'windows-latest'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -198,6 +183,11 @@ jobs:
           if (-not $installer) {
             throw "Missing Windows NSIS installer"
           }
+          $forbiddenInstallers = Get-ChildItem -Path "target\release\bundle" -Recurse -File |
+            Where-Object { $_.Extension -in @(".msi", ".zip", ".appx", ".msix", ".msixbundle") }
+          if ($forbiddenInstallers) {
+            throw "Windows build must only produce the NSIS .exe installer. Unexpected artifacts: $($forbiddenInstallers.FullName -join ', ')"
+          }
 
           $imeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "keytao_windows_ime.dll" -File | Select-Object -First 1
           $rimeDll = Get-ChildItem -Path "target\release" -Recurse -Filter "rime.dll" -File | Select-Object -First 1
@@ -232,78 +222,27 @@ jobs:
           Write-Host "Rime data: $($rimeData.FullName)"
           Write-Host "VC Runtime: $($vcRuntime.FullName)"
 
-      - name: Verify Linux bundles include keytao-ime
+      - name: Verify Linux bundles
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         run: |
           set -euo pipefail
-          ime_pattern='(^|/)keytao-ime(-x86_64-unknown-linux-gnu)?$'
+          scripts/verify-linux-bundles.sh target/release/bundle
 
-          show_bundle_tree() {
-            echo "Bundle files:"
-            find target/release/bundle -maxdepth 4 -type f -print 2>/dev/null | sort || true
-          }
-
-          find_one() {
-            local result_var="$1"
-            local dir="$2"
-            local pattern="$3"
-            local label="$4"
-            local path
-            path="$(find "$dir" -name "$pattern" -print -quit 2>/dev/null || true)"
-            if [[ -z "$path" ]]; then
-              echo "::error::Missing $label in $dir"
-              show_bundle_tree
-              exit 1
-            fi
-            printf -v "$result_var" '%s' "$path"
-          }
-
-          require_match() {
-            local label="$1"
-            local listing="$2"
-            if ! printf '%s\n' "$listing" | grep -E "$ime_pattern"; then
-              echo "::error::$label does not include keytao-ime"
-              exit 1
-            fi
-          }
-
-          sidecar="src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu"
-          if [[ ! -x "$sidecar" ]]; then
-            echo "::error::Missing executable Linux keytao-ime sidecar at $sidecar"
-            find src-tauri/binaries -maxdepth 1 -type f -print 2>/dev/null | sort || true
-            exit 1
-          fi
-          ls -lh "$sidecar"
-          echo "Tauri Linux config:"
-          sed -n '1,80p' src-tauri/tauri.linux.conf.json
-          show_bundle_tree
-
-          find_one deb target/release/bundle/deb '*.deb' 'deb bundle'
-          echo "Inspecting deb: $deb"
-          require_match "deb bundle" "$(dpkg-deb -c "$deb")"
-
-          find_one rpm_pkg target/release/bundle/rpm '*.rpm' 'rpm bundle'
-          echo "Inspecting rpm: $rpm_pkg"
-          require_match "rpm bundle" "$(rpm -qpl "$rpm_pkg")"
-
-      - name: Upload Linux tar.gz to release
+      - name: Upload Linux artifacts to release
         if: matrix.platform == 'ubuntu-22.04'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          app_bin="$(find target/release -maxdepth 1 -type f -perm -111 \
-            ! -name 'keytao-ime' ! -name '*.so' -print -quit)"
-          test -n "$app_bin"
-          app_name="$(basename "$app_bin")"
-          tar -czf "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
-            -C target/release "$app_name" keytao-ime
-          gh release upload ${{ github.ref_name }} \
-            "target/release/bundle/keytao-app-${VERSION}-linux-x86_64.tar.gz" \
-            --clobber
+          mapfile -t artifacts < <(find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
+          if [[ "${#artifacts[@]}" -eq 0 ]]; then
+            echo "::error::No Linux artifacts found in dist"
+            find target/release/bundle -maxdepth 4 -type f -print 2>/dev/null | sort || true
+            exit 1
+          fi
+          gh release upload ${{ github.ref_name }} "${artifacts[@]}" --clobber
 
   build-android:
     needs: create-release

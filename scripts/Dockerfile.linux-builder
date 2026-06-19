@@ -1,7 +1,6 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    APPIMAGE_EXTRACT_AND_RUN=1 \
     CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     PATH="/root/.cargo/bin:$PATH"
 
@@ -18,8 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libayatana-appindicator3-dev \
         librsvg2-dev \
         librime-dev \
+        librime-plugin-lua \
         libfreetype6-dev \
+        libxcb1-dev \
         libxdo-dev \
+        libxkbcommon-dev \
+        libxkbcommon-x11-dev \
         patchelf \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*

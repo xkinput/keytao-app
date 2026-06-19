@@ -20,6 +20,17 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "tauri build failed with exit code $LASTEXITCODE"
     }
+
+    $installer = Get-ChildItem -Path "target\release\bundle\nsis" -Filter "*.exe" -File | Select-Object -First 1
+    if (-not $installer) {
+        throw "missing Windows NSIS .exe installer"
+    }
+
+    $forbiddenInstallers = Get-ChildItem -Path "target\release\bundle" -Recurse -File |
+        Where-Object { $_.Extension -in @(".msi", ".zip", ".appx", ".msix", ".msixbundle") }
+    if ($forbiddenInstallers) {
+        throw "Windows build must only produce the NSIS .exe installer. Unexpected artifacts: $($forbiddenInstallers.FullName -join ', ')"
+    }
 } finally {
     Pop-Location
 }
