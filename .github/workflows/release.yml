@@ -65,6 +65,12 @@ jobs:
           version: 10
 
       - uses: actions/setup-node@v4
+        if: matrix.os_name == 'linux'
+        with:
+          node-version: 22
+
+      - uses: actions/setup-node@v4
+        if: matrix.os_name != 'linux'
         with:
           node-version: 22
           cache: pnpm
