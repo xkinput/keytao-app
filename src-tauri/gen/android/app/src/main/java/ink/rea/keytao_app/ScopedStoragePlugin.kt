@@ -1,9 +1,13 @@
 package ink.rea.keytao_app
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.Settings
+import android.view.inputmethod.InputMethodInfo
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.result.ActivityResult
 import androidx.documentfile.provider.DocumentFile
 import app.tauri.annotation.ActivityCallback
@@ -42,6 +46,58 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     fun pickDirectory(invoke: Invoke) {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
         startActivityForResult(invoke, intent, "handleDirectoryPicked")
+    }
+
+    @Command
+    fun imeStatus(invoke: Invoke) {
+        try {
+            invoke.resolve(resolveImeStatus())
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to read Android input method status")
+        }
+    }
+
+    @Command
+    fun keytaoRoot(invoke: Invoke) {
+        try {
+            val root = KeytaoAndroidPaths.userRoot()
+            invoke.resolve(JSObject().apply {
+                put("path", root.absolutePath)
+                put("themePath", KeytaoAndroidPaths.themeFile().absolutePath)
+                put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile().absolutePath)
+                put("writable", KeytaoAndroidPaths.isWritable(root))
+            })
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to resolve KeyTao data directory")
+        }
+    }
+
+    @Command
+    fun openInputMethodSettings(invoke: Invoke) {
+        try {
+            val intent = Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to open Android input method settings")
+        }
+    }
+
+    @Command
+    fun showInputMethodPicker(invoke: Invoke) {
+        try {
+            val status = resolveImeStatus()
+            if (!status.getBoolean("enabled")) {
+                return invoke.reject("KeyTao 输入法尚未启用")
+            }
+            val imm = inputMethodManager()
+                ?: return invoke.reject("InputMethodManager is unavailable")
+            imm.showInputMethodPicker()
+            invoke.resolve()
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to show Android input method picker")
+        }
     }
 
     @ActivityCallback
@@ -383,6 +439,134 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         }.start()
     }
 
+    @Command
+    fun smartExtractZipToPrivate(invoke: Invoke) {
+        class ExtractArgs {
+            var zipPath: String? = null
+        }
+        val parsed = invoke.parseArgs(ExtractArgs::class.java)
+        val zipPath = parsed.zipPath ?: return invoke.reject("Missing zipPath")
+
+        Thread {
+            try {
+                val root = KeytaoAndroidPaths.userRoot()
+                if (!KeytaoAndroidPaths.isWritable(root)) {
+                    return@Thread invoke.reject("无法写入 ${root.absolutePath}，请授予 KeyTao 文件访问权限后重试")
+                }
+                val zipFile = File(zipPath)
+                val logs = mutableListOf<String>()
+
+                JZipFile(zipFile).use { zip ->
+                    val allEntries = zip.entries().toList()
+                    val zipLuaFilenames = mutableSetOf<String>()
+                    var dcEntry: java.util.zip.ZipEntry? = null
+                    var rimeLuaEntry: java.util.zip.ZipEntry? = null
+
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
+                        val filename = relative.substringAfterLast('/')
+                        when {
+                            !entry.isDirectory && isDefaultCustom(filename) && dcEntry == null -> dcEntry = entry
+                            !entry.isDirectory && filename == "rime.lua" && !relative.contains('/') && rimeLuaEntry == null -> rimeLuaEntry = entry
+                            !entry.isDirectory && relative.startsWith("lua/") && !relative.substring(4).contains('/') -> zipLuaFilenames.add(filename)
+                        }
+                    }
+
+                    val dcMergeResult = dcEntry?.let { entry ->
+                        val zipContent = zip.getInputStream(entry).bufferedReader().readText()
+                        val existing = readPrivateText(root, "default.custom.yaml")
+                            ?: readPrivateText(root, "default-custom.yaml")
+                        mergeDefaultCustom(existing, zipContent)
+                    }
+
+                    val rimeLuaMergeResult = rimeLuaEntry?.let { entry ->
+                        val zipContent = zip.getInputStream(entry).bufferedReader().readText()
+                        val localContent = readPrivateText(root, "rime.lua")
+                        if (localContent != null) mergeRimeLua(localContent, zipContent, zipLuaFilenames)
+                        else RimeLuaMergeResult(zipContent, emptyList())
+                    }
+
+                    val renamedLuaFiles = rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
+                        val oldFile = File(root, "lua/$oldName.lua")
+                        if (oldFile.isFile) newName to oldFile.readBytes() else null
+                    } ?: emptyList()
+
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
+                        if (relative.isEmpty()) continue
+                        val filename = relative.substringAfterLast('/')
+                        val output = safePrivateFile(root, relative)
+                        if (entry.isDirectory) {
+                            output.mkdirs()
+                            continue
+                        }
+                        output.parentFile?.mkdirs()
+                        when {
+                            isDefaultCustom(filename) && dcMergeResult != null -> {
+                                output.writeText(dcMergeResult.mergedContent)
+                                logs.add("[MERGED] $relative")
+                            }
+                            filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
+                                output.writeText(rimeLuaMergeResult.mergedContent)
+                                logs.add("[MERGED] $relative")
+                            }
+                            else -> {
+                                zip.getInputStream(entry).use { input ->
+                                    FileOutputStream(output).buffered(65536).use { out ->
+                                        input.copyTo(out, 65536)
+                                    }
+                                }
+                                logs.add("[OK] $relative")
+                            }
+                        }
+                    }
+
+                    if (renamedLuaFiles.isNotEmpty()) {
+                        val luaDir = File(root, "lua").apply { mkdirs() }
+                        for ((newName, bytes) in renamedLuaFiles) {
+                            File(luaDir, "$newName.lua").writeBytes(bytes)
+                            logs.add("[RENAMED] lua/$newName.lua")
+                        }
+                    }
+
+                    KeytaoAndroidPaths.reloadStampFile().writeText(System.currentTimeMillis().toString())
+
+                    val mergedArray = JSONArray()
+                    dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }
+                    val logsArray = JSONArray()
+                    logs.forEach { logsArray.put(it) }
+
+                    val verifyArray = JSONArray()
+                    fun addVerify(path: String, ok: Boolean, note: String) {
+                        verifyArray.put(JSObject().apply { put("path", path); put("ok", ok); put("note", note) })
+                    }
+                    addVerify("default.yaml", File(root, "default.yaml").isFile, "KeyTao IME shared data marker")
+                    addVerify("keytao.schema.yaml", File(root, "keytao.schema.yaml").isFile, "KeyTao schema")
+                    addVerify("keytao-ime.reload", KeytaoAndroidPaths.reloadStampFile().isFile, "reload stamp")
+
+                    invoke.resolve(JSObject().apply {
+                        put("mergedSchemas", mergedArray)
+                        put("logs", logsArray)
+                        put("verify", verifyArray)
+                    })
+                }
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Private extraction failed")
+            }
+        }.start()
+    }
+
+    @Command
+    fun writeImeReloadStamp(invoke: Invoke) {
+        try {
+            val stamp = KeytaoAndroidPaths.reloadStampFile()
+            stamp.writeText(System.currentTimeMillis().toString())
+            invoke.resolve(JSObject().apply { put("path", stamp.absolutePath) })
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to write reload stamp")
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private fun readFileFromTree(root: DocumentFile, filename: String): String? {
@@ -392,6 +576,65 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
             }
         } catch (e: Exception) {
             null
+        }
+    }
+
+    private fun readPrivateText(root: File, relativePath: String): String? {
+        return try {
+            File(root, relativePath).takeIf { it.isFile }?.readText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun safePrivateFile(root: File, relativePath: String): File {
+        val rootPath = root.canonicalFile.toPath()
+        val output = File(root, relativePath).canonicalFile
+        if (!output.toPath().startsWith(rootPath)) {
+            throw Exception("Unsafe zip entry: $relativePath")
+        }
+        return output
+    }
+
+    private fun inputMethodManager(): InputMethodManager? {
+        return activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+    }
+
+    private fun isKeytaoInputMethod(info: InputMethodInfo): Boolean {
+        val serviceName = KeytaoInputMethodService::class.java.name
+        return info.packageName == activity.packageName &&
+            (info.serviceName == serviceName || info.serviceName.endsWith(".KeytaoInputMethodService"))
+    }
+
+    private fun resolveImeStatus(): JSObject {
+        val imm = inputMethodManager()
+        val installedInfo = imm?.inputMethodList?.firstOrNull(::isKeytaoInputMethod)
+        val enabledInfo = imm?.enabledInputMethodList?.firstOrNull(::isKeytaoInputMethod)
+        val info = installedInfo ?: enabledInfo
+        val serviceName = KeytaoInputMethodService::class.java.name
+        val inputMethodId = info?.id
+        val defaultInputMethod = Settings.Secure.getString(
+            activity.contentResolver,
+            Settings.Secure.DEFAULT_INPUT_METHOD
+        )
+        val enabled = enabledInfo != null
+        val selected = enabled && inputMethodId != null && inputMethodId == defaultInputMethod
+        val message = when {
+            selected -> "KeyTao 输入法已启用并正在使用"
+            enabled -> "KeyTao 输入法已启用，尚未切换为当前输入法"
+            installedInfo != null -> "KeyTao 输入法已随应用安装，尚未在系统中启用"
+            else -> "系统尚未识别 KeyTao 输入法服务"
+        }
+
+        return JSObject().apply {
+            put("packageName", activity.packageName)
+            put("serviceName", serviceName)
+            if (inputMethodId != null) put("inputMethodId", inputMethodId)
+            if (defaultInputMethod != null) put("defaultInputMethod", defaultInputMethod)
+            put("enabled", enabled)
+            put("selected", selected)
+            put("canShowPicker", enabled)
+            put("message", message)
         }
     }
 

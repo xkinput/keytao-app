@@ -9,7 +9,9 @@ PLATFORM_DESTINATION=""
 WINDOWS_ARCH="x64"
 WINDOWS_TOOLSET="msvc"
 USER_AGENT="keytao-librime-fetch"
+CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
 PLATFORMS=()
+OPENCC_PORTABLE_VERSION="${OPENCC_PORTABLE_VERSION:-latest}"
 
 usage() {
     cat <<EOF
@@ -140,7 +142,7 @@ github_api() {
     if [ -n "${GITHUB_TOKEN:-}" ]; then
         headers+=(-H "Authorization: Bearer $GITHUB_TOKEN")
     fi
-    curl -fsSL "${headers[@]}" "$1"
+    curl -fsSL "${CURL_RETRY_ARGS[@]}" "${headers[@]}" "$1"
 }
 
 ensure_release_json() {
@@ -214,7 +216,10 @@ download_asset() {
 
     if [ ! -f "$file" ]; then
         echo "Downloading $(basename "$file")"
-        curl -fL -H "User-Agent: $USER_AGENT" -o "$file" "$url"
+        local tmp="$file.tmp"
+        rm -f "$tmp"
+        curl -fL "${CURL_RETRY_ARGS[@]}" -H "User-Agent: $USER_AGENT" -o "$tmp" "$url"
+        mv "$tmp" "$file"
     else
         echo "Using cached $(basename "$file")"
     fi
@@ -232,19 +237,111 @@ download_asset() {
     fi
 }
 
+download_raw_file() {
+    local url="$1"
+    local file="$2"
+    echo "Downloading $(basename "$file")"
+    local tmp="$file.tmp"
+    rm -f "$tmp"
+    curl -fsSL "${CURL_RETRY_ARGS[@]}" -H "User-Agent: $USER_AGENT" "$url" -o "$tmp"
+    mv "$tmp" "$file"
+}
+
+opencc_portable_asset() {
+    local release_json
+    release_json="$(mktemp "${TMPDIR:-/tmp}/keytao-opencc-release.XXXXXX")"
+    if [ "$OPENCC_PORTABLE_VERSION" = "latest" ]; then
+        github_api "https://api.github.com/repos/BYVoid/OpenCC/releases/latest" > "$release_json"
+    else
+        github_api "https://api.github.com/repos/BYVoid/OpenCC/releases/tags/$OPENCC_PORTABLE_VERSION" > "$release_json"
+    fi
+    python3 - "$release_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    release = json.load(handle)
+
+asset = next(
+    (
+        item
+        for item in release.get("assets", [])
+        if item.get("name", "").lower().endswith("windows-x64-portable.zip")
+    ),
+    None,
+)
+if not asset:
+    names = ", ".join(item.get("name", "") for item in release.get("assets", []))
+    raise SystemExit(f"missing OpenCC portable zip in {release.get('tag_name')}; assets: {names}")
+
+print("\t".join([
+    release.get("tag_name", ""),
+    asset.get("name", ""),
+    asset.get("browser_download_url", ""),
+]))
+PY
+    rm -f "$release_json"
+}
+
+fetch_opencc_data() {
+    local destination="$1"
+    mkdir -p "$destination"
+    local source
+    for source in \
+        "$DESTINATION_ROOT/macos-universal/rime-data/opencc" \
+        "$PROJECT_DIR/vendor/librime/macos-universal/rime-data/opencc"; do
+        if [ -d "$source" ] && has_glob "$source/*.ocd2"; then
+            echo "Using OpenCC data from $source"
+            copy_dir_contents "$source" "$destination"
+            return
+        fi
+    done
+
+    local tag
+    local asset_name
+    local asset_url
+    IFS=$'\t' read -r tag asset_name asset_url < <(opencc_portable_asset)
+    local cache_dir="$CACHE_ROOT/opencc/$tag"
+    local archive="$cache_dir/$asset_name"
+    local extract_dir="$cache_dir/extract"
+    mkdir -p "$cache_dir"
+    download_asset "$asset_url" "$archive" ""
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    unzip -q "$archive" -d "$extract_dir"
+
+    local data_marker
+    data_marker="$(find "$extract_dir" -type f -name 'STCharacters.ocd2' -print -quit || true)"
+    if [ -z "$data_marker" ]; then
+        echo "ERROR: OpenCC portable zip does not contain compiled .ocd2 data" >&2
+        exit 1
+    fi
+    copy_dir_contents "$(dirname "$data_marker")" "$destination"
+}
+
 fetch_base_rime_data() {
     local destination="$1"
     mkdir -p "$destination"
     echo "Fetching base rime-data into $destination"
     local file
     for file in default.yaml key_bindings.yaml punctuation.yaml symbols.yaml; do
-        curl -fsSL -H "User-Agent: $USER_AGENT" \
-            "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" \
-            -o "$destination/$file"
+        download_raw_file "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" "$destination/$file"
     done
-    curl -fsSL -H "User-Agent: $USER_AGENT" \
-        "https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt" \
-        -o "$destination/essay.txt"
+    download_raw_file "https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt" "$destination/essay.txt"
+    for file in \
+        luna_pinyin.dict.yaml \
+        luna_pinyin.schema.yaml \
+        luna_pinyin_fluency.schema.yaml \
+        luna_pinyin_simp.schema.yaml \
+        luna_pinyin_tw.schema.yaml \
+        luna_quanpin.schema.yaml \
+        pinyin.yaml; do
+        download_raw_file "https://raw.githubusercontent.com/rime/rime-luna-pinyin/master/$file" "$destination/$file"
+    done
+    for file in stroke.dict.yaml stroke.schema.yaml; do
+        download_raw_file "https://raw.githubusercontent.com/rime/rime-stroke/master/$file" "$destination/$file"
+    done
+    fetch_opencc_data "$destination/opencc"
 }
 
 find_seven_zip() {
@@ -272,6 +369,18 @@ copy_flat_files() {
     while IFS= read -r -d '' file; do
         cp -f "$file" "$destination/$(basename "$file")"
     done < <(find "$source_dir" -type f -name "$pattern" -print0)
+}
+
+copy_dir_contents() {
+    local source="$1"
+    local destination="$2"
+    [ -d "$source" ] || return 1
+    mkdir -p "$destination"
+    cp -R "$source"/. "$destination"/
+}
+
+has_glob() {
+    compgen -G "$1" >/dev/null 2>&1
 }
 
 write_metadata() {
@@ -487,7 +596,13 @@ EOF
     echo ""
     echo "librime $platform data is ready:"
     echo "  $destination"
-    echo "  note: the current mobile app path does not link a native librime SDK."
+    if [ "$platform" = "android" ]; then
+        echo "  note: Android IME now links native librime through keytao-core."
+        echo "  note: this script only prepares rime-data."
+        echo "  note: import/sync Android ABI native libraries with scripts/android-librime-runtime.sh."
+    else
+        echo "  note: the current iOS app path does not link a native librime SDK."
+    fi
 }
 
 trap 'if [ -n "${RELEASE_JSON:-}" ]; then rm -f "$RELEASE_JSON"; fi' EXIT

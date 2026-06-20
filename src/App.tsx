@@ -16,6 +16,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog"
 import VirtualLogViewer from "@/components/VirtualLogViewer"
+import AndroidImeOnboarding, { type AndroidImeStatus } from "@/components/AndroidImeOnboarding"
 import {
   FolderOpen,
   Download,
@@ -54,7 +55,7 @@ const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
 
 function hasSystemIme(os: OSType): boolean {
-  return os === "linux" || os === "macos" || os === "windows"
+  return os === "linux" || os === "macos" || os === "windows" || os === "android"
 }
 
 interface AppUpdateInfo {
@@ -292,6 +293,9 @@ export default function App() {
   const [isManagingWindowsIme, setIsManagingWindowsIme] = useState(false)
   const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
   const [macosImeError, setMacosImeError] = useState<string | null>(null)
+  const [androidImeStatus, setAndroidImeStatus] = useState<AndroidImeStatus | null>(null)
+  const [androidImeError, setAndroidImeError] = useState<string | null>(null)
+  const [isCheckingAndroidIme, setIsCheckingAndroidIme] = useState(false)
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
   const [imeUiError, setImeUiError] = useState<string | null>(null)
   const [isSavingImeUiSettings, setIsSavingImeUiSettings] = useState(false)
@@ -365,7 +369,7 @@ export default function App() {
       .then((info) => { if (info.has_update) setAppUpdate(info) })
       .catch(() => { })
 
-    invoke<string | null>("rime_get_data_dir")
+    invoke<string | null>(os === "android" ? "android_keytao_data_dir" : "rime_get_data_dir")
       .then((d) => setDefaultDir(d ?? null))
       .catch(() => { })
 
@@ -409,11 +413,132 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (osType !== "android") return
+    void refreshAndroidImeStatus()
+
+    const handleFocus = () => {
+      void refreshAndroidImeStatus()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshAndroidImeStatus()
+      }
+    }
+
+    window.addEventListener("focus", handleFocus)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+    return () => {
+      window.removeEventListener("focus", handleFocus)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [osType])
+
+  useEffect(() => {
+    if (osType !== "android") return
+
+    const root = document.documentElement
+    const isEditableElement = (element: Element | null): element is HTMLElement => {
+      return element instanceof HTMLElement && element.matches("input, textarea, [contenteditable='true']")
+    }
+    const focusedKeyboardFallbackInset = () => {
+      return isEditableElement(document.activeElement) ? Math.round(window.innerHeight * 0.42) : 0
+    }
+    const updateKeyboardInset = () => {
+      const viewport = window.visualViewport
+      const rawInset = viewport
+        ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+        : 0
+      const inset = Math.max(rawInset, focusedKeyboardFallbackInset())
+      root.style.setProperty("--android-ime-inset-bottom", `${Math.round(inset)}px`)
+      return inset
+    }
+    const scrollFocusedControlIntoView = () => {
+      const active = document.activeElement
+      if (!isEditableElement(active)) return
+      const align = () => {
+        const inset = updateKeyboardInset()
+        const rect = active.getBoundingClientRect()
+        const topLimit = 24
+        const bottomLimit = window.innerHeight - inset - 24
+        if (rect.bottom > bottomLimit) {
+          window.scrollBy({ top: rect.bottom - bottomLimit, behavior: "smooth" })
+        } else if (rect.top < topLimit) {
+          window.scrollBy({ top: rect.top - topLimit, behavior: "smooth" })
+        }
+      }
+      align()
+      ;[120, 320, 720].forEach((delay) => window.setTimeout(align, delay))
+    }
+    const handleFocusOut = () => {
+      window.setTimeout(updateKeyboardInset, 180)
+    }
+
+    updateKeyboardInset()
+    window.visualViewport?.addEventListener("resize", updateKeyboardInset)
+    window.visualViewport?.addEventListener("scroll", updateKeyboardInset)
+    window.addEventListener("resize", updateKeyboardInset)
+    document.addEventListener("focusin", scrollFocusedControlIntoView)
+    document.addEventListener("focusout", handleFocusOut)
+    return () => {
+      root.style.removeProperty("--android-ime-inset-bottom")
+      window.visualViewport?.removeEventListener("resize", updateKeyboardInset)
+      window.visualViewport?.removeEventListener("scroll", updateKeyboardInset)
+      window.removeEventListener("resize", updateKeyboardInset)
+      document.removeEventListener("focusin", scrollFocusedControlIntoView)
+      document.removeEventListener("focusout", handleFocusOut)
+    }
+  }, [osType])
+
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying
   const systemImeAvailable = hasSystemIme(osType)
+  const canOpenDefaultDir = osType !== "android"
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
+  const androidImePaddingStyle =
+    osType === "android"
+      ? { paddingBottom: "calc(1.5rem + var(--android-ime-inset-bottom, 0px))" }
+      : undefined
+  const shouldShowAndroidImeOnboarding =
+    osType === "android" && (!androidImeStatus || !androidImeStatus.enabled || !androidImeStatus.selected)
+
+  async function refreshAndroidImeStatus() {
+    setIsCheckingAndroidIme(true)
+    try {
+      const status = await invoke<AndroidImeStatus>("android_ime_status")
+      setAndroidImeStatus(status)
+      setAndroidImeError(null)
+      return status
+    } catch (e) {
+      const message = String(e)
+      setAndroidImeError(message)
+      return null
+    } finally {
+      setIsCheckingAndroidIme(false)
+    }
+  }
+
+  async function handleOpenAndroidImeSettings() {
+    setAndroidImeError(null)
+    try {
+      await invoke("android_open_input_method_settings")
+    } catch (e) {
+      setAndroidImeError(String(e))
+    }
+  }
+
+  async function handleShowAndroidImePicker() {
+    setAndroidImeError(null)
+    try {
+      await invoke("android_show_input_method_picker")
+      window.setTimeout(() => {
+        void refreshAndroidImeStatus()
+      }, 800)
+    } catch (e) {
+      setAndroidImeError(String(e))
+    }
+  }
 
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
@@ -707,9 +832,22 @@ export default function App() {
     </div>
   )
 
+  if (shouldShowAndroidImeOnboarding) {
+    return (
+      <AndroidImeOnboarding
+        status={androidImeStatus}
+        loading={isCheckingAndroidIme}
+        error={androidImeError}
+        onOpenSettings={handleOpenAndroidImeSettings}
+        onShowPicker={handleShowAndroidImePicker}
+        onRefresh={refreshAndroidImeStatus}
+      />
+    )
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4" style={androidImePaddingStyle}>
 
         {/* Header */}
         <div className="flex items-center gap-3 pb-1">
@@ -1054,112 +1192,114 @@ export default function App() {
 
             {systemImeAvailable && (
               <Card>
-                <CardHeader className="pb-3">
+                <CardHeader className="pb-3 space-y-2">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
                     <Download className="h-4 w-4 text-muted-foreground" />
                     键道方案
-                    <div className="ml-auto">{VersionPicker}</div>
                   </CardTitle>
+                  <div className="flex flex-wrap items-center gap-1.5">{VersionPicker}</div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {defaultDir && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
                       <Info className="h-3.5 w-3.5 shrink-0" />
-                      <span>目录：<code className="font-mono">{defaultDir}</code></span>
+                      <span className="shrink-0">目录：</span>
+                      <code className="font-mono truncate min-w-0">{defaultDir}</code>
                     </div>
                   )}
-                  {localSchemaInfo !== null && (
-                    <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${localSchemaInfo.installed
-                      ? "bg-green-500/10 border-green-500/30 text-green-400"
-                      : "bg-muted/40 border-border text-muted-foreground"
-                      }`}>
-                      {localSchemaInfo.installed
-                        ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                        : <Info className="h-3.5 w-3.5 shrink-0" />
-                      }
-                      <span>
-                        {localSchemaInfo.installed
-                          ? `已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}`
-                          : "未检测到已安装的键道方案"
-                        }
-                        {localSchemaInfo.installed && localSchemaInfo.schemas.length > 0 && (
-                          <span className="ml-1 text-muted-foreground/80">({localSchemaInfo.schemas.join(", ")})</span>
+                        {localSchemaInfo !== null && (
+                          <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${localSchemaInfo.installed
+                            ? "bg-green-500/10 border-green-500/30 text-green-400"
+                            : "bg-muted/40 border-border text-muted-foreground"
+                            }`}>
+                            {localSchemaInfo.installed
+                              ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                              : <Info className="h-3.5 w-3.5 shrink-0" />
+                            }
+                            <span>
+                              {localSchemaInfo.installed
+                                ? `已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}`
+                                : "未检测到已安装的键道方案"
+                              }
+                              {localSchemaInfo.installed && localSchemaInfo.schemas.length > 0 && (
+                                <span className="ml-1 text-muted-foreground/80">({localSchemaInfo.schemas.join(", ")})</span>
+                              )}
+                            </span>
+                          </div>
                         )}
-                      </span>
-                    </div>
-                  )}
-                  {releaseError && (
-                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>获取版本信息失败：{releaseError}</span>
-                    </div>
-                  )}
-                  {installError && (
-                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>{installError}</span>
-                    </div>
-                  )}
-                  {isInstalling && installProgress && (
-                    <div className="space-y-1.5">
-                      <Progress value={installProgress.percent} className="h-1.5" />
-                      <p className="text-xs text-muted-foreground">{installProgress.message}</p>
-                    </div>
-                  )}
-                  {deploySteps.length > 0 && (
-                    <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 space-y-1">
+                        {releaseError && (
+                          <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                            <span>获取版本信息失败：{releaseError}</span>
+                          </div>
+                        )}
+                        {installError && (
+                          <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                            <span>{installError}</span>
+                          </div>
+                        )}
+                        {isInstalling && installProgress && (
+                          <div className="space-y-1.5">
+                            <Progress value={installProgress.percent} className="h-1.5" />
+                            <p className="text-xs text-muted-foreground">{installProgress.message}</p>
+                          </div>
+                        )}
+                        {deploySteps.length > 0 && (
+                          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 space-y-1">
                       {deploySteps.map((step, i) => (
-                        <div key={i} className="flex items-center gap-2 text-xs">
+                        <div key={i} className="flex min-w-0 items-center gap-2 text-xs">
                           {step.done
                             ? <CheckCircle2 className="h-3 w-3 text-green-400 shrink-0" />
                             : step.error
                               ? <XCircle className="h-3 w-3 text-destructive shrink-0" />
                               : <Loader2 className={`h-3 w-3 shrink-0 text-muted-foreground ${isDeploying && i === deploySteps.length - 1 ? "animate-spin" : ""}`} />
                           }
-                          <span className={step.error ? "text-destructive" : step.done ? "text-green-400" : "text-muted-foreground"}>
+                          <span className={`min-w-0 break-all ${step.error ? "text-destructive" : step.done ? "text-green-400" : "text-muted-foreground"}`}>
                             {step.msg}
                           </span>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                  <div className="flex gap-2 flex-wrap">
-                    <Button size="sm" onClick={handleInstall} disabled={isBusy || !downloadUrl} className="gap-1.5">
-                      <Download className="h-4 w-4" />
-                      {isInstalling ? "安装中..." : isDeploying ? "部署中..." : localSchemaInfo?.installed ? "更新方案" : "安装方案"}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={handleCheckLocalSchema}
-                      disabled={isCheckingLocal || isBusy} className="gap-1.5">
-                      <RefreshCw className={`h-3.5 w-3.5 ${isCheckingLocal ? "animate-spin" : ""}`} />
-                      检查本地
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleOpenDefaultDir}
-                      disabled={!defaultDir || isOpeningDir || isBusy}
-                      className="gap-1.5"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" />
-                      {isOpeningDir ? "打开中..." : "打开目录"}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={handleDeploy} disabled={isBusy} className="gap-1.5">
-                      <Play className="h-3.5 w-3.5" />
-                      部署
-                    </Button>
-                    {logBuffer.length > 0 && (
-                      <Button variant="ghost" size="sm" onClick={() => setShowLogs(true)}
-                        className="gap-1.5 text-muted-foreground ml-auto">
-                        <ScrollText className="h-3.5 w-3.5" />
-                        日志 ({logBuffer.length})
-                      </Button>
-                    )}
-                  </div>
-                  <textarea
-                    className="w-full rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-                    rows={3}
-                    placeholder="在此测试输入法…"
-                  />
+                            ))}
+                          </div>
+                        )}
+                        <div className="flex gap-2 flex-wrap">
+                          <Button size="sm" onClick={handleInstall} disabled={isBusy || !downloadUrl} className="gap-1.5">
+                            <Download className="h-4 w-4" />
+                            {isInstalling ? "安装中..." : isDeploying ? "部署中..." : localSchemaInfo?.installed ? "更新方案" : "安装方案"}
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={handleCheckLocalSchema}
+                            disabled={isCheckingLocal || isBusy} className="gap-1.5">
+                            <RefreshCw className={`h-3.5 w-3.5 ${isCheckingLocal ? "animate-spin" : ""}`} />
+                            检查本地
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleOpenDefaultDir}
+                            disabled={!canOpenDefaultDir || !defaultDir || isOpeningDir || isBusy}
+                            className="gap-1.5"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            {isOpeningDir ? "打开中..." : "打开目录"}
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={handleDeploy} disabled={isBusy} className="gap-1.5">
+                            <Play className="h-3.5 w-3.5" />
+                            部署
+                          </Button>
+                          {logBuffer.length > 0 && (
+                            <Button variant="ghost" size="sm" onClick={() => setShowLogs(true)}
+                              className="gap-1.5 text-muted-foreground ml-auto">
+                              <ScrollText className="h-3.5 w-3.5" />
+                              日志 ({logBuffer.length})
+                            </Button>
+                          )}
+                        </div>
+                    <textarea
+                      className="w-full rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+                      style={osType === "android" ? { scrollMarginBottom: "calc(var(--android-ime-inset-bottom, 0px) + 24px)" } : undefined}
+                      rows={3}
+                      placeholder="在此测试输入法…"
+                    />
                 </CardContent>
               </Card>
             )}
