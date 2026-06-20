@@ -143,7 +143,7 @@ ensure_release_json() {
     if [ -n "$RELEASE_JSON" ]; then
         return
     fi
-    RELEASE_JSON="$(mktemp "${TMPDIR:-/tmp}/keytao-librime-release.XXXXXX.json")"
+    RELEASE_JSON="$(mktemp "${TMPDIR:-/tmp}/keytao-librime-release.XXXXXX")"
     if [ "$VERSION" = "latest" ]; then
         github_api "https://api.github.com/repos/rime/librime/releases/latest" > "$RELEASE_JSON"
     else

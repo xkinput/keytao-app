@@ -93,8 +93,8 @@ write_info_plist_strings() {
     local copyright="$6"
     local tmp_xml
     local tmp_utf16
-    tmp_xml="$(mktemp "${TMPDIR:-/tmp}/keytao-info-plist.XXXXXX.xml")"
-    tmp_utf16="$(mktemp "${TMPDIR:-/tmp}/keytao-info-plist.XXXXXX.utf16")"
+    tmp_xml="$(mktemp "${TMPDIR:-/tmp}/keytao-info-plist-xml.XXXXXX")"
+    tmp_utf16="$(mktemp "${TMPDIR:-/tmp}/keytao-info-plist-utf16.XXXXXX")"
 
     cat > "$tmp_xml" << XML_EOF
 <?xml version="1.0" encoding="UTF-16"?>

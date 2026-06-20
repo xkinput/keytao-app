@@ -40,13 +40,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends rustup \
     && rustup show
 
 # Use rsproxy.cn mirror for cargo (avoids index.crates.io DNS issues)
-RUN mkdir -p /root/.cargo && cat > /root/.cargo/config.toml << 'EOF'
-[source.crates-io]
-replace-with = "rsproxy-sparse"
-
-[source.rsproxy-sparse]
-registry = "sparse+https://rsproxy.cn/index/"
-
-[registries.rsproxy]
-index = "https://rsproxy.cn/index/"
-EOF
+RUN mkdir -p /root/.cargo \
+    && printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "rsproxy-sparse"' \
+        '' \
+        '[source.rsproxy-sparse]' \
+        'registry = "sparse+https://rsproxy.cn/index/"' \
+        '' \
+        '[registries.rsproxy]' \
+        'index = "https://rsproxy.cn/index/"' \
+        > /root/.cargo/config.toml
