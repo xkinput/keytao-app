@@ -169,6 +169,8 @@ scripts/android-librime-runtime.sh sync --all --allow-missing
 - matching ABI 的 `vendor/librime/android/<abi>/lib/librime.so`
 - Android NDK sysroot：`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT` 或 `NDK_HOME`
 
+CI release job 会先显式执行 `import-fcitx5-rime`、`verify --all`、`sync --all`，然后在 APK 构建阶段设置 `KEYTAO_ANDROID_SKIP_RUNTIME_SYNC=1` 跳过 Gradle 的重复同步。这样发布链路只有一个负责导入/校验 Android ABI 闭包的步骤，避免 Tauri/Gradle 构建期间二次同步再次读取临时环境造成不一致；本地构建不设置该变量时仍保留自动同步。
+
 ## 通用 runtime 接入
 
 Android 直接在 `src-tauri/src/lib.rs` 暴露 JNI，不经过 `keytao-core-ffi` C ABI。原因是 Android 主库本身已经是 Rust/Tauri native library，JNI 可以直接调用 Rust crate。

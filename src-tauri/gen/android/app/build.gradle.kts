@@ -89,7 +89,10 @@ dependencies {
 tasks.register<Exec>("syncKeytaoAndroidRuntime") {
     group = "keytao"
     description = "Sync imported Android librime runtime into jniLibs and assets."
-    onlyIf { androidRuntimeScript.isFile }
+    val skipRuntimeSync = providers.environmentVariable("KEYTAO_ANDROID_SKIP_RUNTIME_SYNC")
+        .map { it == "1" || it.equals("true", ignoreCase = true) }
+        .orElse(false)
+    onlyIf { androidRuntimeScript.isFile && !skipRuntimeSync.get() }
     commandLine(
         androidRuntimeScript.absolutePath,
         "sync",
