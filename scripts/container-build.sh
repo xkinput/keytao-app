@@ -75,6 +75,34 @@ copy_rime_plugins() {
   done
 }
 
+has_rime_data() {
+  dir="$1"
+  [ -n "$dir" ] && [ -f "$dir/default.yaml" ]
+}
+
+ensure_linux_rime_data() {
+  for candidate in \
+    "${KEYTAO_RIME_SHARED_DATA_DIR:-}" \
+    "${RIME_SHARED_DATA_DIR:-}" \
+    "${RIME_DATA_DIR:-}" \
+    "/usr/share/rime-data" \
+    "/usr/local/share/rime-data"; do
+    if has_rime_data "$candidate"; then
+      return 0
+    fi
+  done
+
+  echo "=== Fetching Linux rime-data ==="
+  linux_data_dir="target/keytao-linux-rime"
+  /app/scripts/fetch-librime.sh \
+    --platform linux \
+    --destination "$linux_data_dir"
+  if [ -f "$linux_data_dir/env.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$linux_data_dir/env.sh"
+  fi
+}
+
 prepare_linux_runtime() {
   rm -rf "$LINUX_RUNTIME_DIR"
   mkdir -p "$LINUX_RUNTIME_LIB_DIR" "$LINUX_RUNTIME_RIME_DATA_DIR"
@@ -140,6 +168,7 @@ chmod -R u+w target/release/bundle/ 2>/dev/null || true
 find target/release/bundle -type f \( -name '*.tar.gz' -o -iname '*.appimage' \) -delete 2>/dev/null || true
 rm -rf target/release/bundle/appimage target/release/bundle/appimage* 2>/dev/null || true
 pnpm install --frozen-lockfile
+ensure_linux_rime_data
 cargo build -p keytao-linux-ime --release
 prepare_linux_runtime
 target_triple="$(rustc -vV | sed -n 's/^host: //p')"

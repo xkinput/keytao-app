@@ -243,11 +243,6 @@ Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Destination $runtimeDir
 
-$currentRuntimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\current"
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $currentRuntimeDir
-New-Item -ItemType Directory -Force -Path $currentRuntimeDir | Out-Null
-Copy-Item -Recurse -Force -Path (Join-Path $runtimeDir "*") -Destination $currentRuntimeDir
-
 $appRuntimeDir = Join-Path $repoRoot "target\keytao-windows-app-runtime"
 New-Item -ItemType Directory -Force -Path $appRuntimeDir | Out-Null
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $appRuntimeDir
@@ -259,6 +254,11 @@ foreach ($runtimeDll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dl
         Copy-Item -Force -LiteralPath $source -Destination $appRuntimeDir
     }
 }
+
+$currentRuntimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\current"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $currentRuntimeDir
+New-Item -ItemType Directory -Force -Path $currentRuntimeDir | Out-Null
+Copy-Item -Recurse -Force -Path (Join-Path $runtimeDir "*") -Destination $currentRuntimeDir
 
 Write-Host ""
 Write-Host "Windows IME runtime is ready:"
