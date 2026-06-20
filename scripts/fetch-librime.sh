@@ -376,6 +376,13 @@ copy_dir_contents() {
     local destination="$2"
     [ -d "$source" ] || return 1
     mkdir -p "$destination"
+    local source_abs
+    local destination_abs
+    source_abs="$(cd "$source" && pwd -P)"
+    destination_abs="$(cd "$destination" && pwd -P)"
+    if [ "$source_abs" = "$destination_abs" ]; then
+        return 0
+    fi
     cp -R "$source"/. "$destination"/
 }
 

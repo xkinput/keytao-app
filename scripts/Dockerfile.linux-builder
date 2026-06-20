@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl file git \
         gcc g++ pkg-config \
         python3 \
+        unzip \
         rpm \
         mold \
         clang libclang-dev \

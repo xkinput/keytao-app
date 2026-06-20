@@ -586,21 +586,18 @@ with open(release_path, "r", encoding="utf-8") as response:
 
 plugin_asset = None
 base_asset = None
+abi_suffix = f"-{abi}-release.apk"
 for item in release.get("assets", []):
     name = item.get("name", "")
     if (
         name.startswith("org.fcitx.fcitx5.android.plugin.rime-")
-        and abi in name
-        and name.endswith(".apk")
-        and "release" in name
+        and name.endswith(abi_suffix)
     ):
         plugin_asset = item
     if (
         name.startswith("org.fcitx.fcitx5.android-")
         and ".plugin." not in name
-        and abi in name
-        and name.endswith(".apk")
-        and "release" in name
+        and name.endswith(abi_suffix)
     ):
         base_asset = item
 if not plugin_asset or not base_asset:
