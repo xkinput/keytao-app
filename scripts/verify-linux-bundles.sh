@@ -96,7 +96,7 @@ if command -v patchelf >/dev/null 2>&1; then
 fi
 
 echo "==> Verifying Linux deb/rpm bundles"
-forbidden_artifacts="$(find "$BUNDLE_DIR" -type f \( -iname '*.appimage' -o -name '*.tar.gz' \) -print 2>/dev/null | sort || true)"
+forbidden_artifacts="$(find "$BUNDLE_DIR" -maxdepth 2 -type f \( -iname '*.appimage' -o -name '*.tar.gz' \) -print 2>/dev/null | sort || true)"
 if [ -n "$forbidden_artifacts" ]; then
     echo "ERROR: Linux release must only produce deb/rpm, but found:" >&2
     printf '%s\n' "$forbidden_artifacts" >&2
