@@ -192,8 +192,11 @@ cat > "$ENTITLEMENTS" << 'ENTEOF'
 </dict></plist>
 ENTEOF
 
-APPLE_DEV_CERT="$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+APPLE_DEV_CERT=""
+if [ "${CI:-}" != "true" ]; then
+    APPLE_DEV_CERT="$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+fi
 if [ -n "${KEYTAO_CODESIGN_IDENTITY:-}" ]; then
     SIGN_ID="$KEYTAO_CODESIGN_IDENTITY"
 elif [ -n "$APPLE_DEV_CERT" ]; then

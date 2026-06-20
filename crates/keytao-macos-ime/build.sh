@@ -303,7 +303,7 @@ swiftc \
     $( [[ "$PROFILE" == "release" ]] && echo "-O" || echo "-g" ) \
     -o "$APP/Contents/MacOS/KeyTaoIME"
 
-echo "==> Signing (Apple Development cert)..."
+echo "==> Signing macOS IME bundle..."
 ENTITLEMENTS="$SCRIPT_DIR/dev.entitlements.plist"
 cat > "$ENTITLEMENTS" << 'ENTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -314,15 +314,19 @@ cat > "$ENTITLEMENTS" << 'ENTEOF'
 </dict></plist>
 ENTEOF
 
-APPLE_DEV_CERT=$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
-if [ -n "$APPLE_DEV_CERT" ]; then
+APPLE_DEV_CERT=""
+if [ "${CI:-}" != "true" ]; then
+    APPLE_DEV_CERT=$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
+fi
+if [ -n "${KEYTAO_CODESIGN_IDENTITY:-}" ]; then
+    SIGN_ID="$KEYTAO_CODESIGN_IDENTITY"
+elif [ -n "$APPLE_DEV_CERT" ]; then
     SIGN_ID="$APPLE_DEV_CERT"
-    echo "    Using cert: $SIGN_ID"
 else
     SIGN_ID="-"
-    echo "    WARNING: No Apple Development cert found, falling back to ad-hoc"
 fi
+echo "    Using signing identity: $SIGN_ID"
 
 while IFS= read -r -d '' dylib; do
     codesign --force --sign "$SIGN_ID" --options runtime \
