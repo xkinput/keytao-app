@@ -28,7 +28,7 @@ pub fn current_mod_mask() -> u32 {
 
 /// Convert a Windows Virtual Key code to an X11 keysym.
 ///
-/// Returns `None` for keys the IME should never eat (e.g. function keys, media keys).
+/// Returns `None` for keys the IME should never eat (e.g. media keys).
 pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
@@ -86,6 +86,7 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
         VK_END => 0xFF57,   // XK_End
         VK_PRIOR => 0xFF55, // XK_Prior (Page Up)
         VK_NEXT => 0xFF56,  // XK_Next  (Page Down)
+        VK_F4 => 0xFFC1,    // XK_F4 opens the Rime menu
 
         // --- OEM punctuation (US layout) ---
         VK_OEM_MINUS => 0x002D,  // '-'
@@ -100,7 +101,7 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
         VK_OEM_6 => 0x005D,      // ']'
         VK_OEM_7 => 0x0027,      // '\''
 
-        // Anything else (function keys, media keys, etc.) — don't intercept
+        // Anything else (other function keys, media keys, etc.) — don't intercept
         _ => return None,
     };
     Some(sym)
@@ -154,6 +155,9 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     }
 
     let vk = VIRTUAL_KEY(vk);
+    if vk == VK_F4 {
+        return true;
+    }
 
     if has_composition {
         is_nonstarter_vk(vk.0) || is_letter_vk(vk) || ascii_char_for_vk(vk.0).is_some()

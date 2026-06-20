@@ -131,8 +131,9 @@ Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 
 - 字母按 Shift 状态传小写或大写 ASCII keysym，同时保留 Shift modifier mask，语义与 Linux/macOS 的“keysym 表示实际字符、mask 表示修饰键”一致。
 - 数字、小键盘、常见标点映射到 ASCII keysym。
 - Backspace、Tab、Return、Escape、Space、Delete、方向键等映射到 XK 值。
+- `VK_F4` 映射为 `XK_F4` / `0xffc1`，用于打开 Rime schema / options 菜单。
 - `Shift_L` / `Shift_R` 只在 solo key up 时以 release mask 送入 Rime。
-- Function key、媒体键等返回 `None`，输入法不拦截。
+- 其它 function key、媒体键等返回 `None`，输入法不拦截。
 
 ## 重载
 

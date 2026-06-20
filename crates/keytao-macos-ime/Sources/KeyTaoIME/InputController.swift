@@ -8,6 +8,7 @@ private let rimeModifierControl: UInt32 = 0x0004
 private let rimeModifierAlt: UInt32 = 0x0008
 private let rimeReleaseMask: UInt32 = 1 << 30
 private let rimeKeyReturn: UInt32 = 0xff0d
+private let rimeKeyF4: UInt32 = 0xffc1
 
 /// KeyTao's IMKInputController subclass.
 /// macOS creates one controller per client context and routes key events here.
@@ -81,14 +82,13 @@ final class KeyTaoInputController: IMKInputController {
         if event.modifierFlags.contains(.shift) {
             shiftPressedWithoutKey = false
         }
-        if asciiMode && !hasComposition {
-            return false
-        }
-
         guard let session = ensureSession() else { return false }
 
         let keyval = rimeKeyValue(from: event)
         if keyval == 0 {
+            return false
+        }
+        if asciiMode && !hasComposition && keyval != rimeKeyF4 {
             return false
         }
 
@@ -545,6 +545,7 @@ final class KeyTaoInputController: IMKInputController {
         case kVK_PageUp:        return 0xff55
         case kVK_PageDown:      return 0xff56
         case kVK_Tab:           return 0xff09
+        case kVK_F4:            return rimeKeyF4
         default:
             return printableAsciiKeyValue(from: event)
         }

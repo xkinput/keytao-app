@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
     collections::HashSet,
+    ffi::CStr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -20,12 +21,15 @@ pub struct ImeState {
     pub preedit: String,
     pub cursor: usize,
     pub candidates: Vec<Candidate>,
+    pub all_candidates: Vec<Candidate>,
     pub highlighted_candidate_index: usize,
+    pub page_size: usize,
     pub page: usize,
     pub is_last_page: bool,
     pub committed: Option<String>,
     pub select_keys: Option<String>,
     pub ascii_mode: bool,
+    pub schema_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,17 +50,26 @@ impl ImeState {
             preedit: String::new(),
             cursor: 0,
             candidates: vec![],
+            all_candidates: vec![],
             highlighted_candidate_index: 0,
+            page_size: 0,
             page: 0,
             is_last_page: true,
             committed: None,
             select_keys: None,
             ascii_mode: false,
+            schema_name: String::new(),
         }
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    test
+))]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
     let staging_dir = user_data_dir.join("build");
     let prebuilt_dir = if user_data_dir == shared_data_dir {
@@ -67,17 +80,28 @@ fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, Pa
     (staging_dir, prebuilt_dir)
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    test
+))]
 fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 mod desktop {
     use super::*;
-    use librime_sys::rime_get_api;
+    use librime_sys::{rime_get_api, RimeCandidateListIterator};
     use rime_api::{
         create_session, full_deploy_and_wait, initialize, setup, DeployResult, KeyEvent, KeyStatus,
         Traits,
@@ -173,6 +197,20 @@ mod desktop {
             extract_state(&self.session)
         }
 
+        pub fn select_candidate_global(&self, index: usize) -> ImeState {
+            unsafe {
+                let api = rime_get_api();
+                if let Some(select_candidate) = (*api).select_candidate {
+                    select_candidate(self.session.session_id, index);
+                }
+            }
+            extract_state(&self.session)
+        }
+
+        pub fn all_candidates(&self) -> Vec<Candidate> {
+            extract_all_candidates(&self.session).unwrap_or_default()
+        }
+
         pub fn change_page(&self, backward: bool) -> ImeState {
             let kc = if backward { b'-' as u32 } else { b'=' as u32 };
             self.session.process_key(key_event(kc, 0));
@@ -225,7 +263,7 @@ mod desktop {
         let cursor = comp.cursor_pos;
 
         let menu = ctx.menu();
-        let candidates = menu
+        let candidates: Vec<Candidate> = menu
             .candidates
             .iter()
             .map(|c| Candidate {
@@ -234,23 +272,81 @@ mod desktop {
             })
             .collect();
 
-        let ascii_mode = session.status().map(|s| s.is_ascii_mode).unwrap_or(false);
+        let status = session.status().ok();
+        let ascii_mode = status.as_ref().map(|s| s.is_ascii_mode).unwrap_or(false);
+        let schema_name = status
+            .as_ref()
+            .map(|s| s.schema_name().to_string())
+            .unwrap_or_default();
 
         ImeState {
             preedit,
             cursor,
             candidates,
+            all_candidates: Vec::new(),
             highlighted_candidate_index: menu.highlighted_candidate_index,
+            page_size: menu.page_size,
             page: menu.page_no,
             is_last_page: menu.is_last_page,
             committed,
             select_keys: menu.select_keys.map(|s: &str| s.to_string()),
             ascii_mode,
+            schema_name,
+        }
+    }
+
+    fn extract_all_candidates(session: &rime_api::Session) -> Option<Vec<Candidate>> {
+        unsafe {
+            let api = rime_get_api();
+            let candidate_list_begin = (*api).candidate_list_begin?;
+            let candidate_list_next = (*api).candidate_list_next?;
+            let candidate_list_end = (*api).candidate_list_end?;
+            let mut iterator =
+                std::mem::MaybeUninit::<RimeCandidateListIterator>::zeroed().assume_init();
+            if candidate_list_begin(session.session_id, &mut iterator) == 0 {
+                return None;
+            }
+
+            let mut candidates = Vec::new();
+            loop {
+                let text = candidate_string(iterator.candidate.text);
+                let comment = candidate_optional_string(iterator.candidate.comment);
+                if !text.is_empty() {
+                    candidates.push(Candidate { text, comment });
+                }
+                if candidate_list_next(&mut iterator) == 0 {
+                    break;
+                }
+            }
+            candidate_list_end(&mut iterator);
+            Some(candidates)
+        }
+    }
+
+    unsafe fn candidate_string(value: *mut std::os::raw::c_char) -> String {
+        if value.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(value).to_string_lossy().into_owned()
+        }
+    }
+
+    unsafe fn candidate_optional_string(value: *mut std::os::raw::c_char) -> Option<String> {
+        if value.is_null() {
+            None
+        } else {
+            let value = CStr::from_ptr(value).to_string_lossy().into_owned();
+            (!value.is_empty()).then_some(value)
         }
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 pub use desktop::{deploy, Engine};
 
 pub const RIME_MOD_SHIFT: u32 = 0x0001;
@@ -276,6 +372,7 @@ pub mod key_policy {
     pub const XK_END: u32 = 0xff57;
     pub const XK_DELETE: u32 = 0xffff;
     pub const XK_KP_ENTER: u32 = 0xff8d;
+    pub const XK_F4: u32 = 0xffc1;
 
     pub fn is_enter_key(sym: u32) -> bool {
         matches!(sym, XK_RETURN | XK_KP_ENTER)
@@ -442,20 +539,44 @@ mod ime_runtime_tests {
             RIME_MOD_CONTROL
         ));
     }
+
+    #[test]
+    fn key_policy_does_not_bypass_rime_menu_key() {
+        assert!(!key_policy::should_bypass_empty_composition(
+            key_policy::XK_F4,
+            0,
+            &ImeState::empty()
+        ));
+    }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 #[derive(Clone)]
 pub struct ImeRuntime(Arc<ImeRuntimeState>);
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 #[derive(Clone)]
 pub struct ImeRuntimeSession {
     shared: Arc<ImeRuntimeState>,
     inner: Arc<Mutex<ImeRuntimeSessionInner>>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 struct ImeRuntimeState {
     initialized: Mutex<bool>,
     generation: AtomicU64,
@@ -463,13 +584,23 @@ struct ImeRuntimeState {
     shared_data_dir: Option<String>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 struct ImeRuntimeSessionInner {
     engine: Engine,
     generation: u64,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 impl ImeRuntime {
     pub fn new() -> Self {
         Self::with_optional_dirs(None, None)
@@ -542,14 +673,24 @@ impl ImeRuntime {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 impl Default for ImeRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
         let mut inner = self.inner.lock().unwrap();
@@ -573,6 +714,18 @@ impl ImeRuntimeSession {
         let mut inner = self.inner.lock().unwrap();
         self.refresh_if_needed(&mut inner).ok()?;
         Some(inner.engine.select_candidate(index))
+    }
+
+    pub fn select_candidate_global(&self, index: usize) -> Option<ImeState> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.select_candidate_global(index))
+    }
+
+    pub fn all_candidates(&self) -> Option<Vec<Candidate>> {
+        let mut inner = self.inner.lock().ok()?;
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.all_candidates())
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
@@ -625,7 +778,7 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
 fn has_base_default_yaml(dir: &Path) -> bool {
     dir.join("default.yaml").is_file()
 }
@@ -1017,7 +1170,16 @@ pub fn default_user_data_dir() -> Option<PathBuf> {
     {
         return dirs::data_local_dir().map(|d| d.join("keytao"));
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "android")]
+    {
+        return dirs::data_local_dir().map(|d| d.join("keytao"));
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     {
         None
     }
@@ -1195,7 +1357,44 @@ pub fn default_shared_data_dir() -> String {
 
         return r"C:\Program Files\Rime\weasel-data".to_string();
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "android")]
+    {
+        for key in [
+            "KEYTAO_RIME_SHARED_DATA_DIR",
+            "RIME_SHARED_DATA_DIR",
+            "RIME_DATA_DIR",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                if !value.is_empty() && has_base_default_yaml(Path::new(value)) {
+                    return value.to_string();
+                }
+            }
+        }
+
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(bin_dir) = current_exe.parent() {
+                for path in [
+                    bin_dir.join("rime-data"),
+                    bin_dir.join("runtime/rime-data"),
+                    bin_dir.join("resources/rime-data"),
+                    bin_dir.join("resources/runtime/rime-data"),
+                ] {
+                    if has_base_default_yaml(&path) {
+                        return path.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        }
+
+        return String::new();
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     {
         String::new()
     }

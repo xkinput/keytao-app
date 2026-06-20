@@ -6,7 +6,14 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "android")]
+use jni::{
+    objects::{JObject, JString},
+    sys::{jboolean, jint, jlong, jstring},
+    JNIEnv,
+};
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::sync::Mutex;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -81,7 +88,6 @@ const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
 const IME_RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -105,7 +111,6 @@ fn reload_stamp_path() -> Option<PathBuf> {
     keytao_core::default_user_data_dir().map(|dir| dir.join(IME_RELOAD_STAMP_FILE))
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn file_signature(path: &Path) -> String {
     match std::fs::metadata(path) {
         Ok(metadata) => {
@@ -149,11 +154,18 @@ fn ime_theme_path() -> Result<PathBuf, String> {
     keytao_theme::default_user_theme_path().ok_or("Cannot determine keytao data directory".into())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String> {
-    let theme_path = ime_theme_path()?;
+fn ime_ui_settings_from_paths(
+    theme_path: PathBuf,
+    reload_stamp_path: Option<PathBuf>,
+    message: String,
+) -> Result<ImeUiSettings, String> {
     let theme = keytao_theme::ThemeResolver::new(None, Some(theme_path.clone())).current();
-    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
+    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_path
+        .map(|path| {
+            let signature = file_signature(&path);
+            (Some(path_string(path)), Some(signature))
+        })
+        .unwrap_or((None, None));
     let accent_color = theme
         .ui
         .accent_color
@@ -172,12 +184,18 @@ fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn write_ime_ui_settings(
+fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String> {
+    let theme_path = ime_theme_path()?;
+    let reload_stamp_path = reload_stamp_path();
+    ime_ui_settings_from_paths(theme_path, reload_stamp_path, message)
+}
+
+fn write_ime_ui_settings_to_path(
+    theme_path: &Path,
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
 ) -> Result<(), String> {
-    let theme_path = ime_theme_path()?;
     if let Some(parent) = theme_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
     }
@@ -235,12 +253,21 @@ fn write_ime_ui_settings(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_ui_settings(
+    color_scheme: keytao_theme::UiColorScheme,
+    orientation: keytao_theme::PanelOrientation,
+    accent_color: String,
+) -> Result<(), String> {
+    let theme_path = ime_theme_path()?;
+    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn write_ime_ui_color_scheme(color_scheme: keytao_theme::UiColorScheme) -> Result<(), String> {
     let current = ime_ui_settings_with_message(String::new())?;
     write_ime_ui_settings(color_scheme, current.orientation, current.accent_color)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn yaml_child_mapping<'a>(
     mapping: &'a mut serde_yaml::Mapping,
     key: &str,
@@ -1302,7 +1329,7 @@ fn configure_kde_virtual_keyboard(app: &tauri::AppHandle) -> Result<Vec<String>,
     ])
 }
 
-fn build_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
     let version = app.package_info().version.to_string();
     reqwest::Client::builder()
         .user_agent(format!("keytao-app/{version}"))
@@ -1736,7 +1763,10 @@ fn write_file_privileged_fallback(
 }
 
 #[tauri::command]
-async fn download_to_temp(app: AppHandle, url: String) -> Result<String, String> {
+async fn download_to_temp<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    url: String,
+) -> Result<String, String> {
     let emit = |stage: &str, percent: u32, message: &str| {
         let _ = app.emit(
             "install-progress",
@@ -2010,16 +2040,516 @@ struct ScopedStorageHandle<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
 
 fn scoped_storage_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("scopedStorage")
-        .setup(|app, api| {
+        .setup(|_app, _api| {
             #[cfg(target_os = "android")]
             {
                 let handle =
-                    api.register_android_plugin("ink.rea.keytao_app", "ScopedStoragePlugin")?;
-                app.manage(ScopedStorageHandle(handle));
+                    _api.register_android_plugin("ink.rea.keytao_app", "ScopedStoragePlugin")?;
+                _app.manage(ScopedStorageHandle(handle));
             }
             Ok(())
         })
         .build()
+}
+
+#[cfg(target_os = "android")]
+fn optional_jni_path(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<PathBuf> {
+    if value.is_null() {
+        return None;
+    }
+    let value = env.get_string(&value).ok()?;
+    let value = value.to_string_lossy();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+#[cfg(target_os = "android")]
+fn jni_string(env: &mut JNIEnv<'_>, value: &str) -> jstring {
+    env.new_string(value)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+#[cfg(target_os = "android")]
+static ANDROID_IME_RUNTIME: Mutex<Option<keytao_core::ImeRuntime>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidImeStateJson {
+    preedit: String,
+    cursor: usize,
+    candidates: Vec<keytao_core::Candidate>,
+    all_candidates: Vec<keytao_core::Candidate>,
+    highlighted_candidate_index: usize,
+    page_size: usize,
+    page: usize,
+    is_last_page: bool,
+    committed: String,
+    select_keys: String,
+    ascii_mode: bool,
+    schema_name: String,
+    accepted: bool,
+    candidate_panel: keytao_theme::CandidatePanelModel,
+    mode_hint: keytao_theme::ModeHintModel,
+}
+
+#[cfg(target_os = "android")]
+fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
+    let theme = android_current_theme();
+    let candidate_panel = theme.candidate_panel_model(
+        keytao_theme::CandidatePanelInput {
+            preedit: state.preedit.clone(),
+            candidates: state
+                .candidates
+                .iter()
+                .map(|candidate| keytao_theme::ThemeCandidate {
+                    text: candidate.text.clone(),
+                    comment: candidate.comment.clone(),
+                })
+                .collect(),
+            highlighted_candidate_index: state.highlighted_candidate_index,
+            page: state.page,
+            is_last_page: state.is_last_page,
+            select_keys: state.select_keys.clone(),
+        },
+        &keytao_theme::UiCapabilities::full_custom(),
+    );
+    let mode_hint = theme.mode_hint_model(state.ascii_mode);
+    let value = AndroidImeStateJson {
+        preedit: state.preedit,
+        cursor: state.cursor,
+        candidates: state.candidates,
+        all_candidates: state.all_candidates,
+        highlighted_candidate_index: state.highlighted_candidate_index,
+        page_size: state.page_size,
+        page: state.page,
+        is_last_page: state.is_last_page,
+        committed: state.committed.unwrap_or_default(),
+        select_keys: state.select_keys.unwrap_or_default(),
+        ascii_mode: state.ascii_mode,
+        schema_name: state.schema_name,
+        accepted,
+        candidate_panel,
+        mode_hint,
+    };
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+}
+
+#[cfg(target_os = "android")]
+fn android_candidates_json(candidates: Vec<keytao_core::Candidate>) -> String {
+    serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".into())
+}
+
+#[cfg(target_os = "android")]
+fn android_current_theme() -> keytao_theme::ResolvedImeTheme {
+    let user_path = ANDROID_IME_USER_THEME_PATH
+        .lock()
+        .ok()
+        .and_then(|path| path.clone())
+        .filter(|path| path.is_file());
+    keytao_theme::resolve_theme_from_paths(None, user_path.as_deref())
+}
+
+#[cfg(target_os = "android")]
+fn android_result_json(result: keytao_core::KeyProcessResult) -> String {
+    android_state_json(result.state, result.accepted)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidImeStatus {
+    pub package_name: String,
+    pub service_name: String,
+    pub input_method_id: Option<String>,
+    pub default_input_method: Option<String>,
+    pub enabled: bool,
+    pub selected: bool,
+    pub can_show_picker: bool,
+    pub message: String,
+}
+
+#[cfg(target_os = "android")]
+fn android_session<'a>(session: jlong) -> Option<&'a keytao_core::ImeRuntimeSession> {
+    if session == 0 {
+        return None;
+    }
+    Some(unsafe { &*(session as *mut keytao_core::ImeRuntimeSession) })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolveThemeJson(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    default_theme_path: JString<'_>,
+    user_theme_path: JString<'_>,
+) -> jstring {
+    let default_path = optional_jni_path(&mut env, default_theme_path);
+    let user_path = optional_jni_path(&mut env, user_theme_path);
+    let theme =
+        keytao_theme::resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref());
+    match keytao_theme::resolved_theme_json(&theme) {
+        Ok(json) => jni_string(&mut env, &json),
+        Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineAvailable(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jboolean {
+    1
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+    shared_dir: JString<'_>,
+) -> jboolean {
+    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+        return 0;
+    };
+    let user_theme_path = user_dir.join("theme.yaml");
+    let shared_dir = optional_jni_path(&mut env, shared_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(keytao_core::default_shared_data_dir);
+
+    let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
+    if runtime.init().is_err() {
+        return 0;
+    }
+    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
+        *theme_path = Some(user_theme_path);
+    }
+    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
+        return 0;
+    };
+    *slot = Some(runtime);
+    1
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReload(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jboolean {
+    let Ok(slot) = ANDROID_IME_RUNTIME.lock() else {
+        return 0;
+    };
+    let Some(runtime) = slot.as_ref().cloned() else {
+        return 0;
+    };
+    drop(slot);
+    if runtime.reload().is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCreateSession(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jlong {
+    let Ok(slot) = ANDROID_IME_RUNTIME.lock() else {
+        return 0;
+    };
+    let Some(runtime) = slot.as_ref().cloned() else {
+        return 0;
+    };
+    drop(slot);
+    match runtime.create_session() {
+        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDestroySession(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) {
+    if session == 0 {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(
+            session as *mut keytao_core::ImeRuntimeSession,
+        ));
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSessionState(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(session.state(), false))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeProcessKey(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    keyval: jint,
+    modifiers: jint,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(result) = session.process_key_result(keyval as u32, modifiers as u32) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_result_json(result))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectCandidate(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    index: jint,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = session.select_candidate(index.max(0) as usize) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(state, true))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectCandidateGlobal(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    index: jint,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = session.select_candidate_global(index.max(0) as usize) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(state, true))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeAllCandidates(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(candidates) = session.all_candidates() else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_candidates_json(candidates))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeChangePage(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    backward: jboolean,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = session.change_page(backward != 0) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(state, true))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReset(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = session.reset() else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(state, true))
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeGetAsciiMode(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jboolean {
+    let Some(session) = android_session(session) else {
+        return 0;
+    };
+    if session.is_ascii_mode() {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSetAsciiMode(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    enabled: jboolean,
+) -> jstring {
+    let Some(session) = android_session(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = session.set_ascii_mode(enabled != 0) else {
+        return std::ptr::null_mut();
+    };
+    jni_string(&mut env, &android_state_json(state, true))
+}
+
+#[tauri::command]
+async fn android_ime_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<AndroidImeStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("imeStatus", ())
+            .map_err(|e| e.to_string())?;
+        serde_json::from_value(result).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_open_input_method_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("openInputMethodSettings", ())
+            .map(|_: serde_json::Value| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_show_input_method_picker<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("showInputMethodPicker", ())
+            .map(|_: serde_json::Value| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Not Android".into())
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    let result: serde_json::Value = app
+        .state::<ScopedStorageHandle<R>>()
+        .0
+        .run_mobile_plugin("keytaoRoot", ())
+        .map_err(|e| e.to_string())?;
+    let path = result
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or("Android KeyTao data directory is unavailable")?;
+    Ok(PathBuf::from(path))
+}
+
+#[cfg(target_os = "android")]
+fn android_reload_stamp_path(root: &Path) -> PathBuf {
+    root.join(IME_RELOAD_STAMP_FILE)
+}
+
+#[cfg(target_os = "android")]
+fn write_android_reload_stamp(root: &Path) -> Result<PathBuf, String> {
+    let stamp = android_reload_stamp_path(root);
+    if let Some(parent) = stamp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 Android 输入法目录失败: {e}"))?;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    std::fs::write(&stamp, now.to_string())
+        .map_err(|e| format!("写入 Android 输入法重载标记失败 {}: {e}", stamp.display()))?;
+    Ok(stamp)
+}
+
+#[tauri::command]
+async fn android_keytao_data_dir<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        android_keytao_root(&app).map(|path| Some(path_string(path)))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -2135,6 +2665,48 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
     }
 }
 
+#[cfg(target_os = "android")]
+fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
+    let merged_schemas = result["mergedSchemas"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let logs = result["logs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let verify = result["verify"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(VerifyEntry {
+                        path: v["path"].as_str()?.to_string(),
+                        ok: v["ok"].as_bool().unwrap_or(false),
+                        note: v["note"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    InstallResult {
+        merged_schemas,
+        logs,
+        verify,
+    }
+}
+
 #[tauri::command]
 async fn android_smart_extract<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -2184,6 +2756,15 @@ async fn android_smart_extract<R: tauri::Runtime>(
                 Ok(())
             });
 
+        let _private_result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin(
+                "smartExtractZipToPrivate",
+                serde_json::json!({ "zipPath": zip_path.clone() }),
+            )
+            .map_err(|e| e.to_string())?;
+
         let result: serde_json::Value = app
             .state::<ScopedStorageHandle<R>>()
             .0
@@ -2202,44 +2783,7 @@ async fn android_smart_extract<R: tauri::Runtime>(
             },
         );
 
-        let merged_schemas = result["mergedSchemas"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let logs = result["logs"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let verify = result["verify"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        Some(VerifyEntry {
-                            path: v["path"].as_str()?.to_string(),
-                            ok: v["ok"].as_bool().unwrap_or(false),
-                            note: v["note"].as_str().unwrap_or("").to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(InstallResult {
-            merged_schemas,
-            logs,
-            verify,
-        })
+        Ok(install_result_from_value(&result))
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -2638,23 +3182,37 @@ fn opencc_version() -> Option<String> {
 
 #[tauri::command]
 fn get_component_versions(app: AppHandle) -> ComponentVersions {
+    #[cfg(target_os = "android")]
+    let data_dir = android_keytao_root(&app).ok().map(path_string);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let data_dir = keytao_core::default_user_data_dir().map(|p| p.to_string_lossy().into_owned());
+    #[cfg(target_os = "ios")]
+    let data_dir = None;
+
     ComponentVersions {
         app_version: app.package_info().version.to_string(),
         tauri_version: tauri::VERSION.to_string(),
         librime_version: librime_version(&app),
         opencc_version: opencc_version(),
-        data_dir: keytao_core::default_user_data_dir().map(|p| p.to_string_lossy().into_owned()),
+        data_dir,
     }
 }
 
 #[tauri::command]
-fn check_local_schema(path: Option<String>) -> LocalSchemaInfo {
+fn check_local_schema<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: Option<String>,
+) -> LocalSchemaInfo {
     let dir: Option<PathBuf> = path.map(PathBuf::from).or_else(|| {
+        #[cfg(target_os = "android")]
+        {
+            return android_keytao_root(&app).ok();
+        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             return keytao_core::default_user_data_dir();
         }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "ios")]
         {
             return None;
         }
@@ -2742,7 +3300,31 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 }
 
 #[tauri::command]
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "android")]
+async fn rime_deploy_default<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<DeployResult, String> {
+    let result: serde_json::Value = app
+        .state::<ScopedStorageHandle<R>>()
+        .0
+        .run_mobile_plugin("writeImeReloadStamp", ())
+        .map_err(|e| e.to_string())?;
+    let path = result["path"]
+        .as_str()
+        .unwrap_or("/storage/emulated/0/keytao/keytao-ime.reload");
+    Ok(DeployResult {
+        success: true,
+        message: format!("已通知 Android 输入法重载：{path}"),
+    })
+}
+
+#[tauri::command]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+)))]
 async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
     Err("librime deployment is not supported on this platform yet".into())
 }
@@ -2754,9 +3336,22 @@ fn get_ime_ui_settings() -> Result<ImeUiSettings, String> {
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
+fn get_ime_ui_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ImeUiSettings, String> {
+    let root = android_keytao_root(&app)?;
+    ime_ui_settings_from_paths(
+        root.join("theme.yaml"),
+        Some(android_reload_stamp_path(&root)),
+        "已读取 Android 输入法 UI 配置".into(),
+    )
+}
+
+#[tauri::command]
+#[cfg(target_os = "ios")]
 fn get_ime_ui_settings() -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on mobile".into())
+    Err("IME UI settings are not supported on iOS".into())
 }
 
 #[tauri::command]
@@ -2788,21 +3383,79 @@ fn set_ime_ui_settings(
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn set_ime_ui_color_scheme(
-    _color_scheme: keytao_theme::UiColorScheme,
+#[cfg(target_os = "android")]
+fn set_ime_ui_color_scheme<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    color_scheme: keytao_theme::UiColorScheme,
 ) -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on mobile".into())
+    let root = android_keytao_root(&app)?;
+    let theme_path = root.join("theme.yaml");
+    let current = ime_ui_settings_from_paths(
+        theme_path.clone(),
+        Some(android_reload_stamp_path(&root)),
+        String::new(),
+    )?;
+    write_ime_ui_settings_to_path(
+        &theme_path,
+        color_scheme,
+        current.orientation,
+        current.accent_color,
+    )?;
+    let reload_message = match write_android_reload_stamp(&root) {
+        Ok(path) => format!(
+            "已保存 Android 输入法 UI 配置并通知输入法重载：{}",
+            path.display()
+        ),
+        Err(e) => format!("已保存 Android 输入法 UI 配置，但输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_from_paths(
+        theme_path,
+        Some(android_reload_stamp_path(&root)),
+        reload_message,
+    )
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "ios")]
+fn set_ime_ui_color_scheme(
+    _color_scheme: keytao_theme::UiColorScheme,
+) -> Result<ImeUiSettings, String> {
+    Err("IME UI settings are not supported on iOS".into())
+}
+
+#[tauri::command]
+#[cfg(target_os = "android")]
+fn set_ime_ui_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    color_scheme: keytao_theme::UiColorScheme,
+    orientation: keytao_theme::PanelOrientation,
+    accent_color: String,
+) -> Result<ImeUiSettings, String> {
+    let root = android_keytao_root(&app)?;
+    let theme_path = root.join("theme.yaml");
+    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)?;
+    let reload_message = match write_android_reload_stamp(&root) {
+        Ok(path) => format!(
+            "已保存 Android 输入法 UI 配置并通知输入法重载：{}",
+            path.display()
+        ),
+        Err(e) => format!("已保存 Android 输入法 UI 配置，但输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_from_paths(
+        theme_path,
+        Some(android_reload_stamp_path(&root)),
+        reload_message,
+    )
+}
+
+#[tauri::command]
+#[cfg(target_os = "ios")]
 fn set_ime_ui_settings(
     _color_scheme: keytao_theme::UiColorScheme,
     _orientation: keytao_theme::PanelOrientation,
     _accent_color: String,
 ) -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on mobile".into())
+    Err("IME UI settings are not supported on iOS".into())
 }
 
 #[cfg(target_os = "windows")]
@@ -2838,9 +3491,37 @@ async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallR
 }
 
 #[tauri::command]
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
+async fn rime_install_to_default<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    url: String,
+) -> Result<InstallResult, String> {
+    let root = android_keytao_root(&app)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建 Android 输入法目录失败: {e}"))?;
+    let temp = download_to_temp(app.clone(), url).await?;
+    let result: serde_json::Value = app
+        .state::<ScopedStorageHandle<R>>()
+        .0
+        .run_mobile_plugin(
+            "smartExtractZipToPrivate",
+            serde_json::json!({ "zipPath": temp }),
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "done".into(),
+            percent: 100,
+            message: "安装完成！".into(),
+        },
+    );
+    Ok(install_result_from_value(&result))
+}
+
+#[tauri::command]
+#[cfg(target_os = "ios")]
 async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<InstallResult, String> {
-    Err("Not supported on mobile".into())
+    Err("Not supported on iOS".into())
 }
 
 #[tauri::command]
@@ -3161,6 +3842,10 @@ pub fn run() {
             macos_install_ime,
             macos_uninstall_ime,
             rime_install_to_default,
+            android_ime_status,
+            android_keytao_data_dir,
+            android_open_input_method_settings,
+            android_show_input_method_picker,
             android_open_app,
             android_pick_directory,
             android_list_files,

@@ -144,13 +144,14 @@ Linux 各后端尽量遵守同一套 librime 事件形状：
 5. 没有 composition 时，空格、回车、退格、删除、Tab、Escape、导航键等直接放行。
 6. Shift 自身的按下不切换模式；Shift release 送入 Rime，用于中英模式切换。
 7. Shift+字母、Shift+数字符号不是 solo Shift，必须走普通 key press 路径，让 librime 的 ASCII composer 决定提交大写或符号。
-8. 有 preedit 时按 Enter 会直接提交当前 preedit，然后 reset session。
-9. 空格在有候选时优先选中当前高亮候选。
-10. IBus engine 和 IBus shim 会根据 `select_keys` 把数字/选择键转成候选索引；Wayland/XIM 目前主要让 librime 自己处理非空格选择键。
-11. `accepted=false` 时放行或转发按键。
-12. 有 `committed` 时用当前后端原生接口提交。
-13. 有 `preedit` 时用当前后端原生接口更新客户端预编辑。
-14. 有 `candidates` 时更新候选窗或候选服务。
+8. F4 不属于空 composition bypass；Wayland/X11/IBus 后端收到 `XK_F4` / `0xffc1` 时会送入 librime 打开 Rime schema / options 菜单。
+9. 有 preedit 时按 Enter 会直接提交当前 preedit，然后 reset session。
+10. 空格在有候选时优先选中当前高亮候选。
+11. IBus engine 和 IBus shim 会根据 `select_keys` 把数字/选择键转成候选索引；Wayland/XIM 目前主要让 librime 自己处理非空格选择键。
+12. `accepted=false` 时放行或转发按键。
+13. 有 `committed` 时用当前后端原生接口提交。
+14. 有 `preedit` 时用当前后端原生接口更新客户端预编辑。
+15. 有 `candidates` 时更新候选窗或候选服务。
 
 这套规则是后续实现其它平台前端时的兼容基线：keyval 表达“实际字符”，modifier mask 表达“同时按住的修饰键”。
 
