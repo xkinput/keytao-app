@@ -24,7 +24,11 @@ function Resolve-RepoRoot {
 }
 
 function Invoke-GitHubApi($Uri) {
-    Invoke-RestMethod -Uri $Uri -Headers @{ "User-Agent" = "keytao-librime-fetch" }
+    $headers = @{ "User-Agent" = "keytao-librime-fetch" }
+    if ($env:GITHUB_TOKEN) {
+        $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+    }
+    Invoke-RestMethod -Uri $Uri -Headers $headers
 }
 
 function Find-Extractor {

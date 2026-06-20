@@ -137,6 +137,10 @@ mod desktop {
     unsafe impl Send for Engine {}
     unsafe impl Sync for Engine {}
 
+    fn key_event(keycode: u32, mask: u32) -> KeyEvent {
+        KeyEvent::new(keycode as _, mask as _)
+    }
+
     impl Engine {
         /// Create a new session. `deploy()` must have succeeded first.
         pub fn new() -> Result<Self, String> {
@@ -149,7 +153,7 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
-            let status = self.session.process_key(KeyEvent::new(keycode, mask));
+            let status = self.session.process_key(key_event(keycode, mask));
             KeyProcessResult {
                 state: extract_state(&self.session),
                 accepted: matches!(status, KeyStatus::Accept),
@@ -164,19 +168,19 @@ mod desktop {
             let state = extract_state(&self.session);
             let select_keys = state.select_keys.as_deref().unwrap_or("1234567890");
             if let Some(key) = select_keys.chars().nth(index) {
-                self.session.process_key(KeyEvent::new(key as u32, 0));
+                self.session.process_key(key_event(key as u32, 0));
             }
             extract_state(&self.session)
         }
 
         pub fn change_page(&self, backward: bool) -> ImeState {
             let kc = if backward { b'-' as u32 } else { b'=' as u32 };
-            self.session.process_key(KeyEvent::new(kc, 0));
+            self.session.process_key(key_event(kc, 0));
             extract_state(&self.session)
         }
 
         pub fn reset(&self) -> ImeState {
-            self.session.process_key(KeyEvent::new(0xff1b, 0)); // XK_Escape
+            self.session.process_key(key_event(0xff1b, 0)); // XK_Escape
             extract_state(&self.session)
         }
 

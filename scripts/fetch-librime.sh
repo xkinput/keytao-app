@@ -136,7 +136,11 @@ expand_platforms() {
 }
 
 github_api() {
-    curl -fsSL -H "User-Agent: $USER_AGENT" "$1"
+    local headers=(-H "User-Agent: $USER_AGENT")
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        headers+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    fi
+    curl -fsSL "${headers[@]}" "$1"
 }
 
 ensure_release_json() {
