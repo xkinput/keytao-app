@@ -169,7 +169,7 @@ fn is_letter_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) ->
 }
 
 fn is_space_vk(vk: u16) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_SPACE};
 
     VIRTUAL_KEY(vk) == VK_SPACE
 }
