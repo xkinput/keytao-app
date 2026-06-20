@@ -19,6 +19,7 @@
     "fetch:librime:macos": "scripts/fetch-librime-macos.sh",
     "build:macos": "scripts/build-macos.sh",
     "build:linux": "bash scripts/build-linux.sh",
+    "build:android": "tauri android build --apk --split-per-abi",
     "fetch:librime:windows": "powershell -ExecutionPolicy Bypass -File scripts/fetch-librime-windows.ps1",
     "build:windows-ime": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-ime.ps1",
     "build:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1"

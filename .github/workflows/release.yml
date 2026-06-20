@@ -205,6 +205,9 @@ jobs:
   build-android:
     needs: create-release
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION: "1.17.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -240,38 +243,73 @@ jobs:
         run: |
           node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
 
-      - name: Setup Android signing
+      - name: Init Android project
         run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          export ANDROID_NDK_HOME="$NDK_HOME"
+          pnpm tauri android init --ci --skip-targets-install
+
+      - name: Setup Android signing
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANDROID_KEY_BASE64:-}" || -z "${ANDROID_KEY_ALIAS:-}" || -z "${ANDROID_KEY_PASSWORD:-}" ]]; then
+            echo "::error::ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD are required for release APK signing"
+            exit 1
+          fi
           cd src-tauri/gen/android
-          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > "$RUNNER_TEMP/keystore_orig.jks"
+          echo "$ANDROID_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/keystore_orig.jks"
           keytool -importkeystore \
             -srckeystore "$RUNNER_TEMP/keystore_orig.jks" \
             -destkeystore "$RUNNER_TEMP/keystore.jks" \
             -deststoretype JKS \
-            -srcstorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
-            -deststorepass "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            -srcstorepass "$ANDROID_KEY_PASSWORD" \
+            -deststorepass "$ANDROID_KEY_PASSWORD" \
             -noprompt
-          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
-          echo "password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> keystore.properties
+          echo "keyAlias=$ANDROID_KEY_ALIAS" > keystore.properties
+          echo "password=$ANDROID_KEY_PASSWORD" >> keystore.properties
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
-      - name: Init Android project
+      - name: Import Android librime runtime
         run: |
+          set -euo pipefail
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          pnpm tauri android init
+          export ANDROID_NDK_HOME="$NDK_HOME"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            scripts/android-librime-runtime.sh import-fcitx5-rime --abi "$abi"
+          done
+          scripts/android-librime-runtime.sh verify --all
+          scripts/android-librime-runtime.sh sync --all
 
       - name: Build Android APK
         run: |
+          set -euo pipefail
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          export ANDROID_NDK_HOME="$NDK_HOME"
           unset BZIP2_LIB_DIR BZIP2_INCLUDE_DIR
-          pnpm tauri android build --apk
+          pnpm tauri android build --ci --apk --split-per-abi --target aarch64 armv7 i686 x86_64
 
-      - name: Upload APK to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload APKs to release
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          APK=$(find src-tauri/gen/android -name "*.apk" | grep -v "/test/" | head -1)
-          RENAMED="keytao-app_${VERSION}_android.apk"
-          cp "$APK" "$RENAMED"
-          gh release upload ${{ github.ref_name }} "$RENAMED" --clobber
+          mkdir -p dist/release-upload
+          rm -f dist/release-upload/*.apk
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*.apk" | grep -v "/androidTest/" | sort)
+          if [[ "${#apks[@]}" -eq 0 ]]; then
+            echo "::error::No Android APKs found"
+            find src-tauri/gen/android -maxdepth 6 -type f -name "*.apk" -print 2>/dev/null | sort || true
+            exit 1
+          fi
+          artifacts=()
+          for apk in "${apks[@]}"; do
+            base="$(basename "$apk" .apk)"
+            base="${base#app-}"
+            renamed="dist/release-upload/keytao-app-${VERSION}-android-${base}.apk"
+            cp "$apk" "$renamed"
+            artifacts+=("$renamed")
+          done
+          gh release upload ${{ github.ref_name }} "${artifacts[@]}" --clobber

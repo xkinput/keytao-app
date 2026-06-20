@@ -38,6 +38,7 @@
 - Linux 版本内置完整 `keytao-ime` 系统输入法 daemon
 - macOS 版本包含实验性 IMKit 系统输入法 bundle
 - Windows 版本包含实验性 TSF 系统输入法 DLL
+- Android 版本包含实验性 `InputMethodService` 系统输入法，native engine 通过 JNI 接入 `keytao-core`，Android ABI 的 `librime` runtime 通过 `scripts/android-librime-runtime.sh` 导入并同步到 APK
 
 ## 平台状态
 
@@ -46,7 +47,7 @@
 | Linux | 已支持 | 已支持，`keytao-ime` daemon 覆盖 Wayland、KDE、GNOME IBus、XIM、IBus 兼容路径 |
 | macOS | 已支持 | 实验性支持，基于 IMKit，安装到 `/Library/Input Methods/KeyTao.app` |
 | Windows | 已支持 | 实验性支持，基于 TSF TIP，注册 `keytao_windows_ime.dll` |
-| Android | 已支持 | 暂无系统 IME，当前是方案安装/合并工具 |
+| Android | 已支持 | 实验性支持，基于 `InputMethodService`，需要导入 Android ABI 的 native `librime` runtime |
 | iOS | 手动导入 | 暂无系统键盘 extension |
 
 ## 数据与部署
@@ -72,7 +73,7 @@ KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，不构建 dmg。
 - Linux 只构建 `deb` 和 `rpm`，不构建 AppImage 或 tarball。deb/rpm 同时安装图形 App、`keytao-ime` 和包内 runtime，保证可以作为系统输入法安装。
 - Windows release 只构建 x64 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/current` 资源目录。官方 librime Windows 发布包目前没有 ARM64 SDK，Windows ARM64 包需要另做实验性源码构建链路后再开启。
-- macOS、Linux 和 Windows 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
+- macOS、Linux、Windows 和 Android 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
 
 ### 通用准备
 
@@ -159,6 +160,33 @@ pnpm build:windows-ime
 - `target\keytao-windows-ime-runtime\current`
 - `target\keytao-windows-ime-runtime\x64`
 - `target\release\bundle\nsis`
+
+### Android
+
+Android 系统输入法走 Tauri Android 工程和 `InputMethodService`。构建 native engine 前需要先为目标 ABI 导入 Android 版 librime runtime，并确保安装 Android NDK：
+
+```bash
+# 自编 SDK 导入
+scripts/android-librime-runtime.sh import-sdk --abi arm64-v8a --source /path/to/android-librime-sdk
+
+# 或用 Fcitx5 Android Rime 插件里的纯 librime.so bootstrap native runtime
+scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a --version 0.1.2
+
+# 同步到 src-tauri/gen/android/app/src/main/jniLibs 和 assets
+scripts/android-librime-runtime.sh sync --all
+
+# 生成 Tauri Android glue 并构建 split APK
+pnpm tauri android init --ci --skip-targets-install
+pnpm build:android
+
+# 单 ABI Rust 检查
+source <(scripts/android-librime-runtime.sh env --abi arm64-v8a)
+cargo check -p keytao-core --target aarch64-linux-android
+```
+
+Release CI 会安装 Android NDK、导入 `arm64-v8a` / `armeabi-v7a` / `x86` / `x86_64` 四个 ABI 的 librime runtime，执行 `tauri android build --apk --split-per-abi`，并把生成的 APK 上传到 GitHub Release。用户首次打开 Android 版 App 时，会先进入系统输入法启用/切换引导，KeyTao 已启用并选中后再进入主界面。
+
+Gradle `preBuild` 会自动执行 `scripts/android-librime-runtime.sh sync --all --allow-missing`。如果没有导入 runtime，会给出 warning；真正编译 Android Rust target 时，本地 patched `librime-sys` 会要求匹配 ABI 的 `vendor/librime/android/<abi>` 和可用 NDK sysroot。
 
 ## 开发
 
