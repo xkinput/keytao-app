@@ -6,12 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESOURCES_DIR="$SCRIPT_DIR/Resources"
 SOURCE_ICON="$WORKSPACE_DIR/src-tauri/icons/icon.png"
+MENU_PNG="$RESOURCES_DIR/keytao-menu-icon.png"
+MENU_PDF="$RESOURCES_DIR/keytao-menu-icon.pdf"
+INPUT_ICNS="$RESOURCES_DIR/KeyTaoInputSource.icns"
+
+have_generated_icons() {
+    [ -f "$MENU_PNG" ] && [ -f "$MENU_PDF" ] && [ -f "$INPUT_ICNS" ]
+}
 
 if ! command -v magick >/dev/null 2>&1; then
+    if have_generated_icons; then
+        echo "ImageMagick 'magick' is not available; reusing checked-in macOS IME icons."
+        exit 0
+    fi
     echo "ERROR: ImageMagick 'magick' is required to generate macOS IME icons." >&2
     exit 1
 fi
 if ! command -v iconutil >/dev/null 2>&1; then
+    if have_generated_icons; then
+        echo "macOS 'iconutil' is not available; reusing checked-in macOS IME icons."
+        exit 0
+    fi
     echo "ERROR: macOS 'iconutil' is required to generate KeyTaoInputSource.icns." >&2
     exit 1
 fi
@@ -25,8 +40,6 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 MASK="$TMP_DIR/keytao-logo-mask.png"
 MENU_SVG="$TMP_DIR/keytao-menu-icon.svg"
-MENU_PNG="$RESOURCES_DIR/keytao-menu-icon.png"
-MENU_PDF="$RESOURCES_DIR/keytao-menu-icon.pdf"
 INPUT_BG="$TMP_DIR/keytao-input-bg.png"
 INPUT_MASK="$TMP_DIR/keytao-input-mask.png"
 INPUT_GLYPH="$TMP_DIR/keytao-input-glyph.png"
