@@ -3325,18 +3325,37 @@ fn nix_store_package_version(package: &str) -> Option<String> {
         .max()
 }
 
-fn pkg_config_file_version(lib_dir: &Path) -> Option<String> {
-    ["rime.pc", "librime.pc"].iter().find_map(|name| {
+fn version_from_pkg_config_content(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() == "Version" {
+            non_empty_version(value)
+        } else {
+            None
+        }
+    })
+}
+
+fn pkg_config_file_version(lib_dir: &Path, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
         let path = lib_dir.join("pkgconfig").join(name);
         let content = std::fs::read_to_string(path).ok()?;
-        content.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            if key.trim() == "Version" {
-                non_empty_version(value)
-            } else {
-                None
-            }
-        })
+        version_from_pkg_config_content(&content)
+    })
+}
+
+fn metadata_file_version(path: &Path, keys: &[&str]) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        keys.iter()
+            .any(|candidate| key.trim() == *candidate)
+            .then(|| non_empty_version(value))
+            .flatten()
     })
 }
 
@@ -3360,7 +3379,12 @@ fn rime_lib_dir_version(path: &Path) -> Option<String> {
             .and_then(rime_filename_version);
     }
 
-    pkg_config_file_version(path).or_else(|| {
+    metadata_file_version(
+        &path.join("librime-release.txt"),
+        &["version", "librime_version"],
+    )
+    .or_else(|| pkg_config_file_version(path, &["rime.pc", "librime.pc"]))
+    .or_else(|| {
         std::fs::read_dir(path)
             .ok()?
             .filter_map(|entry| entry.ok())
@@ -3370,18 +3394,45 @@ fn rime_lib_dir_version(path: &Path) -> Option<String> {
     })
 }
 
-fn bundled_librime_version(app: &AppHandle) -> Option<String> {
+fn opencc_dir_version(path: &Path) -> Option<String> {
+    if path.is_file() {
+        return std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| version_from_pkg_config_content(&content));
+    }
+
+    metadata_file_version(
+        &path.join("opencc-release.txt"),
+        &["version", "opencc_version"],
+    )
+    .or_else(|| pkg_config_file_version(path, &["opencc.pc", "libopencc.pc", "OpenCC.pc"]))
+    .or_else(|| {
+        pkg_config_file_version(
+            &path.join("lib"),
+            &["opencc.pc", "libopencc.pc", "OpenCC.pc"],
+        )
+    })
+}
+
+fn bundled_runtime_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.extend([
             resource_dir.clone(),
             resource_dir.join("Frameworks"),
-            resource_dir
-                .parent()
-                .map(|contents| contents.join("Frameworks"))
-                .unwrap_or_else(|| resource_dir.join("..").join("Frameworks")),
+            resource_dir.join("rime-data"),
+            resource_dir.join("runtime"),
+            resource_dir.join("runtime/lib"),
+            resource_dir.join("runtime/rime-data"),
+            resource_dir.join("keytao-windows-ime-runtime/current"),
+            resource_dir.join("keytao-windows-ime-runtime/current/bin"),
+            resource_dir.join("keytao-windows-ime-runtime/current/lib"),
+            resource_dir.join("keytao-windows-ime-runtime/current/rime-data"),
         ]);
+        if let Some(contents) = resource_dir.parent() {
+            candidates.push(contents.join("Frameworks"));
+        }
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -3389,22 +3440,50 @@ fn bundled_librime_version(app: &AppHandle) -> Option<String> {
             candidates.extend([
                 exe_dir.to_path_buf(),
                 exe_dir.join("Frameworks"),
-                exe_dir
-                    .parent()
-                    .map(|contents| contents.join("Frameworks"))
-                    .unwrap_or_else(|| exe_dir.join("..").join("Frameworks")),
+                exe_dir.join("runtime"),
+                exe_dir.join("runtime/lib"),
+                exe_dir.join("runtime/rime-data"),
             ]);
+            if let Some(contents) = exe_dir.parent() {
+                candidates.push(contents.join("Frameworks"));
+            }
         }
     }
 
     candidates
+}
+
+fn bundled_librime_version(app: &AppHandle) -> Option<String> {
+    bundled_runtime_candidates(app)
         .into_iter()
         .find_map(|dir| rime_lib_dir_version(&dir))
 }
 
+fn runtime_librime_version() -> Option<String> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    ))]
+    {
+        keytao_core::librime_runtime_version().and_then(non_empty_version)
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    )))]
+    {
+        None
+    }
+}
+
 fn librime_version(app: &AppHandle) -> Option<String> {
-    option_env!("RIME_VERSION")
-        .and_then(non_empty_version)
+    runtime_librime_version()
+        .or_else(|| option_env!("RIME_VERSION").and_then(non_empty_version))
         .or_else(|| env_version("RIME_VERSION"))
         .or_else(|| {
             env_version("RIME_LIB_DIR").and_then(|path| rime_lib_dir_version(Path::new(&path)))
@@ -3415,10 +3494,23 @@ fn librime_version(app: &AppHandle) -> Option<String> {
         .or_else(|| nix_store_package_version("librime"))
 }
 
-fn opencc_version() -> Option<String> {
-    ["opencc", "libopencc", "OpenCC"]
-        .iter()
-        .find_map(|name| command_version("pkg-config", &["--modversion", name]))
+fn opencc_version(app: &AppHandle) -> Option<String> {
+    option_env!("OPENCC_VERSION")
+        .and_then(non_empty_version)
+        .or_else(|| env_version("OPENCC_VERSION"))
+        .or_else(|| {
+            env_version("OPENCC_LIB_DIR").and_then(|path| opencc_dir_version(Path::new(&path)))
+        })
+        .or_else(|| {
+            bundled_runtime_candidates(app)
+                .into_iter()
+                .find_map(|dir| opencc_dir_version(&dir))
+        })
+        .or_else(|| {
+            ["opencc", "libopencc", "OpenCC"]
+                .iter()
+                .find_map(|name| command_version("pkg-config", &["--modversion", name]))
+        })
         .or_else(|| command_version("opencc", &["--version"]))
         .or_else(|| nix_store_package_version("opencc"))
 }
@@ -3436,7 +3528,7 @@ fn get_component_versions(app: AppHandle) -> ComponentVersions {
         app_version: app.package_info().version.to_string(),
         tauri_version: tauri::VERSION.to_string(),
         librime_version: librime_version(&app),
-        opencc_version: opencc_version(),
+        opencc_version: opencc_version(&app),
         data_dir,
     }
 }
@@ -4197,6 +4289,44 @@ mod tests {
         std::fs::write(dir.join("librime.1.dylib"), "").expect("write dylib marker");
 
         assert_eq!(rime_lib_dir_version(&dir), Some("9.8.7".to_owned()));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_rime_lib_dir_version_reads_release_metadata() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-rime-release-version-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create version dir");
+        std::fs::write(
+            dir.join("librime-release.txt"),
+            "platform=android\nversion=1.17.0\n",
+        )
+        .expect("write release metadata");
+        std::fs::write(dir.join("librime.1.dylib"), "").expect("write dylib marker");
+
+        assert_eq!(rime_lib_dir_version(&dir), Some("1.17.0".to_owned()));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_opencc_dir_version_reads_metadata_and_pkg_config() {
+        let dir =
+            std::env::temp_dir().join(format!("keytao-opencc-version-test-{}", std::process::id()));
+        let pkgconfig_dir = dir.join("lib/pkgconfig");
+        std::fs::create_dir_all(&pkgconfig_dir).expect("create pkgconfig dir");
+        std::fs::write(dir.join("opencc-release.txt"), "version=1.1.9\n")
+            .expect("write opencc metadata");
+        std::fs::write(
+            pkgconfig_dir.join("opencc.pc"),
+            "Name: opencc\nVersion: 7.6.5\n",
+        )
+        .expect("write opencc.pc");
+
+        assert_eq!(opencc_dir_version(&dir), Some("1.1.9".to_owned()));
+        std::fs::remove_file(dir.join("opencc-release.txt")).ok();
+        assert_eq!(opencc_dir_version(&dir), Some("7.6.5".to_owned()));
         std::fs::remove_dir_all(dir).ok();
     }
 

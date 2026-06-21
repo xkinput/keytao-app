@@ -293,6 +293,7 @@ fetch_opencc_data() {
         if [ -d "$source" ] && has_glob "$source/*.ocd2"; then
             echo "Using OpenCC data from $source"
             copy_dir_contents "$source" "$destination"
+            copy_opencc_metadata_for_data_dir "$source" "$destination"
             return
         fi
     done
@@ -317,6 +318,10 @@ fetch_opencc_data() {
         exit 1
     fi
     copy_dir_contents "$(dirname "$data_marker")" "$destination"
+    write_opencc_metadata_for_data_dir \
+        "$destination" \
+        "$tag" \
+        "https://github.com/BYVoid/OpenCC/releases/tag/$tag"
 }
 
 fetch_base_rime_data() {
@@ -390,6 +395,19 @@ has_glob() {
     compgen -G "$1" >/dev/null 2>&1
 }
 
+normalize_version_tag() {
+    local tag="$1"
+    tag="${tag#ver.}"
+    tag="${tag#v}"
+    printf '%s\n' "$tag"
+}
+
+pkg_config_version() {
+    local pc_file="$1"
+    [ -f "$pc_file" ] || return 1
+    awk -F: '$1 == "Version" { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' "$pc_file"
+}
+
 write_metadata() {
     local destination="$1"
     local platform="$2"
@@ -399,6 +417,44 @@ platform=$platform
 version=$tag
 source=https://github.com/rime/librime/releases/tag/$tag
 EOF
+}
+
+write_opencc_metadata() {
+    local destination="$1"
+    local version="$2"
+    local source="$3"
+    version="$(normalize_version_tag "$version")"
+    [ -n "$version" ] || return 0
+    cat > "$destination/opencc-release.txt" <<EOF
+version=$version
+source=$source
+EOF
+}
+
+opencc_metadata_root_for_data_dir() {
+    local data_dir="$1"
+    dirname "$(dirname "$data_dir")"
+}
+
+write_opencc_metadata_for_data_dir() {
+    local data_dir="$1"
+    local version="$2"
+    local source="$3"
+    local root
+    root="$(opencc_metadata_root_for_data_dir "$data_dir")"
+    write_opencc_metadata "$root" "$version" "$source"
+}
+
+copy_opencc_metadata_for_data_dir() {
+    local source_data_dir="$1"
+    local destination_data_dir="$2"
+    local source_root
+    local destination_root
+    source_root="$(opencc_metadata_root_for_data_dir "$source_data_dir")"
+    destination_root="$(opencc_metadata_root_for_data_dir "$destination_data_dir")"
+    if [ -f "$source_root/opencc-release.txt" ]; then
+        cp "$source_root/opencc-release.txt" "$destination_root/opencc-release.txt"
+    fi
 }
 
 fetch_macos() {
@@ -446,6 +502,11 @@ fetch_macos() {
         ditto "$deps_root/share/opencc" "$destination/rime-data/opencc"
     fi
     fetch_base_rime_data "$destination/rime-data"
+    opencc_pc="$(find "$deps_root" -type f -path '*/pkgconfig/opencc.pc' -print -quit || true)"
+    if [ -n "$opencc_pc" ]; then
+        opencc_version="$(pkg_config_version "$opencc_pc" || true)"
+        write_opencc_metadata "$destination" "$opencc_version" "https://github.com/rime/librime/releases/tag/$release"
+    fi
     write_metadata "$destination" "macos-universal" "$release"
 
     cat > "$destination/env.sh" <<EOF
@@ -516,6 +577,11 @@ fetch_windows() {
         cp -R "$(dirname "$data_marker")/." "$destination/rime-data"
     fi
     fetch_base_rime_data "$destination/rime-data"
+    opencc_pc="$(find "$extract_dir" -type f -path '*/pkgconfig/opencc.pc' -print -quit || true)"
+    if [ -n "$opencc_pc" ]; then
+        opencc_version="$(pkg_config_version "$opencc_pc" || true)"
+        write_opencc_metadata "$destination" "$opencc_version" "https://github.com/rime/librime/releases/tag/$release"
+    fi
     write_metadata "$destination" "windows-$WINDOWS_TOOLSET-$WINDOWS_ARCH" "$release"
 
     cat > "$destination/env.sh" <<EOF
@@ -579,6 +645,10 @@ EOF
         cat >> "$destination/env.sh" <<EOF
 export RIME_LIB_DIR="$lib_dir"
 EOF
+    fi
+    if pkg-config --exists opencc 2>/dev/null; then
+        opencc_version="$(pkg-config --modversion opencc 2>/dev/null || true)"
+        write_opencc_metadata "$destination" "$opencc_version" "pkg-config:opencc"
     fi
 
     echo ""

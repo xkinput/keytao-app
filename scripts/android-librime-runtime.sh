@@ -160,6 +160,83 @@ has_glob() {
     compgen -G "$1" >/dev/null 2>&1
 }
 
+normalize_version_tag() {
+    local tag="$1"
+    tag="${tag#ver.}"
+    tag="${tag#v}"
+    printf '%s\n' "$tag"
+}
+
+write_librime_metadata() {
+    local destination="$1"
+    local version="$2"
+    local source="$3"
+    version="$(normalize_version_tag "$version")"
+    [ -n "$version" ] || return 0
+    cat > "$destination/librime-release.txt" <<EOF
+platform=android
+version=$version
+source=$source
+EOF
+}
+
+write_opencc_metadata() {
+    local destination="$1"
+    local version="$2"
+    local source="$3"
+    version="$(normalize_version_tag "$version")"
+    [ -n "$version" ] || return 0
+    cat > "$destination/opencc-release.txt" <<EOF
+version=$version
+source=$source
+EOF
+}
+
+metadata_root_for_data_dir() {
+    local data_dir="$1"
+    dirname "$(dirname "$data_dir")"
+}
+
+copy_opencc_metadata_for_data_dir() {
+    local source_data_dir="$1"
+    local destination_root="$2"
+    local source_root
+    source_root="$(metadata_root_for_data_dir "$source_data_dir")"
+    if [ -f "$source_root/opencc-release.txt" ]; then
+        cp "$source_root/opencc-release.txt" "$destination_root/opencc-release.txt"
+        return 0
+    fi
+    return 1
+}
+
+copy_runtime_metadata_from_source() {
+    local source="$1"
+    local destination="$2"
+    if [ -f "$source/librime-release.txt" ]; then
+        cp "$source/librime-release.txt" "$destination/librime-release.txt"
+    fi
+    if [ -f "$source/opencc-release.txt" ]; then
+        cp "$source/opencc-release.txt" "$destination/opencc-release.txt"
+    fi
+}
+
+ensure_android_metadata() {
+    local destination="$1"
+    local source="$2"
+    if [ ! -f "$destination/librime-release.txt" ]; then
+        write_librime_metadata "$destination" "$LIBRIME_HEADERS_VERSION" "$source"
+    fi
+    if [ ! -f "$destination/opencc-release.txt" ]; then
+        for source_data in \
+            "$PROJECT_DIR/vendor/librime/macos-universal/rime-data/opencc" \
+            "$PROJECT_DIR/vendor/librime/android-data/rime-data/opencc"; do
+            if [ -d "$source_data" ] && copy_opencc_metadata_for_data_dir "$source_data" "$destination"; then
+                break
+            fi
+        done
+    fi
+}
+
 contains_elf_string() {
     local file="$1"
     local pattern="$2"
@@ -466,17 +543,21 @@ import_sdk() {
     mkdir -p "$staging/include" "$staging/lib" "$staging/rime-data"
     copy_dir_contents "$include_dir" "$staging/include"
     copy_dir_contents "$lib_dir" "$staging/lib"
+    copy_runtime_metadata_from_source "$source" "$staging"
     validate_runtime_lib_dir "$staging/lib" "$abi"
     if [ -n "$data_dir" ]; then
         copy_dir_contents "$data_dir" "$staging/rime-data"
+        copy_opencc_metadata_for_data_dir "$data_dir/opencc" "$staging" || true
     else
         local data_tmp
         data_tmp="$(mktemp -d "${TMPDIR:-/tmp}/keytao-android-data.XXXXXX")"
         "$PROJECT_DIR/scripts/fetch-librime.sh" --platform android --destination "$data_tmp"
         copy_dir_contents "$data_tmp/rime-data" "$staging/rime-data"
+        copy_opencc_metadata_for_data_dir "$data_tmp/rime-data/opencc" "$staging" || true
         rm -rf "$data_tmp"
     fi
     ensure_rime_data_closure "$staging/rime-data"
+    ensure_android_metadata "$staging" "android-sdk:$source"
     rm -rf "$destination"
     mv "$staging" "$destination"
     write_env_file "$abi" "$destination"
@@ -546,16 +627,20 @@ import_apk() {
     validate_runtime_lib_dir "$staging/lib" "$abi"
     if [ -n "$data_dir" ]; then
         copy_dir_contents "$data_dir" "$staging/rime-data"
+        copy_opencc_metadata_for_data_dir "$data_dir/opencc" "$staging" || true
     elif [ -n "$apk_shared_dir" ]; then
         copy_dir_contents "$apk_shared_dir" "$staging/rime-data"
+        copy_opencc_metadata_for_data_dir "$apk_shared_dir/opencc" "$staging" || true
     else
         local data_tmp
         data_tmp="$(mktemp -d "${TMPDIR:-/tmp}/keytao-android-data.XXXXXX")"
         "$PROJECT_DIR/scripts/fetch-librime.sh" --platform android --destination "$data_tmp"
         copy_dir_contents "$data_tmp/rime-data" "$staging/rime-data"
+        copy_opencc_metadata_for_data_dir "$data_tmp/rime-data/opencc" "$staging" || true
         rm -rf "$data_tmp"
     fi
     ensure_rime_data_closure "$staging/rime-data"
+    ensure_android_metadata "$staging" "android-apk:$apk"
     rm -rf "$destination"
     mv "$staging" "$destination"
     write_env_file "$abi" "$destination"
@@ -729,6 +814,13 @@ sync_assets() {
     mkdir -p "$assets_dir"
     rm -rf "$assets_dir/keytao-rime-data"
     copy_dir_contents "$source_data" "$assets_dir/keytao-rime-data"
+    local source_root
+    source_root="$(metadata_root_for_data_dir "$source_data/opencc")"
+    for metadata_file in librime-release.txt opencc-release.txt; do
+        if [ -f "$source_root/$metadata_file" ]; then
+            cp "$source_root/$metadata_file" "$assets_dir/$metadata_file"
+        fi
+    done
     cat > "$assets_dir/keytao-rime-runtime.txt" <<EOF
 source=$source_data
 generated_by=scripts/android-librime-runtime.sh sync

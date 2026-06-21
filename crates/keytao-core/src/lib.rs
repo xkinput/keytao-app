@@ -91,6 +91,39 @@ fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
+pub fn librime_runtime_version() -> Option<String> {
+    unsafe {
+        let api = librime_sys::rime_get_api();
+        let get_version = (*api).get_version?;
+        let version = get_version();
+        if version.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(version)
+            .to_str()
+            .ok()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+)))]
+pub fn librime_runtime_version() -> Option<String> {
+    None
+}
+
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 
 #[cfg(any(
