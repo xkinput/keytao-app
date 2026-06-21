@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
+import { Slider } from "@/components/ui/slider"
+import { ColorPicker } from "@/components/ui/color-picker"
 import {
   Dialog,
   DialogContent,
@@ -15,6 +18,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog"
+import { cn } from "@/lib/utils"
 import VirtualLogViewer from "@/components/VirtualLogViewer"
 import AndroidImeOnboarding, { type AndroidImeStatus, type AndroidStoragePermissionStatus } from "@/components/AndroidImeOnboarding"
 import {
@@ -41,6 +45,9 @@ import {
   Paintbrush,
   Columns3,
   Rows3,
+  Vibrate,
+  VibrateOff,
+  SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react"
 import DebugTab from "@/components/DebugTab"
@@ -53,6 +60,7 @@ type ImeCandidateOrientation = "horizontal" | "vertical"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
+const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 
 function hasSystemIme(os: OSType): boolean {
@@ -193,6 +201,14 @@ interface ImeUiSettings {
   message: string
 }
 
+interface AndroidImeInputSettings {
+  hapticsEnabled: boolean
+  hapticIntensity: number
+  configPath: string | null
+  reloadStampPath: string | null
+  message: string
+}
+
 function safUriToDisplayPath(uri: string): string {
   try {
     const treeId = decodeURIComponent(uri.split("/tree/")[1] || "")
@@ -303,6 +319,10 @@ export default function App() {
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
   const [imeUiError, setImeUiError] = useState<string | null>(null)
   const [isSavingImeUiSettings, setIsSavingImeUiSettings] = useState(false)
+  const [androidImeInputSettings, setAndroidImeInputSettings] = useState<AndroidImeInputSettings | null>(null)
+  const [androidImeInputError, setAndroidImeInputError] = useState<string | null>(null)
+  const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
+  const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -405,6 +425,11 @@ export default function App() {
         .then(setImeUiSettings)
         .catch((e) => setImeUiError(String(e)))
     }
+    if (os === "android") {
+      invoke<AndroidImeInputSettings>("get_android_ime_input_settings")
+        .then(setAndroidImeInputSettings)
+        .catch((e) => setAndroidImeInputError(String(e)))
+    }
 
     listen<InstallProgress>("install-progress", (e) => {
       setInstallProgress(e.payload)
@@ -437,6 +462,10 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [osType])
+
+  useEffect(() => {
+    setAndroidHapticIntensityDraft(null)
+  }, [androidImeInputSettings?.hapticIntensity])
 
   useEffect(() => {
     if (osType !== "android") return
@@ -498,8 +527,11 @@ export default function App() {
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
   const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission
   const systemImeAvailable = hasSystemIme(osType)
+  const isMobilePlatform = osType === "android" || osType === "ios"
   const canOpenDefaultDir = osType !== "android"
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
+  const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
+  const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
@@ -719,6 +751,57 @@ export default function App() {
     } finally {
       setIsSavingImeUiSettings(false)
     }
+  }
+
+  async function refreshAndroidImeInputSettings() {
+    try {
+      const settings = await invoke<AndroidImeInputSettings>("get_android_ime_input_settings")
+      setAndroidImeInputSettings(settings)
+      setAndroidImeInputError(null)
+      return settings
+    } catch (e) {
+      setAndroidImeInputError(String(e))
+      return null
+    }
+  }
+
+  async function handleUpdateAndroidImeInputSettings(
+    patch: Partial<Pick<AndroidImeInputSettings, "hapticsEnabled" | "hapticIntensity">>,
+  ) {
+    if (osType !== "android" || isSavingAndroidImeInputSettings) return
+    const current = {
+      hapticsEnabled: androidImeInputSettings?.hapticsEnabled ?? true,
+      hapticIntensity: androidImeInputSettings?.hapticIntensity ?? 42,
+    }
+    const next = {
+      ...current,
+      ...patch,
+      hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
+    }
+    next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
+    if (
+      androidImeInputSettings &&
+      next.hapticsEnabled === androidImeInputSettings.hapticsEnabled &&
+      next.hapticIntensity === androidImeInputSettings.hapticIntensity
+    ) {
+      return
+    }
+    setIsSavingAndroidImeInputSettings(true)
+    setAndroidImeInputError(null)
+    try {
+      const settings = await invoke<AndroidImeInputSettings>("set_android_ime_input_settings", next)
+      setAndroidImeInputSettings(settings)
+      addLogs([`[ANDROID IME INPUT] ${settings.message}`])
+    } catch (e) {
+      setAndroidImeInputError(String(e))
+      await refreshAndroidImeInputSettings()
+    } finally {
+      setIsSavingAndroidImeInputSettings(false)
+    }
+  }
+
+  function commitAndroidHapticIntensity(value: number) {
+    void handleUpdateAndroidImeInputSettings({ hapticIntensity: value })
   }
 
   async function handleInstall() {
@@ -1172,61 +1255,67 @@ export default function App() {
                     ]).map(({ id, label, icon: Icon }) => {
                       const selected = (imeUiSettings?.colorScheme ?? "auto") === id
                       return (
-                        <button
+                        <Button
                           key={id}
                           type="button"
+                          variant={selected ? "secondary" : "ghost"}
+                          size="sm"
                           onClick={() => handleUpdateImeUiSettings({ colorScheme: id })}
                           disabled={isSavingImeUiSettings}
-                          className={`h-9 rounded-md text-xs font-medium transition-colors inline-flex items-center justify-center gap-1.5 ${selected
-                            ? "bg-background text-foreground shadow-sm"
-                            : "text-muted-foreground hover:text-foreground hover:bg-background/50"
-                            } disabled:opacity-60`}
+                          className={cn(
+                            "h-8 rounded-md text-xs",
+                            !selected && "text-muted-foreground hover:text-foreground",
+                          )}
                         >
                           <Icon className="h-3.5 w-3.5" />
                           {label}
-                        </button>
+                        </Button>
                       )
                     })}
                   </div>
-                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1">
-                    {([
-                      { id: "horizontal" as const, label: "横排", icon: Columns3 },
-                      { id: "vertical" as const, label: "竖排", icon: Rows3 },
-                    ]).map(({ id, label, icon: Icon }) => {
-                      const selected = (imeUiSettings?.orientation ?? "horizontal") === id
-                      return (
-                        <button
-                          key={id}
-                          type="button"
-                          onClick={() => handleUpdateImeUiSettings({ orientation: id })}
-                          disabled={isSavingImeUiSettings}
-                          className={`h-9 rounded-md text-xs font-medium transition-colors inline-flex items-center justify-center gap-1.5 ${selected
-                            ? "bg-background text-foreground shadow-sm"
-                            : "text-muted-foreground hover:text-foreground hover:bg-background/50"
-                            } disabled:opacity-60`}
-                        >
-                          <Icon className="h-3.5 w-3.5" />
-                          {label}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
-                    <div className="flex min-w-0 items-center gap-2">
+                  {!isMobilePlatform && (
+                    <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1">
+                      {([
+                        { id: "horizontal" as const, label: "横排", icon: Columns3 },
+                        { id: "vertical" as const, label: "竖排", icon: Rows3 },
+                      ]).map(({ id, label, icon: Icon }) => {
+                        const selected = (imeUiSettings?.orientation ?? "horizontal") === id
+                        return (
+                          <Button
+                            key={id}
+                            type="button"
+                            variant={selected ? "secondary" : "ghost"}
+                            size="sm"
+                            onClick={() => handleUpdateImeUiSettings({ orientation: id })}
+                            disabled={isSavingImeUiSettings}
+                            className={cn(
+                              "h-8 rounded-md text-xs",
+                              !selected && "text-muted-foreground hover:text-foreground",
+                            )}
+                          >
+                            <Icon className="h-3.5 w-3.5" />
+                            {label}
+                          </Button>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs sm:grid-cols-[minmax(8.5rem,1fr)_auto] sm:items-center">
+                    <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                       <Paintbrush className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="text-muted-foreground">主题色</span>
+                      <span className="shrink-0 text-muted-foreground">主题色</span>
                       {imeUiSettings && (
-                        <Badge variant="outline" className="text-xs">
+                        <Badge variant="outline" className="shrink-0 text-xs">
                           {imeUiSettings.effectiveColorScheme === "dark" ? "当前夜间" : "当前白天"}
                         </Badge>
                       )}
                     </div>
-                    <input
-                      type="color"
+                    <ColorPicker
                       value={imeAccentColor}
-                      onChange={(event) => handleUpdateImeUiSettings({ accentColor: event.currentTarget.value })}
+                      onChange={(accentColor) => handleUpdateImeUiSettings({ accentColor })}
                       disabled={isSavingImeUiSettings}
-                      className="h-9 w-14 shrink-0 cursor-pointer rounded-md border border-border bg-transparent p-1 disabled:cursor-not-allowed disabled:opacity-60"
+                      presets={CROSS_PLATFORM_IME_ACCENT_PRESETS}
+                      className="justify-start sm:justify-end"
                       title="选择主题色"
                     />
                   </div>
@@ -1251,6 +1340,77 @@ export default function App() {
                     <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                       <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                       <span>{imeUiError}</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {osType === "android" && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    {androidHapticsEnabled ? (
+                      <Vibrate className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <VibrateOff className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    移动端输入反馈
+                    {isSavingAndroidImeInputSettings && (
+                      <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      {androidHapticsEnabled ? (
+                        <Vibrate className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <VibrateOff className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      )}
+                      <span className="text-muted-foreground">键盘震动</span>
+                      <span className="text-xs text-muted-foreground/80">
+                        {androidHapticsEnabled ? "开启" : "关闭"}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={androidHapticsEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ hapticsEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换键盘震动"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">震动强度</span>
+                      </div>
+                      <span className="font-mono text-muted-foreground">{androidHapticIntensity}%</span>
+                    </div>
+                    <Slider
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={[androidHapticIntensity]}
+                      onValueChange={([value]) => setAndroidHapticIntensityDraft(value)}
+                      onValueCommit={([value]) => commitAndroidHapticIntensity(value)}
+                      disabled={!androidHapticsEnabled || isSavingAndroidImeInputSettings}
+                      aria-label="震动强度"
+                    />
+                  </div>
+                  {androidImeInputSettings?.configPath && (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+                      <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">配置：</span>
+                      <code className="font-mono truncate flex-1 min-w-0">{androidImeInputSettings.configPath}</code>
+                    </div>
+                  )}
+                  {androidImeInputError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{androidImeInputError}</span>
                     </div>
                   )}
                 </CardContent>
@@ -1365,7 +1525,10 @@ export default function App() {
                         )}
                         <div className="flex gap-2 flex-wrap">
                           <Button size="sm" onClick={handleInstall} disabled={isBusy || !downloadUrl} className="gap-1.5">
-                            <Download className="h-4 w-4" />
+                            {isCheckingAndroidStoragePermission || isInstalling || isDeploying
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <Download className="h-4 w-4" />
+                            }
                             {isCheckingAndroidStoragePermission ? "检测权限..." : isInstalling ? "安装中..." : isDeploying ? "部署中..." : localSchemaInfo?.installed ? "更新方案" : "安装方案"}
                           </Button>
                           <Button variant="outline" size="sm" onClick={handleCheckLocalSchema}

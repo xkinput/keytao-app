@@ -102,7 +102,8 @@ export default function AndroidImeOnboarding({
         : !schemaInstalled
           ? { label: installingSchema ? "安装中..." : "安装键道方案", icon: Download, action: onInstallSchema, disabled: !canInstallSchema || installingSchema }
           : { label: "重新检测", icon: RefreshCw, action: onRefresh, disabled: false }
-  const PrimaryIcon = primary.icon
+  const primaryLoading = installingSchema && !schemaInstalled
+  const PrimaryIcon = primaryLoading ? Loader2 : primary.icon
   const primaryDisabled = loading || primary.disabled
 
   return (
@@ -180,7 +181,7 @@ export default function AndroidImeOnboarding({
 
             <div className="flex gap-2">
               <Button className="flex-1 gap-1.5" onClick={primary.action} disabled={primaryDisabled}>
-                <PrimaryIcon className={`h-4 w-4 ${installingSchema && !schemaInstalled ? "animate-spin" : ""}`} />
+                <PrimaryIcon className={`h-4 w-4 ${primaryLoading ? "animate-spin" : ""}`} />
                 {primary.label}
               </Button>
               <Button variant="outline" size="icon" onClick={onRefresh} disabled={loading} title="重新检测">

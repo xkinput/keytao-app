@@ -83,11 +83,11 @@ macOS pkg 校验结果：
 - Linux 系统输入法 daemon：`crates/keytao-linux-ime`
 - macOS IMKit 输入法：`crates/keytao-macos-ime`
 - Windows TSF TIP：`crates/keytao-windows-ime`
-- Android：当前不是系统输入法，只作为方案安装/合并辅助工具审查
+- Android `InputMethodService` 系统输入法：`src-tauri/gen/android/app`
 
 ## 总体结论
 
-当前大方向是对的：`keytao-core` 已经把 librime 的部署、session、reload generation 和 `ImeState` 抽取收敛到一处；Linux/macOS/Windows 都在朝“平台 adapter 只处理系统协议和 UI”的方向走。平台实现文档也基本贴近代码，尤其是 Linux/macOS/Windows 的 `IMPL.md` 已经把实现边界写清楚。
+当前大方向是对的：`keytao-core` 已经把 librime 的部署、session、reload generation 和 `ImeState` 抽取收敛到一处；Linux/macOS/Windows/Android 都在朝“平台 adapter 只处理系统协议和 UI”的方向走。平台实现文档也基本贴近代码，尤其是 Linux/macOS/Windows/Android 的 `IMPL.md` 已经把实现边界写清楚。
 
 主要问题不在 core 架构，而在平台对接的细节还没有完全闭环：
 
@@ -107,7 +107,7 @@ macOS pkg 校验结果：
 - macOS 打包脚本已经把 `rime-plugins/librime-lua.dylib` 作为 runtime 一部分处理，解决了“配置存在但 Lua 组件创建失败”的关键路径。
 - Linux daemon 对 GNOME、KDE、wlroots Wayland、XIM、IBus shim 的分流相对清楚，没有把 KDE KWin 私有 `WAYLAND_SOCKET` 和普通 daemon 混在一起。
 - Windows TSF 已经走 `ImeRuntimeSession`，没有再直接持有低层 `Engine`。
-- Android 侧 SAF 安装和 Rime 文件合并已有测试覆盖，且没有误声明为系统输入法。
+- Android 侧 `InputMethodService`、SAF 安装和 Rime 文件合并已有实现与测试覆盖，并已作为正式 Android 系统输入法入口维护。
 
 ## P1：应优先修复的问题
 

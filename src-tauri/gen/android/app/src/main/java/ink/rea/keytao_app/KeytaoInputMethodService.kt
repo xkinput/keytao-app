@@ -19,7 +19,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private val clipboardHistory = mutableListOf<String>()
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
-        rememberCurrentClipboard()
+        rememberCurrentClipboard(suggest = true)
     }
     private var clipboardManager: ClipboardManager? = null
     private var keyboardView: KeytaoKeyboardView? = null
@@ -36,7 +36,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         engine = KeytaoImeEngine(applicationContext)
         clipboardManager = getSystemService(ClipboardManager::class.java)
         clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
-        rememberCurrentClipboard()
+        rememberCurrentClipboard(suggest = false)
     }
 
     override fun onDestroy() {
@@ -191,7 +191,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onRequestClipboardHistory(callback: (List<String>) -> Unit) {
-        rememberCurrentClipboard()
+        rememberCurrentClipboard(suggest = false)
         callback(clipboardHistory.toList())
     }
 
@@ -317,7 +317,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             "toggleSelection" -> toggleSelectionMode()
             "selectLeft" -> extendSelection(left = true)
             "selectRight" -> extendSelection(left = false)
-            "pasteText" -> value?.takeIf { it.isNotEmpty() }?.let { commitDirect(it) }
+            "pasteText" -> value?.takeIf { it.isNotEmpty() }?.let {
+                keyboardView?.clearRecentClipboardSuggestion()
+                commitDirect(it)
+            }
         }
     }
 
@@ -335,6 +338,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun pasteClipboard() {
         clearCompositionBeforeEdit()
+        keyboardView?.clearRecentClipboardSuggestion()
         performContextAction(android.R.id.paste) {
             currentClipboardText()?.let { commitDirect(it) }
         }
@@ -399,19 +403,23 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun setClipboardText(text: String) {
         clipboardManager?.setPrimaryClip(ClipData.newPlainText("KeyTao", text))
-        rememberClipboardText(text)
+        rememberClipboardText(text, suggest = false)
     }
 
-    private fun rememberCurrentClipboard() {
-        currentClipboardText()?.let { rememberClipboardText(it) }
+    private fun rememberCurrentClipboard(suggest: Boolean) {
+        currentClipboardText()?.let { rememberClipboardText(it, suggest) }
     }
 
-    private fun rememberClipboardText(text: String) {
+    private fun rememberClipboardText(text: String, suggest: Boolean) {
         if (text.isBlank()) return
+        val wasFirst = clipboardHistory.firstOrNull() == text
         clipboardHistory.remove(text)
         clipboardHistory.add(0, text)
         while (clipboardHistory.size > clipboardHistoryLimit) {
             clipboardHistory.removeAt(clipboardHistory.lastIndex)
+        }
+        if (suggest && !wasFirst) {
+            keyboardView?.showRecentClipboardSuggestion(text)
         }
     }
 

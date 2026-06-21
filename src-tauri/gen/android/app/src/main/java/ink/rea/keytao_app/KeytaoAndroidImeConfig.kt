@@ -61,6 +61,8 @@ data class KeytaoAndroidImeConfig(
     val keyboardHeightDp: Int,
     val candidateBarHeightDp: Int,
     val keyboardBottomInsetDp: Int,
+    val hapticsEnabled: Boolean,
+    val hapticIntensity: Int,
     val swipeThresholdDp: Float,
     val rows: List<List<KeySpec>>,
     val numberRows: List<List<KeySpec>>,
@@ -73,28 +75,101 @@ data class KeytaoAndroidImeConfig(
                 .openRawResource(R.raw.keytao_android_ime)
                 .bufferedReader()
                 .use { it.readText() }
-            val json = userConfig.takeIf { it.isFile }?.readText() ?: defaultJson
-            return runCatching { parse(json) }.getOrElse { parse(defaultJson) }
+            val userJson = userConfig.takeIf { it.isFile }?.readText()
+            return runCatching {
+                if (userJson == null) parse(defaultJson) else parse(userJson, defaultJson)
+            }.getOrElse { parse(defaultJson) }
         }
 
         fun parse(json: String): KeytaoAndroidImeConfig {
             val root = JSONObject(json)
-            val rows = normalizeRows(parseRows(root.getJSONArray("rows")))
-            val numberRows = root.optJSONArray("numberRows")
-                ?.let { normalizeNumberRows(parseRows(it)) }
-                .orEmpty()
-            val symbolRows = root.optJSONArray("symbolRows")
+            return parseRoot(root, null)
+        }
+
+        private fun parse(json: String, defaultJson: String): KeytaoAndroidImeConfig {
+            return parseRoot(JSONObject(json), JSONObject(defaultJson))
+        }
+
+        private fun parseRoot(root: JSONObject, fallbackRoot: JSONObject?): KeytaoAndroidImeConfig {
+            val rows = rowArray(root, fallbackRoot, "rows")
                 ?.let { normalizeRows(parseRows(it)) }
                 .orEmpty()
+            val numberRows = rowArray(root, fallbackRoot, "numberRows")
+                ?.let { normalizeNumberRows(parseRows(it)) }
+                .orEmpty()
+            val symbolRows = rowArray(root, fallbackRoot, "symbolRows")
+                ?.let { normalizeRows(parseRows(it)) }
+                .orEmpty()
+            val haptics = root.optJSONObject("haptics")
+            val fallbackHaptics = fallbackRoot?.optJSONObject("haptics")
             return KeytaoAndroidImeConfig(
-                keyboardHeightDp = root.optInt("keyboardHeightDp", 262).coerceIn(160, 420),
-                candidateBarHeightDp = root.optInt("candidateBarHeightDp", 52).coerceIn(36, 96),
-                keyboardBottomInsetDp = root.optInt("keyboardBottomInsetDp", 48).coerceIn(0, 80),
-                swipeThresholdDp = root.optDouble("swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
+                keyboardHeightDp = mergedInt(root, fallbackRoot, "keyboardHeightDp", 246).coerceIn(160, 420),
+                candidateBarHeightDp = mergedInt(root, fallbackRoot, "candidateBarHeightDp", 52).coerceIn(36, 96),
+                keyboardBottomInsetDp = mergedInt(root, fallbackRoot, "keyboardBottomInsetDp", 48).coerceIn(0, 80),
+                hapticsEnabled = mergedBoolean(root, fallbackRoot, haptics, fallbackHaptics, "enabled", "hapticsEnabled", true),
+                hapticIntensity = mergedInt(root, fallbackRoot, haptics, fallbackHaptics, "intensity", "hapticIntensity", 42)
+                    .coerceIn(1, 100),
+                swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
                 symbolRows = symbolRows.ifEmpty { defaultSymbolRows() },
             )
+        }
+
+        private fun rowArray(root: JSONObject, fallbackRoot: JSONObject?, name: String): JSONArray? {
+            return root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name)
+        }
+
+        private fun mergedInt(root: JSONObject, fallbackRoot: JSONObject?, name: String, defaultValue: Int): Int {
+            return when {
+                root.has(name) -> root.optInt(name, defaultValue)
+                fallbackRoot?.has(name) == true -> fallbackRoot.optInt(name, defaultValue)
+                else -> defaultValue
+            }
+        }
+
+        private fun mergedDouble(root: JSONObject, fallbackRoot: JSONObject?, name: String, defaultValue: Double): Double {
+            return when {
+                root.has(name) -> root.optDouble(name, defaultValue)
+                fallbackRoot?.has(name) == true -> fallbackRoot.optDouble(name, defaultValue)
+                else -> defaultValue
+            }
+        }
+
+        private fun mergedInt(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            nested: JSONObject?,
+            fallbackNested: JSONObject?,
+            nestedName: String,
+            flatName: String,
+            defaultValue: Int,
+        ): Int {
+            return when {
+                nested?.has(nestedName) == true -> nested.optInt(nestedName, defaultValue)
+                root.has(flatName) -> root.optInt(flatName, defaultValue)
+                fallbackNested?.has(nestedName) == true -> fallbackNested.optInt(nestedName, defaultValue)
+                fallbackRoot?.has(flatName) == true -> fallbackRoot.optInt(flatName, defaultValue)
+                else -> defaultValue
+            }
+        }
+
+        private fun mergedBoolean(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            nested: JSONObject?,
+            fallbackNested: JSONObject?,
+            nestedName: String,
+            flatName: String,
+            defaultValue: Boolean,
+        ): Boolean {
+            return when {
+                nested?.has(nestedName) == true -> nested.optBoolean(nestedName, defaultValue)
+                root.has(flatName) -> root.optBoolean(flatName, defaultValue)
+                fallbackNested?.has(nestedName) == true -> fallbackNested.optBoolean(nestedName, defaultValue)
+                fallbackRoot?.has(flatName) == true -> fallbackRoot.optBoolean(flatName, defaultValue)
+                else -> defaultValue
+            }
         }
 
         private fun normalizeNumberRows(rows: List<List<KeySpec>>): List<List<KeySpec>> {

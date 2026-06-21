@@ -2104,6 +2104,8 @@ struct AndroidImeStateJson {
 #[cfg(target_os = "android")]
 fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
     let theme = android_current_theme();
+    let mut ui_capabilities = keytao_theme::UiCapabilities::full_custom();
+    ui_capabilities.supports_vertical = false;
     let candidate_panel = theme.candidate_panel_model(
         keytao_theme::CandidatePanelInput {
             preedit: state.preedit.clone(),
@@ -2120,7 +2122,7 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
             is_last_page: state.is_last_page,
             select_keys: state.select_keys.clone(),
         },
-        &keytao_theme::UiCapabilities::full_custom(),
+        &ui_capabilities,
     );
     let mode_hint = theme.mode_hint_model(state.ascii_mode);
     let value = AndroidImeStateJson {
@@ -2184,6 +2186,16 @@ pub struct AndroidStoragePermissionStatus {
     pub writable: bool,
     pub requires_manage_all_files: bool,
     pub can_open_settings: bool,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidImeInputSettings {
+    pub haptics_enabled: bool,
+    pub haptic_intensity: u8,
+    pub config_path: Option<String>,
+    pub reload_stamp_path: Option<String>,
     pub message: String,
 }
 
@@ -2585,6 +2597,126 @@ fn write_android_reload_stamp(root: &Path) -> Result<PathBuf, String> {
     std::fs::write(&stamp, now.to_string())
         .map_err(|e| format!("写入 Android 输入法重载标记失败 {}: {e}", stamp.display()))?;
     Ok(stamp)
+}
+
+#[cfg(target_os = "android")]
+fn android_ime_config_path(root: &Path) -> PathBuf {
+    root.join("android_ime.json")
+}
+
+#[cfg(target_os = "android")]
+fn read_android_ime_config(path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "android")]
+fn android_ime_haptics_settings_from_config(
+    root: &Path,
+    message: String,
+) -> AndroidImeInputSettings {
+    let path = android_ime_config_path(root);
+    let config = read_android_ime_config(&path);
+    let haptics = config.get("haptics").and_then(|value| value.as_object());
+    let haptics_enabled = haptics
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            config
+                .get("hapticsEnabled")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(true);
+    let haptic_intensity = haptics
+        .and_then(|value| value.get("intensity"))
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            config
+                .get("hapticIntensity")
+                .and_then(|value| value.as_u64())
+        })
+        .unwrap_or(42)
+        .clamp(1, 100) as u8;
+
+    AndroidImeInputSettings {
+        haptics_enabled,
+        haptic_intensity,
+        config_path: Some(path_string(path)),
+        reload_stamp_path: Some(path_string(android_reload_stamp_path(root))),
+        message,
+    }
+}
+
+#[tauri::command]
+async fn get_android_ime_input_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<AndroidImeInputSettings, String> {
+    #[cfg(target_os = "android")]
+    {
+        let root = android_keytao_root(&app)?;
+        Ok(android_ime_haptics_settings_from_config(
+            &root,
+            "已读取 Android 输入反馈配置".into(),
+        ))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Android IME input settings are only available on Android".into())
+    }
+}
+
+#[tauri::command]
+async fn set_android_ime_input_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    haptics_enabled: bool,
+    haptic_intensity: u8,
+) -> Result<AndroidImeInputSettings, String> {
+    #[cfg(target_os = "android")]
+    {
+        let root = android_keytao_root(&app)?;
+        let path = android_ime_config_path(&root);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建 Android 输入法配置目录失败: {e}"))?;
+        }
+        let mut config = read_android_ime_config(&path);
+        let mut haptics = config
+            .get("haptics")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        haptics.insert("enabled".into(), serde_json::Value::Bool(haptics_enabled));
+        haptics.insert(
+            "intensity".into(),
+            serde_json::Value::from(haptic_intensity.clamp(1, 100)),
+        );
+        config.insert("haptics".into(), serde_json::Value::Object(haptics));
+
+        let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
+            .map_err(|e| format!("序列化 Android 输入法配置失败: {e}"))?;
+        std::fs::write(&path, format!("{content}\n"))
+            .map_err(|e| format!("写入 Android 输入法配置失败 {}: {e}", path.display()))?;
+
+        let message = match write_android_reload_stamp(&root) {
+            Ok(stamp) => format!(
+                "已保存 Android 输入反馈配置并通知输入法重载：{}",
+                stamp.display()
+            ),
+            Err(e) => format!("已保存 Android 输入反馈配置，但输入法重载通知失败：{e}"),
+        };
+        Ok(android_ime_haptics_settings_from_config(&root, message))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = haptics_enabled;
+        let _ = haptic_intensity;
+        Err("Android IME input settings are only available on Android".into())
+    }
 }
 
 #[tauri::command]
@@ -3907,6 +4039,8 @@ pub fn run() {
             android_storage_permission_status,
             android_open_storage_permission_settings,
             android_keytao_data_dir,
+            get_android_ime_input_settings,
+            set_android_ime_input_settings,
             android_open_input_method_settings,
             android_show_input_method_picker,
             android_open_app,
