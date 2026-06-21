@@ -16,7 +16,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog"
 import VirtualLogViewer from "@/components/VirtualLogViewer"
-import AndroidImeOnboarding, { type AndroidImeStatus } from "@/components/AndroidImeOnboarding"
+import AndroidImeOnboarding, { type AndroidImeStatus, type AndroidStoragePermissionStatus } from "@/components/AndroidImeOnboarding"
 import {
   FolderOpen,
   Download,
@@ -53,6 +53,7 @@ type ImeCandidateOrientation = "horizontal" | "vertical"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
+const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 
 function hasSystemIme(os: OSType): boolean {
   return os === "linux" || os === "macos" || os === "windows" || os === "android"
@@ -296,6 +297,9 @@ export default function App() {
   const [androidImeStatus, setAndroidImeStatus] = useState<AndroidImeStatus | null>(null)
   const [androidImeError, setAndroidImeError] = useState<string | null>(null)
   const [isCheckingAndroidIme, setIsCheckingAndroidIme] = useState(false)
+  const [androidStoragePermission, setAndroidStoragePermission] = useState<AndroidStoragePermissionStatus | null>(null)
+  const [androidStoragePermissionError, setAndroidStoragePermissionError] = useState<string | null>(null)
+  const [isCheckingAndroidStoragePermission, setIsCheckingAndroidStoragePermission] = useState(false)
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
   const [imeUiError, setImeUiError] = useState<string | null>(null)
   const [isSavingImeUiSettings, setIsSavingImeUiSettings] = useState(false)
@@ -415,14 +419,14 @@ export default function App() {
 
   useEffect(() => {
     if (osType !== "android") return
-    void refreshAndroidImeStatus()
+    void refreshAndroidSetupStatus()
 
     const handleFocus = () => {
-      void refreshAndroidImeStatus()
+      void refreshAndroidSetupStatus()
     }
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        void refreshAndroidImeStatus()
+        void refreshAndroidSetupStatus()
       }
     }
 
@@ -492,16 +496,26 @@ export default function App() {
 
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
-  const isBusy = isInstalling || isDeploying
+  const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission
   const systemImeAvailable = hasSystemIme(osType)
   const canOpenDefaultDir = osType !== "android"
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
+  const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
+  const androidStorageGranted = androidStoragePermission?.granted ?? false
+  const androidSchemaInstalled = localSchemaInfo?.installed ?? false
   const androidImePaddingStyle =
     osType === "android"
       ? { paddingBottom: "calc(1.5rem + var(--android-ime-inset-bottom, 0px))" }
       : undefined
   const shouldShowAndroidImeOnboarding =
-    osType === "android" && (!androidImeStatus || !androidImeStatus.enabled || !androidImeStatus.selected)
+    osType === "android" && (
+      !androidImeStatus ||
+      !androidImeStatus.enabled ||
+      !androidImeStatus.selected ||
+      !androidStoragePermission ||
+      !androidStorageGranted ||
+      !androidSchemaInstalled
+    )
 
   async function refreshAndroidImeStatus() {
     setIsCheckingAndroidIme(true)
@@ -519,12 +533,48 @@ export default function App() {
     }
   }
 
+  async function refreshAndroidStoragePermission() {
+    setIsCheckingAndroidStoragePermission(true)
+    try {
+      const status = await invoke<AndroidStoragePermissionStatus>("android_storage_permission_status")
+      setAndroidStoragePermission(status)
+      setAndroidStoragePermissionError(null)
+      return status
+    } catch (e) {
+      const message = String(e)
+      setAndroidStoragePermissionError(message)
+      return null
+    } finally {
+      setIsCheckingAndroidStoragePermission(false)
+    }
+  }
+
+  async function refreshAndroidSetupStatus() {
+    await Promise.all([
+      refreshAndroidImeStatus(),
+      refreshAndroidStoragePermission(),
+      handleCheckLocalSchema(),
+    ])
+  }
+
   async function handleOpenAndroidImeSettings() {
     setAndroidImeError(null)
     try {
       await invoke("android_open_input_method_settings")
     } catch (e) {
       setAndroidImeError(String(e))
+    }
+  }
+
+  async function handleOpenAndroidStoragePermissionSettings() {
+    setAndroidStoragePermissionError(null)
+    try {
+      await invoke("android_open_storage_permission_settings")
+      window.setTimeout(() => {
+        void refreshAndroidStoragePermission()
+      }, 800)
+    } catch (e) {
+      setAndroidStoragePermissionError(String(e))
     }
   }
 
@@ -673,11 +723,22 @@ export default function App() {
 
   async function handleInstall() {
     if (!downloadUrl) return
-    setIsInstalling(true)
     setInstallProgress(null)
     setInstallError(null)
     setDeploySteps([])
 
+    if (osType === "android") {
+      const permission = await refreshAndroidStoragePermission()
+      if (!permission?.granted) {
+        const message = permission?.message || ANDROID_STORAGE_PERMISSION_MESSAGE
+        setInstallError(message)
+        addLogs([`[ANDROID PERMISSION] ${message}`])
+        await handleOpenAndroidStoragePermissionSettings()
+        return
+      }
+    }
+
+    setIsInstalling(true)
     try {
       const result = await invoke<InstallResult>("rime_install_to_default", { url: downloadUrl })
       addLogs(result.logs)
@@ -836,11 +897,19 @@ export default function App() {
     return (
       <AndroidImeOnboarding
         status={androidImeStatus}
-        loading={isCheckingAndroidIme}
+        storageStatus={androidStoragePermission}
+        schemaInstalled={androidSchemaInstalled}
+        loading={androidSetupLoading}
         error={androidImeError}
+        storageError={androidStoragePermissionError}
+        installError={installError}
+        installingSchema={isInstalling || isDeploying}
+        canInstallSchema={Boolean(downloadUrl)}
         onOpenSettings={handleOpenAndroidImeSettings}
         onShowPicker={handleShowAndroidImePicker}
-        onRefresh={refreshAndroidImeStatus}
+        onOpenStorageSettings={handleOpenAndroidStoragePermissionSettings}
+        onInstallSchema={handleInstall}
+        onRefresh={refreshAndroidSetupStatus}
       />
     )
   }
@@ -1207,6 +1276,38 @@ export default function App() {
                       <code className="font-mono truncate min-w-0">{defaultDir}</code>
                     </div>
                   )}
+                  {osType === "android" && androidStoragePermission && (
+                    <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${androidStoragePermission.granted
+                      ? "bg-green-500/10 border-green-500/30 text-green-400"
+                      : "bg-yellow-500/10 border-yellow-500/30 text-yellow-500"
+                      }`}>
+                      {androidStoragePermission.granted
+                        ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      }
+                      <span className="min-w-0 flex-1">
+                        {androidStoragePermission.message}
+                      </span>
+                      {!androidStoragePermission.granted && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleOpenAndroidStoragePermissionSettings}
+                          disabled={isCheckingAndroidStoragePermission || !androidStoragePermission.canOpenSettings}
+                          className="h-7 shrink-0 gap-1.5"
+                        >
+                          <Settings className="h-3.5 w-3.5" />
+                          去授权
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {osType === "android" && androidStoragePermissionError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{androidStoragePermissionError}</span>
+                    </div>
+                  )}
                         {localSchemaInfo !== null && (
                           <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${localSchemaInfo.installed
                             ? "bg-green-500/10 border-green-500/30 text-green-400"
@@ -1265,7 +1366,7 @@ export default function App() {
                         <div className="flex gap-2 flex-wrap">
                           <Button size="sm" onClick={handleInstall} disabled={isBusy || !downloadUrl} className="gap-1.5">
                             <Download className="h-4 w-4" />
-                            {isInstalling ? "安装中..." : isDeploying ? "部署中..." : localSchemaInfo?.installed ? "更新方案" : "安装方案"}
+                            {isCheckingAndroidStoragePermission ? "检测权限..." : isInstalling ? "安装中..." : isDeploying ? "部署中..." : localSchemaInfo?.installed ? "更新方案" : "安装方案"}
                           </Button>
                           <Button variant="outline" size="sm" onClick={handleCheckLocalSchema}
                             disabled={isCheckingLocal || isBusy} className="gap-1.5">

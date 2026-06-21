@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
@@ -69,6 +71,25 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
             })
         } catch (ex: Exception) {
             invoke.reject(ex.message ?: "Failed to resolve KeyTao data directory")
+        }
+    }
+
+    @Command
+    fun storagePermissionStatus(invoke: Invoke) {
+        try {
+            invoke.resolve(resolveStoragePermissionStatus())
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to read Android storage permission status")
+        }
+    }
+
+    @Command
+    fun openStoragePermissionSettings(invoke: Invoke) {
+        try {
+            openStoragePermissionSettings()
+            invoke.resolve()
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to open Android storage permission settings")
         }
     }
 
@@ -636,6 +657,53 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
             put("canShowPicker", enabled)
             put("message", message)
         }
+    }
+
+    private fun hasManageExternalStoragePermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+    }
+
+    private fun resolveStoragePermissionStatus(): JSObject {
+        val root = KeytaoAndroidPaths.userRoot()
+        val writable = KeytaoAndroidPaths.isWritable(root)
+        val hasManageAccess = hasManageExternalStoragePermission()
+        val requiresManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasManageAccess
+        val granted = hasManageAccess && writable
+        val message = when {
+            granted -> "已授予 KeyTao 文件访问权限：${root.absolutePath}"
+            requiresManageAllFiles -> "请授予 KeyTao 所有文件访问权限后安装键道方案"
+            else -> "请授予 KeyTao 文件访问权限后安装键道方案"
+        }
+        return JSObject().apply {
+            put("path", root.absolutePath)
+            put("granted", granted)
+            put("writable", writable)
+            put("requiresManageAllFiles", requiresManageAllFiles)
+            put("canOpenSettings", true)
+            put("message", message)
+        }
+    }
+
+    private fun openStoragePermissionSettings() {
+        val packageUri = Uri.parse("package:${activity.packageName}")
+        val intents = mutableListOf<Intent>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            intents.add(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri))
+            intents.add(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        }
+        intents.add(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
+
+        var lastError: Throwable? = null
+        for (intent in intents) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                return
+            } catch (ex: Throwable) {
+                lastError = ex
+            }
+        }
+        throw Exception(lastError?.message ?: "No Android storage permission settings activity found")
     }
 
     private fun writeFileBytes(root: DocumentFile, relativePath: String, content: ByteArray, logs: MutableList<String>, merged: Boolean = false) {

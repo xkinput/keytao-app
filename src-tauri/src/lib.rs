@@ -2176,6 +2176,17 @@ pub struct AndroidImeStatus {
     pub message: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidStoragePermissionStatus {
+    pub path: String,
+    pub granted: bool,
+    pub writable: bool,
+    pub requires_manage_all_files: bool,
+    pub can_open_settings: bool,
+    pub message: String,
+}
+
 #[cfg(target_os = "android")]
 fn android_session<'a>(session: jlong) -> Option<&'a keytao_core::ImeRuntimeSession> {
     if session == 0 {
@@ -2457,6 +2468,45 @@ async fn android_ime_status<R: tauri::Runtime>(
             .run_mobile_plugin("imeStatus", ())
             .map_err(|e| e.to_string())?;
         serde_json::from_value(result).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_storage_permission_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<AndroidStoragePermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let result: serde_json::Value = app
+            .state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("storagePermissionStatus", ())
+            .map_err(|e| e.to_string())?;
+        serde_json::from_value(result).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Not Android".into())
+    }
+}
+
+#[tauri::command]
+async fn android_open_storage_permission_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("openStoragePermissionSettings", ())
+            .map(|_: serde_json::Value| ())
+            .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -3496,6 +3546,17 @@ async fn rime_install_to_default<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     url: String,
 ) -> Result<InstallResult, String> {
+    let permission_value: serde_json::Value = app
+        .state::<ScopedStorageHandle<R>>()
+        .0
+        .run_mobile_plugin("storagePermissionStatus", ())
+        .map_err(|e| e.to_string())?;
+    let permission: AndroidStoragePermissionStatus =
+        serde_json::from_value(permission_value).map_err(|e| e.to_string())?;
+    if !permission.granted {
+        return Err(permission.message);
+    }
+
     let root = android_keytao_root(&app)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("创建 Android 输入法目录失败: {e}"))?;
     let temp = download_to_temp(app.clone(), url).await?;
@@ -3843,6 +3904,8 @@ pub fn run() {
             macos_uninstall_ime,
             rime_install_to_default,
             android_ime_status,
+            android_storage_permission_status,
+            android_open_storage_permission_settings,
             android_keytao_data_dir,
             android_open_input_method_settings,
             android_show_input_method_picker,
