@@ -106,6 +106,12 @@ fn default_user_data_dir_string() -> Option<String> {
     keytao_core::default_user_data_dir().map(path_string)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[tauri::command]
+fn rime_get_data_dir() -> Option<String> {
+    default_user_data_dir_string()
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reload_stamp_path() -> Option<PathBuf> {
     keytao_core::default_user_data_dir().map(|dir| dir.join(IME_RELOAD_STAMP_FILE))
@@ -4207,6 +4213,8 @@ pub fn run() {
             set_ime_ui_color_scheme,
             set_ime_ui_settings,
             read_debug_logs,
+            #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
+            rime_get_data_dir,
             #[cfg(target_os = "linux")]
             linux_ime_status,
             #[cfg(target_os = "linux")]
