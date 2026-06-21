@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import android.content.Context
+import android.os.SystemClock
 import java.io.File
 
 class KeytaoImeEngine(context: Context) {
@@ -11,6 +12,8 @@ class KeytaoImeEngine(context: Context) {
     private var lastState = KeytaoImeState.empty()
     private var lastDisplaySchemaName = ""
     private var reloadStampSignature: String? = fileSignature(reloadStamp)
+    private var writableCache: Boolean? = null
+    private var writableCacheCheckedAtMs = 0L
 
     var nativeReady: Boolean = false
         private set
@@ -57,9 +60,9 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
-    fun allCandidates(): List<KeytaoCandidate> {
+    fun allCandidates(limit: Int): List<KeytaoCandidate> {
         if (!nativeReady || session == 0L) return emptyList()
-        return KeytaoNativeBridge.allCandidates(session)
+        return KeytaoNativeBridge.allCandidates(session, limit)
     }
 
     fun changePage(backward: Boolean): KeytaoImeState {
@@ -92,7 +95,18 @@ class KeytaoImeEngine(context: Context) {
 
     fun hasInstalledSchema(): Boolean = KeytaoAndroidPaths.hasInstalledSchema(userDir)
 
-    fun isUserDataWritable(): Boolean = KeytaoAndroidPaths.isWritable(userDir)
+    fun isUserDataWritable(forceRefresh: Boolean = false): Boolean {
+        val now = SystemClock.uptimeMillis()
+        writableCache?.let { cached ->
+            if (!forceRefresh && now - writableCacheCheckedAtMs < writableCacheTtlMs) {
+                return cached
+            }
+        }
+        val writable = KeytaoAndroidPaths.isWritable(userDir)
+        writableCache = writable
+        writableCacheCheckedAtMs = now
+        return writable
+    }
 
     fun reset(): KeytaoImeState {
         val state = KeytaoNativeBridge.reset(session)
@@ -196,5 +210,6 @@ class KeytaoImeEngine(context: Context) {
 
     companion object {
         private const val bundledRimeDataAssetPath = "keytao-rime-data"
+        private const val writableCacheTtlMs = 2_000L
     }
 }

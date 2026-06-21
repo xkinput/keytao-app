@@ -62,6 +62,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val secondaryLabel: String? = null,
     )
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
+    private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class KeyboardLayer { LETTERS, NUMBERS, SYMBOLS }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD, EMOJI }
@@ -98,6 +99,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var recentClipboardSuggestion: String? = null
     private var expandedCandidateScrollY = 0f
     private var expandedCandidateContentHeight = 0f
+    private var pendingExpandedCandidateLoad: Runnable? = null
+    private val candidateWidthCache = mutableMapOf<String, Float>()
+    private var expandedCandidateItemsCacheSignature = ""
+    private var expandedCandidateItemsCache: List<CandidateDrawItem> = emptyList()
+    private var keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
     private var candidateDownX = 0f
     private var candidateDownY = 0f
     private var candidateDownScrollX = 0f
@@ -158,6 +164,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun updateConfig(next: KeytaoAndroidImeConfig) {
         config = next
+        invalidateKeyboardLayoutCache()
+        invalidateExpandedCandidateItemsCache()
         resetCandidateTouch()
         resetCandidateScroll()
         requestLayout()
@@ -166,6 +174,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun updateTheme(next: KeytaoImeTheme) {
         theme = next
+        candidateWidthCache.clear()
+        invalidateKeyboardLayoutCache()
         invalidate()
     }
 
@@ -173,7 +183,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val nextSignature = candidateSignature(next)
         if (nextSignature != candidateSignature) {
             candidateSignature = nextSignature
+            cancelExpandedCandidateRequest()
             expandedCandidates = emptyList()
+            invalidateExpandedCandidateItemsCache()
             resetCandidateScroll()
             resetExpandedCandidateScroll()
         }
@@ -182,6 +194,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             candidatePanelExpanded = false
             expandedCandidates = emptyList()
             expandedCandidatesLoading = false
+            invalidateExpandedCandidateItemsCache()
             resetExpandedCandidateScroll()
         }
         state = next
@@ -216,7 +229,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun showRecentClipboardSuggestion(text: String) {
         val normalized = text
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
             .takeIf { it.isNotEmpty() }
             ?: return
@@ -245,9 +258,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         functionPanelActive = false
         functionPanelMode = FunctionPanelMode.HOME
         expandedCandidates = emptyList()
-        expandedCandidatesLoading = false
+        cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
-        expandRequestToken++
         pressedKey = null
         pressedToolbar = null
         toolbarTouchActive = false
@@ -286,6 +298,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        invalidateKeyboardLayoutCache()
         coerceCandidateScroll()
         coerceExpandedCandidateScroll()
     }
@@ -663,16 +676,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun expandedCandidateItems(): List<CandidateDrawItem> {
-        if (functionPanelActive) {
-            return when (functionPanelMode) {
+        val signature = expandedCandidateItemsSignature()
+        if (signature == expandedCandidateItemsCacheSignature) {
+            return expandedCandidateItemsCache
+        }
+        val items = if (functionPanelActive) {
+            when (functionPanelMode) {
                 FunctionPanelMode.HOME -> functionHomeItems()
                 FunctionPanelMode.SELECTION -> selectionPanelItems()
                 FunctionPanelMode.CLIPBOARD -> clipboardPanelItems()
                 FunctionPanelMode.EMOJI -> emojiPanelItems()
                 FunctionPanelMode.RIME -> rimePanelItems()
             }
+        } else {
+            rimePanelItems()
         }
-        return rimePanelItems()
+        expandedCandidateItemsCacheSignature = signature
+        expandedCandidateItemsCache = items
+        return items
     }
 
     private fun rimePanelItems(): List<CandidateDrawItem> {
@@ -693,6 +714,56 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 global = true,
             )
         }.filterNot { item -> !functionPanelActive && item.index in visibleCandidateGlobalIndexes }
+    }
+
+    private fun expandedCandidateItemsSignature(): String {
+        return buildString {
+            append(functionPanelActive)
+            append('|')
+            append(functionPanelMode)
+            append('|')
+            append(candidateSignature)
+            append('|')
+            append(selectedGlobalCandidateIndex())
+            append('|')
+            if (!functionPanelActive) {
+                visibleCandidateGlobalIndexes.sorted().forEach { index ->
+                    append(index)
+                    append(',')
+                }
+            }
+            append('|')
+            val source = expandedCandidates
+                .takeIf { it.isNotEmpty() }
+                ?: state.allCandidates.takeIf { it.isNotEmpty() }
+                ?: state.candidates
+            appendCandidateListSignature(source)
+            if (functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD) {
+                append('|')
+                clipboardItems.forEach { item ->
+                    append(item.length)
+                    append(':')
+                    append(item)
+                    append('\u0001')
+                }
+            }
+        }
+    }
+
+    private fun StringBuilder.appendCandidateListSignature(candidates: List<KeytaoCandidate>) {
+        candidates.forEach { candidate ->
+            append(candidate.index)
+            append(':')
+            append(candidate.text)
+            append(':')
+            append(candidate.comment.orEmpty())
+            append('\u0001')
+        }
+    }
+
+    private fun invalidateExpandedCandidateItemsCache() {
+        expandedCandidateItemsCacheSignature = ""
+        expandedCandidateItemsCache = emptyList()
     }
 
     private fun functionHomeItems(): List<CandidateDrawItem> = panelItems(
@@ -755,6 +826,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun candidateWidth(item: CandidateDrawItem): Float {
+        val cacheKey = candidateWidthCacheKey(item)
+        candidateWidthCache[cacheKey]?.let { return it }
         textPaint.textSize = sp(candidateLabelSizeSp())
         val labelWidth = item.label.takeIf { it.isNotBlank() }?.let { textPaint.measureText(it) } ?: 0f
         textPaint.textSize = sp(candidateTextSizeSp())
@@ -762,10 +835,27 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.textSize = sp(candidateCommentSizeSp())
         val commentWidth = item.comment?.takeIf { it.isNotBlank() }?.let { textPaint.measureText(it) } ?: 0f
         val inlineGap = dp(candidateInlineGapDp())
-        val segmentCount = listOf(labelWidth, textWidth, commentWidth).count { it > 0f }
+        var segmentCount = 0
+        if (labelWidth > 0f) segmentCount++
+        if (textWidth > 0f) segmentCount++
+        if (commentWidth > 0f) segmentCount++
         val textGaps = segmentCount.minus(1).coerceAtLeast(0).toFloat() * inlineGap
         val selectedAccentSpace = if (item.selected) dp(4f) else 0f
-        return labelWidth + textWidth + commentWidth + textGaps + selectedAccentSpace + dp(candidatePaddingXDp() * 2)
+        val width = labelWidth + textWidth + commentWidth + textGaps + selectedAccentSpace + dp(candidatePaddingXDp() * 2)
+        candidateWidthCache[cacheKey] = width
+        return width
+    }
+
+    private fun candidateWidthCacheKey(item: CandidateDrawItem): String {
+        return buildString {
+            append(item.label)
+            append('\u0000')
+            append(item.text)
+            append('\u0000')
+            append(item.comment.orEmpty())
+            append('\u0000')
+            append(item.selected)
+        }
     }
 
     private fun candidateTextSizeSp(): Float = min(theme.fontSizeSp - 2f, 16f).coerceAtLeast(13f)
@@ -1043,39 +1133,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawKeyboard(canvas: Canvas) {
+        val layout = keyboardLayout()
         val top = keyboardTop()
-        val bottom = keyboardBottom()
-        val horizontalGap = keyboardHorizontalGap()
-        val verticalGapFloor = keyboardVerticalGap()
-        val rows = activeRows()
-        val rowCount = rows.size.coerceAtLeast(1)
-        val availableHeight = (bottom - top).coerceAtLeast(0f)
-        val naturalRowHeight = ((availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
-            .coerceAtLeast(dp(36f))
-        val rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
-        val verticalGap = ((availableHeight - rowHeight * rowCount) / (rowCount + 1))
-            .coerceAtLeast(verticalGapFloor)
-        val nextRects = mutableListOf<KeyRect>()
-
         drawContentLayer(canvas, top) {
-            var y = top + verticalGap
-            for (row in rows) {
-                val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat().coerceAtLeast(1f)
-                val usableWidth = width - horizontalGap * (row.size + 1)
-                var x = horizontalGap
-                for (key in row) {
-                    val keyWidth = usableWidth * key.weight / totalWeight
-                    val rect = RectF(x, y, x + keyWidth, y + rowHeight)
-                    val isPressed = pressedKey?.spec == key
-                    drawKey(canvas, key, rect, isPressed)
-                    nextRects.add(KeyRect(key, rect))
-                    x = rect.right + horizontalGap
-                }
-                y += rowHeight + verticalGap
+            for (keyRect in layout) {
+                drawKey(canvas, keyRect.spec, keyRect.rect, pressedKey?.spec == keyRect.spec)
             }
         }
 
-        keyRects = nextRects
+        keyRects = layout
     }
 
     private fun drawKey(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean) {
@@ -1196,6 +1262,76 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             KeyboardLayer.SYMBOLS -> config.symbolRows
             KeyboardLayer.LETTERS -> config.rows
         }
+    }
+
+    private fun keyboardLayout(): List<KeyRect> {
+        val signature = keyboardLayoutSignature()
+        if (signature == keyboardLayoutCache.signature) {
+            return keyboardLayoutCache.keys
+        }
+
+        val top = keyboardTop()
+        val bottom = keyboardBottom()
+        val horizontalGap = keyboardHorizontalGap()
+        val verticalGapFloor = keyboardVerticalGap()
+        val rows = activeRows()
+        val rowCount = rows.size.coerceAtLeast(1)
+        val availableHeight = (bottom - top).coerceAtLeast(0f)
+        val naturalRowHeight = ((availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
+            .coerceAtLeast(dp(36f))
+        val rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
+        val verticalGap = ((availableHeight - rowHeight * rowCount) / (rowCount + 1))
+            .coerceAtLeast(verticalGapFloor)
+        val nextRects = mutableListOf<KeyRect>()
+
+        var y = top + verticalGap
+        for (row in rows) {
+            val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat().coerceAtLeast(1f)
+            val usableWidth = width - horizontalGap * (row.size + 1)
+            var x = horizontalGap
+            for (key in row) {
+                val keyWidth = usableWidth * key.weight / totalWeight
+                val rect = RectF(x, y, x + keyWidth, y + rowHeight)
+                nextRects.add(KeyRect(key, rect))
+                x = rect.right + horizontalGap
+            }
+            y += rowHeight + verticalGap
+        }
+
+        keyboardLayoutCache = KeyboardLayoutCache(signature, nextRects)
+        return nextRects
+    }
+
+    private fun keyboardLayoutSignature(): String {
+        return buildString {
+            append(width)
+            append('x')
+            append(height)
+            append('|')
+            append(keyboardLayer)
+            append('|')
+            append(config.keyboardHeightDp)
+            append(':')
+            append(config.candidateBarHeightDp)
+            append(':')
+            append(config.keyboardBottomInsetDp)
+            append(':')
+            append(config.swipeThresholdDp)
+            append('|')
+            append(theme.panelGapDp)
+            append(':')
+            append(theme.fontSizeSp)
+            append(':')
+            append(theme.labelSizeSp)
+            append(':')
+            append(theme.commentSizeSp)
+            append('|')
+            append(activeRows().hashCode())
+        }
+    }
+
+    private fun invalidateKeyboardLayoutCache() {
+        keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
     }
 
     private fun actionForMode(key: KeySpec): KeyCommand {
@@ -1322,9 +1458,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         functionPanelMode = FunctionPanelMode.HOME
         recentClipboardSuggestion = null
         expandedCandidates = emptyList()
-        expandedCandidatesLoading = false
+        cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
-        expandRequestToken++
         resetExpandedCandidateTouch()
         resetExpandedCandidateScroll()
         startContentTransition()
@@ -1335,12 +1470,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         candidatePanelExpanded = true
         functionPanelMode = mode
         expandedCandidates = emptyList()
-        expandedCandidatesLoading = mode == FunctionPanelMode.RIME
+        cancelExpandedCandidateRequest()
         clipboardItemsLoading = mode == FunctionPanelMode.CLIPBOARD
         pressedKey = null
         pressedToolbar = null
         toolbarTouchActive = false
         resetExpandedCandidateScroll()
+        if (mode == FunctionPanelMode.RIME) {
+            requestExpandedCandidatesAsync()
+        }
         if (mode == FunctionPanelMode.CLIPBOARD) {
             requestClipboardItemsAsync()
         }
@@ -1383,19 +1521,58 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun requestExpandedCandidatesAsync() {
+        pendingExpandedCandidateLoad?.let(longPressHandler::removeCallbacks)
+        pendingExpandedCandidateLoad = null
+
+        if (!canRequestExpandedCandidates()) {
+            expandedCandidatesLoading = false
+            return
+        }
+
+        state.allCandidates.takeIf { it.isNotEmpty() }?.let { candidates ->
+            expandedCandidates = candidates
+            expandedCandidatesLoading = false
+            coerceExpandedCandidateScroll()
+            invalidate()
+            return
+        }
+
         val callback = listener ?: run {
             expandedCandidatesLoading = false
             return
         }
         val token = ++expandRequestToken
         expandedCandidatesLoading = true
-        callback.onRequestExpandCandidates { candidates ->
-            if (token != expandRequestToken || !candidatePanelExpanded) return@onRequestExpandCandidates
-            expandedCandidates = candidates
-            expandedCandidatesLoading = false
-            coerceExpandedCandidateScroll()
-            invalidate()
+        val request = Runnable {
+            pendingExpandedCandidateLoad = null
+            if (token != expandRequestToken || !canRequestExpandedCandidates()) {
+                expandedCandidatesLoading = false
+                invalidate()
+                return@Runnable
+            }
+            callback.onRequestExpandCandidates { candidates ->
+                if (token != expandRequestToken || !canRequestExpandedCandidates()) return@onRequestExpandCandidates
+                expandedCandidates = candidates
+                expandedCandidatesLoading = false
+                coerceExpandedCandidateScroll()
+                invalidate()
+            }
         }
+        pendingExpandedCandidateLoad = request
+        longPressHandler.postDelayed(request, expandedCandidateLoadDelayMs)
+        invalidate()
+    }
+
+    private fun canRequestExpandedCandidates(): Boolean {
+        if (!candidatePanelExpanded || state.candidatePanel.candidates.isEmpty()) return false
+        return !functionPanelActive || functionPanelMode == FunctionPanelMode.RIME
+    }
+
+    private fun cancelExpandedCandidateRequest() {
+        pendingExpandedCandidateLoad?.let(longPressHandler::removeCallbacks)
+        pendingExpandedCandidateLoad = null
+        expandRequestToken++
+        expandedCandidatesLoading = false
     }
 
     private fun requestClipboardItemsAsync() {
@@ -1743,6 +1920,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val longPressDelayMs = 420L
         private const val backspaceRepeatIntervalMs = 72L
         private const val contentTransitionDurationMs = 140L
+        private const val expandedCandidateLoadDelayMs = 180L
+        private val whitespaceRegex = Regex("\\s+")
         private val emojiChoices = listOf(
             "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
             "🥰", "😇", "🙂", "😉", "😋", "🤔", "😭", "😡",

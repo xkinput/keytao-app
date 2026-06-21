@@ -208,7 +208,11 @@ mod desktop {
         }
 
         pub fn all_candidates(&self) -> Vec<Candidate> {
-            extract_all_candidates(&self.session).unwrap_or_default()
+            self.all_candidates_limited(usize::MAX)
+        }
+
+        pub fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate> {
+            extract_all_candidates(&self.session, max_count).unwrap_or_default()
         }
 
         pub fn change_page(&self, backward: bool) -> ImeState {
@@ -295,7 +299,13 @@ mod desktop {
         }
     }
 
-    fn extract_all_candidates(session: &rime_api::Session) -> Option<Vec<Candidate>> {
+    fn extract_all_candidates(
+        session: &rime_api::Session,
+        max_count: usize,
+    ) -> Option<Vec<Candidate>> {
+        if max_count == 0 {
+            return Some(Vec::new());
+        }
         unsafe {
             let api = rime_get_api();
             let candidate_list_begin = (*api).candidate_list_begin?;
@@ -313,6 +323,9 @@ mod desktop {
                 let comment = candidate_optional_string(iterator.candidate.comment);
                 if !text.is_empty() {
                     candidates.push(Candidate { text, comment });
+                }
+                if candidates.len() >= max_count {
+                    break;
                 }
                 if candidate_list_next(&mut iterator) == 0 {
                     break;
@@ -726,6 +739,12 @@ impl ImeRuntimeSession {
         let mut inner = self.inner.lock().ok()?;
         self.refresh_if_needed(&mut inner).ok()?;
         Some(inner.engine.all_candidates())
+    }
+
+    pub fn all_candidates_limited(&self, max_count: usize) -> Option<Vec<Candidate>> {
+        let mut inner = self.inner.lock().ok()?;
+        self.refresh_if_needed(&mut inner).ok()?;
+        Some(inner.engine.all_candidates_limited(max_count))
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {

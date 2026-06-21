@@ -183,7 +183,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return
         }
         candidateExecutor.execute {
-            val candidates = engine.allCandidates()
+            val candidates = engine.allCandidates(expandedCandidateLimit)
             mainHandler.post {
                 callback(candidates)
             }
@@ -532,6 +532,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     companion object {
         private const val clipboardHistoryLimit = 24
+        private const val expandedCandidateLimit = 96
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

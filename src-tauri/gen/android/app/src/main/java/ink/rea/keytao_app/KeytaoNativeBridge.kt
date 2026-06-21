@@ -66,10 +66,10 @@ object KeytaoNativeBridge {
         )
     }
 
-    fun allCandidates(session: Long): List<KeytaoCandidate> {
+    fun allCandidates(session: Long, limit: Int): List<KeytaoCandidate> {
         if (!loaded || session == 0L) return emptyList()
         return KeytaoImeState.parseCandidateArray(
-            runCatching { nativeAllCandidates(session) }.getOrNull()
+            runCatching { nativeAllCandidates(session, limit.coerceAtLeast(0)) }.getOrNull()
         )
     }
 
@@ -117,7 +117,7 @@ object KeytaoNativeBridge {
 
     external fun nativeSelectCandidateGlobal(session: Long, index: Int): String?
 
-    external fun nativeAllCandidates(session: Long): String?
+    external fun nativeAllCandidates(session: Long, limit: Int): String?
 
     external fun nativeChangePage(session: Long, backward: Boolean): String?
 

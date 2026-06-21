@@ -2081,6 +2081,38 @@ static ANDROID_IME_RUNTIME: Mutex<Option<keytao_core::ImeRuntime>> = Mutex::new(
 static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(target_os = "android")]
+struct AndroidThemeResolverState {
+    default_theme_path: Option<PathBuf>,
+    user_theme_path: Option<PathBuf>,
+    resolver: keytao_theme::ThemeResolver,
+}
+
+#[cfg(target_os = "android")]
+impl AndroidThemeResolverState {
+    fn new(default_theme_path: Option<PathBuf>, user_theme_path: Option<PathBuf>) -> Self {
+        Self {
+            resolver: keytao_theme::ThemeResolver::new(
+                default_theme_path.clone(),
+                user_theme_path.clone(),
+            ),
+            default_theme_path,
+            user_theme_path,
+        }
+    }
+
+    fn matches(
+        &self,
+        default_theme_path: &Option<PathBuf>,
+        user_theme_path: &Option<PathBuf>,
+    ) -> bool {
+        self.default_theme_path == *default_theme_path && self.user_theme_path == *user_theme_path
+    }
+}
+
+#[cfg(target_os = "android")]
+static ANDROID_IME_THEME_RESOLVER: Mutex<Option<AndroidThemeResolverState>> = Mutex::new(None);
+
+#[cfg(target_os = "android")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AndroidImeStateJson {
@@ -2157,7 +2189,33 @@ fn android_current_theme() -> keytao_theme::ResolvedImeTheme {
         .ok()
         .and_then(|path| path.clone())
         .filter(|path| path.is_file());
-    keytao_theme::resolve_theme_from_paths(None, user_path.as_deref())
+    android_cached_theme(None, user_path)
+}
+
+#[cfg(target_os = "android")]
+fn android_cached_theme(
+    default_theme_path: Option<PathBuf>,
+    user_theme_path: Option<PathBuf>,
+) -> keytao_theme::ResolvedImeTheme {
+    let Ok(mut slot) = ANDROID_IME_THEME_RESOLVER.lock() else {
+        return keytao_theme::resolve_theme_from_paths(
+            default_theme_path.as_deref(),
+            user_theme_path.as_deref(),
+        );
+    };
+    let needs_resolver = slot
+        .as_ref()
+        .map(|state| !state.matches(&default_theme_path, &user_theme_path))
+        .unwrap_or(true);
+    if needs_resolver {
+        *slot = Some(AndroidThemeResolverState::new(
+            default_theme_path,
+            user_theme_path,
+        ));
+    }
+    slot.as_ref()
+        .map(|state| state.resolver.current())
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "android")]
@@ -2217,8 +2275,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
 ) -> jstring {
     let default_path = optional_jni_path(&mut env, default_theme_path);
     let user_path = optional_jni_path(&mut env, user_theme_path);
-    let theme =
-        keytao_theme::resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref());
+    let theme = android_cached_theme(default_path, user_path);
     match keytao_theme::resolved_theme_json(&theme) {
         Ok(json) => jni_string(&mut env, &json),
         Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
@@ -2256,6 +2313,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     }
     if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
         *theme_path = Some(user_theme_path);
+    }
+    if let Ok(mut theme_resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
+        *theme_resolver = None;
     }
     let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
         return 0;
@@ -2391,11 +2451,12 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeAllCand
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     session: jlong,
+    limit: jint,
 ) -> jstring {
     let Some(session) = android_session(session) else {
         return std::ptr::null_mut();
     };
-    let Some(candidates) = session.all_candidates() else {
+    let Some(candidates) = session.all_candidates_limited(limit.max(0) as usize) else {
         return std::ptr::null_mut();
     };
     jni_string(&mut env, &android_candidates_json(candidates))
