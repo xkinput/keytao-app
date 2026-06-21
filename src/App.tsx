@@ -23,6 +23,7 @@ import VirtualLogViewer from "@/components/VirtualLogViewer"
 import AndroidImeOnboarding, { type AndroidImeStatus, type AndroidStoragePermissionStatus } from "@/components/AndroidImeOnboarding"
 import {
   FolderOpen,
+  BookOpen,
   Download,
   CheckCircle2,
   AlertTriangle,
@@ -59,12 +60,18 @@ type ImeEffectiveColorScheme = "light" | "dark"
 type ImeCandidateOrientation = "horizontal" | "vertical"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
+const RIME_DICT_MANAGER_URL_SCHEME = "rime-dict"
+const DESKTOP_RIME_DICT_MANAGER_PLATFORMS: OSType[] = ["windows", "macos", "linux"]
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
 const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 
 function hasSystemIme(os: OSType): boolean {
   return os === "linux" || os === "macos" || os === "windows" || os === "android"
+}
+
+function buildRimeDictManagerUrl(dir: string): string {
+  return `${RIME_DICT_MANAGER_URL_SCHEME}://open?${new URLSearchParams({ dir }).toString()}`
 }
 
 interface AppUpdateInfo {
@@ -331,6 +338,7 @@ export default function App() {
   const [localSchemaInfo, setLocalSchemaInfo] = useState<LocalSchemaInfo | null>(null)
   const [isCheckingLocal, setIsCheckingLocal] = useState(false)
   const [isOpeningDir, setIsOpeningDir] = useState(false)
+  const [isOpeningDictManager, setIsOpeningDictManager] = useState(false)
   const [isOpeningExtDir, setIsOpeningExtDir] = useState(false)
   const [componentVersions, setComponentVersions] = useState<ComponentVersions | null>(null)
 
@@ -529,6 +537,7 @@ export default function App() {
   const systemImeAvailable = hasSystemIme(osType)
   const isMobilePlatform = osType === "android" || osType === "ios"
   const canOpenDefaultDir = osType !== "android"
+  const canOpenRimeDictManager = DESKTOP_RIME_DICT_MANAGER_PLATFORMS.includes(osType)
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
   const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
   const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
@@ -640,6 +649,18 @@ export default function App() {
       addLogs([`[OPEN DIR ERROR] ${String(e)}`])
     } finally {
       setIsOpeningDir(false)
+    }
+  }
+
+  async function handleOpenRimeDictManager() {
+    if (!defaultDir || !canOpenRimeDictManager) return
+    setIsOpeningDictManager(true)
+    try {
+      await openUrl(buildRimeDictManagerUrl(defaultDir))
+    } catch (e) {
+      addLogs([`[OPEN RIME DICT ERROR] ${String(e)}`])
+    } finally {
+      setIsOpeningDictManager(false)
     }
   }
 
@@ -1546,6 +1567,18 @@ export default function App() {
                             <FolderOpen className="h-3.5 w-3.5" />
                             {isOpeningDir ? "打开中..." : "打开目录"}
                           </Button>
+                          {canOpenRimeDictManager && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={handleOpenRimeDictManager}
+                              disabled={!defaultDir || isOpeningDictManager || isBusy}
+                              className="gap-1.5"
+                            >
+                              <BookOpen className="h-3.5 w-3.5" />
+                              {isOpeningDictManager ? "打开中..." : "词库管理器"}
+                            </Button>
+                          )}
                           <Button variant="outline" size="sm" onClick={handleDeploy} disabled={isBusy} className="gap-1.5">
                             <Play className="h-3.5 w-3.5" />
                             部署
