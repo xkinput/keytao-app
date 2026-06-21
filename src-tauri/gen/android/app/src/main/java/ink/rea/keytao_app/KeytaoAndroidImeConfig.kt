@@ -89,7 +89,7 @@ data class KeytaoAndroidImeConfig(
             return KeytaoAndroidImeConfig(
                 keyboardHeightDp = root.optInt("keyboardHeightDp", 262).coerceIn(160, 420),
                 candidateBarHeightDp = root.optInt("candidateBarHeightDp", 52).coerceIn(36, 96),
-                keyboardBottomInsetDp = root.optInt("keyboardBottomInsetDp", 34).coerceIn(0, 80),
+                keyboardBottomInsetDp = root.optInt("keyboardBottomInsetDp", 48).coerceIn(0, 80),
                 swipeThresholdDp = root.optDouble("swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
