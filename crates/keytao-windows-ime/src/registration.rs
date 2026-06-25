@@ -11,6 +11,7 @@
 use windows::{
     core::{IUnknown, Result, PCWSTR},
     Win32::{
+        Foundation::BOOL,
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
@@ -19,10 +20,12 @@ use windows::{
             RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
             KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_SZ,
         },
+        UI::Input::KeyboardAndMouse::HKL,
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
-            ITfInputProcessorProfiles, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-            GUID_TFCAT_TIPCAP_UIELEMENTENABLED, GUID_TFCAT_TIP_KEYBOARD,
+            ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+            GUID_TFCAT_TIP_KEYBOARD,
         },
     },
 };
@@ -153,6 +156,22 @@ pub fn register() -> Result<()> {
             &icon_path[..icon_path.len() - 1],
             0,
         )?;
+        if let Ok(profile_mgr) = profiles.cast::<ITfInputProcessorProfileMgr>() {
+            if let Err(e) = profile_mgr.RegisterProfile(
+                &CLSID_TEXT_SERVICE,
+                LANGID_CHINESE_SIMPLIFIED,
+                &GUID_PROFILE,
+                &profile_desc[..profile_desc.len() - 1],
+                &icon_path[..icon_path.len() - 1],
+                0,
+                HKL::default(),
+                0,
+                BOOL::from(true),
+                0,
+            ) {
+                tracing::warn!("modern TSF RegisterProfile fallback failed: {e}");
+            }
+        }
 
         // 4. Register category: keyboard TIP
         let cat_mgr: ITfCategoryMgr = CoCreateInstance(
@@ -166,6 +185,23 @@ pub fn register() -> Result<()> {
             GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
         ] {
             cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE)?;
+        }
+
+        // 5. AddLanguageProfile records the profile, but the input switcher only
+        // offers profiles that are enabled for the current user.
+        profiles.EnableLanguageProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+            BOOL::from(true),
+        )?;
+        if let Err(e) = profiles.EnableLanguageProfileByDefault(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+            BOOL::from(true),
+        ) {
+            tracing::warn!("failed to enable KeyTao profile by default: {e}");
         }
     }
 
@@ -185,6 +221,14 @@ pub fn unregister() -> Result<()> {
             CLSCTX_INPROC_SERVER,
         );
         if let Ok(profiles) = profiles {
+            if let Ok(profile_mgr) = profiles.cast::<ITfInputProcessorProfileMgr>() {
+                let _ = profile_mgr.UnregisterProfile(
+                    &CLSID_TEXT_SERVICE,
+                    LANGID_CHINESE_SIMPLIFIED,
+                    &GUID_PROFILE,
+                    0,
+                );
+            }
             let _ = profiles.RemoveLanguageProfile(
                 &CLSID_TEXT_SERVICE,
                 LANGID_CHINESE_SIMPLIFIED,

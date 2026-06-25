@@ -252,9 +252,9 @@ impl PanelRenderer {
             width as f32 - 1.0,
             height as f32 - 1.0,
             theme.mode_hint.corner_radius,
-            theme.mode_hint.background,
-            theme.panel.border_color,
-            theme.panel.border_width,
+            theme.candidate.selected_background,
+            theme.candidate.selected_border_color,
+            theme.candidate.border_width.max(1.0),
         );
 
         let x = (width as f32 - text_width) * 0.5;
@@ -264,7 +264,12 @@ impl PanelRenderer {
             &label,
             x,
             baseline,
-            bgra(theme.mode_hint.foreground),
+            bgra(RgbaColor {
+                red: 0xff,
+                green: 0xff,
+                blue: 0xff,
+                alpha: 0xff,
+            }),
             font_size,
         );
 

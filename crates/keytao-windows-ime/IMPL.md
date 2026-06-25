@@ -23,8 +23,12 @@ Windows 输入法实现为 TSF TIP DLL：
 2. 设置 `ThreadingModel=Apartment`。
 3. 调用 `ITfInputProcessorProfiles::Register`。
 4. 调用 `AddLanguageProfile` 注册 `KeyTao` profile。
-5. 调用 `ITfCategoryMgr::RegisterCategory` 标记为 keyboard TIP。
-6. 注册 immersive support 和 UI element enabled 能力。
+5. 调用 `ITfInputProcessorProfileMgr::RegisterProfile` 补齐现代 TSF profile 注册，并设置默认启用。
+6. 调用 `ITfCategoryMgr::RegisterCategory` 标记为 keyboard TIP。
+7. 注册 immersive support 和 UI element enabled 能力。
+8. 调用 `EnableLanguageProfile` / `EnableLanguageProfileByDefault` 启用当前用户和默认语言 profile。
+
+只写入 CLSID / InprocServer32 代表 COM server 已注册，但不代表用户语言 profile 已启用；Windows 输入切换器只会切到已启用的 TSF language profile。
 
 `DllUnregisterServer` 会反向移除 TSF profile、category 和 CLSID 注册表树。
 

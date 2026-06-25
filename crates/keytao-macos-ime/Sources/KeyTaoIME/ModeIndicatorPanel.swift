@@ -75,10 +75,12 @@ final class ModeIndicatorPanel: NSPanel {
 
     private func apply(_ theme: ImeTheme) {
         hasShadow = theme.modeHint.shadow
-        containerView.layer?.backgroundColor = theme.modeHint.background.cgColor
+        containerView.layer?.backgroundColor = theme.candidate.selectedBackground.cgColor
+        containerView.layer?.borderColor = theme.candidate.selectedBorderColor.cgColor
+        containerView.layer?.borderWidth = max(theme.candidate.borderWidth, 1)
         containerView.layer?.cornerRadius = theme.modeHint.cornerRadius
         label.font = .systemFont(ofSize: theme.modeHint.fontSize, weight: .semibold)
-        label.textColor = theme.modeHint.foreground.nsColor
+        label.textColor = ThemeColor(red: 0xFF, green: 0xFF, blue: 0xFF, alpha: 0xFF).nsColor
     }
 }
 
