@@ -952,10 +952,13 @@ fn windows_init_com_apartment() -> Result<WindowsComApartment, String> {
         System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED},
     };
 
-    match unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) } {
-        Ok(()) => Ok(WindowsComApartment(true)),
-        Err(e) if e.code() == RPC_E_CHANGED_MODE => Ok(WindowsComApartment(false)),
-        Err(e) => Err(format!("initialize COM apartment: {e}")),
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if hr.is_ok() {
+        Ok(WindowsComApartment(true))
+    } else if hr == RPC_E_CHANGED_MODE {
+        Ok(WindowsComApartment(false))
+    } else {
+        Err(format!("initialize COM apartment: {}", hr.message()))
     }
 }
 
