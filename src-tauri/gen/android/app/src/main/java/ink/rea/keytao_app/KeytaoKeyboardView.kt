@@ -33,7 +33,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onRequestClipboardHistory(callback: (List<String>) -> Unit)
     }
 
-    private data class KeyRect(val spec: KeySpec, val rect: RectF)
+    private data class KeyRect(val spec: KeySpec, val rect: RectF, val sticky: Boolean = false)
     private data class ActiveRowSpan(val weight: Float, var remainingRows: Int)
     private data class KeyTouch(
         val key: KeyRect,
@@ -114,6 +114,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var recentClipboardSuggestion: String? = null
     private var expandedCandidateScrollY = 0f
     private var expandedCandidateContentHeight = 0f
+    private var keyboardScrollY = 0f
+    private var keyboardDownY = 0f
+    private var keyboardDownScrollY = 0f
+    private var keyboardDragging = false
+    private var keyboardScrollTouchActive = false
+    private var keyboardScrollContentHeight = 0f
+    private var keyboardScrollViewportHeight = 0f
+    private var keyboardScrollViewportTop = 0f
+    private var keyboardScrollViewportBottom = 0f
     private var pendingExpandedCandidateLoad: Runnable? = null
     private val candidateWidthCache = mutableMapOf<String, Float>()
     private var expandedCandidateItemsCacheSignature = ""
@@ -164,8 +173,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         override fun run() {
             val pointerId = repeatingPointerId ?: return
             val key = repeatingKey ?: return
-            val touch = activeKeyTouches[pointerId] ?: return
-            if (touch.key.spec != key.spec) return
+            val touch = activeKeyTouches[pointerId]
+            if (touch == null || touch.key.spec != key.spec || touch.backspaceGestureConsumed) {
+                stopLongPressAndRepeat(pointerId)
+                return
+            }
             val command = resolveCommand(key.spec, 0f, key.rect, key.rect.centerY())
             clearRecentClipboardSuggestionForCommand(command)
             listener?.onKeyCommand(command)
@@ -187,6 +199,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         config = next
         invalidateKeyboardLayoutCache()
         invalidateExpandedCandidateItemsCache()
+        resetKeyboardScroll()
         resetCandidateTouch()
         resetCandidateScroll()
         requestLayout()
@@ -282,6 +295,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         toolbarTouchActive = false
         stopLongPressAndRepeat()
         resetExpandedCandidateScroll()
+        resetKeyboardScroll()
         if (changed) startContentTransition()
         invalidate()
     }
@@ -308,7 +322,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
-        val desiredHeight = dp(config.keyboardHeightDp + config.candidateBarHeightDp + config.keyboardBottomInsetDp).toInt()
+        val desiredHeight = dp(config.keyboardHeightDp + config.candidateBarHeightDp + effectiveKeyboardBottomInsetDp()).toInt()
         val resolvedHeight = resolveSize(desiredHeight, heightMeasureSpec)
         setMeasuredDimension(width, resolvedHeight)
     }
@@ -336,6 +350,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    override fun onDetachedFromWindow() {
+        clearActiveKeyTouches()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        if (visibility != VISIBLE) {
+            clearActiveKeyTouches()
+        }
+        super.onWindowVisibilityChanged(visibility)
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -361,6 +387,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 expandedTouchActive = !candidateTouchActive && !candidateExpandPressed && isInExpandedCandidatePanel(event.y)
                 candidateDragging = false
                 expandedDragging = false
+                keyboardDownY = event.y
+                keyboardDownScrollY = keyboardScrollY
+                keyboardDragging = false
+                keyboardScrollTouchActive = !candidateTouchActive &&
+                    !toolbarTouchActive &&
+                    !candidateExpandPressed &&
+                    !expandedTouchActive &&
+                    usesCategorizedSymbolKeyboard() &&
+                    maxKeyboardScroll() > 0f &&
+                    event.y >= keyboardScrollViewportTop &&
+                    event.y < keyboardScrollViewportBottom
                 stopLongPressAndRepeat()
                 pressedExpandedCandidate = if (expandedTouchActive) findExpandedCandidate(event.x, event.y) else null
                 pressedKey = null
@@ -433,6 +470,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     }
                     return true
                 }
+                if (keyboardScrollTouchActive) {
+                    val deltaY = event.y - keyboardDownY
+                    if (!keyboardDragging && abs(deltaY) > touchSlop) {
+                        keyboardDragging = true
+                        stopLongPressAndRepeat()
+                        clearActiveKeyTouches()
+                    }
+                    if (keyboardDragging) {
+                        keyboardScrollY = (keyboardDownScrollY - deltaY).coerceIn(0f, maxKeyboardScroll())
+                        invalidateKeyboardLayoutCache()
+                        invalidate()
+                    }
+                    return true
+                }
                 if (activeKeyTouches.isNotEmpty()) {
                     updateKeyTouchMove(event)
                     return true
@@ -502,6 +553,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     invalidate()
                     return true
                 }
+                if (keyboardScrollTouchActive) {
+                    val wasDragging = keyboardDragging
+                    keyboardScrollTouchActive = false
+                    keyboardDragging = false
+                    if (wasDragging) {
+                        clearActiveKeyTouches()
+                        invalidate()
+                        return true
+                    }
+                }
                 val pointerId = event.getPointerId(event.actionIndex)
                 if (finishKeyTouch(pointerId, event.x, event.y)) {
                     invalidate()
@@ -516,6 +577,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 clearActiveKeyTouches()
                 resetCandidateTouch()
                 resetExpandedCandidateTouch()
+                keyboardScrollTouchActive = false
+                keyboardDragging = false
                 pressedToolbar = null
                 toolbarTouchActive = false
                 candidateExpandPressed = false
@@ -570,6 +633,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (functionPanelActive) {
             resetCandidateScroll()
             drawFunctionPanelBar(canvas, barHeight, leftPadding)
+            return
+        }
+
+        if (usesFullHeightSymbolKeyboard()) {
+            resetCandidateScroll()
+            toolbarRects = emptyList()
+            candidateRects = emptyList()
+            candidateExpandRect = null
             return
         }
 
@@ -892,8 +963,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (textWidth > 0f) segmentCount++
         if (commentWidth > 0f) segmentCount++
         val textGaps = segmentCount.minus(1).coerceAtLeast(0).toFloat() * inlineGap
-        val selectedAccentSpace = if (item.selected) dp(4f) else 0f
-        val width = labelWidth + textWidth + commentWidth + textGaps + selectedAccentSpace + dp(candidatePaddingXDp() * 2)
+        val width = labelWidth + textWidth + commentWidth + textGaps + dp(candidatePaddingXDp() * 2)
         candidateWidthCache[cacheKey] = width
         return width
     }
@@ -972,20 +1042,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawRoundRect(rect, radius, radius, paint)
         }
 
-        if (item.selected) {
-            paint.style = Paint.Style.FILL
-            paint.color = theme.selectedLabelColor.toArgb()
-            val accent = RectF(
-                rect.left + dp(5f),
-                rect.top + dp(6f),
-                rect.left + dp(8f),
-                rect.bottom - dp(6f),
-            )
-            canvas.drawRoundRect(accent, dp(2f), dp(2f), paint)
-        }
-
         textPaint.textAlign = Paint.Align.LEFT
-        var textX = rect.left + dp(candidatePaddingXDp()) + if (item.selected) dp(4f) else 0f
+        var textX = rect.left + dp(candidatePaddingXDp())
         val inlineGap = dp(candidateInlineGapDp())
         canvas.save()
         canvas.clipRect(rect.left + dp(4f), rect.top, rect.right - dp(4f), rect.bottom)
@@ -1337,9 +1395,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val layout = keyboardLayout()
         val top = keyboardTop()
         drawContentLayer(canvas, top) {
-            for (keyRect in layout) {
-                val pressed = pressedKey?.spec == keyRect.spec
-                drawKey(canvas, keyRect.spec, keyRect.rect, pressed, pressedStackIndexFor(keyRect))
+            if (usesCategorizedSymbolKeyboard(activeRows())) {
+                canvas.save()
+                canvas.clipRect(0f, keyboardScrollViewportTop, width.toFloat(), keyboardScrollViewportBottom)
+                for (keyRect in layout) {
+                    if (keyRect.sticky) continue
+                    val pressed = pressedKey?.spec == keyRect.spec
+                    drawKey(canvas, keyRect.spec, keyRect.rect, pressed, pressedStackIndexFor(keyRect))
+                }
+                canvas.restore()
+                for (keyRect in layout) {
+                    if (!keyRect.sticky) continue
+                    val pressed = pressedKey?.spec == keyRect.spec
+                    drawKey(canvas, keyRect.spec, keyRect.rect, pressed, pressedStackIndexFor(keyRect))
+                }
+            } else {
+                for (keyRect in layout) {
+                    val pressed = pressedKey?.spec == keyRect.spec
+                    drawKey(canvas, keyRect.spec, keyRect.rect, pressed, pressedStackIndexFor(keyRect))
+                }
             }
         }
 
@@ -1545,60 +1619,102 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val rows = activeRows()
         val rowCount = rows.size.coerceAtLeast(1)
         val availableHeight = (bottom - top).coerceAtLeast(0f)
-        val naturalRowHeight = ((availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
-            .coerceAtLeast(dp(36f))
-        val rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
-        val verticalGap = ((availableHeight - rowHeight * rowCount) / (rowCount + 1))
-            .coerceAtLeast(verticalGapFloor)
         val nextRects = mutableListOf<KeyRect>()
-
         val maximumRowWidth = (width - keyboardOuterInset() * 2f).coerceAtLeast(1f)
         val referenceUnitWidth = keyboardReferenceUnitWidth(rows, horizontalGap)
-        var y = top + verticalGap
-        var activeLeadingSpans = mutableListOf<ActiveRowSpan>()
-        for ((rowIndex, row) in rows.withIndex()) {
-            if (row.isEmpty()) {
-                activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
-                y += rowHeight + verticalGap
-                continue
-            }
-            val leadingWeight = activeLeadingSpans.sumOf { it.weight.toDouble() }.toFloat()
-            val totalWeight = (leadingWeight + rowWeight(row)).coerceAtLeast(1f)
-            val effectiveKeyCount = activeLeadingSpans.size + row.size
-            val gapWidth = horizontalGap * (effectiveKeyCount - 1).coerceAtLeast(0)
-            val rowWidth = keyboardRowWidth(
-                row = row,
-                rowIndex = rowIndex,
-                rows = rows,
-                referenceUnitWidth = referenceUnitWidth,
-                horizontalGap = horizontalGap,
-                maximumRowWidth = maximumRowWidth,
-                effectiveKeyCount = effectiveKeyCount,
-                effectiveWeight = totalWeight,
-            )
-            val unitWidth = ((rowWidth - gapWidth) / totalWeight).coerceAtLeast(1f)
-            var x = (width - rowWidth) / 2f
-            for (span in activeLeadingSpans) {
-                x += unitWidth * span.weight + horizontalGap
-            }
-            val nextLeadingSpans = mutableListOf<ActiveRowSpan>()
-            var acceptingLeadingSpan = true
-            for (key in row) {
-                val keyWidth = unitWidth * key.weight
-                val spanRows = keyRowSpan(key)
-                val keyHeight = rowHeight * spanRows + verticalGap * (spanRows - 1)
-                val rect = RectF(x, y, x + keyWidth, y + keyHeight)
-                nextRects.add(KeyRect(key, rect))
-                if (acceptingLeadingSpan && spanRows > 1) {
-                    nextLeadingSpans.add(ActiveRowSpan(key.weight, spanRows - 1))
-                } else {
-                    acceptingLeadingSpan = false
+
+        fun appendRows(
+            layoutRows: List<List<KeySpec>>,
+            rowIndexOffset: Int,
+            startY: Float,
+            rowHeight: Float,
+            verticalGap: Float,
+            sticky: Boolean,
+        ): Float {
+            var y = startY
+            var activeLeadingSpans = mutableListOf<ActiveRowSpan>()
+            for ((localRowIndex, row) in layoutRows.withIndex()) {
+                val rowIndex = rowIndexOffset + localRowIndex
+                if (row.isEmpty()) {
+                    activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                    y += rowHeight + verticalGap
+                    continue
                 }
-                x = rect.right + horizontalGap
+                val leadingWeight = activeLeadingSpans.sumOf { it.weight.toDouble() }.toFloat()
+                val totalWeight = (leadingWeight + rowWeight(row)).coerceAtLeast(1f)
+                val effectiveKeyCount = activeLeadingSpans.size + row.size
+                val gapWidth = horizontalGap * (effectiveKeyCount - 1).coerceAtLeast(0)
+                val rowWidth = keyboardRowWidth(
+                    row = row,
+                    rowIndex = rowIndex,
+                    rows = rows,
+                    referenceUnitWidth = referenceUnitWidth,
+                    horizontalGap = horizontalGap,
+                    maximumRowWidth = maximumRowWidth,
+                    effectiveKeyCount = effectiveKeyCount,
+                    effectiveWeight = totalWeight,
+                )
+                val unitWidth = ((rowWidth - gapWidth) / totalWeight).coerceAtLeast(1f)
+                var x = (width - rowWidth) / 2f
+                for (span in activeLeadingSpans) {
+                    x += unitWidth * span.weight + horizontalGap
+                }
+                val nextLeadingSpans = mutableListOf<ActiveRowSpan>()
+                var acceptingLeadingSpan = true
+                for (key in row) {
+                    val keyWidth = unitWidth * key.weight
+                    val spanRows = keyRowSpan(key)
+                    val keyHeight = rowHeight * spanRows + verticalGap * (spanRows - 1)
+                    val rect = RectF(x, y, x + keyWidth, y + keyHeight)
+                    nextRects.add(KeyRect(key, rect, sticky = sticky))
+                    if (acceptingLeadingSpan && spanRows > 1) {
+                        nextLeadingSpans.add(ActiveRowSpan(key.weight, spanRows - 1))
+                    } else {
+                        acceptingLeadingSpan = false
+                    }
+                    x = rect.right + horizontalGap
+                }
+                activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                activeLeadingSpans.addAll(nextLeadingSpans)
+                y += rowHeight + verticalGap
             }
-            activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
-            activeLeadingSpans.addAll(nextLeadingSpans)
-            y += rowHeight + verticalGap
+            return y
+        }
+
+        if (usesCategorizedSymbolKeyboard(rows)) {
+            val targetVisibleRows = min(5, rowCount)
+            val rowHeight = min(
+                ((availableHeight - verticalGapFloor * (targetVisibleRows + 1)) / targetVisibleRows)
+                    .coerceAtLeast(dp(40f)),
+                keyboardMaxKeyHeight(),
+            )
+            val verticalGap = verticalGapFloor
+            val headerRow = rows.take(1)
+            val bodyRows = rows.drop(1).dropLast(1)
+            val footerRow = rows.takeLast(1)
+            val headerTop = top + verticalGap
+            val footerTop = bottom - verticalGap - rowHeight
+            keyboardScrollViewportTop = headerTop + rowHeight + verticalGap
+            keyboardScrollViewportBottom = (footerTop - verticalGap).coerceAtLeast(keyboardScrollViewportTop)
+            keyboardScrollViewportHeight = (keyboardScrollViewportBottom - keyboardScrollViewportTop).coerceAtLeast(0f)
+            keyboardScrollContentHeight = (bodyRows.size * rowHeight + (bodyRows.size - 1).coerceAtLeast(0) * verticalGap)
+                .coerceAtLeast(0f)
+            keyboardScrollY = keyboardScrollY.coerceIn(0f, maxKeyboardScroll())
+            appendRows(headerRow, 0, headerTop, rowHeight, verticalGap, sticky = true)
+            appendRows(bodyRows, 1, keyboardScrollViewportTop - keyboardScrollY, rowHeight, verticalGap, sticky = false)
+            appendRows(footerRow, rows.lastIndex, footerTop, rowHeight, verticalGap, sticky = true)
+        } else {
+            val naturalRowHeight = ((availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
+                .coerceAtLeast(dp(36f))
+            val rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
+            val verticalGap = ((availableHeight - rowHeight * rowCount) / (rowCount + 1))
+                .coerceAtLeast(verticalGapFloor)
+            keyboardScrollY = 0f
+            keyboardScrollContentHeight = availableHeight
+            keyboardScrollViewportHeight = availableHeight
+            keyboardScrollViewportTop = top
+            keyboardScrollViewportBottom = bottom
+            appendRows(rows, 0, top + verticalGap, rowHeight, verticalGap, sticky = false)
         }
 
         keyboardLayoutCache = KeyboardLayoutCache(signature, nextRects)
@@ -1619,6 +1735,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(':')
             append(config.keyboardBottomInsetDp)
             append(':')
+            append(effectiveKeyboardBottomInsetDp())
+            append(':')
             append(config.horizontalGapDp)
             append(':')
             append(config.verticalGapDp)
@@ -1638,6 +1756,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(theme.commentSizeSp)
             append('|')
             append(activeRows().hashCode())
+            append('|')
+            append(keyboardScrollY.roundToInt())
         }
     }
 
@@ -1646,6 +1766,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun actionForMode(key: KeySpec): KeyCommand {
+        if (keyboardLayer.isSymbolLayer() && key.action.isTextInputCommand()) {
+            return KeyCommand.directInput(valueForMode(key))
+        }
         if (state.asciiMode) {
             key.asciiAction?.let { return it }
             key.asciiValue?.let { return KeyCommand.input(it) }
@@ -1696,6 +1819,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun actionForMode(item: KeyStackItem): KeyCommand {
+        if (keyboardLayer.isSymbolLayer() && item.isTextInputItem()) {
+            return KeyCommand.directInput(valueForMode(item))
+        }
         if (state.asciiMode) {
             item.asciiAction?.let { return it }
             item.asciiValue?.let { return KeyCommand.input(it) }
@@ -1731,6 +1857,27 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         } else {
             key.value
         }
+    }
+
+    private fun valueForMode(item: KeyStackItem): String {
+        val value = item.value ?: item.label
+        return if (state.asciiMode) {
+            item.asciiValue ?: value
+        } else {
+            value
+        }
+    }
+
+    private fun KeyCommand.isTextInputCommand(): Boolean {
+        return type == KeyCommandTypes.INPUT || type == KeyCommandTypes.RIME_INPUT || type == KeyCommandTypes.DIRECT_INPUT
+    }
+
+    private fun KeyStackItem.isTextInputItem(): Boolean {
+        val actionType = action?.type
+        return actionType == null ||
+            actionType == KeyCommandTypes.INPUT ||
+            actionType == KeyCommandTypes.RIME_INPUT ||
+            actionType == KeyCommandTypes.DIRECT_INPUT
     }
 
     private fun toolbarActions(): List<ToolbarAction> {
@@ -1790,6 +1937,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return candidatePanelExpanded && y >= top && y < keyboardBottom()
     }
 
+    private fun usesFullHeightSymbolKeyboard(): Boolean {
+        return keyboardLayer.isSymbolLayer() && !candidatePanelExpanded && !functionPanelActive
+    }
+
+    private fun String.isSymbolLayer(): Boolean {
+        return this == "symbols" || startsWith("symbols_")
+    }
+
+    private fun usesCategorizedSymbolKeyboard(rows: List<List<KeySpec>> = activeRows()): Boolean {
+        return usesFullHeightSymbolKeyboard() && rows.size >= 3
+    }
+
+    private fun usesScrollableSymbolKeyboard(rows: List<List<KeySpec>> = activeRows()): Boolean {
+        return usesCategorizedSymbolKeyboard(rows) && rows.size > 5
+    }
+
     private fun expandedCandidatePanelHeight(): Float {
         return if (candidatePanelExpanded && (functionPanelActive || state.candidatePanel.candidates.isNotEmpty() || expandedCandidatesLoading)) {
             (keyboardBottom() - dp(config.candidateBarHeightDp)).coerceAtLeast(0f)
@@ -1799,6 +1962,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyboardTop(): Float {
+        if (usesFullHeightSymbolKeyboard()) return 0f
         return dp(config.candidateBarHeightDp)
     }
 
@@ -1807,10 +1971,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun bottomReservedInset(): Float {
-        val requested = min(dp(config.keyboardBottomInsetDp), dp(28f))
+        val requested = min(dp(effectiveKeyboardBottomInsetDp()), dp(64f))
         val minKeyboardContentHeight = dp(180f)
         val available = (height.toFloat() - keyboardTop() - minKeyboardContentHeight).coerceAtLeast(0f)
         return min(requested, available)
+    }
+
+    private fun effectiveKeyboardBottomInsetDp(): Int {
+        return config.keyboardBottomInsetDp.takeIf { it > 0 } ?: androidSystemBottomInsetDp
     }
 
     private fun toggleCandidatePanel() {
@@ -2007,8 +2175,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidateContentHeight = expandedCandidatePanelHeight()
     }
 
+    private fun resetKeyboardScroll() {
+        keyboardScrollY = 0f
+        keyboardDownY = 0f
+        keyboardDownScrollY = 0f
+        keyboardDragging = false
+        keyboardScrollTouchActive = false
+        keyboardScrollContentHeight = 0f
+        keyboardScrollViewportHeight = 0f
+        keyboardScrollViewportTop = keyboardTop()
+        keyboardScrollViewportBottom = keyboardBottom()
+        invalidateKeyboardLayoutCache()
+    }
+
     private fun maxCandidateScroll(): Float {
         return max(0f, candidateContentWidth - width.toFloat())
+    }
+
+    private fun maxKeyboardScroll(): Float {
+        return max(0f, keyboardScrollContentHeight - keyboardScrollViewportHeight)
     }
 
     private fun coerceCandidateScroll() {
@@ -2117,10 +2302,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 ?: activeKeyTouches.keys.firstOrNull()
         }
         refreshPressedKey()
-        if (handleBackspaceRelease(touch, x, y)) {
+        if (touch.backspaceGestureConsumed) {
+            handleBackspaceDrag(touch, pointerId, x, y, final = true)
             return true
         }
-        if (touch.backspaceGestureConsumed) {
+        if (handleBackspaceRelease(touch, x, y)) {
             return true
         }
         if (shouldAcceptKeyRelease(touch, x, y) && !touch.longPressConsumed) {
@@ -2134,6 +2320,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun clearActiveKeyTouches() {
+        stopLongPressAndRepeat()
         activeKeyTouches.clear()
         primaryKeyPointerId = null
         repeatingPointerId = null
@@ -2160,7 +2347,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return actionForMode(key).type == KeyCommandTypes.BACKSPACE
     }
 
-    private fun handleBackspaceDrag(touch: KeyTouch, pointerId: Int, x: Float, y: Float): Boolean {
+    private fun handleBackspaceDrag(
+        touch: KeyTouch,
+        pointerId: Int,
+        x: Float,
+        y: Float,
+        final: Boolean = false,
+    ): Boolean {
         if (!isBackspaceKey(touch.key.spec)) return false
         val deltaX = x - touch.downX
         val deltaY = y - touch.downY
@@ -2176,16 +2369,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val stepWidth = max(dp(8f), touch.key.rect.width() * 0.22f)
         val moved = max(0f, abs(deltaX) - threshold)
         val stepCount = max(1, (moved / stepWidth).toInt() + 1)
-        val targetUnits = if (deltaX < 0f) stepCount else -stepCount
+        val targetUnits = (if (deltaX < 0f) stepCount else -stepCount)
+            .coerceIn(-maxBackspaceGestureUnitsPerGesture, maxBackspaceGestureUnitsPerGesture)
         val deltaUnits = targetUnits - touch.backspaceGestureUnits
         if (deltaUnits == 0) return true
 
         val action = if (deltaUnits > 0) "delete" else "restore"
-        repeat(abs(deltaUnits)) {
-            listener?.onKeyCommand(backspaceGestureCommand(action))
-        }
+        listener?.onKeyCommand(backspaceGestureCommand(action, abs(deltaUnits)))
         touch.backspaceGestureUnits = targetUnits
-        performConfiguredHaptic()
+        if (!final) performConfiguredHaptic()
         return true
     }
 
@@ -2203,8 +2395,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return true
     }
 
-    private fun backspaceGestureCommand(action: String): KeyCommand {
-        return KeyCommand(KeyCommandTypes.BACKSPACE_GESTURE, action)
+    private fun backspaceGestureCommand(action: String, count: Int = 1): KeyCommand {
+        return KeyCommand(KeyCommandTypes.BACKSPACE_GESTURE, action, count.coerceAtLeast(1).toString())
     }
 
     private fun isBackspaceKey(key: KeySpec): Boolean {
@@ -2225,14 +2417,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         longPressHandler.removeCallbacks(longPressRunnable)
         val spec = key?.spec ?: return
         if (primaryKeyPointerId != pointerId) return
-        val hasLongPressAction = spec.longPress != null || !spec.hint.isNullOrBlank()
+        val hasLongPressAction = spec.longPress != null || !spec.hint.isNullOrBlank() || isRepeatableKey(spec)
         if (hasLongPressAction) {
             longPressHandler.postDelayed(longPressRunnable, longPressDelayMs)
         }
     }
 
     private fun findKey(x: Float, y: Float): KeyRect? {
-        return keyRects.firstOrNull { it.rect.contains(x, y) }
+        return keyRects.firstOrNull { key ->
+            val insideVisibleScrollArea = key.sticky ||
+                !usesCategorizedSymbolKeyboard() ||
+                (y >= keyboardScrollViewportTop && y < keyboardScrollViewportBottom)
+            insideVisibleScrollArea && key.rect.contains(x, y)
+        }
     }
 
     private fun findCandidate(x: Float, y: Float): CandidateRect? {
@@ -2518,8 +2715,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     companion object {
         private const val longPressDelayMs = 420L
         private const val backspaceRepeatIntervalMs = 72L
+        private const val maxBackspaceGestureUnitsPerGesture = 96
         private const val contentTransitionDurationMs = 140L
         private const val expandedCandidateLoadDelayMs = 180L
+        private const val androidSystemBottomInsetDp = 48
         private val whitespaceRegex = Regex("\\s+")
         private val emojiChoices = listOf(
             "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",

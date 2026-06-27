@@ -91,6 +91,15 @@ numberRows:
 
 symbolRows:
   - [
+      { label: "中文", style: "accent", action: { type: keyboardMode, value: symbols } },
+      { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+      { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+      { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+      { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+      { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+      { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+    ]
+  - [
       { label: "【", value: "【", asciiLabel: "[", asciiValue: "[", rimeValue: ";k" },
       { label: "】", value: "】", asciiLabel: "]", asciiValue: "]", rimeValue: ";l" },
       { label: "《", value: "《", asciiLabel: "<", asciiValue: "<", rimeValue: ";u" },
@@ -115,19 +124,319 @@ symbolRows:
       { label: "”", value: "”", asciiLabel: "'", asciiValue: "'", rimeValue: ";g" }
     ]
   - [
-      { label: "123", weight: 1.35, action: { type: keyboardMode, value: numbers } },
+      { label: "『", value: "『" },
+      { label: "』", value: "』" },
+      { label: "「", value: "「" },
+      { label: "」", value: "」" },
+      { label: "〔", value: "〔" },
+      { label: "〕", value: "〕" },
+      { label: "〈", value: "〈" },
+      { label: "〉", value: "〉" },
+      { label: "—", value: "—", asciiLabel: "_", asciiValue: "_" },
+      { label: "…", value: "…", asciiLabel: "...", asciiValue: "...", rimeValue: ";s" }
+    ]
+  - [
       { label: "，", value: "，", asciiLabel: ",", asciiValue: "," },
       { label: "。", value: "。", asciiLabel: ".", asciiValue: "." },
       { label: "、", value: "、", asciiLabel: "/", asciiValue: "/", rimeValue: ";d" },
-      { label: "…", value: "…", asciiLabel: "...", asciiValue: "...", rimeValue: ";s" },
-      { label: "⌫", weight: 1.35, action: { type: backspace } }
+      { label: "：", value: "：" },
+      { label: "；", value: "；" },
+      { label: "？", value: "？", asciiLabel: "?", asciiValue: "?", rimeValue: ";w" },
+      { label: "！", value: "！", asciiLabel: "!", asciiValue: "!", rimeValue: ";t" },
+      { label: "·", value: "·", rimeValue: ";o" },
+      { label: "～", value: "～" },
+      { label: "￥", value: "￥" }
     ]
   - [
-      { label: "ABC", weight: 1.35, action: { type: keyboardMode, value: letters } },
-      { label: "空格", weight: 4.4, action: { type: space } },
-      { label: "↵", weight: 1.35, action: { type: enter } }
+      { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+      { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+      { label: "空格", weight: 4.6, action: { type: space } },
+      { label: "⌫", weight: 1.15, action: { type: backspace } },
+      { label: "↵", weight: 1.15, action: { type: enter } }
     ]
 
 # Extra custom keyboard pages. A key can jump here with
 # action: { type: keyboardMode, value: myPage }.
-layers: {}
+layers:
+  symbols_en:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", style: "accent", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "[", value: "[" },
+        { label: "]", value: "]" },
+        { label: "{", value: "{" },
+        { label: "}", value: "}" },
+        { label: "<", value: "<" },
+        { label: ">", value: ">" },
+        { label: "(", value: "(" },
+        { label: ")", value: ")" },
+        { label: "\"", value: "\"" },
+        { label: "'", value: "'" }
+      ]
+    - [
+        { label: "!", value: "!" },
+        { label: "?", value: "?" },
+        { label: ",", value: "," },
+        { label: ".", value: "." },
+        { label: ":", value: ":" },
+        { label: ";", value: ";" },
+        { label: "/", value: "/" },
+        { label: "\\", value: "\\" },
+        { label: "`", value: "`" },
+        { label: "~", value: "~" }
+      ]
+    - [
+        { label: "@", value: "@" },
+        { label: "#", value: "#" },
+        { label: "$", value: "$" },
+        { label: "%", value: "%" },
+        { label: "&", value: "&" },
+        { label: "*", value: "*" },
+        { label: "+", value: "+" },
+        { label: "-", value: "-" },
+        { label: "=", value: "=" },
+        { label: "_", value: "_" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "Space", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]
+  symbols_math:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", style: "accent", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "+", value: "+" },
+        { label: "-", value: "-" },
+        { label: "×", value: "×" },
+        { label: "÷", value: "÷" },
+        { label: "=", value: "=" },
+        { label: "≠", value: "≠" },
+        { label: "≈", value: "≈" },
+        { label: "≤", value: "≤" },
+        { label: "≥", value: "≥" },
+        { label: "%", value: "%" }
+      ]
+    - [
+        { label: "±", value: "±" },
+        { label: "√", value: "√" },
+        { label: "∞", value: "∞" },
+        { label: "∑", value: "∑" },
+        { label: "∫", value: "∫" },
+        { label: "π", value: "π" },
+        { label: "∂", value: "∂" },
+        { label: "∆", value: "∆" },
+        { label: "∈", value: "∈" },
+        { label: "∉", value: "∉" }
+      ]
+    - [
+        { label: "∧", value: "∧" },
+        { label: "∨", value: "∨" },
+        { label: "∩", value: "∩" },
+        { label: "∪", value: "∪" },
+        { label: "⊂", value: "⊂" },
+        { label: "⊃", value: "⊃" },
+        { label: "⊆", value: "⊆" },
+        { label: "⊇", value: "⊇" },
+        { label: "°", value: "°" },
+        { label: "‰", value: "‰" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "空格", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]
+  symbols_currency:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", style: "accent", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "￥", value: "￥" },
+        { label: "¥", value: "¥" },
+        { label: "$", value: "$" },
+        { label: "€", value: "€" },
+        { label: "£", value: "£" },
+        { label: "¢", value: "¢" },
+        { label: "₩", value: "₩" },
+        { label: "₽", value: "₽" },
+        { label: "₹", value: "₹" },
+        { label: "₿", value: "₿" }
+      ]
+    - [
+        { label: "₫", value: "₫" },
+        { label: "₭", value: "₭" },
+        { label: "₦", value: "₦" },
+        { label: "₱", value: "₱" },
+        { label: "₪", value: "₪" },
+        { label: "₮", value: "₮" },
+        { label: "₴", value: "₴" },
+        { label: "₲", value: "₲" },
+        { label: "₡", value: "₡" },
+        { label: "¤", value: "¤" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "空格", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]
+  symbols_arrows:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", style: "accent", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "←", value: "←" },
+        { label: "→", value: "→" },
+        { label: "↑", value: "↑" },
+        { label: "↓", value: "↓" },
+        { label: "↔", value: "↔" },
+        { label: "↕", value: "↕" },
+        { label: "↖", value: "↖" },
+        { label: "↗", value: "↗" },
+        { label: "↙", value: "↙" },
+        { label: "↘", value: "↘" }
+      ]
+    - [
+        { label: "⇐", value: "⇐" },
+        { label: "⇒", value: "⇒" },
+        { label: "⇑", value: "⇑" },
+        { label: "⇓", value: "⇓" },
+        { label: "⇔", value: "⇔" },
+        { label: "⇕", value: "⇕" },
+        { label: "↩", value: "↩" },
+        { label: "↪", value: "↪" },
+        { label: "↺", value: "↺" },
+        { label: "↻", value: "↻" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "空格", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]
+  symbols_numbers:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", style: "accent", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "①", value: "①" },
+        { label: "②", value: "②" },
+        { label: "③", value: "③" },
+        { label: "④", value: "④" },
+        { label: "⑤", value: "⑤" },
+        { label: "⑥", value: "⑥" },
+        { label: "⑦", value: "⑦" },
+        { label: "⑧", value: "⑧" },
+        { label: "⑨", value: "⑨" },
+        { label: "⑩", value: "⑩" }
+      ]
+    - [
+        { label: "⑴", value: "⑴" },
+        { label: "⑵", value: "⑵" },
+        { label: "⑶", value: "⑶" },
+        { label: "⑷", value: "⑷" },
+        { label: "⑸", value: "⑸" },
+        { label: "Ⅰ", value: "Ⅰ" },
+        { label: "Ⅱ", value: "Ⅱ" },
+        { label: "Ⅲ", value: "Ⅲ" },
+        { label: "Ⅳ", value: "Ⅳ" },
+        { label: "Ⅴ", value: "Ⅴ" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "空格", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]
+  symbols_shapes:
+    - [
+        { label: "中文", action: { type: keyboardMode, value: symbols } },
+        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
+        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
+        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
+        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
+        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
+        { label: "图形", style: "accent", action: { type: keyboardMode, value: symbols_shapes } }
+      ]
+    - [
+        { label: "©", value: "©" },
+        { label: "®", value: "®" },
+        { label: "™", value: "™" },
+        { label: "§", value: "§" },
+        { label: "¶", value: "¶" },
+        { label: "✓", value: "✓" },
+        { label: "✕", value: "✕" },
+        { label: "•", value: "•" },
+        { label: "°", value: "°" },
+        { label: "♪", value: "♪" }
+      ]
+    - [
+        { label: "★", value: "★" },
+        { label: "☆", value: "☆" },
+        { label: "♥", value: "♥" },
+        { label: "♡", value: "♡" },
+        { label: "◆", value: "◆" },
+        { label: "◇", value: "◇" },
+        { label: "●", value: "●" },
+        { label: "○", value: "○" },
+        { label: "■", value: "■" },
+        { label: "□", value: "□" }
+      ]
+    - [
+        { label: "△", value: "△" },
+        { label: "▲", value: "▲" },
+        { label: "▽", value: "▽" },
+        { label: "▼", value: "▼" },
+        { label: "♠", value: "♠" },
+        { label: "♣", value: "♣" },
+        { label: "♥", value: "♥" },
+        { label: "♦", value: "♦" },
+        { label: "☀", value: "☀" },
+        { label: "☁", value: "☁" }
+      ]
+    - [
+        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
+        { label: "空格", weight: 4.6, action: { type: space } },
+        { label: "⌫", weight: 1.15, action: { type: backspace } },
+        { label: "↵", weight: 1.15, action: { type: enter } }
+      ]

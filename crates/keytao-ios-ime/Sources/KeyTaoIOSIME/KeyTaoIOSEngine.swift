@@ -83,8 +83,12 @@ enum KeyTaoIOSPaths {
 
     static func seedDefaultKeyboardIfNeeded(userRoot: URL) {
         let url = keyboardFile(userRoot: userRoot)
-        guard !FileManager.default.fileExists(atPath: url.path),
-              let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
+        guard let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
+            return
+        }
+        if FileManager.default.fileExists(atPath: url.path),
+           let existing = try? String(contentsOf: url, encoding: .utf8),
+           !shouldRefreshDefaultKeyboard(existing: existing, bundled: yaml) {
             return
         }
         do {
@@ -93,6 +97,18 @@ enum KeyTaoIOSPaths {
         } catch {
             return
         }
+    }
+
+    private static func shouldRefreshDefaultKeyboard(existing: String, bundled: String) -> Bool {
+        let trimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != bundled else {
+            return trimmed.isEmpty
+        }
+        return existing.contains("# KeyTao IME default keyboard layout.")
+            && existing.contains("layers: {}")
+            && !existing.contains("symbols_en:")
+            && !existing.contains("label: \"英文\"")
+            && bundled.contains("symbols_en:")
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {

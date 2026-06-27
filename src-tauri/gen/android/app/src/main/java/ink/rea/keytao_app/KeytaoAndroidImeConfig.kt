@@ -221,12 +221,26 @@ data class KeytaoAndroidImeConfig(
 
         private fun ensureDefaultKeyboardConfig() {
             val file = KeytaoAndroidPaths.keyboardFile()
-            if (file.isFile) return
             val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
+            if (file.isFile) {
+                val existing = runCatching { file.readText() }.getOrNull()
+                if (existing != null && !shouldRefreshDefaultKeyboard(existing, yaml)) return
+            }
             runCatching {
                 file.parentFile?.mkdirs()
                 file.writeText(yaml)
             }
+        }
+
+        private fun shouldRefreshDefaultKeyboard(existing: String, bundled: String): Boolean {
+            val trimmed = existing.trim()
+            if (trimmed.isEmpty()) return true
+            if (existing == bundled) return false
+            return existing.contains("# KeyTao IME default keyboard layout.") &&
+                existing.contains("layers: {}") &&
+                !existing.contains("symbols_en:") &&
+                !existing.contains("label: \"英文\"") &&
+                bundled.contains("symbols_en:")
         }
 
         private fun resolvedUserKeyboard(): JSONObject? {

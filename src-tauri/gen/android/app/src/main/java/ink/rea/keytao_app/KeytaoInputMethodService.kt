@@ -32,6 +32,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private val backspaceRestoreStack = mutableListOf<String>()
+    private val recentCommittedUnits = mutableListOf<String>()
+    private var restoreAllOnNextDirectionalRestore = false
 
     override fun onCreate() {
         super.onCreate()
@@ -153,7 +155,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.DIRECT_INPUT -> commitDirect(command.value.orEmpty())
             KeyCommandTypes.RIME_INPUT -> handleRimeInput(command.value.orEmpty(), command.fallbackValue)
             KeyCommandTypes.BACKSPACE -> handleBackspace()
-            KeyCommandTypes.BACKSPACE_GESTURE -> handleBackspaceGesture(command.value.orEmpty())
+            KeyCommandTypes.BACKSPACE_GESTURE -> handleBackspaceGesture(command.value.orEmpty(), command.fallbackValue)
             KeyCommandTypes.ENTER -> handleEnter()
             KeyCommandTypes.SPACE -> handleSpace()
             KeyCommandTypes.SHIFT -> keyboardView?.toggleShift()
@@ -276,66 +278,127 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    private fun handleBackspaceGesture(action: String) {
+    private fun handleBackspaceGesture(action: String, countValue: String?) {
+        val count = countValue
+            ?.toIntOrNull()
+            ?.coerceIn(1, maxBackspaceGestureBatchCount)
+            ?: 1
         when (action) {
-            "delete" -> deleteOneBeforeCursorForRestore()
-            "restore" -> restoreOneBackspaceText()
+            "delete" -> deleteBeforeCursorForRestore(count)
+            "restore" -> restoreBackspaceText(count)
             "deleteAll" -> deleteAllBeforeCursorForRestore()
             "restoreAll" -> restoreAllBackspaceText()
         }
     }
 
     private fun deleteOneBeforeCursorForRestore(resetComposition: Boolean = true): Boolean {
+        if (resetComposition) {
+            return deleteBeforeCursorForRestore(1)
+        }
+        return deleteBeforeCursorForRestore(1, resetComposition = false)
+    }
+
+    private fun deleteBeforeCursorForRestore(count: Int, resetComposition: Boolean = true): Boolean {
+        val preeditUnits = if (resetComposition) textUnits(currentState.preedit) else emptyList()
         if (resetComposition) clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return false
-        val before = connection.getTextBeforeCursor(backspaceUnitContextLimit, 0)?.toString().orEmpty()
-        val deleted = lastTextUnit(before)
-        if (deleted == null) {
-            connection.deleteSurroundingText(1, 0)
-            selectionModeActive = false
-            return false
+        val unitCount = count.coerceAtLeast(1)
+        restoreAllOnNextDirectionalRestore = false
+        rememberCommittedUnits(preeditUnits)
+        val deletedUnits = takeRecentCommittedUnits(unitCount)
+        if (deletedUnits.isEmpty()) {
+            backspaceRestoreStack.clear()
+        } else {
+            backspaceRestoreStack.addAll(deletedUnits.asReversed())
         }
-        connection.deleteSurroundingText(deleted.length, 0)
-        backspaceRestoreStack.add(deleted)
+        deleteSurroundingCodePoints(connection, unitCount)
         selectionModeActive = false
         return true
     }
 
     private fun deleteAllBeforeCursorForRestore() {
+        val preeditUnits = textUnits(currentState.preedit)
         clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return
-        val before = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
-        if (before.isEmpty()) return
-        connection.deleteSurroundingText(before.length, 0)
-        backspaceRestoreStack.addAll(textUnits(before).asReversed())
+        backspaceRestoreStack.clear()
+        val recoverableUnits = recentCommittedUnits + preeditUnits
+        if (recoverableUnits.isEmpty()) {
+            restoreAllOnNextDirectionalRestore = false
+        } else {
+            backspaceRestoreStack.addAll(recoverableUnits.asReversed())
+            recentCommittedUnits.clear()
+        }
+        restoreAllOnNextDirectionalRestore = backspaceRestoreStack.isNotEmpty()
+        deleteSurroundingCodePoints(connection, backspaceContextLimit)
         selectionModeActive = false
     }
 
     private fun restoreOneBackspaceText(): Boolean {
+        return restoreBackspaceText(1)
+    }
+
+    private fun restoreBackspaceText(count: Int): Boolean {
+        if (restoreAllOnNextDirectionalRestore) {
+            return restoreAllBackspaceText()
+        }
         val connection = currentInputConnection ?: return false
         if (backspaceRestoreStack.isEmpty()) return false
-        val text = backspaceRestoreStack.removeAt(backspaceRestoreStack.lastIndex)
-        connection.commitText(text, 1)
+        val restored = buildString {
+            repeat(count.coerceAtLeast(1)) {
+                if (backspaceRestoreStack.isEmpty()) return@repeat
+                append(backspaceRestoreStack.removeAt(backspaceRestoreStack.lastIndex))
+            }
+        }
+        if (restored.isEmpty()) return false
+        connection.commitText(restored, 1)
+        rememberCommittedText(restored)
         selectionModeActive = false
         return true
     }
 
-    private fun restoreAllBackspaceText() {
-        val connection = currentInputConnection ?: return
-        if (backspaceRestoreStack.isEmpty()) return
+    private fun restoreAllBackspaceText(): Boolean {
+        val connection = currentInputConnection ?: return false
+        if (backspaceRestoreStack.isEmpty()) return false
+        restoreAllOnNextDirectionalRestore = false
         val restored = buildString {
             while (backspaceRestoreStack.isNotEmpty()) {
                 append(backspaceRestoreStack.removeAt(backspaceRestoreStack.lastIndex))
             }
         }
         connection.commitText(restored, 1)
+        rememberCommittedText(restored)
         selectionModeActive = false
+        return true
     }
 
-    private fun lastTextUnit(text: String): String? {
-        if (text.isEmpty()) return null
-        val start = text.offsetByCodePoints(text.length, -1)
-        return text.substring(start)
+    private fun deleteSurroundingCodePoints(connection: android.view.inputmethod.InputConnection, count: Int): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            connection.deleteSurroundingTextInCodePoints(count.coerceAtLeast(1), 0)
+        } else {
+            connection.deleteSurroundingText(count.coerceAtLeast(1), 0)
+        }
+    }
+
+    private fun takeRecentCommittedUnits(count: Int): List<String> {
+        if (recentCommittedUnits.isEmpty()) return emptyList()
+        val actualCount = count.coerceIn(1, recentCommittedUnits.size)
+        val fromIndex = recentCommittedUnits.size - actualCount
+        val deleted = recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size).toList()
+        recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size).clear()
+        return deleted
+    }
+
+    private fun rememberCommittedText(text: String) {
+        if (text.isEmpty()) return
+        rememberCommittedUnits(textUnits(text))
+    }
+
+    private fun rememberCommittedUnits(units: List<String>) {
+        if (units.isEmpty()) return
+        recentCommittedUnits.addAll(units)
+        while (recentCommittedUnits.size > recentCommittedUnitLimit) {
+            recentCommittedUnits.removeAt(0)
+        }
     }
 
     private fun textUnits(text: String): List<String> {
@@ -532,8 +595,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val connection = currentInputConnection ?: return
         val hadComposition = composing || currentState.hasComposition
         backspaceRestoreStack.clear()
+        restoreAllOnNextDirectionalRestore = false
         connection.beginBatchEdit()
         connection.commitText(text, 1)
+        rememberCommittedText(text)
         composing = false
         selectionModeActive = false
         connection.endBatchEdit()
@@ -553,7 +618,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             connection.beginBatchEdit()
             if (state.committed.isNotEmpty()) {
                 backspaceRestoreStack.clear()
+                restoreAllOnNextDirectionalRestore = false
                 connection.commitText(state.committed, 1)
+                rememberCommittedText(state.committed)
                 composing = false
                 selectionModeActive = false
             }
@@ -617,8 +684,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     companion object {
         private const val clipboardHistoryLimit = 24
         private const val expandedCandidateLimit = 96
-        private const val backspaceUnitContextLimit = 64
         private const val backspaceContextLimit = 8192
+        private const val maxBackspaceGestureBatchCount = 96
+        private const val recentCommittedUnitLimit = 8192
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

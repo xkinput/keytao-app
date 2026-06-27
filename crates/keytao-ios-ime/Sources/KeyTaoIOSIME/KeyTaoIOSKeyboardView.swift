@@ -30,6 +30,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private struct KeyRect {
         var spec: KeyTaoKeySpec
         var rect: CGRect
+        var sticky: Bool = false
     }
 
     private struct ActiveRowSpan {
@@ -85,6 +86,15 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var clipboardItems: [String] = []
     private var expandedCandidateScrollY: CGFloat = 0
     private var expandedCandidateContentHeight: CGFloat = 0
+    private var keyboardScrollY: CGFloat = 0
+    private var keyboardTouchStartY: CGFloat = 0
+    private var keyboardTouchStartScrollY: CGFloat = 0
+    private var keyboardDragging = false
+    private var keyboardScrollTouchActive = false
+    private var keyboardScrollContentHeight: CGFloat = 0
+    private var keyboardScrollViewportHeight: CGFloat = 0
+    private var keyboardScrollViewportTop: CGFloat = 0
+    private var keyboardScrollViewportBottom: CGFloat = 0
     private var expandRequestToken = 0
 
     private var keyRects: [KeyRect] = []
@@ -137,6 +147,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     func update(config: KeyTaoIOSImeConfig) {
         self.config = config
         resetExpandedCandidateScroll()
+        resetKeyboardScroll()
         invalidateLayoutAndDisplay()
     }
 
@@ -213,6 +224,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         shiftState = .off
         pressedKey = nil
         pressedToolbar = nil
+        resetKeyboardScroll()
         invalidateLayoutAndDisplay()
     }
 
@@ -241,7 +253,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         touchStart = point
         currentTouchPoint = point
         touchStartScrollY = expandedCandidateScrollY
+        keyboardTouchStartY = point.y
+        keyboardTouchStartScrollY = keyboardScrollY
         expandedDragging = false
+        keyboardDragging = false
         longPressConsumed = false
         backspaceGestureUnits = 0
         backspaceGestureConsumed = false
@@ -258,8 +273,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             expandedTouchActive = true
             pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
         }
+        keyboardScrollTouchActive = pressedToolbar == nil
+            && pressedCandidate == nil
+            && !candidateExpandPressed
+            && !expandedTouchActive
+            && usesCategorizedSymbolKeyboard()
+            && maxKeyboardScroll() > 0
+            && point.y >= keyboardScrollViewportTop
+            && point.y < keyboardScrollViewportBottom
         if pressedToolbar == nil && pressedCandidate == nil && !candidateExpandPressed && !expandedTouchActive {
-            pressedKey = keyRects.first { $0.rect.contains(point) }
+            pressedKey = keyRects.first { isVisibleKey($0, at: point) && $0.rect.contains(point) }
             scheduleLongPressIfNeeded()
         }
         setNeedsDisplay()
@@ -281,6 +304,19 @@ final class KeyTaoIOSKeyboardView: UIView {
                 invalidateLayoutAndDisplay()
             }
             return
+        }
+        if keyboardScrollTouchActive {
+            let deltaY = point.y - keyboardTouchStartY
+            if !keyboardDragging && abs(deltaY) > 6 {
+                keyboardDragging = true
+                stopLongPressAndRepeat()
+                pressedKey = nil
+            }
+            if keyboardDragging {
+                keyboardScrollY = max(0, min(maxKeyboardScroll(), keyboardTouchStartScrollY - deltaY))
+                invalidateLayoutAndDisplay()
+                return
+            }
         }
         if handleBackspaceDrag(at: point) {
             return
@@ -325,6 +361,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                 delegate?.keyboardView(self, didSelectCandidate: candidate.selectIndex, global: candidate.global)
             }
             return
+        }
+
+        if keyboardScrollTouchActive {
+            let wasDragging = keyboardDragging
+            keyboardScrollTouchActive = false
+            keyboardDragging = false
+            if wasDragging {
+                clearPressedState()
+                invalidateLayoutAndDisplay()
+                return
+            }
         }
 
         if let key = pressedKey, handleBackspaceRelease(for: key, at: point) {
@@ -385,6 +432,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         candidateExpandPressed = false
         expandedTouchActive = false
         expandedDragging = false
+        keyboardScrollTouchActive = false
+        keyboardDragging = false
         backspaceGestureUnits = 0
         backspaceGestureConsumed = false
         setNeedsDisplay()
@@ -451,6 +500,10 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
 
+        if usesFullHeightSymbolKeyboard() {
+            return
+        }
+
         if !state.candidatePanel.candidates.isEmpty {
             for candidate in candidateDrawItems(inlineOnly: true) {
                 guard let rect = inlineCandidateRects.first(where: { $0.identifierIndex == candidate.identifierIndex })?.rect else {
@@ -485,6 +538,25 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawKeyboard() {
+        if usesCategorizedSymbolKeyboard(), let context = UIGraphicsGetCurrentContext() {
+            context.saveGState()
+            UIBezierPath(rect: CGRect(
+                x: 0,
+                y: keyboardScrollViewportTop,
+                width: bounds.width,
+                height: max(0, keyboardScrollViewportBottom - keyboardScrollViewportTop)
+            )).addClip()
+            for key in keyRects where !key.sticky {
+                let pressed = pressedKey?.spec == key.spec
+                drawKey(key.spec, rect: key.rect, pressed: pressed, pressedStackIndex: pressedStackIndex(for: key))
+            }
+            context.restoreGState()
+            for key in keyRects where key.sticky {
+                let pressed = pressedKey?.spec == key.spec
+                drawKey(key.spec, rect: key.rect, pressed: pressed, pressedStackIndex: pressedStackIndex(for: key))
+            }
+            return
+        }
         for key in keyRects {
             let pressed = pressedKey?.spec == key.spec
             drawKey(key.spec, rect: key.rect, pressed: pressed, pressedStackIndex: pressedStackIndex(for: key))
@@ -581,17 +653,9 @@ final class KeyTaoIOSKeyboardView: UIView {
             path.stroke()
         }
 
-        if selected {
-            theme.candidate.selectedLabelColor.uiColor.setFill()
-            UIBezierPath(
-                roundedRect: CGRect(x: rect.minX + 5, y: rect.minY + 6, width: 3, height: rect.height - 12),
-                cornerRadius: 2
-            ).fill()
-        }
-
         let paddingX = candidatePaddingX()
         let inlineGap = candidateInlineGap()
-        var x = rect.minX + paddingX + (selected ? 4 : 0)
+        var x = rect.minX + paddingX
         let centerY = rect.midY
         if !item.label.isEmpty {
             x += drawInlineText(
@@ -943,57 +1007,128 @@ final class KeyTaoIOSKeyboardView: UIView {
         let verticalGapFloor = keyboardVerticalGap()
         let rowCount = CGFloat(rows.count)
         let availableHeight = max(0, bottom - top)
-        let naturalRowHeight = max(36, (availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
-        let rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
-        let verticalGap = max(verticalGapFloor, (availableHeight - rowHeight * rowCount) / (rowCount + 1))
-        var y = top + verticalGap
         var next: [KeyRect] = []
         let maximumRowWidth = max(1, bounds.width - keyboardOuterInset() * 2)
         let referenceUnitWidth = keyboardReferenceUnitWidth(rows: rows, horizontalGap: horizontalGap)
-        var activeLeadingSpans: [ActiveRowSpan] = []
-        for (rowIndex, row) in rows.enumerated() {
-            guard !row.isEmpty else {
-                activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
-                y += rowHeight + verticalGap
-                continue
-            }
-            let leadingWeight = activeLeadingSpans.reduce(CGFloat(0)) { $0 + $1.weight }
-            let totalWeight = max(1, leadingWeight + rowWeight(row))
-            let effectiveKeyCount = activeLeadingSpans.count + row.count
-            let gapWidth = horizontalGap * CGFloat(max(0, effectiveKeyCount - 1))
-            let rowWidth = keyboardRowWidth(
-                row,
-                rowIndex: rowIndex,
-                rows: rows,
-                referenceUnitWidth: referenceUnitWidth,
-                horizontalGap: horizontalGap,
-                maximumRowWidth: maximumRowWidth,
-                effectiveKeyCount: effectiveKeyCount,
-                effectiveWeight: totalWeight
-            )
-            let unitWidth = max(1, (rowWidth - gapWidth) / totalWeight)
-            var x = (bounds.width - rowWidth) / 2
-            for span in activeLeadingSpans {
-                x += unitWidth * span.weight + horizontalGap
-            }
-            var nextLeadingSpans: [ActiveRowSpan] = []
-            var acceptingLeadingSpan = true
-            for key in row {
-                let width = unitWidth * keyWeight(key)
-                let spanRows = keyRowSpan(key)
-                let height = rowHeight * CGFloat(spanRows) + verticalGap * CGFloat(spanRows - 1)
-                let rect = CGRect(x: x, y: y, width: width, height: height)
-                next.append(KeyRect(spec: key, rect: rect))
-                if acceptingLeadingSpan && spanRows > 1 {
-                    nextLeadingSpans.append(ActiveRowSpan(weight: keyWeight(key), remainingRows: spanRows - 1))
-                } else {
-                    acceptingLeadingSpan = false
+
+        func appendRows(
+            _ layoutRows: [[KeyTaoKeySpec]],
+            rowIndexOffset: Int,
+            startY: CGFloat,
+            rowHeight: CGFloat,
+            verticalGap: CGFloat,
+            sticky: Bool
+        ) {
+            var y = startY
+            var activeLeadingSpans: [ActiveRowSpan] = []
+            for (localRowIndex, row) in layoutRows.enumerated() {
+                let rowIndex = rowIndexOffset + localRowIndex
+                guard !row.isEmpty else {
+                    activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                    y += rowHeight + verticalGap
+                    continue
                 }
-                x = rect.maxX + horizontalGap
+                let leadingWeight = activeLeadingSpans.reduce(CGFloat(0)) { $0 + $1.weight }
+                let totalWeight = max(1, leadingWeight + rowWeight(row))
+                let effectiveKeyCount = activeLeadingSpans.count + row.count
+                let gapWidth = horizontalGap * CGFloat(max(0, effectiveKeyCount - 1))
+                let rowWidth = keyboardRowWidth(
+                    row,
+                    rowIndex: rowIndex,
+                    rows: rows,
+                    referenceUnitWidth: referenceUnitWidth,
+                    horizontalGap: horizontalGap,
+                    maximumRowWidth: maximumRowWidth,
+                    effectiveKeyCount: effectiveKeyCount,
+                    effectiveWeight: totalWeight
+                )
+                let unitWidth = max(1, (rowWidth - gapWidth) / totalWeight)
+                var x = (bounds.width - rowWidth) / 2
+                for span in activeLeadingSpans {
+                    x += unitWidth * span.weight + horizontalGap
+                }
+                var nextLeadingSpans: [ActiveRowSpan] = []
+                var acceptingLeadingSpan = true
+                for key in row {
+                    let width = unitWidth * keyWeight(key)
+                    let spanRows = keyRowSpan(key)
+                    let height = rowHeight * CGFloat(spanRows) + verticalGap * CGFloat(spanRows - 1)
+                    let rect = CGRect(x: x, y: y, width: width, height: height)
+                    next.append(KeyRect(spec: key, rect: rect, sticky: sticky))
+                    if acceptingLeadingSpan && spanRows > 1 {
+                        nextLeadingSpans.append(ActiveRowSpan(weight: keyWeight(key), remainingRows: spanRows - 1))
+                    } else {
+                        acceptingLeadingSpan = false
+                    }
+                    x = rect.maxX + horizontalGap
+                }
+                activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                activeLeadingSpans.append(contentsOf: nextLeadingSpans)
+                y += rowHeight + verticalGap
             }
-            activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
-            activeLeadingSpans.append(contentsOf: nextLeadingSpans)
-            y += rowHeight + verticalGap
+        }
+
+        if usesCategorizedSymbolKeyboard(rows) {
+            let targetVisibleRows = CGFloat(min(5, rows.count))
+            let rowHeight = min(
+                max(40, (availableHeight - verticalGapFloor * (targetVisibleRows + 1)) / targetVisibleRows),
+                keyboardMaxKeyHeight()
+            )
+            let verticalGap = verticalGapFloor
+            let headerRow = Array(rows.prefix(1))
+            let bodyRows = Array(rows.dropFirst().dropLast())
+            let footerRow = Array(rows.suffix(1))
+            let headerTop = top + verticalGap
+            let footerTop = bottom - verticalGap - rowHeight
+            keyboardScrollViewportTop = headerTop + rowHeight + verticalGap
+            keyboardScrollViewportBottom = max(keyboardScrollViewportTop, footerTop - verticalGap)
+            keyboardScrollViewportHeight = max(0, keyboardScrollViewportBottom - keyboardScrollViewportTop)
+            keyboardScrollContentHeight = max(
+                0,
+                CGFloat(bodyRows.count) * rowHeight + CGFloat(max(0, bodyRows.count - 1)) * verticalGap
+            )
+            keyboardScrollY = max(0, min(maxKeyboardScroll(), keyboardScrollY))
+            appendRows(
+                headerRow,
+                rowIndexOffset: 0,
+                startY: headerTop,
+                rowHeight: rowHeight,
+                verticalGap: verticalGap,
+                sticky: true
+            )
+            appendRows(
+                bodyRows,
+                rowIndexOffset: 1,
+                startY: keyboardScrollViewportTop - keyboardScrollY,
+                rowHeight: rowHeight,
+                verticalGap: verticalGap,
+                sticky: false
+            )
+            appendRows(
+                footerRow,
+                rowIndexOffset: rows.count - 1,
+                startY: footerTop,
+                rowHeight: rowHeight,
+                verticalGap: verticalGap,
+                sticky: true
+            )
+        } else {
+            let naturalRowHeight = max(36, (availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
+            let rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
+            let verticalGap = max(verticalGapFloor, (availableHeight - rowHeight * rowCount) / (rowCount + 1))
+            keyboardScrollY = 0
+            keyboardScrollContentHeight = availableHeight
+            keyboardScrollViewportHeight = availableHeight
+            keyboardScrollViewportTop = top
+            keyboardScrollViewportBottom = bottom
+            appendRows(
+                rows,
+                rowIndexOffset: 0,
+                startY: top + verticalGap,
+                rowHeight: rowHeight,
+                verticalGap: verticalGap,
+                sticky: false
+            )
         }
         return next
     }
@@ -1096,6 +1231,9 @@ final class KeyTaoIOSKeyboardView: UIView {
                     rect: CGRect(x: bounds.width - leftPadding - settingsWidth, y: top, width: settingsWidth, height: chipHeight)
                 ),
             ]
+        }
+        if usesFullHeightSymbolKeyboard() {
+            return []
         }
         guard state.candidatePanel.candidates.isEmpty, (state.candidatePanel.preedit ?? state.preedit).isEmpty else {
             return []
@@ -1286,8 +1424,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let commentWidth = item.comment.map { textWidth($0, size: candidateCommentSize()) } ?? 0
         let segmentCount = [labelWidth, bodyWidth, commentWidth].filter { $0 > 0 }.count
         let gaps = CGFloat(max(0, segmentCount - 1)) * candidateInlineGap()
-        let accent = item.selected ? 4 : 0
-        return labelWidth + bodyWidth + commentWidth + gaps + CGFloat(accent) + candidatePaddingX() * 2
+        return labelWidth + bodyWidth + commentWidth + gaps + candidatePaddingX() * 2
     }
 
     private func toolbarChipWidth(_ action: ToolbarAction, horizontalPadding: CGFloat = 22, minimumWidth: CGFloat? = nil) -> CGFloat {
@@ -1611,8 +1748,24 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidateContentHeight = expandedCandidatePanelHeight()
     }
 
+    private func resetKeyboardScroll() {
+        keyboardScrollY = 0
+        keyboardTouchStartY = 0
+        keyboardTouchStartScrollY = 0
+        keyboardDragging = false
+        keyboardScrollTouchActive = false
+        keyboardScrollContentHeight = 0
+        keyboardScrollViewportHeight = 0
+        keyboardScrollViewportTop = keyboardTop()
+        keyboardScrollViewportBottom = keyboardBottom()
+    }
+
     private func maxExpandedCandidateScroll() -> CGFloat {
         max(0, expandedCandidateContentHeight - expandedCandidatePanelHeight())
+    }
+
+    private func maxKeyboardScroll() -> CGFloat {
+        max(0, keyboardScrollContentHeight - keyboardScrollViewportHeight)
     }
 
     private func coerceExpandedCandidateScroll() {
@@ -1768,6 +1921,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func actionForMode(_ key: KeyTaoKeySpec) -> KeyTaoKeyCommand {
+        if layerMode.id.isSymbolLayer && key.isTextInputKey {
+            return .directInput(valueForMode(key))
+        }
         if state.asciiMode {
             if let asciiAction = key.asciiAction {
                 return asciiAction
@@ -1835,6 +1991,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func actionForMode(_ item: KeyTaoKeyStackItem) -> KeyTaoKeyCommand {
+        if layerMode.id.isSymbolLayer && item.isTextInputItem {
+            return .directInput(valueForMode(item))
+        }
         if state.asciiMode {
             if let asciiAction = item.asciiAction {
                 return asciiAction
@@ -1943,6 +2102,21 @@ final class KeyTaoIOSKeyboardView: UIView {
         return item.label
     }
 
+    private func valueForMode(_ key: KeyTaoKeySpec) -> String {
+        if state.asciiMode {
+            return key.asciiValue ?? key.value ?? key.label
+        }
+        return key.value ?? key.label
+    }
+
+    private func valueForMode(_ item: KeyTaoKeyStackItem) -> String {
+        let value = item.value ?? item.label
+        if state.asciiMode {
+            return item.asciiValue ?? value
+        }
+        return value
+    }
+
     private func isActiveKey(_ key: KeyTaoKeySpec) -> Bool {
         key.action?.type == KeyTaoCommandType.shift && shiftState != .off
     }
@@ -1997,11 +2171,32 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func keyboardTop() -> CGFloat {
-        config.candidateBarHeightDp
+        if usesFullHeightSymbolKeyboard() {
+            return 0
+        }
+        return config.candidateBarHeightDp
     }
 
     private func keyboardBottom() -> CGFloat {
         bounds.height
+    }
+
+    private func usesFullHeightSymbolKeyboard() -> Bool {
+        layerMode.id.isSymbolLayer && !candidatePanelExpanded && !functionPanelActive
+    }
+
+    private func usesCategorizedSymbolKeyboard(_ rows: [[KeyTaoKeySpec]]? = nil) -> Bool {
+        usesFullHeightSymbolKeyboard() && (rows ?? activeRows()).count >= 3
+    }
+
+    private func usesScrollableSymbolKeyboard(_ rows: [[KeyTaoKeySpec]]? = nil) -> Bool {
+        usesCategorizedSymbolKeyboard(rows) && (rows ?? activeRows()).count > 5
+    }
+
+    private func isVisibleKey(_ key: KeyRect, at point: CGPoint) -> Bool {
+        key.sticky
+            || !usesCategorizedSymbolKeyboard()
+            || (point.y >= keyboardScrollViewportTop && point.y < keyboardScrollViewportBottom)
     }
 
     private func keyboardHorizontalGap() -> CGFloat {
@@ -2350,5 +2545,31 @@ final class KeyTaoIOSKeyboardView: UIView {
 private extension Int {
     var clampedColor: Int {
         Swift.min(Swift.max(self, 0), 255)
+    }
+}
+
+private extension String {
+    var isSymbolLayer: Bool {
+        self == "symbols" || hasPrefix("symbols_")
+    }
+}
+
+private extension KeyTaoKeyCommand {
+    var isTextInputCommand: Bool {
+        type == KeyTaoCommandType.input ||
+            type == KeyTaoCommandType.rimeInput ||
+            type == KeyTaoCommandType.directInput
+    }
+}
+
+private extension KeyTaoKeySpec {
+    var isTextInputKey: Bool {
+        action?.isTextInputCommand ?? true
+    }
+}
+
+private extension KeyTaoKeyStackItem {
+    var isTextInputItem: Bool {
+        action?.isTextInputCommand ?? true
     }
 }

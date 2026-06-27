@@ -1117,8 +1117,46 @@ struct PartialKeyboardTheme {
     rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     number_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     symbol_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
-    #[serde(default, alias = "pages", alias = "keyboards")]
+    #[serde(
+        default,
+        alias = "pages",
+        alias = "keyboards",
+        deserialize_with = "optional_keyboard_layers"
+    )]
     layers: Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum PartialKeyboardLayerRows {
+    Rows(Vec<Vec<KeyboardKeyTheme>>),
+    Object { rows: Vec<Vec<KeyboardKeyTheme>> },
+}
+
+impl PartialKeyboardLayerRows {
+    fn into_rows(self) -> Vec<Vec<KeyboardKeyTheme>> {
+        match self {
+            Self::Rows(rows) | Self::Object { rows } => rows,
+        }
+    }
+}
+
+fn optional_keyboard_layers<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<BTreeMap<String, PartialKeyboardLayerRows>>::deserialize(deserializer)?;
+    Ok(raw.map(|layers| {
+        layers
+            .into_iter()
+            .filter_map(|(name, rows)| {
+                let rows = rows.into_rows();
+                (!rows.is_empty()).then_some((name, rows))
+            })
+            .collect()
+    }))
 }
 
 impl PartialKeyboardTheme {
@@ -1266,7 +1304,11 @@ impl KeyboardTheme {
         assign(&mut self.rows, partial.rows);
         assign(&mut self.number_rows, partial.number_rows);
         assign(&mut self.symbol_rows, partial.symbol_rows);
-        assign(&mut self.layers, partial.layers);
+        if let Some(layers) = partial.layers {
+            if !layers.is_empty() {
+                self.layers.extend(layers);
+            }
+        }
     }
 }
 
@@ -1542,9 +1584,11 @@ mod tests {
         assert_eq!(keyboard.rows.len(), 4);
         assert_eq!(keyboard.rows[0][0].label, "q");
         assert_eq!(keyboard.number_rows[0][0].label, "+");
-        assert_eq!(keyboard.symbol_rows[0][0].label, "【");
+        assert_eq!(keyboard.symbol_rows[0][0].label, "中文");
+        assert_eq!(keyboard.symbol_rows[1][0].label, "【");
         let json = resolved_keyboard_json(&keyboard).unwrap();
         assert!(json.contains("\"numberRows\""));
+        assert!(json.contains("\"symbols_arrows\""));
     }
 
     #[test]
@@ -1565,6 +1609,41 @@ mod tests {
 
         assert_eq!(keyboard.height, 300.0);
         assert_eq!(keyboard.layers["emoji"][0][0].label, "🙂");
+    }
+
+    #[test]
+    fn keyboard_yaml_accepts_object_layer_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-keyboard-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "layers:\n  emoji:\n    rows:\n      - [ { label: \"🙂\", value: \"🙂\" } ]\n",
+        )
+        .unwrap();
+
+        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        assert_eq!(keyboard.layers["emoji"][0][0].label, "🙂");
+    }
+
+    #[test]
+    fn empty_keyboard_layers_do_not_clear_default_layers() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-keyboard-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(&path, "layers: {}\n").unwrap();
+
+        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        assert!(keyboard.layers.contains_key("symbols_en"));
+        assert!(keyboard.layers.contains_key("symbols_math"));
     }
 
     #[test]

@@ -316,9 +316,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             (try? container.decode([[KeyTaoKeySpec]].self, forKey: .symbolRows)) ?? Self.fallback.symbolRows
         )
         self.customRows = Self.normalizeCustomRows(
-            (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .layers))
-                ?? (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .pages))
-                ?? (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .keyboards))
+            Self.decodeLayerRows(from: container, forKey: .layers)
+                ?? Self.decodeLayerRows(from: container, forKey: .pages)
+                ?? Self.decodeLayerRows(from: container, forKey: .keyboards)
                 ?? Self.fallback.customRows
         )
     }
@@ -416,7 +416,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
             symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows,
-            customRows: keyboard.layers ?? Self.fallback.customRows
+            customRows: keyboard.layerRows ?? Self.fallback.customRows
         )
     }
 
@@ -440,7 +440,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
             symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows,
-            customRows: keyboard.layers ?? Self.fallback.customRows
+            customRows: keyboard.layerRows ?? Self.fallback.customRows
         )
     }
 
@@ -492,6 +492,16 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 result[name] = normalized
             }
         }
+    }
+
+    private static func decodeLayerRows(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) -> [String: [[KeyTaoKeySpec]]]? {
+        guard let decoded = try? container.decode([String: KeyTaoLayerRows].self, forKey: key) else {
+            return nil
+        }
+        return decoded.mapValues(\.rows)
     }
 
     private static func clamp(_ value: CGFloat, min minimum: CGFloat, max maximum: CGFloat) -> CGFloat {
@@ -614,7 +624,28 @@ private struct KeyTaoThemeKeyboard: Decodable {
     var rows: [[KeyTaoKeySpec]]?
     var numberRows: [[KeyTaoKeySpec]]?
     var symbolRows: [[KeyTaoKeySpec]]?
-    var layers: [String: [[KeyTaoKeySpec]]]?
+    var layers: [String: KeyTaoLayerRows]?
+
+    var layerRows: [String: [[KeyTaoKeySpec]]]? {
+        layers?.mapValues(\.rows)
+    }
+}
+
+private struct KeyTaoLayerRows: Decodable {
+    var rows: [[KeyTaoKeySpec]]
+
+    private enum CodingKeys: String, CodingKey {
+        case rows
+    }
+
+    init(from decoder: Decoder) throws {
+        if let rows = try? [[KeyTaoKeySpec]](from: decoder) {
+            self.rows = rows
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.rows = try container.decode([[KeyTaoKeySpec]].self, forKey: .rows)
+    }
 }
 
 private extension KeyTaoKeySpec {
