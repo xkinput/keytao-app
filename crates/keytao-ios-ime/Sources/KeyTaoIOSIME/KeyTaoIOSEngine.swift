@@ -38,6 +38,10 @@ enum KeyTaoIOSPaths {
         userRoot.appendingPathComponent("theme.yaml")
     }
 
+    static func keyboardFile(userRoot: URL) -> URL {
+        userRoot.appendingPathComponent("keyboard.yaml")
+    }
+
     static func configFile(userRoot: URL) -> URL {
         userRoot.appendingPathComponent("ios_ime.json")
     }
@@ -75,6 +79,20 @@ enum KeyTaoIOSPaths {
 
     static func ensureUserRoot(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    static func seedDefaultKeyboardIfNeeded(userRoot: URL) {
+        let url = keyboardFile(userRoot: userRoot)
+        guard !FileManager.default.fileExists(atPath: url.path),
+              let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try yaml.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            return
+        }
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {
@@ -149,6 +167,7 @@ final class KeyTaoIOSEngine {
         self.reloadStamp = KeyTaoIOSPaths.reloadStampFile(userRoot: userRoot)
         self.reloadStampSignature = Self.fileSignature(reloadStamp)
         KeyTaoIOSPaths.ensureUserRoot(userRoot)
+        KeyTaoIOSPaths.seedDefaultKeyboardIfNeeded(userRoot: userRoot)
         KeyTaoIOSPaths.seedPackagedRimeDataIfNeeded(userRoot: userRoot)
     }
 
@@ -179,13 +198,18 @@ final class KeyTaoIOSEngine {
     }
 
     func loadConfig(systemColorScheme: KeyTaoEffectiveColorScheme?) -> KeyTaoIOSImeConfig {
+        let userKeyboard = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot)
         let userConfig = KeyTaoIOSPaths.configFile(userRoot: userRoot)
         let userTheme = KeyTaoIOSPaths.themeFile(userRoot: userRoot)
         let resolvedThemeJson = KeyTaoIOSThemeResolver.resolveJson(
             userThemePath: FileManager.default.fileExists(atPath: userTheme.path) ? userTheme.path : nil,
             systemColorScheme: systemColorScheme
         )
+        let resolvedKeyboardJson = KeyTaoIOSKeyboardConfigResolver.resolveJson(
+            userKeyboardPath: FileManager.default.fileExists(atPath: userKeyboard.path) ? userKeyboard.path : nil
+        )
         return KeyTaoIOSImeConfig.load(
+            resolvedKeyboardJson: resolvedKeyboardJson,
             userConfigURL: FileManager.default.fileExists(atPath: userConfig.path) ? userConfig : nil,
             resolvedThemeJson: resolvedThemeJson
         )

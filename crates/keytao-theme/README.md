@@ -20,7 +20,7 @@ ResolvedImeTheme + Model
 
 ## 主题位置
 
-内置默认主题在本 crate 的 `default-theme.yaml`。用户覆盖主题放在 KeyTao 用户数据目录：
+内置默认主题在本 crate 的 `default-theme.yaml`。桌面发行包也会随包放置同一份 `default-theme.yaml`，平台 renderer 优先读取随包文件，找不到时使用编译进 crate 的内置版本。用户覆盖主题放在 KeyTao 用户数据目录：
 
 | 平台 | 用户主题路径 |
 | --- | --- |
@@ -32,6 +32,12 @@ ResolvedImeTheme + Model
 
 ```sh
 KEYTAO_IME_THEME_PATH=/path/to/theme.yaml
+```
+
+调试随包默认主题查找可以设置：
+
+```sh
+KEYTAO_IME_DEFAULT_THEME_PATH=/path/to/default-theme.yaml
 ```
 
 ## 示例

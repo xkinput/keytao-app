@@ -19,6 +19,23 @@ object KeytaoNativeBridge {
             ?.takeIf { it.isNotBlank() }
     }
 
+    fun defaultKeyboardYaml(): String? {
+        if (!loaded) return null
+        return runCatching { nativeDefaultKeyboardYaml() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun resolveKeyboardJson(
+        defaultKeyboardPath: String?,
+        userKeyboardPath: String?,
+    ): String? {
+        if (!loaded) return null
+        return runCatching { nativeResolveKeyboardJson(defaultKeyboardPath, userKeyboardPath) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
     fun engineAvailable(): Boolean {
         if (!loaded) return false
         return runCatching { nativeEngineAvailable() }.getOrDefault(false)
@@ -105,6 +122,13 @@ object KeytaoNativeBridge {
         defaultThemePath: String?,
         userThemePath: String?,
         systemColorScheme: String?,
+    ): String
+
+    external fun nativeDefaultKeyboardYaml(): String
+
+    external fun nativeResolveKeyboardJson(
+        defaultKeyboardPath: String?,
+        userKeyboardPath: String?,
     ): String
 
     external fun nativeEngineAvailable(): Boolean

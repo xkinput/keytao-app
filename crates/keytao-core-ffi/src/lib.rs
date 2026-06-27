@@ -322,6 +322,31 @@ pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
     theme_json_cstring(&theme)
 }
 
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {
+    to_cstring(keytao_theme::default_keyboard_yaml())
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_resolve_keyboard_json(
+    default_keyboard_path: *const c_char,
+    user_keyboard_path: *const c_char,
+) -> *mut c_char {
+    let default_path = optional_path_arg(default_keyboard_path);
+    let user_path = optional_path_arg(user_keyboard_path);
+    let keyboard =
+        keytao_theme::resolve_keyboard_from_paths(default_path.as_deref(), user_path.as_deref());
+    match keytao_theme::resolved_keyboard_json(&keyboard) {
+        Ok(json) => to_cstring(&json),
+        Err(e) => {
+            eprintln!("keytao_resolve_keyboard_json: serialize failed: {e}");
+            to_cstring("{}")
+        }
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
     match resolved_theme_json(&theme) {

@@ -7,6 +7,7 @@ use keytao_core::ImeState;
 use keytao_theme::{
     CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
+use std::path::{Path, PathBuf};
 use tiny_skia::*;
 
 // ── Font loader ───────────────────────────────────────────────────────────────
@@ -46,7 +47,11 @@ impl PanelRenderer {
     pub fn new(font: fontdue::Font) -> Self {
         Self {
             font,
-            theme_resolver: ThemeResolver::from_default_locations(),
+            theme_resolver: ThemeResolver::new(
+                windows_bundled_default_theme_path()
+                    .or_else(keytao_theme::default_bundled_theme_path),
+                keytao_theme::default_user_theme_path(),
+            ),
         }
     }
 
@@ -449,6 +454,51 @@ impl PanelRenderer {
             .map(|c| self.font.rasterize(c, size).0.advance_width)
             .sum()
     }
+}
+
+fn windows_bundled_default_theme_path() -> Option<PathBuf> {
+    for base in dll_related_dirs() {
+        for candidate in [
+            base.join("default-theme.yaml"),
+            base.join("theme.yaml"),
+            base.join("resources").join("default-theme.yaml"),
+            base.join("resources").join("theme.yaml"),
+            base.join("share").join("keytao").join("default-theme.yaml"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn dll_related_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(hmodule) = crate::globals::DLL_INSTANCE.get().copied() {
+        let mut buf = vec![0u16; 32768];
+        let len = unsafe {
+            windows::Win32::System::LibraryLoader::GetModuleFileNameW(
+                windows::Win32::Foundation::HMODULE(hmodule as _),
+                &mut buf,
+            )
+        } as usize;
+        if len > 0 {
+            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        dirs.push(parent);
+    }
+
+    dirs
 }
 
 #[inline]

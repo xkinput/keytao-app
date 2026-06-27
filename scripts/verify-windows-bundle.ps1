@@ -73,6 +73,7 @@ $imeRuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\current"
 $imeDll = Join-Path $imeRuntimeDir "keytao_windows_ime.dll"
 $imeRimeDll = Join-Path $imeRuntimeDir "rime.dll"
 $imeRimeData = Join-Path $imeRuntimeDir "rime-data\default.yaml"
+$imeDefaultTheme = Join-Path $imeRuntimeDir "default-theme.yaml"
 $imeVcRuntime = Join-Path $imeRuntimeDir "vcruntime140.dll"
 $appRimeDll = Join-Path $ReleaseDir "rime.dll"
 $imeLuaPlugin = Find-LuaPlugin @($imeRuntimeDir, (Join-Path $imeRuntimeDir "rime-plugins"))
@@ -83,6 +84,7 @@ Require-File $appExe "Windows release payload is missing keytao-app.exe"
 Require-File $imeDll "Windows release payload is missing keytao_windows_ime.dll"
 Require-File $imeRimeDll "Windows IME runtime is missing rime.dll"
 Require-File $imeRimeData "Windows IME runtime is missing rime-data\default.yaml"
+Require-File $imeDefaultTheme "Windows IME runtime is missing default-theme.yaml"
 Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
 Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
 if (-not $imeLuaPlugin) {
@@ -124,6 +126,7 @@ if (-not $installerScript) {
 Require-Pattern $installerScript.FullName 'nsis-hooks\.nsh' "Generated Windows installer script does not include the KeyTao NSIS hook file"
 Require-Pattern $installerScript.FullName 'keytao_windows_ime\.dll' "Generated Windows installer script does not install keytao_windows_ime.dll"
 Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime' "Generated Windows installer script does not install the IME runtime directory"
+Require-Pattern $installerScript.FullName 'default-theme\.yaml' "Generated Windows installer script does not install the shared default theme"
 Require-Pattern $installerScript.FullName '/oname=.*rime\.dll' "Generated Windows installer script does not install rime.dll next to keytao-app.exe"
 Require-Pattern $installerScript.FullName 'rime.*lua.*\.dll' "Generated Windows installer script does not install the librime-lua plugin DLL"
 

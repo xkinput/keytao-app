@@ -288,7 +288,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun deleteOneBeforeCursorForRestore(resetComposition: Boolean = true): Boolean {
         if (resetComposition) clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return false
-        val before = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val before = connection.getTextBeforeCursor(backspaceUnitContextLimit, 0)?.toString().orEmpty()
         val deleted = lastTextUnit(before)
         if (deleted == null) {
             connection.deleteSurroundingText(1, 0)
@@ -617,6 +617,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     companion object {
         private const val clipboardHistoryLimit = 24
         private const val expandedCandidateLimit = 96
+        private const val backspaceUnitContextLimit = 64
         private const val backspaceContextLimit = 8192
     }
 

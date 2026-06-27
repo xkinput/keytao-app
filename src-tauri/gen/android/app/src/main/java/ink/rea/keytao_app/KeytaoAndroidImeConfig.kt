@@ -85,20 +85,44 @@ data class KeytaoAndroidImeConfig(
     val rows: List<List<KeySpec>>,
     val numberRows: List<List<KeySpec>>,
     val symbolRows: List<List<KeySpec>>,
+    val customRows: Map<String, List<List<KeySpec>>> = emptyMap(),
 ) {
+    fun rowsForLayer(layer: String): List<List<KeySpec>> {
+        return when (layer) {
+            "numbers" -> numberRows
+            "symbols" -> symbolRows
+            "letters" -> rows
+            else -> customRows[layer] ?: rows
+        }
+    }
+
+    fun hasLayer(layer: String): Boolean {
+        return layer == "letters" || layer == "numbers" || layer == "symbols" || customRows.containsKey(layer)
+    }
+
+    fun normalizedLayer(layer: String?): String {
+        val value = layer?.takeIf { it.isNotBlank() } ?: "letters"
+        return if (hasLayer(value)) value else "letters"
+    }
+
     companion object {
         fun load(context: Context): KeytaoAndroidImeConfig {
+            ensureDefaultKeyboardConfig()
             val userConfig = KeytaoAndroidPaths.imeConfigFile()
             val defaultJson = context.resources
                 .openRawResource(R.raw.keytao_android_ime)
                 .bufferedReader()
                 .use { it.readText() }
             val userJson = userConfig.takeIf { it.isFile }?.readText()
+            val userKeyboard = resolvedUserKeyboard()
             val defaultRoot = JSONObject(defaultJson)
             val themeKeyboard = resolvedThemeKeyboard(context)
             return runCatching {
-                val root = userJson?.let { JSONObject(it) } ?: themeKeyboard ?: defaultRoot
+                val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: themeKeyboard ?: defaultRoot
                 val fallbackRoot = when {
+                    userKeyboard != null && userJson != null -> JSONObject(userJson)
+                    userKeyboard != null && themeKeyboard != null -> themeKeyboard
+                    userKeyboard != null -> defaultRoot
                     userJson != null && themeKeyboard != null -> themeKeyboard
                     userJson != null -> defaultRoot
                     themeKeyboard != null -> defaultRoot
@@ -127,6 +151,7 @@ data class KeytaoAndroidImeConfig(
             val symbolRows = rowArray(root, fallbackRoot, "symbolRows")
                 ?.let { normalizeRows(parseRows(it)) }
                 .orEmpty()
+            val customRows = layerRows(root, fallbackRoot)
             val haptics = root.optJSONObject("haptics")
             val fallbackHaptics = fallbackRoot?.optJSONObject("haptics")
             return KeytaoAndroidImeConfig(
@@ -159,11 +184,59 @@ data class KeytaoAndroidImeConfig(
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
                 symbolRows = symbolRows.ifEmpty { defaultSymbolRows() },
+                customRows = customRows,
             )
         }
 
         private fun rowArray(root: JSONObject, fallbackRoot: JSONObject?, name: String): JSONArray? {
             return root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name)
+        }
+
+        private fun layerRows(root: JSONObject, fallbackRoot: JSONObject?): Map<String, List<List<KeySpec>>> {
+            return parseLayerRows(fallbackRoot).toMutableMap().apply {
+                putAll(parseLayerRows(root))
+            }.filterKeys { it.isNotBlank() && it !in builtInLayers }
+        }
+
+        private fun parseLayerRows(root: JSONObject?): Map<String, List<List<KeySpec>>> {
+            if (root == null) return emptyMap()
+            val layers = root.optJSONObject("layers")
+                ?: root.optJSONObject("pages")
+                ?: root.optJSONObject("keyboards")
+                ?: return emptyMap()
+            return buildMap {
+                val names = layers.keys()
+                while (names.hasNext()) {
+                    val name = names.next()
+                    val rows = when (val value = layers.opt(name)) {
+                        is JSONArray -> value
+                        is JSONObject -> value.optJSONArray("rows")
+                        else -> null
+                    } ?: continue
+                    val parsed = normalizeRows(parseRows(rows))
+                    if (parsed.isNotEmpty()) put(name, parsed)
+                }
+            }
+        }
+
+        private fun ensureDefaultKeyboardConfig() {
+            val file = KeytaoAndroidPaths.keyboardFile()
+            if (file.isFile) return
+            val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeText(yaml)
+            }
+        }
+
+        private fun resolvedUserKeyboard(): JSONObject? {
+            return runCatching {
+                val userKeyboard = KeytaoAndroidPaths.keyboardFile()
+                if (!userKeyboard.isFile) return@runCatching null
+                val json = KeytaoNativeBridge.resolveKeyboardJson(null, userKeyboard.absolutePath)
+                    ?: return@runCatching null
+                JSONObject(json)
+            }.getOrNull()
         }
 
         private fun resolvedThemeKeyboard(context: Context): JSONObject? {
@@ -541,5 +614,7 @@ data class KeytaoAndroidImeConfig(
             hint = hint,
             longPress = longPress,
         )
+
+        private val builtInLayers = setOf("letters", "numbers", "symbols")
     }
 }

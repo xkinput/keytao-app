@@ -263,6 +263,7 @@ $dll = Join-Path $repoRoot "target\$target\$profile\keytao_windows_ime.dll"
 $runtimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\$Arch"
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
+Copy-Item -Force -LiteralPath (Join-Path $repoRoot "crates\keytao-theme\default-theme.yaml") -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Destination $runtimeDir
 $runtimePluginDir = Join-Path $runtimeDir "rime-plugins"

@@ -14,6 +14,8 @@ object KeytaoAndroidPaths {
 
     fun themeFile(): File = File(userRoot(), "theme.yaml")
 
+    fun keyboardFile(): File = File(userRoot(), "keyboard.yaml")
+
     fun imeConfigFile(): File = File(userRoot(), "android_ime.json")
 
     fun reloadStampFile(): File = File(userRoot(), reloadStampFileName)

@@ -107,6 +107,11 @@ char *keytao_resolve_theme_json_with_system_scheme(const char *default_theme_pat
                                                    const char *user_theme_path,
                                                    const char *system_color_scheme);
 
+char *keytao_default_keyboard_yaml(void);
+
+char *keytao_resolve_keyboard_json(const char *default_keyboard_path,
+                                   const char *user_keyboard_path);
+
 char *keytao_session_state_json(void *session);
 
 char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);

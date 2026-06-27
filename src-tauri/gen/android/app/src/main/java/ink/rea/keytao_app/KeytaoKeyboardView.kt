@@ -79,7 +79,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, BACK, SETTINGS }
-    private enum class KeyboardLayer { LETTERS, NUMBERS, SYMBOLS }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD, EMOJI }
 
@@ -89,7 +88,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
     private var state: KeytaoImeState = KeytaoImeState.empty()
     private var shiftState = ShiftState.OFF
-    private var keyboardLayer = KeyboardLayer.LETTERS
+    private var keyboardLayer = "letters"
     private var schemaReady = true
     private var statusMessage: String? = null
     private var keyRects: List<KeyRect> = emptyList()
@@ -269,11 +268,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun setKeyboardLayer(value: String?) {
-        val nextLayer = when (value) {
-            "numbers" -> KeyboardLayer.NUMBERS
-            "symbols" -> KeyboardLayer.SYMBOLS
-            else -> KeyboardLayer.LETTERS
-        }
+        val nextLayer = config.normalizedLayer(value)
         val changed = nextLayer != keyboardLayer || candidatePanelExpanded
         keyboardLayer = nextLayer
         candidatePanelExpanded = false
@@ -921,6 +916,27 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun candidateCommentSizeSp(): Float = min(theme.commentSizeSp - 1f, 12f).coerceAtLeast(10f)
 
+    private fun keyLabelSizeSp(label: String): Float {
+        if (label.length > 2 || containsCjk(label)) {
+            return min(min(theme.labelSizeSp, theme.fontSizeSp - 4f), 16f).coerceAtLeast(12f)
+        }
+        return theme.fontSizeSp
+    }
+
+    private fun keyHintSizeSp(): Float {
+        return min(min(theme.commentSizeSp - 2f, keyLabelSizeSp("中") - 2f), 12f).coerceAtLeast(9f)
+    }
+
+    private fun containsCjk(text: String): Boolean {
+        return text.any { char ->
+            val block = Character.UnicodeBlock.of(char)
+            block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
+                block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A ||
+                block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B ||
+                block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
+        }
+    }
+
     private fun candidatePaddingXDp(): Float = min(theme.candidatePaddingXDp, 9f).coerceAtLeast(7f)
 
     private fun candidateInlineGapDp(): Float = min(theme.candidateInlineGapDp, 4f).coerceAtLeast(2f)
@@ -1354,7 +1370,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
         val label = displayLabel(key)
         textPaint.textAlign = Paint.Align.CENTER
-        var labelSize = sp(if (label.length > 2) theme.labelSizeSp else theme.fontSizeSp)
+        var labelSize = sp(keyLabelSizeSp(label))
         textPaint.textSize = labelSize
         val maxLabelWidth = keyRect.width() - dp(10f)
         while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
@@ -1366,9 +1382,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
         key.hint?.let { hint ->
             textPaint.textAlign = Paint.Align.RIGHT
-            textPaint.textSize = sp(theme.commentSizeSp)
+            textPaint.textSize = sp(keyHintSizeSp())
             textPaint.color = theme.commentColor.toArgb()
-            canvas.drawText(hint, keyRect.right - dp(7f), keyRect.top + dp(15f), textPaint)
+            canvas.drawText(hint, keyRect.right - dp(7f), keyRect.top + dp(13f), textPaint)
         }
     }
 
@@ -1396,7 +1412,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             val maxLabelWidth = keyRect.width() - dp(10f)
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.color = keyForegroundColor(key, selected)
-            var labelSize = sp(if (label.length > 2) theme.labelSizeSp else theme.fontSizeSp)
+            var labelSize = sp(keyLabelSizeSp(label))
             textPaint.textSize = labelSize
             while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
                 labelSize -= dp(1f)
@@ -1482,12 +1498,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun activeRows(): List<List<KeySpec>> {
-        val rows = when (keyboardLayer) {
-            KeyboardLayer.NUMBERS -> config.numberRows
-            KeyboardLayer.SYMBOLS -> config.symbolRows
-            KeyboardLayer.LETTERS -> config.rows
-        }
-        if (keyboardLayer != KeyboardLayer.LETTERS || !shouldUseInlineNumberRow()) {
+        val rows = config.rowsForLayer(keyboardLayer)
+        if (keyboardLayer != "letters" || !shouldUseInlineNumberRow()) {
             return rows
         }
         return rows.mapIndexed { index, row ->
@@ -1724,7 +1736,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun toolbarActions(): List<ToolbarAction> {
         val function = ToolbarAction("功能", KeyCommand.panel("home"), icon = ToolbarIcon.FUNCTION)
         val languageToggle = languageToggleAction()
-        return if (keyboardLayer == KeyboardLayer.SYMBOLS) {
+        return if (keyboardLayer == "symbols") {
             listOf(
                 function,
                 ToolbarAction("中", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !state.asciiMode),
@@ -2462,7 +2474,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyboardRowShouldFillWidth(row: List<KeySpec>, rowIndex: Int, rows: List<List<KeySpec>>): Boolean {
-        if (keyboardLayer != KeyboardLayer.LETTERS) return true
+        if (keyboardLayer != "letters") return true
         if (rowIndex == 0 || rowIndex == rows.lastIndex) return true
         if (row.size <= 5) return true
         return row.any { key ->

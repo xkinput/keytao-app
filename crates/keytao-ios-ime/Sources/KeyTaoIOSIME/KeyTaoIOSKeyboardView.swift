@@ -202,14 +202,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     func setLayer(_ value: String?) {
-        switch value {
-        case "numbers":
-            layerMode = .numbers
-        case "symbols":
-            layerMode = .symbols
-        default:
-            layerMode = .letters
-        }
+        layerMode = config.normalizedLayer(value)
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = .home
@@ -841,20 +834,20 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawKeyOutline(key, rect: keyRect, pressed: pressed)
 
         let label = displayLabel(key)
-        let baseSize = label.count > 2 ? theme.font.labelSize : theme.font.size
+        let baseSize = keyLabelSize(for: label)
         let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10)
         let color = keyForegroundColor(key, selected: selected)
         drawText(label, in: keyRect, color: color, font: font, alignment: .center)
 
         if let hint = key.hint, !hint.isEmpty {
-            let hintFont = themedFont(size: theme.font.commentSize, weight: .regular)
+            let hintFont = themedFont(size: keyHintSize(), weight: .regular)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: hintFont,
                 .foregroundColor: theme.candidate.commentColor.uiColor,
             ]
             let size = hint.size(withAttributes: attributes)
             hint.draw(
-                at: CGPoint(x: keyRect.maxX - size.width - 7, y: keyRect.minY + 5),
+                at: CGPoint(x: keyRect.maxX - size.width - 7, y: keyRect.minY + 4),
                 withAttributes: attributes
             )
         }
@@ -875,7 +868,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawKeyOutline(key, rect: itemRect, pressed: pressed)
 
             let label = stackLabelForMode(item)
-            let baseSize = label.count > 2 ? theme.font.labelSize : theme.font.size
+            let baseSize = keyLabelSize(for: label)
             let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10)
             let color = keyForegroundColor(key, selected: selected)
             drawText(label, in: itemRect, color: color, font: font, alignment: .center)

@@ -9,23 +9,23 @@ ui:
 
 font:
   family: ""
-  size: 18
-  labelSize: 14
-  commentSize: 13
+  size: 20
+  labelSize: 15
+  commentSize: 16
   preeditSize: 15
-  weight: medium
+  weight: semibold
 
 panel:
-  orientation: horizontal
+  orientation: vertical
   background: "#F8FAFFF2"
-  borderColor: "#D8E2F1"
+  borderColor: "#B8C3D0"
   borderWidth: 1
-  cornerRadius: 14
-  paddingX: 8
-  paddingY: 7
-  gap: 6
-  minWidth: 96
-  maxWidth: 820
+  cornerRadius: 16
+  paddingX: 10
+  paddingY: 10
+  gap: 4
+  minWidth: 128
+  maxWidth: 320
   maxHeight: 460
   screenMargin: 8
   shadow: true
@@ -155,31 +155,31 @@ candidate:
   background: transparent
   hoverBackground: "#F1F6FF"
   selectedBackground: "#E6F0FF"
-  foreground: "#1F2933"
-  selectedForeground: "#14233B"
-  labelColor: "#6B7785"
-  selectedLabelColor: "#3B73D9"
-  commentColor: "#7A8790"
-  selectedCommentColor: "#526A91"
+  foreground: "#263442"
+  selectedForeground: "#243241"
+  labelColor: "#7F8D9C"
+  selectedLabelColor: "#4A8DF6"
+  commentColor: "#84929E"
+  selectedCommentColor: "#617286"
   borderColor: transparent
-  selectedBorderColor: "#A8C7FA"
-  borderWidth: 0
-  cornerRadius: 9
-  paddingX: 11
-  paddingY: 6
-  inlineGap: 5
-  minHeight: 32
-  maxWidth: 210
+  selectedBorderColor: "#5DA7D7"
+  borderWidth: 1
+  cornerRadius: 11
+  paddingX: 10
+  paddingY: 5
+  inlineGap: 4
+  minHeight: 34
+  maxWidth: 190
   separatorVisible: false
   separatorColor: "#DCE7F7"
   labelSuffix: "."
 
 navigation:
-  foreground: "#4A5966"
+  foreground: "#687684"
   disabledForeground: "#A5B0B8"
   hoverBackground: "#F1F6FF"
   buttonSize: 28
-  cornerRadius: 8
+  cornerRadius: 10
 
 modeHint:
   background: "#2D4B63"
@@ -188,7 +188,7 @@ modeHint:
   borderWidth: 1
   fontSize: 24
   width: 72
-  height: 48
+  height: 44
   cornerRadius: 14
   duration: 0.75
   shadow: true
@@ -198,7 +198,7 @@ modeHint:
 dark:
   panel:
     background: "#171A20F2"
-    borderColor: "#373D48"
+    borderColor: "#3E4652"
     shadow: true
 
   candidate:

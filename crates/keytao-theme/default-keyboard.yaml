@@ -1,0 +1,133 @@
+# KeyTao IME default keyboard layout.
+# Copy this file to the platform Rime data directory as keyboard.yaml and edit it
+# to customize mobile keyboard pages, keys, commands, long press, swipe actions,
+# and keyboardMode jumps.
+
+version: 1
+
+height: 266
+candidateBarHeight: 52
+bottomInset: 0
+horizontalGap: 4
+verticalGap: 5
+outerInset: 5
+maxKeyHeight: 54
+
+rows:
+  - [
+      { label: "q", hint: "1", value: "q", longPress: { type: input, value: "1" } },
+      { label: "w", hint: "2", value: "w", longPress: { type: input, value: "2" } },
+      { label: "e", hint: "3", value: "e", longPress: { type: input, value: "3" } },
+      { label: "r", hint: "4", value: "r", longPress: { type: input, value: "4" } },
+      { label: "t", hint: "5", value: "t", longPress: { type: input, value: "5" } },
+      { label: "y", hint: "6", value: "y", longPress: { type: input, value: "6" } },
+      { label: "u", hint: "7", value: "u", longPress: { type: input, value: "7" } },
+      { label: "i", hint: "8", value: "i", longPress: { type: input, value: "8" } },
+      { label: "o", hint: "9", value: "o", longPress: { type: input, value: "9" } },
+      { label: "p", hint: "0", value: "p", longPress: { type: input, value: "0" } }
+    ]
+  - [
+      { label: "a", hint: "@", value: "a", longPress: { type: input, value: "@" } },
+      { label: "s", hint: "#", value: "s", longPress: { type: input, value: "#" } },
+      { label: "d", hint: "$", value: "d", longPress: { type: input, value: "$" } },
+      { label: "f", hint: "%", value: "f", longPress: { type: input, value: "%" } },
+      { label: "g", hint: "&", value: "g", longPress: { type: input, value: "&" } },
+      { label: "h", hint: "*", value: "h", longPress: { type: input, value: "*" } },
+      { label: "j", hint: "(", value: "j", longPress: { type: input, value: "(" } },
+      { label: "k", hint: ")", value: "k", longPress: { type: input, value: ")" } },
+      { label: "l", hint: "_", value: "l", longPress: { type: input, value: "_" } }
+    ]
+  - [
+      { label: "⇧", weight: 1.3, action: { type: shift } },
+      { label: "z", hint: "-", value: "z", longPress: { type: input, value: "-" } },
+      { label: "x", hint: "/", value: "x", longPress: { type: input, value: "/" } },
+      { label: "c", hint: ":", value: "c", longPress: { type: input, value: ":" } },
+      { label: "v", hint: ";", value: "v", longPress: { type: input, value: ";" } },
+      { label: "b", hint: "\"", value: "b", longPress: { type: input, value: "\"" } },
+      { label: "n", hint: "'", value: "n", longPress: { type: input, value: "'" } },
+      { label: "m", hint: "=", value: "m", longPress: { type: input, value: "=" } },
+      { label: "⌫", weight: 1.3, action: { type: backspace } }
+    ]
+  - [
+      { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" } },
+      { label: "空格", weight: 4.6, action: { type: space }, swipeDown: { type: reset } },
+      { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" } },
+      { label: "↵", weight: 1.45, action: { type: enter } }
+    ]
+
+numberRows:
+  - [
+      { label: "+", value: "+", rowSpan: 3, stack: [
+        { label: "+", value: "+" },
+        { label: "*", value: "*" },
+        { label: "-", value: "-" },
+        { label: "/", value: "/" }
+      ] },
+      { label: "1", value: "1" },
+      { label: "2", value: "2" },
+      { label: "3", value: "3" },
+      { label: "⌫", action: { type: backspace } }
+    ]
+  - [
+      { label: "4", value: "4" },
+      { label: "5", value: "5" },
+      { label: "6", value: "6" },
+      { label: "·", value: "." }
+    ]
+  - [
+      { label: "7", value: "7" },
+      { label: "8", value: "8" },
+      { label: "9", value: "9" },
+      { label: "=", value: "=" }
+    ]
+  - [
+      { label: "返回", action: { type: keyboardMode, value: letters } },
+      { label: "#+=", action: { type: keyboardMode, value: symbols } },
+      { label: "0", value: "0" },
+      { label: "␣", action: { type: space } },
+      { label: "发送", action: { type: enter } }
+    ]
+
+symbolRows:
+  - [
+      { label: "【", value: "【", asciiLabel: "[", asciiValue: "[", rimeValue: ";k" },
+      { label: "】", value: "】", asciiLabel: "]", asciiValue: "]", rimeValue: ";l" },
+      { label: "《", value: "《", asciiLabel: "<", asciiValue: "<", rimeValue: ";u" },
+      { label: "》", value: "》", asciiLabel: ">", asciiValue: ">", rimeValue: ";i" },
+      { label: "「", value: "「", asciiLabel: "{", asciiValue: "{" },
+      { label: "」", value: "」", asciiLabel: "}", asciiValue: "}" },
+      { label: "、", value: "、", asciiLabel: "\\", asciiValue: "\\", rimeValue: ";d" },
+      { label: "：", value: "：", asciiLabel: ":", asciiValue: ":" },
+      { label: "；", value: "；", asciiLabel: ";", asciiValue: ";" },
+      { label: "？", value: "？", asciiLabel: "?", asciiValue: "?", rimeValue: ";w" }
+    ]
+  - [
+      { label: "！", value: "！", asciiLabel: "!", asciiValue: "!", rimeValue: ";t" },
+      { label: "（", value: "（", asciiLabel: "(", asciiValue: "(", rimeValue: ";e" },
+      { label: "）", value: "）", asciiLabel: ")", asciiValue: ")", rimeValue: ";r" },
+      { label: "￥", value: "￥", asciiLabel: "$", asciiValue: "$" },
+      { label: "……", value: "……", asciiLabel: "^", asciiValue: "^", rimeValue: ";s" },
+      { label: "—", value: "—", asciiLabel: "_", asciiValue: "_" },
+      { label: "·", value: "·", asciiLabel: "`", asciiValue: "`", rimeValue: ";o" },
+      { label: "～", value: "～", asciiLabel: "~", asciiValue: "~" },
+      { label: "“", value: "“", asciiLabel: "\"", asciiValue: "\"", rimeValue: ";f" },
+      { label: "”", value: "”", asciiLabel: "'", asciiValue: "'", rimeValue: ";g" }
+    ]
+  - [
+      { label: "123", weight: 1.35, action: { type: keyboardMode, value: numbers } },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: "," },
+      { label: "。", value: "。", asciiLabel: ".", asciiValue: "." },
+      { label: "、", value: "、", asciiLabel: "/", asciiValue: "/", rimeValue: ";d" },
+      { label: "…", value: "…", asciiLabel: "...", asciiValue: "...", rimeValue: ";s" },
+      { label: "⌫", weight: 1.35, action: { type: backspace } }
+    ]
+  - [
+      { label: "ABC", weight: 1.35, action: { type: keyboardMode, value: letters } },
+      { label: "空格", weight: 4.4, action: { type: space } },
+      { label: "↵", weight: 1.35, action: { type: enter } }
+    ]
+
+# Extra custom keyboard pages. A key can jump here with
+# action: { type: keyboardMode, value: myPage }.
+layers: {}

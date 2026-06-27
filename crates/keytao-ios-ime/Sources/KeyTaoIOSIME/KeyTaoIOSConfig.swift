@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import CKeytaoCore
 
 public enum KeyTaoCommandType {
     public static let input = "input"
@@ -167,10 +168,16 @@ public enum KeyTaoShiftState {
     case locked
 }
 
-public enum KeyTaoKeyboardLayer {
-    case letters
-    case numbers
-    case symbols
+public struct KeyTaoKeyboardLayer: Equatable {
+    public var id: String
+
+    public init(_ id: String) {
+        self.id = id
+    }
+
+    public static let letters = KeyTaoKeyboardLayer("letters")
+    public static let numbers = KeyTaoKeyboardLayer("numbers")
+    public static let symbols = KeyTaoKeyboardLayer("symbols")
 }
 
 public struct KeyTaoIOSImeConfig: Codable, Equatable {
@@ -187,6 +194,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var rows: [[KeyTaoKeySpec]]
     public var numberRows: [[KeyTaoKeySpec]]
     public var symbolRows: [[KeyTaoKeySpec]]
+    public var customRows: [String: [[KeyTaoKeySpec]]]
 
     private enum CodingKeys: String, CodingKey {
         case keyboardHeightDp
@@ -203,6 +211,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case rows
         case numberRows
         case symbolRows
+        case layers
+        case pages
+        case keyboards
     }
 
     private enum HapticsCodingKeys: String, CodingKey {
@@ -223,7 +234,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
         numberRows: [[KeyTaoKeySpec]],
-        symbolRows: [[KeyTaoKeySpec]]
+        symbolRows: [[KeyTaoKeySpec]],
+        customRows: [String: [[KeyTaoKeySpec]]] = [:]
     ) {
         self.keyboardHeightDp = keyboardHeightDp
         self.candidateBarHeightDp = candidateBarHeightDp
@@ -238,6 +250,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.rows = Self.normalizeRows(rows)
         self.numberRows = Self.normalizeNumberRows(numberRows)
         self.symbolRows = Self.normalizeRows(symbolRows)
+        self.customRows = Self.normalizeCustomRows(customRows)
     }
 
     public init(from decoder: Decoder) throws {
@@ -302,9 +315,22 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.symbolRows = Self.normalizeRows(
             (try? container.decode([[KeyTaoKeySpec]].self, forKey: .symbolRows)) ?? Self.fallback.symbolRows
         )
+        self.customRows = Self.normalizeCustomRows(
+            (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .layers))
+                ?? (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .pages))
+                ?? (try? container.decode([String: [[KeyTaoKeySpec]]].self, forKey: .keyboards))
+                ?? Self.fallback.customRows
+        )
     }
 
-    public static func load(userConfigURL: URL?, resolvedThemeJson: String? = nil) -> KeyTaoIOSImeConfig {
+    public static func load(
+        resolvedKeyboardJson: String? = nil,
+        userConfigURL: URL?,
+        resolvedThemeJson: String? = nil
+    ) -> KeyTaoIOSImeConfig {
+        if let keyboardConfig = decodeKeyboard(json: resolvedKeyboardJson) {
+            return keyboardConfig
+        }
         if let userConfigURL, let config = decode(url: userConfigURL) {
             return config
         }
@@ -320,14 +346,25 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     }
 
     public func rows(for layer: KeyTaoKeyboardLayer) -> [[KeyTaoKeySpec]] {
-        switch layer {
-        case .letters:
+        if layer == .letters {
             return rows
-        case .numbers:
+        }
+        if layer == .numbers {
             return numberRows
-        case .symbols:
+        }
+        if layer == .symbols {
             return symbolRows
         }
+        return customRows[layer.id] ?? rows
+    }
+
+    public func hasLayer(_ layer: KeyTaoKeyboardLayer) -> Bool {
+        layer == .letters || layer == .numbers || layer == .symbols || customRows[layer.id] != nil
+    }
+
+    public func normalizedLayer(_ value: String?) -> KeyTaoKeyboardLayer {
+        let layer = KeyTaoKeyboardLayer(value?.isEmpty == false ? value! : KeyTaoKeyboardLayer.letters.id)
+        return hasLayer(layer) ? layer : .letters
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -346,6 +383,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(rows, forKey: .rows)
         try container.encode(numberRows, forKey: .numberRows)
         try container.encode(symbolRows, forKey: .symbolRows)
+        if !customRows.isEmpty {
+            try container.encode(customRows, forKey: .layers)
+        }
     }
 
     private static func decode(url: URL) -> KeyTaoIOSImeConfig? {
@@ -375,7 +415,32 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
-            symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows
+            symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows,
+            customRows: keyboard.layers ?? Self.fallback.customRows
+        )
+    }
+
+    private static func decodeKeyboard(json: String?) -> KeyTaoIOSImeConfig? {
+        guard let json,
+              let data = json.data(using: .utf8),
+              let keyboard = try? JSONDecoder().decode(KeyTaoThemeKeyboard.self, from: data) else {
+            return nil
+        }
+        return KeyTaoIOSImeConfig(
+            keyboardHeightDp: keyboard.height ?? Self.fallback.keyboardHeightDp,
+            candidateBarHeightDp: keyboard.candidateBarHeight ?? Self.fallback.candidateBarHeightDp,
+            keyboardBottomInsetDp: keyboard.bottomInset ?? Self.fallback.keyboardBottomInsetDp,
+            horizontalGapDp: keyboard.horizontalGap ?? Self.fallback.horizontalGapDp,
+            verticalGapDp: keyboard.verticalGap ?? Self.fallback.verticalGapDp,
+            outerInsetDp: keyboard.outerInset ?? Self.fallback.outerInsetDp,
+            maxKeyHeightDp: keyboard.maxKeyHeight ?? Self.fallback.maxKeyHeightDp,
+            hapticsEnabled: Self.fallback.hapticsEnabled,
+            hapticIntensity: Self.fallback.hapticIntensity,
+            swipeThresholdDp: Self.fallback.swipeThresholdDp,
+            rows: keyboard.rows ?? Self.fallback.rows,
+            numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
+            symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows,
+            customRows: keyboard.layers ?? Self.fallback.customRows
         )
     }
 
@@ -409,6 +474,22 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 default:
                     return key
                 }
+            }
+        }
+    }
+
+    private static func normalizeCustomRows(_ rows: [String: [[KeyTaoKeySpec]]]) -> [String: [[KeyTaoKeySpec]]] {
+        rows.reduce(into: [:]) { result, entry in
+            let name = entry.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty,
+                  name != KeyTaoKeyboardLayer.letters.id,
+                  name != KeyTaoKeyboardLayer.numbers.id,
+                  name != KeyTaoKeyboardLayer.symbols.id else {
+                return
+            }
+            let normalized = normalizeRows(entry.value)
+            if !normalized.isEmpty {
+                result[name] = normalized
             }
         }
     }
@@ -480,8 +561,42 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 KeyTaoKeySpec(label: "发送", action: KeyTaoKeyCommand(type: KeyTaoCommandType.enter, value: nil, fallbackValue: nil)),
             ],
         ],
-        symbolRows: []
+        symbolRows: [],
+        customRows: [:]
     )
+}
+
+enum KeyTaoIOSKeyboardConfigResolver {
+    static func defaultKeyboardYaml() -> String? {
+        guard let ptr = keytao_default_keyboard_yaml() else {
+            return nil
+        }
+        defer { keytao_free_string(ptr) }
+        let yaml = String(cString: ptr)
+        return yaml.isEmpty ? nil : yaml
+    }
+
+    static func resolveJson(userKeyboardPath: String?) -> String? {
+        let ptr: UnsafeMutablePointer<CChar>? = withOptionalCString(userKeyboardPath) { userPtr in
+            keytao_resolve_keyboard_json(nil, userPtr)
+        }
+        guard let ptr else {
+            return nil
+        }
+        defer { keytao_free_string(ptr) }
+        let json = String(cString: ptr)
+        return json.isEmpty ? nil : json
+    }
+
+    private static func withOptionalCString<Result>(
+        _ value: String?,
+        _ body: (UnsafePointer<CChar>?) -> Result
+    ) -> Result {
+        if let value {
+            return value.withCString { body($0) }
+        }
+        return body(nil)
+    }
 }
 
 private struct KeyTaoThemeKeyboardRoot: Decodable {
@@ -499,6 +614,7 @@ private struct KeyTaoThemeKeyboard: Decodable {
     var rows: [[KeyTaoKeySpec]]?
     var numberRows: [[KeyTaoKeySpec]]?
     var symbolRows: [[KeyTaoKeySpec]]?
+    var layers: [String: [[KeyTaoKeySpec]]]?
 }
 
 private extension KeyTaoKeySpec {

@@ -2429,6 +2429,33 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
 
 #[cfg(target_os = "android")]
 #[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDefaultKeyboardYaml(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) -> jstring {
+    jni_string(&mut env, keytao_theme::default_keyboard_yaml())
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolveKeyboardJson(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    default_keyboard_path: JString<'_>,
+    user_keyboard_path: JString<'_>,
+) -> jstring {
+    let default_path = optional_jni_path(&mut env, default_keyboard_path);
+    let user_path = optional_jni_path(&mut env, user_keyboard_path);
+    let keyboard =
+        keytao_theme::resolve_keyboard_from_paths(default_path.as_deref(), user_path.as_deref());
+    match keytao_theme::resolved_keyboard_json(&keyboard) {
+        Ok(json) => jni_string(&mut env, &json),
+        Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineAvailable(
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,

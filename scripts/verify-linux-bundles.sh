@@ -69,6 +69,7 @@ require_runtime_listing() {
     local listing="$2"
     require_listing_match "$label" "$listing" '(^|/)keytao-app$'
     require_listing_match "$label" "$listing" '(^|/)keytao-ime(-x86_64-unknown-linux-gnu)?$'
+    require_listing_match "$label" "$listing" '(^|/)runtime/default-theme\.yaml$'
     require_listing_match "$label" "$listing" '(^|/)runtime/rime-data/default\.yaml$'
     require_listing_match "$label" "$listing" '(^|/)runtime/rime-data/opencc/'
     require_listing_match "$label" "$listing" '(^|/)runtime/lib/librime[^/]*\.so'
@@ -82,9 +83,11 @@ echo "==> Verifying Linux runtime directory"
 require_executable "$PROJECT_DIR/target/release/keytao-app"
 require_executable "$PROJECT_DIR/target/release/keytao-ime"
 require_file "$RUNTIME_DIR/rime-data/default.yaml"
+require_file "$RUNTIME_DIR/default-theme.yaml"
 require_glob "$RUNTIME_DIR/lib/librime*.so*"
 require_glob "$RUNTIME_DIR/lib/rime-plugins/librime-lua.so*"
 require_file "$RELEASE_RUNTIME_DIR/rime-data/default.yaml"
+require_file "$RELEASE_RUNTIME_DIR/default-theme.yaml"
 require_glob "$RELEASE_RUNTIME_DIR/lib/librime*.so*"
 require_glob "$RELEASE_RUNTIME_DIR/lib/rime-plugins/librime-lua.so*"
 

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -14,6 +15,7 @@ use std::{
 
 pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
+pub const DEFAULT_KEYBOARD_YAML: &str = include_str!("../default-keyboard.yaml");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -176,6 +178,8 @@ pub struct KeyboardTheme {
     pub rows: Vec<Vec<KeyboardKeyTheme>>,
     pub number_rows: Vec<Vec<KeyboardKeyTheme>>,
     pub symbol_rows: Vec<Vec<KeyboardKeyTheme>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layers: BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -376,7 +380,7 @@ impl ThemeResolver {
     }
 
     pub fn from_default_locations() -> Self {
-        Self::new(None, default_user_theme_path())
+        Self::new(default_bundled_theme_path(), default_user_theme_path())
     }
 
     pub fn current(&self) -> ResolvedImeTheme {
@@ -448,6 +452,48 @@ pub fn default_user_theme_path() -> Option<PathBuf> {
     }
 }
 
+pub fn default_bundled_theme_path() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var("KEYTAO_IME_DEFAULT_THEME_PATH") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))?;
+    let candidates = [
+        exe_dir.join("default-theme.yaml"),
+        exe_dir.join("theme.yaml"),
+        exe_dir.join("resources").join("default-theme.yaml"),
+        exe_dir.join("resources").join("theme.yaml"),
+        exe_dir.join("runtime").join("default-theme.yaml"),
+        exe_dir
+            .join("resources")
+            .join("runtime")
+            .join("default-theme.yaml"),
+        exe_dir
+            .join("..")
+            .join("runtime")
+            .join("default-theme.yaml"),
+        exe_dir
+            .join("..")
+            .join("lib")
+            .join("keytao-app")
+            .join("runtime")
+            .join("default-theme.yaml"),
+        exe_dir
+            .join("..")
+            .join("lib")
+            .join("keytao-app")
+            .join("resources")
+            .join("runtime")
+            .join("default-theme.yaml"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 pub fn resolve_theme_from_paths(
     default_theme_path: Option<&Path>,
     user_theme_path: Option<&Path>,
@@ -490,10 +536,7 @@ pub fn resolve_theme_from_paths_with_system_scheme(
         UiColorScheme::Dark => EffectiveColorScheme::Dark,
     };
 
-    let mut theme = ResolvedImeTheme {
-        ui: ui.clone(),
-        ..ResolvedImeTheme::default()
-    };
+    let mut theme = ResolvedImeTheme::schema_base(ui.clone());
     for partial in partials {
         theme.apply(partial.clone());
         if ui.effective_color_scheme == EffectiveColorScheme::Light {
@@ -520,11 +563,172 @@ fn resolve_theme_from_paths_with_system(
     resolve_theme_from_paths_with_system_scheme(default_theme_path, user_theme_path, system_scheme)
 }
 
+fn builtin_default_theme(system_scheme: EffectiveColorScheme) -> ResolvedImeTheme {
+    let mut partials = Vec::new();
+    if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
+        partials.push(partial);
+    }
+
+    let mut ui = UiTheme::default();
+    for partial in &partials {
+        if let Some(partial_ui) = partial.ui.clone() {
+            ui.apply(partial_ui);
+        }
+    }
+    ui.effective_color_scheme = match ui.color_scheme {
+        UiColorScheme::Auto => system_scheme,
+        UiColorScheme::Light => EffectiveColorScheme::Light,
+        UiColorScheme::Dark => EffectiveColorScheme::Dark,
+    };
+
+    let mut theme = ResolvedImeTheme::schema_base(ui.clone());
+    for partial in partials {
+        theme.apply(partial.clone());
+        if ui.effective_color_scheme == EffectiveColorScheme::Light {
+            if let Some(light) = partial.light {
+                theme.apply_variant(light);
+            }
+        } else if let Some(dark) = partial.dark {
+            theme.apply_variant(dark);
+        }
+    }
+    theme.ui = ui.clone();
+    if let Some(accent_color) = ui.accent_color {
+        theme.apply_accent_color(accent_color);
+    }
+    theme.sanitized()
+}
+
 pub fn resolved_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_json::Error> {
     serde_json::to_string(theme)
 }
 
+pub fn default_keyboard_yaml() -> &'static str {
+    DEFAULT_KEYBOARD_YAML
+}
+
+pub fn resolve_keyboard_from_paths(
+    default_keyboard_path: Option<&Path>,
+    user_keyboard_path: Option<&Path>,
+) -> KeyboardTheme {
+    let mut keyboard = KeyboardTheme::default();
+    for partial in keyboard_partials(default_keyboard_path, user_keyboard_path) {
+        keyboard.apply(partial);
+    }
+    sanitize_keyboard(keyboard)
+}
+
+pub fn resolved_keyboard_json(keyboard: &KeyboardTheme) -> Result<String, serde_json::Error> {
+    serde_json::to_string(keyboard)
+}
+
+fn keyboard_partials(
+    default_keyboard_path: Option<&Path>,
+    user_keyboard_path: Option<&Path>,
+) -> Vec<PartialKeyboardTheme> {
+    let mut partials = Vec::new();
+    if let Some(partial) = parse_keyboard_yaml(DEFAULT_KEYBOARD_YAML) {
+        partials.push(partial);
+    }
+    for path in [default_keyboard_path, user_keyboard_path]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(partial) = parse_keyboard_yaml(&content) {
+            partials.push(partial);
+        }
+    }
+    partials
+}
+
+fn parse_keyboard_yaml(content: &str) -> Option<PartialKeyboardTheme> {
+    if let Ok(file) = serde_yaml::from_str::<KeyboardFile>(content) {
+        return file.into_keyboard();
+    }
+    serde_yaml::from_str::<PartialTheme>(content)
+        .ok()
+        .and_then(|theme| theme.keyboard)
+}
+
 impl ResolvedImeTheme {
+    fn schema_base(ui: UiTheme) -> Self {
+        Self {
+            version: THEME_SCHEMA_VERSION,
+            ui,
+            font: FontTheme {
+                family: None,
+                size: 20.0,
+                label_size: 15.0,
+                comment_size: 16.0,
+                preedit_size: 15.0,
+                weight: FontWeight::SemiBold,
+            },
+            panel: PanelTheme {
+                orientation: PanelOrientation::Vertical,
+                background: rgba(0xF8, 0xFA, 0xFF, 0xF2),
+                border_color: rgba(0xB8, 0xC3, 0xD0, 0xFF),
+                border_width: 1.0,
+                corner_radius: 16.0,
+                padding_x: 10.0,
+                padding_y: 10.0,
+                gap: 4.0,
+                min_width: 128.0,
+                max_width: 320.0,
+                max_height: 460.0,
+                screen_margin: 8.0,
+                shadow: true,
+            },
+            candidate: CandidateTheme {
+                background: rgba(0, 0, 0, 0),
+                hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
+                selected_background: rgba(0xE6, 0xF0, 0xFF, 0xFF),
+                foreground: rgba(0x26, 0x34, 0x42, 0xFF),
+                selected_foreground: rgba(0x24, 0x32, 0x41, 0xFF),
+                label_color: rgba(0x7F, 0x8D, 0x9C, 0xFF),
+                selected_label_color: rgba(0x4A, 0x8D, 0xF6, 0xFF),
+                comment_color: rgba(0x84, 0x92, 0x9E, 0xFF),
+                selected_comment_color: rgba(0x61, 0x72, 0x86, 0xFF),
+                border_color: rgba(0, 0, 0, 0),
+                selected_border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
+                border_width: 1.0,
+                corner_radius: 11.0,
+                padding_x: 10.0,
+                padding_y: 5.0,
+                inline_gap: 4.0,
+                min_height: 34.0,
+                max_width: 190.0,
+                separator_visible: false,
+                separator_color: rgba(0xDC, 0xE7, 0xF7, 0xFF),
+                label_suffix: ".".to_string(),
+            },
+            navigation: NavigationTheme {
+                foreground: rgba(0x68, 0x76, 0x84, 0xFF),
+                disabled_foreground: rgba(0xA5, 0xB0, 0xB8, 0xFF),
+                hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
+                button_size: 28.0,
+                corner_radius: 10.0,
+            },
+            mode_hint: ModeHintTheme {
+                background: rgba(0x2D, 0x4B, 0x63, 0xFF),
+                foreground: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+                border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
+                border_width: 1.0,
+                font_size: 24.0,
+                width: 72.0,
+                height: 44.0,
+                corner_radius: 14.0,
+                duration: 0.75,
+                shadow: true,
+                chinese_text: "中".to_string(),
+                english_text: "英".to_string(),
+            },
+            keyboard: KeyboardTheme::default(),
+        }
+    }
+
     pub fn candidate_panel_model(
         &self,
         input: CandidatePanelInput,
@@ -643,6 +847,8 @@ impl ResolvedImeTheme {
             with_alpha(mix_color(panel_background, accent, selected_weight), 0xff);
         self.candidate.hover_background =
             with_alpha(mix_color(panel_background, accent, hover_weight), 0xff);
+        self.mode_hint.border_color = opaque(accent);
+        self.mode_hint.foreground = rgba(0xff, 0xff, 0xff, 0xff);
     }
 
     fn sanitized(mut self) -> Self {
@@ -676,90 +882,14 @@ impl ResolvedImeTheme {
         self.mode_hint.corner_radius = clamp(self.mode_hint.corner_radius, 0.0, 32.0);
         self.mode_hint.duration = clamp(self.mode_hint.duration, 0.15, 4.0);
         self.keyboard.height = clamp(self.keyboard.height, 160.0, 420.0);
-        self.keyboard.candidate_bar_height = clamp(self.keyboard.candidate_bar_height, 36.0, 96.0);
-        self.keyboard.bottom_inset = clamp(self.keyboard.bottom_inset, 0.0, 80.0);
-        self.keyboard.horizontal_gap = clamp(self.keyboard.horizontal_gap, 0.0, 24.0);
-        self.keyboard.vertical_gap = clamp(self.keyboard.vertical_gap, 0.0, 24.0);
-        self.keyboard.outer_inset = clamp(self.keyboard.outer_inset, 0.0, 32.0);
-        self.keyboard.max_key_height = clamp(self.keyboard.max_key_height, 36.0, 84.0);
+        self.keyboard = sanitize_keyboard(self.keyboard);
         self
     }
 }
 
 impl Default for ResolvedImeTheme {
     fn default() -> Self {
-        Self {
-            version: THEME_SCHEMA_VERSION,
-            ui: UiTheme::default(),
-            font: FontTheme {
-                family: None,
-                size: 18.0,
-                label_size: 14.0,
-                comment_size: 13.0,
-                preedit_size: 15.0,
-                weight: FontWeight::Medium,
-            },
-            panel: PanelTheme {
-                orientation: PanelOrientation::Horizontal,
-                background: rgba(0xF8, 0xFA, 0xFF, 0xF2),
-                border_color: rgba(0xD8, 0xE2, 0xF1, 0xFF),
-                border_width: 1.0,
-                corner_radius: 14.0,
-                padding_x: 8.0,
-                padding_y: 7.0,
-                gap: 6.0,
-                min_width: 96.0,
-                max_width: 820.0,
-                max_height: 460.0,
-                screen_margin: 8.0,
-                shadow: true,
-            },
-            candidate: CandidateTheme {
-                background: rgba(0, 0, 0, 0),
-                hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
-                selected_background: rgba(0xE6, 0xF0, 0xFF, 0xFF),
-                foreground: rgba(0x1F, 0x29, 0x33, 0xFF),
-                selected_foreground: rgba(0x14, 0x23, 0x3B, 0xFF),
-                label_color: rgba(0x6B, 0x77, 0x85, 0xFF),
-                selected_label_color: rgba(0x3B, 0x73, 0xD9, 0xFF),
-                comment_color: rgba(0x7A, 0x87, 0x90, 0xFF),
-                selected_comment_color: rgba(0x52, 0x6A, 0x91, 0xFF),
-                border_color: rgba(0, 0, 0, 0),
-                selected_border_color: rgba(0xA8, 0xC7, 0xFA, 0xFF),
-                border_width: 0.0,
-                corner_radius: 9.0,
-                padding_x: 11.0,
-                padding_y: 6.0,
-                inline_gap: 5.0,
-                min_height: 32.0,
-                max_width: 210.0,
-                separator_visible: false,
-                separator_color: rgba(0xDC, 0xE7, 0xF7, 0xFF),
-                label_suffix: ".".to_string(),
-            },
-            navigation: NavigationTheme {
-                foreground: rgba(0x4A, 0x59, 0x66, 0xFF),
-                disabled_foreground: rgba(0xA5, 0xB0, 0xB8, 0xFF),
-                hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
-                button_size: 28.0,
-                corner_radius: 8.0,
-            },
-            mode_hint: ModeHintTheme {
-                background: rgba(0x2D, 0x4B, 0x63, 0xFF),
-                foreground: rgba(0xFF, 0xFF, 0xFF, 0xFF),
-                border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
-                border_width: 1.0,
-                font_size: 24.0,
-                width: 72.0,
-                height: 48.0,
-                corner_radius: 14.0,
-                duration: 0.75,
-                shadow: true,
-                chinese_text: "中".to_string(),
-                english_text: "英".to_string(),
-            },
-            keyboard: KeyboardTheme::default(),
-        }
+        builtin_default_theme(EffectiveColorScheme::Light)
     }
 }
 
@@ -776,8 +906,27 @@ impl Default for KeyboardTheme {
             rows: Vec::new(),
             number_rows: Vec::new(),
             symbol_rows: Vec::new(),
+            layers: BTreeMap::new(),
         }
     }
+}
+
+fn sanitize_keyboard(mut keyboard: KeyboardTheme) -> KeyboardTheme {
+    keyboard.height = clamp(keyboard.height, 160.0, 420.0);
+    keyboard.candidate_bar_height = clamp(keyboard.candidate_bar_height, 36.0, 96.0);
+    keyboard.bottom_inset = clamp(keyboard.bottom_inset, 0.0, 80.0);
+    keyboard.horizontal_gap = clamp(keyboard.horizontal_gap, 0.0, 24.0);
+    keyboard.vertical_gap = clamp(keyboard.vertical_gap, 0.0, 24.0);
+    keyboard.outer_inset = clamp(keyboard.outer_inset, 0.0, 32.0);
+    keyboard.max_key_height = clamp(keyboard.max_key_height, 36.0, 84.0);
+    keyboard.layers.retain(|name, rows| {
+        !name.trim().is_empty()
+            && name != "letters"
+            && name != "numbers"
+            && name != "symbols"
+            && !rows.is_empty()
+    });
+    keyboard
 }
 
 impl Default for UiTheme {
@@ -817,6 +966,21 @@ struct PartialThemeVariant {
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
     keyboard: Option<PartialKeyboardTheme>,
+}
+
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyboardFile {
+    keyboard: Option<PartialKeyboardTheme>,
+    #[serde(flatten)]
+    root: PartialKeyboardTheme,
+}
+
+impl KeyboardFile {
+    fn into_keyboard(self) -> Option<PartialKeyboardTheme> {
+        self.keyboard
+            .or_else(|| self.root.has_any_value().then_some(self.root))
+    }
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -935,6 +1099,7 @@ struct PartialModeHintTheme {
 #[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialKeyboardTheme {
+    version: Option<u32>,
     #[serde(alias = "keyboardHeightDp")]
     height: Option<f32>,
     #[serde(alias = "candidateBarHeightDp")]
@@ -952,6 +1117,28 @@ struct PartialKeyboardTheme {
     rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     number_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     symbol_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
+    #[serde(default, alias = "pages", alias = "keyboards")]
+    layers: Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>,
+}
+
+impl PartialKeyboardTheme {
+    fn has_any_value(&self) -> bool {
+        self.version.is_some()
+            || self.height.is_some()
+            || self.candidate_bar_height.is_some()
+            || self.bottom_inset.is_some()
+            || self.horizontal_gap.is_some()
+            || self.vertical_gap.is_some()
+            || self.outer_inset.is_some()
+            || self.max_key_height.is_some()
+            || self.rows.is_some()
+            || self.number_rows.is_some()
+            || self.symbol_rows.is_some()
+            || self
+                .layers
+                .as_ref()
+                .is_some_and(|layers| !layers.is_empty())
+    }
 }
 
 impl UiTheme {
@@ -1079,6 +1266,7 @@ impl KeyboardTheme {
         assign(&mut self.rows, partial.rows);
         assign(&mut self.number_rows, partial.number_rows);
         assign(&mut self.symbol_rows, partial.symbol_rows);
+        assign(&mut self.layers, partial.layers);
     }
 }
 
@@ -1326,8 +1514,57 @@ mod tests {
         let theme = resolve_theme_from_paths(None, None);
         assert_eq!(theme.version, THEME_SCHEMA_VERSION);
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
-        assert_eq!(theme.panel.orientation, PanelOrientation::Horizontal);
+        assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert_eq!(theme.panel.min_width, 128.0);
+        assert_eq!(theme.font.size, 20.0);
         assert_eq!(theme.candidate.label_suffix, ".");
+        assert_eq!(
+            theme.candidate.selected_border_color,
+            rgba(0x5d, 0xa7, 0xd7, 0xff)
+        );
+        assert_eq!(theme.mode_hint.width, 72.0);
+        assert_eq!(theme.mode_hint.height, 44.0);
+    }
+
+    #[test]
+    fn resolved_default_uses_builtin_theme_yaml() {
+        let theme = ResolvedImeTheme::default();
+        assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert_eq!(theme.candidate.min_height, 34.0);
+        assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
+        assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
+    }
+
+    #[test]
+    fn default_keyboard_yaml_resolves() {
+        let keyboard = resolve_keyboard_from_paths(None, None);
+        assert_eq!(keyboard.height, 266.0);
+        assert_eq!(keyboard.rows.len(), 4);
+        assert_eq!(keyboard.rows[0][0].label, "q");
+        assert_eq!(keyboard.number_rows[0][0].label, "+");
+        assert_eq!(keyboard.symbol_rows[0][0].label, "【");
+        let json = resolved_keyboard_json(&keyboard).unwrap();
+        assert!(json.contains("\"numberRows\""));
+    }
+
+    #[test]
+    fn keyboard_yaml_accepts_custom_layers() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-keyboard-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "height: 300\nlayers:\n  emoji:\n    - [ { label: \"🙂\", value: \"🙂\" } ]\n",
+        )
+        .unwrap();
+
+        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        assert_eq!(keyboard.height, 300.0);
+        assert_eq!(keyboard.layers["emoji"][0][0].label, "🙂");
     }
 
     #[test]
@@ -1412,7 +1649,7 @@ mod tests {
         );
         assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
         assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
-        assert_eq!(theme.mode_hint.border_color, rgba(0x5d, 0xa7, 0xd7, 0xff));
+        assert_eq!(theme.mode_hint.border_color, rgba(0x12, 0x34, 0x56, 0xff));
     }
 
     #[test]

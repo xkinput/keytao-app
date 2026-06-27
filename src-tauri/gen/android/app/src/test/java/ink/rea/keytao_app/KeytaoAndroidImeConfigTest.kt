@@ -139,6 +139,24 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `parse config keeps custom keyboard layers`() {
+        val config = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              "rows": [[{ "label": "a", "value": "a" }]],
+              "layers": {
+                "emoji": [[{ "label": "🙂", "value": "🙂" }]]
+              }
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(true, config.hasLayer("emoji"))
+        assertEquals("🙂", config.rowsForLayer("emoji").single().single().label)
+        assertEquals("letters", config.normalizedLayer("missing"))
+    }
+
+    @Test
     fun `default m long press goes through rime input path`() {
         val config = KeytaoAndroidImeConfig.parse("""{ "rows": [] }""")
         val mKey = config.rows

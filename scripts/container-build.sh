@@ -106,6 +106,7 @@ ensure_linux_rime_data() {
 prepare_linux_runtime() {
   rm -rf "$LINUX_RUNTIME_DIR"
   mkdir -p "$LINUX_RUNTIME_LIB_DIR" "$LINUX_RUNTIME_RIME_DATA_DIR"
+  cp crates/keytao-theme/default-theme.yaml "$LINUX_RUNTIME_DIR/default-theme.yaml"
 
   rime_data_src=""
   for candidate in \
