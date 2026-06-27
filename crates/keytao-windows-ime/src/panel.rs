@@ -7,7 +7,7 @@ use keytao_core::ImeState;
 use keytao_theme::{
     CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
-use std::path::{Path, PathBuf};
+use std::path::{Path as FsPath, PathBuf};
 use tiny_skia::*;
 
 // ── Font loader ───────────────────────────────────────────────────────────────
@@ -493,7 +493,7 @@ fn dll_related_dirs() -> Vec<PathBuf> {
 
     if let Some(parent) = std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .and_then(|path| path.parent().map(FsPath::to_path_buf))
     {
         dirs.push(parent);
     }

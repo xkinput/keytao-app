@@ -9,7 +9,7 @@
 //! Undo: regsvr32 /u keytao_windows_ime.dll
 
 use windows::{
-    core::{IUnknown, Result, PCWSTR},
+    core::{IUnknown, Interface, Result, PCWSTR},
     Win32::{
         Foundation::BOOL,
         System::Com::{
