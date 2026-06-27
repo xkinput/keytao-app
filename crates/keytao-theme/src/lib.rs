@@ -70,6 +70,7 @@ pub struct ResolvedImeTheme {
     pub candidate: CandidateTheme,
     pub navigation: NavigationTheme,
     pub mode_hint: ModeHintTheme,
+    pub keyboard: KeyboardTheme,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -160,6 +161,86 @@ pub struct ModeHintTheme {
     pub shadow: bool,
     pub chinese_text: String,
     pub english_text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardTheme {
+    pub height: f32,
+    pub candidate_bar_height: f32,
+    pub bottom_inset: f32,
+    pub horizontal_gap: f32,
+    pub vertical_gap: f32,
+    pub outer_inset: f32,
+    pub max_key_height: f32,
+    pub rows: Vec<Vec<KeyboardKeyTheme>>,
+    pub number_rows: Vec<Vec<KeyboardKeyTheme>>,
+    pub symbol_rows: Vec<Vec<KeyboardKeyTheme>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardKeyTheme {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rime_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_action: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swipe_up: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swipe_down: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_press: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_long_press: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_span: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<KeyboardKeyStackItemTheme>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardKeyStackItemTheme {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rime_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<KeyboardCommandTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ascii_action: Option<KeyboardCommandTheme>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardCommandTheme {
+    #[serde(rename = "type")]
+    pub command_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -257,6 +338,7 @@ pub struct ModeHintModel {
 pub struct ThemeResolver {
     default_theme_path: Option<PathBuf>,
     user_theme_path: Option<PathBuf>,
+    system_scheme: Option<EffectiveColorScheme>,
     cache: Mutex<ThemeCache>,
 }
 
@@ -277,9 +359,18 @@ impl Default for ThemeCache {
 
 impl ThemeResolver {
     pub fn new(default_theme_path: Option<PathBuf>, user_theme_path: Option<PathBuf>) -> Self {
+        Self::with_system_scheme(default_theme_path, user_theme_path, None)
+    }
+
+    pub fn with_system_scheme(
+        default_theme_path: Option<PathBuf>,
+        user_theme_path: Option<PathBuf>,
+        system_scheme: Option<EffectiveColorScheme>,
+    ) -> Self {
         Self {
             default_theme_path,
             user_theme_path,
+            system_scheme,
             cache: Mutex::new(ThemeCache::default()),
         }
     }
@@ -290,18 +381,23 @@ impl ThemeResolver {
 
     pub fn current(&self) -> ResolvedImeTheme {
         let signature = self.signature();
+        let system_scheme = self
+            .system_scheme
+            .unwrap_or_else(cached_system_effective_color_scheme);
         let Ok(mut cache) = self.cache.lock() else {
-            return resolve_theme_from_paths(
+            return resolve_theme_from_paths_with_system_scheme(
                 self.default_theme_path.as_deref(),
                 self.user_theme_path.as_deref(),
+                system_scheme,
             );
         };
         if cache.signature == signature {
             return cache.theme.clone();
         }
-        let theme = resolve_theme_from_paths(
+        let theme = resolve_theme_from_paths_with_system_scheme(
             self.default_theme_path.as_deref(),
             self.user_theme_path.as_deref(),
+            system_scheme,
         );
         cache.signature = signature;
         cache.theme = theme.clone();
@@ -319,7 +415,8 @@ impl ThemeResolver {
         .collect::<Vec<_>>();
         parts.push(format!(
             "system:{:?}",
-            cached_system_effective_color_scheme()
+            self.system_scheme
+                .unwrap_or_else(cached_system_effective_color_scheme)
         ));
         parts.join("|")
     }
@@ -362,7 +459,7 @@ pub fn resolve_theme_from_paths(
     )
 }
 
-fn resolve_theme_from_paths_with_system(
+pub fn resolve_theme_from_paths_with_system_scheme(
     default_theme_path: Option<&Path>,
     user_theme_path: Option<&Path>,
     system_scheme: EffectiveColorScheme,
@@ -413,6 +510,14 @@ fn resolve_theme_from_paths_with_system(
     }
 
     theme.sanitized()
+}
+
+fn resolve_theme_from_paths_with_system(
+    default_theme_path: Option<&Path>,
+    user_theme_path: Option<&Path>,
+    system_scheme: EffectiveColorScheme,
+) -> ResolvedImeTheme {
+    resolve_theme_from_paths_with_system_scheme(default_theme_path, user_theme_path, system_scheme)
 }
 
 pub fn resolved_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_json::Error> {
@@ -501,6 +606,7 @@ impl ResolvedImeTheme {
             candidate: partial.candidate,
             navigation: partial.navigation,
             mode_hint: partial.mode_hint,
+            keyboard: partial.keyboard,
         });
     }
 
@@ -519,6 +625,9 @@ impl ResolvedImeTheme {
         }
         if let Some(mode_hint) = partial.mode_hint {
             self.mode_hint.apply(mode_hint);
+        }
+        if let Some(keyboard) = partial.keyboard {
+            self.keyboard.apply(keyboard);
         }
     }
 
@@ -566,6 +675,13 @@ impl ResolvedImeTheme {
         self.mode_hint.height = clamp(self.mode_hint.height, 28.0, 140.0);
         self.mode_hint.corner_radius = clamp(self.mode_hint.corner_radius, 0.0, 32.0);
         self.mode_hint.duration = clamp(self.mode_hint.duration, 0.15, 4.0);
+        self.keyboard.height = clamp(self.keyboard.height, 160.0, 420.0);
+        self.keyboard.candidate_bar_height = clamp(self.keyboard.candidate_bar_height, 36.0, 96.0);
+        self.keyboard.bottom_inset = clamp(self.keyboard.bottom_inset, 0.0, 80.0);
+        self.keyboard.horizontal_gap = clamp(self.keyboard.horizontal_gap, 0.0, 24.0);
+        self.keyboard.vertical_gap = clamp(self.keyboard.vertical_gap, 0.0, 24.0);
+        self.keyboard.outer_inset = clamp(self.keyboard.outer_inset, 0.0, 32.0);
+        self.keyboard.max_key_height = clamp(self.keyboard.max_key_height, 36.0, 84.0);
         self
     }
 }
@@ -642,6 +758,24 @@ impl Default for ResolvedImeTheme {
                 chinese_text: "中".to_string(),
                 english_text: "英".to_string(),
             },
+            keyboard: KeyboardTheme::default(),
+        }
+    }
+}
+
+impl Default for KeyboardTheme {
+    fn default() -> Self {
+        Self {
+            height: 266.0,
+            candidate_bar_height: 52.0,
+            bottom_inset: 0.0,
+            horizontal_gap: 4.0,
+            vertical_gap: 5.0,
+            outer_inset: 5.0,
+            max_key_height: 54.0,
+            rows: Vec::new(),
+            number_rows: Vec::new(),
+            symbol_rows: Vec::new(),
         }
     }
 }
@@ -667,6 +801,7 @@ struct PartialTheme {
     navigation: Option<PartialNavigationTheme>,
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
+    keyboard: Option<PartialKeyboardTheme>,
     light: Option<PartialThemeVariant>,
     #[serde(alias = "night")]
     dark: Option<PartialThemeVariant>,
@@ -681,6 +816,7 @@ struct PartialThemeVariant {
     navigation: Option<PartialNavigationTheme>,
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
+    keyboard: Option<PartialKeyboardTheme>,
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -796,6 +932,28 @@ struct PartialModeHintTheme {
     english_text: Option<String>,
 }
 
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialKeyboardTheme {
+    #[serde(alias = "keyboardHeightDp")]
+    height: Option<f32>,
+    #[serde(alias = "candidateBarHeightDp")]
+    candidate_bar_height: Option<f32>,
+    #[serde(alias = "keyboardBottomInsetDp")]
+    bottom_inset: Option<f32>,
+    #[serde(alias = "horizontalGapDp")]
+    horizontal_gap: Option<f32>,
+    #[serde(alias = "verticalGapDp")]
+    vertical_gap: Option<f32>,
+    #[serde(alias = "outerInsetDp")]
+    outer_inset: Option<f32>,
+    #[serde(alias = "maxKeyHeightDp")]
+    max_key_height: Option<f32>,
+    rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
+    number_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
+    symbol_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
+}
+
 impl UiTheme {
     fn apply(&mut self, partial: PartialUiTheme) {
         if let Some(color_scheme) = partial.color_scheme {
@@ -906,6 +1064,21 @@ impl ModeHintTheme {
         if let Some(english_text) = partial.english_text {
             self.english_text = english_text;
         }
+    }
+}
+
+impl KeyboardTheme {
+    fn apply(&mut self, partial: PartialKeyboardTheme) {
+        assign(&mut self.height, partial.height);
+        assign(&mut self.candidate_bar_height, partial.candidate_bar_height);
+        assign(&mut self.bottom_inset, partial.bottom_inset);
+        assign(&mut self.horizontal_gap, partial.horizontal_gap);
+        assign(&mut self.vertical_gap, partial.vertical_gap);
+        assign(&mut self.outer_inset, partial.outer_inset);
+        assign(&mut self.max_key_height, partial.max_key_height);
+        assign(&mut self.rows, partial.rows);
+        assign(&mut self.number_rows, partial.number_rows);
+        assign(&mut self.symbol_rows, partial.symbol_rows);
     }
 }
 

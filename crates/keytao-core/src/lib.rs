@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
     collections::HashSet,
-    ffi::CStr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -68,6 +67,7 @@ impl ImeState {
     target_os = "windows",
     target_os = "macos",
     target_os = "android",
+    target_os = "ios",
     test
 ))]
 fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, PathBuf) {
@@ -85,6 +85,7 @@ fn rime_build_dirs(user_data_dir: &Path, shared_data_dir: &Path) -> (PathBuf, Pa
     target_os = "windows",
     target_os = "macos",
     target_os = "android",
+    target_os = "ios",
     test
 ))]
 fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
@@ -95,7 +96,8 @@ fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 pub fn librime_runtime_version() -> Option<String> {
     unsafe {
@@ -118,7 +120,8 @@ pub fn librime_runtime_version() -> Option<String> {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 )))]
 pub fn librime_runtime_version() -> Option<String> {
     None
@@ -130,20 +133,47 @@ pub fn librime_runtime_version() -> Option<String> {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 mod desktop {
     use super::*;
-    use librime_sys::{rime_get_api, RimeCandidateListIterator};
-    use rime_api::{
-        create_session, full_deploy_and_wait, initialize, setup, DeployResult, KeyEvent, KeyStatus,
-        Traits,
-    };
-    use std::ffi::CString;
-    use std::sync::OnceLock;
+    use librime_sys::{rime_get_api, RimeCandidateListIterator, RimeTraits};
+    use rime_api::{create_session, KeyEvent, KeyStatus};
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::sync::{Mutex, OnceLock};
 
     // librime setup+initialize must run exactly once per process.
     static RIME_INITED: OnceLock<()> = OnceLock::new();
+    static DEPLOY_RESULT: Mutex<Option<bool>> = Mutex::new(None);
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    extern "C" {
+        // Static/mobile librime builds keep plugin modules dormant until required.
+        #[link_name = "_Z23rime_require_module_luav"]
+        fn rime_require_module_lua();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg_attr(target_os = "linux", link(name = "dl"))]
+    extern "C" {
+        fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlerror() -> *const c_char;
+    }
+
+    #[cfg(target_os = "windows")]
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut c_void;
+        fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const c_char) -> *mut c_void;
+        fn GetModuleHandleExW(
+            dw_flags: u32,
+            lp_module_name: *const u16,
+            ph_module: *mut *mut c_void,
+        ) -> i32;
+        fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
+    }
 
     /// Initialize and fully deploy librime.
     /// `setup` + `initialize` run only on the first call; subsequent calls only
@@ -162,25 +192,523 @@ mod desktop {
             let _ = std::fs::create_dir_all(&prebuilt_dir);
             let _ = std::fs::create_dir_all(&log_dir);
 
-            let mut traits = Traits::new();
-            traits.set_user_data_dir(&user_data_dir);
-            traits.set_shared_data_dir(&shared_data_dir);
-            traits.set_staging_dir(&staging_dir.to_string_lossy());
-            traits.set_prebuilt_data_dir(&prebuilt_dir.to_string_lossy());
-            traits.set_log_dir(&log_dir.to_string_lossy());
-            traits.set_distribution_name("KeyTao");
-            traits.set_distribution_code_name("keytao");
-            traits.set_distribution_version("1.0.0");
-            traits.set_app_name("rime.keytao");
-            setup(&mut traits);
-            initialize(&mut traits);
+            setup_rime(
+                &user_data_dir,
+                &shared_data_dir,
+                &staging_dir.to_string_lossy(),
+                &prebuilt_dir.to_string_lossy(),
+                &log_dir.to_string_lossy(),
+            );
         });
-        match full_deploy_and_wait() {
-            DeployResult::Success => Ok(()),
-            DeployResult::Failure => Err(format!(
+        if full_deploy_and_wait() {
+            Ok(())
+        } else {
+            Err(format!(
                 "Rime deployment failed. See librime logs in {}",
                 log_dir.display()
-            )),
+            ))
+        }
+    }
+
+    fn setup_rime(
+        user_data_dir: &str,
+        shared_data_dir: &str,
+        staging_dir: &str,
+        prebuilt_data_dir: &str,
+        log_dir: &str,
+    ) {
+        let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
+        let shared_data_dir = CString::new(shared_data_dir).expect("valid shared data dir");
+        let staging_dir = CString::new(staging_dir).expect("valid staging dir");
+        let prebuilt_data_dir = CString::new(prebuilt_data_dir).expect("valid prebuilt data dir");
+        let log_dir = CString::new(log_dir).expect("valid log dir");
+        let distribution_name = CString::new("KeyTao").unwrap();
+        let distribution_code_name = CString::new("keytao").unwrap();
+        let distribution_version = CString::new("1.0.0").unwrap();
+        let app_name = CString::new("rime.keytao").unwrap();
+        let module_default = CString::new("default").unwrap();
+        let module_lua = CString::new("lua").unwrap();
+        let mut modules = [
+            module_default.as_ptr(),
+            module_lua.as_ptr(),
+            std::ptr::null::<c_char>(),
+        ];
+
+        librime_sys::rime_struct!(traits: RimeTraits);
+        traits.user_data_dir = user_data_dir.as_ptr();
+        traits.shared_data_dir = shared_data_dir.as_ptr();
+        traits.staging_dir = staging_dir.as_ptr();
+        traits.prebuilt_data_dir = prebuilt_data_dir.as_ptr();
+        traits.log_dir = log_dir.as_ptr();
+        traits.distribution_name = distribution_name.as_ptr();
+        traits.distribution_code_name = distribution_code_name.as_ptr();
+        traits.distribution_version = distribution_version.as_ptr();
+        traits.app_name = app_name.as_ptr();
+        traits.modules = modules.as_mut_ptr();
+
+        unsafe {
+            require_lua_module();
+
+            let api = rime_get_api();
+            if let Some(setup) = (*api).setup {
+                setup(&mut traits);
+            }
+            if let Some(initialize) = (*api).initialize {
+                initialize(&mut traits);
+            }
+            if let Some(set_notification_handler) = (*api).set_notification_handler {
+                set_notification_handler(Some(notification_handler), std::ptr::null_mut());
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    unsafe fn require_lua_module() {
+        rime_require_module_lua();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    unsafe fn require_lua_module() {
+        if let Err(error) = load_unix_lua_plugin() {
+            eprintln!(
+                "KeyTao: failed to load {} librime-lua plugin: {error}",
+                std::env::consts::OS
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn require_lua_module() {
+        if let Err(error) = load_windows_lua_plugin() {
+            eprintln!("KeyTao: failed to load Windows librime-lua plugin: {error}");
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
+    unsafe fn require_lua_module() {}
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    unsafe fn load_unix_lua_plugin() -> Result<(), String> {
+        const RTLD_NOW: i32 = 0x2;
+        #[cfg(target_os = "macos")]
+        const RTLD_GLOBAL: i32 = 0x8;
+        #[cfg(target_os = "linux")]
+        const RTLD_GLOBAL: i32 = 0x100;
+
+        let candidates = unix_lua_plugin_candidates();
+        let mut attempted = Vec::new();
+        for path in &candidates {
+            if !path.is_file() {
+                continue;
+            }
+            let display = path.display().to_string();
+            let path = CString::new(path.to_string_lossy().as_bytes())
+                .map_err(|_| "plugin path contains NUL byte".to_string())?;
+            let handle = dlopen(path.as_ptr(), RTLD_NOW | RTLD_GLOBAL);
+            if handle.is_null() {
+                attempted.push(format!("{display}: {}", dlerror_string()));
+                continue;
+            }
+            if let Some(require) = find_unix_lua_require_symbol(handle) {
+                let require: unsafe extern "C" fn() = std::mem::transmute(require);
+                require();
+                return Ok(());
+            }
+            attempted.push(format!("{display}: missing rime_require_module_lua symbol"));
+        }
+        lua_plugin_load_error(&candidates, &attempted)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn find_unix_lua_require_symbol(handle: *mut c_void) -> Option<*mut c_void> {
+        for symbol in lua_require_symbol_names() {
+            let symbol = CString::new(*symbol).ok()?;
+            let require = unsafe { dlsym(handle, symbol.as_ptr()) };
+            if !require.is_null() {
+                return Some(require);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn load_windows_lua_plugin() -> Result<(), String> {
+        let candidates = windows_lua_plugin_candidates();
+        let mut attempted = Vec::new();
+        for path in &candidates {
+            if !path.is_file() {
+                continue;
+            }
+            let display = path.display().to_string();
+            let path = path_to_wide(path);
+            let handle = LoadLibraryW(path.as_ptr());
+            if handle.is_null() {
+                attempted.push(format!("{display}: {}", std::io::Error::last_os_error()));
+                continue;
+            }
+            if let Some(require) = find_windows_lua_require_symbol(handle) {
+                let require: unsafe extern "C" fn() = std::mem::transmute(require);
+                require();
+                return Ok(());
+            }
+            attempted.push(format!("{display}: missing rime_require_module_lua symbol"));
+        }
+        lua_plugin_load_error(&candidates, &attempted)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn find_windows_lua_require_symbol(handle: *mut c_void) -> Option<*mut c_void> {
+        for symbol in lua_require_symbol_names() {
+            let symbol = CString::new(*symbol).ok()?;
+            let require = unsafe { GetProcAddress(handle, symbol.as_ptr()) };
+            if !require.is_null() {
+                return Some(require);
+            }
+        }
+        None
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn unix_lua_plugin_candidates() -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(plugin_dir) = std::env::var("KEYTAO_RIME_PLUGIN_DIR") {
+            push_lua_plugin_files(&mut candidates, Path::new(&plugin_dir));
+        }
+        if let Ok(lib_dir) = std::env::var("RIME_LIB_DIR") {
+            let lib_dir = PathBuf::from(lib_dir);
+            push_lua_plugin_files(&mut candidates, &lib_dir.join("rime-plugins"));
+            push_lua_plugin_files(&mut candidates, &lib_dir);
+        }
+        append_platform_lua_plugin_candidates(&mut candidates);
+        dedupe_paths(candidates)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn append_platform_lua_plugin_candidates(candidates: &mut Vec<PathBuf>) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents_dir) = exe.parent().and_then(Path::parent) {
+                let frameworks_dir = contents_dir.join("Frameworks");
+                push_lua_plugin_files(candidates, &frameworks_dir.join("rime-plugins"));
+                push_lua_plugin_files(candidates, &frameworks_dir);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn append_platform_lua_plugin_candidates(candidates: &mut Vec<PathBuf>) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(bin_dir) = exe.parent() {
+                for lib_dir in [
+                    bin_dir.join("runtime/lib"),
+                    bin_dir.join("runtime/lib64"),
+                    bin_dir.join("resources/runtime/lib"),
+                    bin_dir.join("resources/runtime/lib64"),
+                    bin_dir.join("../runtime/lib"),
+                    bin_dir.join("../runtime/lib64"),
+                    bin_dir.join("../lib"),
+                    bin_dir.join("../lib/keytao-app/runtime/lib"),
+                    bin_dir.join("../lib/keytao-app/runtime/lib64"),
+                    bin_dir.join("../lib/keytao-app/resources/runtime/lib"),
+                    bin_dir.join("../lib/keytao-app/resources/runtime/lib64"),
+                ] {
+                    push_lua_plugin_files(candidates, &lib_dir.join("rime-plugins"));
+                    push_lua_plugin_files(candidates, &lib_dir);
+                }
+            }
+        }
+
+        for lib_dir in linux_system_library_dirs() {
+            push_lua_plugin_files(candidates, &lib_dir.join("rime-plugins"));
+            push_lua_plugin_files(candidates, &lib_dir);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_system_library_dirs() -> Vec<PathBuf> {
+        let mut dirs = vec![PathBuf::from("/usr/lib"), PathBuf::from("/usr/local/lib")];
+        if let Ok(entries) = std::fs::read_dir("/usr/lib") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if path.is_dir() && name.ends_with("-linux-gnu") {
+                    dirs.push(path);
+                }
+            }
+        }
+        dirs.push(PathBuf::from("/usr/lib64"));
+        dedupe_paths(dirs)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_lua_plugin_candidates() -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(plugin_dir) = std::env::var("KEYTAO_RIME_PLUGIN_DIR") {
+            push_lua_plugin_files(&mut candidates, Path::new(&plugin_dir));
+        }
+        if let Ok(lib_dir) = std::env::var("RIME_LIB_DIR") {
+            let lib_dir = PathBuf::from(lib_dir);
+            if let Some(prefix) = lib_dir.parent() {
+                push_lua_plugin_files(&mut candidates, &prefix.join("bin"));
+                push_lua_plugin_files(&mut candidates, &prefix.join("bin/rime-plugins"));
+            }
+            push_lua_plugin_files(&mut candidates, &lib_dir);
+            push_lua_plugin_files(&mut candidates, &lib_dir.join("rime-plugins"));
+        }
+        if let Some(module_dir) = current_windows_module_dir() {
+            append_windows_runtime_lua_plugin_candidates(&mut candidates, &module_dir);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                append_windows_runtime_lua_plugin_candidates(&mut candidates, dir);
+            }
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                push_lua_plugin_files(&mut candidates, &dir);
+                push_lua_plugin_files(&mut candidates, &dir.join("rime-plugins"));
+            }
+        }
+        dedupe_paths(candidates)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn append_windows_runtime_lua_plugin_candidates(candidates: &mut Vec<PathBuf>, dir: &Path) {
+        for plugin_dir in [
+            dir.to_path_buf(),
+            dir.join("rime-plugins"),
+            dir.join("bin"),
+            dir.join("bin/rime-plugins"),
+            dir.join("lib"),
+            dir.join("lib/rime-plugins"),
+            dir.join("keytao-windows-ime-runtime/current"),
+            dir.join("keytao-windows-ime-runtime/current/rime-plugins"),
+            dir.join("resources/keytao-windows-ime-runtime/current"),
+            dir.join("resources/keytao-windows-ime-runtime/current/rime-plugins"),
+        ] {
+            push_lua_plugin_files(candidates, &plugin_dir);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn current_windows_module_dir() -> Option<PathBuf> {
+        const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x0000_0002;
+        const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
+
+        let mut module = std::ptr::null_mut();
+        let address = current_windows_module_dir as usize as *const u16;
+        let ok = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                address,
+                &mut module,
+            )
+        };
+        if ok == 0 || module.is_null() {
+            return None;
+        }
+
+        let mut buffer = vec![0u16; 32768];
+        let len = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) }
+            as usize;
+        if len == 0 || len >= buffer.len() {
+            return None;
+        }
+        buffer.truncate(len);
+        PathBuf::from(String::from_utf16_lossy(&buffer))
+            .parent()
+            .map(Path::to_path_buf)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lua_plugin_filenames() -> &'static [&'static str] {
+        &["librime-lua.dylib"]
+    }
+
+    #[cfg(target_os = "linux")]
+    fn lua_plugin_filenames() -> &'static [&'static str] {
+        &["librime-lua.so"]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn lua_plugin_filenames() -> &'static [&'static str] {
+        &["librime-lua.dll", "rime-lua.dll"]
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn lua_require_symbol_names() -> &'static [&'static str] {
+        &[
+            "_Z23rime_require_module_luav",
+            "?rime_require_module_lua@@YAXXZ",
+            "rime_require_module_lua",
+        ]
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn push_lua_plugin_files(candidates: &mut Vec<PathBuf>, dir: &Path) {
+        for filename in lua_plugin_filenames() {
+            candidates.push(dir.join(filename));
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if path.is_file() && is_lua_plugin_filename(name) {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn is_lua_plugin_filename(name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        name.contains("rime") && name.contains("lua") && lua_plugin_extension_matches(&name)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lua_plugin_extension_matches(name: &str) -> bool {
+        name.ends_with(".dylib")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn lua_plugin_extension_matches(name: &str) -> bool {
+        name.contains(".so")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn lua_plugin_extension_matches(name: &str) -> bool {
+        name.ends_with(".dll")
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut deduped = Vec::new();
+        for path in paths {
+            if !deduped.iter().any(|existing| existing == &path) {
+                deduped.push(path);
+            }
+        }
+        deduped
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn lua_plugin_load_error(candidates: &[PathBuf], attempted: &[String]) -> Result<(), String> {
+        if attempted.is_empty() {
+            Err(format!(
+                "{} not found; checked: {}",
+                lua_plugin_filenames().join(" or "),
+                format_paths(candidates)
+            ))
+        } else {
+            Err(format!(
+                "could not load Lua plugin: {}",
+                attempted.join("; ")
+            ))
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn format_paths(paths: &[PathBuf]) -> String {
+        if paths.is_empty() {
+            return "(no candidate paths)".to_string();
+        }
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn path_to_wide(path: &Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    unsafe fn dlerror_string() -> String {
+        let error = dlerror();
+        if error.is_null() {
+            return "unknown error".to_string();
+        }
+        CStr::from_ptr(error).to_string_lossy().into_owned()
+    }
+
+    extern "C" fn notification_handler(
+        _obj: *mut c_void,
+        _session_id: librime_sys::RimeSessionId,
+        message_type: *const c_char,
+        message_value: *const c_char,
+    ) {
+        let Some(message_type) = cstr_to_str(message_type) else {
+            return;
+        };
+        let Some(message_value) = cstr_to_str(message_value) else {
+            return;
+        };
+        if message_type == "deploy" {
+            if let Ok(mut result) = DEPLOY_RESULT.lock() {
+                match message_value.as_str() {
+                    "success" => *result = Some(true),
+                    "failure" => *result = Some(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn cstr_to_str(ptr: *const c_char) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        unsafe { CStr::from_ptr(ptr).to_str().ok().map(str::to_owned) }
+    }
+
+    fn full_deploy_and_wait() -> bool {
+        if let Ok(mut result) = DEPLOY_RESULT.lock() {
+            *result = None;
+        }
+        unsafe {
+            let api = rime_get_api();
+            let Some(start_maintenance) = (*api).start_maintenance else {
+                return false;
+            };
+            if start_maintenance(1) == 0 {
+                return false;
+            }
+            if let Some(join_maintenance_thread) = (*api).join_maintenance_thread {
+                join_maintenance_thread();
+            }
+        }
+        DEPLOY_RESULT
+            .lock()
+            .map(|result| *result == Some(true))
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    mod unix_lua_plugin_tests {
+        use super::*;
+
+        #[test]
+        fn loads_lua_plugin_from_configured_rime_lib_dir() {
+            if std::env::var("RIME_LIB_DIR").is_err() {
+                return;
+            }
+            unsafe {
+                load_unix_lua_plugin().expect("load librime-lua plugin");
+            }
         }
     }
 
@@ -391,7 +919,8 @@ mod desktop {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 pub use desktop::{deploy, Engine};
 
@@ -600,7 +1129,8 @@ mod ime_runtime_tests {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 #[derive(Clone)]
 pub struct ImeRuntime(Arc<ImeRuntimeState>);
@@ -609,7 +1139,8 @@ pub struct ImeRuntime(Arc<ImeRuntimeState>);
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 #[derive(Clone)]
 pub struct ImeRuntimeSession {
@@ -621,7 +1152,8 @@ pub struct ImeRuntimeSession {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 struct ImeRuntimeState {
     initialized: Mutex<bool>,
@@ -634,7 +1166,8 @@ struct ImeRuntimeState {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 struct ImeRuntimeSessionInner {
     engine: Engine,
@@ -645,7 +1178,8 @@ struct ImeRuntimeSessionInner {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 impl ImeRuntime {
     pub fn new() -> Self {
@@ -723,7 +1257,8 @@ impl ImeRuntime {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 impl Default for ImeRuntime {
     fn default() -> Self {
@@ -735,7 +1270,8 @@ impl Default for ImeRuntime {
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
@@ -830,7 +1366,12 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
 fn has_base_default_yaml(dir: &Path) -> bool {
     dir.join("default.yaml").is_file()
 }
@@ -1226,11 +1767,16 @@ pub fn default_user_data_dir() -> Option<PathBuf> {
     {
         return dirs::data_local_dir().map(|d| d.join("keytao"));
     }
+    #[cfg(target_os = "ios")]
+    {
+        return dirs::data_local_dir().map(|d| d.join("keytao"));
+    }
     #[cfg(not(any(
         target_os = "macos",
         target_os = "windows",
         target_os = "linux",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     )))]
     {
         None
@@ -1409,7 +1955,7 @@ pub fn default_shared_data_dir() -> String {
 
         return r"C:\Program Files\Rime\weasel-data".to_string();
     }
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         for key in [
             "KEYTAO_RIME_SHARED_DATA_DIR",
@@ -1445,7 +1991,8 @@ pub fn default_shared_data_dir() -> String {
         target_os = "macos",
         target_os = "linux",
         target_os = "windows",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     )))]
     {
         String::new()

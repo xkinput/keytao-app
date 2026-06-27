@@ -64,6 +64,11 @@ crates/keytao-macos-ime/Sources/CKeytaoCore/
 crates/keytao-macos-ime/Resources/appex_Info.plist
 crates/keytao-macos-ime/Resources/container_Info.plist
 
+# iOS IME build artefacts
+crates/keytao-ios-ime/build/
+crates/keytao-ios-ime/.build/
+crates/keytao-ios-ime/.swiftpm/xcode/xcuserdata/
+
 # macOS
 .DS_Store
 **/.DS_Store

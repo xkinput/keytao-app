@@ -2528,6 +2528,8 @@ dependencies = [
  "keytao-theme",
  "libc",
  "memmap2 0.9.10",
+ "objc2 0.5.2",
+ "objc2-foundation",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

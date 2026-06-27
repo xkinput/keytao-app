@@ -261,20 +261,36 @@ final class ImeThemeManager {
             return cachedTheme
         }
 
-        let theme = loadTheme(defaultPath: defaultURL?.path, userPath: userURL?.path) ?? .default
+        let theme = loadTheme(
+            defaultPath: defaultURL?.path,
+            userPath: userURL?.path,
+            systemColorScheme: systemColorScheme()
+        ) ?? .default
         cachedSignature = signature
         cachedTheme = theme
         return theme
     }
 
-    private func loadTheme(defaultPath: String?, userPath: String?) -> ImeTheme? {
+    private func loadTheme(
+        defaultPath: String?,
+        userPath: String?,
+        systemColorScheme: EffectiveThemeColorScheme
+    ) -> ImeTheme? {
         let json: String?
         if let defaultPath {
             json = defaultPath.withCString { defaultPtr in
-                resolveThemeJSON(defaultThemePath: defaultPtr, userThemePath: userPath)
+                resolveThemeJSON(
+                    defaultThemePath: defaultPtr,
+                    userThemePath: userPath,
+                    systemColorScheme: systemColorScheme.rawValue
+                )
             }
         } else {
-            json = resolveThemeJSON(defaultThemePath: nil, userThemePath: userPath)
+            json = resolveThemeJSON(
+                defaultThemePath: nil,
+                userThemePath: userPath,
+                systemColorScheme: systemColorScheme.rawValue
+            )
         }
 
         guard let data = json?.data(using: .utf8) else {
@@ -288,14 +304,15 @@ final class ImeThemeManager {
         }
     }
 
-    private func resolveThemeJSON(defaultThemePath: UnsafePointer<CChar>?, userThemePath: String?) -> String? {
-        let ptr: UnsafeMutablePointer<CChar>?
-        if let userThemePath {
-            ptr = userThemePath.withCString { userPtr in
-                keytao_resolve_theme_json(defaultThemePath, userPtr)
+    private func resolveThemeJSON(
+        defaultThemePath: UnsafePointer<CChar>?,
+        userThemePath: String?,
+        systemColorScheme: String
+    ) -> String? {
+        let ptr: UnsafeMutablePointer<CChar>? = withOptionalCString(userThemePath) { userPtr in
+            systemColorScheme.withCString { schemePtr in
+                keytao_resolve_theme_json_with_system_scheme(defaultThemePath, userPtr, schemePtr)
             }
-        } else {
-            ptr = keytao_resolve_theme_json(defaultThemePath, nil)
         }
 
         guard let ptr else {
@@ -303,6 +320,16 @@ final class ImeThemeManager {
         }
         defer { keytao_free_string(ptr) }
         return String(cString: ptr)
+    }
+
+    private func withOptionalCString<Result>(
+        _ value: String?,
+        _ body: (UnsafePointer<CChar>?) -> Result
+    ) -> Result {
+        if let value {
+            return value.withCString { body($0) }
+        }
+        return body(nil)
     }
 
     private func defaultThemeURL() -> URL? {
@@ -332,11 +359,21 @@ final class ImeThemeManager {
     }
 
     private func systemAppearanceSignature() -> String {
+        systemColorScheme().rawValue
+    }
+
+    private func systemColorScheme() -> EffectiveThemeColorScheme {
         let environment = ProcessInfo.processInfo.environment
-        if let override = environment["KEYTAO_IME_SYSTEM_COLOR_SCHEME"], !override.isEmpty {
-            return override.lowercased()
+        if let override = environment["KEYTAO_IME_SYSTEM_COLOR_SCHEME"]?.lowercased() {
+            if override == "dark" || override == "night" {
+                return .dark
+            }
+            if override == "light" || override == "day" {
+                return .light
+            }
         }
-        return UserDefaults.standard.string(forKey: "AppleInterfaceStyle")?.lowercased() ?? "light"
+        let appearance = NSApp.effectiveAppearance
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 }
 

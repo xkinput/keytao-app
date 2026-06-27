@@ -1,0 +1,5 @@
+module CKeytaoCore [system] {
+  header "../../../keytao-core-ffi/include/keytao_core.h"
+  link "keytao_core_ffi"
+  export *
+}

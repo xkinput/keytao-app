@@ -7,7 +7,7 @@ edition = "2021"
 name = "keytao_core_ffi"
 crate-type = ["cdylib", "staticlib"]
 
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+[target.'cfg(not(target_os = "android"))'.dependencies]
 keytao-core = { path = "../keytao-core" }
 keytao-theme = { path = "../keytao-theme" }
 serde_json = "1"

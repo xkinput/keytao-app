@@ -3,10 +3,13 @@ use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 use keytao_core::{ImeRuntime, ImeRuntimeSession, ImeState, KeyProcessResult};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use keytao_theme::{resolve_theme_from_paths, resolved_theme_json};
+#[cfg(not(target_os = "android"))]
+use keytao_theme::{
+    resolve_theme_from_paths, resolve_theme_from_paths_with_system_scheme, resolved_theme_json,
+    EffectiveColorScheme,
+};
 
 // ── C-compatible state struct ─────────────────────────────────────────────────
 
@@ -30,24 +33,27 @@ pub struct KeytaoState {
 
 // ── Module-level singleton runtime session ────────────────────────────────────
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 struct Global {
     initialized: bool,
     runtime: Option<ImeRuntime>,
     singleton_session: Option<ImeRuntimeSession>,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 static GLOBAL: Mutex<Global> = Mutex::new(Global {
     initialized: false,
     runtime: None,
     singleton_session: None,
 });
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 struct SessionHandle {
     session: ImeRuntimeSession,
 }
+
+#[cfg(not(target_os = "android"))]
+static THEME_PATHS: Mutex<(Option<PathBuf>, Option<PathBuf>)> = Mutex::new((None, None));
 
 // ── Public C API ──────────────────────────────────────────────────────────────
 
@@ -55,7 +61,7 @@ struct SessionHandle {
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char) -> bool {
     let user = match c_string_arg(user_dir, "user_dir") {
         Ok(value) => value,
@@ -95,7 +101,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
 }
 
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_is_initialized() -> bool {
     GLOBAL.lock().map(|g| g.initialized).unwrap_or(false)
 }
@@ -103,7 +109,7 @@ pub extern "C" fn keytao_is_initialized() -> bool {
 /// Redeploy Rime data through the shared runtime. Existing sessions refresh
 /// lazily on their next operation.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reload() -> bool {
     let runtime = {
         let Ok(g) = GLOBAL.lock() else {
@@ -130,7 +136,7 @@ pub extern "C" fn keytao_reload() -> bool {
 /// Create a per-client input session. Returns null if keytao_init() has not
 /// completed successfully. Destroy with keytao_destroy_session().
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_create_session() -> *mut c_void {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
@@ -154,7 +160,7 @@ pub extern "C" fn keytao_create_session() -> *mut c_void {
 
 /// Destroy a session created by keytao_create_session().
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_destroy_session(session: *mut c_void) {
     if session.is_null() {
         return;
@@ -166,7 +172,7 @@ pub extern "C" fn keytao_destroy_session(session: *mut c_void) {
 
 /// Return current state for a per-client session.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_state(session: *mut c_void) -> *mut KeytaoState {
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
@@ -176,7 +182,7 @@ pub extern "C" fn keytao_session_state(session: *mut c_void) -> *mut KeytaoState
 
 /// Process a key event on a per-client session.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_process_key(
     session: *mut c_void,
     keyval: u32,
@@ -193,7 +199,7 @@ pub extern "C" fn keytao_session_process_key(
 
 /// Select a candidate in a per-client session.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_select_candidate(
     session: *mut c_void,
     index: u32,
@@ -209,7 +215,7 @@ pub extern "C" fn keytao_session_select_candidate(
 
 /// Flip to the next/previous candidate page in a per-client session.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_change_page(
     session: *mut c_void,
     backward: bool,
@@ -225,7 +231,7 @@ pub extern "C" fn keytao_session_change_page(
 
 /// Clear current composition in a per-client session.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_reset(session: *mut c_void) -> *mut KeytaoState {
     let Some(handle) = session_handle(session) else {
         return std::ptr::null_mut();
@@ -238,7 +244,7 @@ pub extern "C" fn keytao_session_reset(session: *mut c_void) -> *mut KeytaoState
 
 /// Return whether a per-client session is in ASCII mode.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_get_ascii_mode(session: *mut c_void) -> bool {
     let Some(handle) = session_handle(session) else {
         return false;
@@ -248,7 +254,7 @@ pub extern "C" fn keytao_session_get_ascii_mode(session: *mut c_void) -> bool {
 
 /// Set ASCII mode on a per-client session and return the updated state.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_set_ascii_mode(
     session: *mut c_void,
     enabled: bool,
@@ -262,11 +268,26 @@ pub extern "C" fn keytao_session_set_ascii_mode(
     Box::into_raw(Box::new(state_to_c(state, true)))
 }
 
+/// Configure optional default/user theme paths used by JSON state helpers.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_set_theme_paths(
+    default_theme_path: *const c_char,
+    user_theme_path: *const c_char,
+) {
+    if let Ok(mut paths) = THEME_PATHS.lock() {
+        *paths = (
+            optional_path_arg(default_theme_path),
+            optional_path_arg(user_theme_path),
+        );
+    }
+}
+
 /// Resolve theme YAML from the optional default and user paths and return a
 /// normalized JSON theme. The caller must free the string with
 /// keytao_free_string().
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_resolve_theme_json(
     default_theme_path: *const c_char,
     user_theme_path: *const c_char,
@@ -274,6 +295,35 @@ pub extern "C" fn keytao_resolve_theme_json(
     let default_path = optional_path_arg(default_theme_path);
     let user_path = optional_path_arg(user_theme_path);
     let theme = resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref());
+    theme_json_cstring(&theme)
+}
+
+/// Resolve theme YAML with a platform-provided system color scheme and return a
+/// normalized JSON theme. The caller must free the string with
+/// keytao_free_string().
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
+    default_theme_path: *const c_char,
+    user_theme_path: *const c_char,
+    system_color_scheme: *const c_char,
+) -> *mut c_char {
+    let default_path = optional_path_arg(default_theme_path);
+    let user_path = optional_path_arg(user_theme_path);
+    let Some(system_scheme) = optional_effective_color_scheme_arg(system_color_scheme) else {
+        let theme = resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref());
+        return theme_json_cstring(&theme);
+    };
+    let theme = resolve_theme_from_paths_with_system_scheme(
+        default_path.as_deref(),
+        user_path.as_deref(),
+        system_scheme,
+    );
+    theme_json_cstring(&theme)
+}
+
+#[cfg(not(target_os = "android"))]
+fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
     match resolved_theme_json(&theme) {
         Ok(json) => to_cstring(&json),
         Err(e) => {
@@ -281,6 +331,119 @@ pub extern "C" fn keytao_resolve_theme_json(
             to_cstring("{}")
         }
     }
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_state_json(session: *mut c_void) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(handle.session.state(), false))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_process_key_json(
+    session: *mut c_void,
+    keyval: u32,
+    modifiers: u32,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(result) = handle.session.process_key_result(keyval, modifiers) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&result_json(result))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_select_candidate_json(
+    session: *mut c_void,
+    index: u32,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = handle.session.select_candidate(index as usize) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(state, true))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_select_candidate_global_json(
+    session: *mut c_void,
+    index: u32,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = handle.session.select_candidate_global(index as usize) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(state, true))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_all_candidates_json(
+    session: *mut c_void,
+    limit: u32,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(candidates) = handle.session.all_candidates_limited(limit as usize) else {
+        return std::ptr::null_mut();
+    };
+    let json = serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".into());
+    to_cstring(&json)
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_change_page_json(
+    session: *mut c_void,
+    backward: bool,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = handle.session.change_page(backward) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(state, true))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_reset_json(session: *mut c_void) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = handle.session.reset() else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(state, true))
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_set_ascii_mode_json(
+    session: *mut c_void,
+    enabled: bool,
+) -> *mut c_char {
+    let Some(handle) = session_handle(session) else {
+        return std::ptr::null_mut();
+    };
+    let Some(state) = handle.session.set_ascii_mode(enabled) else {
+        return std::ptr::null_mut();
+    };
+    to_cstring(&state_json(state, true))
 }
 
 /// Free a UTF-8 string returned by keytao-core-ffi.
@@ -292,7 +455,7 @@ pub extern "C" fn keytao_free_string(ptr: *mut c_char) {
 /// Process a key event. Returns heap-allocated KeytaoState; caller must free
 /// with keytao_free_state(). Returns null if the runtime is not initialized.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_process_key(keyval: u32, modifiers: u32) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
@@ -308,7 +471,7 @@ pub extern "C" fn keytao_process_key(keyval: u32, modifiers: u32) -> *mut Keytao
 
 /// Select a candidate by 0-based index. Returns new state; caller must free.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_select_candidate(index: u32) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
@@ -324,7 +487,7 @@ pub extern "C" fn keytao_select_candidate(index: u32) -> *mut KeytaoState {
 
 /// Flip to the next/previous candidate page. Returns new state; caller must free.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_change_page(backward: bool) -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
@@ -340,7 +503,7 @@ pub extern "C" fn keytao_change_page(backward: bool) -> *mut KeytaoState {
 
 /// Clear current composition (Escape). Returns new state; caller must free.
 #[no_mangle]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reset() -> *mut KeytaoState {
     let Ok(g) = GLOBAL.lock() else {
         return std::ptr::null_mut();
@@ -390,7 +553,7 @@ pub extern "C" fn keytao_free_state(ptr: *mut KeytaoState) {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn session_handle<'a>(session: *mut c_void) -> Option<&'a SessionHandle> {
     if session.is_null() {
         return None;
@@ -398,12 +561,12 @@ fn session_handle<'a>(session: *mut c_void) -> Option<&'a SessionHandle> {
     Some(unsafe { &*(session as *mut SessionHandle) })
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn result_to_c(result: KeyProcessResult) -> KeytaoState {
     state_to_c(result.state, result.accepted)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn state_to_c(state: ImeState, accepted: bool) -> KeytaoState {
     let count = state.candidates.len();
     let (texts_ptr, comments_ptr) = if count == 0 {
@@ -442,6 +605,64 @@ fn state_to_c(state: ImeState, accepted: bool) -> KeytaoState {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn result_json(result: KeyProcessResult) -> String {
+    state_json(result.state, result.accepted)
+}
+
+#[cfg(not(target_os = "android"))]
+fn state_json(state: ImeState, accepted: bool) -> String {
+    let theme = current_theme();
+    let mut ui_capabilities = keytao_theme::UiCapabilities::full_custom();
+    ui_capabilities.supports_vertical = false;
+    let candidate_panel = theme.candidate_panel_model(
+        keytao_theme::CandidatePanelInput {
+            preedit: state.preedit.clone(),
+            candidates: state
+                .candidates
+                .iter()
+                .map(|candidate| keytao_theme::ThemeCandidate {
+                    text: candidate.text.clone(),
+                    comment: candidate.comment.clone(),
+                })
+                .collect(),
+            highlighted_candidate_index: state.highlighted_candidate_index,
+            page: state.page,
+            is_last_page: state.is_last_page,
+            select_keys: state.select_keys.clone(),
+        },
+        &ui_capabilities,
+    );
+    let mode_hint = theme.mode_hint_model(state.ascii_mode);
+    let value = serde_json::json!({
+        "preedit": state.preedit,
+        "cursor": state.cursor,
+        "candidates": state.candidates,
+        "allCandidates": state.all_candidates,
+        "highlightedCandidateIndex": state.highlighted_candidate_index,
+        "pageSize": state.page_size,
+        "page": state.page,
+        "isLastPage": state.is_last_page,
+        "committed": state.committed.unwrap_or_default(),
+        "selectKeys": state.select_keys.unwrap_or_default(),
+        "asciiMode": state.ascii_mode,
+        "schemaName": state.schema_name,
+        "accepted": accepted,
+        "candidatePanel": candidate_panel,
+        "modeHint": mode_hint,
+    });
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+}
+
+#[cfg(not(target_os = "android"))]
+fn current_theme() -> keytao_theme::ResolvedImeTheme {
+    let (default_path, user_path) = THEME_PATHS
+        .lock()
+        .map(|paths| paths.clone())
+        .unwrap_or((None, None));
+    resolve_theme_from_paths(default_path.as_deref(), user_path.as_deref())
+}
+
 fn c_string_arg(ptr: *const c_char, name: &str) -> Result<String, String> {
     if ptr.is_null() {
         return Err(format!("{name} is null"));
@@ -461,6 +682,21 @@ fn optional_path_arg(ptr: *const c_char) -> Option<PathBuf> {
     };
     let value = value.trim();
     (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+#[cfg(not(target_os = "android"))]
+fn optional_effective_color_scheme_arg(ptr: *const c_char) -> Option<EffectiveColorScheme> {
+    if ptr.is_null() {
+        return None;
+    }
+    let Ok(value) = (unsafe { CStr::from_ptr(ptr) }).to_str() else {
+        return None;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "dark" | "night" => Some(EffectiveColorScheme::Dark),
+        "light" | "day" => Some(EffectiveColorScheme::Light),
+        _ => None,
+    }
 }
 
 fn to_cstring(s: &str) -> *mut c_char {

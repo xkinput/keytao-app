@@ -87,11 +87,41 @@ bool keytao_session_get_ascii_mode(void *session);
 struct KeytaoState *keytao_session_set_ascii_mode(void *session, bool enabled);
 
 /**
+ * Configure optional default/user theme paths used by JSON state helpers.
+ */
+void keytao_set_theme_paths(const char *default_theme_path, const char *user_theme_path);
+
+/**
  * Resolve theme YAML from the optional default and user paths and return a
  * normalized JSON theme. The caller must free the string with
  * keytao_free_string().
  */
 char *keytao_resolve_theme_json(const char *default_theme_path, const char *user_theme_path);
+
+/**
+ * Resolve theme YAML with a platform-provided system color scheme and return a
+ * normalized JSON theme. The caller must free the string with
+ * keytao_free_string().
+ */
+char *keytao_resolve_theme_json_with_system_scheme(const char *default_theme_path,
+                                                   const char *user_theme_path,
+                                                   const char *system_color_scheme);
+
+char *keytao_session_state_json(void *session);
+
+char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);
+
+char *keytao_session_select_candidate_json(void *session, uint32_t index);
+
+char *keytao_session_select_candidate_global_json(void *session, uint32_t index);
+
+char *keytao_session_all_candidates_json(void *session, uint32_t limit);
+
+char *keytao_session_change_page_json(void *session, bool backward);
+
+char *keytao_session_reset_json(void *session);
+
+char *keytao_session_set_ascii_mode_json(void *session, bool enabled);
 
 /**
  * Free a UTF-8 string returned by keytao-core-ffi.

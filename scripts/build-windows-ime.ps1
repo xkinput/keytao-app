@@ -163,14 +163,37 @@ function Initialize-MsvcEnvironment([string]$MsvcArch) {
     throw "MSVC linker link.exe was not found for $MsvcArch. $componentHint"
 }
 
+function Get-WindowsLuaPluginFiles([string]$Root) {
+    if (-not $Root) {
+        return @()
+    }
+    $binDir = Join-Path $Root "bin"
+    if (-not (Test-Path -LiteralPath $binDir -PathType Container)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -File -Path $binDir |
+            Where-Object {
+                $name = $_.Name.ToLowerInvariant()
+                $name.Contains("rime") -and $name.Contains("lua") -and $name.EndsWith(".dll")
+            }
+    )
+}
+
 $needsFetch = -not (Test-Path (Join-Path $vendorDir "include\rime_api.h")) -or
     -not (Test-Path (Join-Path $vendorDir "lib\rime.lib")) -or
     -not (Test-Path (Join-Path $vendorDir "bin\rime.dll")) -or
     -not (Test-Path (Join-Path $vendorDir "rime-data\default.yaml")) -or
+    -not (Get-WindowsLuaPluginFiles $vendorDir) -or
     -not (Test-Path $envFile)
 
 if ($needsFetch) {
     & (Join-Path $repoRoot "scripts\fetch-librime-windows.ps1") -Arch $Arch -Version $Version -Destination $vendorDir
+}
+
+$luaPlugins = Get-WindowsLuaPluginFiles $vendorDir
+if (-not $luaPlugins) {
+    throw "Windows librime runtime is missing the librime-lua plugin DLL in $vendorDir\bin. Refetch the runtime or use a librime release that includes librime-lua."
 }
 
 $oldErrorActionPreference = $ErrorActionPreference
@@ -242,6 +265,11 @@ New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Destination $runtimeDir
+$runtimePluginDir = Join-Path $runtimeDir "rime-plugins"
+New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
+foreach ($plugin in $luaPlugins) {
+    Copy-Item -Force -LiteralPath $plugin.FullName -Destination $runtimePluginDir
+}
 
 $appRuntimeDir = Join-Path $repoRoot "target\keytao-windows-app-runtime"
 New-Item -ItemType Directory -Force -Path $appRuntimeDir | Out-Null

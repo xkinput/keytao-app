@@ -314,3 +314,39 @@ jobs:
             artifacts+=("$renamed")
           done
           gh release upload ${{ github.ref_name }} "${artifacts[@]}" --clobber
+
+  build-ios:
+    needs: create-release
+    runs-on: macos-15
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set version from tag
+        run: |
+          node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
+
+      - name: Build unsigned iOS package
+        run: |
+          set -euo pipefail
+          pnpm build:ios -- --no-sign --ci

@@ -67,7 +67,7 @@ const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 
 function hasSystemIme(os: OSType): boolean {
-  return os === "linux" || os === "macos" || os === "windows" || os === "android"
+  return os === "linux" || os === "macos" || os === "windows" || os === "android" || os === "ios"
 }
 
 function buildRimeDictManagerUrl(dir: string): string {
@@ -90,6 +90,7 @@ interface PlatformRelease {
     windows?: string
     linux?: string
     android?: string
+    ios?: string
   }
 }
 
@@ -1019,8 +1020,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4" style={androidImePaddingStyle}>
+    <div className="h-screen overflow-y-auto bg-background text-foreground">
+      <div className="max-w-2xl mx-auto px-4 pt-6 pb-[calc(2rem+env(safe-area-inset-bottom))] space-y-4" style={androidImePaddingStyle}>
 
         {/* Header */}
         <div className="flex items-center gap-3 pb-1">
@@ -1327,7 +1328,11 @@ export default function App() {
                       <span className="shrink-0 text-muted-foreground">主题色</span>
                       {imeUiSettings && (
                         <Badge variant="outline" className="shrink-0 text-xs">
-                          {imeUiSettings.effectiveColorScheme === "dark" ? "当前夜间" : "当前白天"}
+                          {imeUiSettings.colorScheme === "auto"
+                            ? "跟随系统"
+                            : imeUiSettings.colorScheme === "dark"
+                              ? "固定夜间"
+                              : "固定白天"}
                         </Badge>
                       )}
                     </div>
@@ -1593,7 +1598,13 @@ export default function App() {
                         </div>
                     <textarea
                       className="w-full rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-                      style={osType === "android" ? { scrollMarginBottom: "calc(var(--android-ime-inset-bottom, 0px) + 24px)" } : undefined}
+                      style={
+                        osType === "android"
+                          ? { scrollMarginBottom: "calc(var(--android-ime-inset-bottom, 0px) + 24px)" }
+                          : osType === "ios"
+                            ? { scrollMarginBottom: "42vh" }
+                            : undefined
+                      }
                       rows={3}
                       placeholder="在此测试输入法…"
                     />

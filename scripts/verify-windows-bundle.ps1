@@ -33,6 +33,24 @@ function Require-Pattern([string]$Path, [string]$Pattern, [string]$Message) {
     }
 }
 
+function Find-LuaPlugin([string[]]$Dirs) {
+    foreach ($dir in $Dirs) {
+        if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) {
+            continue
+        }
+        $plugin = Get-ChildItem -Path $dir -File |
+            Where-Object {
+                $name = $_.Name.ToLowerInvariant()
+                $name.Contains("rime") -and $name.Contains("lua") -and $name.EndsWith(".dll")
+            } |
+            Select-Object -First 1
+        if ($plugin) {
+            return $plugin.FullName
+        }
+    }
+    return $null
+}
+
 Require-Directory $ReleaseDir "Missing Windows release directory: $ReleaseDir"
 Require-Directory $BundleDir "Missing Windows bundle directory: $BundleDir"
 
@@ -57,6 +75,8 @@ $imeRimeDll = Join-Path $imeRuntimeDir "rime.dll"
 $imeRimeData = Join-Path $imeRuntimeDir "rime-data\default.yaml"
 $imeVcRuntime = Join-Path $imeRuntimeDir "vcruntime140.dll"
 $appRimeDll = Join-Path $ReleaseDir "rime.dll"
+$imeLuaPlugin = Find-LuaPlugin @($imeRuntimeDir, (Join-Path $imeRuntimeDir "rime-plugins"))
+$appLuaPlugin = Find-LuaPlugin @($ReleaseDir, (Join-Path $ReleaseDir "rime-plugins"))
 $hookFile = Join-Path $repoRoot "src-tauri\windows\nsis-hooks.nsh"
 
 Require-File $appExe "Windows release payload is missing keytao-app.exe"
@@ -65,6 +85,12 @@ Require-File $imeRimeDll "Windows IME runtime is missing rime.dll"
 Require-File $imeRimeData "Windows IME runtime is missing rime-data\default.yaml"
 Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
 Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
+if (-not $imeLuaPlugin) {
+    throw "Windows IME runtime is missing the librime-lua plugin DLL"
+}
+if (-not $appLuaPlugin) {
+    throw "Windows app payload is missing the librime-lua plugin DLL next to keytao-app.exe"
+}
 Require-File $hookFile "Missing NSIS installer hook file: $hookFile"
 
 Require-Pattern $hookFile 'NSIS_HOOK_POSTINSTALL' "NSIS hook file does not define NSIS_HOOK_POSTINSTALL"
@@ -99,6 +125,7 @@ Require-Pattern $installerScript.FullName 'nsis-hooks\.nsh' "Generated Windows i
 Require-Pattern $installerScript.FullName 'keytao_windows_ime\.dll' "Generated Windows installer script does not install keytao_windows_ime.dll"
 Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime' "Generated Windows installer script does not install the IME runtime directory"
 Require-Pattern $installerScript.FullName '/oname=.*rime\.dll' "Generated Windows installer script does not install rime.dll next to keytao-app.exe"
+Require-Pattern $installerScript.FullName 'rime.*lua.*\.dll' "Generated Windows installer script does not install the librime-lua plugin DLL"
 
 Write-Host "Windows bundle verification passed"
 Write-Host "  Installer: $($installer.FullName)"

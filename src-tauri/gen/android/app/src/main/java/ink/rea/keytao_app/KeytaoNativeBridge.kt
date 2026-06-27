@@ -8,9 +8,13 @@ object KeytaoNativeBridge {
         true
     }.getOrDefault(false)
 
-    fun resolveThemeJson(defaultThemePath: String?, userThemePath: String?): String? {
+    fun resolveThemeJson(
+        defaultThemePath: String?,
+        userThemePath: String?,
+        systemColorScheme: String?,
+    ): String? {
         if (!loaded) return null
-        return runCatching { nativeResolveThemeJson(defaultThemePath, userThemePath) }
+        return runCatching { nativeResolveThemeJson(defaultThemePath, userThemePath, systemColorScheme) }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
     }
@@ -97,7 +101,11 @@ object KeytaoNativeBridge {
         )
     }
 
-    external fun nativeResolveThemeJson(defaultThemePath: String?, userThemePath: String?): String
+    external fun nativeResolveThemeJson(
+        defaultThemePath: String?,
+        userThemePath: String?,
+        systemColorScheme: String?,
+    ): String
 
     external fun nativeEngineAvailable(): Boolean
 

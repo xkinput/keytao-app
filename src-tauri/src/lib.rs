@@ -38,6 +38,7 @@ pub struct DownloadUrls {
     pub windows: Option<String>,
     pub linux: Option<String>,
     pub android: Option<String>,
+    pub ios: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -87,6 +88,8 @@ const API_BASE: &str = "https://keytao.rea.ink";
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
 const IME_RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
+#[cfg(target_os = "ios")]
+const IOS_APP_GROUP_IDENTIFIER: &str = "group.ink.rea.keytao-app";
 
 fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
@@ -112,9 +115,101 @@ fn rime_get_data_dir() -> Option<String> {
     default_user_data_dir_string()
 }
 
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn rime_get_data_dir<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Option<String> {
+    ios_keytao_root(&app).ok().map(path_string)
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reload_stamp_path() -> Option<PathBuf> {
     keytao_core::default_user_data_dir().map(|dir| dir.join(IME_RELOAD_STAMP_FILE))
+}
+
+#[cfg(target_os = "ios")]
+fn ios_app_group_container() -> Option<PathBuf> {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::{NSFileManager, NSString};
+
+    autoreleasepool(|_| {
+        let manager = NSFileManager::defaultManager();
+        let group = NSString::from_str(IOS_APP_GROUP_IDENTIFIER);
+        let url = manager.containerURLForSecurityApplicationGroupIdentifier(&group)?;
+        url.to_file_path()
+    })
+}
+
+#[cfg(target_os = "ios")]
+fn ios_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    if let Ok(override_dir) = std::env::var("KEYTAO_IOS_USER_DATA_DIR") {
+        if !override_dir.trim().is_empty() {
+            return Ok(PathBuf::from(override_dir));
+        }
+    }
+
+    if let Some(container) = ios_app_group_container() {
+        return Ok(container.join("keytao"));
+    }
+
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("keytao"))
+        .map_err(|e| format!("Cannot determine iOS KeyTao data directory: {e}"))
+}
+
+#[cfg(target_os = "ios")]
+fn ios_reload_stamp_path(root: &Path) -> PathBuf {
+    root.join(IME_RELOAD_STAMP_FILE)
+}
+
+#[cfg(target_os = "ios")]
+fn write_ios_reload_stamp(root: &Path) -> Result<PathBuf, String> {
+    let stamp = ios_reload_stamp_path(root);
+    if let Some(parent) = stamp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 iOS 输入法目录失败: {e}"))?;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::fs::write(&stamp, format!("{now}\n"))
+        .map_err(|e| format!("写入 iOS 输入法重载标记失败 {}: {e}", stamp.display()))?;
+    Ok(stamp)
+}
+
+#[cfg(target_os = "ios")]
+fn ios_app_shared_data_dir<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    user_root: &Path,
+) -> Option<String> {
+    let mut candidates = vec![
+        user_root.to_path_buf(),
+        user_root.join("rime-data"),
+        user_root.join("shared"),
+    ];
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("rime-data"),
+            resource_dir.join("runtime").join("rime-data"),
+            resource_dir.join("SharedSupport"),
+        ]);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.extend([
+                exe_dir.join("rime-data"),
+                exe_dir.join("runtime").join("rime-data"),
+                exe_dir.join("..").join("rime-data"),
+            ]);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("default.yaml").is_file())
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 fn file_signature(path: &Path) -> String {
@@ -1351,6 +1446,7 @@ fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
         windows: urls["windows"].as_str().map(|s| s.to_string()),
         linux: urls["linux"].as_str().map(|s| s.to_string()),
         android: urls["android"].as_str().map(|s| s.to_string()),
+        ios: urls["ios"].as_str().map(|s| s.to_string()),
     }
 }
 
@@ -1504,7 +1600,7 @@ async fn select_directory(
     #[allow(unused_variables)] app: AppHandle,
     im_type: Option<String>,
 ) -> Result<Option<String>, String> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         use tauri_plugin_dialog::{DialogExt, FilePath};
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1529,9 +1625,9 @@ async fn select_directory(
         let result = rx.await.map_err(|e| e.to_string())?;
         Ok(result.map(|p| p.to_string()))
     }
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        Err("Not supported on Android".into())
+        Err("Not supported on this platform".into())
     }
 }
 
@@ -2074,6 +2170,22 @@ fn optional_jni_path(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<PathBuf
 }
 
 #[cfg(target_os = "android")]
+fn optional_jni_effective_color_scheme(
+    env: &mut JNIEnv<'_>,
+    value: JString<'_>,
+) -> Option<keytao_theme::EffectiveColorScheme> {
+    if value.is_null() {
+        return None;
+    }
+    let value = env.get_string(&value).ok()?;
+    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+        "dark" | "night" => Some(keytao_theme::EffectiveColorScheme::Dark),
+        "light" | "day" => Some(keytao_theme::EffectiveColorScheme::Light),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "android")]
 fn jni_string(env: &mut JNIEnv<'_>, value: &str) -> jstring {
     env.new_string(value)
         .map(|s| s.into_raw())
@@ -2090,19 +2202,26 @@ static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 struct AndroidThemeResolverState {
     default_theme_path: Option<PathBuf>,
     user_theme_path: Option<PathBuf>,
+    system_scheme: keytao_theme::EffectiveColorScheme,
     resolver: keytao_theme::ThemeResolver,
 }
 
 #[cfg(target_os = "android")]
 impl AndroidThemeResolverState {
-    fn new(default_theme_path: Option<PathBuf>, user_theme_path: Option<PathBuf>) -> Self {
+    fn new(
+        default_theme_path: Option<PathBuf>,
+        user_theme_path: Option<PathBuf>,
+        system_scheme: keytao_theme::EffectiveColorScheme,
+    ) -> Self {
         Self {
-            resolver: keytao_theme::ThemeResolver::new(
+            resolver: keytao_theme::ThemeResolver::with_system_scheme(
                 default_theme_path.clone(),
                 user_theme_path.clone(),
+                Some(system_scheme),
             ),
             default_theme_path,
             user_theme_path,
+            system_scheme,
         }
     }
 
@@ -2110,10 +2229,17 @@ impl AndroidThemeResolverState {
         &self,
         default_theme_path: &Option<PathBuf>,
         user_theme_path: &Option<PathBuf>,
+        system_scheme: keytao_theme::EffectiveColorScheme,
     ) -> bool {
-        self.default_theme_path == *default_theme_path && self.user_theme_path == *user_theme_path
+        self.default_theme_path == *default_theme_path
+            && self.user_theme_path == *user_theme_path
+            && self.system_scheme == system_scheme
     }
 }
+
+#[cfg(target_os = "android")]
+static ANDROID_IME_SYSTEM_COLOR_SCHEME: Mutex<keytao_theme::EffectiveColorScheme> =
+    Mutex::new(keytao_theme::EffectiveColorScheme::Light);
 
 #[cfg(target_os = "android")]
 static ANDROID_IME_THEME_RESOLVER: Mutex<Option<AndroidThemeResolverState>> = Mutex::new(None);
@@ -2195,28 +2321,35 @@ fn android_current_theme() -> keytao_theme::ResolvedImeTheme {
         .ok()
         .and_then(|path| path.clone())
         .filter(|path| path.is_file());
-    android_cached_theme(None, user_path)
+    let system_scheme = ANDROID_IME_SYSTEM_COLOR_SCHEME
+        .lock()
+        .map(|scheme| *scheme)
+        .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
+    android_cached_theme(None, user_path, system_scheme)
 }
 
 #[cfg(target_os = "android")]
 fn android_cached_theme(
     default_theme_path: Option<PathBuf>,
     user_theme_path: Option<PathBuf>,
+    system_scheme: keytao_theme::EffectiveColorScheme,
 ) -> keytao_theme::ResolvedImeTheme {
     let Ok(mut slot) = ANDROID_IME_THEME_RESOLVER.lock() else {
-        return keytao_theme::resolve_theme_from_paths(
+        return keytao_theme::resolve_theme_from_paths_with_system_scheme(
             default_theme_path.as_deref(),
             user_theme_path.as_deref(),
+            system_scheme,
         );
     };
     let needs_resolver = slot
         .as_ref()
-        .map(|state| !state.matches(&default_theme_path, &user_theme_path))
+        .map(|state| !state.matches(&default_theme_path, &user_theme_path, system_scheme))
         .unwrap_or(true);
     if needs_resolver {
         *slot = Some(AndroidThemeResolverState::new(
             default_theme_path,
             user_theme_path,
+            system_scheme,
         ));
     }
     slot.as_ref()
@@ -2278,10 +2411,16 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
     _receiver: JObject<'_>,
     default_theme_path: JString<'_>,
     user_theme_path: JString<'_>,
+    system_color_scheme: JString<'_>,
 ) -> jstring {
     let default_path = optional_jni_path(&mut env, default_theme_path);
     let user_path = optional_jni_path(&mut env, user_theme_path);
-    let theme = android_cached_theme(default_path, user_path);
+    let system_scheme = optional_jni_effective_color_scheme(&mut env, system_color_scheme)
+        .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
+    if let Ok(mut current) = ANDROID_IME_SYSTEM_COLOR_SCHEME.lock() {
+        *current = system_scheme;
+    }
+    let theme = android_cached_theme(default_path, user_path, system_scheme);
     match keytao_theme::resolved_theme_json(&theme) {
         Ok(json) => jni_string(&mut env, &json),
         Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
@@ -3470,7 +3609,8 @@ fn runtime_librime_version() -> Option<String> {
         target_os = "linux",
         target_os = "windows",
         target_os = "macos",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     ))]
     {
         keytao_core::librime_runtime_version().and_then(non_empty_version)
@@ -3480,7 +3620,8 @@ fn runtime_librime_version() -> Option<String> {
         target_os = "linux",
         target_os = "windows",
         target_os = "macos",
-        target_os = "android"
+        target_os = "android",
+        target_os = "ios"
     )))]
     {
         None
@@ -3528,7 +3669,7 @@ fn get_component_versions(app: AppHandle) -> ComponentVersions {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let data_dir = keytao_core::default_user_data_dir().map(|p| p.to_string_lossy().into_owned());
     #[cfg(target_os = "ios")]
-    let data_dir = None;
+    let data_dir = ios_keytao_root(&app).ok().map(path_string);
 
     ComponentVersions {
         app_version: app.package_info().version.to_string(),
@@ -3555,7 +3696,7 @@ fn check_local_schema<R: tauri::Runtime>(
         }
         #[cfg(target_os = "ios")]
         {
-            return None;
+            return ios_keytao_root(&app).ok();
         }
     });
 
@@ -3660,11 +3801,49 @@ async fn rime_deploy_default<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+#[cfg(target_os = "ios")]
+async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
+    let dest = ios_keytao_root(&app)?;
+    let user = dest.to_string_lossy().into_owned();
+    let shared =
+        ios_app_shared_data_dir(&app, &dest).unwrap_or_else(keytao_core::default_shared_data_dir);
+
+    let _ = app.emit("deploy-progress", "正在部署 librime...");
+
+    match tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await {
+        Ok(Ok(())) => {
+            let _ = app.emit("deploy-progress", "部署完成");
+            match write_ios_reload_stamp(&dest) {
+                Ok(stamp) => {
+                    let message = format!("已通知 iOS 输入法重载：{}", stamp.display());
+                    let _ = app.emit("deploy-progress", &message);
+                    Ok(DeployResult {
+                        success: true,
+                        message,
+                    })
+                }
+                Err(e) => {
+                    let message = format!("部署完成，但 iOS 输入法重载通知失败：{e}");
+                    let _ = app.emit("deploy-progress", &message);
+                    Ok(DeployResult {
+                        success: true,
+                        message,
+                    })
+                }
+            }
+        }
+        Ok(Err(e)) => Err(format!("部署失败: {e}")),
+        Err(e) => Err(format!("任务错误: {e}")),
+    }
+}
+
+#[tauri::command]
 #[cfg(not(any(
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 )))]
 async fn rime_deploy_default(_app: AppHandle) -> Result<DeployResult, String> {
     Err("librime deployment is not supported on this platform yet".into())
@@ -3691,8 +3870,15 @@ fn get_ime_ui_settings<R: tauri::Runtime>(
 
 #[tauri::command]
 #[cfg(target_os = "ios")]
-fn get_ime_ui_settings() -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on iOS".into())
+fn get_ime_ui_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<ImeUiSettings, String> {
+    let root = ios_keytao_root(&app)?;
+    ime_ui_settings_from_paths(
+        root.join("theme.yaml"),
+        Some(ios_reload_stamp_path(&root)),
+        "已读取 iOS 输入法 UI 配置".into(),
+    )
 }
 
 #[tauri::command]
@@ -3759,9 +3945,34 @@ fn set_ime_ui_color_scheme<R: tauri::Runtime>(
 #[tauri::command]
 #[cfg(target_os = "ios")]
 fn set_ime_ui_color_scheme(
-    _color_scheme: keytao_theme::UiColorScheme,
+    app: tauri::AppHandle,
+    color_scheme: keytao_theme::UiColorScheme,
 ) -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on iOS".into())
+    let root = ios_keytao_root(&app)?;
+    let theme_path = root.join("theme.yaml");
+    let current = ime_ui_settings_from_paths(
+        theme_path.clone(),
+        Some(ios_reload_stamp_path(&root)),
+        String::new(),
+    )?;
+    write_ime_ui_settings_to_path(
+        &theme_path,
+        color_scheme,
+        current.orientation,
+        current.accent_color,
+    )?;
+    let reload_message = match write_ios_reload_stamp(&root) {
+        Ok(path) => format!(
+            "已保存 iOS 输入法 UI 配置并通知输入法重载：{}",
+            path.display()
+        ),
+        Err(e) => format!("已保存 iOS 输入法 UI 配置，但输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_from_paths(
+        theme_path,
+        Some(ios_reload_stamp_path(&root)),
+        reload_message,
+    )
 }
 
 #[tauri::command]
@@ -3792,11 +4003,26 @@ fn set_ime_ui_settings<R: tauri::Runtime>(
 #[tauri::command]
 #[cfg(target_os = "ios")]
 fn set_ime_ui_settings(
-    _color_scheme: keytao_theme::UiColorScheme,
-    _orientation: keytao_theme::PanelOrientation,
-    _accent_color: String,
+    app: tauri::AppHandle,
+    color_scheme: keytao_theme::UiColorScheme,
+    orientation: keytao_theme::PanelOrientation,
+    accent_color: String,
 ) -> Result<ImeUiSettings, String> {
-    Err("IME UI settings are not supported on iOS".into())
+    let root = ios_keytao_root(&app)?;
+    let theme_path = root.join("theme.yaml");
+    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)?;
+    let reload_message = match write_ios_reload_stamp(&root) {
+        Ok(path) => format!(
+            "已保存 iOS 输入法 UI 配置并通知输入法重载：{}",
+            path.display()
+        ),
+        Err(e) => format!("已保存 iOS 输入法 UI 配置，但输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_from_paths(
+        theme_path,
+        Some(ios_reload_stamp_path(&root)),
+        reload_message,
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -3872,8 +4098,12 @@ async fn rime_install_to_default<R: tauri::Runtime>(
 
 #[tauri::command]
 #[cfg(target_os = "ios")]
-async fn rime_install_to_default(_app: AppHandle, _url: String) -> Result<InstallResult, String> {
-    Err("Not supported on iOS".into())
+async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallResult, String> {
+    let dest = ios_keytao_root(&app)?;
+    std::fs::create_dir_all(&dest).map_err(|e| format!("创建 iOS 输入法目录失败: {e}"))?;
+    let dest_str = dest.to_string_lossy().into_owned();
+    let temp = download_to_temp(app.clone(), url).await?;
+    smart_install(app, temp, dest_str).await
 }
 
 #[tauri::command]
@@ -4213,7 +4443,7 @@ pub fn run() {
             set_ime_ui_color_scheme,
             set_ime_ui_settings,
             read_debug_logs,
-            #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
+            #[cfg(not(any(target_os = "android", target_os = "linux")))]
             rime_get_data_dir,
             #[cfg(target_os = "linux")]
             linux_ime_status,

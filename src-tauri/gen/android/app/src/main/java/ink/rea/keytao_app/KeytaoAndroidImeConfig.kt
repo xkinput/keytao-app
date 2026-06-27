@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import android.content.Context
+import android.content.res.Configuration
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -9,6 +10,7 @@ object KeyCommandTypes {
     const val DIRECT_INPUT = "directInput"
     const val RIME_INPUT = "rimeInput"
     const val BACKSPACE = "backspace"
+    const val BACKSPACE_GESTURE = "backspaceGesture"
     const val ENTER = "enter"
     const val SPACE = "space"
     const val SHIFT = "shift"
@@ -40,6 +42,16 @@ data class KeyCommand(
     }
 }
 
+data class KeyStackItem(
+    val label: String,
+    val value: String? = null,
+    val asciiLabel: String? = null,
+    val asciiValue: String? = null,
+    val rimeValue: String? = null,
+    val action: KeyCommand? = null,
+    val asciiAction: KeyCommand? = null,
+)
+
 data class KeySpec(
     val label: String,
     val value: String,
@@ -55,12 +67,18 @@ data class KeySpec(
     val swipeDown: KeyCommand? = null,
     val longPress: KeyCommand? = null,
     val asciiLongPress: KeyCommand? = null,
+    val rowSpan: Int = 1,
+    val stack: List<KeyStackItem> = emptyList(),
 )
 
 data class KeytaoAndroidImeConfig(
     val keyboardHeightDp: Int,
     val candidateBarHeightDp: Int,
     val keyboardBottomInsetDp: Int,
+    val horizontalGapDp: Float,
+    val verticalGapDp: Float,
+    val outerInsetDp: Float,
+    val maxKeyHeightDp: Float,
     val hapticsEnabled: Boolean,
     val hapticIntensity: Int,
     val swipeThresholdDp: Float,
@@ -76,9 +94,18 @@ data class KeytaoAndroidImeConfig(
                 .bufferedReader()
                 .use { it.readText() }
             val userJson = userConfig.takeIf { it.isFile }?.readText()
+            val defaultRoot = JSONObject(defaultJson)
+            val themeKeyboard = resolvedThemeKeyboard(context)
             return runCatching {
-                if (userJson == null) parse(defaultJson) else parse(userJson, defaultJson)
-            }.getOrElse { parse(defaultJson) }
+                val root = userJson?.let { JSONObject(it) } ?: themeKeyboard ?: defaultRoot
+                val fallbackRoot = when {
+                    userJson != null && themeKeyboard != null -> themeKeyboard
+                    userJson != null -> defaultRoot
+                    themeKeyboard != null -> defaultRoot
+                    else -> null
+                }
+                parseRoot(root, fallbackRoot)
+            }.getOrElse { parseRoot(themeKeyboard ?: defaultRoot, defaultRoot) }
         }
 
         fun parse(json: String): KeytaoAndroidImeConfig {
@@ -103,9 +130,28 @@ data class KeytaoAndroidImeConfig(
             val haptics = root.optJSONObject("haptics")
             val fallbackHaptics = fallbackRoot?.optJSONObject("haptics")
             return KeytaoAndroidImeConfig(
-                keyboardHeightDp = mergedInt(root, fallbackRoot, "keyboardHeightDp", 246).coerceIn(160, 420),
-                candidateBarHeightDp = mergedInt(root, fallbackRoot, "candidateBarHeightDp", 52).coerceIn(36, 96),
-                keyboardBottomInsetDp = mergedInt(root, fallbackRoot, "keyboardBottomInsetDp", 48).coerceIn(0, 80),
+                keyboardHeightDp = mergedInt(root, fallbackRoot, listOf("height", "heightDp", "keyboardHeightDp"), 246)
+                    .coerceIn(160, 420),
+                candidateBarHeightDp = mergedInt(
+                    root,
+                    fallbackRoot,
+                    listOf("candidateBarHeight", "candidateBarHeightDp"),
+                    52,
+                ).coerceIn(36, 96),
+                keyboardBottomInsetDp = mergedInt(root, fallbackRoot, listOf("bottomInset", "bottomInsetDp", "keyboardBottomInsetDp"), 48)
+                    .coerceIn(0, 80),
+                horizontalGapDp = mergedDouble(root, fallbackRoot, listOf("horizontalGap", "horizontalGapDp"), 4.0)
+                    .toFloat()
+                    .coerceIn(0f, 24f),
+                verticalGapDp = mergedDouble(root, fallbackRoot, listOf("verticalGap", "verticalGapDp"), 5.0)
+                    .toFloat()
+                    .coerceIn(0f, 24f),
+                outerInsetDp = mergedDouble(root, fallbackRoot, listOf("outerInset", "outerInsetDp"), 5.0)
+                    .toFloat()
+                    .coerceIn(0f, 32f),
+                maxKeyHeightDp = mergedDouble(root, fallbackRoot, listOf("maxKeyHeight", "maxKeyHeightDp"), 54.0)
+                    .toFloat()
+                    .coerceIn(36f, 84f),
                 hapticsEnabled = mergedBoolean(root, fallbackRoot, haptics, fallbackHaptics, "enabled", "hapticsEnabled", true),
                 hapticIntensity = mergedInt(root, fallbackRoot, haptics, fallbackHaptics, "intensity", "hapticIntensity", 42)
                     .coerceIn(1, 100),
@@ -118,6 +164,45 @@ data class KeytaoAndroidImeConfig(
 
         private fun rowArray(root: JSONObject, fallbackRoot: JSONObject?, name: String): JSONArray? {
             return root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name)
+        }
+
+        private fun resolvedThemeKeyboard(context: Context): JSONObject? {
+            return runCatching {
+                val userTheme = KeytaoAndroidPaths.themeFile()
+                val userThemePath = userTheme.takeIf { it.isFile }?.absolutePath
+                val json = KeytaoNativeBridge.resolveThemeJson(null, userThemePath, systemColorScheme(context))
+                    ?: return@runCatching null
+                JSONObject(json).optJSONObject("keyboard")
+            }.getOrNull()
+        }
+
+        private fun systemColorScheme(context: Context): String {
+            val nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+            return if (nightMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
+        }
+
+        private fun mergedInt(root: JSONObject, fallbackRoot: JSONObject?, names: List<String>, defaultValue: Int): Int {
+            for (name in names) {
+                if (root.has(name)) return root.optInt(name, defaultValue)
+            }
+            if (fallbackRoot != null) {
+                for (name in names) {
+                    if (fallbackRoot.has(name)) return fallbackRoot.optInt(name, defaultValue)
+                }
+            }
+            return defaultValue
+        }
+
+        private fun mergedDouble(root: JSONObject, fallbackRoot: JSONObject?, names: List<String>, defaultValue: Double): Double {
+            for (name in names) {
+                if (root.has(name)) return root.optDouble(name, defaultValue)
+            }
+            if (fallbackRoot != null) {
+                for (name in names) {
+                    if (fallbackRoot.has(name)) return fallbackRoot.optDouble(name, defaultValue)
+                }
+            }
+            return defaultValue
         }
 
         private fun mergedInt(root: JSONObject, fallbackRoot: JSONObject?, name: String, defaultValue: Int): Int {
@@ -237,7 +322,31 @@ data class KeytaoAndroidImeConfig(
                 swipeDown = parseOptionalCommand(json.opt("swipeDown")),
                 longPress = parseOptionalCommand(json.opt("longPress")),
                 asciiLongPress = parseOptionalCommand(json.opt("asciiLongPress")),
+                rowSpan = json.optInt("rowSpan", 1).coerceIn(1, 8),
+                stack = parseKeyStack(json.optJSONArray("stack")),
             )
+        }
+
+        private fun parseKeyStack(stack: JSONArray?): List<KeyStackItem> {
+            if (stack == null) return emptyList()
+            return buildList {
+                for (index in 0 until stack.length()) {
+                    val item = stack.optJSONObject(index) ?: continue
+                    val label = item.optString("label", "")
+                    val value = item.optString("value").takeIf { it.isNotBlank() }
+                    add(
+                        KeyStackItem(
+                            label = label,
+                            value = value,
+                            asciiLabel = item.optString("asciiLabel").takeIf { it.isNotBlank() },
+                            asciiValue = item.optString("asciiValue").takeIf { it.isNotBlank() },
+                            rimeValue = item.optString("rimeValue").takeIf { it.isNotBlank() },
+                            action = parseOptionalCommand(item.opt("action")),
+                            asciiAction = parseOptionalCommand(item.opt("asciiAction")),
+                        ),
+                    )
+                }
+            }
         }
 
         private fun parseOptionalCommand(value: Any?): KeyCommand? {
@@ -294,38 +403,50 @@ data class KeytaoAndroidImeConfig(
         )
 
         private fun defaultNumberRows(): List<List<KeySpec>> = listOf(
-            "1234567890".map { KeySpec(label = it.toString(), value = it.toString()) },
-            listOf("-", "/", ":", ";", "(", ")", "\$", "&", "@", "\"").map { KeySpec(label = it, value = it) },
-            listOf("#+=", ".", ",", "?", "!", "'", "⌫").map { label ->
-                if (label == "⌫") {
-                    KeySpec(label = label, value = "", action = KeyCommand(KeyCommandTypes.BACKSPACE))
-                } else if (label == "#+=") {
-                    KeySpec(
-                        label = label,
-                        value = "",
-                        action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols"),
-                    )
-                } else {
-                    KeySpec(label = label, value = label)
-                }
-            },
             listOf(
                 KeySpec(
-                    label = "ABC",
+                    label = "+",
+                    value = "+",
+                    rowSpan = 3,
+                    stack = listOf("+", "*", "-", "/").map { KeyStackItem(label = it, value = it) },
+                ),
+                KeySpec(label = "1", value = "1"),
+                KeySpec(label = "2", value = "2"),
+                KeySpec(label = "3", value = "3"),
+                KeySpec(label = "⌫", value = "", action = KeyCommand(KeyCommandTypes.BACKSPACE)),
+            ),
+            listOf(
+                KeySpec(label = "4", value = "4"),
+                KeySpec(label = "5", value = "5"),
+                KeySpec(label = "6", value = "6"),
+                KeySpec(label = "·", value = "."),
+            ),
+            listOf(
+                KeySpec(label = "7", value = "7"),
+                KeySpec(label = "8", value = "8"),
+                KeySpec(label = "9", value = "9"),
+                KeySpec(label = "=", value = "="),
+            ),
+            listOf(
+                KeySpec(
+                    label = "返回",
                     value = "",
-                    weight = 1.4f,
                     action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters"),
                 ),
                 KeySpec(
-                    label = "空格",
+                    label = "#+=",
+                    value = "",
+                    action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols"),
+                ),
+                KeySpec(label = "0", value = "0"),
+                KeySpec(
+                    label = "␣",
                     value = " ",
-                    weight = 4.2f,
                     action = KeyCommand(KeyCommandTypes.SPACE),
                 ),
                 KeySpec(
-                    label = "回车",
+                    label = "发送",
                     value = "\n",
-                    weight = 1.4f,
                     action = KeyCommand(KeyCommandTypes.ENTER),
                 ),
             ),

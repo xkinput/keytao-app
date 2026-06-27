@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.os.Build
 import android.os.Handler
@@ -33,12 +34,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private data class KeyRect(val spec: KeySpec, val rect: RectF)
+    private data class ActiveRowSpan(val weight: Float, var remainingRows: Int)
     private data class KeyTouch(
         val key: KeyRect,
         val downX: Float,
         val downY: Float,
         val allowLongPress: Boolean,
+        var currentX: Float = downX,
+        var currentY: Float = downY,
         var longPressConsumed: Boolean = false,
+        var backspaceGestureUnits: Int = 0,
+        var backspaceGestureConsumed: Boolean = false,
     )
     private data class CandidateRect(
         val index: Int,
@@ -60,6 +66,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val command: KeyCommand,
         val selected: Boolean = false,
         val secondaryLabel: String? = null,
+        val icon: ToolbarIcon? = null,
     )
     private data class ToolbarRect(
         val label: String,
@@ -67,9 +74,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val rect: RectF,
         val selected: Boolean = false,
         val secondaryLabel: String? = null,
+        val icon: ToolbarIcon? = null,
     )
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
+    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, BACK, SETTINGS }
     private enum class KeyboardLayer { LETTERS, NUMBERS, SYMBOLS }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD, EMOJI }
@@ -77,7 +86,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     var listener: Listener? = null
 
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
-    private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve()
+    private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
     private var state: KeytaoImeState = KeytaoImeState.empty()
     private var shiftState = ShiftState.OFF
     private var keyboardLayer = KeyboardLayer.LETTERS
@@ -158,7 +167,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             val key = repeatingKey ?: return
             val touch = activeKeyTouches[pointerId] ?: return
             if (touch.key.spec != key.spec) return
-            val command = resolveCommand(key.spec, 0f)
+            val command = resolveCommand(key.spec, 0f, key.rect, key.rect.centerY())
             clearRecentClipboardSuggestionForCommand(command)
             listener?.onKeyCommand(command)
             longPressHandler.postDelayed(this, backspaceRepeatIntervalMs)
@@ -552,7 +561,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (!schemaReady || (message != null && panelModel.candidates.isEmpty() && panelModel.preedit.isNullOrEmpty())) {
             resetCandidateScroll()
             textPaint.textSize = sp(theme.preeditSizeSp)
-            textPaint.color = theme.labelColor.toArgb()
+            textPaint.color = statusMessageColor()
             textPaint.textAlign = Paint.Align.LEFT
             canvas.drawText(
                 message ?: "请先在 KeyTao App 安装键道方案",
@@ -1004,6 +1013,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 rect,
                 action.selected,
                 action.secondaryLabel,
+                action.icon,
             )
             drawToolbarChip(canvas, toolbarRect)
             rects.add(toolbarRect)
@@ -1068,6 +1078,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun toolbarChipWidth(action: ToolbarAction): Float {
+        if (action.icon != null && action.secondaryLabel.isNullOrBlank()) {
+            return dp(46f)
+        }
         textPaint.textSize = sp(theme.labelSizeSp)
         val labelWidth = textPaint.measureText(action.label)
         val secondaryWidth = action.secondaryLabel
@@ -1086,17 +1099,21 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun drawFunctionPanelBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
         val chipHeight = minOf(dp(34f), barHeight - dp(12f))
         val top = (barHeight - chipHeight) / 2f
-        val backWidth = dp(74f)
-        val settingsWidth = dp(74f)
+        val backAction = ToolbarAction("返回", KeyCommand.panel("close"), icon = ToolbarIcon.BACK)
+        val settingsAction = ToolbarAction("设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
+        val backWidth = toolbarChipWidth(backAction)
+        val settingsWidth = toolbarChipWidth(settingsAction)
         val back = ToolbarRect(
-            "返回",
-            KeyCommand.panel("close"),
+            backAction.label,
+            backAction.command,
             RectF(leftPadding, top, leftPadding + backWidth, top + chipHeight),
+            icon = backAction.icon,
         )
         val settings = ToolbarRect(
-            "设置",
-            KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"),
+            settingsAction.label,
+            settingsAction.command,
             RectF(width - leftPadding - settingsWidth, top, width - leftPadding, top + chipHeight),
+            icon = settingsAction.icon,
         )
         toolbarRects = listOf(back, settings)
         drawToolbarChip(canvas, back)
@@ -1138,13 +1155,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.textAlign = Paint.Align.CENTER
         val secondary = item.secondaryLabel?.takeIf { it.isNotBlank() }
         if (secondary == null) {
-            textPaint.textSize = sp(theme.labelSizeSp)
-            textPaint.color = when {
+            val color = when {
                 pressed -> theme.keySelectedForeground.toArgb()
                 item.selected -> theme.candidateSelectedForeground.toArgb()
                 else -> theme.keyForeground.toArgb()
             }
-            canvas.drawText(item.label, item.rect.centerX(), item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
+            if (item.icon != null) {
+                drawToolbarIcon(canvas, item.icon, item.rect, color)
+            } else {
+                textPaint.textSize = sp(theme.labelSizeSp)
+                textPaint.color = color
+                canvas.drawText(item.label, item.rect.centerX(), item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
+            }
         } else {
             textPaint.textSize = sp(theme.labelSizeSp)
             val primaryWidth = textPaint.measureText(item.label)
@@ -1161,6 +1183,116 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             textPaint.textSize = sp(theme.commentSizeSp)
             textPaint.color = if (pressed) theme.keySelectedForeground.toArgb() else theme.commentColor.toArgb()
             canvas.drawText(secondary, secondaryX, item.rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        }
+    }
+
+    private fun drawToolbarIcon(canvas: Canvas, icon: ToolbarIcon, rect: RectF, color: Int) {
+        val size = minOf(dp(21f), rect.width() - dp(16f), rect.height() - dp(11f)).coerceAtLeast(dp(14f))
+        val iconRect = RectF(
+            rect.centerX() - size / 2f,
+            rect.centerY() - size / 2f,
+            rect.centerX() + size / 2f,
+            rect.centerY() + size / 2f,
+        )
+        val oldStyle = paint.style
+        val oldColor = paint.color
+        val oldStrokeWidth = paint.strokeWidth
+        val oldStrokeCap = paint.strokeCap
+        val oldStrokeJoin = paint.strokeJoin
+
+        paint.color = color
+        paint.strokeWidth = max(dp(1.7f), size * 0.095f)
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeJoin = Paint.Join.ROUND
+
+        when (icon) {
+            ToolbarIcon.FUNCTION -> drawGridToolbarIcon(canvas, iconRect)
+            ToolbarIcon.SELECTION -> drawSelectionToolbarIcon(canvas, iconRect)
+            ToolbarIcon.CLIPBOARD -> drawClipboardToolbarIcon(canvas, iconRect)
+            ToolbarIcon.EMOJI -> drawEmojiToolbarIcon(canvas, iconRect)
+            ToolbarIcon.BACK -> drawBackToolbarIcon(canvas, iconRect)
+            ToolbarIcon.SETTINGS -> drawSettingsToolbarIcon(canvas, iconRect)
+        }
+
+        paint.style = oldStyle
+        paint.color = oldColor
+        paint.strokeWidth = oldStrokeWidth
+        paint.strokeCap = oldStrokeCap
+        paint.strokeJoin = oldStrokeJoin
+    }
+
+    private fun drawGridToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val cell = rect.width() * 0.34f
+        val gap = rect.width() - cell * 2f
+        for (row in 0 until 2) {
+            for (column in 0 until 2) {
+                val left = rect.left + column * (cell + gap)
+                val top = rect.top + row * (cell + gap)
+                canvas.drawRoundRect(RectF(left, top, left + cell, top + cell), cell * 0.22f, cell * 0.22f, paint)
+            }
+        }
+    }
+
+    private fun drawSelectionToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val path = Path()
+        path.reset()
+        path.moveTo(rect.left + rect.width() * 0.24f, rect.top + rect.height() * 0.12f)
+        path.lineTo(rect.left + rect.width() * 0.24f, rect.bottom - rect.height() * 0.14f)
+        path.lineTo(rect.left + rect.width() * 0.42f, rect.top + rect.height() * 0.66f)
+        path.lineTo(rect.left + rect.width() * 0.54f, rect.bottom - rect.height() * 0.10f)
+        path.lineTo(rect.left + rect.width() * 0.68f, rect.bottom - rect.height() * 0.18f)
+        path.lineTo(rect.left + rect.width() * 0.56f, rect.top + rect.height() * 0.58f)
+        path.lineTo(rect.right - rect.width() * 0.20f, rect.top + rect.height() * 0.58f)
+        path.close()
+        canvas.drawPath(path, paint)
+    }
+
+    private fun drawClipboardToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val body = RectF(rect.left + rect.width() * 0.2f, rect.top + rect.height() * 0.16f, rect.right - rect.width() * 0.2f, rect.bottom - rect.height() * 0.12f)
+        canvas.drawRoundRect(body, rect.width() * 0.1f, rect.width() * 0.1f, paint)
+        val clip = RectF(rect.left + rect.width() * 0.36f, rect.top + rect.height() * 0.08f, rect.right - rect.width() * 0.36f, rect.top + rect.height() * 0.26f)
+        canvas.drawRoundRect(clip, rect.width() * 0.06f, rect.width() * 0.06f, paint)
+        canvas.drawLine(body.left + body.width() * 0.22f, body.centerY(), body.right - body.width() * 0.22f, body.centerY(), paint)
+    }
+
+    private fun drawEmojiToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        canvas.drawOval(RectF(rect.left + rect.width() * 0.08f, rect.top + rect.height() * 0.08f, rect.right - rect.width() * 0.08f, rect.bottom - rect.height() * 0.08f), paint)
+        paint.style = Paint.Style.FILL
+        val eye = rect.width() * 0.07f
+        canvas.drawOval(RectF(rect.left + rect.width() * 0.32f, rect.top + rect.height() * 0.36f, rect.left + rect.width() * 0.32f + eye, rect.top + rect.height() * 0.36f + eye), paint)
+        canvas.drawOval(RectF(rect.right - rect.width() * 0.39f, rect.top + rect.height() * 0.36f, rect.right - rect.width() * 0.39f + eye, rect.top + rect.height() * 0.36f + eye), paint)
+        paint.style = Paint.Style.STROKE
+        val smile = Path()
+        smile.moveTo(rect.left + rect.width() * 0.32f, rect.top + rect.height() * 0.62f)
+        smile.quadTo(
+            rect.centerX(),
+            rect.bottom - rect.height() * 0.18f,
+            rect.right - rect.width() * 0.32f,
+            rect.top + rect.height() * 0.62f,
+        )
+        canvas.drawPath(smile, paint)
+    }
+
+    private fun drawBackToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        canvas.drawLine(rect.right - rect.width() * 0.15f, rect.centerY(), rect.left + rect.width() * 0.18f, rect.centerY(), paint)
+        canvas.drawLine(rect.left + rect.width() * 0.18f, rect.centerY(), rect.left + rect.width() * 0.42f, rect.top + rect.height() * 0.26f, paint)
+        canvas.drawLine(rect.left + rect.width() * 0.18f, rect.centerY(), rect.left + rect.width() * 0.42f, rect.bottom - rect.height() * 0.26f, paint)
+    }
+
+    private fun drawSettingsToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val rows = listOf(0.28f to 0.65f, 0.5f to 0.34f, 0.72f to 0.58f)
+        for ((yRatio, knobRatio) in rows) {
+            val y = rect.top + rect.height() * yRatio
+            canvas.drawLine(rect.left + rect.width() * 0.14f, y, rect.right - rect.width() * 0.14f, y, paint)
+            paint.style = Paint.Style.FILL
+            canvas.drawCircle(rect.left + rect.width() * knobRatio, y, rect.width() * 0.085f, paint)
+            paint.style = Paint.Style.STROKE
         }
     }
 
@@ -1190,14 +1322,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val top = keyboardTop()
         drawContentLayer(canvas, top) {
             for (keyRect in layout) {
-                drawKey(canvas, keyRect.spec, keyRect.rect, pressedKey?.spec == keyRect.spec)
+                val pressed = pressedKey?.spec == keyRect.spec
+                drawKey(canvas, keyRect.spec, keyRect.rect, pressed, pressedStackIndexFor(keyRect))
             }
         }
 
         keyRects = layout
     }
 
-    private fun drawKey(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean) {
+    private fun drawKey(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean, pressedStackIndex: Int? = null) {
+        if (key.stack.isNotEmpty()) {
+            drawStackKey(canvas, key, rect, pressedStackIndex)
+            return
+        }
+
         val keyRect = RectF(rect)
         if (pressed) {
             keyRect.offset(0f, dp(1f))
@@ -1234,12 +1372,46 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun resolveCommand(key: KeySpec, deltaY: Float): KeyCommand {
+    private fun drawStackKey(canvas: Canvas, key: KeySpec, rect: RectF, pressedStackIndex: Int?) {
+        val stackRects = stackItemRects(rect, key.stack.size)
+        for ((index, item) in key.stack.withIndex()) {
+            val pressed = pressedStackIndex == index
+            val keyRect = RectF(stackRects[index])
+            if (pressed) {
+                keyRect.offset(0f, dp(1f))
+            }
+            val selected = pressed || isActiveKey(key)
+            drawKeyShadow(canvas, keyRect, pressed)
+
+            paint.style = Paint.Style.FILL
+            paint.color = when {
+                selected && isSoftAccentKey(key) -> softenedAccentSurfaceColor(0.24f)
+                selected -> theme.keySelectedBackground.toArgb()
+                else -> keyBackgroundColor(key)
+            }
+            canvas.drawRoundRect(keyRect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+            drawKeyOutline(canvas, key, keyRect, pressed)
+
+            val label = stackLabelForMode(item)
+            val maxLabelWidth = keyRect.width() - dp(10f)
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.color = keyForegroundColor(key, selected)
+            var labelSize = sp(if (label.length > 2) theme.labelSizeSp else theme.fontSizeSp)
+            textPaint.textSize = labelSize
+            while (labelSize > sp(12f) && textPaint.measureText(label) > maxLabelWidth) {
+                labelSize -= dp(1f)
+                textPaint.textSize = labelSize
+            }
+            canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
+        }
+    }
+
+    private fun resolveCommand(key: KeySpec, deltaY: Float, rect: RectF? = null, releaseY: Float? = null): KeyCommand {
         val threshold = dp(config.swipeThresholdDp)
         val command = when {
             deltaY < -threshold -> resolveSwipeUpCommand(key)
             deltaY > threshold -> key.swipeDown ?: key.action
-            else -> actionForMode(key)
+            else -> stackCommandForPoint(key, rect, releaseY) ?: actionForMode(key)
         }
         return applyShift(command)
     }
@@ -1368,17 +1540,52 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             .coerceAtLeast(verticalGapFloor)
         val nextRects = mutableListOf<KeyRect>()
 
+        val maximumRowWidth = (width - keyboardOuterInset() * 2f).coerceAtLeast(1f)
+        val referenceUnitWidth = keyboardReferenceUnitWidth(rows, horizontalGap)
         var y = top + verticalGap
-        for (row in rows) {
-            val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat().coerceAtLeast(1f)
-            val usableWidth = width - horizontalGap * (row.size + 1)
-            var x = horizontalGap
+        var activeLeadingSpans = mutableListOf<ActiveRowSpan>()
+        for ((rowIndex, row) in rows.withIndex()) {
+            if (row.isEmpty()) {
+                activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                y += rowHeight + verticalGap
+                continue
+            }
+            val leadingWeight = activeLeadingSpans.sumOf { it.weight.toDouble() }.toFloat()
+            val totalWeight = (leadingWeight + rowWeight(row)).coerceAtLeast(1f)
+            val effectiveKeyCount = activeLeadingSpans.size + row.size
+            val gapWidth = horizontalGap * (effectiveKeyCount - 1).coerceAtLeast(0)
+            val rowWidth = keyboardRowWidth(
+                row = row,
+                rowIndex = rowIndex,
+                rows = rows,
+                referenceUnitWidth = referenceUnitWidth,
+                horizontalGap = horizontalGap,
+                maximumRowWidth = maximumRowWidth,
+                effectiveKeyCount = effectiveKeyCount,
+                effectiveWeight = totalWeight,
+            )
+            val unitWidth = ((rowWidth - gapWidth) / totalWeight).coerceAtLeast(1f)
+            var x = (width - rowWidth) / 2f
+            for (span in activeLeadingSpans) {
+                x += unitWidth * span.weight + horizontalGap
+            }
+            val nextLeadingSpans = mutableListOf<ActiveRowSpan>()
+            var acceptingLeadingSpan = true
             for (key in row) {
-                val keyWidth = usableWidth * key.weight / totalWeight
-                val rect = RectF(x, y, x + keyWidth, y + rowHeight)
+                val keyWidth = unitWidth * key.weight
+                val spanRows = keyRowSpan(key)
+                val keyHeight = rowHeight * spanRows + verticalGap * (spanRows - 1)
+                val rect = RectF(x, y, x + keyWidth, y + keyHeight)
                 nextRects.add(KeyRect(key, rect))
+                if (acceptingLeadingSpan && spanRows > 1) {
+                    nextLeadingSpans.add(ActiveRowSpan(key.weight, spanRows - 1))
+                } else {
+                    acceptingLeadingSpan = false
+                }
                 x = rect.right + horizontalGap
             }
+            activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+            activeLeadingSpans.addAll(nextLeadingSpans)
             y += rowHeight + verticalGap
         }
 
@@ -1399,6 +1606,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(config.candidateBarHeightDp)
             append(':')
             append(config.keyboardBottomInsetDp)
+            append(':')
+            append(config.horizontalGapDp)
+            append(':')
+            append(config.verticalGapDp)
+            append(':')
+            append(config.outerInsetDp)
+            append(':')
+            append(config.maxKeyHeightDp)
             append(':')
             append(config.swipeThresholdDp)
             append('|')
@@ -1429,11 +1644,72 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return key.action
     }
 
+    private fun stackCommandForPoint(key: KeySpec, rect: RectF?, releaseY: Float?): KeyCommand? {
+        val stack = key.stack.takeIf { it.isNotEmpty() } ?: return null
+        val item = if (rect == null || releaseY == null || rect.height() <= 0f) {
+            stack.first()
+        } else {
+            stack[stackIndexAt(key, rect, releaseY)]
+        }
+        return actionForMode(item)
+    }
+
+    private fun pressedStackIndexFor(keyRect: KeyRect): Int? {
+        val stack = keyRect.spec.stack
+        if (stack.isEmpty()) return null
+        val touch = activeKeyTouches.values.lastOrNull { it.key.spec == keyRect.spec } ?: return null
+        if (!keyRect.rect.contains(touch.currentX, touch.currentY)) return null
+        return stackIndexAt(keyRect.spec, keyRect.rect, touch.currentY)
+    }
+
+    private fun stackIndexAt(key: KeySpec, rect: RectF, y: Float): Int {
+        val count = key.stack.size
+        if (count <= 1 || rect.height() <= 0f) return 0
+        val itemRects = stackItemRects(rect, count)
+        for ((index, itemRect) in itemRects.withIndex()) {
+            if (y >= itemRect.top && y <= itemRect.bottom) return index
+        }
+        val ratio = ((y - rect.top) / rect.height()).coerceIn(0f, 0.999f)
+        return (ratio * count).toInt().coerceIn(0, count - 1)
+    }
+
+    private fun stackItemRects(rect: RectF, count: Int): List<RectF> {
+        if (count <= 1) return listOf(RectF(rect))
+        val gap = min(keyboardVerticalGap(), dp(6f)).coerceAtLeast(0f)
+        val itemHeight = ((rect.height() - gap * (count - 1)) / count).coerceAtLeast(1f)
+        return List(count) { index ->
+            val top = rect.top + (itemHeight + gap) * index
+            RectF(rect.left, top, rect.right, top + itemHeight)
+        }
+    }
+
+    private fun actionForMode(item: KeyStackItem): KeyCommand {
+        if (state.asciiMode) {
+            item.asciiAction?.let { return it }
+            item.asciiValue?.let { return KeyCommand.input(it) }
+        } else {
+            item.rimeValue?.let { return KeyCommand.rimeInput(it, item.value ?: item.label) }
+            item.asciiValue?.takeIf { it != (item.value ?: item.label) }?.let {
+                return KeyCommand.rimeInput(it, item.value ?: item.label)
+            }
+        }
+        item.action?.let { return it }
+        return KeyCommand.input(item.value ?: item.label)
+    }
+
     private fun labelForMode(key: KeySpec): String {
         return if (state.asciiMode) {
             key.asciiLabel ?: key.asciiValue ?: key.label
         } else {
             key.label
+        }
+    }
+
+    private fun stackLabelForMode(item: KeyStackItem): String {
+        return if (state.asciiMode) {
+            item.asciiLabel ?: item.asciiValue ?: item.label
+        } else {
+            item.label
         }
     }
 
@@ -1446,28 +1722,39 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun toolbarActions(): List<ToolbarAction> {
-        val function = ToolbarAction("功能", KeyCommand.panel("home"))
+        val function = ToolbarAction("功能", KeyCommand.panel("home"), icon = ToolbarIcon.FUNCTION)
+        val languageToggle = languageToggleAction()
         return if (keyboardLayer == KeyboardLayer.SYMBOLS) {
             listOf(
                 function,
-                ToolbarAction("中文", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !state.asciiMode),
-                ToolbarAction("英文", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode),
+                ToolbarAction("中", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !state.asciiMode),
+                ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode),
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers")),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters")),
             )
         } else {
-            val currentMode = if (state.asciiMode) "英" else "中"
-            val nextMode = if (state.asciiMode) "中" else "英"
             listOf(
                 function,
-                ToolbarAction(
-                    currentMode,
-                    KeyCommand(KeyCommandTypes.MODE),
-                    secondaryLabel = nextMode,
-                ),
-                ToolbarAction("选择", KeyCommand.panel("selection")),
-                ToolbarAction("剪贴板", KeyCommand.panel("clipboard")),
-                ToolbarAction("Emoji", KeyCommand.panel("emoji")),
+                languageToggle,
+                ToolbarAction("选择", KeyCommand.panel("selection"), icon = ToolbarIcon.SELECTION),
+                ToolbarAction("剪贴板", KeyCommand.panel("clipboard"), icon = ToolbarIcon.CLIPBOARD),
+                ToolbarAction("Emoji", KeyCommand.panel("emoji"), icon = ToolbarIcon.EMOJI),
+            )
+        }
+    }
+
+    private fun languageToggleAction(): ToolbarAction {
+        return if (state.asciiMode) {
+            ToolbarAction(
+                "En",
+                KeyCommand(KeyCommandTypes.MODE),
+                secondaryLabel = "中",
+            )
+        } else {
+            ToolbarAction(
+                "中",
+                KeyCommand(KeyCommandTypes.MODE),
+                secondaryLabel = "En",
             )
         }
     }
@@ -1508,7 +1795,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun bottomReservedInset(): Float {
-        val requested = dp(config.keyboardBottomInsetDp)
+        val requested = min(dp(config.keyboardBottomInsetDp), dp(28f))
         val minKeyboardContentHeight = dp(180f)
         val available = (height.toFloat() - keyboardTop() - minKeyboardContentHeight).coerceAtLeast(0f)
         return min(requested, available)
@@ -1796,10 +2083,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         for (pointerIndex in 0 until event.pointerCount) {
             val pointerId = event.getPointerId(pointerIndex)
             val touch = activeKeyTouches[pointerId] ?: continue
-            if (pointerId == primaryKeyPointerId && !touch.key.rect.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
+            val x = event.getX(pointerIndex)
+            val y = event.getY(pointerIndex)
+            touch.currentX = x
+            touch.currentY = y
+            if (handleBackspaceDrag(touch, pointerId, x, y)) {
+                continue
+            }
+            if (pointerId == primaryKeyPointerId && !touch.key.rect.contains(x, y)) {
                 stopLongPressAndRepeat(pointerId)
             }
         }
+        invalidate()
     }
 
     private fun finishKeyTouch(pointerId: Int, x: Float, y: Float): Boolean {
@@ -1810,8 +2105,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 ?: activeKeyTouches.keys.firstOrNull()
         }
         refreshPressedKey()
+        if (handleBackspaceRelease(touch, x, y)) {
+            return true
+        }
+        if (touch.backspaceGestureConsumed) {
+            return true
+        }
         if (shouldAcceptKeyRelease(touch, x, y) && !touch.longPressConsumed) {
-            val command = resolveCommand(touch.key.spec, y - touch.downY)
+            val command = resolveCommand(touch.key.spec, y - touch.downY, touch.key.rect, y)
             performConfiguredHaptic()
             clearRecentClipboardSuggestionForCommand(command)
             listener?.onKeyCommand(command)
@@ -1847,10 +2148,61 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return actionForMode(key).type == KeyCommandTypes.BACKSPACE
     }
 
+    private fun handleBackspaceDrag(touch: KeyTouch, pointerId: Int, x: Float, y: Float): Boolean {
+        if (!isBackspaceKey(touch.key.spec)) return false
+        val deltaX = x - touch.downX
+        val deltaY = y - touch.downY
+        val threshold = max(dp(8f), dp(config.swipeThresholdDp) * 0.65f)
+        if (abs(deltaX) <= threshold || abs(deltaX) <= abs(deltaY) * 0.75f) {
+            return false
+        }
+
+        stopLongPressAndRepeat(pointerId)
+        touch.longPressConsumed = true
+        touch.backspaceGestureConsumed = true
+
+        val stepWidth = max(dp(8f), touch.key.rect.width() * 0.22f)
+        val moved = max(0f, abs(deltaX) - threshold)
+        val stepCount = max(1, (moved / stepWidth).toInt() + 1)
+        val targetUnits = if (deltaX < 0f) stepCount else -stepCount
+        val deltaUnits = targetUnits - touch.backspaceGestureUnits
+        if (deltaUnits == 0) return true
+
+        val action = if (deltaUnits > 0) "delete" else "restore"
+        repeat(abs(deltaUnits)) {
+            listener?.onKeyCommand(backspaceGestureCommand(action))
+        }
+        touch.backspaceGestureUnits = targetUnits
+        performConfiguredHaptic()
+        return true
+    }
+
+    private fun handleBackspaceRelease(touch: KeyTouch, x: Float, y: Float): Boolean {
+        if (!isBackspaceKey(touch.key.spec) || touch.backspaceGestureConsumed) return false
+        val deltaX = x - touch.downX
+        val deltaY = y - touch.downY
+        val threshold = max(dp(12f), dp(config.swipeThresholdDp))
+        if (abs(deltaY) <= threshold || abs(deltaY) <= abs(deltaX) * 1.1f) {
+            return false
+        }
+
+        listener?.onKeyCommand(backspaceGestureCommand(if (deltaY < 0f) "deleteAll" else "restoreAll"))
+        performConfiguredHaptic(strong = true)
+        return true
+    }
+
+    private fun backspaceGestureCommand(action: String): KeyCommand {
+        return KeyCommand(KeyCommandTypes.BACKSPACE_GESTURE, action)
+    }
+
+    private fun isBackspaceKey(key: KeySpec): Boolean {
+        return actionForMode(key).type == KeyCommandTypes.BACKSPACE
+    }
+
     private fun startRepeatingKey(pointerId: Int, key: KeyRect) {
         repeatingPointerId = pointerId
         repeatingKey = key
-        val command = resolveCommand(key.spec, 0f)
+        val command = resolveCommand(key.spec, 0f, key.rect, key.rect.centerY())
         clearRecentClipboardSuggestionForCommand(command)
         listener?.onKeyCommand(command)
         longPressHandler.removeCallbacks(repeatRunnable)
@@ -1861,7 +2213,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         longPressHandler.removeCallbacks(longPressRunnable)
         val spec = key?.spec ?: return
         if (primaryKeyPointerId != pointerId) return
-        val hasLongPressAction = isRepeatableKey(spec) || spec.longPress != null || !spec.hint.isNullOrBlank()
+        val hasLongPressAction = spec.longPress != null || !spec.hint.isNullOrBlank()
         if (hasLongPressAction) {
             longPressHandler.postDelayed(longPressRunnable, longPressDelayMs)
         }
@@ -1987,7 +2339,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             return true
         }
         if (item.command.type == KeyCommandTypes.OPEN_PAGE) return true
-        return item.label in setOf("功能", "中", "英", "中文", "英文", "选择", "剪贴板", "Emoji", "返回", "设置")
+        return item.label in setOf("功能", "中", "En", "中文", "英文", "选择", "剪贴板", "Emoji", "返回", "设置")
     }
 
     private fun isToolbarPressed(item: ToolbarRect): Boolean {
@@ -2006,6 +2358,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             0.07f,
             theme.panelBackground.alpha,
         )
+    }
+
+    private fun statusMessageColor(): Int {
+        return if (isDarkPanel()) {
+            Color.argb(235, 245, 247, 250)
+        } else {
+            Color.argb(224, 31, 41, 51)
+        }
     }
 
     private fun softenedAccentSurfaceColor(amount: Float): Int {
@@ -2028,15 +2388,87 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyboardHorizontalGap(): Float {
-        return dp((theme.panelGapDp * 0.88f).coerceAtLeast(4f))
+        return dp(config.horizontalGapDp)
     }
 
     private fun keyboardVerticalGap(): Float {
-        return dp((theme.panelGapDp * 1.1f).coerceAtLeast(6f))
+        return dp(config.verticalGapDp)
     }
 
     private fun keyboardMaxKeyHeight(): Float {
-        return dp(48f)
+        return dp(config.maxKeyHeightDp)
+    }
+
+    private fun rowWeight(row: List<KeySpec>): Float {
+        return row.sumOf { it.weight.toDouble() }.toFloat().coerceAtLeast(1f)
+    }
+
+    private fun keyRowSpan(key: KeySpec): Int {
+        return key.rowSpan.coerceIn(1, 8)
+    }
+
+    private fun advanceRowSpans(spans: List<ActiveRowSpan>): MutableList<ActiveRowSpan> {
+        return spans.mapNotNull { span ->
+            span.remainingRows -= 1
+            if (span.remainingRows > 0) span else null
+        }.toMutableList()
+    }
+
+    private fun keyboardOuterInset(): Float {
+        return dp(config.outerInsetDp)
+    }
+
+    private fun keyboardReferenceUnitWidth(rows: List<List<KeySpec>>, horizontalGap: Float): Float {
+        var activeLeadingSpans = mutableListOf<ActiveRowSpan>()
+        var referenceKeyCount = 0
+        var referenceWeight = 1f
+        for (row in rows) {
+            val effectiveKeyCount = activeLeadingSpans.size + row.size
+            val effectiveWeight = (
+                activeLeadingSpans.sumOf { it.weight.toDouble() }.toFloat() + rowWeight(row)
+            ).coerceAtLeast(1f)
+            if (effectiveKeyCount > referenceKeyCount ||
+                (effectiveKeyCount == referenceKeyCount && effectiveWeight > referenceWeight)
+            ) {
+                referenceKeyCount = effectiveKeyCount
+                referenceWeight = effectiveWeight
+            }
+            val nextLeadingSpans = row.takeWhile { keyRowSpan(it) > 1 }
+                .map { ActiveRowSpan(it.weight, keyRowSpan(it) - 1) }
+            activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+            activeLeadingSpans.addAll(nextLeadingSpans)
+        }
+        if (referenceKeyCount <= 0) return dp(32f)
+        val gapWidth = horizontalGap * (referenceKeyCount - 1).coerceAtLeast(0)
+        val availableWidth = (width - keyboardOuterInset() * 2f - gapWidth).coerceAtLeast(1f)
+        return (availableWidth / referenceWeight).coerceAtLeast(dp(24f))
+    }
+
+    private fun keyboardRowWidth(
+        row: List<KeySpec>,
+        rowIndex: Int,
+        rows: List<List<KeySpec>>,
+        referenceUnitWidth: Float,
+        horizontalGap: Float,
+        maximumRowWidth: Float,
+        effectiveKeyCount: Int,
+        effectiveWeight: Float,
+    ): Float {
+        if (keyboardRowShouldFillWidth(row, rowIndex, rows)) {
+            return maximumRowWidth
+        }
+        val gapWidth = horizontalGap * (effectiveKeyCount - 1).coerceAtLeast(0)
+        return (referenceUnitWidth * effectiveWeight + gapWidth).coerceAtMost(maximumRowWidth)
+    }
+
+    private fun keyboardRowShouldFillWidth(row: List<KeySpec>, rowIndex: Int, rows: List<List<KeySpec>>): Boolean {
+        if (keyboardLayer != KeyboardLayer.LETTERS) return true
+        if (rowIndex == 0 || rowIndex == rows.lastIndex) return true
+        if (row.size <= 5) return true
+        return row.any { key ->
+            val type = actionForMode(key).type
+            type == KeyCommandTypes.SHIFT || type == KeyCommandTypes.BACKSPACE
+        }
     }
 
     private fun isDarkPanel(): Boolean {

@@ -1,5 +1,7 @@
 package ink.rea.keytao_app
 
+import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import org.json.JSONObject
 
@@ -143,9 +145,16 @@ data class KeytaoImeTheme(
 }
 
 object KeytaoThemeResolver {
-    fun resolve(): KeytaoImeTheme {
+    fun resolve(context: Context): KeytaoImeTheme {
         val userTheme = KeytaoAndroidPaths.themeFile()
         val userThemePath = userTheme.takeIf { it.isFile }?.absolutePath
-        return KeytaoImeTheme.fromJson(KeytaoNativeBridge.resolveThemeJson(null, userThemePath))
+        return KeytaoImeTheme.fromJson(
+            KeytaoNativeBridge.resolveThemeJson(null, userThemePath, systemColorScheme(context))
+        )
+    }
+
+    private fun systemColorScheme(context: Context): String {
+        val nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+        return if (nightMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
     }
 }

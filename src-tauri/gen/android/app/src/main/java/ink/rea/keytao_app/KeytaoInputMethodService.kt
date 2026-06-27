@@ -3,6 +3,7 @@ package ink.rea.keytao_app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.res.Configuration
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
@@ -30,6 +31,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var pendingShiftKeyCode = 0
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
+    private val backspaceRestoreStack = mutableListOf<String>()
 
     override fun onCreate() {
         super.onCreate()
@@ -52,7 +54,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val view = KeytaoKeyboardView(this)
         view.listener = this
         view.updateConfig(KeytaoAndroidImeConfig.load(this))
-        view.updateTheme(KeytaoThemeResolver.resolve())
+        view.updateTheme(KeytaoThemeResolver.resolve(this))
         view.updateState(currentState)
         keyboardView = view
         refreshInputAvailability()
@@ -72,10 +74,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (engine.reloadIfNeeded()) {
             currentState = engine.state().withoutTransientCommit()
         }
-        keyboardView?.updateTheme(KeytaoThemeResolver.resolve())
+        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
         keyboardView?.updateConfig(KeytaoAndroidImeConfig.load(this))
         refreshInputAvailability()
         keyboardView?.updateState(currentState)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
     }
 
     override fun onFinishInput() {
@@ -146,6 +153,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.DIRECT_INPUT -> commitDirect(command.value.orEmpty())
             KeyCommandTypes.RIME_INPUT -> handleRimeInput(command.value.orEmpty(), command.fallbackValue)
             KeyCommandTypes.BACKSPACE -> handleBackspace()
+            KeyCommandTypes.BACKSPACE_GESTURE -> handleBackspaceGesture(command.value.orEmpty())
             KeyCommandTypes.ENTER -> handleEnter()
             KeyCommandTypes.SPACE -> handleSpace()
             KeyCommandTypes.SHIFT -> keyboardView?.toggleShift()
@@ -253,7 +261,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun handleBackspace() {
         if (!currentState.hasComposition && !composing) {
-            currentInputConnection?.deleteSurroundingText(1, 0)
+            deleteOneBeforeCursorForRestore()
             selectionModeActive = false
             return
         }
@@ -261,11 +269,85 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (result.accepted || result.hasComposition) {
             applyState(result)
         } else {
-            currentInputConnection?.deleteSurroundingText(1, 0)
+            deleteOneBeforeCursorForRestore(resetComposition = false)
             composing = false
             currentState = engine.reset().withoutTransientCommit()
             keyboardView?.updateState(currentState)
         }
+    }
+
+    private fun handleBackspaceGesture(action: String) {
+        when (action) {
+            "delete" -> deleteOneBeforeCursorForRestore()
+            "restore" -> restoreOneBackspaceText()
+            "deleteAll" -> deleteAllBeforeCursorForRestore()
+            "restoreAll" -> restoreAllBackspaceText()
+        }
+    }
+
+    private fun deleteOneBeforeCursorForRestore(resetComposition: Boolean = true): Boolean {
+        if (resetComposition) clearCompositionBeforeEdit()
+        val connection = currentInputConnection ?: return false
+        val before = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val deleted = lastTextUnit(before)
+        if (deleted == null) {
+            connection.deleteSurroundingText(1, 0)
+            selectionModeActive = false
+            return false
+        }
+        connection.deleteSurroundingText(deleted.length, 0)
+        backspaceRestoreStack.add(deleted)
+        selectionModeActive = false
+        return true
+    }
+
+    private fun deleteAllBeforeCursorForRestore() {
+        clearCompositionBeforeEdit()
+        val connection = currentInputConnection ?: return
+        val before = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        if (before.isEmpty()) return
+        connection.deleteSurroundingText(before.length, 0)
+        backspaceRestoreStack.addAll(textUnits(before).asReversed())
+        selectionModeActive = false
+    }
+
+    private fun restoreOneBackspaceText(): Boolean {
+        val connection = currentInputConnection ?: return false
+        if (backspaceRestoreStack.isEmpty()) return false
+        val text = backspaceRestoreStack.removeAt(backspaceRestoreStack.lastIndex)
+        connection.commitText(text, 1)
+        selectionModeActive = false
+        return true
+    }
+
+    private fun restoreAllBackspaceText() {
+        val connection = currentInputConnection ?: return
+        if (backspaceRestoreStack.isEmpty()) return
+        val restored = buildString {
+            while (backspaceRestoreStack.isNotEmpty()) {
+                append(backspaceRestoreStack.removeAt(backspaceRestoreStack.lastIndex))
+            }
+        }
+        connection.commitText(restored, 1)
+        selectionModeActive = false
+    }
+
+    private fun lastTextUnit(text: String): String? {
+        if (text.isEmpty()) return null
+        val start = text.offsetByCodePoints(text.length, -1)
+        return text.substring(start)
+    }
+
+    private fun textUnits(text: String): List<String> {
+        if (text.isEmpty()) return emptyList()
+        val units = mutableListOf<String>()
+        var index = 0
+        while (index < text.length) {
+            val next = text.offsetByCodePoints(index, 1)
+            units.add(text.substring(index, next))
+            index = next
+        }
+        return units
     }
 
     private fun handleSpace() {
@@ -449,6 +531,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun commitDirect(text: String) {
         val connection = currentInputConnection ?: return
         val hadComposition = composing || currentState.hasComposition
+        backspaceRestoreStack.clear()
         connection.beginBatchEdit()
         connection.commitText(text, 1)
         composing = false
@@ -469,6 +552,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (connection != null) {
             connection.beginBatchEdit()
             if (state.committed.isNotEmpty()) {
+                backspaceRestoreStack.clear()
                 connection.commitText(state.committed, 1)
                 composing = false
                 selectionModeActive = false
@@ -533,11 +617,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     companion object {
         private const val clipboardHistoryLimit = 24
         private const val expandedCandidateLimit = 96
+        private const val backspaceContextLimit = 8192
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {
         return when (type) {
             KeyCommandTypes.OPEN_PAGE,
+            KeyCommandTypes.BACKSPACE,
+            KeyCommandTypes.BACKSPACE_GESTURE,
             KeyCommandTypes.KEYBOARD_PICKER,
             KeyCommandTypes.KEYBOARD_MODE,
             KeyCommandTypes.SHIFT,

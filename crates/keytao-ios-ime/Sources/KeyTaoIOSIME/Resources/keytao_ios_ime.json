@@ -1,7 +1,7 @@
 {
   "keyboardHeightDp": 246,
   "candidateBarHeightDp": 52,
-  "keyboardBottomInsetDp": 48,
+  "keyboardBottomInsetDp": 0,
   "haptics": {
     "enabled": true,
     "intensity": 42
