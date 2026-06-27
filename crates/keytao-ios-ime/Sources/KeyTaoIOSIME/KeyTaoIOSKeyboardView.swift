@@ -2028,6 +2028,26 @@ final class KeyTaoIOSKeyboardView: UIView {
         max(10, min(theme.font.commentSize - 1, 12))
     }
 
+    private func keyLabelSize(for label: String) -> CGFloat {
+        if label.count > 2 || containsCJK(label) {
+            return max(12, min(theme.font.labelSize, theme.font.size - 4, 16))
+        }
+        return theme.font.size
+    }
+
+    private func keyHintSize() -> CGFloat {
+        max(9, min(theme.font.commentSize - 2, keyLabelSize(for: "中") - 2, 12))
+    }
+
+    private func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value) ||
+                (0x3400...0x4DBF).contains(scalar.value) ||
+                (0x20000...0x2A6DF).contains(scalar.value) ||
+                (0xF900...0xFAFF).contains(scalar.value)
+        }
+    }
+
     private func candidatePaddingX() -> CGFloat {
         max(7, min(theme.candidate.paddingX, 9))
     }
