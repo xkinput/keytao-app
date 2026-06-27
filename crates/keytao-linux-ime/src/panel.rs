@@ -758,31 +758,17 @@ impl PanelRenderer {
         let mut pm = Pixmap::new(width, hint_height).expect("pixmap alloc");
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
 
-        if let Some(path) = rounded_rect_path(
+        draw_rounded_rect(
+            &mut pm,
             0.5,
             0.5,
             width as f32 - 1.0,
             hint_height as f32 - 1.0,
             self.s(theme.mode_hint.corner_radius),
-        ) {
-            let mut paint = Paint::default();
-            paint.set_color(tiny_color(theme.mode_hint.background));
-            paint.anti_alias = true;
-            pm.fill_path(
-                &path,
-                &paint,
-                FillRule::Winding,
-                Transform::identity(),
-                None,
-            );
-
-            if theme.panel.border_width > 0.0 {
-                paint.set_color(tiny_color(theme.panel.border_color));
-                let mut stroke = Stroke::default();
-                stroke.width = self.s(1.0).max(1.0);
-                pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-            }
-        }
+            theme.mode_hint.background,
+            theme.mode_hint.border_color,
+            self.s(theme.mode_hint.border_width),
+        );
 
         let x = (width as f32 - text_width) * 0.5;
         let baseline = (hint_height as f32 + hint_size) * 0.5 - self.s(3.0);
@@ -1146,7 +1132,18 @@ fn draw_rounded_rect(
     border: RgbaColor,
     border_width: f32,
 ) {
-    let Some(path) = rounded_rect_path(x, y, width.max(1.0), height.max(1.0), radius) else {
+    let stroke_width = if border_width > 0.0 && border.alpha > 0 {
+        border_width.max(1.0)
+    } else {
+        0.0
+    };
+    let stroke_inset = ((stroke_width - 1.0) * 0.5).max(0.0);
+    let path_x = x + stroke_inset;
+    let path_y = y + stroke_inset;
+    let path_width = (width - stroke_inset * 2.0).max(1.0);
+    let path_height = (height - stroke_inset * 2.0).max(1.0);
+    let path_radius = (radius - stroke_inset).max(0.0);
+    let Some(path) = rounded_rect_path(path_x, path_y, path_width, path_height, path_radius) else {
         return;
     };
     let mut paint = Paint::default();
@@ -1161,10 +1158,10 @@ fn draw_rounded_rect(
             None,
         );
     }
-    if border_width > 0.0 && border.alpha > 0 {
+    if stroke_width > 0.0 {
         paint.set_color(tiny_color(border));
         let mut stroke = Stroke::default();
-        stroke.width = border_width.max(1.0);
+        stroke.width = stroke_width;
         pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }

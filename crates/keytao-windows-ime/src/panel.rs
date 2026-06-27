@@ -252,9 +252,9 @@ impl PanelRenderer {
             width as f32 - 1.0,
             height as f32 - 1.0,
             theme.mode_hint.corner_radius,
-            theme.candidate.selected_background,
-            theme.candidate.selected_border_color,
-            theme.candidate.border_width.max(1.0),
+            theme.mode_hint.background,
+            theme.mode_hint.border_color,
+            theme.mode_hint.border_width,
         );
 
         let x = (width as f32 - text_width) * 0.5;
@@ -264,12 +264,7 @@ impl PanelRenderer {
             &label,
             x,
             baseline,
-            bgra(RgbaColor {
-                red: 0xff,
-                green: 0xff,
-                blue: 0xff,
-                alpha: 0xff,
-            }),
+            bgra(theme.mode_hint.foreground),
             font_size,
         );
 
@@ -498,7 +493,18 @@ fn draw_rounded_rect(
     border: RgbaColor,
     border_width: f32,
 ) {
-    let Some(path) = rounded_rect_path(x, y, width.max(1.0), height.max(1.0), radius) else {
+    let stroke_width = if border_width > 0.0 && border.alpha > 0 {
+        border_width.max(1.0)
+    } else {
+        0.0
+    };
+    let stroke_inset = ((stroke_width - 1.0) * 0.5).max(0.0);
+    let path_x = x + stroke_inset;
+    let path_y = y + stroke_inset;
+    let path_width = (width - stroke_inset * 2.0).max(1.0);
+    let path_height = (height - stroke_inset * 2.0).max(1.0);
+    let path_radius = (radius - stroke_inset).max(0.0);
+    let Some(path) = rounded_rect_path(path_x, path_y, path_width, path_height, path_radius) else {
         return;
     };
     let mut paint = Paint::default();
@@ -513,10 +519,10 @@ fn draw_rounded_rect(
             None,
         );
     }
-    if border_width > 0.0 && border.alpha > 0 {
+    if stroke_width > 0.0 {
         paint.set_color(tiny_color(border));
         let mut stroke = Stroke::default();
-        stroke.width = border_width.max(1.0);
+        stroke.width = stroke_width;
         pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }

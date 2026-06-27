@@ -150,6 +150,8 @@ pub struct NavigationTheme {
 pub struct ModeHintTheme {
     pub background: RgbaColor,
     pub foreground: RgbaColor,
+    pub border_color: RgbaColor,
+    pub border_width: f32,
     pub font_size: f32,
     pub width: f32,
     pub height: f32,
@@ -525,7 +527,6 @@ impl ResolvedImeTheme {
         let is_dark = self.ui.effective_color_scheme == EffectiveColorScheme::Dark;
         let selected_weight = if is_dark { 0.42 } else { 0.18 };
         let hover_weight = if is_dark { 0.22 } else { 0.09 };
-        let hint_weight = if is_dark { 0.32 } else { 0.14 };
 
         self.candidate.selected_label_color = opaque(accent);
         self.candidate.selected_border_color = opaque(accent);
@@ -533,9 +534,6 @@ impl ResolvedImeTheme {
             with_alpha(mix_color(panel_background, accent, selected_weight), 0xff);
         self.candidate.hover_background =
             with_alpha(mix_color(panel_background, accent, hover_weight), 0xff);
-        self.mode_hint.foreground = opaque(accent);
-        self.mode_hint.background =
-            with_alpha(mix_color(panel_background, accent, hint_weight), 0xf2);
     }
 
     fn sanitized(mut self) -> Self {
@@ -562,6 +560,7 @@ impl ResolvedImeTheme {
         self.candidate.max_width = clamp(self.candidate.max_width, 72.0, 640.0);
         self.navigation.button_size = clamp(self.navigation.button_size, 18.0, 56.0);
         self.navigation.corner_radius = clamp(self.navigation.corner_radius, 0.0, 20.0);
+        self.mode_hint.border_width = clamp(self.mode_hint.border_width, 0.0, 4.0);
         self.mode_hint.font_size = clamp(self.mode_hint.font_size, 12.0, 42.0);
         self.mode_hint.width = clamp(self.mode_hint.width, 36.0, 180.0);
         self.mode_hint.height = clamp(self.mode_hint.height, 28.0, 140.0);
@@ -630,8 +629,10 @@ impl Default for ResolvedImeTheme {
                 corner_radius: 8.0,
             },
             mode_hint: ModeHintTheme {
-                background: rgba(0xE6, 0xF0, 0xFF, 0xF2),
-                foreground: rgba(0x2F, 0x5F, 0xB8, 0xFF),
+                background: rgba(0x2D, 0x4B, 0x63, 0xFF),
+                foreground: rgba(0xFF, 0xFF, 0xFF, 0xFF),
+                border_color: rgba(0x5D, 0xA7, 0xD7, 0xFF),
+                border_width: 1.0,
                 font_size: 24.0,
                 width: 72.0,
                 height: 48.0,
@@ -782,6 +783,9 @@ struct PartialModeHintTheme {
     background: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
     foreground: Option<RgbaColor>,
+    #[serde(default, deserialize_with = "optional_color")]
+    border_color: Option<RgbaColor>,
+    border_width: Option<f32>,
     font_size: Option<f32>,
     width: Option<f32>,
     height: Option<f32>,
@@ -888,6 +892,8 @@ impl ModeHintTheme {
     fn apply(&mut self, partial: PartialModeHintTheme) {
         assign(&mut self.background, partial.background);
         assign(&mut self.foreground, partial.foreground);
+        assign(&mut self.border_color, partial.border_color);
+        assign(&mut self.border_width, partial.border_width);
         assign(&mut self.font_size, partial.font_size);
         assign(&mut self.width, partial.width);
         assign(&mut self.height, partial.height);
@@ -1231,7 +1237,9 @@ mod tests {
             theme.candidate.selected_label_color,
             rgba(0x12, 0x34, 0x56, 0xff)
         );
-        assert_eq!(theme.mode_hint.foreground, rgba(0x12, 0x34, 0x56, 0xff));
+        assert_eq!(theme.mode_hint.background, rgba(0x2d, 0x4b, 0x63, 0xff));
+        assert_eq!(theme.mode_hint.foreground, rgba(0xff, 0xff, 0xff, 0xff));
+        assert_eq!(theme.mode_hint.border_color, rgba(0x5d, 0xa7, 0xd7, 0xff));
     }
 
     #[test]

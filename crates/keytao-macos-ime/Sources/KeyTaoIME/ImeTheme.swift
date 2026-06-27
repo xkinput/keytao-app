@@ -139,6 +139,8 @@ struct ImeTheme: Codable {
     struct ModeHint: Codable {
         var background: ThemeColor
         var foreground: ThemeColor
+        var borderColor: ThemeColor
+        var borderWidth: CGFloat
         var fontSize: CGFloat
         var width: CGFloat
         var height: CGFloat
@@ -219,8 +221,10 @@ struct ImeTheme: Codable {
                 cornerRadius: 8
             ),
             modeHint: ModeHint(
-                background: ThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xF2),
-                foreground: ThemeColor(red: 0x2F, green: 0x5F, blue: 0xB8, alpha: 0xFF),
+                background: ThemeColor(red: 0x2D, green: 0x4B, blue: 0x63, alpha: 0xFF),
+                foreground: ThemeColor(red: 0xFF, green: 0xFF, blue: 0xFF, alpha: 0xFF),
+                borderColor: ThemeColor(red: 0x5D, green: 0xA7, blue: 0xD7, alpha: 0xFF),
+                borderWidth: 1,
                 fontSize: 24,
                 width: 72,
                 height: 48,

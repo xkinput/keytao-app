@@ -7,8 +7,15 @@ class CandidatePanel: NSPanel {
     var onSelect: ((Int) -> Void)?
     var onPageChange: ((Bool) -> Void)?
 
+    private static let chromeInset: CGFloat = 8
+
+    private let rootView = NSView()
     private let containerView = NSView()
     private let stackView = NSStackView()
+    private var stackLeadingConstraint: NSLayoutConstraint?
+    private var stackTrailingConstraint: NSLayoutConstraint?
+    private var stackTopConstraint: NSLayoutConstraint?
+    private var stackBottomConstraint: NSLayoutConstraint?
 
     // MARK: - Init
 
@@ -33,6 +40,10 @@ class CandidatePanel: NSPanel {
         isMovable = false
         hidesOnDeactivate = false
 
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        containerView.translatesAutoresizingMaskIntoConstraints = false
         containerView.wantsLayer = true
         containerView.layer?.masksToBounds = true
 
@@ -40,15 +51,30 @@ class CandidatePanel: NSPanel {
         stackView.setContentHuggingPriority(.required, for: .horizontal)
         stackView.setContentHuggingPriority(.required, for: .vertical)
 
+        rootView.addSubview(containerView)
         containerView.addSubview(stackView)
+
+        let leading = stackView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor)
+        let trailing = stackView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor)
+        let top = stackView.topAnchor.constraint(equalTo: containerView.topAnchor)
+        let bottom = stackView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+        stackLeadingConstraint = leading
+        stackTrailingConstraint = trailing
+        stackTopConstraint = top
+        stackBottomConstraint = bottom
+
         NSLayoutConstraint.activate([
-            stackView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            stackView.topAnchor.constraint(equalTo: containerView.topAnchor),
-            stackView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            containerView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: Self.chromeInset),
+            containerView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -Self.chromeInset),
+            containerView.topAnchor.constraint(equalTo: rootView.topAnchor, constant: Self.chromeInset),
+            containerView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -Self.chromeInset),
+            leading,
+            trailing,
+            top,
+            bottom,
         ])
 
-        contentView = containerView
+        contentView = rootView
     }
 
     // MARK: - Update
@@ -89,27 +115,32 @@ class CandidatePanel: NSPanel {
         }
 
         contentView?.layoutSubtreeIfNeeded()
-        let fittingSize = stackView.fittingSize
+        let contentSize = stackView.fittingSize
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let maxWidth = min(theme.panel.maxWidth, max(80, visibleFrame.width - theme.panel.screenMargin * 2))
-        let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2))
-        let finalSize = NSSize(
-            width: min(max(fittingSize.width, theme.panel.minWidth), maxWidth),
-            height: min(fittingSize.height, maxHeight)
+        let chromeInset = Self.chromeInset
+        let maxWidth = min(theme.panel.maxWidth, max(80, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2))
+        let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
+        let panelSize = NSSize(
+            width: min(max(contentSize.width + theme.panel.paddingX * 2, theme.panel.minWidth), maxWidth),
+            height: min(contentSize.height + theme.panel.paddingY * 2, maxHeight)
+        )
+        let windowSize = NSSize(
+            width: panelSize.width + chromeInset * 2,
+            height: panelSize.height + chromeInset * 2
         )
         let anchor = cursorRect.isUsableTextInputRect
             ? cursorRect
             : NSRect(origin: NSEvent.mouseLocation, size: .zero)
 
         let margin = theme.panel.screenMargin
-        var origin = NSPoint(x: anchor.minX, y: anchor.minY - finalSize.height - margin / 2)
+        var origin = NSPoint(x: anchor.minX - chromeInset, y: anchor.minY - panelSize.height - margin / 2 - chromeInset)
         if origin.y < visibleFrame.minY + margin {
-            origin.y = anchor.maxY + margin / 2
+            origin.y = anchor.maxY + margin / 2 - chromeInset
         }
-        origin.x = min(max(origin.x, visibleFrame.minX + margin), visibleFrame.maxX - finalSize.width - margin)
-        origin.y = min(max(origin.y, visibleFrame.minY + margin), visibleFrame.maxY - finalSize.height - margin)
-        setFrame(NSRect(origin: origin, size: finalSize), display: true, animate: false)
+        origin.x = min(max(origin.x, visibleFrame.minX + margin), visibleFrame.maxX - windowSize.width - margin)
+        origin.y = min(max(origin.y, visibleFrame.minY + margin), visibleFrame.maxY - windowSize.height - margin)
+        setFrame(NSRect(origin: origin, size: windowSize), display: true, animate: false)
 
         orderFront(nil)
     }
@@ -124,12 +155,10 @@ class CandidatePanel: NSPanel {
         stackView.orientation = theme.panel.orientation == .vertical ? .vertical : .horizontal
         stackView.alignment = theme.panel.orientation == .vertical ? .leading : .centerY
         stackView.spacing = theme.panel.gap
-        stackView.edgeInsets = NSEdgeInsets(
-            top: theme.panel.paddingY,
-            left: theme.panel.paddingX,
-            bottom: theme.panel.paddingY,
-            right: theme.panel.paddingX
-        )
+        stackLeadingConstraint?.constant = theme.panel.paddingX
+        stackTrailingConstraint?.constant = -theme.panel.paddingX
+        stackTopConstraint?.constant = theme.panel.paddingY
+        stackBottomConstraint?.constant = -theme.panel.paddingY
     }
 
     // MARK: - Actions

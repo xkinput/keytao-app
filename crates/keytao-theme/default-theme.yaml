@@ -61,8 +61,10 @@ navigation:
   cornerRadius: 8
 
 modeHint:
-  background: "#E6F0FFF2"
-  foreground: "#2F5FB8"
+  background: "#2D4B63"
+  foreground: "#FFFFFF"
+  borderColor: "#5DA7D7"
+  borderWidth: 1
   fontSize: 24
   width: 72
   height: 48
@@ -97,5 +99,7 @@ dark:
     hoverBackground: "#242D36"
 
   modeHint:
-    background: "#25384AF2"
-    foreground: "#D5F0FF"
+    background: "#2D4B63"
+    foreground: "#FFFFFF"
+    borderColor: "#5DA7D7"
+    borderWidth: 1
