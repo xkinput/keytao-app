@@ -72,14 +72,6 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         let mut st = self.state.lock().unwrap();
 
-        // Init the shared IME runtime (blocking; acceptable in Activate which runs once).
-        if st.session.is_none() {
-            st.init_engine().map_err(|e| {
-                tracing::error!("librime init failed: {e}");
-                windows::core::Error::from(windows::Win32::Foundation::E_FAIL)
-            })?;
-        }
-
         st.thread_mgr = Some(thread_mgr.clone());
         st.client_id = tid;
 

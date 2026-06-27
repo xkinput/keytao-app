@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app"
-version = "1.2.1-alpha.22"
+version = "1.2.1-alpha.23"
 dependencies = [
  "bzip2",
  "cosmic-text",
@@ -2547,6 +2547,7 @@ dependencies = [
  "tracing",
  "wayland-client",
  "wayland-protocols-misc",
+ "windows 0.58.0",
  "xkbcommon",
  "zip",
 ]
@@ -2574,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "1.2.1-alpha.22"
+version = "1.2.1-alpha.23"
 dependencies = [
  "dirs 5.0.1",
  "freetype-rs",
@@ -2611,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "1.2.1-alpha.22"
+version = "1.2.1-alpha.23"
 dependencies = [
  "fontdue",
  "keytao-core",

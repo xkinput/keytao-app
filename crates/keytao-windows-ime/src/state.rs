@@ -69,6 +69,19 @@ impl TsfState {
         Ok(())
     }
 
+    pub fn ensure_engine(&mut self) -> bool {
+        if self.session.is_some() {
+            return true;
+        }
+        match self.init_engine() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("librime init failed: {e}");
+                false
+            }
+        }
+    }
+
     pub fn check_reload_stamp(&mut self) -> bool {
         let Some(path) = &self.reload_stamp_path else {
             return false;

@@ -913,6 +913,96 @@ fn process_exists(pid: u32) -> bool {
 const WINDOWS_TEXT_SERVICE_CLSID: &str = "{4A5C6D7E-8F90-1A2B-3C4D-5E6F7A8B9C0D}";
 
 #[cfg(target_os = "windows")]
+const WINDOWS_TEXT_SERVICE_GUID: windows::core::GUID = windows::core::GUID {
+    data1: 0x4A5C6D7E,
+    data2: 0x8F90,
+    data3: 0x1A2B,
+    data4: [0x3C, 0x4D, 0x5E, 0x6F, 0x7A, 0x8B, 0x9C, 0x0D],
+};
+
+#[cfg(target_os = "windows")]
+const WINDOWS_PROFILE_GUID: windows::core::GUID = windows::core::GUID {
+    data1: 0x1B2C3D4E,
+    data2: 0x5F60,
+    data3: 0x7A8B,
+    data4: [0x9C, 0x0D, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D],
+};
+
+#[cfg(target_os = "windows")]
+const WINDOWS_LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
+
+#[cfg(target_os = "windows")]
+struct WindowsComApartment(bool);
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsComApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_init_com_apartment() -> Result<WindowsComApartment, String> {
+    use windows::Win32::{
+        Foundation::RPC_E_CHANGED_MODE,
+        System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED},
+    };
+
+    match unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) } {
+        Ok(()) => Ok(WindowsComApartment(true)),
+        Err(e) if e.code() == RPC_E_CHANGED_MODE => Ok(WindowsComApartment(false)),
+        Err(e) => Err(format!("initialize COM apartment: {e}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tsf_profile_enabled() -> Result<bool, String> {
+    use windows::{
+        core::{IUnknown, Interface},
+        Win32::{
+            System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+            UI::{
+                Input::KeyboardAndMouse::HKL,
+                TextServices::{
+                    CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfileMgr,
+                    ITfInputProcessorProfiles, TF_INPUTPROCESSORPROFILE, TF_IPP_FLAG_ENABLED,
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                },
+            },
+        },
+    };
+
+    let _com = windows_init_com_apartment()?;
+    unsafe {
+        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
+            &CLSID_TF_InputProcessorProfiles,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        )
+        .map_err(|e| format!("open TSF input processor profiles: {e}"))?;
+        let profile_mgr: ITfInputProcessorProfileMgr = profiles
+            .cast()
+            .map_err(|e| format!("open modern TSF profile manager: {e}"))?;
+        let mut profile = TF_INPUTPROCESSORPROFILE::default();
+        profile_mgr
+            .GetProfile(
+                TF_PROFILETYPE_INPUTPROCESSOR,
+                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                &WINDOWS_TEXT_SERVICE_GUID,
+                &WINDOWS_PROFILE_GUID,
+                HKL::default(),
+                &mut profile,
+            )
+            .map_err(|e| format!("query KeyTao TSF profile: {e}"))?;
+        Ok(profile.dwFlags & TF_IPP_FLAG_ENABLED != 0)
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -1099,8 +1189,14 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
     let packaged = dll_path.as_ref().is_some_and(|path| path.is_file())
         && runtime_dir
             .as_ref()
-            .is_some_and(|dir| dir.join("rime.dll").is_file());
-    let registered = match (&dll_path, &registered_path) {
+            .is_some_and(|dir| dir.join("rime.dll").is_file())
+        && runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("rime-data").join("default.yaml").is_file())
+        && runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("default-theme.yaml").is_file());
+    let registered_dll = match (&dll_path, &registered_path) {
         (Some(dll), Some(path)) => {
             let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
             let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
@@ -1109,6 +1205,12 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         }
         _ => false,
     };
+    let (profile_enabled, profile_status) = match windows_tsf_profile_enabled() {
+        Ok(true) => (true, "TSF profile 已启用".to_string()),
+        Ok(false) => (false, "TSF profile 已存在但未启用".to_string()),
+        Err(e) => (false, format!("TSF profile 不可用：{e}")),
+    };
+    let registered = registered_dll && profile_enabled;
     let (shared_data_dir, shared_data_source) =
         shared_data_status(windows_app_shared_data_dir(app));
     let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
@@ -1117,9 +1219,12 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         supported: true,
         packaged,
         registered,
+        registered_dll,
+        profile_enabled,
         runtime_dir: runtime_dir.map(|p| windows_normal_path(&p)),
         dll_path: dll_path.map(|p| windows_normal_path(&p)),
         registered_path,
+        profile_status,
         user_data_dir: default_user_data_dir_string(),
         shared_data_dir,
         shared_data_source,
@@ -4058,9 +4163,12 @@ pub struct WindowsImeStatus {
     pub supported: bool,
     pub packaged: bool,
     pub registered: bool,
+    pub registered_dll: bool,
+    pub profile_enabled: bool,
     pub runtime_dir: Option<String>,
     pub dll_path: Option<String>,
     pub registered_path: Option<String>,
+    pub profile_status: String,
     pub user_data_dir: Option<String>,
     pub shared_data_dir: Option<String>,
     pub shared_data_source: String,

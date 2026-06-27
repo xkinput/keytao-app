@@ -9,7 +9,7 @@
 //! Undo: regsvr32 /u keytao_windows_ime.dll
 
 use windows::{
-    core::{IUnknown, Interface, Result, PCWSTR},
+    core::{Error, IUnknown, Interface, Result, HRESULT, PCWSTR},
     Win32::{
         Foundation::BOOL,
         System::Com::{
@@ -25,7 +25,8 @@ use windows::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
             ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
             GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-            GUID_TFCAT_TIP_KEYBOARD,
+            GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE, TF_IPP_FLAG_ENABLED,
+            TF_PROFILETYPE_INPUTPROCESSOR,
         },
     },
 };
@@ -70,6 +71,110 @@ fn guid_to_string(guid: &windows::core::GUID) -> String {
         guid.data4[6],
         guid.data4[7],
     )
+}
+
+fn error_message(message: impl Into<String>) -> Error {
+    Error::new(HRESULT(0x80004005u32 as i32), message.into())
+}
+
+unsafe fn register_categories(cat_mgr: &ITfCategoryMgr) -> Result<()> {
+    for category in [
+        GUID_TFCAT_TIP_KEYBOARD,
+        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+        GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+    ] {
+        cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE)?;
+    }
+    Ok(())
+}
+
+unsafe fn unregister_categories(cat_mgr: &ITfCategoryMgr) {
+    for category in [
+        GUID_TFCAT_TIP_KEYBOARD,
+        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+        GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+    ] {
+        let _ = cat_mgr.UnregisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE);
+    }
+}
+
+unsafe fn register_profile(
+    profiles: &ITfInputProcessorProfiles,
+    profile_mgr: Option<&ITfInputProcessorProfileMgr>,
+    profile_desc: &[u16],
+    icon_path: &[u16],
+) -> Result<()> {
+    profiles.Register(&CLSID_TEXT_SERVICE)?;
+
+    if let Some(profile_mgr) = profile_mgr {
+        let _ = profile_mgr.UnregisterProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+            0,
+        );
+        profile_mgr.RegisterProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+            profile_desc,
+            icon_path,
+            0,
+            HKL::default(),
+            0,
+            BOOL::from(true),
+            0,
+        )?;
+    } else {
+        let _ = profiles.RemoveLanguageProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+        );
+        profiles.AddLanguageProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_CHINESE_SIMPLIFIED,
+            &GUID_PROFILE,
+            profile_desc,
+            icon_path,
+            0,
+        )?;
+    }
+
+    profiles.EnableLanguageProfile(
+        &CLSID_TEXT_SERVICE,
+        LANGID_CHINESE_SIMPLIFIED,
+        &GUID_PROFILE,
+        BOOL::from(true),
+    )?;
+    if let Err(e) = profiles.EnableLanguageProfileByDefault(
+        &CLSID_TEXT_SERVICE,
+        LANGID_CHINESE_SIMPLIFIED,
+        &GUID_PROFILE,
+        BOOL::from(true),
+    ) {
+        tracing::warn!("failed to enable KeyTao profile by default: {e}");
+    }
+
+    Ok(())
+}
+
+unsafe fn ensure_profile_enabled(profile_mgr: &ITfInputProcessorProfileMgr) -> Result<()> {
+    let mut profile = TF_INPUTPROCESSORPROFILE::default();
+    profile_mgr.GetProfile(
+        TF_PROFILETYPE_INPUTPROCESSOR,
+        LANGID_CHINESE_SIMPLIFIED,
+        &CLSID_TEXT_SERVICE,
+        &GUID_PROFILE,
+        HKL::default(),
+        &mut profile,
+    )?;
+    if profile.dwFlags & TF_IPP_FLAG_ENABLED == 0 {
+        return Err(error_message(
+            "KeyTao TSF profile was registered but is not enabled for the current user",
+        ));
+    }
+    Ok(())
 }
 
 /// Write a REG_SZ value under a registry key.
@@ -137,71 +242,35 @@ pub fn register() -> Result<()> {
         reg_set_sz(key_inproc, "ThreadingModel", "Apartment")?;
         let _ = RegCloseKey(key_inproc).ok();
 
-        // 3. Register with TSF via ITfInputProcessorProfiles
-        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
-            &CLSID_TF_InputProcessorProfiles,
-            None::<&IUnknown>,
-            CLSCTX_INPROC_SERVER,
-        )?;
-
-        profiles.Register(&CLSID_TEXT_SERVICE)?;
-        let profile_desc = to_wide("KeyTao");
-        let icon_path = to_wide(&dll);
-        profiles.AddLanguageProfile(
-            &CLSID_TEXT_SERVICE,
-            LANGID_CHINESE_SIMPLIFIED,
-            &GUID_PROFILE,
-            &profile_desc[..profile_desc.len() - 1],
-            // Icon: use the DLL itself at resource index 0 (can be updated later)
-            &icon_path[..icon_path.len() - 1],
-            0,
-        )?;
-        if let Ok(profile_mgr) = profiles.cast::<ITfInputProcessorProfileMgr>() {
-            if let Err(e) = profile_mgr.RegisterProfile(
-                &CLSID_TEXT_SERVICE,
-                LANGID_CHINESE_SIMPLIFIED,
-                &GUID_PROFILE,
-                &profile_desc[..profile_desc.len() - 1],
-                &icon_path[..icon_path.len() - 1],
-                0,
-                HKL::default(),
-                0,
-                BOOL::from(true),
-                0,
-            ) {
-                tracing::warn!("modern TSF RegisterProfile fallback failed: {e}");
-            }
-        }
-
-        // 4. Register category: keyboard TIP
+        // 3. Register TSF categories before exposing/enabling the language profile.
         let cat_mgr: ITfCategoryMgr = CoCreateInstance(
             &CLSID_TF_CategoryMgr,
             None::<&IUnknown>,
             CLSCTX_INPROC_SERVER,
         )?;
-        for category in [
-            GUID_TFCAT_TIP_KEYBOARD,
-            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-            GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-        ] {
-            cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE)?;
-        }
+        register_categories(&cat_mgr)?;
 
-        // 5. AddLanguageProfile records the profile, but the input switcher only
-        // offers profiles that are enabled for the current user.
-        profiles.EnableLanguageProfile(
-            &CLSID_TEXT_SERVICE,
-            LANGID_CHINESE_SIMPLIFIED,
-            &GUID_PROFILE,
-            BOOL::from(true),
+        // 4. Register with TSF via ITfInputProcessorProfiles.
+        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
+            &CLSID_TF_InputProcessorProfiles,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
         )?;
-        if let Err(e) = profiles.EnableLanguageProfileByDefault(
-            &CLSID_TEXT_SERVICE,
-            LANGID_CHINESE_SIMPLIFIED,
-            &GUID_PROFILE,
-            BOOL::from(true),
-        ) {
-            tracing::warn!("failed to enable KeyTao profile by default: {e}");
+        let profile_desc = to_wide("KeyTao");
+        let icon_path = to_wide(&dll);
+
+        let profile_mgr = profiles.cast::<ITfInputProcessorProfileMgr>().ok();
+        register_profile(
+            &profiles,
+            profile_mgr.as_ref(),
+            &profile_desc[..profile_desc.len() - 1],
+            &icon_path[..icon_path.len() - 1],
+        )?;
+
+        // 5. The modern profile API exposes the enabled flag that the input
+        // switcher cares about. Treat a disabled profile as registration failure.
+        if let Some(profile_mgr) = profile_mgr.as_ref() {
+            ensure_profile_enabled(profile_mgr)?;
         }
     }
 
@@ -243,14 +312,7 @@ pub fn unregister() -> Result<()> {
             CLSCTX_INPROC_SERVER,
         );
         if let Ok(cat_mgr) = cat_mgr {
-            for category in [
-                GUID_TFCAT_TIP_KEYBOARD,
-                GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-                GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-            ] {
-                let _ =
-                    cat_mgr.UnregisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE);
-            }
+            unregister_categories(&cat_mgr);
         }
 
         // Remove HKCR\CLSID\{...} tree

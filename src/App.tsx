@@ -174,9 +174,12 @@ interface WindowsImeStatus {
   supported: boolean
   packaged: boolean
   registered: boolean
+  registered_dll: boolean
+  profile_enabled: boolean
   runtime_dir: string | null
   dll_path: string | null
   registered_path: string | null
+  profile_status: string
   user_data_dir: string | null
   shared_data_dir: string | null
   shared_data_source: string
@@ -1104,6 +1107,12 @@ export default function App() {
                         <Badge variant={windowsImeStatus.registered ? "default" : "outline"} className="text-xs">
                           TSF {windowsImeStatus.registered ? "已注册" : "未注册"}
                         </Badge>
+                        <Badge variant={windowsImeStatus.registered_dll ? "default" : "outline"} className="text-xs">
+                          DLL {windowsImeStatus.registered_dll ? "匹配" : "未匹配"}
+                        </Badge>
+                        <Badge variant={windowsImeStatus.profile_enabled ? "default" : "outline"} className="text-xs">
+                          Profile {windowsImeStatus.profile_enabled ? "已启用" : "不可用"}
+                        </Badge>
                       </div>
                       {windowsImeStatus.runtime_dir && (
                         <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
@@ -1117,6 +1126,13 @@ export default function App() {
                           <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                           <span className="text-muted-foreground">已注册：</span>
                           <code className="font-mono truncate">{windowsImeStatus.registered_path}</code>
+                        </div>
+                      )}
+                      {windowsImeStatus.profile_status && (
+                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                          <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-muted-foreground">Profile：</span>
+                          <code className="font-mono truncate">{windowsImeStatus.profile_status}</code>
                         </div>
                       )}
                       {windowsImeStatus.message && (

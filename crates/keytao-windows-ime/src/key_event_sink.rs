@@ -297,6 +297,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         let client_id = {
             let mut st = self.state.lock().unwrap();
             st.shift_pressed_without_key = false;
+            if !st.ensure_engine() {
+                return Ok(BOOL::from(false));
+            }
             let _ = st.check_reload_stamp();
             let should_clear_reload = st.take_reload_clear_pending();
             let client_id = st.client_id;
@@ -382,6 +385,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             st.shift_pressed_without_key = false;
+            if !st.ensure_engine() {
+                return Ok(BOOL::from(false));
+            }
             let _ = st.check_reload_stamp();
             let should_clear_reload = st.take_reload_clear_pending();
             let client_id = st.client_id;
