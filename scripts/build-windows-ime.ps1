@@ -184,7 +184,6 @@ $needsFetch = -not (Test-Path (Join-Path $vendorDir "include\rime_api.h")) -or
     -not (Test-Path (Join-Path $vendorDir "lib\rime.lib")) -or
     -not (Test-Path (Join-Path $vendorDir "bin\rime.dll")) -or
     -not (Test-Path (Join-Path $vendorDir "rime-data\default.yaml")) -or
-    -not (Get-WindowsLuaPluginFiles $vendorDir) -or
     -not (Test-Path $envFile)
 
 if ($needsFetch) {
@@ -193,7 +192,7 @@ if ($needsFetch) {
 
 $luaPlugins = Get-WindowsLuaPluginFiles $vendorDir
 if (-not $luaPlugins) {
-    throw "Windows librime runtime is missing the librime-lua plugin DLL in $vendorDir\bin. Refetch the runtime or use a librime release that includes librime-lua."
+    Write-Warning "Windows librime runtime does not include librime-lua plugin DLL in $vendorDir\bin. Official rime/librime Windows SDK assets currently do not ship it, so Windows Lua extensions will be unavailable in this build."
 }
 
 $oldErrorActionPreference = $ErrorActionPreference

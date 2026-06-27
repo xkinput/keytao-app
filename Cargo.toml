@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.1-alpha.20"
+version = "1.2.1-alpha.21"
 
 # Shared version pinning across all workspace members
 [workspace.dependencies]

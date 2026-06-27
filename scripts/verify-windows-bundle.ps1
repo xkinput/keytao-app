@@ -88,10 +88,10 @@ Require-File $imeDefaultTheme "Windows IME runtime is missing default-theme.yaml
 Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
 Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
 if (-not $imeLuaPlugin) {
-    throw "Windows IME runtime is missing the librime-lua plugin DLL"
+    Write-Warning "Windows IME runtime does not include the librime-lua plugin DLL; Lua extensions will be unavailable in this Windows package."
 }
 if (-not $appLuaPlugin) {
-    throw "Windows app payload is missing the librime-lua plugin DLL next to keytao-app.exe"
+    Write-Warning "Windows app payload does not include the librime-lua plugin DLL next to keytao-app.exe."
 }
 Require-File $hookFile "Missing NSIS installer hook file: $hookFile"
 
@@ -128,7 +128,9 @@ Require-Pattern $installerScript.FullName 'keytao_windows_ime\.dll' "Generated W
 Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime' "Generated Windows installer script does not install the IME runtime directory"
 Require-Pattern $installerScript.FullName 'default-theme\.yaml' "Generated Windows installer script does not install the shared default theme"
 Require-Pattern $installerScript.FullName '/oname=.*rime\.dll' "Generated Windows installer script does not install rime.dll next to keytao-app.exe"
-Require-Pattern $installerScript.FullName 'rime.*lua.*\.dll' "Generated Windows installer script does not install the librime-lua plugin DLL"
+if ($imeLuaPlugin -or $appLuaPlugin) {
+    Require-Pattern $installerScript.FullName 'rime.*lua.*\.dll' "Generated Windows installer script does not install the librime-lua plugin DLL"
+}
 
 Write-Host "Windows bundle verification passed"
 Write-Host "  Installer: $($installer.FullName)"

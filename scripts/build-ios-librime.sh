@@ -319,7 +319,10 @@ build_target() {
     copy_boost_runtime "$frameworks_dir" "$target" "$prefix" "$boost_source"
 
     local -a common
-    mapfile -t common < <(common_cmake_args "$sdkroot" "$arch" "$prefix")
+    common=()
+    while IFS= read -r arg; do
+        common+=("$arg")
+    done < <(common_cmake_args "$sdkroot" "$arch" "$prefix")
 
     note "Building iOS librime dependencies for $runtime"
     build_cmake_project "$cmake_bin" "$source_dir/deps/glog" "$work/build/glog" \
