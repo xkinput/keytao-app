@@ -4,10 +4,10 @@
 !define KEYTAO_IME_DLL "$INSTDIR\keytao-windows-ime-runtime\current\keytao_windows_ime.dll"
 
 !macro NSIS_HOOK_POSTINSTALL
-  DetailPrint "Registering KeyTao Windows input method..."
+  DetailPrint "Scheduling KeyTao Windows input method registration..."
   ${IfNot} ${FileExists} "${KEYTAO_IME_DLL}"
-    MessageBox MB_ICONSTOP|MB_OK "KeyTao input method runtime is missing: ${KEYTAO_IME_DLL}"
-    Abort
+    DetailPrint "KeyTao input method runtime is missing: ${KEYTAO_IME_DLL}"
+    Return
   ${EndIf}
 
   ClearErrors
@@ -15,13 +15,12 @@
     SetRegView 64
     ${DisableX64FSRedirection}
   ${EndIf}
-  ExecWait '"$WINDIR\System32\regsvr32.exe" /s "${KEYTAO_IME_DLL}"' $0
+  Exec '"$WINDIR\System32\regsvr32.exe" /s "${KEYTAO_IME_DLL}"'
   ${If} ${RunningX64}
     ${EnableX64FSRedirection}
   ${EndIf}
-  ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Failed to register KeyTao input method (regsvr32 exit code $0)."
-    Abort
+  ${If} ${Errors}
+    DetailPrint "KeyTao input method registration will be retried by the app."
   ${EndIf}
 !macroend
 
@@ -38,8 +37,7 @@
       ${EnableX64FSRedirection}
     ${EndIf}
     ${If} $0 != 0
-      MessageBox MB_ICONSTOP|MB_OK "Failed to unregister KeyTao input method (regsvr32 exit code $0)."
-      Abort
+      DetailPrint "Failed to unregister KeyTao input method (regsvr32 exit code $0)."
     ${EndIf}
   ${EndIf}
 !macroend

@@ -176,6 +176,9 @@ interface WindowsImeStatus {
   registered: boolean
   registered_dll: boolean
   profile_enabled: boolean
+  registration_busy: boolean
+  registration_state: string
+  registration_error: string | null
   runtime_dir: string | null
   dll_path: string | null
   registered_path: string | null
@@ -375,6 +378,7 @@ export default function App() {
 
   const unlistenInstallRef = useRef<(() => void) | null>(null)
   const unlistenDeployRef = useRef<(() => void) | null>(null)
+  const unlistenWindowsImeRef = useRef<(() => void) | null>(null)
 
   function addLogs(lines: string[]) {
     const ts = new Date().toLocaleTimeString()
@@ -423,9 +427,26 @@ export default function App() {
         .catch((e) => setLinuxImeError(String(e)))
     }
     if (os === "windows") {
-      invoke<WindowsImeStatus>("windows_ime_status")
-        .then(setWindowsImeStatus)
-        .catch((e) => setWindowsImeError(String(e)))
+      listen<WindowsImeStatus>("windows-ime-status", (e) => {
+        setWindowsImeStatus(e.payload)
+        setWindowsImeError(e.payload.registration_error ?? null)
+        setIsManagingWindowsIme(e.payload.registration_busy)
+      }).then((fn) => { unlistenWindowsImeRef.current = fn })
+
+      window.setTimeout(() => {
+        setIsManagingWindowsIme(true)
+        setWindowsImeError(null)
+        invoke<WindowsImeStatus>("windows_ime_ensure_registered")
+          .then((status) => {
+            setWindowsImeStatus(status)
+            setWindowsImeError(status.registration_error ?? null)
+            setIsManagingWindowsIme(status.registration_busy)
+          })
+          .catch((e) => {
+            setWindowsImeError(String(e))
+            setIsManagingWindowsIme(false)
+          })
+      }, 0)
     }
     if (os === "macos") {
       invoke<MacosImeStatus>("macos_ime_status")
@@ -451,6 +472,7 @@ export default function App() {
     return () => {
       unlistenInstallRef.current?.()
       unlistenDeployRef.current?.()
+      unlistenWindowsImeRef.current?.()
     }
   }, [])
 
@@ -561,6 +583,20 @@ export default function App() {
       !androidStorageGranted ||
       !androidSchemaInstalled
     )
+  const windowsRegistrationBusy = osType === "windows" && (
+    isManagingWindowsIme || windowsImeStatus?.registration_busy === true
+  )
+  const windowsRegistrationState = windowsImeStatus?.registration_state ?? "checking"
+  const windowsRegistrationLabel = (() => {
+    if (windowsRegistrationBusy) {
+      return windowsRegistrationState === "registering" ? "正在注册" : "正在检测"
+    }
+    if (windowsImeStatus?.registered) return "已注册"
+    if (windowsRegistrationState === "failed") return "注册失败"
+    if (windowsRegistrationState === "partial") return "部分注册"
+    if (windowsRegistrationState === "missing_runtime") return "运行时缺失"
+    return windowsImeStatus ? "未注册" : "检测中"
+  })()
 
   async function refreshAndroidImeStatus() {
     setIsCheckingAndroidIme(true)
@@ -724,19 +760,14 @@ export default function App() {
     }
   }
 
-  async function handleWindowsImeAction(action: "refresh" | "register" | "unregister" | "restart") {
+  async function handleWindowsImeRefresh() {
     if (isManagingWindowsIme) return
     setIsManagingWindowsIme(true)
     setWindowsImeError(null)
-    const command = {
-      refresh: "windows_ime_status",
-      register: "windows_register_ime",
-      unregister: "windows_unregister_ime",
-      restart: "windows_restart_ime",
-    }[action]
     try {
-      const status = await invoke<WindowsImeStatus>(command)
+      const status = await invoke<WindowsImeStatus>("windows_ime_status")
       setWindowsImeStatus(status)
+      setWindowsImeError(status.registration_error ?? null)
       addLogs([`[WINDOWS IME] ${status.message}`])
     } catch (e) {
       const message = String(e)
@@ -1090,22 +1121,45 @@ export default function App() {
                     <Keyboard className="h-4 w-4 text-muted-foreground" />
                     Windows 系统输入法
                     <span className="ml-auto">
-                      {windowsImeStatus?.registered
-                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已注册</Badge>
-                        : <Badge variant="outline" className="text-xs">未注册</Badge>
-                      }
+                      {windowsRegistrationBusy ? (
+                        <Badge variant="outline" className="text-xs gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          {windowsRegistrationLabel}
+                        </Badge>
+                      ) : windowsImeStatus?.registered ? (
+                        <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已注册</Badge>
+                      ) : windowsRegistrationState === "failed" ? (
+                        <Badge variant="outline" className="text-xs gap-1 border-destructive/40 text-destructive">
+                          <AlertTriangle className="h-3 w-3" />
+                          注册失败
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-xs">{windowsRegistrationLabel}</Badge>
+                      )}
                     </span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {!windowsImeStatus && (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                      正在检测 KeyTao Windows IME 状态
+                    </div>
+                  )}
                   {windowsImeStatus && (
                     <div className="grid gap-2 text-xs">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant={windowsImeStatus.packaged ? "default" : "outline"} className="text-xs">
                           安装包 {windowsImeStatus.packaged ? "完整" : "缺少 IME 运行时"}
                         </Badge>
-                        <Badge variant={windowsImeStatus.registered ? "default" : "outline"} className="text-xs">
-                          TSF {windowsImeStatus.registered ? "已注册" : "未注册"}
+                        <Badge
+                          variant={windowsImeStatus.registered ? "default" : "outline"}
+                          className={cn(
+                            "text-xs",
+                            windowsRegistrationState === "failed" && "border-destructive/40 text-destructive",
+                          )}
+                        >
+                          注册 {windowsRegistrationLabel}
                         </Badge>
                         <Badge variant={windowsImeStatus.registered_dll ? "default" : "outline"} className="text-xs">
                           DLL {windowsImeStatus.registered_dll ? "匹配" : "未匹配"}
@@ -1140,41 +1194,20 @@ export default function App() {
                           {windowsImeStatus.message}
                         </div>
                       )}
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleWindowsImeAction("refresh")}
-                          disabled={isManagingWindowsIme}
-                          className="gap-1.5"
-                        >
-                          <RefreshCw className={`h-3.5 w-3.5 ${isManagingWindowsIme ? "animate-spin" : ""}`} />
-                          刷新
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={() => handleWindowsImeAction(windowsImeStatus.registered ? "restart" : "register")}
-                          disabled={isManagingWindowsIme || !windowsImeStatus.packaged}
-                          className="gap-1.5"
-                        >
-                          <Keyboard className="h-3.5 w-3.5" />
-                          {windowsImeStatus.registered ? "重新注册" : "注册输入法"}
-                        </Button>
-                        {windowsImeStatus.registered && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleWindowsImeAction("unregister")}
-                            disabled={isManagingWindowsIme}
-                            className="gap-1.5"
-                          >
-                            <XCircle className="h-3.5 w-3.5" />
-                            取消注册
-                          </Button>
-                        )}
-                      </div>
                     </div>
                   )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleWindowsImeRefresh}
+                      disabled={windowsRegistrationBusy}
+                      className="gap-1.5"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${windowsRegistrationBusy ? "animate-spin" : ""}`} />
+                      刷新
+                    </Button>
+                  </div>
                   {windowsImeError && (
                     <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                       <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />

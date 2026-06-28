@@ -6,6 +6,26 @@
   <link rel="icon" type="image/svg+xml" href="/vite.svg" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tauri + React + Typescript</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0a0a0f;
+      color: #f7f7fb;
+      font-family: "Noto Sans CJK SC", system-ui, sans-serif;
+    }
+
+    #root:empty {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+    }
+
+    #root:empty::before {
+      content: "键道正在启动...";
+      color: rgba(247, 247, 251, 0.64);
+      font-size: 13px;
+    }
+  </style>
 </head>
 
 <body>

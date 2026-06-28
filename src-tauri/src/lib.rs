@@ -16,6 +16,9 @@ use jni::{
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use keytao_core;
 
@@ -932,6 +935,12 @@ const WINDOWS_PROFILE_GUID: windows::core::GUID = windows::core::GUID {
 const WINDOWS_LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
 
 #[cfg(target_os = "windows")]
+const WINDOWS_IME_STATUS_EVENT: &str = "windows-ime-status";
+
+#[cfg(target_os = "windows")]
+static WINDOWS_IME_REGISTRATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
 struct WindowsComApartment(bool);
 
 #[cfg(target_os = "windows")]
@@ -1214,6 +1223,16 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         Err(e) => (false, format!("TSF profile 不可用：{e}")),
     };
     let registered = registered_dll && profile_enabled;
+    let registration_state = if !packaged {
+        "missing_runtime"
+    } else if registered {
+        "registered"
+    } else if registered_dll || profile_enabled {
+        "partial"
+    } else {
+        "not_registered"
+    }
+    .to_string();
     let (shared_data_dir, shared_data_source) =
         shared_data_status(windows_app_shared_data_dir(app));
     let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
@@ -1224,6 +1243,9 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         registered,
         registered_dll,
         profile_enabled,
+        registration_busy: false,
+        registration_state,
+        registration_error: None,
         runtime_dir: runtime_dir.map(|p| windows_normal_path(&p)),
         dll_path: dll_path.map(|p| windows_normal_path(&p)),
         registered_path,
@@ -1235,6 +1257,19 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         reload_stamp_signature,
         message,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_registering_status(app: &tauri::AppHandle, message: String) -> WindowsImeStatus {
+    let mut status = windows_ime_status_with_message(app, message);
+    status.registration_busy = true;
+    status.registration_state = "registering".into();
+    status
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_ime_status(app: &tauri::AppHandle, status: WindowsImeStatus) {
+    let _ = app.emit(WINDOWS_IME_STATUS_EVENT, status);
 }
 
 #[cfg(target_os = "windows")]
@@ -1354,18 +1389,21 @@ try {{
 
 #[tauri::command]
 #[cfg(target_os = "windows")]
-fn windows_ime_status(app: AppHandle) -> WindowsImeStatus {
-    windows_ime_status_with_message(&app, "已刷新 KeyTao Windows IME 状态".into())
+async fn windows_ime_status(app: AppHandle) -> Result<WindowsImeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        windows_ime_status_with_message(&app, "已刷新 KeyTao Windows IME 状态".into())
+    })
+    .await
+    .map_err(|e| format!("读取 Windows IME 状态失败：{e}"))
 }
 
-#[tauri::command]
 #[cfg(target_os = "windows")]
-fn windows_register_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
+fn windows_register_ime_blocking(app: &AppHandle) -> Result<WindowsImeStatus, String> {
     let runtime_dir =
-        windows_ime_runtime_dir(&app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
+        windows_ime_runtime_dir(app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
     let dll = runtime_dir.join("keytao_windows_ime.dll");
     run_regsvr32_elevated(&dll, false)?;
-    let status = windows_ime_status_with_message(&app, "已注册 KeyTao Windows IME".into());
+    let status = windows_ime_status_with_message(app, "已注册 KeyTao Windows IME".into());
     if status.registered {
         Ok(status)
     } else {
@@ -1375,32 +1413,56 @@ fn windows_register_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
 
 #[tauri::command]
 #[cfg(target_os = "windows")]
-fn windows_unregister_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
-    let dll = windows_ime_runtime_dir(&app)
-        .map(|dir| dir.join("keytao_windows_ime.dll"))
-        .or_else(|| windows_registered_ime_path().map(PathBuf::from))
-        .ok_or("未找到可卸载的 KeyTao Windows IME DLL")?;
-    run_regsvr32_elevated(&dll, true)?;
-    Ok(windows_ime_status_with_message(
+async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatus, String> {
+    let status_app = app.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        windows_ime_status_with_message(&status_app, "正在检测 KeyTao Windows IME 状态".into())
+    })
+    .await
+    .map_err(|e| format!("读取 Windows IME 状态失败：{e}"))?;
+
+    if !status.packaged || status.registered {
+        return Ok(status);
+    }
+
+    if WINDOWS_IME_REGISTRATION_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return Ok(windows_ime_registering_status(
+            &app,
+            "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
+        ));
+    }
+
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        emit_windows_ime_status(
+            &task_app,
+            windows_ime_registering_status(
+                &task_app,
+                "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
+            ),
+        );
+
+        let final_status = match windows_register_ime_blocking(&task_app) {
+            Ok(status) => status,
+            Err(error) => {
+                let mut status = windows_ime_status_with_message(
+                    &task_app,
+                    format!("KeyTao Windows IME 注册失败：{error}"),
+                );
+                status.registration_state = "failed".into();
+                status.registration_error = Some(error);
+                status
+            }
+        };
+
+        WINDOWS_IME_REGISTRATION_IN_PROGRESS.store(false, Ordering::SeqCst);
+        emit_windows_ime_status(&task_app, final_status);
+    });
+
+    Ok(windows_ime_registering_status(
         &app,
-        "已卸载 KeyTao Windows IME".into(),
+        "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
     ))
-}
-
-#[tauri::command]
-#[cfg(target_os = "windows")]
-fn windows_restart_ime(app: AppHandle) -> Result<WindowsImeStatus, String> {
-    let runtime_dir =
-        windows_ime_runtime_dir(&app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
-    let dll = runtime_dir.join("keytao_windows_ime.dll");
-    let _ = run_regsvr32_elevated(&dll, true);
-    run_regsvr32_elevated(&dll, false)?;
-    let status = windows_ime_status_with_message(&app, "已重新注册 KeyTao Windows IME".into());
-    if status.registered {
-        Ok(status)
-    } else {
-        Err("regsvr32 已结束，但 TSF 注册表中仍未找到 KeyTao；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4168,6 +4230,9 @@ pub struct WindowsImeStatus {
     pub registered: bool,
     pub registered_dll: bool,
     pub profile_enabled: bool,
+    pub registration_busy: bool,
+    pub registration_state: String,
+    pub registration_error: Option<String>,
     pub runtime_dir: Option<String>,
     pub dll_path: Option<String>,
     pub registered_path: Option<String>,
@@ -4594,11 +4659,7 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             windows_ime_status,
             #[cfg(target_os = "windows")]
-            windows_register_ime,
-            #[cfg(target_os = "windows")]
-            windows_unregister_ime,
-            #[cfg(target_os = "windows")]
-            windows_restart_ime,
+            windows_ime_ensure_registered,
             // ── IME engine commands (Linux only for now) ──
             #[cfg(target_os = "linux")]
             rime::rime_setup,

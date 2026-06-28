@@ -31,7 +31,7 @@ Windows 输入法实现为 TSF TIP DLL：
 
 `DllUnregisterServer` 会反向移除 TSF profile、category 和 CLSID 注册表树。
 
-Tauri 主 App 的 Windows 管理按钮会用提升权限 PowerShell 加载 DLL，并调用 `DllRegisterServer` / `DllUnregisterServer`。
+Tauri 主 App 在启动后会先渲染界面，再通过后台任务检查 TSF 状态；若安装包完整但当前 DLL/profile 尚未注册，会异步触发提升权限 PowerShell 调用 `DllRegisterServer`，并通过 `windows-ime-status` 事件把“正在注册 / 已注册 / 注册失败”回传到界面。界面只保留刷新入口，不提供手动重装 TSF 或卸载按钮，避免注册流程阻塞首屏显示。
 主 App 状态检查同样分开检查 DLL path 和 TSF profile enabled 状态：`registered=true` 必须同时满足已注册 DLL 路径匹配当前 runtime，并且 TSF profile 已启用。这样不会再把“COM DLL 注册表存在”误报成“输入法可切换”。
 
 ## TSF 官方契约对齐点
