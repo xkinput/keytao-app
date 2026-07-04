@@ -18,7 +18,7 @@ use windows::{
 use crate::{
     globals::{lock_server, obj_add, obj_release},
     key_event_sink::KeyEventSink,
-    state::{new_shared_state, SharedState},
+    state::{hide_ime_windows, new_shared_state, SharedState},
 };
 
 // ── IClassFactory ─────────────────────────────────────────────────────────────
@@ -70,10 +70,11 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             windows::Win32::Foundation::E_INVALIDARG,
         ))?;
 
-        let mut st = self.state.lock().unwrap();
-
-        st.thread_mgr = Some(thread_mgr.clone());
-        st.client_id = tid;
+        {
+            let mut st = self.state.lock().unwrap();
+            st.thread_mgr = Some(thread_mgr.clone());
+            st.client_id = tid;
+        }
 
         // Create KeyEventSink COM object (shares Arc<Mutex<State>>)
         let key_sink = KeyEventSink {
@@ -83,9 +84,16 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         // Advise KeyEventSink via ITfKeystrokeMgr
         let keystroke_mgr: ITfKeystrokeMgr = thread_mgr.cast()?;
-        unsafe {
-            keystroke_mgr.AdviseKeyEventSink(tid, &key_sink_iface, BOOL::from(true))?;
+        let advise_result =
+            unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &key_sink_iface, BOOL::from(true)) };
+        if let Err(e) = advise_result {
+            let mut st = self.state.lock().unwrap();
+            st.thread_mgr = None;
+            st.client_id = 0;
+            return Err(e);
         }
+
+        let mut st = self.state.lock().unwrap();
         st.key_sink = Some(key_sink_iface);
 
         // Advise ThreadMgrEventSink (optional but good practice for focus tracking)
@@ -96,9 +104,12 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     }
 
     fn Deactivate(&self) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
+        let (thread_mgr, client_id) = {
+            let st = self.state.lock().unwrap();
+            (st.thread_mgr.clone(), st.client_id)
+        };
 
-        if let (Some(thread_mgr), client_id) = (&st.thread_mgr, st.client_id) {
+        if let Some(thread_mgr) = thread_mgr {
             if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
                 unsafe {
                     let _ = km.UnadviseKeyEventSink(client_id);
@@ -106,15 +117,18 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             }
         }
 
+        let mut st = self.state.lock().unwrap();
+
         // End any active composition
         // (The edit session needed for this runs on the UI thread; at Deactivate
         // there may be no active context, so we just drop the handle.)
         st.composition = None;
-        st.candidate_win.hide();
-        st.mode_hint_win.hide();
         st.key_sink = None;
         st.thread_mgr = None;
         st.ime_state = None;
+        st.client_id = 0;
+        drop(st);
+        hide_ime_windows(&self.state);
 
         tracing::info!("KeyTao TSF deactivated");
         Ok(())

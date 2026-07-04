@@ -13,6 +13,8 @@
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case)]
 
+use std::sync::Once;
+
 mod candidate_win;
 mod globals;
 mod key_event_sink;
@@ -25,7 +27,7 @@ mod text_service;
 use windows::{
     core::{Interface, GUID, HRESULT},
     Win32::{
-        Foundation::{BOOL, HMODULE, S_FALSE, S_OK},
+        Foundation::{BOOL, E_POINTER, HMODULE, S_FALSE, S_OK},
         System::Com::IClassFactory,
         System::LibraryLoader::DisableThreadLibraryCalls,
     },
@@ -33,6 +35,8 @@ use windows::{
 
 use globals::{can_unload, DLL_INSTANCE};
 use text_service::ClassFactory;
+
+static TRACING_INIT: Once = Once::new();
 
 // ── Well-known GUIDs ──────────────────────────────────────────────────────────
 
@@ -65,6 +69,12 @@ extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL 
         unsafe {
             let _ = DisableThreadLibraryCalls(hinstance);
         }
+    }
+    BOOL::from(true)
+}
+
+fn init_tracing() {
+    TRACING_INIT.call_once(|| {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -72,8 +82,7 @@ extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL 
             )
             .try_init()
             .ok();
-    }
-    BOOL::from(true)
+    });
 }
 
 // ── COM DLL exports ───────────────────────────────────────────────────────────
@@ -85,6 +94,11 @@ extern "system" fn DllGetClassObject(
     ppv: *mut *mut std::ffi::c_void,
 ) -> HRESULT {
     unsafe {
+        if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+            return E_POINTER;
+        }
+        *ppv = std::ptr::null_mut();
+        init_tracing();
         let clsid = &*rclsid;
         if *clsid != CLSID_TEXT_SERVICE {
             return windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE;
@@ -105,6 +119,7 @@ extern "system" fn DllCanUnloadNow() -> HRESULT {
 
 #[no_mangle]
 extern "system" fn DllRegisterServer() -> HRESULT {
+    init_tracing();
     registration::register()
         .map(|_| S_OK)
         .unwrap_or_else(|e| e.into())
@@ -112,6 +127,7 @@ extern "system" fn DllRegisterServer() -> HRESULT {
 
 #[no_mangle]
 extern "system" fn DllUnregisterServer() -> HRESULT {
+    init_tracing();
     registration::unregister()
         .map(|_| S_OK)
         .unwrap_or_else(|e| e.into())

@@ -2,13 +2,22 @@
 
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
-    KeyProcessResult,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
-use windows::Win32::UI::TextServices::{ITfComposition, ITfKeyEventSink, ITfThreadMgr};
+use windows::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{FreeLibrary, HANDLE, HMODULE},
+        System::LibraryLoader::{
+            LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        },
+        UI::TextServices::{ITfComposition, ITfKeyEventSink, ITfThreadMgr},
+    },
+};
 
 const RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 
@@ -17,6 +26,7 @@ const RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 pub struct TsfState {
     pub runtime: Option<ImeRuntime>,
     pub session: Option<ImeRuntimeSession>,
+    rime_dll: Option<LoadedRimeDll>,
     pub thread_mgr: Option<ITfThreadMgr>,
     pub client_id: u32,
     pub key_sink: Option<ITfKeyEventSink>,
@@ -31,6 +41,29 @@ pub struct TsfState {
     pub shift_pressed_without_key: bool,
 }
 
+pub(crate) struct EngineBundle {
+    runtime: ImeRuntime,
+    session: ImeRuntimeSession,
+    reload_stamp_path: PathBuf,
+    reload_stamp_signature: String,
+    rime_dll: Option<LoadedRimeDll>,
+}
+
+struct LoadedRimeDll(HMODULE);
+
+// SAFETY: The handle is retained only to keep the lazily loaded module alive
+// while the TSF text service owns the librime runtime. It is not dereferenced.
+unsafe impl Send for LoadedRimeDll {}
+unsafe impl Sync for LoadedRimeDll {}
+
+impl Drop for LoadedRimeDll {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = FreeLibrary(self.0);
+        }
+    }
+}
+
 // SAFETY: TSF TIPs run in COM STA; all calls are on the same thread.
 unsafe impl Send for TsfState {}
 unsafe impl Sync for TsfState {}
@@ -40,6 +73,7 @@ impl TsfState {
         Self {
             runtime: None,
             session: None,
+            rime_dll: None,
             thread_mgr: None,
             client_id: 0,
             key_sink: None,
@@ -55,77 +89,58 @@ impl TsfState {
         }
     }
 
-    pub fn init_engine(&mut self) -> Result<(), String> {
+    pub(crate) fn build_engine() -> Result<EngineBundle, String> {
         let user_dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
         let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
+        let rime_dll = preload_rime_dll(&shared)?;
         let reload_stamp_path = user_dir.join(RELOAD_STAMP_FILE);
         let runtime = ImeRuntime::with_dirs(user_dir, shared);
         runtime.init()?;
         let session = runtime.create_session()?;
-        self.runtime = Some(runtime);
-        self.session = Some(session);
-        self.reload_stamp_signature = Some(reload_stamp_signature(&reload_stamp_path));
-        self.reload_stamp_path = Some(reload_stamp_path);
-        Ok(())
+        let reload_stamp_signature = reload_stamp_signature(&reload_stamp_path);
+        Ok(EngineBundle {
+            runtime,
+            session,
+            reload_stamp_path,
+            reload_stamp_signature,
+            rime_dll,
+        })
     }
 
-    pub fn ensure_engine(&mut self) -> bool {
-        if self.session.is_some() {
-            return true;
-        }
-        match self.init_engine() {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("librime init failed: {e}");
-                false
-            }
-        }
+    pub(crate) fn install_engine(&mut self, bundle: EngineBundle) {
+        self.runtime = Some(bundle.runtime);
+        self.session = Some(bundle.session);
+        self.reload_stamp_signature = Some(bundle.reload_stamp_signature);
+        self.reload_stamp_path = Some(bundle.reload_stamp_path);
+        self.rime_dll = bundle.rime_dll;
     }
 
-    pub fn check_reload_stamp(&mut self) -> bool {
+    pub(crate) fn engine_ready(&self) -> bool {
+        self.session.is_some()
+    }
+
+    pub(crate) fn take_reload_runtime_if_changed(&mut self) -> Option<ImeRuntime> {
         let Some(path) = &self.reload_stamp_path else {
-            return false;
+            return None;
         };
         let signature = reload_stamp_signature(path);
         if self.reload_stamp_signature.as_deref() == Some(signature.as_str()) {
-            return false;
+            return None;
         }
         self.reload_stamp_signature = Some(signature);
-
-        let Some(runtime) = &self.runtime else {
-            return false;
-        };
-        match runtime.reload() {
-            Ok(()) => {
-                self.reload_clear_pending = true;
-                tracing::info!("librime redeployed after reload stamp change");
-                true
-            }
-            Err(e) => {
-                tracing::error!("librime reload failed: {e}");
-                false
-            }
-        }
+        self.runtime.clone()
     }
 
-    pub fn take_reload_clear_pending(&mut self) -> bool {
+    pub(crate) fn mark_reload_clear_pending(&mut self) {
+        self.reload_clear_pending = true;
+    }
+
+    pub(crate) fn take_reload_clear_pending(&mut self) -> bool {
         std::mem::take(&mut self.reload_clear_pending)
     }
 
-    pub fn current_state(&self) -> Option<ImeState> {
-        self.session.as_ref().map(ImeRuntimeSession::state)
-    }
-
-    pub fn process_key_result(&self, keysym: u32, mods: u32) -> Option<KeyProcessResult> {
-        self.session.as_ref()?.process_key_result(keysym, mods)
-    }
-
-    pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
-        self.session.as_ref()?.select_candidate(index)
-    }
-
-    pub fn reset_session(&self) -> Option<ImeState> {
-        self.session.as_ref()?.reset()
+    pub(crate) fn session(&self) -> Option<ImeRuntimeSession> {
+        self.session.clone()
     }
 }
 
@@ -133,6 +148,68 @@ pub type SharedState = Arc<Mutex<TsfState>>;
 
 pub fn new_shared_state() -> SharedState {
     Arc::new(Mutex::new(TsfState::new()))
+}
+
+pub(crate) fn update_ime_windows(
+    shared_state: &SharedState,
+    ime_state: &ImeState,
+    caret_x: i32,
+    caret_y: i32,
+    show_mode_hint: bool,
+) {
+    with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
+        let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
+        if show {
+            candidate_win.show(ime_state, caret_x, caret_y);
+        } else {
+            candidate_win.hide();
+        }
+        if show_mode_hint {
+            mode_hint_win.show_mode_hint(ime_state.ascii_mode, caret_x, caret_y);
+        }
+    });
+}
+
+pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
+    with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
+        candidate_win.hide();
+        mode_hint_win.hide();
+    });
+}
+
+pub(crate) fn hide_candidate_window(shared_state: &SharedState) {
+    with_detached_windows(shared_state, |candidate_win, _mode_hint_win| {
+        candidate_win.hide();
+    });
+}
+
+fn with_detached_windows<R>(
+    shared_state: &SharedState,
+    f: impl FnOnce(
+        &mut crate::candidate_win::CandidateWindow,
+        &mut crate::candidate_win::CandidateWindow,
+    ) -> R,
+) -> R {
+    let (mut candidate_win, mut mode_hint_win) = {
+        let mut st = shared_state.lock().unwrap();
+        (
+            std::mem::replace(
+                &mut st.candidate_win,
+                crate::candidate_win::CandidateWindow::new(),
+            ),
+            std::mem::replace(
+                &mut st.mode_hint_win,
+                crate::candidate_win::CandidateWindow::new(),
+            ),
+        )
+    };
+
+    let result = f(&mut candidate_win, &mut mode_hint_win);
+
+    let mut st = shared_state.lock().unwrap();
+    st.candidate_win = candidate_win;
+    st.mode_hint_win = mode_hint_win;
+    result
 }
 
 fn has_rime_base_data(dir: &Path) -> bool {
@@ -152,6 +229,24 @@ fn reload_stamp_signature(path: &Path) -> String {
         }
         Err(_) => "missing".to_string(),
     }
+}
+
+fn preload_rime_dll(shared_data_dir: &str) -> Result<Option<LoadedRimeDll>, String> {
+    let Some(runtime_dir) = Path::new(shared_data_dir).parent() else {
+        return Ok(None);
+    };
+    let rime_dll = runtime_dir.join("rime.dll");
+    if !rime_dll.is_file() {
+        return Ok(None);
+    }
+
+    let mut wide: Vec<u16> = rime_dll.to_string_lossy().encode_utf16().collect();
+    wide.push(0);
+    let flags =
+        LOAD_LIBRARY_FLAGS(LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.0 | LOAD_LIBRARY_SEARCH_SYSTEM32.0);
+    let module = unsafe { LoadLibraryExW(PCWSTR(wide.as_ptr()), HANDLE::default(), flags) }
+        .map_err(|e| format!("load bundled rime.dll from {}: {e}", rime_dll.display()))?;
+    Ok(Some(LoadedRimeDll(module)))
 }
 
 fn bundled_shared_data_dir() -> Option<String> {

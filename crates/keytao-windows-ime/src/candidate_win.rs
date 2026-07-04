@@ -63,17 +63,38 @@ unsafe impl Sync for CandidateWindow {}
 
 impl CandidateWindow {
     pub fn new() -> Self {
-        let renderer = crate::panel::load_font().map(PanelRenderer::new);
-        if renderer.is_none() {
-            tracing::warn!("candidate window: no CJK font found");
-        }
-
-        let hwnd = unsafe { Self::create_window() }.unwrap_or(HWND(std::ptr::null_mut()));
         Self {
-            hwnd,
-            renderer,
+            hwnd: HWND(std::ptr::null_mut()),
+            renderer: None,
             visible: false,
         }
+    }
+
+    fn ensure_window(&mut self) -> bool {
+        if !self.hwnd.0.is_null() {
+            return true;
+        }
+        match unsafe { Self::create_window() } {
+            Ok(hwnd) => {
+                self.hwnd = hwnd;
+                true
+            }
+            Err(e) => {
+                tracing::warn!("candidate window: failed to create popup window: {e}");
+                false
+            }
+        }
+    }
+
+    fn ensure_renderer(&mut self) -> bool {
+        if self.renderer.is_some() {
+            return true;
+        }
+        self.renderer = crate::panel::load_font().map(PanelRenderer::new);
+        if self.renderer.is_none() {
+            tracing::warn!("candidate window: no CJK font found");
+        }
+        self.renderer.is_some()
     }
 
     unsafe fn create_window() -> Result<HWND> {
@@ -114,12 +135,12 @@ impl CandidateWindow {
 
     /// Show/update the panel near caret position (screen coordinates).
     pub fn show(&mut self, state: &ImeState, caret_x: i32, caret_y: i32) {
-        if self.hwnd.0.is_null() {
-            return;
-        }
         let has_content = !state.candidates.is_empty() || !state.preedit.is_empty();
         if !has_content {
             self.hide();
+            return;
+        }
+        if !self.ensure_window() || !self.ensure_renderer() {
             return;
         }
         let Some(renderer) = &self.renderer else {
@@ -168,7 +189,7 @@ impl CandidateWindow {
     }
 
     pub fn show_mode_hint(&mut self, ascii_mode: bool, caret_x: i32, caret_y: i32) {
-        if self.hwnd.0.is_null() {
+        if !self.ensure_window() || !self.ensure_renderer() {
             return;
         }
         let Some(renderer) = &self.renderer else {

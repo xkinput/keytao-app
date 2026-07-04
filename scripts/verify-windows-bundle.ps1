@@ -33,6 +33,31 @@ function Require-Pattern([string]$Path, [string]$Pattern, [string]$Message) {
     }
 }
 
+function Find-OnPath([string]$Name) {
+    $result = & cmd.exe /d /c "where `"$Name`" 2>nul"
+    if ($LASTEXITCODE -eq 0 -and $result) {
+        return $result | Select-Object -First 1
+    }
+    return $null
+}
+
+function Require-DelayLoadedDependency([string]$Dll, [string]$Dependency) {
+    $dumpbin = Find-OnPath "dumpbin.exe"
+    if (-not $dumpbin) {
+        Write-Warning "dumpbin.exe was not found; skipping delay-load import verification for $Dll."
+        return
+    }
+
+    $output = & $dumpbin /dependents $Dll 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin.exe failed while checking delay-load imports for $Dll"
+    }
+
+    if ($output -notmatch "(?is)delay load dependencies:\s*.*$([regex]::Escape($Dependency))") {
+        throw "$Dependency must be delay-loaded by $Dll; otherwise TSF may load librime while switching input methods."
+    }
+}
+
 function Find-LuaPlugin([string[]]$Dirs) {
     foreach ($dir in $Dirs) {
         if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) {
@@ -87,6 +112,7 @@ Require-File $imeRimeData "Windows IME runtime is missing rime-data\default.yaml
 Require-File $imeDefaultTheme "Windows IME runtime is missing default-theme.yaml"
 Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
 Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
+Require-DelayLoadedDependency $imeDll "rime.dll"
 if (-not $imeLuaPlugin) {
     Write-Warning "Windows IME runtime does not include the librime-lua plugin DLL; Lua extensions will be unavailable in this Windows package."
 }
