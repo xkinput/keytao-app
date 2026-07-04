@@ -27,6 +27,8 @@ pub struct TsfState {
     pub runtime: Option<ImeRuntime>,
     pub session: Option<ImeRuntimeSession>,
     rime_dll: Option<LoadedRimeDll>,
+    pub engine_building: bool,
+    pub engine_error: Option<String>,
     pub thread_mgr: Option<ITfThreadMgr>,
     pub client_id: u32,
     pub key_sink: Option<ITfKeyEventSink>,
@@ -37,6 +39,7 @@ pub struct TsfState {
     pub ascii_mode: bool,
     pub reload_stamp_path: Option<PathBuf>,
     pub reload_stamp_signature: Option<String>,
+    pub reload_in_progress: bool,
     pub reload_clear_pending: bool,
     pub shift_pressed_without_key: bool,
 }
@@ -74,6 +77,8 @@ impl TsfState {
             runtime: None,
             session: None,
             rime_dll: None,
+            engine_building: false,
+            engine_error: None,
             thread_mgr: None,
             client_id: 0,
             key_sink: None,
@@ -84,6 +89,7 @@ impl TsfState {
             ascii_mode: false,
             reload_stamp_path: None,
             reload_stamp_signature: None,
+            reload_in_progress: false,
             reload_clear_pending: false,
             shift_pressed_without_key: false,
         }
@@ -113,13 +119,32 @@ impl TsfState {
         self.reload_stamp_signature = Some(bundle.reload_stamp_signature);
         self.reload_stamp_path = Some(bundle.reload_stamp_path);
         self.rime_dll = bundle.rime_dll;
+        self.engine_building = false;
+        self.engine_error = None;
     }
 
     pub(crate) fn engine_ready(&self) -> bool {
         self.session.is_some()
     }
 
-    pub(crate) fn take_reload_runtime_if_changed(&mut self) -> Option<ImeRuntime> {
+    pub(crate) fn begin_engine_build(&mut self) -> bool {
+        if self.engine_ready() || self.engine_building {
+            return false;
+        }
+        self.engine_building = true;
+        self.engine_error = None;
+        true
+    }
+
+    pub(crate) fn finish_engine_build_error(&mut self, error: String) {
+        self.engine_building = false;
+        self.engine_error = Some(error);
+    }
+
+    pub(crate) fn begin_reload_if_changed(&mut self) -> Option<ImeRuntime> {
+        if self.reload_in_progress {
+            return None;
+        }
         let Some(path) = &self.reload_stamp_path else {
             return None;
         };
@@ -127,12 +152,17 @@ impl TsfState {
         if self.reload_stamp_signature.as_deref() == Some(signature.as_str()) {
             return None;
         }
+        let runtime = self.runtime.clone()?;
         self.reload_stamp_signature = Some(signature);
-        self.runtime.clone()
+        self.reload_in_progress = true;
+        Some(runtime)
     }
 
-    pub(crate) fn mark_reload_clear_pending(&mut self) {
-        self.reload_clear_pending = true;
+    pub(crate) fn finish_reload(&mut self, ok: bool) {
+        self.reload_in_progress = false;
+        if ok {
+            self.reload_clear_pending = true;
+        }
     }
 
     pub(crate) fn take_reload_clear_pending(&mut self) -> bool {
@@ -148,6 +178,60 @@ pub type SharedState = Arc<Mutex<TsfState>>;
 
 pub fn new_shared_state() -> SharedState {
     Arc::new(Mutex::new(TsfState::new()))
+}
+
+pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
+    let should_start = {
+        let mut st = shared_state.lock().unwrap();
+        st.begin_engine_build()
+    };
+    if !should_start {
+        return;
+    }
+
+    let state = Arc::clone(shared_state);
+    std::thread::spawn(move || match TsfState::build_engine() {
+        Ok(bundle) => {
+            let mut st = state.lock().unwrap();
+            if !st.engine_ready() {
+                st.install_engine(bundle);
+            } else {
+                st.engine_building = false;
+            }
+            tracing::info!("KeyTao Windows IME engine warmed up");
+        }
+        Err(error) => {
+            tracing::error!("librime init failed: {error}");
+            state.lock().unwrap().finish_engine_build_error(error);
+        }
+    });
+}
+
+pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
+    let runtime = {
+        let mut st = shared_state.lock().unwrap();
+        st.begin_reload_if_changed()
+    };
+
+    let Some(runtime) = runtime else {
+        return false;
+    };
+
+    let state = Arc::clone(shared_state);
+    std::thread::spawn(move || {
+        let ok = match runtime.reload() {
+            Ok(()) => {
+                tracing::info!("librime redeployed after reload stamp change");
+                true
+            }
+            Err(error) => {
+                tracing::error!("librime reload failed: {error}");
+                false
+            }
+        };
+        state.lock().unwrap().finish_reload(ok);
+    });
+    true
 }
 
 pub(crate) fn update_ime_windows(

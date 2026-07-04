@@ -422,6 +422,37 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleEnter() {
+        val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
+        if (behavior == EnterKeyBehaviors.NEWLINE) {
+            commitLineBreak()
+        } else {
+            performSystemEnter()
+        }
+    }
+
+    private fun commitLineBreak() {
+        val connection = currentInputConnection ?: return
+        val hadComposition = composing || currentState.hasComposition
+        backspaceRestoreStack.clear()
+        restoreAllOnNextDirectionalRestore = false
+        connection.beginBatchEdit()
+        if (hadComposition) {
+            connection.commitText("", 1)
+        }
+        connection.commitText("\n", 1)
+        rememberCommittedText("\n")
+        composing = false
+        selectionModeActive = false
+        connection.endBatchEdit()
+        currentState = if (!engine.nativeReady) {
+            currentState.withoutTransientCommit()
+        } else {
+            engine.reset().withoutTransientCommit()
+        }
+        keyboardView?.updateState(currentState)
+    }
+
+    private fun performSystemEnter() {
         if (currentState.hasComposition) {
             applyState(engine.processKey(AndroidKeyMapper.XK_RETURN, 0))
             return

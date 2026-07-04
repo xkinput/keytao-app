@@ -206,6 +206,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun currentConfig(): KeytaoAndroidImeConfig = config
+
     fun updateTheme(next: KeytaoImeTheme) {
         theme = next
         candidateWidthCache.clear()

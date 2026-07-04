@@ -144,7 +144,10 @@ impl PanelRenderer {
             .ceil()
             .max(1.0) as u32;
 
-        let mut pm = Pixmap::new(width, height).expect("pixmap alloc");
+        let Some(mut pm) = Pixmap::new(width, height) else {
+            tracing::warn!("candidate panel: failed to allocate pixmap {width}x{height}");
+            return (Vec::new(), 0, 0);
+        };
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
         draw_rounded_rect(
             &mut pm,
@@ -248,7 +251,10 @@ impl PanelRenderer {
         let text_width = self.text_width(&label, font_size);
         let width = min_width.max((text_width + 40.0).ceil() as u32);
 
-        let mut pm = Pixmap::new(width, height).expect("pixmap alloc");
+        let Some(mut pm) = Pixmap::new(width, height) else {
+            tracing::warn!("mode hint: failed to allocate pixmap {width}x{height}");
+            return (Vec::new(), 0, 0);
+        };
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
         draw_rounded_rect(
             &mut pm,

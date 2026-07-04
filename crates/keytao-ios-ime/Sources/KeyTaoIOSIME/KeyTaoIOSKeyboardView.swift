@@ -151,6 +151,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
+    func currentConfig() -> KeyTaoIOSImeConfig {
+        config
+    }
+
     func update(theme: KeyTaoImeTheme) {
         self.theme = theme
         invalidateLayoutAndDisplay()

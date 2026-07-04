@@ -6,7 +6,10 @@
 //!   preedit text    → manage ITfComposition
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
 
-use std::{cell::UnsafeCell, sync::Arc};
+use std::{
+    cell::UnsafeCell,
+    sync::{Arc, Mutex},
+};
 
 use keytao_core::{ImeRuntimeSession, ImeState, KeyProcessResult};
 use windows::{
@@ -23,7 +26,10 @@ use crate::{
         shift_keysym_for_vk, should_bypass_empty_composition, should_eat_key, vk_to_keysym,
         RIME_RELEASE_MASK,
     },
-    state::{hide_candidate_window, hide_ime_windows, update_ime_windows, SharedState, TsfState},
+    state::{
+        hide_candidate_window, hide_ime_windows, start_engine_warmup, start_reload_if_needed,
+        update_ime_windows, SharedState,
+    },
 };
 
 // ── Edit session helper ───────────────────────────────────────────────────────
@@ -163,6 +169,8 @@ fn apply_ime_state(
 ) -> Result<()> {
     let state_arc = Arc::clone(shared_state);
     let ime_state_clone = ime_state.clone();
+    let window_update = Arc::new(Mutex::new(None));
+    let window_update_for_session = Arc::clone(&window_update);
     let comp_sink_obj = CompositionSink {
         state: Arc::clone(shared_state),
     };
@@ -214,76 +222,29 @@ fn apply_ime_state(
             st.ime_state = Some(ime_state_clone.clone());
             mode_changed
         };
-        update_ime_windows(
-            &state_arc,
-            &ime_state_clone,
+        *window_update_for_session.lock().unwrap() = Some((
+            ime_state_clone.clone(),
             cx,
             cy,
             show_mode_hint_on_change && mode_changed,
-        );
+        ));
 
         Ok(())
-    })
-}
+    })?;
 
-fn clear_after_reload(
-    context: &ITfContext,
-    client_id: u32,
-    shared_state: &SharedState,
-) -> Result<()> {
-    apply_ime_state(context, client_id, shared_state, ImeState::empty(), false)
-}
-
-fn ensure_engine_ready(shared_state: &SharedState) -> bool {
-    if shared_state.lock().unwrap().engine_ready() {
-        return true;
+    if let Some((ime_state, cx, cy, show_mode_hint)) = window_update.lock().unwrap().take() {
+        update_ime_windows(&state_arc, &ime_state, cx, cy, show_mode_hint);
     }
 
-    let bundle = match TsfState::build_engine() {
-        Ok(bundle) => bundle,
-        Err(e) => {
-            tracing::error!("librime init failed: {e}");
-            return false;
-        }
-    };
-
-    let mut st = shared_state.lock().unwrap();
-    if !st.engine_ready() {
-        st.install_engine(bundle);
-    }
-    true
-}
-
-fn reload_if_needed(shared_state: &SharedState) -> bool {
-    let runtime = {
-        let mut st = shared_state.lock().unwrap();
-        st.take_reload_runtime_if_changed()
-    };
-
-    let Some(runtime) = runtime else {
-        return false;
-    };
-
-    match runtime.reload() {
-        Ok(()) => {
-            let mut st = shared_state.lock().unwrap();
-            st.mark_reload_clear_pending();
-            tracing::info!("librime redeployed after reload stamp change");
-            true
-        }
-        Err(e) => {
-            tracing::error!("librime reload failed: {e}");
-            false
-        }
-    }
+    Ok(())
 }
 
 fn runtime_session(shared_state: &SharedState) -> Option<ImeRuntimeSession> {
     shared_state.lock().unwrap().session()
 }
 
-fn current_ime_state(shared_state: &SharedState) -> Option<ImeState> {
-    runtime_session(shared_state).map(|session| session.state())
+fn cached_ime_state(shared_state: &SharedState) -> Option<ImeState> {
+    shared_state.lock().unwrap().ime_state.clone()
 }
 
 fn process_key_result(
@@ -300,6 +261,33 @@ fn select_candidate(shared_state: &SharedState, index: usize) -> Option<ImeState
 
 fn reset_session(shared_state: &SharedState) -> Option<ImeState> {
     runtime_session(shared_state)?.reset()
+}
+
+fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> Result<Option<u32>> {
+    if !shared_state.lock().unwrap().engine_ready() {
+        start_engine_warmup(shared_state);
+        return Ok(None);
+    }
+
+    let reload_started = start_reload_if_needed(shared_state);
+    let (client_id, reload_in_progress, should_clear_reload) = {
+        let mut st = shared_state.lock().unwrap();
+        (
+            st.client_id,
+            st.reload_in_progress,
+            st.take_reload_clear_pending(),
+        )
+    };
+
+    if should_clear_reload {
+        apply_ime_state(context, client_id, shared_state, ImeState::empty(), false)?;
+    }
+
+    if reload_started || reload_in_progress {
+        return Ok(None);
+    }
+
+    Ok(Some(client_id))
 }
 
 // ── KeyEventSink + CompositionSink (one COM object, shared state) ─────────────
@@ -329,14 +317,20 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             st.shift_pressed_without_key = true;
             return Ok(BOOL::from(false));
         }
-        let state = {
+        let (engine_ready, reload_in_progress, state) = {
             let mut st = self.state.lock().unwrap();
             if st.shift_pressed_without_key {
                 st.shift_pressed_without_key = false;
             }
-            st.ime_state.clone()
+            (
+                st.engine_ready(),
+                st.reload_in_progress,
+                st.ime_state.clone(),
+            )
+        };
+        if !engine_ready || reload_in_progress {
+            return Ok(BOOL::from(false));
         }
-        .or_else(|| current_ime_state(&self.state));
         let is_composing = state
             .as_ref()
             .map(|s| !s.preedit.is_empty() || !s.candidates.is_empty())
@@ -367,25 +361,17 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             return Ok(BOOL::from(false));
         }
 
-        let client_id = {
+        let client_id = match {
             let mut st = self.state.lock().unwrap();
             st.shift_pressed_without_key = false;
             drop(st);
-            if !ensure_engine_ready(&self.state) {
-                return Ok(BOOL::from(false));
-            }
-            let reloaded = reload_if_needed(&self.state);
-            let mut st = self.state.lock().unwrap();
-            let should_clear_reload = st.take_reload_clear_pending();
-            let client_id = st.client_id;
-            drop(st);
-            if reloaded && should_clear_reload {
-                clear_after_reload(&context, client_id, &self.state)?;
-            }
-            client_id
+            prepare_engine_for_key(&context, &self.state)?
+        } {
+            Some(client_id) => client_id,
+            None => return Ok(BOOL::from(false)),
         };
 
-        let before_state = current_ime_state(&self.state).unwrap_or_else(ImeState::empty);
+        let before_state = cached_ime_state(&self.state).unwrap_or_else(ImeState::empty);
 
         if should_bypass_empty_composition(vk, mods, &before_state) {
             hide_candidate_window(&self.state);
@@ -446,25 +432,17 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         };
 
         let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
-        let client_id = {
+        let client_id = match {
             let mut st = self.state.lock().unwrap();
             if !st.shift_pressed_without_key {
                 return Ok(BOOL::from(false));
             }
             st.shift_pressed_without_key = false;
             drop(st);
-            if !ensure_engine_ready(&self.state) {
-                return Ok(BOOL::from(false));
-            }
-            let reloaded = reload_if_needed(&self.state);
-            let mut st = self.state.lock().unwrap();
-            let should_clear_reload = st.take_reload_clear_pending();
-            let client_id = st.client_id;
-            drop(st);
-            if reloaded && should_clear_reload {
-                clear_after_reload(&context, client_id, &self.state)?;
-            }
-            client_id
+            prepare_engine_for_key(&context, &self.state)?
+        } {
+            Some(client_id) => client_id,
+            None => return Ok(BOOL::from(false)),
         };
 
         let result = process_key_result(&self.state, keysym, RIME_RELEASE_MASK);

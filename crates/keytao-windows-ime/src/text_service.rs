@@ -18,7 +18,7 @@ use windows::{
 use crate::{
     globals::{lock_server, obj_add, obj_release},
     key_event_sink::KeyEventSink,
-    state::{hide_ime_windows, new_shared_state, SharedState},
+    state::{hide_ime_windows, new_shared_state, start_engine_warmup, SharedState},
 };
 
 // ── IClassFactory ─────────────────────────────────────────────────────────────
@@ -95,6 +95,9 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         let mut st = self.state.lock().unwrap();
         st.key_sink = Some(key_sink_iface);
+        drop(st);
+
+        start_engine_warmup(&self.state);
 
         // Advise ThreadMgrEventSink (optional but good practice for focus tracking)
         // We skip this for now to keep the implementation minimal.

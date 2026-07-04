@@ -49,6 +49,10 @@ import {
   Vibrate,
   VibrateOff,
   SlidersHorizontal,
+  User,
+  LogIn,
+  LogOut,
+  Cloud,
   type LucideIcon,
 } from "lucide-react"
 import DebugTab from "@/components/DebugTab"
@@ -58,6 +62,7 @@ type Tab = "ime" | "extension" | "about" | "debug"
 type ImeUiColorScheme = "auto" | "light" | "dark"
 type ImeEffectiveColorScheme = "light" | "dark"
 type ImeCandidateOrientation = "horizontal" | "vertical"
+type EnterKeyBehavior = "system" | "newline"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const RIME_DICT_MANAGER_URL_SCHEME = "rime-dict"
@@ -65,6 +70,17 @@ const DESKTOP_RIME_DICT_MANAGER_PLATFORMS: OSType[] = ["windows", "macos", "linu
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
 const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
+const AUTH_TOKEN_STORAGE_KEY = "keytao.auth.token"
+const AUTH_USER_STORAGE_KEY = "keytao.auth.user"
+
+type SchemeKey = "keytao" | "xmjd" | "txjx" | "keydo"
+
+const SCHEME_OPTIONS: Array<{ key: SchemeKey; label: string; asset: string }> = [
+  { key: "keytao", label: "键道6", asset: "keytao-linux" },
+  { key: "xmjd", label: "星猫键道", asset: "xmjd6.zip" },
+  { key: "txjx", label: "天行键", asset: "txjx.zip" },
+  { key: "keydo", label: "键道·我流", asset: "nightly zip" },
+]
 
 function hasSystemIme(os: OSType): boolean {
   return os === "linux" || os === "macos" || os === "windows" || os === "android" || os === "ios"
@@ -101,6 +117,41 @@ interface ReleaseInfo {
   body: string
   github: PlatformRelease | null
   gitee: PlatformRelease | null
+}
+
+interface SchemeReleaseInfo {
+  scheme: SchemeKey
+  sourceType: string | null
+  label: string
+  version: string
+  name: string
+  publishedAt: string | null
+  downloadUrl: string
+  assetName: string
+}
+
+interface AppAuthUser {
+  id: number
+  name: string | null
+  nickname: string | null
+  email: string | null
+}
+
+interface AppAuthSession {
+  token: string
+  user: AppAuthUser
+}
+
+interface UserDictionarySyncResult {
+  file_name: string
+  path: string
+  generic_file_name: string
+  generic_path: string
+  count: number
+  updated_at: string
+  import_table_patched: boolean
+  reload_stamp_path: string | null
+  message: string
 }
 
 interface InstallProgress {
@@ -218,6 +269,7 @@ interface ImeUiSettings {
 interface AndroidImeInputSettings {
   hapticsEnabled: boolean
   hapticIntensity: number
+  enterKeyBehavior: EnterKeyBehavior
   configPath: string | null
   reloadStampPath: string | null
   message: string
@@ -315,6 +367,18 @@ export default function App() {
   const [isFetchingRelease, setIsFetchingRelease] = useState(true)
   const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
+  const [selectedSchemeKey, setSelectedSchemeKey] = useState<SchemeKey>("keytao")
+  const [schemeReleaseInfo, setSchemeReleaseInfo] = useState<SchemeReleaseInfo | null>(null)
+  const [schemeReleaseError, setSchemeReleaseError] = useState<string | null>(null)
+  const [isFetchingSchemeRelease, setIsFetchingSchemeRelease] = useState(false)
+  const [authToken, setAuthToken] = useState<string | null>(null)
+  const [authUser, setAuthUser] = useState<AppAuthUser | null>(null)
+  const [loginName, setLoginName] = useState("")
+  const [loginPassword, setLoginPassword] = useState("")
+  const [authError, setAuthError] = useState<string | null>(null)
+  const [authMessage, setAuthMessage] = useState<string | null>(null)
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [isSyncingUserDictionary, setIsSyncingUserDictionary] = useState(false)
 
   // Linux IME daemon
   const [linuxImeStatus, setLinuxImeStatus] = useState<LinuxImeStatus | null>(null)
@@ -384,6 +448,75 @@ export default function App() {
     const ts = new Date().toLocaleTimeString()
     setLogBuffer((prev) => [...prev, ...lines.map((l) => `[${ts}] ${l}`)])
   }
+
+  function persistAuth(token: string, user: AppAuthUser) {
+    setAuthToken(token)
+    setAuthUser(user)
+    try {
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token)
+      window.localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user))
+    } catch {
+      // Local storage is a convenience only; the in-memory session remains usable.
+    }
+  }
+
+  function clearAuth() {
+    setAuthToken(null)
+    setAuthUser(null)
+    setLoginPassword("")
+    try {
+      window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+      window.localStorage.removeItem(AUTH_USER_STORAGE_KEY)
+    } catch {
+      // Ignore storage cleanup failures.
+    }
+  }
+
+  useEffect(() => {
+    try {
+      const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)
+      const rawUser = window.localStorage.getItem(AUTH_USER_STORAGE_KEY)
+      if (token) {
+        setAuthToken(token)
+        if (rawUser) setAuthUser(JSON.parse(rawUser) as AppAuthUser)
+      }
+    } catch {
+      // Ignore invalid persisted auth state.
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!authToken) return
+    invoke<AppAuthUser>("keytao_me", { token: authToken })
+      .then((user) => {
+        setAuthUser(user)
+        try {
+          window.localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user))
+        } catch {
+          // Ignore storage update failures.
+        }
+      })
+      .catch((e) => {
+        setAuthError(String(e))
+        clearAuth()
+      })
+  }, [authToken])
+
+  useEffect(() => {
+    if (selectedSchemeKey === "keytao") {
+      setSchemeReleaseInfo(null)
+      setSchemeReleaseError(null)
+      setIsFetchingSchemeRelease(false)
+      return
+    }
+
+    setIsFetchingSchemeRelease(true)
+    setSchemeReleaseError(null)
+    invoke<SchemeReleaseInfo>("fetch_scheme_release", { scheme: selectedSchemeKey })
+      .then(setSchemeReleaseInfo)
+      .catch((e) => setSchemeReleaseError(String(e)))
+      .finally(() => setIsFetchingSchemeRelease(false))
+  }, [selectedSchemeKey])
 
   useEffect(() => {
     const p = platform()
@@ -458,7 +591,7 @@ export default function App() {
         .then(setImeUiSettings)
         .catch((e) => setImeUiError(String(e)))
     }
-    if (os === "android") {
+    if (os === "android" || os === "ios") {
       invoke<AndroidImeInputSettings>("get_android_ime_input_settings")
         .then(setAndroidImeInputSettings)
         .catch((e) => setAndroidImeInputError(String(e)))
@@ -559,6 +692,10 @@ export default function App() {
 
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
+  const selectedScheme = SCHEME_OPTIONS.find((scheme) => scheme.key === selectedSchemeKey) ?? SCHEME_OPTIONS[0]
+  const selectedSchemeDownloadUrl = selectedSchemeKey === "keytao" ? downloadUrl : schemeReleaseInfo?.downloadUrl
+  const selectedSchemeVersion = selectedSchemeKey === "keytao" ? activePlatform?.version : schemeReleaseInfo?.version
+  const selectedSchemeAsset = selectedSchemeKey === "keytao" ? selectedScheme.asset : schemeReleaseInfo?.assetName ?? selectedScheme.asset
   const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission
   const systemImeAvailable = hasSystemIme(osType)
   const isMobilePlatform = osType === "android" || osType === "ios"
@@ -567,6 +704,7 @@ export default function App() {
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
   const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
   const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
+  const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
@@ -822,23 +960,26 @@ export default function App() {
   }
 
   async function handleUpdateAndroidImeInputSettings(
-    patch: Partial<Pick<AndroidImeInputSettings, "hapticsEnabled" | "hapticIntensity">>,
+    patch: Partial<Pick<AndroidImeInputSettings, "hapticsEnabled" | "hapticIntensity" | "enterKeyBehavior">>,
   ) {
-    if (osType !== "android" || isSavingAndroidImeInputSettings) return
+    if (!["android", "ios"].includes(osType) || isSavingAndroidImeInputSettings) return
     const current = {
       hapticsEnabled: androidImeInputSettings?.hapticsEnabled ?? true,
       hapticIntensity: androidImeInputSettings?.hapticIntensity ?? 42,
+      enterKeyBehavior: androidImeInputSettings?.enterKeyBehavior ?? ("system" as EnterKeyBehavior),
     }
     const next = {
       ...current,
       ...patch,
       hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
     }
+    next.enterKeyBehavior = next.enterKeyBehavior === "newline" ? "newline" : "system"
     next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
     if (
       androidImeInputSettings &&
       next.hapticsEnabled === androidImeInputSettings.hapticsEnabled &&
-      next.hapticIntensity === androidImeInputSettings.hapticIntensity
+      next.hapticIntensity === androidImeInputSettings.hapticIntensity &&
+      next.enterKeyBehavior === androidImeInputSettings.enterKeyBehavior
     ) {
       return
     }
@@ -847,7 +988,7 @@ export default function App() {
     try {
       const settings = await invoke<AndroidImeInputSettings>("set_android_ime_input_settings", next)
       setAndroidImeInputSettings(settings)
-      addLogs([`[ANDROID IME INPUT] ${settings.message}`])
+      addLogs([`[MOBILE IME INPUT] ${settings.message}`])
     } catch (e) {
       setAndroidImeInputError(String(e))
       await refreshAndroidImeInputSettings()
@@ -861,7 +1002,7 @@ export default function App() {
   }
 
   async function handleInstall() {
-    if (!downloadUrl) return
+    if (!selectedSchemeDownloadUrl) return
     setInstallProgress(null)
     setInstallError(null)
     setDeploySteps([])
@@ -879,7 +1020,7 @@ export default function App() {
 
     setIsInstalling(true)
     try {
-      const result = await invoke<InstallResult>("rime_install_to_default", { url: downloadUrl })
+      const result = await invoke<InstallResult>("rime_install_to_default", { url: selectedSchemeDownloadUrl })
       addLogs(result.logs)
       if (result.verify.some((v) => !v.ok)) {
         addLogs(result.verify.filter((v) => !v.ok).map((v) => `[VERIFY FAIL] ${v.path}: ${v.note}`))
@@ -895,12 +1036,71 @@ export default function App() {
   }
 
   async function handleRefetchRelease() {
+    if (selectedSchemeKey !== "keytao") {
+      setIsFetchingSchemeRelease(true)
+      setSchemeReleaseError(null)
+      invoke<SchemeReleaseInfo>("fetch_scheme_release", { scheme: selectedSchemeKey })
+        .then(setSchemeReleaseInfo)
+        .catch((e) => setSchemeReleaseError(String(e)))
+        .finally(() => setIsFetchingSchemeRelease(false))
+      return
+    }
+
     setIsFetchingRelease(true)
     setReleaseError(null)
     invoke<ReleaseInfo>("fetch_latest_release")
       .then(setReleaseInfo)
       .catch((e) => setReleaseError(String(e)))
       .finally(() => setIsFetchingRelease(false))
+  }
+
+  async function handleLogin() {
+    if (isLoggingIn) return
+    setIsLoggingIn(true)
+    setAuthError(null)
+    setAuthMessage(null)
+    try {
+      const session = await invoke<AppAuthSession>("keytao_login", {
+        name: loginName,
+        password: loginPassword,
+      })
+      persistAuth(session.token, session.user)
+      setLoginPassword("")
+      setAuthMessage("已登录 KeyTao 账号")
+    } catch (e) {
+      setAuthError(String(e))
+    } finally {
+      setIsLoggingIn(false)
+    }
+  }
+
+  function handleLogout() {
+    clearAuth()
+    setAuthError(null)
+    setAuthMessage("已退出登录")
+  }
+
+  async function handleSyncUserDictionary() {
+    if (!authToken || isSyncingUserDictionary) return
+    setIsSyncingUserDictionary(true)
+    setAuthError(null)
+    setAuthMessage("正在同步用户词库...")
+    try {
+      const result = await invoke<UserDictionarySyncResult>("sync_user_dictionary", { token: authToken })
+      setAuthMessage(`${result.message}，已写入 ${result.file_name}`)
+      addLogs([
+        `[USER DICT] ${result.message}`,
+        `[USER DICT] ${result.path}`,
+        `[USER DICT] ${result.generic_path}`,
+        result.import_table_patched ? "[USER DICT] 已更新词典导入表" : "[USER DICT] 词典导入表已就绪",
+      ])
+      await handleDeploy()
+      await handleCheckLocalSchema()
+    } catch (e) {
+      setAuthError(String(e))
+    } finally {
+      setIsSyncingUserDictionary(false)
+    }
   }
 
   async function loadFiles(path?: string, uri?: string) {
@@ -965,13 +1165,13 @@ export default function App() {
   }
 
   async function handleInstallExt() {
-    if (!selectedDir || !downloadUrl) return
+    if (!selectedDir || !selectedSchemeDownloadUrl) return
     setIsInstallingExt(true)
     setExtResult(null)
     setExtError(null)
     setExtProgress(null)
     try {
-      const tempPath = await invoke<string>("download_to_temp", { url: downloadUrl })
+      const tempPath = await invoke<string>("download_to_temp", { url: selectedSchemeDownloadUrl })
       let result: InstallResult
       if (osType === "android" && safUri) {
         result = await invoke<InstallResult>("android_smart_extract", { zipPath: tempPath, treeUri: safUri })
@@ -992,7 +1192,7 @@ export default function App() {
   // ── Release source picker (shared widget) ────────────────────────────────
   const VersionPicker = (
     <div className="flex items-center gap-1.5">
-      {releaseInfo?.github && (
+      {selectedSchemeKey === "keytao" && releaseInfo?.github && (
         <div className="flex gap-1">
           {(["github", "gitee"] as const).map((src) => {
             const p = src === "github" ? releaseInfo.github : releaseInfo.gitee
@@ -1012,10 +1212,15 @@ export default function App() {
           })}
         </div>
       )}
-      {releaseInfo && !releaseInfo.github && (
+      {selectedSchemeKey === "keytao" && releaseInfo && !releaseInfo.github && (
         <Badge variant="secondary" className="font-mono text-xs">{releaseInfo.version}</Badge>
       )}
-      {releaseInfo?.body && (
+      {selectedSchemeKey !== "keytao" && selectedSchemeVersion && (
+        <Badge variant="secondary" className="font-mono text-xs">
+          {selectedSchemeVersion} · {selectedSchemeAsset}
+        </Badge>
+      )}
+      {selectedSchemeKey === "keytao" && releaseInfo?.body && (
         <button
           onClick={() => setShowChangelog(true)}
           className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
@@ -1023,7 +1228,7 @@ export default function App() {
           更新内容
         </button>
       )}
-      {isFetchingRelease
+      {isFetchingRelease || isFetchingSchemeRelease
         ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         : <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleRefetchRelease} title="检查新版本">
           <RefreshCw className="h-3.5 w-3.5" />
@@ -1043,7 +1248,7 @@ export default function App() {
         storageError={androidStoragePermissionError}
         installError={installError}
         installingSchema={isInstalling || isDeploying}
-        canInstallSchema={Boolean(downloadUrl)}
+        canInstallSchema={Boolean(selectedSchemeDownloadUrl)}
         onOpenSettings={handleOpenAndroidImeSettings}
         onShowPicker={handleShowAndroidImePicker}
         onOpenStorageSettings={handleOpenAndroidStoragePermissionSettings}
@@ -1421,7 +1626,7 @@ export default function App() {
               </Card>
             )}
 
-            {osType === "android" && (
+            {(osType === "android" || osType === "ios") && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -1475,6 +1680,39 @@ export default function App() {
                       aria-label="震动强度"
                     />
                   </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">回车键</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground/80">
+                        {enterKeyBehavior === "newline" ? "输入换行" : "跟随系统"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant={enterKeyBehavior === "system" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => handleUpdateAndroidImeInputSettings({ enterKeyBehavior: "system" })}
+                        disabled={isSavingAndroidImeInputSettings}
+                        className="h-8 text-xs"
+                      >
+                        跟随系统
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={enterKeyBehavior === "newline" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => handleUpdateAndroidImeInputSettings({ enterKeyBehavior: "newline" })}
+                        disabled={isSavingAndroidImeInputSettings}
+                        className="h-8 text-xs"
+                      >
+                        换行
+                      </Button>
+                    </div>
+                  </div>
                   {androidImeInputSettings?.configPath && (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
                       <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1496,6 +1734,78 @@ export default function App() {
 
             {systemImeAvailable && (
               <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <User className="h-4 w-4 text-muted-foreground" />
+                    KeyTao 账号
+                    {authUser && (
+                      <Badge variant="secondary" className="ml-auto text-xs">
+                        {authUser.nickname || authUser.name || `#${authUser.id}`}
+                      </Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {authUser ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        onClick={handleSyncUserDictionary}
+                        disabled={isSyncingUserDictionary || isDeploying}
+                        className="gap-1.5"
+                      >
+                        {isSyncingUserDictionary || isDeploying
+                          ? <Loader2 className="h-4 w-4 animate-spin" />
+                          : <Cloud className="h-4 w-4" />
+                        }
+                        {isSyncingUserDictionary ? "同步中..." : isDeploying ? "部署中..." : "同步用户词库"}
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={handleLogout} className="gap-1.5">
+                        <LogOut className="h-3.5 w-3.5" />
+                        退出
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                      <input
+                        value={loginName}
+                        onChange={(event) => setLoginName(event.target.value)}
+                        placeholder="用户名"
+                        className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <input
+                        value={loginPassword}
+                        onChange={(event) => setLoginPassword(event.target.value)}
+                        placeholder="密码"
+                        type="password"
+                        className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-primary"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void handleLogin()
+                        }}
+                      />
+                      <Button size="sm" onClick={handleLogin} disabled={isLoggingIn} className="gap-1.5">
+                        {isLoggingIn ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
+                        登录
+                      </Button>
+                    </div>
+                  )}
+                  {authMessage && (
+                    <div className="text-xs text-green-400 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2">
+                      {authMessage}
+                    </div>
+                  )}
+                  {authError && (
+                    <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {systemImeAvailable && (
+              <Card>
                 <CardHeader className="pb-3 space-y-2">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
                     <Download className="h-4 w-4 text-muted-foreground" />
@@ -1504,6 +1814,37 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-1.5">{VersionPicker}</div>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {SCHEME_OPTIONS.map((scheme) => {
+                      const selected = selectedSchemeKey === scheme.key
+                      return (
+                        <Button
+                          key={scheme.key}
+                          type="button"
+                          variant={selected ? "secondary" : "outline"}
+                          size="sm"
+                          onClick={() => setSelectedSchemeKey(scheme.key)}
+                          disabled={isInstalling || isDeploying || isFetchingSchemeRelease}
+                          className="h-10 min-w-0 flex-col gap-0 px-2"
+                          title={scheme.asset}
+                        >
+                          <span className="text-xs leading-tight">{scheme.label}</span>
+                          <span className="max-w-full truncate font-mono text-[10px] leading-tight text-muted-foreground">
+                            {scheme.key === selectedSchemeKey && selectedSchemeVersion ? selectedSchemeVersion : scheme.asset}
+                          </span>
+                        </Button>
+                      )
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 border border-border rounded-lg px-3 py-2">
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span className="shrink-0">当前：</span>
+                    <span className="min-w-0 truncate">
+                      {selectedScheme.label}
+                      {selectedSchemeVersion ? ` ${selectedSchemeVersion}` : ""}
+                      {selectedSchemeAsset ? ` · ${selectedSchemeAsset}` : ""}
+                    </span>
+                  </div>
                   {defaultDir && (
                     <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
                       <Info className="h-3.5 w-3.5 shrink-0" />
@@ -1563,10 +1904,10 @@ export default function App() {
                             </span>
                           </div>
                         )}
-                        {releaseError && (
+                        {(releaseError || schemeReleaseError) && (
                           <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
                             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                            <span>获取版本信息失败：{releaseError}</span>
+                            <span>获取版本信息失败：{selectedSchemeKey === "keytao" ? releaseError : schemeReleaseError}</span>
                           </div>
                         )}
                         {installError && (
@@ -1599,7 +1940,7 @@ export default function App() {
                           </div>
                         )}
                         <div className="flex gap-2 flex-wrap">
-                          <Button size="sm" onClick={handleInstall} disabled={isBusy || !downloadUrl} className="gap-1.5">
+                          <Button size="sm" onClick={handleInstall} disabled={isBusy || isFetchingSchemeRelease || !selectedSchemeDownloadUrl} className="gap-1.5">
                             {isCheckingAndroidStoragePermission || isInstalling || isDeploying
                               ? <Loader2 className="h-4 w-4 animate-spin" />
                               : <Download className="h-4 w-4" />
@@ -1686,7 +2027,7 @@ export default function App() {
                     {isOpeningExtDir ? "打开中..." : "打开目录"}
                   </Button>
                 )}
-                {selectedDir && downloadUrl && (
+                {selectedDir && selectedSchemeDownloadUrl && (
                   <Button variant="secondary" size="sm" onClick={handleInstallExt} disabled={isInstallingExt} className="gap-1.5">
                     <Download className="h-4 w-4" />
                     {isInstallingExt ? "安装中..." : "立即安装"}

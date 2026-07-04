@@ -26,6 +26,11 @@ object KeyCommandTypes {
     const val EDIT = "edit"
 }
 
+object EnterKeyBehaviors {
+    const val SYSTEM = "system"
+    const val NEWLINE = "newline"
+}
+
 data class KeyCommand(
     val type: String,
     val value: String? = null,
@@ -81,6 +86,7 @@ data class KeytaoAndroidImeConfig(
     val maxKeyHeightDp: Float,
     val hapticsEnabled: Boolean,
     val hapticIntensity: Int,
+    val enterKeyBehavior: String,
     val swipeThresholdDp: Float,
     val rows: List<List<KeySpec>>,
     val numberRows: List<List<KeySpec>>,
@@ -180,6 +186,9 @@ data class KeytaoAndroidImeConfig(
                 hapticsEnabled = mergedBoolean(root, fallbackRoot, haptics, fallbackHaptics, "enabled", "hapticsEnabled", true),
                 hapticIntensity = mergedInt(root, fallbackRoot, haptics, fallbackHaptics, "intensity", "hapticIntensity", 42)
                     .coerceIn(1, 100),
+                enterKeyBehavior = normalizeEnterKeyBehavior(
+                    mergedString(root, fallbackRoot, "enterKeyBehavior", EnterKeyBehaviors.SYSTEM),
+                ),
                 swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
@@ -305,6 +314,21 @@ data class KeytaoAndroidImeConfig(
                 root.has(name) -> root.optDouble(name, defaultValue)
                 fallbackRoot?.has(name) == true -> fallbackRoot.optDouble(name, defaultValue)
                 else -> defaultValue
+            }
+        }
+
+        private fun mergedString(root: JSONObject, fallbackRoot: JSONObject?, name: String, defaultValue: String): String {
+            return when {
+                root.has(name) -> root.optString(name, defaultValue)
+                fallbackRoot?.has(name) == true -> fallbackRoot.optString(name, defaultValue)
+                else -> defaultValue
+            }
+        }
+
+        private fun normalizeEnterKeyBehavior(value: String): String {
+            return when (value.trim().lowercase()) {
+                "newline", "linebreak", "line_break" -> EnterKeyBehaviors.NEWLINE
+                else -> EnterKeyBehaviors.SYSTEM
             }
         }
 

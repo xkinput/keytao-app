@@ -60,6 +60,55 @@ pub struct ReleaseInfo {
     pub gitee: Option<PlatformRelease>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemeReleaseInfo {
+    pub scheme: String,
+    pub source_type: Option<String>,
+    pub label: String,
+    pub version: String,
+    pub name: String,
+    pub published_at: Option<String>,
+    pub download_url: String,
+    pub asset_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AppAuthUser {
+    pub id: i64,
+    pub name: Option<String>,
+    pub nickname: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AppAuthSession {
+    pub token: String,
+    pub user: AppAuthUser,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserDictionaryExportResponse {
+    file_name: String,
+    content: String,
+    count: usize,
+    updated_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct UserDictionarySyncResult {
+    pub file_name: String,
+    pub path: String,
+    pub generic_file_name: String,
+    pub generic_path: String,
+    pub count: usize,
+    pub updated_at: String,
+    pub import_table_patched: bool,
+    pub reload_stamp_path: Option<String>,
+    pub message: String,
+}
+
 #[derive(Serialize, Clone)]
 pub struct InstallProgress {
     pub stage: String,
@@ -1737,6 +1786,300 @@ async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
     Ok(info)
 }
 
+async fn api_error_message(response: reqwest::Response, fallback: &str) -> String {
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+            return error.to_string();
+        }
+        if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
+            return message.to_string();
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        format!("{fallback}，HTTP {status}")
+    } else {
+        format!("{fallback}，HTTP {status}: {trimmed}")
+    }
+}
+
+fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
+    match scheme {
+        "keytao" => Ok("keytao"),
+        "xmjd" => Ok("xmjd"),
+        "txjx" => Ok("txjx"),
+        "keydo" => Ok("keydo"),
+        _ => Err("不支持的方案".into()),
+    }
+}
+
+#[tauri::command]
+async fn fetch_scheme_release(app: AppHandle, scheme: String) -> Result<SchemeReleaseInfo, String> {
+    let scheme = validate_scheme_key(scheme.trim())?;
+    let client = build_client(&app)?;
+    let url = format!("{API_BASE}/api/practice/scheme-release?scheme={scheme}");
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| format!("获取方案版本失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "获取方案版本失败").await);
+    }
+
+    response
+        .json::<SchemeReleaseInfo>()
+        .await
+        .map_err(|e| format!("解析方案版本失败: {e}"))
+}
+
+#[tauri::command]
+async fn keytao_login(
+    app: AppHandle,
+    name: String,
+    password: String,
+) -> Result<AppAuthSession, String> {
+    let name = name.trim();
+    if name.is_empty() || password.is_empty() {
+        return Err("用户名和密码不能为空".into());
+    }
+
+    let client = build_client(&app)?;
+    let response = client
+        .post(format!("{API_BASE}/api/auth/login"))
+        .json(&serde_json::json!({ "name": name, "password": password }))
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| format!("登录请求失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "登录失败").await);
+    }
+
+    response
+        .json::<AppAuthSession>()
+        .await
+        .map_err(|e| format!("解析登录响应失败: {e}"))
+}
+
+#[tauri::command]
+async fn keytao_me(app: AppHandle, token: String) -> Result<AppAuthUser, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("未登录".into());
+    }
+
+    let client = build_client(&app)?;
+    let response = client
+        .get(format!("{API_BASE}/api/auth/me"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| format!("校验登录状态失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "校验登录状态失败").await);
+    }
+
+    response
+        .json::<AppAuthUser>()
+        .await
+        .map_err(|e| format!("解析账号信息失败: {e}"))
+}
+
+fn with_user_dict_name(content: &str, dict_name: &str) -> String {
+    let mut replaced = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if !replaced && line.trim_start().starts_with("name:") {
+            lines.push(format!("name: {dict_name}"));
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        lines.insert(0, format!("name: {dict_name}"));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn active_import_exists(content: &str, import_name: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#')
+            && trimmed
+                .strip_prefix("-")
+                .map(|rest| rest.trim().split_whitespace().next() == Some(import_name))
+                .unwrap_or(false)
+    })
+}
+
+fn ensure_import_table_entry(path: &Path, import_name: &str) -> Result<bool, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取词典导入表失败 {}: {e}", path.display()))?;
+    if active_import_exists(&content, import_name) {
+        return Ok(false);
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(index) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("import_tables:"))
+    else {
+        return Ok(false);
+    };
+
+    let indent = lines
+        .iter()
+        .skip(index + 1)
+        .find_map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("-") && !trimmed.starts_with("#") {
+                Some(line.len() - trimmed.len())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(2);
+
+    let mut output = Vec::with_capacity(lines.len() + 1);
+    for (line_index, line) in lines.iter().enumerate() {
+        output.push((*line).to_string());
+        if line_index == index {
+            output.push(format!("{}- {import_name}", " ".repeat(indent)));
+        }
+    }
+
+    std::fs::write(path, format!("{}\n", output.join("\n")))
+        .map_err(|e| format!("写入词典导入表失败 {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
+    let mut patched = false;
+    let entries = std::fs::read_dir(root).map_err(|e| format!("读取输入法目录失败: {e}"))?;
+    for entry in entries.filter_map(|item| item.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(filename.ends_with(".extended.dict.yaml") || filename == "keytao.extended.dict.yaml") {
+            continue;
+        }
+
+        let import_name = if filename.starts_with("keytao") {
+            "keytao.user"
+        } else {
+            "user"
+        };
+        patched |= ensure_import_table_entry(&path, import_name)?;
+    }
+    Ok(patched)
+}
+
+fn default_keytao_user_root<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        android_keytao_root(app)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        ios_keytao_root(app)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory".into())
+    }
+}
+
+fn write_default_reload_stamp<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        write_android_reload_stamp(root).map(Some)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = app;
+        write_ios_reload_stamp(root).map(Some)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        write_keytao_ime_reload_stamp().map(|()| Some(root.join(IME_RELOAD_STAMP_FILE)))
+    }
+}
+
+#[tauri::command]
+async fn sync_user_dictionary<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    token: String,
+) -> Result<UserDictionarySyncResult, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先登录 KeyTao 账号".into());
+    }
+
+    let client = build_client(&app)?;
+    let response = client
+        .get(format!("{API_BASE}/api/user/dictionary/export"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("同步用户词库失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "同步用户词库失败").await);
+    }
+
+    let export = response
+        .json::<UserDictionaryExportResponse>()
+        .await
+        .map_err(|e| format!("解析用户词库失败: {e}"))?;
+    let root = default_keytao_user_root(&app)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("创建输入法目录失败: {e}"))?;
+
+    let keytao_path = root.join("keytao.user.dict.yaml");
+    let generic_path = root.join("user.dict.yaml");
+    std::fs::write(&keytao_path, export.content.as_bytes())
+        .map_err(|e| format!("写入用户词库失败 {}: {e}", keytao_path.display()))?;
+    let generic_content = with_user_dict_name(&export.content, "user");
+    std::fs::write(&generic_path, generic_content.as_bytes())
+        .map_err(|e| format!("写入通用用户词库失败 {}: {e}", generic_path.display()))?;
+
+    let import_table_patched = ensure_user_dictionary_imports(&root)?;
+    let reload_stamp_path = write_default_reload_stamp(&app, &root)?.map(path_string);
+
+    Ok(UserDictionarySyncResult {
+        file_name: export.file_name,
+        path: path_string(keytao_path),
+        generic_file_name: "user.dict.yaml".into(),
+        generic_path: path_string(generic_path),
+        count: export.count,
+        updated_at: export.updated_at,
+        import_table_patched,
+        reload_stamp_path,
+        message: format!("已同步 {} 条用户词条", export.count),
+    })
+}
+
 fn rime_default_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -2561,6 +2904,7 @@ pub struct AndroidStoragePermissionStatus {
 pub struct AndroidImeInputSettings {
     pub haptics_enabled: bool,
     pub haptic_intensity: u8,
+    pub enter_key_behavior: String,
     pub config_path: Option<String>,
     pub reload_stamp_path: Option<String>,
     pub message: String,
@@ -3002,12 +3346,19 @@ fn write_android_reload_stamp(root: &Path) -> Result<PathBuf, String> {
     Ok(stamp)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn android_ime_config_path(root: &Path) -> PathBuf {
-    root.join("android_ime.json")
+    #[cfg(target_os = "ios")]
+    {
+        root.join("ios_ime.json")
+    }
+    #[cfg(target_os = "android")]
+    {
+        root.join("android_ime.json")
+    }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn read_android_ime_config(path: &Path) -> serde_json::Map<String, serde_json::Value> {
     std::fs::read_to_string(path)
         .ok()
@@ -3016,7 +3367,20 @@ fn read_android_ime_config(path: &Path) -> serde_json::Map<String, serde_json::V
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalize_enter_key_behavior(value: Option<&str>) -> String {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "newline" | "linebreak" | "line_break" => "newline".into(),
+        _ => "system".into(),
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn android_ime_haptics_settings_from_config(
     root: &Path,
     message: String,
@@ -3043,12 +3407,27 @@ fn android_ime_haptics_settings_from_config(
         })
         .unwrap_or(42)
         .clamp(1, 100) as u8;
+    let enter_key_behavior = normalize_enter_key_behavior(
+        config
+            .get("enterKeyBehavior")
+            .and_then(|value| value.as_str()),
+    );
 
     AndroidImeInputSettings {
         haptics_enabled,
         haptic_intensity,
+        enter_key_behavior,
         config_path: Some(path_string(path)),
-        reload_stamp_path: Some(path_string(android_reload_stamp_path(root))),
+        reload_stamp_path: Some(path_string({
+            #[cfg(target_os = "ios")]
+            {
+                ios_reload_stamp_path(root)
+            }
+            #[cfg(target_os = "android")]
+            {
+                android_reload_stamp_path(root)
+            }
+        })),
         message,
     }
 }
@@ -3065,10 +3444,18 @@ async fn get_android_ime_input_settings<R: tauri::Runtime>(
             "已读取 Android 输入反馈配置".into(),
         ))
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        let root = ios_keytao_root(&app)?;
+        Ok(android_ime_haptics_settings_from_config(
+            &root,
+            "已读取 iOS 输入反馈配置".into(),
+        ))
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Err("Android IME input settings are only available on Android".into())
+        Err("Mobile IME input settings are only available on Android and iOS".into())
     }
 }
 
@@ -3077,14 +3464,18 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     haptics_enabled: bool,
     haptic_intensity: u8,
+    enter_key_behavior: String,
 ) -> Result<AndroidImeInputSettings, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
+        #[cfg(target_os = "android")]
         let root = android_keytao_root(&app)?;
+        #[cfg(target_os = "ios")]
+        let root = ios_keytao_root(&app)?;
         let path = android_ime_config_path(&root);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建 Android 输入法配置目录失败: {e}"))?;
+                .map_err(|e| format!("创建移动端输入法配置目录失败: {e}"))?;
         }
         let mut config = read_android_ime_config(&path);
         let mut haptics = config
@@ -3098,27 +3489,46 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
             serde_json::Value::from(haptic_intensity.clamp(1, 100)),
         );
         config.insert("haptics".into(), serde_json::Value::Object(haptics));
+        config.insert(
+            "enterKeyBehavior".into(),
+            serde_json::Value::String(normalize_enter_key_behavior(Some(&enter_key_behavior))),
+        );
 
         let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
-            .map_err(|e| format!("序列化 Android 输入法配置失败: {e}"))?;
+            .map_err(|e| format!("序列化移动端输入法配置失败: {e}"))?;
         std::fs::write(&path, format!("{content}\n"))
-            .map_err(|e| format!("写入 Android 输入法配置失败 {}: {e}", path.display()))?;
+            .map_err(|e| format!("写入移动端输入法配置失败 {}: {e}", path.display()))?;
 
-        let message = match write_android_reload_stamp(&root) {
+        #[cfg(target_os = "android")]
+        let reload_result = write_android_reload_stamp(&root);
+        #[cfg(target_os = "ios")]
+        let reload_result = write_ios_reload_stamp(&root);
+        let platform = {
+            #[cfg(target_os = "android")]
+            {
+                "Android"
+            }
+            #[cfg(target_os = "ios")]
+            {
+                "iOS"
+            }
+        };
+        let message = match reload_result {
             Ok(stamp) => format!(
-                "已保存 Android 输入反馈配置并通知输入法重载：{}",
+                "已保存 {platform} 输入反馈配置并通知输入法重载：{}",
                 stamp.display()
             ),
-            Err(e) => format!("已保存 Android 输入反馈配置，但输入法重载通知失败：{e}"),
+            Err(e) => format!("已保存 {platform} 输入反馈配置，但输入法重载通知失败：{e}"),
         };
         Ok(android_ime_haptics_settings_from_config(&root, message))
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         let _ = haptics_enabled;
         let _ = haptic_intensity;
-        Err("Android IME input settings are only available on Android".into())
+        let _ = enter_key_behavior;
+        Err("Mobile IME input settings are only available on Android and iOS".into())
     }
 }
 
@@ -4617,6 +5027,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_app_update,
             fetch_latest_release,
+            fetch_scheme_release,
+            keytao_login,
+            keytao_me,
+            sync_user_dictionary,
             get_component_versions,
             select_directory,
             download_to_temp,

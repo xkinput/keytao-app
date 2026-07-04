@@ -180,6 +180,20 @@ public struct KeyTaoKeyboardLayer: Equatable {
     public static let symbols = KeyTaoKeyboardLayer("symbols")
 }
 
+public enum KeyTaoEnterKeyBehavior {
+    public static let system = "system"
+    public static let newline = "newline"
+
+    public static func normalize(_ value: String?) -> String {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "newline", "linebreak", "line_break":
+            return newline
+        default:
+            return system
+        }
+    }
+}
+
 public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var keyboardHeightDp: CGFloat
     public var candidateBarHeightDp: CGFloat
@@ -190,6 +204,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var maxKeyHeightDp: CGFloat
     public var hapticsEnabled: Bool
     public var hapticIntensity: Int
+    public var enterKeyBehavior: String
     public var swipeThresholdDp: CGFloat
     public var rows: [[KeyTaoKeySpec]]
     public var numberRows: [[KeyTaoKeySpec]]
@@ -207,6 +222,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case haptics
         case hapticsEnabled
         case hapticIntensity
+        case enterKeyBehavior
         case swipeThresholdDp
         case rows
         case numberRows
@@ -231,6 +247,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         maxKeyHeightDp: CGFloat,
         hapticsEnabled: Bool,
         hapticIntensity: Int,
+        enterKeyBehavior: String = KeyTaoEnterKeyBehavior.system,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
         numberRows: [[KeyTaoKeySpec]],
@@ -246,6 +263,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.maxKeyHeightDp = Self.clamp(maxKeyHeightDp, min: 36, max: 84)
         self.hapticsEnabled = hapticsEnabled
         self.hapticIntensity = hapticIntensity
+        self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(enterKeyBehavior)
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
         self.numberRows = Self.normalizeNumberRows(numberRows)
@@ -300,6 +318,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 ?? Self.fallback.hapticIntensity,
             min: 1,
             max: 100
+        )
+        self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(
+            try? container.decode(String.self, forKey: .enterKeyBehavior)
         )
         self.swipeThresholdDp = Self.clamp(
             (try? container.decode(CGFloat.self, forKey: .swipeThresholdDp)) ?? Self.fallback.swipeThresholdDp,
@@ -379,6 +400,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         var haptics = container.nestedContainer(keyedBy: HapticsCodingKeys.self, forKey: .haptics)
         try haptics.encode(hapticsEnabled, forKey: .enabled)
         try haptics.encode(hapticIntensity, forKey: .intensity)
+        try container.encode(enterKeyBehavior, forKey: .enterKeyBehavior)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
         try container.encode(numberRows, forKey: .numberRows)
@@ -412,6 +434,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             maxKeyHeightDp: keyboard.maxKeyHeight ?? Self.fallback.maxKeyHeightDp,
             hapticsEnabled: Self.fallback.hapticsEnabled,
             hapticIntensity: Self.fallback.hapticIntensity,
+            enterKeyBehavior: Self.fallback.enterKeyBehavior,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -436,6 +459,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             maxKeyHeightDp: keyboard.maxKeyHeight ?? Self.fallback.maxKeyHeightDp,
             hapticsEnabled: Self.fallback.hapticsEnabled,
             hapticIntensity: Self.fallback.hapticIntensity,
+            enterKeyBehavior: Self.fallback.enterKeyBehavior,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -522,6 +546,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         maxKeyHeightDp: 54,
         hapticsEnabled: true,
         hapticIntensity: 42,
+        enterKeyBehavior: KeyTaoEnterKeyBehavior.system,
         swipeThresholdDp: 34,
         rows: [
             "qwertyuiop".map { KeyTaoKeySpec(label: String($0), value: String($0), rimeValue: nil, hint: nil, weight: nil, style: nil, action: nil, swipeUp: nil, swipeDown: nil, longPress: nil, asciiLongPress: nil, asciiLabel: nil, asciiValue: nil, asciiAction: nil) },

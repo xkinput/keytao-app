@@ -332,6 +332,22 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func handleEnter() {
+        let behavior = keyboardView?.currentConfig().enterKeyBehavior ?? KeyTaoEnterKeyBehavior.system
+        if behavior == KeyTaoEnterKeyBehavior.newline {
+            commitLineBreak()
+        } else {
+            performSystemEnter()
+        }
+    }
+
+    private func commitLineBreak() {
+        if currentState.hasComposition {
+            apply(engine.reset())
+        }
+        textDocumentProxy.insertText("\n")
+    }
+
+    private func performSystemEnter() {
         if currentState.hasComposition {
             apply(engine.processKey(rimeKeyReturn))
         } else {
