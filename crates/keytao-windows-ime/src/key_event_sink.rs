@@ -168,6 +168,7 @@ fn apply_ime_state(
     show_mode_hint_on_change: bool,
 ) -> Result<()> {
     let state_arc = Arc::clone(shared_state);
+    let state_arc_for_session = Arc::clone(&state_arc);
     let ime_state_clone = ime_state.clone();
     let window_update = Arc::new(Mutex::new(None));
     let window_update_for_session = Arc::clone(&window_update);
@@ -184,7 +185,7 @@ fn apply_ime_state(
         let has_commit = committed.is_some();
 
         let mut composition = {
-            let mut st = state_arc.lock().unwrap();
+            let mut st = state_arc_for_session.lock().unwrap();
             st.composition.take()
         };
 
@@ -215,7 +216,7 @@ fn apply_ime_state(
 
         let (cx, cy) = caret_screen_pos(ec, ctx);
         let mode_changed = {
-            let mut st = state_arc.lock().unwrap();
+            let mut st = state_arc_for_session.lock().unwrap();
             st.composition = composition;
             let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
             st.ascii_mode = ime_state_clone.ascii_mode;
