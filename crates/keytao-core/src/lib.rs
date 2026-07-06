@@ -729,7 +729,12 @@ mod desktop {
     impl Engine {
         /// Create a new session. `deploy()` must have succeeded first.
         pub fn new() -> Result<Self, String> {
+            Self::new_with_user_data_dir(None)
+        }
+
+        pub(crate) fn new_with_user_data_dir(user_data_dir: Option<&Path>) -> Result<Self, String> {
             let session = create_session().map_err(|e| format!("{e:?}"))?;
+            select_preferred_schema(&session, user_data_dir);
             Ok(Self { session })
         }
 
@@ -802,14 +807,31 @@ mod desktop {
         }
 
         pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
-            let option = CString::new("ascii_mode").expect("static string is valid CString");
-            unsafe {
-                let api = rime_get_api();
-                if let Some(set_option) = (*api).set_option {
-                    set_option(self.session.session_id, option.as_ptr(), i32::from(enabled));
-                }
-            }
+            set_session_option(&self.session, "ascii_mode", enabled);
             extract_state(&self.session)
+        }
+    }
+
+    fn select_preferred_schema(session: &rime_api::Session, user_data_dir: Option<&Path>) {
+        let Some(schema) = preferred_schema_id(user_data_dir) else {
+            return;
+        };
+        if let Err(error) = session.select_schema(&schema) {
+            eprintln!("KeyTao: failed to select preferred schema {schema}: {error:?}");
+        } else {
+            set_session_option(session, "ascii_mode", false);
+        }
+    }
+
+    fn set_session_option(session: &rime_api::Session, option_name: &str, enabled: bool) {
+        let Ok(option) = CString::new(option_name) else {
+            return;
+        };
+        unsafe {
+            let api = rime_get_api();
+            if let Some(set_option) = (*api).set_option {
+                set_option(session.session_id, option.as_ptr(), i32::from(enabled));
+            }
         }
     }
 
@@ -1246,7 +1268,7 @@ impl ImeRuntime {
         Ok(ImeRuntimeSession {
             shared: self.0.clone(),
             inner: Arc::new(Mutex::new(ImeRuntimeSessionInner {
-                engine: Engine::new()?,
+                engine: Engine::new_with_user_data_dir(self.0.user_data_dir.as_deref())?,
                 generation,
             })),
         })
@@ -1350,7 +1372,7 @@ impl ImeRuntimeSession {
         if inner.generation == current {
             return Ok(());
         }
-        inner.engine = Engine::new()?;
+        inner.engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
         inner.generation = current;
         Ok(())
     }
@@ -1364,6 +1386,43 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
     std::fs::read_to_string(base.join("default.custom.yaml"))
         .ok()
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
+}
+
+fn preferred_schema_id(user_data_dir: Option<&Path>) -> Option<String> {
+    if let Some(dir) = user_data_dir {
+        if let Some(schema) = preferred_schema_id_from_dir(dir) {
+            return Some(schema);
+        }
+    }
+    default_user_data_dir().and_then(|dir| preferred_schema_id_from_dir(&dir))
+}
+
+fn preferred_schema_id_from_dir(dir: &Path) -> Option<String> {
+    [
+        dir.join("default.custom.yaml"),
+        dir.join("default-custom.yaml"),
+        dir.join("build/default.yaml"),
+        dir.join("default.yaml"),
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::read_to_string(path).ok())
+    .find_map(|content| preferred_schema_from_list(parse_schema_list(&content)))
+}
+
+fn preferred_schema_from_list(schemas: Vec<String>) -> Option<String> {
+    let mut first_schema = None;
+    for schema in schemas {
+        if schema.trim().is_empty() {
+            continue;
+        }
+        if first_schema.is_none() {
+            first_schema = Some(schema.clone());
+        }
+        if is_keytao_managed_schema(&schema) {
+            return Some(schema);
+        }
+    }
+    first_schema
 }
 
 #[cfg(any(
@@ -1471,11 +1530,31 @@ fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
-fn merge_yaml_mapping(existing: &Mapping, package: &Mapping) -> Mapping {
+fn is_managed_default_patch_key(key: &str) -> bool {
+    matches!(
+        key,
+        "schema_list"
+            | "switcher"
+            | "menu"
+            | "ascii_composer"
+            | "recognizer"
+            | "key_binder"
+            | "punctuator"
+            | "selector"
+    ) || key.starts_with("menu/")
+        || key.starts_with("ascii_composer/")
+        || key.starts_with("recognizer/")
+        || key.starts_with("key_binder/")
+        || key.starts_with("punctuator/")
+        || key.starts_with("selector/")
+}
+
+fn merge_yaml_mapping(existing: &Mapping, package: &Mapping, inside_patch: bool) -> Mapping {
     let mut merged = package.clone();
 
     for (key, existing_value) in existing {
-        match (key.as_str(), package.get(key)) {
+        let key_name = key.as_str();
+        match (key_name, package.get(key)) {
             (Some("schema_list"), Some(package_value)) => {
                 let package_schemas = schema_list_from_yaml(Some(package_value));
                 let user_schemas: Vec<String> = schema_list_from_yaml(Some(existing_value))
@@ -1486,11 +1565,18 @@ fn merge_yaml_mapping(existing: &Mapping, package: &Mapping) -> Mapping {
                     dedupe_schemas(user_schemas.iter().chain(package_schemas.iter()).cloned());
                 merged.insert(key.clone(), make_schema_list_value(&merged_schemas));
             }
+            (Some(key_name), Some(_)) if inside_patch && is_managed_default_patch_key(key_name) => {
+            }
+            (Some(key_name), None) if inside_patch && is_managed_default_patch_key(key_name) => {}
             (_, Some(Value::Mapping(package_map))) => {
                 if let Value::Mapping(existing_map) = existing_value {
                     merged.insert(
                         key.clone(),
-                        Value::Mapping(merge_yaml_mapping(existing_map, package_map)),
+                        Value::Mapping(merge_yaml_mapping(
+                            existing_map,
+                            package_map,
+                            key_name == Some("patch"),
+                        )),
                     );
                 }
             }
@@ -1562,7 +1648,7 @@ pub fn merge_default_custom_content(
     let merged_yaml = if let Some(existing) = existing {
         match serde_yaml::from_str::<Value>(existing) {
             Ok(Value::Mapping(existing_mapping)) => {
-                Value::Mapping(merge_yaml_mapping(&existing_mapping, &package_yaml))
+                Value::Mapping(merge_yaml_mapping(&existing_mapping, &package_yaml, false))
             }
             _ => Value::Mapping(package_yaml.clone()),
         }
@@ -2019,15 +2105,43 @@ pub fn has_schemas(dir: &Path) -> bool {
 mod tests {
     use super::{
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
-        parse_schema_list, rime_build_dirs, rime_log_dir,
+        parse_schema_list, preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir,
     };
     use std::collections::HashSet;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parse_schema_list_reads_schema_entries() {
         let content = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: foo\n";
         assert_eq!(parse_schema_list(content), vec!["keytao", "foo"]);
+    }
+
+    #[test]
+    fn preferred_schema_id_reads_current_user_schema() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-core-schema-test-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("build/default.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: xmjd6\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            preferred_schema_id_from_dir(&dir),
+            Some("xmjd6".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2057,13 +2171,17 @@ mod tests {
     }
 
     #[test]
-    fn merge_default_custom_preserves_other_patch_keys() {
-        let existing = "patch:\n  menu:\n    page_size: 9\n  ascii_composer:\n    switch_key:\n      Caps_Lock: noop\n  schema_list:\n    - schema: user_schema\n";
-        let package = "patch:\n  menu:\n    page_size: 6\n  schema_list:\n    - schema: keytao\n";
+    fn merge_default_custom_keeps_user_keys_and_replaces_managed_patch_keys() {
+        let existing = "patch:\n  custom_user_patch: true\n  menu:\n    page_size: 9\n  ascii_composer:\n    switch_key:\n      Caps_Lock: noop\n  ascii_composer/good_old_caps_lock: true\n  schema_list:\n    - schema: user_schema\n    - schema: keydo\n";
+        let package = "patch:\n  switcher:\n    caption: current\n  menu:\n    page_size: 6\n  schema_list:\n    - schema: txjx\n";
         let (merged, _) = merge_default_custom_content(Some(existing), package).unwrap();
-        assert!(merged.contains("switch_key"));
-        assert!(merged.contains("Caps_Lock"));
+        assert!(merged.contains("custom_user_patch: true"));
         assert!(merged.contains("page_size: 6"));
+        assert!(merged.contains("- schema: user_schema"));
+        assert!(merged.contains("- schema: txjx"));
+        assert!(!merged.contains("Caps_Lock"));
+        assert!(!merged.contains("good_old_caps_lock"));
+        assert!(!merged.contains("- schema: keydo"));
     }
 
     #[test]

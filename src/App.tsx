@@ -82,6 +82,17 @@ const SCHEME_OPTIONS: Array<{ key: SchemeKey; label: string; asset: string }> = 
   { key: "keydo", label: "键道·我流", asset: "nightly zip" },
 ]
 
+function schemeKeyFromSchemas(schemas: string[]): SchemeKey | null {
+  for (const schema of schemas) {
+    const normalized = schema.trim().toLowerCase()
+    if (normalized.startsWith("xmjd6")) return "xmjd"
+    if (normalized.startsWith("txjx")) return "txjx"
+    if (normalized.startsWith("keydo")) return "keydo"
+    if (normalized.startsWith("keytao")) return "keytao"
+  }
+  return null
+}
+
 function hasSystemIme(os: OSType): boolean {
   return os === "linux" || os === "macos" || os === "windows" || os === "android" || os === "ios"
 }
@@ -145,8 +156,6 @@ interface AppAuthSession {
 interface UserDictionarySyncResult {
   file_name: string
   path: string
-  generic_file_name: string
-  generic_path: string
   count: number
   updated_at: string
   import_table_patched: boolean
@@ -368,6 +377,7 @@ export default function App() {
   const [downloadSource, setDownloadSource] = useState<DownloadSource>("gitee")
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
   const [selectedSchemeKey, setSelectedSchemeKey] = useState<SchemeKey>("keytao")
+  const hasManualSchemeSelectionRef = useRef(false)
   const [schemeReleaseInfo, setSchemeReleaseInfo] = useState<SchemeReleaseInfo | null>(null)
   const [schemeReleaseError, setSchemeReleaseError] = useState<string | null>(null)
   const [isFetchingSchemeRelease, setIsFetchingSchemeRelease] = useState(false)
@@ -517,6 +527,13 @@ export default function App() {
       .catch((e) => setSchemeReleaseError(String(e)))
       .finally(() => setIsFetchingSchemeRelease(false))
   }, [selectedSchemeKey])
+
+  useEffect(() => {
+    if (hasManualSchemeSelectionRef.current) return
+    const detectedSchemeKey = schemeKeyFromSchemas(localSchemaInfo?.schemas ?? [])
+    if (!detectedSchemeKey) return
+    setSelectedSchemeKey((current) => current === detectedSchemeKey ? current : detectedSchemeKey)
+  }, [localSchemaInfo?.schemas.join(",")])
 
   useEffect(() => {
     const p = platform()
@@ -692,6 +709,8 @@ export default function App() {
 
   const activePlatform = downloadSource === "gitee" ? releaseInfo?.gitee : releaseInfo?.github
   const downloadUrl = activePlatform?.download_urls?.[osType as keyof PlatformRelease["download_urls"]]
+  const installedSchemeKey = schemeKeyFromSchemas(localSchemaInfo?.schemas ?? [])
+  const installedScheme = installedSchemeKey ? SCHEME_OPTIONS.find((scheme) => scheme.key === installedSchemeKey) : null
   const selectedScheme = SCHEME_OPTIONS.find((scheme) => scheme.key === selectedSchemeKey) ?? SCHEME_OPTIONS[0]
   const selectedSchemeDownloadUrl = selectedSchemeKey === "keytao" ? downloadUrl : schemeReleaseInfo?.downloadUrl
   const selectedSchemeVersion = selectedSchemeKey === "keytao" ? activePlatform?.version : schemeReleaseInfo?.version
@@ -1091,7 +1110,6 @@ export default function App() {
       addLogs([
         `[USER DICT] ${result.message}`,
         `[USER DICT] ${result.path}`,
-        `[USER DICT] ${result.generic_path}`,
         result.import_table_patched ? "[USER DICT] 已更新词典导入表" : "[USER DICT] 词典导入表已就绪",
       ])
       await handleDeploy()
@@ -1823,7 +1841,10 @@ export default function App() {
                           type="button"
                           variant={selected ? "secondary" : "outline"}
                           size="sm"
-                          onClick={() => setSelectedSchemeKey(scheme.key)}
+                          onClick={() => {
+                            hasManualSchemeSelectionRef.current = true
+                            setSelectedSchemeKey(scheme.key)
+                          }}
                           disabled={isInstalling || isDeploying || isFetchingSchemeRelease}
                           className="h-10 min-w-0 flex-col gap-0 px-2"
                           title={scheme.asset}
@@ -1838,7 +1859,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 border border-border rounded-lg px-3 py-2">
                     <Download className="h-3.5 w-3.5 shrink-0" />
-                    <span className="shrink-0">当前：</span>
+                    <span className="shrink-0">选择：</span>
                     <span className="min-w-0 truncate">
                       {selectedScheme.label}
                       {selectedSchemeVersion ? ` ${selectedSchemeVersion}` : ""}
@@ -1895,7 +1916,7 @@ export default function App() {
                             }
                             <span>
                               {localSchemaInfo.installed
-                                ? `已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}`
+                                ? `已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}${installedScheme ? ` · ${installedScheme.label}` : ""}`
                                 : "未检测到已安装的键道方案"
                               }
                               {localSchemaInfo.installed && localSchemaInfo.schemas.length > 0 && (

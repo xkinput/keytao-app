@@ -299,7 +299,39 @@ COPYFILE_DISABLE=1 pkgbuild \
     --install-location "/" \
     "$PKG_BUILD_DIR/KeyTao.pkg"
 
+PKG_OUTPUT="$PKG_BUILD_DIR/KeyTao.pkg"
+PKG_REPACK_DIR="$PKG_BUILD_DIR/repack"
+PKG_EXPANDED_DIR="$PKG_REPACK_DIR/expanded"
+PKG_FLAT_DIR="$PKG_REPACK_DIR/flat"
+PKG_CLEAN_OUTPUT="$PKG_REPACK_DIR/KeyTao.clean.pkg"
+
+echo "==> Removing AppleDouble metadata from installer pkg..."
+rm -rf "$PKG_REPACK_DIR"
+mkdir -p "$PKG_FLAT_DIR"
+pkgutil --expand "$PKG_OUTPUT" "$PKG_EXPANDED_DIR"
+cp "$PKG_EXPANDED_DIR/PackageInfo" "$PKG_FLAT_DIR/PackageInfo"
+mkbom -s "$PKG_PAYLOAD" "$PKG_FLAT_DIR/Bom"
+(
+    cd "$PKG_PAYLOAD"
+    find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
+) > "$PKG_FLAT_DIR/Payload"
+(
+    cd "$PKG_SCRIPTS"
+    find . -print | LC_ALL=C sort | COPYFILE_DISABLE=1 cpio -o --format odc 2>/dev/null | gzip -c
+) > "$PKG_FLAT_DIR/Scripts"
+(
+    cd "$PKG_FLAT_DIR"
+    xar --compression gzip \
+        --no-compress='Payload' \
+        --no-compress='Scripts' \
+        --prop-exclude='.*' \
+        -cf "$PKG_CLEAN_OUTPUT" \
+        Bom Payload Scripts PackageInfo
+)
+mv "$PKG_CLEAN_OUTPUT" "$PKG_OUTPUT"
+rm -rf "$PKG_REPACK_DIR"
+
 echo ""
-echo "==> pkg complete: $PKG_BUILD_DIR/KeyTao.pkg"
+echo "==> pkg complete: $PKG_OUTPUT"
 echo "    /Applications/KeyTao.app"
 echo "    /Library/Input Methods/KeyTao.app"

@@ -100,8 +100,6 @@ struct UserDictionaryExportResponse {
 pub struct UserDictionarySyncResult {
     pub file_name: String,
     pub path: String,
-    pub generic_file_name: String,
-    pub generic_path: String,
     pub count: usize,
     pub updated_at: String,
     pub import_table_patched: bool,
@@ -1893,23 +1891,6 @@ async fn keytao_me(app: AppHandle, token: String) -> Result<AppAuthUser, String>
         .map_err(|e| format!("解析账号信息失败: {e}"))
 }
 
-fn with_user_dict_name(content: &str, dict_name: &str) -> String {
-    let mut replaced = false;
-    let mut lines = Vec::new();
-    for line in content.lines() {
-        if !replaced && line.trim_start().starts_with("name:") {
-            lines.push(format!("name: {dict_name}"));
-            replaced = true;
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-    if !replaced {
-        lines.insert(0, format!("name: {dict_name}"));
-    }
-    format!("{}\n", lines.join("\n"))
-}
-
 fn active_import_exists(content: &str, import_name: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim_start();
@@ -1973,16 +1954,11 @@ fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
         let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !(filename.ends_with(".extended.dict.yaml") || filename == "keytao.extended.dict.yaml") {
+        if !(filename.starts_with("keytao") && filename.ends_with(".extended.dict.yaml")) {
             continue;
         }
 
-        let import_name = if filename.starts_with("keytao") {
-            "keytao.user"
-        } else {
-            "user"
-        };
-        patched |= ensure_import_table_entry(&path, import_name)?;
+        patched |= ensure_import_table_entry(&path, "keytao.user")?;
     }
     Ok(patched)
 }
@@ -2057,12 +2033,8 @@ async fn sync_user_dictionary<R: tauri::Runtime>(
     std::fs::create_dir_all(&root).map_err(|e| format!("创建输入法目录失败: {e}"))?;
 
     let keytao_path = root.join("keytao.user.dict.yaml");
-    let generic_path = root.join("user.dict.yaml");
     std::fs::write(&keytao_path, export.content.as_bytes())
         .map_err(|e| format!("写入用户词库失败 {}: {e}", keytao_path.display()))?;
-    let generic_content = with_user_dict_name(&export.content, "user");
-    std::fs::write(&generic_path, generic_content.as_bytes())
-        .map_err(|e| format!("写入通用用户词库失败 {}: {e}", generic_path.display()))?;
 
     let import_table_patched = ensure_user_dictionary_imports(&root)?;
     let reload_stamp_path = write_default_reload_stamp(&app, &root)?.map(path_string);
@@ -2070,8 +2042,6 @@ async fn sync_user_dictionary<R: tauri::Runtime>(
     Ok(UserDictionarySyncResult {
         file_name: export.file_name,
         path: path_string(keytao_path),
-        generic_file_name: "user.dict.yaml".into(),
-        generic_path: path_string(generic_path),
         count: export.count,
         updated_at: export.updated_at,
         import_table_patched,
@@ -5360,6 +5330,35 @@ mod tests {
         assert!(merged.contains("- schema: txjx"));
         assert!(!merged.contains("- schema: keytao"));
         assert!(!merged.contains("- schema: xmjd6"));
+    }
+
+    #[test]
+    fn test_user_dictionary_imports_only_patch_keytao_extended_dicts() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-user-dict-import-test-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("keytao.extended.dict.yaml"),
+            "name: keytao.extended\nimport_tables:\n  - keytao.phrase\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("txjx.extended.dict.yaml"),
+            "name: txjx.extended\nimport_tables:\n  - txjx.core\n",
+        )
+        .unwrap();
+
+        assert!(ensure_user_dictionary_imports(&dir).unwrap());
+        let keytao = std::fs::read_to_string(dir.join("keytao.extended.dict.yaml")).unwrap();
+        let txjx = std::fs::read_to_string(dir.join("txjx.extended.dict.yaml")).unwrap();
+        assert!(keytao.contains("- keytao.user"));
+        assert!(!txjx.contains("- user"));
+        assert!(!txjx.contains("- keytao.user"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ── real keytao rime.lua ──────────────────────────────────────────────────
