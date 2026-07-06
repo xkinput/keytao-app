@@ -1255,6 +1255,10 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         && runtime_dir
             .as_ref()
             .is_some_and(|dir| dir.join("default-theme.yaml").is_file());
+    let packaged = packaged
+        && runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("keytao.ico").is_file());
     let registered_dll = match (&dll_path, &registered_path) {
         (Some(dll), Some(path)) => {
             let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());

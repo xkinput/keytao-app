@@ -15,12 +15,14 @@
     SetRegView 64
     ${DisableX64FSRedirection}
   ${EndIf}
-  Exec '"$WINDIR\System32\regsvr32.exe" /s "${KEYTAO_IME_DLL}"'
+  ExecWait '"$WINDIR\System32\regsvr32.exe" /s "${KEYTAO_IME_DLL}"' $0
   ${If} ${RunningX64}
     ${EnableX64FSRedirection}
   ${EndIf}
   ${If} ${Errors}
     DetailPrint "KeyTao input method registration will be retried by the app."
+  ${ElseIf} $0 != 0
+    DetailPrint "KeyTao input method registration failed with exit code $0; it will be retried by the app."
   ${EndIf}
 !macroend
 

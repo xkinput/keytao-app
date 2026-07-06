@@ -38,7 +38,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
         }
         let state = new_shared_state();
         obj_add();
-        let ts: ITfTextInputProcessor = TextService { state }.into();
+        let ts: ITfTextInputProcessorEx = TextService { state }.into();
         unsafe {
             ts.query(riid, ppvobject).ok()?;
             Ok(())
@@ -53,7 +53,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
 
 // ── ITfTextInputProcessor ─────────────────────────────────────────────────────
 
-#[implement(ITfTextInputProcessor)]
+#[implement(ITfTextInputProcessor, ITfTextInputProcessorEx)]
 pub(crate) struct TextService {
     state: SharedState,
 }
@@ -135,5 +135,11 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         tracing::info!("KeyTao TSF deactivated");
         Ok(())
+    }
+}
+
+impl ITfTextInputProcessorEx_Impl for TextService_Impl {
+    fn ActivateEx(&self, ptim: Option<&ITfThreadMgr>, tid: u32, _flags: u32) -> Result<()> {
+        self.Activate(ptim, tid)
     }
 }

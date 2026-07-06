@@ -8,6 +8,8 @@
 //! Run: regsvr32 keytao_windows_ime.dll
 //! Undo: regsvr32 /u keytao_windows_ime.dll
 
+use std::path::{Path, PathBuf};
+
 use windows::{
     core::{Error, IUnknown, Interface, Result, HRESULT, PCWSTR},
     Win32::{
@@ -23,10 +25,10 @@ use windows::{
         UI::Input::KeyboardAndMouse::HKL,
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
-            ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
-            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-            GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE, TF_IPP_FLAG_ENABLED,
-            TF_PROFILETYPE_INPUTPROCESSOR,
+            ITfInputProcessorProfileMgr, ITfInputProcessorProfiles, GUID_TFCAT_CATEGORY_OF_TIP,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            GUID_TFCAT_TIPCAP_UIELEMENTENABLED, GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
+            TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR,
         },
     },
 };
@@ -77,24 +79,54 @@ fn error_message(message: impl Into<String>) -> Error {
     Error::new(HRESULT(0x80004005u32 as i32), message.into())
 }
 
+#[link(name = "input")]
+extern "system" {
+    #[link_name = "InstallLayoutOrTip"]
+    fn install_layout_or_tip(psz: PCWSTR, dw_flags: u32) -> BOOL;
+}
+
+const ILOT_UNINSTALL: u32 = 0x0000_0001;
+
+struct CategoryRegistration {
+    category: windows::core::GUID,
+    item: windows::core::GUID,
+}
+
+fn category_registrations() -> [CategoryRegistration; 5] {
+    [
+        CategoryRegistration {
+            category: GUID_TFCAT_CATEGORY_OF_TIP,
+            item: GUID_TFCAT_TIP_KEYBOARD,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIP_KEYBOARD,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            item: CLSID_TEXT_SERVICE,
+        },
+    ]
+}
+
 unsafe fn register_categories(cat_mgr: &ITfCategoryMgr) -> Result<()> {
-    for category in [
-        GUID_TFCAT_TIP_KEYBOARD,
-        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-        GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-    ] {
-        cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE)?;
+    for entry in category_registrations() {
+        cat_mgr.RegisterCategory(&CLSID_TEXT_SERVICE, &entry.category, &entry.item)?;
     }
     Ok(())
 }
 
 unsafe fn unregister_categories(cat_mgr: &ITfCategoryMgr) {
-    for category in [
-        GUID_TFCAT_TIP_KEYBOARD,
-        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-        GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-    ] {
-        let _ = cat_mgr.UnregisterCategory(&CLSID_TEXT_SERVICE, &category, &CLSID_TEXT_SERVICE);
+    for entry in category_registrations() {
+        let _ = cat_mgr.UnregisterCategory(&CLSID_TEXT_SERVICE, &entry.category, &entry.item);
     }
 }
 
@@ -159,6 +191,29 @@ unsafe fn register_profile(
     Ok(())
 }
 
+fn tip_install_string() -> String {
+    format!(
+        "0x{:04X}:{}{};",
+        LANGID_CHINESE_SIMPLIFIED,
+        guid_to_string(&CLSID_TEXT_SERVICE),
+        guid_to_string(&GUID_PROFILE)
+    )
+}
+
+unsafe fn install_tip_for_current_user() -> Result<()> {
+    let tip = to_wide(&tip_install_string());
+    if install_layout_or_tip(PCWSTR(tip.as_ptr()), 0).as_bool() {
+        Ok(())
+    } else {
+        Err(Error::from_win32())
+    }
+}
+
+unsafe fn uninstall_tip_for_current_user() {
+    let tip = to_wide(&tip_install_string());
+    let _ = install_layout_or_tip(PCWSTR(tip.as_ptr()), ILOT_UNINSTALL);
+}
+
 unsafe fn ensure_profile_enabled(profile_mgr: &ITfInputProcessorProfileMgr) -> Result<()> {
     let mut profile = TF_INPUTPROCESSORPROFILE::default();
     profile_mgr.GetProfile(
@@ -220,6 +275,22 @@ fn dll_path() -> Result<String> {
     Ok(String::from_utf16_lossy(&buf[..len]))
 }
 
+fn profile_icon_path(dll: &str) -> Result<PathBuf> {
+    let dll_path = Path::new(dll);
+    let Some(dir) = dll_path.parent() else {
+        return Err(error_message("KeyTao TSF DLL path has no parent directory"));
+    };
+    let icon = dir.join("keytao.ico");
+    if icon.is_file() {
+        Ok(icon)
+    } else {
+        Err(error_message(format!(
+            "KeyTao TSF profile icon is missing: {}",
+            icon.display()
+        )))
+    }
+}
+
 // Public API
 
 pub fn register() -> Result<()> {
@@ -257,7 +328,8 @@ pub fn register() -> Result<()> {
             CLSCTX_INPROC_SERVER,
         )?;
         let profile_desc = to_wide("KeyTao");
-        let icon_path = to_wide(&dll);
+        let icon_path = profile_icon_path(&dll)?;
+        let icon_path = to_wide(&icon_path.to_string_lossy());
 
         let profile_mgr = profiles.cast::<ITfInputProcessorProfileMgr>().ok();
         register_profile(
@@ -272,6 +344,11 @@ pub fn register() -> Result<()> {
         if let Some(profile_mgr) = profile_mgr.as_ref() {
             ensure_profile_enabled(profile_mgr)?;
         }
+
+        // Add the TIP to the current user's enabled input methods. RegisterProfile
+        // creates the profile, but Windows does not necessarily make it selectable
+        // for the user until InstallLayoutOrTip is applied.
+        install_tip_for_current_user()?;
     }
 
     tracing::info!("KeyTao TSF registered (CLSID={})", clsid_str);
@@ -283,6 +360,8 @@ pub fn unregister() -> Result<()> {
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
     unsafe {
+        uninstall_tip_for_current_user();
+
         // Remove TSF registrations first
         let profiles: windows::core::Result<ITfInputProcessorProfiles> = CoCreateInstance(
             &CLSID_TF_InputProcessorProfiles,
