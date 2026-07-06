@@ -11,13 +11,14 @@
 use std::path::{Path, PathBuf};
 
 use windows::{
-    core::{Error, IUnknown, Interface, Result, HRESULT, PCWSTR},
+    core::{Error, IUnknown, Interface, Result, HRESULT, PCSTR, PCWSTR},
     Win32::{
-        Foundation::BOOL,
+        Foundation::{FreeLibrary, BOOL},
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
         },
+        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
         System::Registry::{
             RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
             KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -79,13 +80,9 @@ fn error_message(message: impl Into<String>) -> Error {
     Error::new(HRESULT(0x80004005u32 as i32), message.into())
 }
 
-#[link(name = "input")]
-extern "system" {
-    #[link_name = "InstallLayoutOrTip"]
-    fn install_layout_or_tip(psz: PCWSTR, dw_flags: u32) -> BOOL;
-}
-
 const ILOT_UNINSTALL: u32 = 0x0000_0001;
+
+type InstallLayoutOrTipFn = unsafe extern "system" fn(PCWSTR, u32) -> BOOL;
 
 struct CategoryRegistration {
     category: windows::core::GUID,
@@ -202,7 +199,7 @@ fn tip_install_string() -> String {
 
 unsafe fn install_tip_for_current_user() -> Result<()> {
     let tip = to_wide(&tip_install_string());
-    if install_layout_or_tip(PCWSTR(tip.as_ptr()), 0).as_bool() {
+    if call_install_layout_or_tip(PCWSTR(tip.as_ptr()), 0)?.as_bool() {
         Ok(())
     } else {
         Err(Error::from_win32())
@@ -211,7 +208,21 @@ unsafe fn install_tip_for_current_user() -> Result<()> {
 
 unsafe fn uninstall_tip_for_current_user() {
     let tip = to_wide(&tip_install_string());
-    let _ = install_layout_or_tip(PCWSTR(tip.as_ptr()), ILOT_UNINSTALL);
+    let _ = call_install_layout_or_tip(PCWSTR(tip.as_ptr()), ILOT_UNINSTALL);
+}
+
+unsafe fn call_install_layout_or_tip(tip: PCWSTR, flags: u32) -> Result<BOOL> {
+    let input_dll = to_wide("input.dll");
+    let module = LoadLibraryW(PCWSTR(input_dll.as_ptr()))?;
+    let Some(proc) = GetProcAddress(module, PCSTR(b"InstallLayoutOrTip\0".as_ptr())) else {
+        let error = Error::from_win32();
+        let _ = FreeLibrary(module);
+        return Err(error);
+    };
+    let install_layout_or_tip: InstallLayoutOrTipFn = std::mem::transmute(proc);
+    let result = install_layout_or_tip(tip, flags);
+    let _ = FreeLibrary(module);
+    Ok(result)
 }
 
 unsafe fn ensure_profile_enabled(profile_mgr: &ITfInputProcessorProfileMgr) -> Result<()> {
