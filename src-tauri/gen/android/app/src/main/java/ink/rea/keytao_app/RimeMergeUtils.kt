@@ -3,8 +3,21 @@ package ink.rea.keytao_app
 data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
 data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)
 
+private val managedSchemaPrefixes = listOf("keytao", "txjx", "xmjd6", "keydo")
+
 fun isDefaultCustom(filename: String) =
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
+
+private fun isManagedSchema(schema: String) =
+    managedSchemaPrefixes.any { schema.startsWith(it) }
+
+private fun dedupeSchemas(schemas: List<String>): List<String> {
+    val seen = linkedSetOf<String>()
+    for (schema in schemas) {
+        if (schema.isNotBlank()) seen.add(schema)
+    }
+    return seen.toList()
+}
 
 fun extractLuaRequire(line: String): String? {
     val pos = line.indexOf("require").takeIf { it >= 0 } ?: return null
@@ -97,11 +110,11 @@ fun mergeRimeLua(
 }
 
 fun mergeDefaultCustom(existing: String?, zipContent: String): MergeResult {
-    val keytaoSchemas = parseSchemas(zipContent).filter { it.startsWith("keytao") }
+    val packageSchemas = parseSchemas(zipContent)
     val userSchemas = existing?.let { c ->
-        parseSchemas(c).filter { !it.startsWith("keytao") }
+        parseSchemas(c).filter { !isManagedSchema(it) }
     } ?: emptyList()
-    val allSchemas = userSchemas + keytaoSchemas
+    val allSchemas = dedupeSchemas(userSchemas + packageSchemas)
 
     val out = StringBuilder()
     var inList = false

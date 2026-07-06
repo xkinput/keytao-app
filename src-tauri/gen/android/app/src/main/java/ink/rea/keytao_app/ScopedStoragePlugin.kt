@@ -184,7 +184,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
             val version = readFileFromTree(root, "version.txt")?.trim()?.takeIf { it.isNotEmpty() }
             val installed = arr.length() > 0
-                || root.findFile("keytao.schema.yaml") != null
+                || root.listFiles().any { it.isFile && it.name?.endsWith(".schema.yaml") == true }
 
             invoke.resolve(JSObject().apply {
                 put("schemas", arr)
@@ -562,7 +562,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                         verifyArray.put(JSObject().apply { put("path", path); put("ok", ok); put("note", note) })
                     }
                     addVerify("default.yaml", File(root, "default.yaml").isFile, "KeyTao IME shared data marker")
-                    addVerify("keytao.schema.yaml", File(root, "keytao.schema.yaml").isFile, "KeyTao schema")
+                    addVerify("*.schema.yaml", root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true, "Rime schema")
                     addVerify("keytao-ime.reload", KeytaoAndroidPaths.reloadStampFile().isFile, "reload stamp")
 
                     invoke.resolve(JSObject().apply {

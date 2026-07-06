@@ -121,12 +121,13 @@ class RimeMergeUtilsTest {
 
     @Test
     fun `mergeDefaultCustom excludes existing keytao schemas from user list`() {
-        val existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n"
+        val existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n    - schema: txjx\n"
         val zip      = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n"
         val result = mergeDefaultCustom(existing, zip)
         assertEquals(listOf("my_schema"), result.userSchemas)
         assertTrue(result.mergedContent.contains("- schema: keytao_b"))
         assertTrue(result.mergedContent.contains("- schema: keytao_bg"))
+        assertFalse(result.mergedContent.contains("- schema: txjx"))
     }
 
     @Test
@@ -135,6 +136,18 @@ class RimeMergeUtilsTest {
         val result = mergeDefaultCustom(null, zip)
         assertTrue(result.userSchemas.isEmpty())
         assertTrue(result.mergedContent.contains("- schema: keytao_b"))
+    }
+
+    @Test
+    fun `mergeDefaultCustom supports non-keytao scheme package`() {
+        val existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao\n    - schema: xmjd6\n"
+        val zip      = "patch:\n  schema_list:\n    - schema: txjx\n"
+        val result = mergeDefaultCustom(existing, zip)
+        assertEquals(listOf("my_schema"), result.userSchemas)
+        assertTrue(result.mergedContent.contains("- schema: my_schema"))
+        assertTrue(result.mergedContent.contains("- schema: txjx"))
+        assertFalse(result.mergedContent.contains("- schema: keytao"))
+        assertFalse(result.mergedContent.contains("- schema: xmjd6"))
     }
 
     @Test

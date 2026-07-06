@@ -2214,7 +2214,11 @@ fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, V
             .map(|c| {
                 parse_schema_list(c)
                     .into_iter()
-                    .filter(|s| !s.starts_with("keytao"))
+                    .filter(|s| {
+                        !["keytao", "txjx", "xmjd6", "keydo"]
+                            .iter()
+                            .any(|prefix| s.starts_with(prefix))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -4315,15 +4319,43 @@ fn check_local_schema<R: tauri::Runtime>(
         };
     };
 
-    let installed = dir.join("keytao.schema.yaml").exists()
-        || dir.join("build").join("keytao.table.bin").exists();
-
     let version = std::fs::read_to_string(dir.join("version.txt"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
     let schemas = read_local_schemas(dir.to_string_lossy().into_owned());
+    let has_schema_file = |base: &Path| {
+        std::fs::read_dir(base)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let path = entry.path();
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".schema.yaml"))
+            })
+    };
+    let has_build_artifact = std::fs::read_dir(dir.join("build"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| {
+            let path = entry.path();
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.ends_with(".schema.yaml") || name.ends_with(".table.bin")
+                    })
+        });
+    let installed = !schemas.is_empty() || has_schema_file(&dir) || has_build_artifact;
 
     LocalSchemaInfo {
         installed,
@@ -5299,12 +5331,14 @@ mod tests {
 
     #[test]
     fn test_merge_dc_excludes_user_keytao_schemas() {
-        let existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n";
+        let existing =
+            "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n    - schema: txjx\n";
         let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
         let (merged, user) = merge_default_custom(Some(existing), zip);
         assert_eq!(user, vec!["my_schema"]);
         assert!(merged.contains("- schema: keytao_b"));
         assert!(merged.contains("- schema: keytao_bg"));
+        assert!(!merged.contains("- schema: txjx"));
     }
 
     #[test]
@@ -5313,6 +5347,19 @@ mod tests {
         let (merged, user) = merge_default_custom(None, zip);
         assert!(user.is_empty());
         assert!(merged.contains("- schema: keytao_b"));
+    }
+
+    #[test]
+    fn test_merge_dc_supports_non_keytao_scheme_package() {
+        let existing =
+            "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao\n    - schema: xmjd6\n";
+        let zip = "patch:\n  schema_list:\n    - schema: txjx\n";
+        let (merged, user) = merge_default_custom(Some(existing), zip);
+        assert_eq!(user, vec!["my_schema"]);
+        assert!(merged.contains("- schema: my_schema"));
+        assert!(merged.contains("- schema: txjx"));
+        assert!(!merged.contains("- schema: keytao"));
+        assert!(!merged.contains("- schema: xmjd6"));
     }
 
     // ── real keytao rime.lua ──────────────────────────────────────────────────

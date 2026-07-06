@@ -23,9 +23,10 @@ object KeytaoAndroidPaths {
     fun rimeDataDir(): File = File(userRoot(), "rime-data")
 
     fun hasInstalledSchema(root: File = userRoot()): Boolean {
-        return File(root, "keytao.schema.yaml").isFile ||
+        return root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
             File(root, "default.custom.yaml").isFile ||
-            File(root, "build/keytao.table.bin").isFile
+            File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
+            File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".table.bin") } == true
     }
 
     fun isWritable(root: File = userRoot()): Boolean {

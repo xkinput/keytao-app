@@ -1456,25 +1456,34 @@ fn make_schema_list_value(schemas: &[String]) -> Value {
     )
 }
 
+fn is_keytao_managed_schema(schema: &str) -> bool {
+    ["keytao", "txjx", "xmjd6", "keydo"]
+        .iter()
+        .any(|prefix| schema.starts_with(prefix))
+}
+
+fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    schemas
+        .into_iter()
+        .filter(|schema| !schema.trim().is_empty())
+        .filter(|schema| seen.insert(schema.clone()))
+        .collect()
+}
+
 fn merge_yaml_mapping(existing: &Mapping, package: &Mapping) -> Mapping {
     let mut merged = package.clone();
 
     for (key, existing_value) in existing {
         match (key.as_str(), package.get(key)) {
             (Some("schema_list"), Some(package_value)) => {
-                let package_schemas: Vec<String> = schema_list_from_yaml(Some(package_value))
-                    .into_iter()
-                    .filter(|schema| schema.starts_with("keytao"))
-                    .collect();
+                let package_schemas = schema_list_from_yaml(Some(package_value));
                 let user_schemas: Vec<String> = schema_list_from_yaml(Some(existing_value))
                     .into_iter()
-                    .filter(|schema| !schema.starts_with("keytao"))
+                    .filter(|schema| !is_keytao_managed_schema(schema))
                     .collect();
-                let merged_schemas: Vec<String> = user_schemas
-                    .iter()
-                    .chain(package_schemas.iter())
-                    .cloned()
-                    .collect();
+                let merged_schemas =
+                    dedupe_schemas(user_schemas.iter().chain(package_schemas.iter()).cloned());
                 merged.insert(key.clone(), make_schema_list_value(&merged_schemas));
             }
             (_, Some(Value::Mapping(package_map))) => {
@@ -1499,23 +1508,16 @@ fn string_merge_default_custom(
     existing: Option<&str>,
     package_content: &str,
 ) -> (String, Vec<String>) {
-    let keytao_schemas: Vec<String> = parse_schema_list(package_content)
-        .into_iter()
-        .filter(|schema| schema.starts_with("keytao"))
-        .collect();
+    let package_schemas = parse_schema_list(package_content);
     let user_schemas: Vec<String> = existing
         .map(|content| {
             parse_schema_list(content)
                 .into_iter()
-                .filter(|schema| !schema.starts_with("keytao"))
+                .filter(|schema| !is_keytao_managed_schema(schema))
                 .collect()
         })
         .unwrap_or_default();
-    let merged_schemas: Vec<String> = user_schemas
-        .iter()
-        .chain(keytao_schemas.iter())
-        .cloned()
-        .collect();
+    let merged_schemas = dedupe_schemas(user_schemas.iter().chain(package_schemas.iter()).cloned());
 
     let mut out = String::new();
     let mut in_list = false;
@@ -1554,7 +1556,7 @@ pub fn merge_default_custom_content(
         .map(parse_schema_list)
         .unwrap_or_default()
         .into_iter()
-        .filter(|schema| !schema.starts_with("keytao"))
+        .filter(|schema| !is_keytao_managed_schema(schema))
         .collect();
 
     let merged_yaml = if let Some(existing) = existing {
@@ -2031,7 +2033,7 @@ mod tests {
     #[test]
     fn merge_default_custom_keeps_user_schemas() {
         let existing =
-            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao_old\n";
+            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao_old\n    - schema: txjx\n";
         let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         assert_eq!(user, vec!["user_schema"]);
@@ -2039,6 +2041,19 @@ mod tests {
         assert!(merged.contains("- schema: keytao"));
         assert!(merged.contains("- schema: keytao-dz"));
         assert!(!merged.contains("keytao_old"));
+    }
+
+    #[test]
+    fn merge_default_custom_accepts_non_keytao_package_schemas() {
+        let existing =
+            "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: keytao\n    - schema: xmjd6\n";
+        let package = "patch:\n  schema_list:\n    - schema: txjx\n";
+        let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
+        assert_eq!(user, vec!["user_schema"]);
+        assert!(merged.contains("- schema: user_schema"));
+        assert!(merged.contains("- schema: txjx"));
+        assert!(!merged.contains("- schema: keytao"));
+        assert!(!merged.contains("- schema: xmjd6"));
     }
 
     #[test]
