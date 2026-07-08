@@ -25,7 +25,11 @@ object KeytaoAndroidPaths {
     fun hasInstalledSchema(root: File = userRoot()): Boolean {
         return root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
             File(root, "default.custom.yaml").isFile ||
-            File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
+            hasDeployedSchema(root)
+    }
+
+    fun hasDeployedSchema(root: File = userRoot()): Boolean {
+        return File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
             File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".table.bin") } == true
     }
 

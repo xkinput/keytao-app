@@ -41,9 +41,9 @@ object KeytaoNativeBridge {
         return runCatching { nativeEngineAvailable() }.getOrDefault(false)
     }
 
-    fun init(userDir: String, sharedDir: String?): Boolean {
+    fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
         if (!loaded) return false
-        return runCatching { nativeInit(userDir, sharedDir) }.getOrDefault(false)
+        return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false)
     }
 
     fun reload(): Boolean {
@@ -133,7 +133,7 @@ object KeytaoNativeBridge {
 
     external fun nativeEngineAvailable(): Boolean
 
-    external fun nativeInit(userDir: String, sharedDir: String?): Boolean
+    external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
 
     external fun nativeReload(): Boolean
 

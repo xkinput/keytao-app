@@ -11,6 +11,7 @@ class KeytaoImeEngine(context: Context) {
     private var session: Long = 0L
     private var lastState = KeytaoImeState.empty()
     private var lastDisplaySchemaName = ""
+    private var sharedDataDir: File? = null
     private var reloadStampSignature: String? = fileSignature(reloadStamp)
     private var writableCache: Boolean? = null
     private var writableCacheCheckedAtMs = 0L
@@ -25,7 +26,8 @@ class KeytaoImeEngine(context: Context) {
     fun ensureReady(): Boolean {
         if (nativeReady) return true
         if (!hasInstalledSchema()) return false
-        return initializeRuntime()
+        if (!hasDeployedSchema()) return false
+        return initializeRuntime(deploy = false)
     }
 
     fun state(): KeytaoImeState {
@@ -74,8 +76,7 @@ class KeytaoImeEngine(context: Context) {
     }
 
     fun reload(): Boolean {
-        if (!nativeReady && !ensureReady()) return false
-        val ok = KeytaoNativeBridge.reload()
+        val ok = initializeRuntime(deploy = false)
         if (ok) {
             reloadStampSignature = fileSignature(reloadStamp)
             lastState = KeytaoNativeBridge.sessionState(session)
@@ -94,6 +95,13 @@ class KeytaoImeEngine(context: Context) {
     }
 
     fun hasInstalledSchema(): Boolean = KeytaoAndroidPaths.hasInstalledSchema(userDir)
+
+    fun hasDeployedSchema(): Boolean = KeytaoAndroidPaths.hasDeployedSchema(userDir)
+
+    fun deployNow(): Boolean {
+        if (!hasInstalledSchema()) return false
+        return initializeRuntime(deploy = true)
+    }
 
     fun isUserDataWritable(forceRefresh: Boolean = false): Boolean {
         val now = SystemClock.uptimeMillis()
@@ -129,12 +137,14 @@ class KeytaoImeEngine(context: Context) {
         session = 0L
     }
 
-    private fun initializeRuntime(): Boolean {
+    private fun initializeRuntime(deploy: Boolean): Boolean {
         if (!hasInstalledSchema()) return false
+        if (!deploy && !hasDeployedSchema()) return false
         ensureBundledSharedData(appContext)
         val sharedDir = findSharedDataDir(appContext)
+        sharedDataDir = sharedDir
         nativeReady = KeytaoNativeBridge.engineAvailable() &&
-            KeytaoNativeBridge.init(userDir.absolutePath, sharedDir?.absolutePath)
+            KeytaoNativeBridge.init(userDir.absolutePath, sharedDir?.absolutePath, deploy)
         if (!nativeReady) {
             lastState = lastState.withoutTransientCommit()
             return false
@@ -154,8 +164,9 @@ class KeytaoImeEngine(context: Context) {
     private fun stableSchemaState(state: KeytaoImeState): KeytaoImeState {
         val name = state.schemaName.trim()
         if (name.isNotEmpty() && !name.startsWith(".")) {
-            lastDisplaySchemaName = name
-            return state
+            val displayName = RimeSchemaNameResolver.resolveDisplayName(userDir, sharedDataDir, name)
+            lastDisplaySchemaName = displayName
+            return state.copy(schemaName = displayName)
         }
         return if (lastDisplaySchemaName.isNotEmpty()) {
             state.copy(schemaName = lastDisplaySchemaName)

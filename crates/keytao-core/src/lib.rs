@@ -175,13 +175,7 @@ mod desktop {
         fn GetModuleFileNameW(h_module: *mut c_void, lp_filename: *mut u16, n_size: u32) -> u32;
     }
 
-    /// Initialize and fully deploy librime.
-    /// `setup` + `initialize` run only on the first call; subsequent calls only
-    /// re-run `full_deploy_and_wait` so that newly installed schemas are picked up.
-    /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
-    pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        let log_dir = rime_log_dir(Path::new(&user_data_dir));
-
+    pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
         RIME_INITED.get_or_init(|| {
             let user_dir = Path::new(&user_data_dir);
             let shared_dir = Path::new(&shared_data_dir);
@@ -200,6 +194,17 @@ mod desktop {
                 &log_dir.to_string_lossy(),
             );
         });
+        Ok(())
+    }
+
+    /// Initialize and fully deploy librime.
+    /// `setup` + `initialize` run only on the first call; subsequent calls only
+    /// re-run `full_deploy_and_wait` so that newly installed schemas are picked up.
+    /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
+    pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+        let log_dir = rime_log_dir(Path::new(&user_data_dir));
+
+        setup_only(user_data_dir, shared_data_dir)?;
         if full_deploy_and_wait() {
             Ok(())
         } else {
@@ -944,7 +949,7 @@ mod desktop {
     target_os = "android",
     target_os = "ios"
 ))]
-pub use desktop::{deploy, Engine};
+pub use desktop::{deploy, setup_only, Engine};
 
 pub const RIME_MOD_SHIFT: u32 = 0x0001;
 pub const RIME_MOD_CONTROL: u32 = 0x0004;
@@ -1235,6 +1240,17 @@ impl ImeRuntime {
         Ok(())
     }
 
+    pub fn init_without_deploy(&self) -> Result<(), String> {
+        let mut initialized = self.0.initialized.lock().unwrap();
+        if *initialized {
+            return Ok(());
+        }
+
+        self.setup_locked()?;
+        *initialized = true;
+        Ok(())
+    }
+
     pub fn reload(&self) -> Result<(), String> {
         let mut initialized = self.0.initialized.lock().unwrap();
         self.deploy_locked()?;
@@ -1243,7 +1259,7 @@ impl ImeRuntime {
         Ok(())
     }
 
-    fn deploy_locked(&self) -> Result<(), String> {
+    fn configured_dirs(&self) -> Result<(PathBuf, String), String> {
         let user_dir = self
             .0
             .user_data_dir
@@ -1255,7 +1271,16 @@ impl ImeRuntime {
             .shared_data_dir
             .clone()
             .unwrap_or_else(default_shared_data_dir);
+        Ok((user_dir, shared))
+    }
 
+    fn setup_locked(&self) -> Result<(), String> {
+        let (user_dir, shared) = self.configured_dirs()?;
+        setup_only(user_dir.to_string_lossy().into_owned(), shared)
+    }
+
+    fn deploy_locked(&self) -> Result<(), String> {
+        let (user_dir, shared) = self.configured_dirs()?;
         deploy(user_dir.to_string_lossy().into_owned(), shared)
     }
 
@@ -1469,7 +1494,7 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
         }
         if in_list {
             if let Some(rest) = t.strip_prefix("- schema:") {
-                let schema = rest.trim().to_string();
+                let schema = clean_yaml_scalar(rest);
                 if !schema.is_empty() {
                     schemas.push(schema);
                 }
@@ -1479,6 +1504,18 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
         }
     }
     schemas
+}
+
+fn clean_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+        let quote = trimmed.chars().next().unwrap();
+        return trimmed[1..]
+            .find(quote)
+            .map(|end| trimmed[1..1 + end].to_string())
+            .unwrap_or_else(|| trimmed[1..].to_string());
+    }
+    trimmed.split_once('#').map_or(trimmed, |(head, _)| head).trim().to_string()
 }
 
 fn schema_list_from_yaml(value: Option<&Value>) -> Vec<String> {
@@ -2115,6 +2152,12 @@ mod tests {
     fn parse_schema_list_reads_schema_entries() {
         let content = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: foo\n";
         assert_eq!(parse_schema_list(content), vec!["keytao", "foo"]);
+    }
+
+    #[test]
+    fn parse_schema_list_strips_inline_comments() {
+        let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
+        assert_eq!(parse_schema_list(content), vec!["keydo"]);
     }
 
     #[test]

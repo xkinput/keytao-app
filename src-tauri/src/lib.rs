@@ -2160,7 +2160,7 @@ fn parse_schema_list(content: &str) -> Vec<String> {
         }
         if in_list {
             if let Some(rest) = t.strip_prefix("- schema:") {
-                let s = rest.trim().to_string();
+                let s = clean_yaml_scalar(rest);
                 if !s.is_empty() {
                     schemas.push(s);
                 }
@@ -2170,6 +2170,18 @@ fn parse_schema_list(content: &str) -> Vec<String> {
         }
     }
     schemas
+}
+
+fn clean_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+        let quote = trimmed.chars().next().unwrap();
+        return trimmed[1..]
+            .find(quote)
+            .map(|end| trimmed[1..1 + end].to_string())
+            .unwrap_or_else(|| trimmed[1..].to_string());
+    }
+    trimmed.split_once('#').map_or(trimmed, |(head, _)| head).trim().to_string()
 }
 
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
@@ -2962,6 +2974,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
     shared_dir: JString<'_>,
+    deploy: jboolean,
 ) -> jboolean {
     let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
         return 0;
@@ -2972,7 +2985,12 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
         .unwrap_or_else(keytao_core::default_shared_data_dir);
 
     let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
-    if runtime.init().is_err() {
+    let init_result = if deploy != 0 {
+        runtime.init()
+    } else {
+        runtime.init_without_deploy()
+    };
+    if init_result.is_err() {
         return 0;
     }
     if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
@@ -4402,14 +4420,15 @@ async fn rime_deploy_default<R: tauri::Runtime>(
     let result: serde_json::Value = app
         .state::<ScopedStorageHandle<R>>()
         .0
-        .run_mobile_plugin("writeImeReloadStamp", ())
+        .run_mobile_plugin("deployImeData", ())
         .map_err(|e| e.to_string())?;
     let path = result["path"]
         .as_str()
         .unwrap_or("/storage/emulated/0/keytao/keytao-ime.reload");
+    let schema_name = result["schemaName"].as_str().unwrap_or("KeyTao");
     Ok(DeployResult {
         success: true,
-        message: format!("已通知 Android 输入法重载：{path}"),
+        message: format!("Android RIME 已部署 {schema_name}，并通知输入法重载：{path}"),
     })
 }
 
@@ -5282,6 +5301,12 @@ mod tests {
     fn test_parse_schema_list_basic() {
         let content = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
         assert_eq!(parse_schema_list(content), vec!["keytao_b", "keytao_bg"]);
+    }
+
+    #[test]
+    fn test_parse_schema_list_strips_inline_comments() {
+        let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
+        assert_eq!(parse_schema_list(content), vec!["keydo"]);
     }
 
     #[test]

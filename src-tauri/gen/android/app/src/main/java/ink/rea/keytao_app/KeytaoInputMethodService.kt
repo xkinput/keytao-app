@@ -602,12 +602,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun refreshInputAvailability(): Boolean {
         val writable = engine.isUserDataWritable()
         val installed = engine.hasInstalledSchema()
+        val deployed = engine.hasDeployedSchema()
         if (writable && installed && !engine.nativeReady) {
             engine.ensureReady()
         }
         val message = when {
             !writable -> "请授予 KeyTao 文件访问权限后安装键道方案"
             !installed -> "请先在 KeyTao App 安装键道方案"
+            !deployed -> "请先在 KeyTao App 部署方案"
             !engine.nativeReady -> "RIME 运行库未就绪，请重新安装 KeyTao"
             else -> ""
         }

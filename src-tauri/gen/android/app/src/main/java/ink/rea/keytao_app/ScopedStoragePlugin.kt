@@ -578,6 +578,34 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun deployImeData(invoke: Invoke) {
+        Thread {
+            try {
+                val engine = KeytaoImeEngine(activity)
+                if (!engine.hasInstalledSchema()) {
+                    return@Thread invoke.reject("请先安装键道方案")
+                }
+                if (!engine.deployNow()) {
+                    return@Thread invoke.reject("Android RIME 部署失败")
+                }
+                val state = engine.state()
+                val stamp = KeytaoAndroidPaths.reloadStampFile()
+                stamp.writeText(System.currentTimeMillis().toString())
+                val deployed = engine.hasDeployedSchema()
+                engine.close()
+
+                invoke.resolve(JSObject().apply {
+                    put("path", stamp.absolutePath)
+                    put("schemaName", state.schemaName)
+                    put("deployed", deployed)
+                })
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Android RIME 部署失败")
+            }
+        }.start()
+    }
+
+    @Command
     fun writeImeReloadStamp(invoke: Invoke) {
         try {
             val stamp = KeytaoAndroidPaths.reloadStampFile()
