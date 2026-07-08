@@ -18,9 +18,11 @@ use windows::{
             BLENDFUNCTION, DIB_RGB_COLORS,
         },
         System::LibraryLoader::GetModuleHandleW,
+        UI::Accessibility::NotifyWinEvent,
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer,
             RegisterClassExW, SetTimer, ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT,
+            EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE, EVENT_OBJECT_IME_SHOW, OBJID_CLIENT,
             SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_TIMER, WNDCLASSEXW,
             WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
@@ -53,6 +55,7 @@ unsafe extern "system" fn wnd_proc(
 /// Manages the floating candidate panel window.
 pub struct CandidateWindow {
     hwnd: HWND,
+    owner_hwnd: HWND,
     renderer: Option<PanelRenderer>,
     visible: bool,
 }
@@ -65,18 +68,27 @@ impl CandidateWindow {
     pub fn new() -> Self {
         Self {
             hwnd: HWND(std::ptr::null_mut()),
+            owner_hwnd: HWND(std::ptr::null_mut()),
             renderer: None,
             visible: false,
         }
     }
 
-    fn ensure_window(&mut self) -> bool {
+    fn ensure_window(&mut self, owner_hwnd: HWND) -> bool {
+        if !self.hwnd.0.is_null() && self.owner_hwnd != owner_hwnd {
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
+            self.hwnd = HWND(std::ptr::null_mut());
+            self.visible = false;
+        }
         if !self.hwnd.0.is_null() {
             return true;
         }
-        match unsafe { Self::create_window() } {
+        match unsafe { Self::create_window(owner_hwnd) } {
             Ok(hwnd) => {
                 self.hwnd = hwnd;
+                self.owner_hwnd = owner_hwnd;
                 true
             }
             Err(e) => {
@@ -97,7 +109,7 @@ impl CandidateWindow {
         self.renderer.is_some()
     }
 
-    unsafe fn create_window() -> Result<HWND> {
+    unsafe fn create_window(owner_hwnd: HWND) -> Result<HWND> {
         let hinstance: HMODULE = DLL_INSTANCE
             .get()
             .map(|raw| HMODULE(*raw as _))
@@ -124,7 +136,7 @@ impl CandidateWindow {
             CW_USEDEFAULT,
             1,
             1, // initial size — overwritten by redraw
-            HWND(std::ptr::null_mut()),
+            owner_hwnd,
             None,
             hinstance,
             None,
@@ -134,13 +146,13 @@ impl CandidateWindow {
     }
 
     /// Show/update the panel near caret position (screen coordinates).
-    pub fn show(&mut self, state: &ImeState, caret_x: i32, caret_y: i32) {
+    pub fn show(&mut self, state: &ImeState, caret_x: i32, caret_y: i32, owner_hwnd: HWND) {
         let has_content = !state.candidates.is_empty() || !state.preedit.is_empty();
         if !has_content {
             self.hide();
             return;
         }
-        if !self.ensure_window() || !self.ensure_renderer() {
+        if !self.ensure_window(owner_hwnd) || !self.ensure_renderer() {
             return;
         }
         let Some(renderer) = &self.renderer else {
@@ -175,6 +187,7 @@ impl CandidateWindow {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
             self.visible = true;
+            self.notify_ime_event(EVENT_OBJECT_IME_SHOW);
         }
     }
 
@@ -185,11 +198,18 @@ impl CandidateWindow {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
             self.visible = false;
+            self.notify_ime_event(EVENT_OBJECT_IME_HIDE);
         }
     }
 
-    pub fn show_mode_hint(&mut self, ascii_mode: bool, caret_x: i32, caret_y: i32) {
-        if !self.ensure_window() || !self.ensure_renderer() {
+    pub fn show_mode_hint(
+        &mut self,
+        ascii_mode: bool,
+        caret_x: i32,
+        caret_y: i32,
+        owner_hwnd: HWND,
+    ) {
+        if !self.ensure_window(owner_hwnd) || !self.ensure_renderer() {
             return;
         }
         let Some(renderer) = &self.renderer else {
@@ -222,6 +242,7 @@ impl CandidateWindow {
             );
         }
         self.visible = true;
+        self.notify_ime_event(EVENT_OBJECT_IME_SHOW);
     }
 
     /// Upload BGRA pixel buffer via UpdateLayeredWindow (per-pixel alpha).
@@ -282,11 +303,21 @@ impl CandidateWindow {
             Some(&blend),
             ULW_ALPHA,
         );
+        self.notify_ime_event(EVENT_OBJECT_IME_CHANGE);
 
         SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(mem_dc);
         ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+    }
+
+    fn notify_ime_event(&self, event: u32) {
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            NotifyWinEvent(event, self.hwnd, OBJID_CLIENT.0, 0);
+        }
     }
 }
 

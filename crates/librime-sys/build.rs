@@ -16,6 +16,9 @@ fn main() {
     if let Ok(e) = env::var("RIME_LIB_DIR") {
         lib_dir = Some(e);
     }
+    if let Ok(extra_args) = env::var("BINDGEN_EXTRA_CLANG_ARGS") {
+        bindgen_args.extend(extra_args.split_whitespace().map(str::to_owned));
+    }
 
     if target.contains("android") {
         let Some(root) = android_rime_root(&target) else {
@@ -47,6 +50,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=RIME_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=RIME_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS");
     println!("cargo:rerun-if-env-changed=KEYTAO_ANDROID_RIME_ROOT");
     println!("cargo:rerun-if-env-changed=KEYTAO_IOS_RIME_ROOT");
     println!("cargo:rerun-if-env-changed=KEYTAO_RIME_LINK_KIND");

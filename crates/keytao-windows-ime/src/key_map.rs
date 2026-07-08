@@ -8,6 +8,11 @@ pub use keytao_core::{
     key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
 };
 
+const XK_PAGE_UP: u32 = 0xFF55;
+const XK_PAGE_DOWN: u32 = 0xFF56;
+const TOUCH_KEYBOARD_NEXT_PAGE: u32 = 0xF003;
+const TOUCH_KEYBOARD_PREVIOUS_PAGE: u32 = 0xF004;
+
 /// Read the current state of Shift, Control, Alt and return an X11 modifier mask.
 pub fn current_mod_mask() -> u32 {
     let mut mask = 0u32;
@@ -33,6 +38,8 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     let sym = match VIRTUAL_KEY(vk) {
+        VK_PACKET => packet_keysym()?,
+
         // --- Printable ASCII letters ---
         // Match Linux/macOS semantics: the keysym reflects the produced
         // printable character while the modifier mask still carries Shift.
@@ -78,15 +85,15 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
         VK_DELETE => 0xFFFF, // XK_Delete
 
         // --- Navigation ---
-        VK_LEFT => 0xFF51,  // XK_Left
-        VK_UP => 0xFF52,    // XK_Up
-        VK_RIGHT => 0xFF53, // XK_Right
-        VK_DOWN => 0xFF54,  // XK_Down
-        VK_HOME => 0xFF50,  // XK_Home
-        VK_END => 0xFF57,   // XK_End
-        VK_PRIOR => 0xFF55, // XK_Prior (Page Up)
-        VK_NEXT => 0xFF56,  // XK_Next  (Page Down)
-        VK_F4 => 0xFFC1,    // XK_F4 opens the Rime menu
+        VK_LEFT => 0xFF51,       // XK_Left
+        VK_UP => 0xFF52,         // XK_Up
+        VK_RIGHT => 0xFF53,      // XK_Right
+        VK_DOWN => 0xFF54,       // XK_Down
+        VK_HOME => 0xFF50,       // XK_Home
+        VK_END => 0xFF57,        // XK_End
+        VK_PRIOR => XK_PAGE_UP,  // XK_Prior (Page Up)
+        VK_NEXT => XK_PAGE_DOWN, // XK_Next  (Page Down)
+        VK_F4 => 0xFFC1,         // XK_F4 opens the Rime menu
 
         // --- OEM punctuation (US layout) ---
         VK_OEM_MINUS => 0x002D,  // '-'
@@ -155,6 +162,12 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     }
 
     let vk = VIRTUAL_KEY(vk);
+    if vk == VK_PACKET {
+        return packet_keysym()
+            .map(|sym| has_composition || is_touch_keyboard_page_key(sym))
+            .unwrap_or(false);
+    }
+
     if vk == VK_F4 {
         return true;
     }
@@ -164,6 +177,29 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     } else {
         is_letter_vk(vk)
     }
+}
+
+fn packet_keysym() -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode, VK_PACKET};
+
+    let mut state = [0u8; 256];
+    unsafe {
+        GetKeyboardState(&mut state).ok()?;
+        let mut buf = [0u16; 2];
+        if ToUnicode(VK_PACKET.0 as u32, 0, Some(&state), &mut buf, 0) != 1 {
+            return None;
+        }
+        let raw = buf[0] as u32;
+        Some(match raw {
+            TOUCH_KEYBOARD_NEXT_PAGE => XK_PAGE_DOWN,
+            TOUCH_KEYBOARD_PREVIOUS_PAGE => XK_PAGE_UP,
+            _ => raw,
+        })
+    }
+}
+
+fn is_touch_keyboard_page_key(sym: u32) -> bool {
+    matches!(sym, XK_PAGE_UP | XK_PAGE_DOWN)
 }
 
 fn is_letter_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {

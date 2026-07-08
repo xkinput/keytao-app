@@ -3,10 +3,11 @@
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
 };
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -15,7 +16,8 @@ use windows::{
             LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         },
-        UI::TextServices::{ITfComposition, ITfKeyEventSink, ITfThreadMgr},
+        UI::Input::KeyboardAndMouse::GetFocus,
+        UI::TextServices::{ITfComposition, ITfKeyEventSink, ITfThreadMgr, ITfThreadMgrEventSink},
     },
 };
 
@@ -30,6 +32,8 @@ pub struct TsfState {
     pub engine_building: bool,
     pub engine_error: Option<String>,
     pub thread_mgr: Option<ITfThreadMgr>,
+    pub thread_mgr_sink: Option<ITfThreadMgrEventSink>,
+    pub thread_mgr_sink_cookie: Option<u32>,
     pub client_id: u32,
     pub key_sink: Option<ITfKeyEventSink>,
     pub composition: Option<ITfComposition>,
@@ -80,6 +84,8 @@ impl TsfState {
             engine_building: false,
             engine_error: None,
             thread_mgr: None,
+            thread_mgr_sink: None,
+            thread_mgr_sink_cookie: None,
             client_id: 0,
             key_sink: None,
             composition: None,
@@ -180,6 +186,26 @@ pub fn new_shared_state() -> SharedState {
     Arc::new(Mutex::new(TsfState::new()))
 }
 
+pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
+    let Some(user_dir) = default_user_data_dir() else {
+        return;
+    };
+
+    let log_dir = user_dir.join("log");
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let log_path = log_dir.join("windows-ime.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "[{timestamp}] {}", message.as_ref());
+    }
+}
+
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
     let should_start = {
         let mut st = shared_state.lock().unwrap();
@@ -189,6 +215,7 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
         return;
     }
 
+    append_diagnostic("engine warmup started");
     let state = Arc::clone(shared_state);
     std::thread::spawn(move || match TsfState::build_engine() {
         Ok(bundle) => {
@@ -199,9 +226,11 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
                 st.engine_building = false;
             }
             tracing::info!("KeyTao Windows IME engine warmed up");
+            append_diagnostic("engine warmup succeeded");
         }
         Err(error) => {
             tracing::error!("librime init failed: {error}");
+            append_diagnostic(format!("engine warmup failed: {error}"));
             state.lock().unwrap().finish_engine_build_error(error);
         }
     });
@@ -218,14 +247,17 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
     };
 
     let state = Arc::clone(shared_state);
+    append_diagnostic("engine reload started");
     std::thread::spawn(move || {
         let ok = match runtime.reload() {
             Ok(()) => {
                 tracing::info!("librime redeployed after reload stamp change");
+                append_diagnostic("engine reload succeeded");
                 true
             }
             Err(error) => {
                 tracing::error!("librime reload failed: {error}");
+                append_diagnostic(format!("engine reload failed: {error}"));
                 false
             }
         };
@@ -239,17 +271,18 @@ pub(crate) fn update_ime_windows(
     ime_state: &ImeState,
     caret_x: i32,
     caret_y: i32,
+    owner_hwnd: windows::Win32::Foundation::HWND,
     show_mode_hint: bool,
 ) {
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show {
-            candidate_win.show(ime_state, caret_x, caret_y);
+            candidate_win.show(ime_state, caret_x, caret_y, owner_hwnd);
         } else {
             candidate_win.hide();
         }
         if show_mode_hint {
-            mode_hint_win.show_mode_hint(ime_state.ascii_mode, caret_x, caret_y);
+            mode_hint_win.show_mode_hint(ime_state.ascii_mode, caret_x, caret_y, owner_hwnd);
         }
     });
 }
@@ -374,4 +407,8 @@ fn dll_related_dirs() -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {
+    unsafe { GetFocus() }
 }

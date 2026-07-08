@@ -18,7 +18,9 @@ use windows::{
 use crate::{
     globals::{lock_server, obj_add, obj_release},
     key_event_sink::KeyEventSink,
-    state::{hide_ime_windows, new_shared_state, start_engine_warmup, SharedState},
+    state::{
+        append_diagnostic, hide_ime_windows, new_shared_state, start_engine_warmup, SharedState,
+    },
 };
 
 // ── IClassFactory ─────────────────────────────────────────────────────────────
@@ -90,32 +92,76 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             let mut st = self.state.lock().unwrap();
             st.thread_mgr = None;
             st.client_id = 0;
+            append_diagnostic(format!("AdviseKeyEventSink failed: {e}"));
             return Err(e);
         }
 
+        let thread_sink = ThreadMgrEventSink {
+            state: std::sync::Arc::clone(&self.state),
+        };
+        let thread_sink_iface: ITfThreadMgrEventSink = thread_sink.into();
+        let source: ITfSource = match thread_mgr.cast() {
+            Ok(source) => source,
+            Err(e) => {
+                unsafe {
+                    let _ = keystroke_mgr.UnadviseKeyEventSink(tid);
+                }
+                let mut st = self.state.lock().unwrap();
+                st.thread_mgr = None;
+                st.client_id = 0;
+                append_diagnostic(format!("Query ITfSource failed: {e}"));
+                return Err(e);
+            }
+        };
+        let thread_sink_cookie =
+            match unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &thread_sink_iface) } {
+                Ok(cookie) => cookie,
+                Err(e) => {
+                    unsafe {
+                        let _ = keystroke_mgr.UnadviseKeyEventSink(tid);
+                    }
+                    let mut st = self.state.lock().unwrap();
+                    st.thread_mgr = None;
+                    st.client_id = 0;
+                    append_diagnostic(format!("Advise ThreadMgrEventSink failed: {e}"));
+                    return Err(e);
+                }
+            };
+
         let mut st = self.state.lock().unwrap();
         st.key_sink = Some(key_sink_iface);
+        st.thread_mgr_sink = Some(thread_sink_iface);
+        st.thread_mgr_sink_cookie = Some(thread_sink_cookie);
         drop(st);
 
         start_engine_warmup(&self.state);
 
-        // Advise ThreadMgrEventSink (optional but good practice for focus tracking)
-        // We skip this for now to keep the implementation minimal.
-
         tracing::info!("KeyTao TSF activated (client_id={})", tid);
+        append_diagnostic(format!("TSF activated client_id={tid}"));
         Ok(())
     }
 
     fn Deactivate(&self) -> Result<()> {
-        let (thread_mgr, client_id) = {
+        let (thread_mgr, client_id, thread_sink_cookie) = {
             let st = self.state.lock().unwrap();
-            (st.thread_mgr.clone(), st.client_id)
+            (
+                st.thread_mgr.clone(),
+                st.client_id,
+                st.thread_mgr_sink_cookie,
+            )
         };
 
         if let Some(thread_mgr) = thread_mgr {
             if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
                 unsafe {
                     let _ = km.UnadviseKeyEventSink(client_id);
+                }
+            }
+            if let Some(cookie) = thread_sink_cookie {
+                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
+                    unsafe {
+                        let _ = source.UnadviseSink(cookie);
+                    }
                 }
             }
         }
@@ -127,6 +173,8 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         // there may be no active context, so we just drop the handle.)
         st.composition = None;
         st.key_sink = None;
+        st.thread_mgr_sink = None;
+        st.thread_mgr_sink_cookie = None;
         st.thread_mgr = None;
         st.ime_state = None;
         st.client_id = 0;
@@ -134,6 +182,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         hide_ime_windows(&self.state);
 
         tracing::info!("KeyTao TSF deactivated");
+        append_diagnostic("TSF deactivated");
         Ok(())
     }
 }
@@ -141,5 +190,59 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
     fn ActivateEx(&self, ptim: Option<&ITfThreadMgr>, tid: u32, _flags: u32) -> Result<()> {
         self.Activate(ptim, tid)
+    }
+}
+
+#[implement(ITfThreadMgrEventSink)]
+struct ThreadMgrEventSink {
+    state: SharedState,
+}
+
+impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
+    fn OnInitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
+        append_diagnostic("ThreadMgrEventSink OnInitDocumentMgr");
+        Ok(())
+    }
+
+    fn OnUninitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
+        append_diagnostic("ThreadMgrEventSink OnUninitDocumentMgr");
+        hide_ime_windows(&self.state);
+        Ok(())
+    }
+
+    fn OnSetFocus(
+        &self,
+        pdimfocus: Option<&ITfDocumentMgr>,
+        _pdimprevfocus: Option<&ITfDocumentMgr>,
+    ) -> Result<()> {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.shift_pressed_without_key = false;
+            if pdimfocus.is_none() {
+                st.ime_state = None;
+                st.composition = None;
+            }
+        }
+        hide_ime_windows(&self.state);
+        append_diagnostic(format!(
+            "ThreadMgrEventSink OnSetFocus focus={}",
+            pdimfocus.is_some()
+        ));
+        Ok(())
+    }
+
+    fn OnPushContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
+        append_diagnostic("ThreadMgrEventSink OnPushContext");
+        Ok(())
+    }
+
+    fn OnPopContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.shift_pressed_without_key = false;
+        }
+        hide_ime_windows(&self.state);
+        append_diagnostic("ThreadMgrEventSink OnPopContext");
+        Ok(())
     }
 }
