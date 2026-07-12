@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
 import android.inputmethodservice.InputMethodService
+import android.icu.text.BreakIterator
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -12,6 +13,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listener {
@@ -305,13 +307,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val unitCount = count.coerceAtLeast(1)
         restoreAllOnNextDirectionalRestore = false
         rememberCommittedUnits(preeditUnits)
-        val deletedUnits = takeRecentCommittedUnits(unitCount)
+        val beforeCursor = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val deletedUnits = textUnits(beforeCursor).takeLast(unitCount)
         if (deletedUnits.isEmpty()) {
             backspaceRestoreStack.clear()
+            deleteSurroundingCodePoints(connection, unitCount)
         } else {
             backspaceRestoreStack.addAll(deletedUnits.asReversed())
+            discardRecentCommittedSuffix(deletedUnits)
+            connection.deleteSurroundingText(deletedUnits.sumOf(String::length), 0)
         }
-        deleteSurroundingCodePoints(connection, unitCount)
         selectionModeActive = false
         return true
     }
@@ -321,15 +326,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return
         backspaceRestoreStack.clear()
-        val recoverableUnits = recentCommittedUnits + preeditUnits
+        rememberCommittedUnits(preeditUnits)
+        val beforeCursor = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val recoverableUnits = textUnits(beforeCursor)
         if (recoverableUnits.isEmpty()) {
             restoreAllOnNextDirectionalRestore = false
+            deleteSurroundingCodePoints(connection, backspaceContextLimit)
         } else {
             backspaceRestoreStack.addAll(recoverableUnits.asReversed())
             recentCommittedUnits.clear()
+            connection.deleteSurroundingText(beforeCursor.length, 0)
         }
         restoreAllOnNextDirectionalRestore = backspaceRestoreStack.isNotEmpty()
-        deleteSurroundingCodePoints(connection, backspaceContextLimit)
         selectionModeActive = false
     }
 
@@ -379,13 +387,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    private fun takeRecentCommittedUnits(count: Int): List<String> {
-        if (recentCommittedUnits.isEmpty()) return emptyList()
-        val actualCount = count.coerceIn(1, recentCommittedUnits.size)
-        val fromIndex = recentCommittedUnits.size - actualCount
-        val deleted = recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size).toList()
-        recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size).clear()
-        return deleted
+    private fun discardRecentCommittedSuffix(deletedUnits: List<String>) {
+        if (deletedUnits.isEmpty() || deletedUnits.size > recentCommittedUnits.size) return
+        val fromIndex = recentCommittedUnits.size - deletedUnits.size
+        if (recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size) == deletedUnits) {
+            recentCommittedUnits.subList(fromIndex, recentCommittedUnits.size).clear()
+        }
     }
 
     private fun rememberCommittedText(text: String) {
@@ -403,12 +410,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun textUnits(text: String): List<String> {
         if (text.isEmpty()) return emptyList()
+        val iterator = BreakIterator.getCharacterInstance(Locale.ROOT)
+        iterator.setText(text)
         val units = mutableListOf<String>()
-        var index = 0
-        while (index < text.length) {
-            val next = text.offsetByCodePoints(index, 1)
-            units.add(text.substring(index, next))
-            index = next
+        var start = iterator.first()
+        var end = iterator.next()
+        while (end != BreakIterator.DONE) {
+            units.add(text.substring(start, end))
+            start = end
+            end = iterator.next()
         }
         return units
     }
