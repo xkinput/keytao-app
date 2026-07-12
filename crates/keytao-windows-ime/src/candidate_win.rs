@@ -13,17 +13,20 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-            SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-            BLENDFUNCTION, DIB_RGB_COLORS,
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
+            MonitorFromPoint, ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, MONITORINFO,
+            MONITOR_DEFAULTTONEAREST,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::Accessibility::NotifyWinEvent,
+        UI::HiDpi::GetDpiForWindow,
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer,
-            RegisterClassExW, SetTimer, ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT,
-            EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE, EVENT_OBJECT_IME_SHOW, OBJID_CLIENT,
-            SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_TIMER, WNDCLASSEXW,
+            RegisterClassExW, SetTimer, ShowWindow, UnregisterClassW, UpdateLayeredWindow,
+            CW_USEDEFAULT, EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE, EVENT_OBJECT_IME_SHOW,
+            OBJID_CLIENT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_TIMER, WNDCLASSEXW,
             WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
@@ -36,6 +39,98 @@ const MODE_HINT_TIMER_ID: usize = 1;
 
 fn class_name_wide() -> Vec<u16> {
     CLASS_NAME.encode_utf16().collect()
+}
+
+fn module_handle() -> HMODULE {
+    DLL_INSTANCE
+        .get()
+        .map(|raw| HMODULE(*raw as _))
+        .unwrap_or_else(|| unsafe { GetModuleHandleW(None).unwrap_or_default() })
+}
+
+fn dpi_scale(owner_hwnd: HWND) -> f32 {
+    if owner_hwnd.0.is_null() {
+        return 1.0;
+    }
+    let dpi = unsafe { GetDpiForWindow(owner_hwnd) };
+    if dpi == 0 {
+        1.0
+    } else {
+        (dpi as f32 / 96.0).clamp(1.0, 3.0)
+    }
+}
+
+fn monitor_work_area(point: POINT) -> windows::Win32::Foundation::RECT {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !monitor.0.is_null() && GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return info.rcWork;
+        }
+
+        let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        windows::Win32::Foundation::RECT {
+            left,
+            top,
+            right: left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    }
+}
+
+fn scale_bgra(pixels: &[u8], width: u32, height: u32, scale: f32) -> (Vec<u8>, u32, u32) {
+    if (scale - 1.0).abs() < 0.01 || width == 0 || height == 0 {
+        return (pixels.to_vec(), width, height);
+    }
+
+    let output_width = ((width as f32 * scale).round() as u32).max(1);
+    let output_height = ((height as f32 * scale).round() as u32).max(1);
+    let mut output = vec![0u8; output_width as usize * output_height as usize * 4];
+    for output_y in 0..output_height {
+        let source_y = ((output_y as f32 + 0.5) / scale - 0.5).clamp(0.0, height as f32 - 1.0);
+        let y0 = source_y.floor() as u32;
+        let y1 = (y0 + 1).min(height - 1);
+        let y_weight = source_y - y0 as f32;
+        for output_x in 0..output_width {
+            let source_x = ((output_x as f32 + 0.5) / scale - 0.5).clamp(0.0, width as f32 - 1.0);
+            let x0 = source_x.floor() as u32;
+            let x1 = (x0 + 1).min(width - 1);
+            let x_weight = source_x - x0 as f32;
+            let destination = (output_y as usize * output_width as usize + output_x as usize) * 4;
+            for channel in 0..4 {
+                let sample = |x: u32, y: u32| {
+                    pixels[(y as usize * width as usize + x as usize) * 4 + channel] as f32
+                };
+                let top = sample(x0, y0) * (1.0 - x_weight) + sample(x1, y0) * x_weight;
+                let bottom = sample(x0, y1) * (1.0 - x_weight) + sample(x1, y1) * x_weight;
+                output[destination + channel] =
+                    (top * (1.0 - y_weight) + bottom * y_weight).round() as u8;
+            }
+        }
+    }
+    (output, output_width, output_height)
+}
+
+fn popup_position(caret_x: i32, caret_y: i32, width: u32, height: u32, gap: i32) -> POINT {
+    let work = monitor_work_area(POINT {
+        x: caret_x,
+        y: caret_y,
+    });
+    let max_x = (work.right - width as i32).max(work.left);
+    let x = caret_x.clamp(work.left, max_x);
+    let below = caret_y + gap;
+    let above = caret_y - height as i32 - gap;
+    let y = if below + height as i32 <= work.bottom {
+        below
+    } else {
+        above
+    }
+    .clamp(work.top, (work.bottom - height as i32).max(work.top));
+    POINT { x, y }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -59,10 +154,6 @@ pub struct CandidateWindow {
     renderer: Option<PanelRenderer>,
     visible: bool,
 }
-
-// SAFETY: TSF TIPs run in COM STA; all window operations happen on the same thread.
-unsafe impl Send for CandidateWindow {}
-unsafe impl Sync for CandidateWindow {}
 
 impl CandidateWindow {
     pub fn new() -> Self {
@@ -110,10 +201,7 @@ impl CandidateWindow {
     }
 
     unsafe fn create_window(owner_hwnd: HWND) -> Result<HWND> {
-        let hinstance: HMODULE = DLL_INSTANCE
-            .get()
-            .map(|raw| HMODULE(*raw as _))
-            .unwrap_or_else(|| GetModuleHandleW(None).unwrap_or_default());
+        let hinstance = module_handle();
 
         let class_name = class_name_wide();
 
@@ -163,23 +251,13 @@ impl CandidateWindow {
         if w == 0 || h == 0 {
             return;
         }
+        let scale = dpi_scale(owner_hwnd);
+        let (pixels, w, h) = scale_bgra(&pixels, w, h, scale);
 
-        // Position: below caret, nudge up if off-screen
-        let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        let x = if caret_x + w as i32 > screen_w {
-            (screen_w - w as i32 - 4).max(0)
-        } else {
-            caret_x.max(0)
-        };
-        let y = if caret_y + h as i32 > screen_h {
-            caret_y - h as i32 - 4
-        } else {
-            caret_y + 4
-        };
+        let position = popup_position(caret_x, caret_y, w, h, (4.0 * scale).round() as i32);
 
         unsafe {
-            self.upload_pixels(&pixels, w, h, x, y.max(0));
+            self.upload_pixels(&pixels, w, h, position.x, position.y);
         }
 
         if !self.visible {
@@ -220,19 +298,19 @@ impl CandidateWindow {
         if w == 0 || h == 0 {
             return;
         }
+        let scale = dpi_scale(owner_hwnd);
+        let (pixels, w, h) = scale_bgra(&pixels, w, h, scale);
 
-        let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        let x = (caret_x - w as i32 / 2).clamp(0, (screen_w - w as i32 - 4).max(0));
-        let y = if caret_y + h as i32 > screen_h {
-            caret_y - h as i32 - 8
-        } else {
-            caret_y + 8
-        }
-        .max(0);
+        let position = popup_position(
+            caret_x - w as i32 / 2,
+            caret_y,
+            w,
+            h,
+            (8.0 * scale).round() as i32,
+        );
 
         unsafe {
-            self.upload_pixels(&pixels, w, h, x, y);
+            self.upload_pixels(&pixels, w, h, position.x, position.y);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             let _ = SetTimer(
                 self.hwnd,
@@ -323,10 +401,31 @@ impl CandidateWindow {
 
 impl Drop for CandidateWindow {
     fn drop(&mut self) {
-        if !self.hwnd.0.is_null() {
-            unsafe {
+        unsafe {
+            if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
             }
+            let class_name = class_name_wide();
+            let _ = UnregisterClassW(windows::core::PCWSTR(class_name.as_ptr()), module_handle());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_bgra;
+
+    #[test]
+    fn scale_bgra_preserves_unscaled_pixels() {
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(scale_bgra(&pixels, 2, 1, 1.0), (pixels, 2, 1));
+    }
+
+    #[test]
+    fn scale_bgra_resizes_all_channels() {
+        let pixels = vec![10, 20, 30, 40];
+        let (scaled, width, height) = scale_bgra(&pixels, 1, 1, 2.0);
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(scaled, pixels.repeat(4));
     }
 }

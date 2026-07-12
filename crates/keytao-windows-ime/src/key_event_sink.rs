@@ -7,16 +7,16 @@
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
 
 use std::{
-    cell::UnsafeCell,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    cell::{RefCell, UnsafeCell},
+    rc::Rc,
 };
+
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use keytao_core::{ImeRuntimeSession, ImeState, KeyProcessResult};
 use windows::{
-    core::{implement, Interface, Result, GUID},
+    core::{implement, Interface, Result, GUID, VARIANT},
     Win32::{
         Foundation::{BOOL, E_INVALIDARG, HWND, LPARAM, RECT, WPARAM},
         UI::TextServices::*,
@@ -24,23 +24,45 @@ use windows::{
 };
 
 use crate::{
+    globals::DllActivityGuard,
     key_map::{
         candidate_index_for_select_key, current_mod_mask, is_enter_vk, is_shift_vk,
         shift_keysym_for_vk, should_bypass_empty_composition, should_eat_key, vk_to_keysym,
         RIME_RELEASE_MASK,
     },
     state::{
-        append_diagnostic, fallback_focus_window, hide_candidate_window, hide_ime_windows,
-        start_engine_warmup, start_reload_if_needed, update_ime_windows, SharedState,
+        clear_input_after_composition_terminated, fallback_focus_window, hide_candidate_window,
+        poll_engine_builds, reset_input_for_focus_change, start_engine_warmup,
+        start_reload_if_needed, update_ime_windows, SharedState, WeakState,
     },
 };
 
+#[cfg(debug_assertions)]
+use crate::state::append_diagnostic;
+
+#[cfg(debug_assertions)]
 static KEY_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn append_key_diagnostic(message: impl AsRef<str>) {
-    if KEY_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < 96 {
-        append_diagnostic(message);
-    }
+#[cfg(debug_assertions)]
+macro_rules! append_key_diagnostic {
+    ($($arg:tt)*) => {
+        if KEY_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < 96 {
+            append_diagnostic(format!($($arg)*));
+        }
+    };
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! append_key_diagnostic {
+    ($($arg:tt)*) => {
+        if false {
+            let _ = format_args!($($arg)*);
+        }
+    };
+}
+
+fn upgrade_state(state: &WeakState) -> Option<SharedState> {
+    state.upgrade()
 }
 
 // ── Edit session helper ───────────────────────────────────────────────────────
@@ -51,11 +73,8 @@ type EditFn = Box<dyn FnOnce(u32, &ITfContext) -> Result<()>>;
 struct EditSession {
     context: ITfContext,
     f: UnsafeCell<Option<EditFn>>,
+    _dll_guard: DllActivityGuard,
 }
-
-// SAFETY: STA — called on the same thread that created it.
-unsafe impl Send for EditSession {}
-unsafe impl Sync for EditSession {}
 
 impl ITfEditSession_Impl for EditSession_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
@@ -75,6 +94,7 @@ fn with_write_session(
     let session = EditSession {
         context: context.clone(),
         f: UnsafeCell::new(Some(Box::new(f))),
+        _dll_guard: DllActivityGuard::new(),
     };
     let iface: ITfEditSession = session.into();
     let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_SYNC.0 | TF_ES_READWRITE.0);
@@ -95,7 +115,9 @@ fn start_composition(
     ec: u32,
     context: &ITfContext,
     preedit: &str,
+    cursor: usize,
     comp_sink: &ITfCompositionSink,
+    display_attribute_atom: Option<u32>,
 ) -> Result<ITfComposition> {
     unsafe {
         // Get insertion point (query only — don't insert yet)
@@ -109,30 +131,98 @@ fn start_composition(
         let wide = to_wide(preedit);
         let comp_range = comp.GetRange()?;
         comp_range.SetText(ec, 0, &wide)?;
+        set_composition_display_attribute(ec, context, &comp_range, display_attribute_atom)?;
+        set_composition_cursor(ec, context, &comp_range, preedit, cursor)?;
 
         Ok(comp)
     }
 }
 
 /// Update preedit text on an existing composition.
-fn update_composition_text(ec: u32, composition: &ITfComposition, preedit: &str) -> Result<()> {
+fn update_composition_text(
+    ec: u32,
+    context: &ITfContext,
+    composition: &ITfComposition,
+    preedit: &str,
+    cursor: usize,
+    display_attribute_atom: Option<u32>,
+) -> Result<()> {
     unsafe {
         let range = composition.GetRange()?;
         let wide = to_wide(preedit);
         range.SetText(ec, 0, &wide)?;
+        set_composition_display_attribute(ec, context, &range, display_attribute_atom)?;
+        set_composition_cursor(ec, context, &range, preedit, cursor)?;
+    }
+    Ok(())
+}
+
+fn set_composition_cursor(
+    ec: u32,
+    context: &ITfContext,
+    composition_range: &ITfRange,
+    preedit: &str,
+    cursor: usize,
+) -> Result<()> {
+    unsafe {
+        let caret = composition_range.Clone()?;
+        caret.Collapse(ec, TF_ANCHOR_START)?;
+        let requested = cursor.min(preedit.encode_utf16().count()) as i32;
+        let mut shifted = 0;
+        caret.ShiftEnd(ec, requested, &mut shifted, std::ptr::null())?;
+        caret.Collapse(ec, TF_ANCHOR_END)?;
+
+        let mut selections = [TF_SELECTION::default()];
+        selections[0].range = std::mem::ManuallyDrop::new(Some(caret));
+        selections[0].style.ase = TF_AE_END;
+        selections[0].style.fInterimChar = BOOL::from(false);
+        let result = context.SetSelection(ec, &selections);
+        std::mem::ManuallyDrop::drop(&mut selections[0].range);
+        result?;
     }
     Ok(())
 }
 
 /// Commit (end) the composition, writing the final committed text.
-fn end_composition(ec: u32, composition: &ITfComposition, committed: Option<&str>) -> Result<()> {
+fn end_composition(
+    ec: u32,
+    context: &ITfContext,
+    composition: &ITfComposition,
+    committed: Option<&str>,
+) -> Result<()> {
     unsafe {
         let range = composition.GetRange()?;
+        clear_composition_display_attribute(ec, context, &range);
         let wide = committed.map(to_wide).unwrap_or_default();
         range.SetText(ec, 0, &wide)?;
         composition.EndComposition(ec)?;
     }
     Ok(())
+}
+
+fn set_composition_display_attribute(
+    ec: u32,
+    context: &ITfContext,
+    range: &ITfRange,
+    atom: Option<u32>,
+) -> Result<()> {
+    let Some(atom) = atom else {
+        return Ok(());
+    };
+    unsafe {
+        let property = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+        let value = VARIANT::from(atom as i32);
+        property.SetValue(ec, range, &value)?;
+    }
+    Ok(())
+}
+
+fn clear_composition_display_attribute(ec: u32, context: &ITfContext, range: &ITfRange) {
+    unsafe {
+        if let Ok(property) = context.GetProperty(&GUID_PROP_ATTRIBUTE) {
+            let _ = property.Clear(ec, range);
+        }
+    }
 }
 
 struct CaretScreenInfo {
@@ -213,17 +303,19 @@ fn apply_ime_state(
     ime_state: ImeState,
     show_mode_hint_on_change: bool,
 ) -> Result<()> {
-    let state_arc = Arc::clone(shared_state);
-    let state_arc_for_session = Arc::clone(&state_arc);
+    let state_arc = Rc::clone(shared_state);
+    let state_arc_for_session = Rc::clone(&state_arc);
     let ime_state_clone = ime_state.clone();
-    let window_update = Arc::new(Mutex::new(None));
-    let window_update_for_session = Arc::clone(&window_update);
+    let window_update = Rc::new(RefCell::new(None));
+    let window_update_for_session = Rc::clone(&window_update);
     let comp_sink_obj = CompositionSink {
-        state: Arc::clone(shared_state),
+        state: Rc::downgrade(shared_state),
+        _dll_guard: DllActivityGuard::new(),
     };
     let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
+    let display_attribute_atom = shared_state.borrow().display_attribute_atom;
 
-    with_write_session(context, client_id, move |ec, ctx| {
+    let session_result = with_write_session(context, client_id, move |ec, ctx| {
         let committed = ime_state_clone
             .committed
             .as_deref()
@@ -231,70 +323,116 @@ fn apply_ime_state(
         let has_commit = committed.is_some();
 
         let mut composition = {
-            let mut st = state_arc_for_session.lock().unwrap();
+            let mut st = state_arc_for_session.borrow_mut();
+            st.composition_context = None;
             st.composition.take()
         };
+        let original_composition = composition.clone();
 
-        if let Some(committed) = committed {
-            if let Some(comp) = composition.take() {
-                end_composition(ec, &comp, Some(committed))?;
-            } else {
-                unsafe {
-                    let ins: ITfInsertAtSelection = ctx.cast()?;
-                    let wide = to_wide(committed);
-                    ins.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide)?;
+        let apply_result = (|| -> Result<()> {
+            if let Some(committed) = committed {
+                if let Some(comp) = composition.take() {
+                    end_composition(ec, ctx, &comp, Some(committed))?;
+                } else {
+                    unsafe {
+                        let ins: ITfInsertAtSelection = ctx.cast()?;
+                        let wide = to_wide(committed);
+                        ins.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide)?;
+                    }
                 }
             }
-        }
 
-        if !ime_state_clone.preedit.is_empty() {
-            if let Some(comp) = &composition {
-                update_composition_text(ec, comp, &ime_state_clone.preedit)?;
-            } else {
-                let comp = start_composition(ec, ctx, &ime_state_clone.preedit, &comp_sink_iface)?;
-                composition = Some(comp);
+            if !ime_state_clone.preedit.is_empty() {
+                if let Some(comp) = &composition {
+                    update_composition_text(
+                        ec,
+                        ctx,
+                        comp,
+                        &ime_state_clone.preedit,
+                        ime_state_clone.cursor,
+                        display_attribute_atom,
+                    )?;
+                } else {
+                    let comp = start_composition(
+                        ec,
+                        ctx,
+                        &ime_state_clone.preedit,
+                        ime_state_clone.cursor,
+                        &comp_sink_iface,
+                        display_attribute_atom,
+                    )?;
+                    composition = Some(comp);
+                }
+            } else if composition.is_some() && !has_commit {
+                if let Some(comp) = composition.take() {
+                    end_composition(ec, ctx, &comp, None)?;
+                }
             }
-        } else if composition.is_some() && !has_commit {
-            if let Some(comp) = composition.take() {
-                end_composition(ec, &comp, None)?;
+            Ok(())
+        })();
+
+        if let Err(error) = apply_result {
+            if let Some(comp) = composition.as_ref().or(original_composition.as_ref()) {
+                let _ = end_composition(ec, ctx, comp, None);
             }
+            let mut st = state_arc_for_session.borrow_mut();
+            st.composition = None;
+            st.composition_context = None;
+            st.ime_state = None;
+            return Err(error);
         }
 
         let caret = caret_screen_info(ec, ctx);
+        let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
         let mode_changed = {
-            let mut st = state_arc_for_session.lock().unwrap();
+            let mut st = state_arc_for_session.borrow_mut();
+            st.composition_context = composition.as_ref().map(|_| ctx.clone());
             st.composition = composition;
             let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
             st.ascii_mode = ime_state_clone.ascii_mode;
             st.ime_state = Some(ime_state_clone.clone());
             mode_changed
         };
-        *window_update_for_session.lock().unwrap() = Some((
+        *window_update_for_session.borrow_mut() = Some((
             ime_state_clone.clone(),
             caret.x,
             caret.y,
             caret.owner_hwnd,
+            document_mgr,
             show_mode_hint_on_change && mode_changed,
         ));
 
         Ok(())
-    })?;
+    });
+    if let Err(error) = session_result {
+        reset_input_for_focus_change(&state_arc);
+        append_key_diagnostic!("TSF edit session failed: {error}");
+        return Err(error);
+    }
 
-    if let Some((ime_state, cx, cy, owner_hwnd, show_mode_hint)) =
-        window_update.lock().unwrap().take()
+    if let Some((ime_state, cx, cy, owner_hwnd, document_mgr, show_mode_hint)) =
+        window_update.borrow_mut().take()
     {
-        update_ime_windows(&state_arc, &ime_state, cx, cy, owner_hwnd, show_mode_hint);
+        update_ime_windows(
+            &state_arc,
+            &ime_state,
+            document_mgr.as_ref(),
+            cx,
+            cy,
+            owner_hwnd,
+            show_mode_hint,
+        );
     }
 
     Ok(())
 }
 
 fn runtime_session(shared_state: &SharedState) -> Option<ImeRuntimeSession> {
-    shared_state.lock().unwrap().session()
+    shared_state.borrow().session()
 }
 
 fn cached_ime_state(shared_state: &SharedState) -> Option<ImeState> {
-    shared_state.lock().unwrap().ime_state.clone()
+    shared_state.borrow().ime_state.clone()
 }
 
 fn has_visible_state(state: &ImeState) -> bool {
@@ -330,8 +468,9 @@ fn reset_session(shared_state: &SharedState) -> Option<ImeState> {
 }
 
 fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> Result<Option<u32>> {
+    poll_engine_builds(shared_state);
     let (engine_ready, engine_building, engine_error) = {
-        let st = shared_state.lock().unwrap();
+        let st = shared_state.borrow();
         (
             st.engine_ready(),
             st.engine_building,
@@ -340,15 +479,15 @@ fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> R
     };
     if !engine_ready {
         start_engine_warmup(shared_state);
-        append_key_diagnostic(format!(
+        append_key_diagnostic!(
             "OnKeyDown engine not ready building={engine_building} error={engine_error:?}"
-        ));
+        );
         return Ok(None);
     }
 
     let reload_started = start_reload_if_needed(shared_state);
     let (client_id, reload_in_progress, should_clear_reload) = {
-        let mut st = shared_state.lock().unwrap();
+        let mut st = shared_state.borrow_mut();
         (
             st.client_id,
             st.reload_in_progress,
@@ -371,13 +510,19 @@ fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> R
 
 #[implement(ITfKeyEventSink)]
 pub(crate) struct KeyEventSink {
-    pub(crate) state: SharedState,
+    pub(crate) state: WeakState,
+    pub(crate) _dll_guard: DllActivityGuard,
 }
 
 impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
-    fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
-        self.state.lock().unwrap().shift_pressed_without_key = false;
-        hide_ime_windows(&self.state);
+    fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(());
+        };
+        reset_input_for_focus_change(&state);
+        if foreground.as_bool() {
+            start_engine_warmup(&state);
+        }
         Ok(())
     }
 
@@ -387,36 +532,39 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(BOOL::from(false));
+        };
+        poll_engine_builds(&state);
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
         if is_shift_vk(vk) {
-            let mut st = self.state.lock().unwrap();
-            st.shift_pressed_without_key = true;
             return Ok(BOOL::from(false));
         }
-        let (engine_ready, reload_in_progress, state) = {
-            let mut st = self.state.lock().unwrap();
-            if st.shift_pressed_without_key {
-                st.shift_pressed_without_key = false;
-            }
-            (
-                st.engine_ready(),
-                st.reload_in_progress,
-                st.ime_state.clone(),
-            )
+        let (engine_ready, reload_needed, cached_state) = {
+            let st = state.borrow();
+            (st.engine_ready(), st.reload_needed(), st.ime_state.clone())
         };
-        if !engine_ready || reload_in_progress {
-            let eat = should_eat_key(vk, false, mods);
-            append_key_diagnostic(format!(
-                "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_in_progress} composing=false eat={eat}"
-            ));
-            return Ok(BOOL::from(eat));
+        if !engine_ready || reload_needed {
+            if !engine_ready {
+                start_engine_warmup(&state);
+            }
+            if reload_needed {
+                start_reload_if_needed(&state);
+            }
+            append_key_diagnostic!(
+                "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_needed} composing=false eat=false"
+            );
+            return Ok(BOOL::from(false));
         }
-        let is_composing = state.as_ref().map(has_visible_state).unwrap_or(false);
+        let is_composing = cached_state
+            .as_ref()
+            .map(has_visible_state)
+            .unwrap_or(false);
         let eat = should_eat_key(vk, is_composing, mods);
-        append_key_diagnostic(format!(
-            "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_in_progress} composing={is_composing} eat={eat}"
-        ));
+        append_key_diagnostic!(
+            "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
+        );
         Ok(BOOL::from(eat))
     }
 
@@ -426,37 +574,60 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(BOOL::from(false));
+        };
+        poll_engine_builds(&state);
         let vk = (wparam.0 & 0xFFFF) as u16;
         if !is_shift_vk(vk) {
             return Ok(BOOL::from(false));
         }
-        let st = self.state.lock().unwrap();
-        Ok(BOOL::from(st.shift_pressed_without_key))
+        let (should_eat, should_retry, should_reload) = {
+            let st = state.borrow();
+            let reload_needed = st.reload_needed();
+            (
+                st.shift_pressed_without_key && st.engine_ready() && !reload_needed,
+                !st.engine_ready(),
+                reload_needed,
+            )
+        };
+        if should_retry {
+            start_engine_warmup(&state);
+        }
+        if should_reload {
+            start_reload_if_needed(&state);
+        }
+        Ok(BOOL::from(should_eat))
     }
 
-    fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(BOOL::from(false));
+        };
         let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
         let vk = (wparam.0 & 0xFFFF) as u16;
         let mods = current_mod_mask();
 
         if is_shift_vk(vk) {
+            state.borrow_mut().shift_pressed_without_key = true;
             return Ok(BOOL::from(false));
         }
 
-        let client_id = match {
-            let mut st = self.state.lock().unwrap();
+        let prepared_engine = {
+            let mut st = state.borrow_mut();
             st.shift_pressed_without_key = false;
             drop(st);
-            prepare_engine_for_key(&context, &self.state)?
-        } {
+            prepare_engine_for_key(&context, &state)?
+        };
+        let client_id = match prepared_engine {
             Some(client_id) => client_id,
             None => return Ok(BOOL::from(false)),
         };
 
-        let before_state = cached_ime_state(&self.state).unwrap_or_else(ImeState::empty);
+        let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
 
         if should_bypass_empty_composition(vk, mods, &before_state) {
-            hide_candidate_window(&self.state);
+            hide_candidate_window(&state);
             return Ok(BOOL::from(false));
         }
 
@@ -469,87 +640,91 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             commit_state.highlighted_candidate_index = 0;
             commit_state.page = 0;
             commit_state.is_last_page = true;
-            let _ = reset_session(&self.state);
-            apply_ime_state(&context, client_id, &self.state, commit_state, true)?;
+            let _ = reset_session(&state);
+            apply_ime_state(&context, client_id, &state, commit_state, true)?;
             return Ok(BOOL::from(true));
         }
 
-        if let Some(index) = candidate_index_for_select_key(vk, &before_state) {
-            let ime_state = select_candidate(&self.state, index);
+        if let Some(index) = candidate_index_for_select_key(vk, mods, &before_state) {
+            let ime_state = select_candidate(&state, index);
             if let Some(ime_state) = ime_state {
-                apply_ime_state(&context, client_id, &self.state, ime_state, true)?;
+                apply_ime_state(&context, client_id, &state, ime_state, true)?;
                 return Ok(BOOL::from(true));
             }
         }
 
-        let keysym = match vk_to_keysym(vk, mods) {
+        let keysym = match vk_to_keysym(vk, lparam.0, mods) {
             Some(k) => k,
             None => {
-                append_key_diagnostic(format!("OnKeyDown vk=0x{vk:02x} mods=0x{mods:x} no keysym"));
+                append_key_diagnostic!("OnKeyDown vk=0x{vk:02x} mods=0x{mods:x} no keysym");
                 return Ok(BOOL::from(false));
             }
         };
 
-        let result = process_key_result(&self.state, keysym, mods);
+        let result = process_key_result(&state, keysym, mods);
         let result = match result {
             Some(r) => r,
             None => {
-                append_key_diagnostic(format!(
+                append_key_diagnostic!(
                     "OnKeyDown vk=0x{vk:02x} keysym=0x{keysym:x} mods=0x{mods:x} no result"
-                ));
+                );
                 return Ok(BOOL::from(false));
             }
         };
         let ime_state = result.state;
 
         let consumed = should_consume_processed_state(result.accepted, &before_state, &ime_state);
-        append_key_diagnostic(format!(
+        append_key_diagnostic!(
             "OnKeyDown vk=0x{vk:02x} keysym=0x{keysym:x} mods=0x{mods:x} accepted={} consumed={} preedit_len={} candidates={} commit={}",
             result.accepted,
             consumed,
             ime_state.preedit.chars().count(),
             ime_state.candidates.len(),
             has_commit(&ime_state),
-        ));
+        );
 
         if !consumed {
             return Ok(BOOL::from(false));
         }
 
-        apply_ime_state(&context, client_id, &self.state, ime_state, true)?;
+        apply_ime_state(&context, client_id, &state, ime_state, true)?;
 
         Ok(BOOL::from(consumed))
     }
 
     fn OnKeyUp(&self, pic: Option<&ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(BOOL::from(false));
+        };
         let vk = (wparam.0 & 0xFFFF) as u16;
         let Some(keysym) = shift_keysym_for_vk(vk) else {
             return Ok(BOOL::from(false));
         };
 
         let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
-        let client_id = match {
-            let mut st = self.state.lock().unwrap();
+        let prepared_engine = {
+            let mut st = state.borrow_mut();
             if !st.shift_pressed_without_key {
                 return Ok(BOOL::from(false));
             }
             st.shift_pressed_without_key = false;
             drop(st);
-            prepare_engine_for_key(&context, &self.state)?
-        } {
+            prepare_engine_for_key(&context, &state)?
+        };
+        let client_id = match prepared_engine {
             Some(client_id) => client_id,
             None => return Ok(BOOL::from(false)),
         };
 
-        let before_state = cached_ime_state(&self.state).unwrap_or_else(ImeState::empty);
-        let result = process_key_result(&self.state, keysym, RIME_RELEASE_MASK);
+        let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
+        let result = process_key_result(&state, keysym, RIME_RELEASE_MASK);
         let Some(result) = result else {
             return Ok(BOOL::from(false));
         };
         let consumed =
             should_consume_processed_state(result.accepted, &before_state, &result.state);
         if consumed {
-            apply_ime_state(&context, client_id, &self.state, result.state, true)?;
+            apply_ime_state(&context, client_id, &state, result.state, true)?;
         }
         Ok(BOOL::from(consumed))
     }
@@ -566,23 +741,20 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
 /// our composition (e.g. user clicks somewhere else).
 #[implement(ITfCompositionSink)]
 pub(crate) struct CompositionSink {
-    pub(crate) state: SharedState,
+    pub(crate) state: WeakState,
+    pub(crate) _dll_guard: DllActivityGuard,
 }
 
 impl ITfCompositionSink_Impl for CompositionSink_Impl {
     fn OnCompositionTerminated(
         &self,
         _ecwrite: u32,
-        _pcomposition: Option<&ITfComposition>,
+        pcomposition: Option<&ITfComposition>,
     ) -> Result<()> {
-        {
-            let mut st = self.state.lock().unwrap();
-            st.composition = None;
-            st.ime_state = None;
-        }
-        hide_ime_windows(&self.state);
-        // Reset the runtime session so the next keypress starts fresh.
-        let _ = reset_session(&self.state);
+        let Some(state) = upgrade_state(&self.state) else {
+            return Ok(());
+        };
+        clear_input_after_composition_terminated(&state, pcomposition);
         Ok(())
     }
 }

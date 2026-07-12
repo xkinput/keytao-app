@@ -1,5 +1,7 @@
 package ink.rea.keytao_app
 
+import org.json.JSONObject
+
 object KeytaoNativeBridge {
     private const val libraryName = "keytao_app_lib"
 
@@ -41,14 +43,20 @@ object KeytaoNativeBridge {
         return runCatching { nativeEngineAvailable() }.getOrDefault(false)
     }
 
+    fun deployStep(userDir: String, sharedDir: String?, schemaId: String?): KeytaoRimeDeployStepResult {
+        if (!loaded) return KeytaoRimeDeployStepResult(error = "KeyTao native bridge is unavailable")
+        val json = runCatching { nativeDeployStep(userDir, sharedDir, schemaId) }.getOrNull()
+        return KeytaoRimeDeployStepResult.fromJson(json)
+    }
+
     fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
         if (!loaded) return false
         return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false)
     }
 
-    fun reload(): Boolean {
+    fun reinitialize(userDir: String, sharedDir: String?): Boolean {
         if (!loaded) return false
-        return runCatching { nativeReload() }.getOrDefault(false)
+        return runCatching { nativeReinitialize(userDir, sharedDir) }.getOrDefault(false)
     }
 
     fun createSession(): Long {
@@ -133,9 +141,11 @@ object KeytaoNativeBridge {
 
     external fun nativeEngineAvailable(): Boolean
 
+    external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String
+
     external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
 
-    external fun nativeReload(): Boolean
+    external fun nativeReinitialize(userDir: String, sharedDir: String?): Boolean
 
     external fun nativeCreateSession(): Long
 
@@ -158,4 +168,38 @@ object KeytaoNativeBridge {
     external fun nativeGetAsciiMode(session: Long): Boolean
 
     external fun nativeSetAsciiMode(session: Long, enabled: Boolean): String?
+}
+
+data class KeytaoRimeDeployStepResult(
+    val success: Boolean = false,
+    val schemas: List<String> = emptyList(),
+    val error: String = "",
+) {
+    companion object {
+        fun fromJson(json: String?): KeytaoRimeDeployStepResult {
+            if (json.isNullOrBlank()) {
+                return KeytaoRimeDeployStepResult(error = "Android RIME deployment returned no result")
+            }
+            return runCatching {
+                val root = JSONObject(json)
+                val values = root.optJSONArray("schemas")
+                val schemas = buildList {
+                    if (values != null) {
+                        for (index in 0 until values.length()) {
+                            values.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
+                        }
+                    }
+                }
+                KeytaoRimeDeployStepResult(
+                    success = root.optBoolean("success", false),
+                    schemas = schemas,
+                    error = root.optString("error"),
+                )
+            }.getOrElse { error ->
+                KeytaoRimeDeployStepResult(
+                    error = error.message ?: "Invalid Android RIME deployment result",
+                )
+            }
+        }
+    }
 }

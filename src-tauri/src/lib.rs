@@ -963,6 +963,9 @@ fn process_exists(pid: u32) -> bool {
 const WINDOWS_TEXT_SERVICE_CLSID: &str = "{4A5C6D7E-8F90-1A2B-3C4D-5E6F7A8B9C0D}";
 
 #[cfg(target_os = "windows")]
+const WINDOWS_PROFILE_ID: &str = "{1B2C3D4E-5F60-7A8B-9C0D-1E2F3A4B5C6D}";
+
+#[cfg(target_os = "windows")]
 const WINDOWS_TEXT_SERVICE_GUID: windows::core::GUID = windows::core::GUID {
     data1: 0x4A5C6D7E,
     data2: 0x8F90,
@@ -980,6 +983,12 @@ const WINDOWS_PROFILE_GUID: windows::core::GUID = windows::core::GUID {
 
 #[cfg(target_os = "windows")]
 const WINDOWS_LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
+
+#[cfg(target_os = "windows")]
+const WINDOWS_PE_MACHINE_X86: u16 = 0x014C;
+
+#[cfg(target_os = "windows")]
+const WINDOWS_PE_MACHINE_X64: u16 = 0x8664;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_IME_STATUS_EVENT: &str = "windows-ime-status";
@@ -1058,6 +1067,84 @@ fn windows_tsf_profile_enabled() -> Result<bool, String> {
             )
             .map_err(|e| format!("query KeyTao TSF profile: {e}"))?;
         Ok(profile.dwFlags & TF_IPP_FLAG_ENABLED != 0)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_enable_ime_for_current_user() -> Result<(), String> {
+    use windows::{
+        core::{Error, IUnknown, PCSTR, PCWSTR},
+        Win32::{
+            Foundation::{FreeLibrary, BOOL},
+            System::{
+                Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+                LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32},
+            },
+            UI::TextServices::{CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfiles},
+        },
+    };
+
+    type InstallLayoutOrTipFn = unsafe extern "system" fn(PCWSTR, u32) -> BOOL;
+
+    let _com = windows_init_com_apartment()?;
+    unsafe {
+        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
+            &CLSID_TF_InputProcessorProfiles,
+            None::<&IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        )
+        .map_err(|e| format!("open TSF input processor profiles: {e}"))?;
+        profiles
+            .EnableLanguageProfile(
+                &WINDOWS_TEXT_SERVICE_GUID,
+                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                &WINDOWS_PROFILE_GUID,
+                BOOL::from(true),
+            )
+            .map_err(|e| format!("enable KeyTao TSF profile for current user: {e}"))?;
+        if let Err(error) = profiles.EnableLanguageProfileByDefault(
+            &WINDOWS_TEXT_SERVICE_GUID,
+            WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+            &WINDOWS_PROFILE_GUID,
+            BOOL::from(true),
+        ) {
+            tracing::warn!("failed to enable KeyTao profile by default for current user: {error}");
+        }
+
+        let mut input_dll = "input.dll".encode_utf16().collect::<Vec<_>>();
+        input_dll.push(0);
+        let module = LoadLibraryExW(
+            PCWSTR(input_dll.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+        .map_err(|e| format!("load system input.dll: {e}"))?;
+        let Some(proc) = GetProcAddress(module, PCSTR(c"InstallLayoutOrTip".as_ptr().cast()))
+        else {
+            let error = Error::from_win32();
+            let _ = FreeLibrary(module);
+            return Err(format!("resolve InstallLayoutOrTip: {error}"));
+        };
+        let install_layout_or_tip: InstallLayoutOrTipFn = std::mem::transmute(proc);
+        let mut tip = format!(
+            "0x{WINDOWS_LANGID_CHINESE_SIMPLIFIED:04X}:{WINDOWS_TEXT_SERVICE_CLSID}{WINDOWS_PROFILE_ID}"
+        )
+        .encode_utf16()
+        .collect::<Vec<_>>();
+        tip.push(0);
+        let installed = install_layout_or_tip(PCWSTR(tip.as_ptr()), 0);
+        let install_error = (!installed.as_bool()).then(Error::from_win32);
+        let _ = FreeLibrary(module);
+        if let Some(error) = install_error {
+            return Err(format!(
+                "add KeyTao to the current user's enabled input methods: {error}"
+            ));
+        }
+    }
+
+    match windows_tsf_profile_enabled()? {
+        true => Ok(()),
+        false => Err("KeyTao TSF profile remains disabled for the current user".into()),
     }
 }
 
@@ -1143,9 +1230,113 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         }
     }
 
+    let expected_machine = if cfg!(target_pointer_width = "64") {
+        WINDOWS_PE_MACHINE_X64
+    } else {
+        WINDOWS_PE_MACHINE_X86
+    };
+    candidates.into_iter().find(|dir| {
+        let dll = dir.join("keytao_windows_ime.dll");
+        dll.is_file() && windows_pe_machine(&dll) == Some(expected_machine)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_x86_standard_runtime_dir() -> Option<PathBuf> {
+    std::env::var_os("ProgramFiles(x86)").map(|program_files_x86| {
+        PathBuf::from(program_files_x86)
+            .join("KeyTao")
+            .join("keytao-windows-ime-runtime")
+            .join("x86")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_x86_runtime_complete(dir: &Path) -> bool {
+    let dll = dir.join("keytao_windows_ime.dll");
+    dll.is_file()
+        && windows_pe_machine(&dll) == Some(WINDOWS_PE_MACHINE_X86)
+        && dir.join("rime.dll").is_file()
+        && dir.join("rime-data").join("default.yaml").is_file()
+        && dir.join("default-theme.yaml").is_file()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_x86_packaged_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if !cfg!(target_pointer_width = "64") {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(native_dir) = windows_ime_runtime_dir(app) {
+        if let Some(runtime_root) = native_dir.parent() {
+            candidates.push(runtime_root.join("x86"));
+        }
+    }
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("x86"),
+            resource_dir.join("keytao-windows-ime-runtime").join("x86"),
+            resource_dir
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("x86"),
+            resource_dir
+                .join("_up_")
+                .join("target")
+                .join("keytao-windows-ime-runtime")
+                .join("x86"),
+        ]);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.extend([
+                dir.join("x86"),
+                dir.join("keytao-windows-ime-runtime").join("x86"),
+                dir.join("resources")
+                    .join("keytao-windows-ime-runtime")
+                    .join("x86"),
+                dir.join("_up_")
+                    .join("target")
+                    .join("keytao-windows-ime-runtime")
+                    .join("x86"),
+            ]);
+        }
+    }
+
     candidates
         .into_iter()
-        .find(|dir| dir.join("keytao_windows_ime.dll").is_file())
+        .find(|dir| windows_x86_runtime_complete(dir))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_x86_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    windows_ime_x86_standard_runtime_dir()
+        .filter(|dir| windows_x86_runtime_complete(dir))
+        .or_else(|| windows_ime_x86_packaged_runtime_dir(app))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pe_machine(path: &Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut dos_magic = [0_u8; 2];
+    file.read_exact(&mut dos_magic).ok()?;
+    if dos_magic != *b"MZ" {
+        return None;
+    }
+    file.seek(SeekFrom::Start(0x3C)).ok()?;
+    let mut offset = [0_u8; 4];
+    file.read_exact(&mut offset).ok()?;
+    file.seek(SeekFrom::Start(u32::from_le_bytes(offset) as u64))
+        .ok()?;
+    let mut header = [0_u8; 6];
+    file.read_exact(&mut header).ok()?;
+    if header[..4] != *b"PE\0\0" {
+        return None;
+    }
+    Some(u16::from_le_bytes([header[4], header[5]]))
 }
 
 #[cfg(target_os = "windows")]
@@ -1215,27 +1406,84 @@ fn macos_app_shared_data_dir(app: &tauri::AppHandle) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_registered_ime_path() -> Option<String> {
+fn windows_registered_ime_path(use_x86_view: bool) -> Option<String> {
+    use windows::{
+        core::PCWSTR,
+        Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
+            KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ,
+        },
+    };
+
     let key = format!(r"HKCR\CLSID\{}\InprocServer32", WINDOWS_TEXT_SERVICE_CLSID);
-    let output = std::process::Command::new("reg")
-        .args(["query", &key, "/ve"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let subkey = key.strip_prefix(r"HKCR\")?;
+    let mut subkey_wide = subkey.encode_utf16().collect::<Vec<_>>();
+    subkey_wide.push(0);
+    let view = if use_x86_view {
+        KEY_WOW64_32KEY
+    } else {
+        KEY_WOW64_64KEY
+    };
+    let mut handle = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CLASSES_ROOT,
+            PCWSTR(subkey_wide.as_ptr()),
+            0,
+            KEY_READ | view,
+            &mut handle,
+        )
+        .ok()
+    }
+    .is_err()
+    {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines().find_map(|line| {
-        let trimmed = line.trim();
-        let marker = "REG_SZ";
-        let (_, value) = trimmed.split_once(marker)?;
-        let value = value.trim();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value.to_string())
+
+    let result = (|| {
+        let mut value_type = REG_SZ;
+        let mut byte_len = 0_u32;
+        unsafe {
+            RegQueryValueExW(
+                handle,
+                PCWSTR::null(),
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut byte_len),
+            )
+            .ok()
+            .ok()?;
         }
-    })
+        if (value_type != REG_SZ && value_type != REG_EXPAND_SZ) || byte_len < 2 {
+            return None;
+        }
+
+        let mut value = vec![0_u16; (byte_len as usize).div_ceil(2)];
+        unsafe {
+            RegQueryValueExW(
+                handle,
+                PCWSTR::null(),
+                None,
+                Some(&mut value_type),
+                Some(value.as_mut_ptr().cast()),
+                Some(&mut byte_len),
+            )
+            .ok()
+            .ok()?;
+        }
+        let value_len = value
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(value.len());
+        let value = String::from_utf16(&value[..value_len]).ok()?;
+        (!value.is_empty()).then_some(value)
+    })();
+
+    unsafe {
+        let _ = RegCloseKey(handle);
+    }
+    result
 }
 
 #[cfg(target_os = "windows")]
@@ -1244,7 +1492,27 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
     let dll_path = runtime_dir
         .as_ref()
         .map(|dir| dir.join("keytao_windows_ime.dll"));
-    let registered_path = windows_registered_ime_path();
+    let registered_path = windows_registered_ime_path(!cfg!(target_pointer_width = "64"));
+    let x86_runtime_dir = windows_ime_x86_runtime_dir(app);
+    let x86_dll_path = x86_runtime_dir
+        .as_ref()
+        .map(|dir| dir.join("keytao_windows_ime.dll"));
+    let x86_registered_path = if cfg!(target_pointer_width = "64") {
+        windows_registered_ime_path(true)
+    } else {
+        None
+    };
+    let x86_packaged = !cfg!(target_pointer_width = "64")
+        || (x86_dll_path.as_ref().is_some_and(|path| path.is_file())
+            && x86_runtime_dir
+                .as_ref()
+                .is_some_and(|dir| dir.join("rime.dll").is_file())
+            && x86_runtime_dir
+                .as_ref()
+                .is_some_and(|dir| dir.join("rime-data").join("default.yaml").is_file())
+            && x86_runtime_dir
+                .as_ref()
+                .is_some_and(|dir| dir.join("default-theme.yaml").is_file()));
     let packaged = dll_path.as_ref().is_some_and(|path| path.is_file())
         && runtime_dir
             .as_ref()
@@ -1254,12 +1522,9 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
             .is_some_and(|dir| dir.join("rime-data").join("default.yaml").is_file())
         && runtime_dir
             .as_ref()
-            .is_some_and(|dir| dir.join("default-theme.yaml").is_file());
-    let packaged = packaged
-        && runtime_dir
-            .as_ref()
-            .is_some_and(|dir| dir.join("keytao.ico").is_file());
-    let registered_dll = match (&dll_path, &registered_path) {
+            .is_some_and(|dir| dir.join("default-theme.yaml").is_file())
+        && x86_packaged;
+    let native_registered_dll = match (&dll_path, &registered_path) {
         (Some(dll), Some(path)) => {
             let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
             let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
@@ -1268,11 +1533,32 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         }
         _ => false,
     };
-    let (profile_enabled, profile_status) = match windows_tsf_profile_enabled() {
+    let x86_registered_dll = if cfg!(target_pointer_width = "64") {
+        match (&x86_dll_path, &x86_registered_path) {
+            (Some(dll), Some(path)) => {
+                let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
+                let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+                lhs.to_string_lossy()
+                    .eq_ignore_ascii_case(&rhs.to_string_lossy())
+            }
+            _ => false,
+        }
+    } else {
+        true
+    };
+    let registered_dll = native_registered_dll && x86_registered_dll;
+    let (profile_enabled, mut profile_status) = match windows_tsf_profile_enabled() {
         Ok(true) => (true, "TSF profile 已启用".to_string()),
         Ok(false) => (false, "TSF profile 已存在但未启用".to_string()),
         Err(e) => (false, format!("TSF profile 不可用：{e}")),
     };
+    if cfg!(target_pointer_width = "64") {
+        profile_status.push_str(if x86_registered_dll {
+            "；x64/x86 COM 均已注册"
+        } else {
+            "；x86 COM 尚未注册"
+        });
+    }
     let registered = registered_dll && profile_enabled;
     let registration_state = if !packaged {
         "missing_runtime"
@@ -1329,11 +1615,21 @@ fn powershell_quote(value: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn run_regsvr32_elevated(dll_path: &Path, unregister: bool) -> Result<(), String> {
-    let dll_path = std::fs::canonicalize(dll_path).unwrap_or_else(|_| dll_path.to_path_buf());
-    let dll_dir = dll_path
-        .parent()
-        .ok_or("invalid keytao_windows_ime.dll path")?;
+struct WindowsImeRegistrationTarget {
+    label: &'static str,
+    source_dll_path: PathBuf,
+    dll_path: PathBuf,
+    x86: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn run_regsvr32_elevated(
+    targets: &[WindowsImeRegistrationTarget],
+    unregister: bool,
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Err("no Windows IME registration targets".into());
+    }
     let temp_dir = std::env::temp_dir();
     let stamp = format!(
         "keytao-ime-register-{}-{}",
@@ -1342,66 +1638,98 @@ fn run_regsvr32_elevated(dll_path: &Path, unregister: bool) -> Result<(), String
     );
     let script_path = temp_dir.join(format!("{stamp}.ps1"));
     let result_path = temp_dir.join(format!("{stamp}.txt"));
-    let proc_name = if unregister {
-        "DllUnregisterServer"
-    } else {
-        "DllRegisterServer"
-    };
+    let system_root = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let registrations = targets
+        .iter()
+        .map(|target| {
+            let source_dll_path = std::fs::canonicalize(&target.source_dll_path)
+                .unwrap_or_else(|_| target.source_dll_path.clone());
+            let source_dir = source_dll_path
+                .parent()
+                .ok_or("invalid source keytao_windows_ime.dll path")?;
+            let dll_path =
+                std::fs::canonicalize(&target.dll_path).unwrap_or_else(|_| target.dll_path.clone());
+            let dll_dir = dll_path
+                .parent()
+                .ok_or("invalid keytao_windows_ime.dll path")?;
+            let regsvr32 = system_root.join(if target.x86 && cfg!(target_pointer_width = "64") {
+                r"SysWOW64\regsvr32.exe"
+            } else {
+                r"System32\regsvr32.exe"
+            });
+            Ok(format!(
+                "@{{ Label = {}; Executable = {}; SourceDirectory = {}; Dll = {}; Directory = {} }}",
+                powershell_quote(target.label),
+                powershell_quote(&windows_normal_path(&regsvr32)),
+                powershell_quote(&windows_normal_path(source_dir)),
+                powershell_quote(&windows_normal_path(&dll_path)),
+                powershell_quote(&windows_normal_path(dll_dir)),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .join(",\n  ");
+    let unregister_arg = if unregister { "$arguments += '/u'" } else { "" };
+    let prepare_runtime = if unregister { "$false" } else { "$true" };
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
-$dir = {dir}
-$dll = {dll}
-$procName = {proc_name}
 $resultFile = {result}
-$source = @"
-using System;
-using System.Runtime.InteropServices;
-public static class KeyTaoNativeRegister {{
-  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool SetDllDirectory(string lpPathName);
-  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr LoadLibrary(string lpFileName);
-  [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-  [DllImport("kernel32", SetLastError=true)] public static extern bool FreeLibrary(IntPtr hModule);
-  [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int RegisterDelegate();
-}}
-"@
+$prepareRuntime = {prepare_runtime}
+$registrations = @(
+  {registrations}
+)
 try {{
-  Add-Type -TypeDefinition $source
-  [KeyTaoNativeRegister]::SetDllDirectory($dir) | Out-Null
-  $module = [KeyTaoNativeRegister]::LoadLibrary($dll)
-  if ($module -eq [IntPtr]::Zero) {{
-    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    "LoadLibrary failed: $code" | Set-Content -Encoding UTF8 -Path $resultFile
-    exit 3
+  $failures = @()
+  foreach ($registration in $registrations) {{
+    $oldPath = $env:PATH
+    try {{
+      if ($prepareRuntime -and $registration.SourceDirectory -ne $registration.Directory) {{
+        New-Item -ItemType Directory -Force -Path $registration.Directory | Out-Null
+        Get-ChildItem -LiteralPath $registration.SourceDirectory -Force |
+          Copy-Item -Destination $registration.Directory -Recurse -Force
+      }}
+      if (-not (Test-Path -LiteralPath $registration.Dll -PathType Leaf)) {{
+        throw "Missing text service DLL after runtime preparation: $($registration.Dll)"
+      }}
+      Set-Location -LiteralPath $registration.Directory
+      $env:PATH = $registration.Directory + ';' + $oldPath
+      $arguments = @('/s')
+      {unregister_arg}
+      $arguments += $registration.Dll
+      & $registration.Executable @arguments
+      if ($LASTEXITCODE -ne 0) {{
+        throw ("regsvr32 failed with exit code {{0}}" -f $LASTEXITCODE)
+      }}
+    }} catch {{
+      $failures += ("{{0}}: {{1}}" -f $registration.Label, $_.Exception.Message)
+    }} finally {{
+      $env:PATH = $oldPath
+    }}
   }}
-  $proc = [KeyTaoNativeRegister]::GetProcAddress($module, $procName)
-  if ($proc -eq [IntPtr]::Zero) {{
-    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    "GetProcAddress $procName failed: $code" | Set-Content -Encoding UTF8 -Path $resultFile
-    [KeyTaoNativeRegister]::FreeLibrary($module) | Out-Null
-    exit 4
+  if ($failures.Count -gt 0) {{
+    ($failures -join [Environment]::NewLine) | Set-Content -Encoding UTF8 -Path $resultFile
+    exit 5
   }}
-  $delegate = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($proc, [KeyTaoNativeRegister+RegisterDelegate])
-  $hr = $delegate.Invoke()
-  [KeyTaoNativeRegister]::FreeLibrary($module) | Out-Null
-  ("{{0}} HRESULT=0x{{1:X8}}" -f $procName, ($hr -band 0xffffffff)) | Set-Content -Encoding UTF8 -Path $resultFile
-  if ($hr -eq 0) {{ exit 0 }}
-  exit 5
+  "Windows IME registration completed" | Set-Content -Encoding UTF8 -Path $resultFile
+  exit 0
 }} catch {{
   ("PowerShell registration failed: " + $_.Exception.Message) | Set-Content -Encoding UTF8 -Path $resultFile
   exit 9
 }}
 "#,
-        dir = powershell_quote(&windows_normal_path(dll_dir)),
-        dll = powershell_quote(&windows_normal_path(&dll_path)),
-        proc_name = powershell_quote(proc_name),
         result = powershell_quote(&windows_normal_path(&result_path)),
+        prepare_runtime = prepare_runtime,
+        registrations = registrations,
+        unregister_arg = unregister_arg,
     );
     std::fs::write(&script_path, script).map_err(|e| format!("write registration script: {e}"))?;
 
+    let script_argument = format!("\"{}\"", windows_normal_path(&script_path));
     let elevated_script = format!(
         "$p = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', {}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
-        powershell_quote(&windows_normal_path(&script_path))
+        powershell_quote(&script_argument)
     );
     let output = std::process::Command::new("powershell")
         .args([
@@ -1453,12 +1781,35 @@ fn windows_register_ime_blocking(app: &AppHandle) -> Result<WindowsImeStatus, St
     let runtime_dir =
         windows_ime_runtime_dir(app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
     let dll = runtime_dir.join("keytao_windows_ime.dll");
-    run_regsvr32_elevated(&dll, false)?;
+    let mut targets = Vec::new();
+    if cfg!(target_pointer_width = "64") {
+        let x86_source_runtime_dir = windows_ime_x86_packaged_runtime_dir(app)
+            .or_else(|| windows_ime_x86_runtime_dir(app))
+            .ok_or("安装包中未找到 x86 keytao_windows_ime.dll")?;
+        let x86_runtime_dir = windows_ime_x86_standard_runtime_dir()
+            .ok_or("Windows 未提供 Program Files (x86) 目录，无法安装 x86 TSF runtime")?;
+        targets.push(WindowsImeRegistrationTarget {
+            label: "x86",
+            source_dll_path: x86_source_runtime_dir.join("keytao_windows_ime.dll"),
+            dll_path: x86_runtime_dir.join("keytao_windows_ime.dll"),
+            x86: true,
+        });
+    }
+    // Register the native profile last so its embedded icon path remains the
+    // canonical profile path after both COM registry views are populated.
+    targets.push(WindowsImeRegistrationTarget {
+        label: "native",
+        source_dll_path: dll.clone(),
+        dll_path: dll,
+        x86: false,
+    });
+    run_regsvr32_elevated(&targets, false)?;
+    windows_enable_ime_for_current_user()?;
     let status = windows_ime_status_with_message(app, "已注册 KeyTao Windows IME".into());
     if status.registered {
         Ok(status)
     } else {
-        Err("regsvr32 已结束，但 TSF 注册表中仍未找到 KeyTao；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
+        Err("regsvr32 已结束，但 x64/x86 COM 注册或 TSF profile 仍不完整；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
     }
 }
 
@@ -1476,24 +1827,49 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
         return Ok(status);
     }
 
+    let can_repair_current_user = status.registered_dll;
+    let initial_message = if can_repair_current_user {
+        "正在为当前用户启用 KeyTao Windows IME"
+    } else {
+        "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示"
+    };
     if WINDOWS_IME_REGISTRATION_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        return Ok(windows_ime_registering_status(
-            &app,
-            "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
-        ));
+        return Ok(windows_ime_registering_status(&app, initial_message.into()));
     }
 
     let task_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         emit_windows_ime_status(
             &task_app,
-            windows_ime_registering_status(
-                &task_app,
-                "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
-            ),
+            windows_ime_registering_status(&task_app, initial_message.into()),
         );
 
-        let final_status = match windows_register_ime_blocking(&task_app) {
+        let registration_result = if can_repair_current_user {
+            match windows_enable_ime_for_current_user() {
+                Ok(()) => Ok(windows_ime_status_with_message(
+                    &task_app,
+                    "已为当前用户启用 KeyTao Windows IME".into(),
+                )),
+                Err(profile_error) => {
+                    emit_windows_ime_status(
+                        &task_app,
+                        windows_ime_registering_status(
+                            &task_app,
+                            "当前用户 profile 修复失败，正在请求 UAC 完成注册".into(),
+                        ),
+                    );
+                    windows_register_ime_blocking(&task_app).map_err(|registration_error| {
+                        format!(
+                            "当前用户 profile 修复失败：{profile_error}；完整注册失败：{registration_error}"
+                        )
+                    })
+                }
+            }
+        } else {
+            windows_register_ime_blocking(&task_app)
+        };
+
+        let final_status = match registration_result {
             Ok(status) => status,
             Err(error) => {
                 let mut status = windows_ime_status_with_message(
@@ -1510,10 +1886,7 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
         emit_windows_ime_status(&task_app, final_status);
     });
 
-    Ok(windows_ime_registering_status(
-        &app,
-        "正在注册 KeyTao Windows IME，请确认 Windows UAC 提示".into(),
-    ))
+    Ok(windows_ime_registering_status(&app, initial_message.into()))
 }
 
 #[cfg(target_os = "linux")]
@@ -2181,7 +2554,11 @@ fn clean_yaml_scalar(value: &str) -> String {
             .map(|end| trimmed[1..1 + end].to_string())
             .unwrap_or_else(|| trimmed[1..].to_string());
     }
-    trimmed.split_once('#').map_or(trimmed, |(head, _)| head).trim().to_string()
+    trimmed
+        .split_once('#')
+        .map_or(trimmed, |(head, _)| head)
+        .trim()
+        .to_string()
 }
 
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
@@ -2673,6 +3050,21 @@ fn optional_jni_path(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<PathBuf
 }
 
 #[cfg(target_os = "android")]
+fn optional_jni_text(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let value = env.get_string(&value).ok()?;
+    let value = value.to_string_lossy();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+#[cfg(target_os = "android")]
 fn optional_jni_effective_color_scheme(
     env: &mut JNIEnv<'_>,
     value: JString<'_>,
@@ -2969,6 +3361,42 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
 
 #[cfg(target_os = "android")]
 #[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployStep(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+    shared_dir: JString<'_>,
+    schema_id: JString<'_>,
+) -> jstring {
+    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+        return jni_string(
+            &mut env,
+            r#"{"success":false,"error":"missing user directory"}"#,
+        );
+    };
+    let shared_dir = optional_jni_path(&mut env, shared_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(keytao_core::default_shared_data_dir);
+    let schema_id = optional_jni_text(&mut env, schema_id);
+    let result = match schema_id {
+        Some(schema_id) => keytao_core::deploy_android_schema(
+            user_dir.to_string_lossy().into_owned(),
+            shared_dir,
+            schema_id,
+        ),
+        None => {
+            keytao_core::deploy_android_config(user_dir.to_string_lossy().into_owned(), shared_dir)
+        }
+    };
+    let payload = match result {
+        Ok(schemas) => serde_json::json!({ "success": true, "schemas": schemas }),
+        Err(error) => serde_json::json!({ "success": false, "error": error }),
+    };
+    jni_string(&mut env, &payload.to_string())
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -3008,22 +3436,49 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
 
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReload(
-    _env: JNIEnv<'_>,
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReinitialize(
+    mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+    shared_dir: JString<'_>,
 ) -> jboolean {
-    let Ok(slot) = ANDROID_IME_RUNTIME.lock() else {
+    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
         return 0;
     };
-    let Some(runtime) = slot.as_ref().cloned() else {
+    let user_theme_path = user_dir.join("theme.yaml");
+    let shared_dir = optional_jni_path(&mut env, shared_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(keytao_core::default_shared_data_dir);
+
+    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
         return 0;
     };
+    *slot = None;
     drop(slot);
-    if runtime.reload().is_ok() {
-        1
-    } else {
-        0
+    if keytao_core::reinitialize_android(
+        user_dir.to_string_lossy().into_owned(),
+        shared_dir.clone(),
+    )
+    .is_err()
+    {
+        return 0;
     }
+
+    let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
+    if runtime.init_without_deploy().is_err() {
+        return 0;
+    }
+    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
+        *theme_path = Some(user_theme_path);
+    }
+    if let Ok(mut theme_resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
+        *theme_resolver = None;
+    }
+    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
+        return 0;
+    };
+    *slot = Some(runtime);
+    1
 }
 
 #[cfg(target_os = "android")]

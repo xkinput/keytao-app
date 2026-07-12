@@ -141,10 +141,15 @@ mod desktop {
     use librime_sys::{rime_get_api, RimeCandidateListIterator, RimeTraits};
     use rime_api::{create_session, KeyEvent, KeyStatus};
     use std::ffi::{c_char, c_void, CStr, CString};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
+    #[cfg(not(target_os = "android"))]
+    use std::sync::OnceLock;
 
-    // librime setup+initialize must run exactly once per process.
+    // Desktop initializes once; Android also supports a controlled no-deploy restart.
+    #[cfg(not(target_os = "android"))]
     static RIME_INITED: OnceLock<()> = OnceLock::new();
+    #[cfg(target_os = "android")]
+    static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
     static DEPLOY_RESULT: Mutex<Option<bool>> = Mutex::new(None);
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -176,36 +181,69 @@ mod desktop {
     }
 
     pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        RIME_INITED.get_or_init(|| {
-            let user_dir = Path::new(&user_data_dir);
-            let shared_dir = Path::new(&shared_data_dir);
-            let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
-            let log_dir = rime_log_dir(user_dir);
+        #[cfg(target_os = "android")]
+        {
+            let mut initialized = RIME_INITIALIZED
+                .lock()
+                .map_err(|_| "Rime lifecycle lock is poisoned")?;
+            if !*initialized {
+                initialize_rime(&user_data_dir, &shared_data_dir);
+                *initialized = true;
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        RIME_INITED.get_or_init(|| initialize_rime(&user_data_dir, &shared_data_dir));
+        Ok(())
+    }
 
-            let _ = std::fs::create_dir_all(&staging_dir);
-            let _ = std::fs::create_dir_all(&prebuilt_dir);
-            let _ = std::fs::create_dir_all(&log_dir);
-
-            setup_rime(
-                &user_data_dir,
-                &shared_data_dir,
-                &staging_dir.to_string_lossy(),
-                &prebuilt_dir.to_string_lossy(),
-                &log_dir.to_string_lossy(),
-            );
-        });
+    #[cfg(target_os = "android")]
+    pub fn reinitialize_android(
+        user_data_dir: String,
+        shared_data_dir: String,
+    ) -> Result<(), String> {
+        let mut initialized = RIME_INITIALIZED
+            .lock()
+            .map_err(|_| "Rime lifecycle lock is poisoned")?;
+        if *initialized {
+            unsafe {
+                let api = rime_get_api();
+                let finalize = (*api)
+                    .finalize
+                    .ok_or("librime finalize API is unavailable")?;
+                finalize();
+            }
+            *initialized = false;
+        }
+        initialize_rime(&user_data_dir, &shared_data_dir);
+        *initialized = true;
         Ok(())
     }
 
     /// Initialize and fully deploy librime.
     /// `setup` + `initialize` run only on the first call; subsequent calls only
     /// re-run `full_deploy_and_wait` so that newly installed schemas are picked up.
+    /// Android deploys one schema at a time to keep large dependency graphs from
+    /// exhausting the app process while producing the same build artifacts.
     /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
         let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
-        setup_only(user_data_dir, shared_data_dir)?;
-        if full_deploy_and_wait() {
+        #[cfg(target_os = "android")]
+        {
+            setup_only(user_data_dir.clone(), shared_data_dir)?;
+            return deploy_android_staged(&user_data_dir).map_err(|error| {
+                format!(
+                    "Rime deployment failed: {error}. See librime logs in {}",
+                    log_dir.display()
+                )
+            });
+        }
+
+        #[cfg(not(target_os = "android"))]
+        if {
+            setup_only(user_data_dir, shared_data_dir)?;
+            full_deploy_and_wait()
+        } {
             Ok(())
         } else {
             Err(format!(
@@ -213,6 +251,216 @@ mod desktop {
                 log_dir.display()
             ))
         }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn deploy_android_config(
+        user_data_dir: String,
+        shared_data_dir: String,
+    ) -> Result<Vec<String>, String> {
+        setup_only(user_data_dir.clone(), shared_data_dir)?;
+        deploy_config_file("default.yaml", "config_version")?;
+        let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
+        if schemas.is_empty() {
+            Err("no schema selected in default.custom.yaml".into())
+        } else {
+            Ok(schemas)
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn deploy_android_schema(
+        user_data_dir: String,
+        shared_data_dir: String,
+        schema_id: String,
+    ) -> Result<Vec<String>, String> {
+        setup_only(user_data_dir.clone(), shared_data_dir)?;
+        let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
+        if !source.is_file() {
+            return Err(format!("missing schema source: {}", source.display()));
+        }
+        let _dictionary_override =
+            prepare_android_auxiliary_dictionary(Path::new(&user_data_dir), &schema_id)?;
+        deploy_schema_file(&source)?;
+        let compiled = Path::new(&user_data_dir)
+            .join("build")
+            .join(format!("{schema_id}.schema.yaml"));
+        Ok(schema_dependencies_from_file(&compiled))
+    }
+
+    #[cfg(target_os = "android")]
+    struct AndroidDictionaryOverride {
+        source: PathBuf,
+        backup: PathBuf,
+    }
+
+    #[cfg(target_os = "android")]
+    impl Drop for AndroidDictionaryOverride {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.source);
+            if std::fs::rename(&self.backup, &self.source).is_err()
+                && std::fs::copy(&self.backup, &self.source).is_ok()
+            {
+                let _ = std::fs::remove_file(&self.backup);
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn prepare_android_auxiliary_dictionary(
+        user_dir: &Path,
+        schema_id: &str,
+    ) -> Result<Option<AndroidDictionaryOverride>, String> {
+        // LiangFen is a character-only reverse lookup dependency in XMJD and TXJX.
+        // Importing essay phrases cannot affect that lookup but exceeds low-memory devices.
+        if schema_id != "liangfen" {
+            return Ok(None);
+        }
+
+        let source = user_dir.join("liangfen.dict.yaml");
+        let backup = user_dir.join(".liangfen.dict.yaml.keytao-backup");
+        if backup.is_file() {
+            let current = std::fs::read_to_string(&source).unwrap_or_default();
+            if current.contains(android_auxiliary_dictionary_marker()) {
+                let _ = std::fs::remove_file(&source);
+                std::fs::rename(&backup, &source)
+                    .map_err(|error| format!("failed to restore LiangFen dictionary: {error}"))?;
+            } else {
+                let _ = std::fs::remove_file(&backup);
+            }
+        }
+
+        let original = std::fs::read_to_string(&source)
+            .map_err(|error| format!("failed to read LiangFen dictionary: {error}"))?;
+        let Some(patched) = patch_android_auxiliary_dictionary(&original) else {
+            return Ok(None);
+        };
+
+        std::fs::rename(&source, &backup)
+            .map_err(|error| format!("failed to stage LiangFen dictionary: {error}"))?;
+        if let Err(error) = std::fs::write(&source, patched) {
+            let _ = std::fs::rename(&backup, &source);
+            return Err(format!(
+                "failed to write Android LiangFen dictionary: {error}"
+            ));
+        }
+        Ok(Some(AndroidDictionaryOverride { source, backup }))
+    }
+
+    fn initialize_rime(user_data_dir: &str, shared_data_dir: &str) {
+        let user_dir = Path::new(user_data_dir);
+        let shared_dir = Path::new(shared_data_dir);
+        let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
+        let log_dir = rime_log_dir(user_dir);
+
+        let _ = std::fs::create_dir_all(&staging_dir);
+        let _ = std::fs::create_dir_all(&prebuilt_dir);
+        let _ = std::fs::create_dir_all(&log_dir);
+
+        setup_rime(
+            user_data_dir,
+            shared_data_dir,
+            &staging_dir.to_string_lossy(),
+            &prebuilt_dir.to_string_lossy(),
+            &log_dir.to_string_lossy(),
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    fn deploy_android_staged(user_data_dir: &str) -> Result<(), String> {
+        deploy_config_file("default.yaml", "config_version")?;
+
+        let user_dir = Path::new(user_data_dir);
+        let initial_schemas = parse_schema_list_from_dir(user_dir);
+        if initial_schemas.is_empty() {
+            return Err("no schema selected in default.custom.yaml".into());
+        }
+
+        let mut pending = initial_schemas
+            .into_iter()
+            .map(|schema| (schema, true))
+            .collect::<std::collections::VecDeque<_>>();
+        let mut deployed = HashSet::new();
+        while let Some((schema_id, required)) = pending.pop_front() {
+            if !deployed.insert(schema_id.clone()) {
+                continue;
+            }
+
+            let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+            if !source.is_file() {
+                if required {
+                    return Err(format!("missing schema source: {}", source.display()));
+                }
+                continue;
+            }
+            let _dictionary_override = prepare_android_auxiliary_dictionary(user_dir, &schema_id)?;
+            deploy_schema_file(&source)?;
+
+            let compiled = user_dir
+                .join("build")
+                .join(format!("{schema_id}.schema.yaml"));
+            for dependency in schema_dependencies_from_file(&compiled) {
+                if !deployed.contains(&dependency) {
+                    pending.push_back((dependency, false));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn deploy_config_file(file_name: &str, version_key: &str) -> Result<(), String> {
+        let file_name = CString::new(file_name).map_err(|_| "invalid config file name")?;
+        let version_key = CString::new(version_key).map_err(|_| "invalid config version key")?;
+        unsafe {
+            let api = rime_get_api();
+            let deploy = (*api)
+                .deploy_config_file
+                .ok_or("librime deploy_config_file API is unavailable")?;
+            if deploy(file_name.as_ptr(), version_key.as_ptr()) == 0 {
+                return Err("failed to deploy default.yaml".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn deploy_schema_file(path: &Path) -> Result<(), String> {
+        let path_string = path.to_string_lossy();
+        let path = CString::new(path_string.as_bytes()).map_err(|_| "invalid schema path")?;
+        unsafe {
+            let api = rime_get_api();
+            let deploy = (*api)
+                .deploy_schema
+                .ok_or("librime deploy_schema API is unavailable")?;
+            if deploy(path.as_ptr()) == 0 {
+                return Err(format!("failed to deploy schema: {path_string}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn parse_schema_list_from_dir(user_dir: &Path) -> Vec<String> {
+        [
+            "default.custom.yaml",
+            "default-custom.yaml",
+            "default.yaml",
+            "build/default.yaml",
+        ]
+        .iter()
+        .filter_map(|name| std::fs::read_to_string(user_dir.join(name)).ok())
+        .map(|content| parse_schema_list(&content))
+        .find(|schemas| !schemas.is_empty())
+        .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "android")]
+    fn schema_dependencies_from_file(path: &Path) -> Vec<String> {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        parse_schema_dependencies(&content)
     }
 
     fn setup_rime(
@@ -260,6 +508,11 @@ mod desktop {
             }
             if let Some(initialize) = (*api).initialize {
                 initialize(&mut traits);
+            }
+            #[cfg(target_os = "android")]
+            if let Some(deployer_initialize) = (*api).deployer_initialize {
+                traits.modules = std::ptr::null_mut();
+                deployer_initialize(&mut traits);
             }
             if let Some(set_notification_handler) = (*api).set_notification_handler {
                 set_notification_handler(Some(notification_handler), std::ptr::null_mut());
@@ -508,7 +761,7 @@ mod desktop {
         const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
 
         let mut module = std::ptr::null_mut();
-        let address = current_windows_module_dir as usize as *const u16;
+        let address = current_windows_module_dir as *const () as usize as *const u16;
         let ok = unsafe {
             GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
@@ -680,6 +933,7 @@ mod desktop {
         unsafe { CStr::from_ptr(ptr).to_str().ok().map(str::to_owned) }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn full_deploy_and_wait() -> bool {
         if let Ok(mut result) = DEPLOY_RESULT.lock() {
             *result = None;
@@ -950,6 +1204,8 @@ mod desktop {
     target_os = "ios"
 ))]
 pub use desktop::{deploy, setup_only, Engine};
+#[cfg(target_os = "android")]
+pub use desktop::{deploy_android_config, deploy_android_schema, reinitialize_android};
 
 pub const RIME_MOD_SHIFT: u32 = 0x0001;
 pub const RIME_MOD_CONTROL: u32 = 0x0004;
@@ -1506,6 +1762,55 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
     schemas
 }
 
+#[cfg(any(target_os = "android", test))]
+fn parse_schema_dependencies(content: &str) -> Vec<String> {
+    let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(content) else {
+        return Vec::new();
+    };
+    let Some(Value::Mapping(schema)) = root.get(Value::String("schema".into())) else {
+        return Vec::new();
+    };
+    let Some(Value::Sequence(dependencies)) = schema.get(Value::String("dependencies".into()))
+    else {
+        return Vec::new();
+    };
+    dependencies
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|dependency| !dependency.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_auxiliary_dictionary_marker() -> &'static str {
+    "KeyTao Android auxiliary deployment"
+}
+
+#[cfg(any(target_os = "android", test))]
+fn patch_android_auxiliary_dictionary(content: &str) -> Option<String> {
+    let marker = android_auxiliary_dictionary_marker();
+    let mut changed = false;
+    let mut output = String::with_capacity(content.len() + marker.len());
+    for line in content.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        if !changed && body.trim() == "use_preset_vocabulary: true" {
+            let indent = &body[..body.len() - body.trim_start().len()];
+            output.push_str(indent);
+            output.push_str("use_preset_vocabulary: false # ");
+            output.push_str(marker);
+            output.push_str(newline);
+            changed = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    changed.then_some(output)
+}
+
 fn clean_yaml_scalar(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.starts_with('"') || trimmed.starts_with('\'') {
@@ -1515,7 +1820,11 @@ fn clean_yaml_scalar(value: &str) -> String {
             .map(|end| trimmed[1..1 + end].to_string())
             .unwrap_or_else(|| trimmed[1..].to_string());
     }
-    trimmed.split_once('#').map_or(trimmed, |(head, _)| head).trim().to_string()
+    trimmed
+        .split_once('#')
+        .map_or(trimmed, |(head, _)| head)
+        .trim()
+        .to_string()
 }
 
 fn schema_list_from_yaml(value: Option<&Value>) -> Vec<String> {
@@ -2142,7 +2451,8 @@ pub fn has_schemas(dir: &Path) -> bool {
 mod tests {
     use super::{
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
-        parse_schema_list, preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir,
+        parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
+        preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -2158,6 +2468,32 @@ mod tests {
     fn parse_schema_list_strips_inline_comments() {
         let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
         assert_eq!(parse_schema_list(content), vec!["keydo"]);
+    }
+
+    #[test]
+    fn parse_schema_dependencies_reads_flow_and_block_sequences() {
+        let flow = "schema:\n  schema_id: txjx\n  dependencies: [txjx.cx, txjx.danzi]\n";
+        assert_eq!(
+            parse_schema_dependencies(flow),
+            vec!["txjx.cx", "txjx.danzi"]
+        );
+
+        let block =
+            "schema:\n  schema_id: xmjd6\n  dependencies:\n    - pinyin_simp\n    - liangfen\n";
+        assert_eq!(
+            parse_schema_dependencies(block),
+            vec!["pinyin_simp", "liangfen"]
+        );
+    }
+
+    #[test]
+    fn android_auxiliary_dictionary_disables_preset_vocabulary() {
+        let content = "---\nname: liangfen\nuse_preset_vocabulary: true\n...\n";
+        let patched = patch_android_auxiliary_dictionary(content).expect("patched dictionary");
+        assert!(
+            patched.contains("use_preset_vocabulary: false # KeyTao Android auxiliary deployment")
+        );
+        assert!(patch_android_auxiliary_dictionary(&patched).is_none());
     }
 
     #[test]

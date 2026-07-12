@@ -48,4 +48,22 @@ class RimeSchemaNameResolverTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `prefer deployed schema name after custom patches`() {
+        val dir = createTempDirectory(prefix = "keytao-schema-resolver-").toFile()
+        try {
+            File(dir, "xmjd6.schema.yaml").writeText(
+                "schema:\n  schema_id: xmjd6\n  name: 星猫键道\n"
+            )
+            File(dir, "build").mkdirs()
+            File(dir, "build/xmjd6.schema.yaml").writeText(
+                "schema:\n  schema_id: xmjd6\n  name: 🌟🐈\n"
+            )
+
+            assertEquals("🌟🐈", RimeSchemaNameResolver.resolveDisplayName(dir, null, "xmjd6"))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

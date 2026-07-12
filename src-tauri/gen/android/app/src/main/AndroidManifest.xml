@@ -35,6 +35,7 @@
             android:name=".KeytaoInputMethodService"
             android:exported="true"
             android:label="@string/keytao_ime_name"
+            android:process=":ime"
             android:permission="android.permission.BIND_INPUT_METHOD">
             <intent-filter>
                 <action android:name="android.view.InputMethod" />
@@ -43,6 +44,12 @@
                 android:name="android.view.im"
                 android:resource="@xml/keytao_input_method" />
         </service>
+
+        <service
+            android:name=".KeytaoRimeDeployService"
+            android:exported="false"
+            android:process=":rime_deployer"
+            android:stopWithTask="false" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

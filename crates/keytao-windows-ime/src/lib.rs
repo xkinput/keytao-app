@@ -13,9 +13,9 @@
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case)]
 
-use std::sync::Once;
-
+mod candidate_ui;
 mod candidate_win;
+mod display_attribute;
 mod globals;
 mod key_event_sink;
 mod key_map;
@@ -35,8 +35,6 @@ use windows::{
 
 use globals::{can_unload, DLL_INSTANCE};
 use text_service::ClassFactory;
-
-static TRACING_INIT: Once = Once::new();
 
 // ── Well-known GUIDs ──────────────────────────────────────────────────────────
 
@@ -59,10 +57,22 @@ pub const GUID_PROFILE: GUID = GUID {
 /// Simplified Chinese (zh-CN)
 pub const LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
 
+/// Branding icon resource embedded in keytao_windows_ime.dll.
+pub const PROFILE_ICON_RESOURCE_ID: u32 = 1;
+pub const PROFILE_ICON_INDEX: u32 = (-1i32) as u32;
+
+/// Display attribute used for active KeyTao composition text.
+pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID = GUID {
+    data1: 0x9d1c2d2e,
+    data2: 0x241c,
+    data3: 0x4df3,
+    data4: [0xb0, 0x63, 0x29, 0x2d, 0x4c, 0xe3, 0x7b, 0x91],
+};
+
 // ── DLL entry ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
-extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL {
+pub extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL {
     const DLL_PROCESS_ATTACH: u32 = 1;
     if reason == DLL_PROCESS_ATTACH {
         let _ = DLL_INSTANCE.set(hinstance.0 as isize);
@@ -73,22 +83,13 @@ extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL 
     BOOL::from(true)
 }
 
-fn init_tracing() {
-    TRACING_INIT.call_once(|| {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .try_init()
-            .ok();
-    });
-}
-
 // ── COM DLL exports ───────────────────────────────────────────────────────────
 
 #[no_mangle]
-extern "system" fn DllGetClassObject(
+/// # Safety
+///
+/// COM must pass valid GUID pointers and a writable output pointer.
+pub unsafe extern "system" fn DllGetClassObject(
     rclsid: *const GUID,
     riid: *const GUID,
     ppv: *mut *mut std::ffi::c_void,
@@ -98,18 +99,17 @@ extern "system" fn DllGetClassObject(
             return E_POINTER;
         }
         *ppv = std::ptr::null_mut();
-        init_tracing();
         let clsid = &*rclsid;
         if *clsid != CLSID_TEXT_SERVICE {
             return windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE;
         }
-        let factory: IClassFactory = ClassFactory.into();
+        let factory: IClassFactory = ClassFactory::new().into();
         factory.query(riid, ppv as *mut _)
     }
 }
 
 #[no_mangle]
-extern "system" fn DllCanUnloadNow() -> HRESULT {
+pub extern "system" fn DllCanUnloadNow() -> HRESULT {
     if can_unload() {
         S_OK
     } else {
@@ -118,16 +118,18 @@ extern "system" fn DllCanUnloadNow() -> HRESULT {
 }
 
 #[no_mangle]
-extern "system" fn DllRegisterServer() -> HRESULT {
-    init_tracing();
-    registration::register()
-        .map(|_| S_OK)
-        .unwrap_or_else(|e| e.into())
+pub extern "system" fn DllRegisterServer() -> HRESULT {
+    match registration::register() {
+        Ok(()) => S_OK,
+        Err(error) => {
+            let _ = registration::unregister();
+            error.into()
+        }
+    }
 }
 
 #[no_mangle]
-extern "system" fn DllUnregisterServer() -> HRESULT {
-    init_tracing();
+pub extern "system" fn DllUnregisterServer() -> HRESULT {
     registration::unregister()
         .map(|_| S_OK)
         .unwrap_or_else(|e| e.into())

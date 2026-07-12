@@ -3,13 +3,15 @@
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
 };
+use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::{
-    core::PCWSTR,
+    core::{implement, Interface, PCWSTR},
     Win32::{
         Foundation::{FreeLibrary, HANDLE, HMODULE},
         System::LibraryLoader::{
@@ -17,11 +19,20 @@ use windows::{
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         },
         UI::Input::KeyboardAndMouse::GetFocus,
-        UI::TextServices::{ITfComposition, ITfKeyEventSink, ITfThreadMgr, ITfThreadMgrEventSink},
+        UI::TextServices::{
+            ITfComposition, ITfContext, ITfDocumentMgr, ITfEditSession, ITfEditSession_Impl,
+            ITfKeyEventSink, ITfThreadFocusSink, ITfThreadMgr, ITfThreadMgrEventSink,
+            GUID_PROP_ATTRIBUTE, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_ASYNC, TF_ES_READWRITE,
+            TF_TMAE_UIELEMENTENABLEDONLY, TF_TMF_UIELEMENTENABLEDONLY,
+        },
     },
 };
 
+use crate::{candidate_ui::CandidateUiManager, globals::DllActivityGuard};
+
 const RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
+const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
+static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
 
 // ── Shared TsfState ───────────────────────────────────────────────────────────
 
@@ -31,21 +42,32 @@ pub struct TsfState {
     rime_dll: Option<LoadedRimeDll>,
     pub engine_building: bool,
     pub engine_error: Option<String>,
+    engine_retry_after: Option<Instant>,
     pub thread_mgr: Option<ITfThreadMgr>,
     pub thread_mgr_sink: Option<ITfThreadMgrEventSink>,
     pub thread_mgr_sink_cookie: Option<u32>,
+    pub thread_focus_sink: Option<ITfThreadFocusSink>,
+    pub thread_focus_sink_cookie: Option<u32>,
     pub client_id: u32,
+    pub activation_flags: u32,
+    pub thread_mgr_flags: u32,
+    pub display_attribute_atom: Option<u32>,
     pub key_sink: Option<ITfKeyEventSink>,
     pub composition: Option<ITfComposition>,
+    pub composition_context: Option<ITfContext>,
     pub ime_state: Option<ImeState>,
     pub candidate_win: crate::candidate_win::CandidateWindow,
     pub mode_hint_win: crate::candidate_win::CandidateWindow,
+    pub candidate_ui: Option<CandidateUiManager>,
     pub ascii_mode: bool,
     pub reload_stamp_path: Option<PathBuf>,
     pub reload_stamp_signature: Option<String>,
     pub reload_in_progress: bool,
     pub reload_clear_pending: bool,
+    reload_retry_after: Option<Instant>,
     pub shift_pressed_without_key: bool,
+    engine_build_mailbox: Arc<EngineBuildMailbox>,
+    reload_mailbox: Arc<EngineBuildMailbox>,
 }
 
 pub(crate) struct EngineBundle {
@@ -56,12 +78,57 @@ pub(crate) struct EngineBundle {
     rime_dll: Option<LoadedRimeDll>,
 }
 
+struct EngineBuildMailbox {
+    result: Mutex<Option<Result<EngineBundle, String>>>,
+}
+
+impl EngineBuildMailbox {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+        }
+    }
+
+    fn store(&self, result: Result<EngineBundle, String>) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+    }
+
+    fn take(&self) -> Option<Result<EngineBundle, String>> {
+        self.result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
 struct LoadedRimeDll(HMODULE);
+
+#[implement(ITfEditSession)]
+struct CompositionEndEditSession {
+    context: ITfContext,
+    composition: ITfComposition,
+    _dll_guard: DllActivityGuard,
+}
+
+impl ITfEditSession_Impl for CompositionEndEditSession_Impl {
+    fn DoEditSession(&self, edit_cookie: u32) -> windows::core::Result<()> {
+        unsafe {
+            let range = self.composition.GetRange()?;
+            if let Ok(property) = self.context.GetProperty(&GUID_PROP_ATTRIBUTE) {
+                let _ = property.Clear(edit_cookie, &range);
+            }
+            range.SetText(edit_cookie, 0, &[])?;
+            self.composition.EndComposition(edit_cookie)
+        }
+    }
+}
 
 // SAFETY: The handle is retained only to keep the lazily loaded module alive
 // while the TSF text service owns the librime runtime. It is not dereferenced.
 unsafe impl Send for LoadedRimeDll {}
-unsafe impl Sync for LoadedRimeDll {}
 
 impl Drop for LoadedRimeDll {
     fn drop(&mut self) {
@@ -71,10 +138,6 @@ impl Drop for LoadedRimeDll {
     }
 }
 
-// SAFETY: TSF TIPs run in COM STA; all calls are on the same thread.
-unsafe impl Send for TsfState {}
-unsafe impl Sync for TsfState {}
-
 impl TsfState {
     pub fn new() -> Self {
         Self {
@@ -83,21 +146,32 @@ impl TsfState {
             rime_dll: None,
             engine_building: false,
             engine_error: None,
+            engine_retry_after: None,
             thread_mgr: None,
             thread_mgr_sink: None,
             thread_mgr_sink_cookie: None,
+            thread_focus_sink: None,
+            thread_focus_sink_cookie: None,
             client_id: 0,
+            activation_flags: 0,
+            thread_mgr_flags: 0,
+            display_attribute_atom: None,
             key_sink: None,
             composition: None,
+            composition_context: None,
             ime_state: None,
             candidate_win: crate::candidate_win::CandidateWindow::new(),
             mode_hint_win: crate::candidate_win::CandidateWindow::new(),
+            candidate_ui: Some(CandidateUiManager::new()),
             ascii_mode: false,
             reload_stamp_path: None,
             reload_stamp_signature: None,
             reload_in_progress: false,
             reload_clear_pending: false,
+            reload_retry_after: None,
             shift_pressed_without_key: false,
+            engine_build_mailbox: Arc::new(EngineBuildMailbox::new()),
+            reload_mailbox: Arc::new(EngineBuildMailbox::new()),
         }
     }
 
@@ -107,7 +181,7 @@ impl TsfState {
         let rime_dll = preload_rime_dll(&shared)?;
         let reload_stamp_path = user_dir.join(RELOAD_STAMP_FILE);
         let runtime = ImeRuntime::with_dirs(user_dir, shared);
-        runtime.init()?;
+        runtime.init_without_deploy()?;
         let session = runtime.create_session()?;
         let reload_stamp_signature = reload_stamp_signature(&reload_stamp_path);
         Ok(EngineBundle {
@@ -127,6 +201,7 @@ impl TsfState {
         self.rime_dll = bundle.rime_dll;
         self.engine_building = false;
         self.engine_error = None;
+        self.engine_retry_after = None;
     }
 
     pub(crate) fn engine_ready(&self) -> bool {
@@ -137,37 +212,65 @@ impl TsfState {
         if self.engine_ready() || self.engine_building {
             return false;
         }
+        if self
+            .engine_retry_after
+            .is_some_and(|retry_after| Instant::now() < retry_after)
+        {
+            return false;
+        }
         self.engine_building = true;
         self.engine_error = None;
+        self.engine_retry_after = None;
         true
     }
 
     pub(crate) fn finish_engine_build_error(&mut self, error: String) {
         self.engine_building = false;
         self.engine_error = Some(error);
+        self.engine_retry_after = Some(Instant::now() + ENGINE_RETRY_DELAY);
     }
 
-    pub(crate) fn begin_reload_if_changed(&mut self) -> Option<ImeRuntime> {
+    pub(crate) fn begin_reload_if_changed(&mut self) -> bool {
+        if self.reload_in_progress || !self.reload_needed() {
+            return false;
+        }
+        if self.reload_stamp_path.is_none() {
+            return false;
+        }
+        if self
+            .reload_retry_after
+            .is_some_and(|retry_after| Instant::now() < retry_after)
+        {
+            return false;
+        }
+        self.reload_in_progress = true;
+        self.reload_retry_after = None;
+        true
+    }
+
+    pub(crate) fn reload_needed(&self) -> bool {
         if self.reload_in_progress {
-            return None;
+            return true;
         }
         let Some(path) = &self.reload_stamp_path else {
-            return None;
+            return false;
         };
         let signature = reload_stamp_signature(path);
-        if self.reload_stamp_signature.as_deref() == Some(signature.as_str()) {
-            return None;
-        }
-        let runtime = self.runtime.clone()?;
-        self.reload_stamp_signature = Some(signature);
-        self.reload_in_progress = true;
-        Some(runtime)
+        self.reload_stamp_signature.as_deref() != Some(signature.as_str())
     }
 
-    pub(crate) fn finish_reload(&mut self, ok: bool) {
+    pub(crate) fn finish_reload(&mut self, bundle: Result<EngineBundle, String>) {
         self.reload_in_progress = false;
-        if ok {
-            self.reload_clear_pending = true;
+        match bundle {
+            Ok(bundle) => {
+                self.install_engine(bundle);
+                self.reload_clear_pending = true;
+                self.reload_retry_after = None;
+            }
+            Err(error) => {
+                self.engine_error = Some(error);
+                self.reload_retry_after = Some(Instant::now() + ENGINE_RETRY_DELAY);
+            }
         }
     }
 
@@ -175,18 +278,42 @@ impl TsfState {
         std::mem::take(&mut self.reload_clear_pending)
     }
 
+    fn poll_engine_builds(&mut self) {
+        if let Some(result) = self.engine_build_mailbox.take() {
+            match result {
+                Ok(bundle) if !self.engine_ready() => self.install_engine(bundle),
+                Ok(_) => self.engine_building = false,
+                Err(error) => self.finish_engine_build_error(error),
+            }
+        }
+        if let Some(result) = self.reload_mailbox.take() {
+            self.finish_reload(result);
+        }
+    }
+
     pub(crate) fn session(&self) -> Option<ImeRuntimeSession> {
         self.session.clone()
     }
 }
 
-pub type SharedState = Arc<Mutex<TsfState>>;
+pub type SharedState = Rc<RefCell<TsfState>>;
+pub type WeakState = Weak<RefCell<TsfState>>;
 
 pub fn new_shared_state() -> SharedState {
-    Arc::new(Mutex::new(TsfState::new()))
+    Rc::new(RefCell::new(TsfState::new()))
 }
 
 pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
+    let enabled = FILE_DIAGNOSTICS_ENABLED.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::var("KEYTAO_WINDOWS_IME_DIAGNOSTICS")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+    });
+    if !enabled {
+        return;
+    }
+
     let Some(user_dir) = default_user_data_dir() else {
         return;
     };
@@ -207,76 +334,114 @@ pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
 }
 
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
-    let should_start = {
-        let mut st = shared_state.lock().unwrap();
-        st.begin_engine_build()
+    let mailbox = {
+        let mut st = shared_state.borrow_mut();
+        if !st.begin_engine_build() {
+            return;
+        }
+        Arc::clone(&st.engine_build_mailbox)
     };
-    if !should_start {
-        return;
-    }
 
     append_diagnostic("engine warmup started");
-    let state = Arc::clone(shared_state);
-    std::thread::spawn(move || match TsfState::build_engine() {
-        Ok(bundle) => {
-            let mut st = state.lock().unwrap();
-            if !st.engine_ready() {
-                st.install_engine(bundle);
-            } else {
-                st.engine_building = false;
+    let dll_guard = DllActivityGuard::new();
+    let spawn_result = std::thread::Builder::new()
+        .name("keytao-ime-warmup".into())
+        .spawn(move || {
+            let result = TsfState::build_engine();
+            match &result {
+                Ok(_) => {
+                    tracing::info!("KeyTao Windows IME engine warmed up");
+                    append_diagnostic("engine warmup succeeded");
+                }
+                Err(error) => {
+                    tracing::error!("librime init failed: {error}");
+                    append_diagnostic(format!("engine warmup failed: {error}"));
+                }
             }
-            tracing::info!("KeyTao Windows IME engine warmed up");
-            append_diagnostic("engine warmup succeeded");
-        }
-        Err(error) => {
-            tracing::error!("librime init failed: {error}");
-            append_diagnostic(format!("engine warmup failed: {error}"));
-            state.lock().unwrap().finish_engine_build_error(error);
-        }
-    });
+            mailbox.store(result);
+            drop(mailbox);
+            drop(dll_guard);
+        });
+    if let Err(error) = spawn_result {
+        let message = format!("start engine warmup thread: {error}");
+        append_diagnostic(&message);
+        shared_state.borrow_mut().finish_engine_build_error(message);
+    }
 }
 
 pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
-    let runtime = {
-        let mut st = shared_state.lock().unwrap();
+    let should_reload = {
+        let mut st = shared_state.borrow_mut();
         st.begin_reload_if_changed()
     };
 
-    let Some(runtime) = runtime else {
+    if !should_reload {
         return false;
-    };
+    }
 
-    let state = Arc::clone(shared_state);
+    let mailbox = {
+        let st = shared_state.borrow();
+        Arc::clone(&st.reload_mailbox)
+    };
+    let dll_guard = DllActivityGuard::new();
     append_diagnostic("engine reload started");
-    std::thread::spawn(move || {
-        let ok = match runtime.reload() {
-            Ok(()) => {
-                tracing::info!("librime redeployed after reload stamp change");
-                append_diagnostic("engine reload succeeded");
-                true
+    let spawn_result = std::thread::Builder::new()
+        .name("keytao-ime-reload".into())
+        .spawn(move || {
+            let bundle = TsfState::build_engine();
+            match &bundle {
+                Ok(_) => {
+                    tracing::info!("librime session refreshed after reload stamp change");
+                    append_diagnostic("engine reload succeeded");
+                }
+                Err(error) => {
+                    tracing::error!("librime reload failed: {error}");
+                    append_diagnostic(format!("engine reload failed: {error}"));
+                }
             }
-            Err(error) => {
-                tracing::error!("librime reload failed: {error}");
-                append_diagnostic(format!("engine reload failed: {error}"));
-                false
-            }
-        };
-        state.lock().unwrap().finish_reload(ok);
-    });
+            mailbox.store(bundle);
+            drop(mailbox);
+            drop(dll_guard);
+        });
+    if let Err(error) = spawn_result {
+        let message = format!("start engine reload thread: {error}");
+        append_diagnostic(&message);
+        shared_state.borrow_mut().finish_reload(Err(message));
+        return false;
+    }
     true
+}
+
+pub(crate) fn poll_engine_builds(shared_state: &SharedState) {
+    shared_state.borrow_mut().poll_engine_builds();
 }
 
 pub(crate) fn update_ime_windows(
     shared_state: &SharedState,
     ime_state: &ImeState,
+    document_mgr: Option<&ITfDocumentMgr>,
     caret_x: i32,
     caret_y: i32,
     owner_hwnd: windows::Win32::Foundation::HWND,
     show_mode_hint: bool,
 ) {
+    let (thread_mgr, allow_fallback_window) = {
+        let st = shared_state.borrow();
+        let uiless = st.activation_flags & TF_TMAE_UIELEMENTENABLEDONLY != 0
+            || st.thread_mgr_flags & TF_TMF_UIELEMENTENABLEDONLY != 0;
+        (st.thread_mgr.clone(), !uiless)
+    };
+    let allow_candidate_window = with_detached_candidate_ui(shared_state, |candidate_ui| {
+        candidate_ui.update(
+            thread_mgr.as_ref(),
+            document_mgr,
+            ime_state,
+            allow_fallback_window,
+        )
+    });
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
-        if show {
+        if show && allow_candidate_window {
             candidate_win.show(ime_state, caret_x, caret_y, owner_hwnd);
         } else {
             candidate_win.hide();
@@ -288,13 +453,86 @@ pub(crate) fn update_ime_windows(
 }
 
 pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
+    with_detached_candidate_ui(shared_state, CandidateUiManager::end);
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         candidate_win.hide();
         mode_hint_win.hide();
     });
 }
 
+pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
+    let (active_composition, session) = {
+        let mut st = shared_state.borrow_mut();
+        st.shift_pressed_without_key = false;
+        let active_composition = st
+            .composition
+            .take()
+            .zip(st.composition_context.take())
+            .map(|(composition, context)| (context, composition, st.client_id));
+        st.ime_state = None;
+        (active_composition, st.session())
+    };
+    if let Some((context, composition, client_id)) = active_composition {
+        request_composition_end(context, composition, client_id);
+    }
+    if let Some(session) = session {
+        let _ = session.reset();
+    }
+    hide_ime_windows(shared_state);
+}
+
+pub(crate) fn clear_input_after_composition_terminated(
+    shared_state: &SharedState,
+    terminated: Option<&ITfComposition>,
+) {
+    let Some(terminated) = terminated else {
+        return;
+    };
+    let is_active_composition = shared_state
+        .borrow()
+        .composition
+        .as_ref()
+        .is_some_and(|active| active.as_raw() == terminated.as_raw());
+    if !is_active_composition {
+        return;
+    }
+
+    let session = {
+        let mut st = shared_state.borrow_mut();
+        st.shift_pressed_without_key = false;
+        st.composition = None;
+        st.composition_context = None;
+        st.ime_state = None;
+        st.session()
+    };
+    if let Some(session) = session {
+        let _ = session.reset();
+    }
+    hide_ime_windows(shared_state);
+}
+
+fn request_composition_end(context: ITfContext, composition: ITfComposition, client_id: u32) {
+    if client_id == 0 {
+        return;
+    }
+    let edit_session: ITfEditSession = CompositionEndEditSession {
+        context: context.clone(),
+        composition,
+        _dll_guard: DllActivityGuard::new(),
+    }
+    .into();
+    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNC.0 | TF_ES_READWRITE.0);
+    let result = unsafe { context.RequestEditSession(client_id, &edit_session, flags) }
+        .and_then(|session_result| session_result.ok());
+    if let Err(error) = result {
+        append_diagnostic(format!(
+            "failed to end composition after focus change: {error}"
+        ));
+    }
+}
+
 pub(crate) fn hide_candidate_window(shared_state: &SharedState) {
+    with_detached_candidate_ui(shared_state, CandidateUiManager::end);
     with_detached_windows(shared_state, |candidate_win, _mode_hint_win| {
         candidate_win.hide();
     });
@@ -308,7 +546,7 @@ fn with_detached_windows<R>(
     ) -> R,
 ) -> R {
     let (mut candidate_win, mut mode_hint_win) = {
-        let mut st = shared_state.lock().unwrap();
+        let mut st = shared_state.borrow_mut();
         (
             std::mem::replace(
                 &mut st.candidate_win,
@@ -323,9 +561,35 @@ fn with_detached_windows<R>(
 
     let result = f(&mut candidate_win, &mut mode_hint_win);
 
-    let mut st = shared_state.lock().unwrap();
-    st.candidate_win = candidate_win;
-    st.mode_hint_win = mode_hint_win;
+    let (replaced_candidate, replaced_mode_hint) = {
+        let mut st = shared_state.borrow_mut();
+        (
+            std::mem::replace(&mut st.candidate_win, candidate_win),
+            std::mem::replace(&mut st.mode_hint_win, mode_hint_win),
+        )
+    };
+    drop((replaced_candidate, replaced_mode_hint));
+    result
+}
+
+fn with_detached_candidate_ui<R>(
+    shared_state: &SharedState,
+    f: impl FnOnce(&mut CandidateUiManager) -> R,
+) -> R {
+    let mut candidate_ui = {
+        let mut st = shared_state.borrow_mut();
+        st.candidate_ui
+            .take()
+            .unwrap_or_else(CandidateUiManager::new)
+    };
+
+    let result = f(&mut candidate_ui);
+
+    let replaced = {
+        let mut st = shared_state.borrow_mut();
+        st.candidate_ui.replace(candidate_ui)
+    };
+    drop(replaced);
     result
 }
 

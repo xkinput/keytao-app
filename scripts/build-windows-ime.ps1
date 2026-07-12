@@ -2,7 +2,8 @@ param(
     [ValidateSet("native", "x64", "arm64", "x86")]
     [string]$Arch = "native",
     [string]$Version = "latest",
-    [switch]$DebugBuild
+    [switch]$DebugBuild,
+    [switch]$SkipAppRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,8 +56,6 @@ function Get-WindowsRustTarget([string]$WindowsArch) {
 $target = Get-WindowsRustTarget $Arch
 $vendorDir = Join-Path $repoRoot "vendor\librime\windows-$Arch"
 $envFile = Join-Path $vendorDir "env.ps1"
-$cargoCommand = "cargo"
-$cargoPrefixArgs = @()
 
 function Find-OnPath([string]$Name) {
     $result = & cmd.exe /d /c "where `"$Name`" 2>nul"
@@ -100,27 +99,6 @@ function Get-RustHostTriple([string]$Command, [string[]]$Arguments) {
     return $null
 }
 
-function Use-RustToolchainForTarget([string]$TargetTriple) {
-    $currentHost = Get-RustHostTriple "rustc" @()
-    if ($currentHost -eq $TargetTriple) {
-        return $currentHost
-    }
-
-    if ($TargetTriple -in @("x86_64-pc-windows-msvc", "i686-pc-windows-msvc")) {
-        $toolchain = "stable-$TargetTriple"
-        $toolchainHost = Get-RustHostTriple "rustup" @("run", $toolchain, "rustc")
-        if ($toolchainHost -eq $TargetTriple) {
-            $script:cargoCommand = "rustup"
-            $script:cargoPrefixArgs = @("run", $toolchain, "cargo")
-            return $toolchainHost
-        }
-
-        throw "Building the $TargetTriple Windows package from this host requires the matching Rust host toolchain. Run 'rustup toolchain install stable-$TargetTriple --force-non-host', then retry."
-    }
-
-    return $currentHost
-}
-
 function Get-MsvcArchForRustHost([string]$HostTriple) {
     if ($HostTriple -like "x86_64-*") {
         return "x64"
@@ -131,26 +109,36 @@ function Get-MsvcArchForRustHost([string]$HostTriple) {
     throw "Unsupported Rust host triple for MSVC environment: $HostTriple"
 }
 
-function Initialize-MsvcEnvironment([string]$MsvcArch) {
-    if ((Find-OnPath "link.exe") -and ($env:VSCMD_ARG_TGT_ARCH -eq $MsvcArch)) {
-        return
-    }
-
+function Find-VcVarsAll {
     $vswhereCandidates = @(
         "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
         "${env:ProgramFiles}\Microsoft Visual Studio\Installer\vswhere.exe"
     )
     $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-    if ($vswhere) {
-        $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if ($LASTEXITCODE -eq 0 -and $vsInstall) {
-            $vcvarsall = Join-Path ($vsInstall | Select-Object -First 1) "VC\Auxiliary\Build\vcvarsall.bat"
-            if (Test-Path -LiteralPath $vcvarsall) {
-                if (Import-CmdEnvironment $vcvarsall @($MsvcArch)) {
-                    if (Find-OnPath "link.exe") {
-                        return
-                    }
-                }
+    if (-not $vswhere) {
+        return $null
+    }
+    $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($LASTEXITCODE -ne 0 -or -not $vsInstall) {
+        return $null
+    }
+    $vcvarsall = Join-Path ($vsInstall | Select-Object -First 1) "VC\Auxiliary\Build\vcvarsall.bat"
+    if (Test-Path -LiteralPath $vcvarsall) {
+        return $vcvarsall
+    }
+    return $null
+}
+
+function Initialize-MsvcEnvironment([string]$MsvcArch) {
+    if ((Find-OnPath "link.exe") -and ($env:VSCMD_ARG_TGT_ARCH -eq $MsvcArch)) {
+        return
+    }
+
+    $vcvarsall = Find-VcVarsAll
+    if ($vcvarsall) {
+        if (Import-CmdEnvironment $vcvarsall @($MsvcArch)) {
+            if (Find-OnPath "link.exe") {
+                return
             }
         }
     }
@@ -203,7 +191,16 @@ try {
     $ErrorActionPreference = $oldErrorActionPreference
 }
 
-$rustHostTriple = Use-RustToolchainForTarget $target
+$rustHostTriple = Get-RustHostTriple "rustc" @()
+if (-not $rustHostTriple) {
+    throw "Unable to determine the active Rust host triple."
+}
+if ($rustHostTriple -ne $target) {
+    & rustup target add $target
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install Rust target $target."
+    }
+}
 $msvcArch = Get-MsvcArchForRustHost $rustHostTriple
 
 $preferredLibclang = Join-Path $env:USERPROFILE "scoop\apps\llvm\current\bin"
@@ -224,15 +221,54 @@ if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "l
 
 Initialize-MsvcEnvironment $msvcArch
 
-function Find-WindowsRuntimeDll($Name) {
+if ($Arch -eq "x86" -and $rustHostTriple -like "x86_64-*") {
+    $vcvarsall = Find-VcVarsAll
+    if (-not $vcvarsall) {
+        throw "vcvarsall.bat is required to configure the x64-to-x86 MSVC linker."
+    }
+    $toolDir = Join-Path $repoRoot "target\keytao-windows-tools"
+    New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+    $linkerWrapper = Join-Path $toolDir "link-i686-pc-windows-msvc.cmd"
+    @"
+@echo off
+call "$vcvarsall" x64_x86 >nul
+link.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $linkerWrapper
+    $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_LINKER = $linkerWrapper
+}
+
+function Find-WindowsRuntimeDll([string]$Name, [string]$WindowsArch) {
     $candidates = @()
-    $whereResult = Find-OnPath $Name
-    if ($whereResult) {
-        $candidates += $whereResult
+
+    if ($env:VCToolsRedistDir) {
+        $redistArchDir = Join-Path $env:VCToolsRedistDir $WindowsArch
+        if (Test-Path -LiteralPath $redistArchDir -PathType Container) {
+            $redistDll = Get-ChildItem -Path $redistArchDir -Filter $Name -File -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($redistDll) {
+                $candidates += $redistDll.FullName
+            }
+        }
     }
+
     if ($env:WINDIR) {
-        $candidates += (Join-Path $env:WINDIR "System32\$Name")
+        $nativeArch = Resolve-NativeWindowsArch
+        $systemDir = if ($WindowsArch -eq "x86" -and $nativeArch -eq "x64") {
+            "SysWOW64"
+        } else {
+            "System32"
+        }
+        $candidates += (Join-Path $env:WINDIR "$systemDir\$Name")
     }
+
+    if ($WindowsArch -eq $msvcArch) {
+        $whereResult = Find-OnPath $Name
+        if ($whereResult) {
+            $candidates += $whereResult
+        }
+    }
+
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) {
             return (Resolve-Path $candidate).Path
@@ -248,8 +284,7 @@ if (-not $DebugBuild) {
 
 Push-Location $repoRoot
 try {
-    $fullCargoArgs = @($cargoPrefixArgs) + @($cargoArgs)
-    & $cargoCommand @fullCargoArgs
+    & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed with exit code $LASTEXITCODE"
     }
@@ -260,9 +295,9 @@ try {
 $profile = if ($DebugBuild) { "debug" } else { "release" }
 $dll = Join-Path $repoRoot "target\$target\$profile\keytao_windows_ime.dll"
 $runtimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\$Arch"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $runtimeDir
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
-Copy-Item -Force -LiteralPath (Join-Path $repoRoot "src-tauri\icons\icon.ico") -Destination (Join-Path $runtimeDir "keytao.ico")
 Copy-Item -Force -LiteralPath (Join-Path $repoRoot "crates\keytao-theme\default-theme.yaml") -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Destination $runtimeDir
@@ -273,14 +308,22 @@ foreach ($plugin in $luaPlugins) {
 }
 
 $appRuntimeDir = Join-Path $repoRoot "target\keytao-windows-app-runtime"
-New-Item -ItemType Directory -Force -Path $appRuntimeDir | Out-Null
-Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $appRuntimeDir
+$populateAppRuntime = -not $SkipAppRuntime
+if ($populateAppRuntime) {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $appRuntimeDir
+    New-Item -ItemType Directory -Force -Path $appRuntimeDir | Out-Null
+    Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $appRuntimeDir
+}
 
 foreach ($runtimeDll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
-    $source = Find-WindowsRuntimeDll $runtimeDll
+    $source = Find-WindowsRuntimeDll $runtimeDll $Arch
     if ($source) {
         Copy-Item -Force -LiteralPath $source -Destination $runtimeDir
-        Copy-Item -Force -LiteralPath $source -Destination $appRuntimeDir
+        if ($populateAppRuntime) {
+            Copy-Item -Force -LiteralPath $source -Destination $appRuntimeDir
+        }
+    } elseif (-not (Test-Path -LiteralPath (Join-Path $runtimeDir $runtimeDll) -PathType Leaf)) {
+        throw "Unable to locate the $Arch $runtimeDll required by the Windows IME runtime. Install the matching Visual C++ Redistributable components in Visual Studio Build Tools."
     }
 }
 

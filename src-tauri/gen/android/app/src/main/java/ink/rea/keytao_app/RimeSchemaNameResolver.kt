@@ -49,8 +49,8 @@ object RimeSchemaNameResolver {
     private fun findSchemaFile(userDir: File, sharedDir: File?, schemaId: String): File? {
         val relative = "$schemaId.schema.yaml"
         return listOfNotNull(
-            File(userDir, relative),
             File(userDir, "build/$relative"),
+            File(userDir, relative),
             sharedDir?.let { File(it, relative) },
         ).firstOrNull { it.isFile }
     }

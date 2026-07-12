@@ -16,6 +16,7 @@ class KeytaoImeEngine(context: Context) {
     private var writableCache: Boolean? = null
     private var writableCacheCheckedAtMs = 0L
 
+    @Volatile
     var nativeReady: Boolean = false
         private set
 
@@ -23,6 +24,7 @@ class KeytaoImeEngine(context: Context) {
         ensureBundledSharedData(appContext)
     }
 
+    @Synchronized
     fun ensureReady(): Boolean {
         if (nativeReady) return true
         if (!hasInstalledSchema()) return false
@@ -30,6 +32,7 @@ class KeytaoImeEngine(context: Context) {
         return initializeRuntime(deploy = false)
     }
 
+    @Synchronized
     fun state(): KeytaoImeState {
         lastState = KeytaoNativeBridge.sessionState(session)
             ?.let { stableSchemaState(it) }
@@ -38,6 +41,7 @@ class KeytaoImeEngine(context: Context) {
         return lastState
     }
 
+    @Synchronized
     fun processKey(keyCode: Int, modifiers: Int): KeytaoImeState {
         val state = KeytaoNativeBridge.processKey(session, keyCode, modifiers)
             ?.let { stableSchemaState(it) }
@@ -46,6 +50,7 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun selectCandidate(index: Int): KeytaoImeState {
         val state = KeytaoNativeBridge.selectCandidate(session, index)
             ?.let { stableSchemaState(it) }
@@ -54,6 +59,7 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun selectCandidateGlobal(index: Int): KeytaoImeState {
         val state = KeytaoNativeBridge.selectCandidateGlobal(session, index)
             ?.let { stableSchemaState(it) }
@@ -62,11 +68,13 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun allCandidates(limit: Int): List<KeytaoCandidate> {
         if (!nativeReady || session == 0L) return emptyList()
         return KeytaoNativeBridge.allCandidates(session, limit)
     }
 
+    @Synchronized
     fun changePage(backward: Boolean): KeytaoImeState {
         val state = KeytaoNativeBridge.changePage(session, backward)
             ?.let { stableSchemaState(it) }
@@ -75,8 +83,9 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun reload(): Boolean {
-        val ok = initializeRuntime(deploy = false)
+        val ok = initializeRuntime(deploy = false, reinitialize = true)
         if (ok) {
             reloadStampSignature = fileSignature(reloadStamp)
             lastState = KeytaoNativeBridge.sessionState(session)
@@ -87,6 +96,7 @@ class KeytaoImeEngine(context: Context) {
         return ok
     }
 
+    @Synchronized
     fun reloadIfNeeded(): Boolean {
         if (!nativeReady) return ensureReady()
         val signature = fileSignature(reloadStamp) ?: return false
@@ -98,9 +108,23 @@ class KeytaoImeEngine(context: Context) {
 
     fun hasDeployedSchema(): Boolean = KeytaoAndroidPaths.hasDeployedSchema(userDir)
 
+    @Synchronized
     fun deployNow(): Boolean {
         if (!hasInstalledSchema()) return false
         return initializeRuntime(deploy = true)
+    }
+
+    fun deployStep(schemaId: String?): KeytaoRimeDeployStepResult {
+        if (!hasInstalledSchema()) {
+            return KeytaoRimeDeployStepResult(error = "No KeyTao schema is installed")
+        }
+        ensureBundledSharedData(appContext)
+        val sharedDir = findSharedDataDir(appContext)
+        return KeytaoNativeBridge.deployStep(
+            userDir.absolutePath,
+            sharedDir?.absolutePath,
+            schemaId,
+        )
     }
 
     fun isUserDataWritable(forceRefresh: Boolean = false): Boolean {
@@ -116,6 +140,7 @@ class KeytaoImeEngine(context: Context) {
         return writable
     }
 
+    @Synchronized
     fun reset(): KeytaoImeState {
         val state = KeytaoNativeBridge.reset(session)
             ?.let { stableSchemaState(it) }
@@ -124,6 +149,7 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun setAsciiMode(enabled: Boolean): KeytaoImeState {
         val state = KeytaoNativeBridge.setAsciiMode(session, enabled)
             ?.let { stableSchemaState(it) }
@@ -132,25 +158,31 @@ class KeytaoImeEngine(context: Context) {
         return state
     }
 
+    @Synchronized
     fun close() {
         KeytaoNativeBridge.destroySession(session)
         session = 0L
     }
 
-    private fun initializeRuntime(deploy: Boolean): Boolean {
+    private fun initializeRuntime(deploy: Boolean, reinitialize: Boolean = false): Boolean {
         if (!hasInstalledSchema()) return false
         if (!deploy && !hasDeployedSchema()) return false
         ensureBundledSharedData(appContext)
         val sharedDir = findSharedDataDir(appContext)
         sharedDataDir = sharedDir
-        nativeReady = KeytaoNativeBridge.engineAvailable() &&
+        if (session != 0L) {
+            KeytaoNativeBridge.destroySession(session)
+            session = 0L
+        }
+        val initialized = if (reinitialize) {
+            KeytaoNativeBridge.reinitialize(userDir.absolutePath, sharedDir?.absolutePath)
+        } else {
             KeytaoNativeBridge.init(userDir.absolutePath, sharedDir?.absolutePath, deploy)
+        }
+        nativeReady = KeytaoNativeBridge.engineAvailable() && initialized
         if (!nativeReady) {
             lastState = lastState.withoutTransientCommit()
             return false
-        }
-        if (session != 0L) {
-            KeytaoNativeBridge.destroySession(session)
         }
         session = KeytaoNativeBridge.createSession()
         lastState = KeytaoNativeBridge.sessionState(session)

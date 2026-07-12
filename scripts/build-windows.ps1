@@ -131,26 +131,36 @@ function Get-MsvcArchForRustHost([string]$HostTriple) {
     throw "Unsupported Rust host triple for MSVC environment: $HostTriple"
 }
 
-function Initialize-MsvcEnvironment([string]$MsvcArch) {
-    if ((Find-OnPath "link.exe") -and ($env:VSCMD_ARG_TGT_ARCH -eq $MsvcArch)) {
-        return
-    }
-
+function Find-VcVarsAll {
     $vswhereCandidates = @(
         "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
         "${env:ProgramFiles}\Microsoft Visual Studio\Installer\vswhere.exe"
     )
     $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-    if ($vswhere) {
-        $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if ($LASTEXITCODE -eq 0 -and $vsInstall) {
-            $vcvarsall = Join-Path ($vsInstall | Select-Object -First 1) "VC\Auxiliary\Build\vcvarsall.bat"
-            if (Test-Path -LiteralPath $vcvarsall) {
-                if (Import-CmdEnvironment $vcvarsall @($MsvcArch)) {
-                    if (Find-OnPath "link.exe") {
-                        return
-                    }
-                }
+    if (-not $vswhere) {
+        return $null
+    }
+    $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($LASTEXITCODE -ne 0 -or -not $vsInstall) {
+        return $null
+    }
+    $vcvarsall = Join-Path ($vsInstall | Select-Object -First 1) "VC\Auxiliary\Build\vcvarsall.bat"
+    if (Test-Path -LiteralPath $vcvarsall) {
+        return $vcvarsall
+    }
+    return $null
+}
+
+function Initialize-MsvcEnvironment([string]$MsvcArch) {
+    if ((Find-OnPath "link.exe") -and ($env:VSCMD_ARG_TGT_ARCH -eq $MsvcArch)) {
+        return
+    }
+
+    $vcvarsall = Find-VcVarsAll
+    if ($vcvarsall) {
+        if (Import-CmdEnvironment $vcvarsall @($MsvcArch)) {
+            if (Find-OnPath "link.exe") {
+                return
             }
         }
     }
@@ -163,35 +173,16 @@ function Initialize-MsvcEnvironment([string]$MsvcArch) {
     throw "MSVC linker link.exe was not found for $MsvcArch. $componentHint"
 }
 
-function Select-RustToolchainForTarget([string]$TargetTriple) {
-    $currentHost = Get-RustHostTriple "rustc" @()
-    if ($currentHost -eq $TargetTriple) {
-        return $null
-    }
-
-    if ($TargetTriple -in @("x86_64-pc-windows-msvc", "i686-pc-windows-msvc")) {
-        $toolchain = "stable-$TargetTriple"
-        $toolchainHost = Get-RustHostTriple "rustup" @("run", $toolchain, "rustc")
-        if ($toolchainHost -eq $TargetTriple) {
-            return $toolchain
-        }
-
-        throw "Building the $TargetTriple Windows package from this host requires the matching Rust host toolchain. Run 'rustup toolchain install stable-$TargetTriple --force-non-host', then retry."
-    }
-
-    return $null
+$rustHostTriple = Get-RustHostTriple "rustc" @()
+if (-not $rustHostTriple) {
+    throw "Unable to determine the active Rust host triple."
 }
-
-$selectedRustToolchain = Select-RustToolchainForTarget $target
-$previousRustupToolchain = $env:RUSTUP_TOOLCHAIN
-if ($selectedRustToolchain) {
-    $env:RUSTUP_TOOLCHAIN = $selectedRustToolchain
-}
-
-$rustHostTriple = if ($selectedRustToolchain) {
-    Get-RustHostTriple "rustup" @("run", $selectedRustToolchain, "rustc")
-} else {
-    Get-RustHostTriple "rustc" @()
+$crossCompiling = $rustHostTriple -ne $target
+if ($crossCompiling) {
+    & rustup target add $target
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install Rust target $target."
+    }
 }
 $msvcArch = Get-MsvcArchForRustHost $rustHostTriple
 
@@ -202,18 +193,59 @@ if (Test-Path (Join-Path $preferredLibclang "libclang.dll")) {
 
 Initialize-MsvcEnvironment $msvcArch
 
+if ($Arch -eq "x86" -and $rustHostTriple -like "x86_64-*") {
+    $vcvarsall = Find-VcVarsAll
+    if (-not $vcvarsall) {
+        throw "vcvarsall.bat is required to configure the x64-to-x86 MSVC linker."
+    }
+    $toolDir = Join-Path $repoRoot "target\keytao-windows-tools"
+    New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+    $linkerWrapper = Join-Path $toolDir "link-i686-pc-windows-msvc.cmd"
+    $compilerWrapper = Join-Path $toolDir "cl-i686-pc-windows-msvc.cmd"
+    $archiverWrapper = Join-Path $toolDir "lib-i686-pc-windows-msvc.cmd"
+    @"
+@echo off
+call "$vcvarsall" x64_x86 >nul
+link.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $linkerWrapper
+    @"
+@echo off
+call "$vcvarsall" x64_x86 >nul
+cl.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $compilerWrapper
+    @"
+@echo off
+call "$vcvarsall" x64_x86 >nul
+lib.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $archiverWrapper
+    $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_LINKER = $linkerWrapper
+    [Environment]::SetEnvironmentVariable("CC_i686_pc_windows_msvc", $compilerWrapper, "Process")
+    [Environment]::SetEnvironmentVariable("CXX_i686_pc_windows_msvc", $compilerWrapper, "Process")
+    [Environment]::SetEnvironmentVariable("AR_i686_pc_windows_msvc", $archiverWrapper, "Process")
+}
+
 Push-Location $repoRoot
 try {
+    if ($Arch -eq "x64") {
+        & powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1 -Arch x86 -SkipAppRuntime
+        if ($LASTEXITCODE -ne 0) {
+            throw "build-windows-ime.ps1 x86 failed with exit code $LASTEXITCODE"
+        }
+    }
+
     & powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1 -Arch $Arch
     if ($LASTEXITCODE -ne 0) {
-        throw "build-windows-ime.ps1 failed with exit code $LASTEXITCODE"
+        throw "build-windows-ime.ps1 $Arch failed with exit code $LASTEXITCODE"
     }
 
     . (Join-Path $repoRoot "vendor\librime\windows-$Arch\env.ps1")
 
     $tauriArgs = @("tauri", "build", "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
     $releaseDir = Join-Path $repoRoot "target\release"
-    if ($selectedRustToolchain) {
+    if ($crossCompiling) {
         $tauriArgs = @("tauri", "build", "--target", $target, "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
         $releaseDir = Join-Path $repoRoot "target\$target\release"
     }
@@ -236,9 +268,4 @@ try {
     }
 } finally {
     Pop-Location
-    if ($null -eq $previousRustupToolchain) {
-        Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
-    } else {
-        $env:RUSTUP_TOOLCHAIN = $previousRustupToolchain
-    }
 }

@@ -550,8 +550,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                         }
                     }
 
-                    KeytaoAndroidPaths.reloadStampFile().writeText(System.currentTimeMillis().toString())
-
                     val mergedArray = JSONArray()
                     dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }
                     val logsArray = JSONArray()
@@ -563,7 +561,6 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                     }
                     addVerify("default.yaml", File(root, "default.yaml").isFile, "KeyTao IME shared data marker")
                     addVerify("*.schema.yaml", root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true, "Rime schema")
-                    addVerify("keytao-ime.reload", KeytaoAndroidPaths.reloadStampFile().isFile, "reload stamp")
 
                     invoke.resolve(JSObject().apply {
                         put("mergedSchemas", mergedArray)
@@ -579,30 +576,20 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun deployImeData(invoke: Invoke) {
-        Thread {
-            try {
-                val engine = KeytaoImeEngine(activity)
-                if (!engine.hasInstalledSchema()) {
-                    return@Thread invoke.reject("请先安装键道方案")
-                }
-                if (!engine.deployNow()) {
-                    return@Thread invoke.reject("Android RIME 部署失败")
-                }
-                val state = engine.state()
-                val stamp = KeytaoAndroidPaths.reloadStampFile()
-                stamp.writeText(System.currentTimeMillis().toString())
-                val deployed = engine.hasDeployedSchema()
-                engine.close()
-
+        if (!KeytaoAndroidPaths.hasInstalledSchema()) {
+            return invoke.reject("请先安装键道方案")
+        }
+        KeytaoRimeDeployClient.deploy(activity) { result ->
+            if (result.success) {
                 invoke.resolve(JSObject().apply {
-                    put("path", stamp.absolutePath)
-                    put("schemaName", state.schemaName)
-                    put("deployed", deployed)
+                    put("path", result.path)
+                    put("schemaName", result.schemaName)
+                    put("deployed", result.deployed)
                 })
-            } catch (ex: Exception) {
-                invoke.reject(ex.message ?: "Android RIME 部署失败")
+            } else {
+                invoke.reject(result.error.ifBlank { "Android RIME 部署失败" })
             }
-        }.start()
+        }
     }
 
     @Command

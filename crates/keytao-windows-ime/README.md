@@ -27,11 +27,22 @@ Or through pnpm:
 pnpm build:windows-ime
 ```
 
-The script creates a test runtime directory:
+`build-windows-ime.ps1` creates the selected architecture directory. The full
+`build-windows.ps1 -Arch x64` installer build creates both architecture
+directories and points `current` at x64:
 
 ```text
 target\keytao-windows-ime-runtime\x64
+target\keytao-windows-ime-runtime\x86
+target\keytao-windows-ime-runtime\current
 ```
+
+An x64 KeyTao installer includes both x64 and x86 TIP runtimes because TSF
+loads the IME DLL into the target application process. The installer registers
+both DLLs with the matching `regsvr32.exe`. The native runtime stays below
+`%ProgramFiles%`, while the complete x86 text-service runtime is installed at
+`%ProgramFiles(x86)%\KeyTao\keytao-windows-ime-runtime\x86` as required for
+side-by-side Windows text services.
 
 To only download librime:
 
@@ -72,6 +83,11 @@ KeyTao\
     essay.txt
     ...
 ```
+
+The input-switcher branding icon is PE resource ID 1 inside
+`keytao_windows_ime.dll`; no external profile ICO is required. The dedicated
+black-and-white icon includes 16, 20, 24, 32, 40, and 48 pixel 32-bit alpha
+frames required by the Windows IME UI guidelines.
 
 The IME first looks for `rime-data` next to `keytao_windows_ime.dll`, then under
 `resources\rime-data` and `share\rime-data`.
@@ -116,5 +132,9 @@ regsvr32 /u .\target\x86_64-pc-windows-msvc\release\keytao_windows_ime.dll
 ```
 
 On Windows 7, use the same commands from an elevated prompt. On 64-bit systems,
-register the 64-bit DLL with the normal `System32\regsvr32.exe`; register the
-32-bit DLL with `SysWOW64\regsvr32.exe` only if you need 32-bit client support.
+register the 64-bit DLL with `System32\regsvr32.exe` and the 32-bit DLL with
+`SysWOW64\regsvr32.exe`.
+
+The TIP initializes librime without deployment. Install or update schemas with
+the KeyTao app before selecting the IME; deployment must not run inside an
+application process that hosts the TSF DLL.

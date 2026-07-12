@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app"
-version = "1.2.1-alpha.31"
+version = "1.2.1-alpha.33"
 dependencies = [
  "bzip2",
  "cosmic-text",
@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "1.2.1-alpha.31"
+version = "1.2.1-alpha.33"
 dependencies = [
  "dirs 5.0.1",
  "freetype-rs",
@@ -2612,15 +2612,15 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "1.2.1-alpha.31"
+version = "1.2.1-alpha.33"
 dependencies = [
+ "embed-resource",
  "fontdue",
  "keytao-core",
  "keytao-theme",
  "serde",
  "tiny-skia",
  "tracing",
- "tracing-subscriber",
  "windows 0.58.0",
  "windows-core 0.58.0",
 ]

@@ -34,7 +34,7 @@ pub fn current_mod_mask() -> u32 {
 /// Convert a Windows Virtual Key code to an X11 keysym.
 ///
 /// Returns `None` for keys the IME should never eat (e.g. media keys).
-pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
+pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     let sym = match VIRTUAL_KEY(vk) {
@@ -52,17 +52,9 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
             base as u32 + (key.0 - VK_A.0) as u32
         }
 
-        // --- Digits (unshifted) ---
-        VK_0 => 0x0030,
-        VK_1 => 0x0031,
-        VK_2 => 0x0032,
-        VK_3 => 0x0033,
-        VK_4 => 0x0034,
-        VK_5 => 0x0035,
-        VK_6 => 0x0036,
-        VK_7 => 0x0037,
-        VK_8 => 0x0038,
-        VK_9 => 0x0039,
+        // Printable keys are resolved with the active keyboard layout. This
+        // preserves non-US OEM punctuation and shifted number-row symbols.
+        key if is_printable_vk(key) => printable_keysym(key, vk, lparam, mods)?,
 
         // --- Numpad ---
         VK_NUMPAD0 => 0x0030,
@@ -75,6 +67,11 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
         VK_NUMPAD7 => 0x0037,
         VK_NUMPAD8 => 0x0038,
         VK_NUMPAD9 => 0x0039,
+        VK_MULTIPLY => 0x002A,
+        VK_ADD => 0x002B,
+        VK_SUBTRACT => 0x002D,
+        VK_DECIMAL => 0x002E,
+        VK_DIVIDE => 0x002F,
 
         // --- Control keys ---
         VK_BACK => 0xFF08,   // XK_BackSpace
@@ -95,23 +92,261 @@ pub fn vk_to_keysym(vk: u16, mods: u32) -> Option<u32> {
         VK_NEXT => XK_PAGE_DOWN, // XK_Next  (Page Down)
         VK_F4 => 0xFFC1,         // XK_F4 opens the Rime menu
 
-        // --- OEM punctuation (US layout) ---
-        VK_OEM_MINUS => 0x002D,  // '-'
-        VK_OEM_PLUS => 0x003D,   // '='
-        VK_OEM_COMMA => 0x002C,  // ','
-        VK_OEM_PERIOD => 0x002E, // '.'
-        VK_OEM_1 => 0x003B,      // ';'
-        VK_OEM_2 => 0x002F,      // '/'
-        VK_OEM_3 => 0x0060,      // '`'
-        VK_OEM_4 => 0x005B,      // '['
-        VK_OEM_5 => 0x005C,      // '\'
-        VK_OEM_6 => 0x005D,      // ']'
-        VK_OEM_7 => 0x0027,      // '\''
-
         // Anything else (other function keys, media keys, etc.) — don't intercept
         _ => return None,
     };
     Some(sym)
+}
+
+enum PrintableTranslation {
+    Character(u32),
+    DeadKey,
+    Unavailable,
+}
+
+fn printable_keysym(
+    key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    vk: u16,
+    lparam: isize,
+    mods: u32,
+) -> Option<u32> {
+    match translated_printable_keysym(vk, lparam) {
+        PrintableTranslation::Character(keysym) => Some(keysym),
+        PrintableTranslation::DeadKey => None,
+        PrintableTranslation::Unavailable => fallback_printable_keysym(key, mods),
+    }
+}
+
+fn translated_printable_keysym(vk: u16, lparam: isize) -> PrintableTranslation {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, GetKeyboardState, ToUnicodeEx,
+    };
+
+    let mut keyboard_state = [0u8; 256];
+    unsafe {
+        if GetKeyboardState(&mut keyboard_state).is_err() {
+            return PrintableTranslation::Unavailable;
+        }
+        let scan_code = ((lparam as usize >> 16) & 0xff) as u32;
+        let mut buffer = [0u16; 4];
+        // Bit 2 asks Windows 10 1607+ not to mutate the keyboard dead-key state.
+        let count = ToUnicodeEx(
+            vk as u32,
+            scan_code,
+            &keyboard_state,
+            &mut buffer,
+            4,
+            GetKeyboardLayout(0),
+        );
+        if count < 0 {
+            return PrintableTranslation::DeadKey;
+        }
+        if count != 1 {
+            return PrintableTranslation::Unavailable;
+        }
+        let Some(ch) = char::from_u32(buffer[0] as u32) else {
+            return PrintableTranslation::Unavailable;
+        };
+        PrintableTranslation::Character(unicode_to_keysym(ch))
+    }
+}
+
+fn unicode_to_keysym(ch: char) -> u32 {
+    let value = ch as u32;
+    if value <= 0xff {
+        value
+    } else {
+        0x0100_0000 | value
+    }
+}
+
+fn fallback_printable_keysym(
+    vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    mods: u32,
+) -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let shifted = mods & RIME_MOD_SHIFT != 0;
+    let value = match vk {
+        VK_0 => {
+            if shifted {
+                ')'
+            } else {
+                '0'
+            }
+        }
+        VK_1 => {
+            if shifted {
+                '!'
+            } else {
+                '1'
+            }
+        }
+        VK_2 => {
+            if shifted {
+                '@'
+            } else {
+                '2'
+            }
+        }
+        VK_3 => {
+            if shifted {
+                '#'
+            } else {
+                '3'
+            }
+        }
+        VK_4 => {
+            if shifted {
+                '$'
+            } else {
+                '4'
+            }
+        }
+        VK_5 => {
+            if shifted {
+                '%'
+            } else {
+                '5'
+            }
+        }
+        VK_6 => {
+            if shifted {
+                '^'
+            } else {
+                '6'
+            }
+        }
+        VK_7 => {
+            if shifted {
+                '&'
+            } else {
+                '7'
+            }
+        }
+        VK_8 => {
+            if shifted {
+                '*'
+            } else {
+                '8'
+            }
+        }
+        VK_9 => {
+            if shifted {
+                '('
+            } else {
+                '9'
+            }
+        }
+        VK_OEM_MINUS => {
+            if shifted {
+                '_'
+            } else {
+                '-'
+            }
+        }
+        VK_OEM_PLUS => {
+            if shifted {
+                '+'
+            } else {
+                '='
+            }
+        }
+        VK_OEM_COMMA => {
+            if shifted {
+                '<'
+            } else {
+                ','
+            }
+        }
+        VK_OEM_PERIOD => {
+            if shifted {
+                '>'
+            } else {
+                '.'
+            }
+        }
+        VK_OEM_1 => {
+            if shifted {
+                ':'
+            } else {
+                ';'
+            }
+        }
+        VK_OEM_2 => {
+            if shifted {
+                '?'
+            } else {
+                '/'
+            }
+        }
+        VK_OEM_3 => {
+            if shifted {
+                '~'
+            } else {
+                '`'
+            }
+        }
+        VK_OEM_4 => {
+            if shifted {
+                '{'
+            } else {
+                '['
+            }
+        }
+        VK_OEM_5 | VK_OEM_102 => {
+            if shifted {
+                '|'
+            } else {
+                '\\'
+            }
+        }
+        VK_OEM_6 => {
+            if shifted {
+                '}'
+            } else {
+                ']'
+            }
+        }
+        VK_OEM_7 => {
+            if shifted {
+                '"'
+            } else {
+                '\''
+            }
+        }
+        _ => return None,
+    };
+    Some(value as u32)
+}
+
+fn is_printable_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    matches!(
+        vk,
+        VK_0 | VK_1
+            | VK_2
+            | VK_3
+            | VK_4
+            | VK_5
+            | VK_6
+            | VK_7
+            | VK_8
+            | VK_9
+            | VK_OEM_MINUS
+            | VK_OEM_PLUS
+            | VK_OEM_COMMA
+            | VK_OEM_PERIOD
+            | VK_OEM_1
+            | VK_OEM_2
+            | VK_OEM_3
+            | VK_OEM_4
+            | VK_OEM_5
+            | VK_OEM_6
+            | VK_OEM_7
+            | VK_OEM_102
+    )
 }
 
 pub fn shift_keysym_for_vk(vk: u16) -> Option<u32> {
@@ -134,7 +369,14 @@ pub fn is_enter_vk(vk: u16) -> bool {
     matches!(VIRTUAL_KEY(vk), VK_RETURN)
 }
 
-pub fn candidate_index_for_select_key(vk: u16, state: &keytao_core::ImeState) -> Option<usize> {
+pub fn candidate_index_for_select_key(
+    vk: u16,
+    mods: u32,
+    state: &keytao_core::ImeState,
+) -> Option<usize> {
+    if mods & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
+        return None;
+    }
     if is_space_vk(vk) {
         return key_policy::highlighted_candidate_index(state);
     }
@@ -264,4 +506,45 @@ fn ascii_char_for_vk(vk: u16) -> Option<char> {
         _ => return None,
     };
     Some(ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use keytao_core::{Candidate, ImeState, RIME_MOD_SHIFT};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_1, VK_OEM_1};
+
+    use super::{candidate_index_for_select_key, fallback_printable_keysym, unicode_to_keysym};
+
+    #[test]
+    fn fallback_printable_mapping_respects_shift() {
+        assert_eq!(fallback_printable_keysym(VK_1, 0), Some('1' as u32));
+        assert_eq!(
+            fallback_printable_keysym(VK_1, RIME_MOD_SHIFT),
+            Some('!' as u32)
+        );
+        assert_eq!(
+            fallback_printable_keysym(VK_OEM_1, RIME_MOD_SHIFT),
+            Some(':' as u32)
+        );
+    }
+
+    #[test]
+    fn shifted_select_key_does_not_choose_candidate() {
+        let mut state = ImeState::empty();
+        state.candidates.push(Candidate {
+            text: "candidate".into(),
+            comment: None,
+        });
+        assert_eq!(candidate_index_for_select_key(VK_1.0, 0, &state), Some(0));
+        assert_eq!(
+            candidate_index_for_select_key(VK_1.0, RIME_MOD_SHIFT, &state),
+            None
+        );
+    }
+
+    #[test]
+    fn unicode_keysym_uses_x11_unicode_encoding() {
+        assert_eq!(unicode_to_keysym('a'), 0x61);
+        assert_eq!(unicode_to_keysym('键'), 0x0100_0000 | '键' as u32);
+    }
 }

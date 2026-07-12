@@ -8,17 +8,15 @@
 //! Run: regsvr32 keytao_windows_ime.dll
 //! Undo: regsvr32 /u keytao_windows_ime.dll
 
-use std::path::{Path, PathBuf};
-
 use windows::{
     core::{Error, IUnknown, Interface, Result, HRESULT, PCSTR, PCWSTR},
     Win32::{
-        Foundation::{FreeLibrary, BOOL},
+        Foundation::{FreeLibrary, BOOL, RPC_E_CHANGED_MODE},
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
         },
-        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
+        System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32},
         System::Registry::{
             RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
             KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -26,15 +24,15 @@ use windows::{
         UI::Input::KeyboardAndMouse::HKL,
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
-            ITfInputProcessorProfileMgr, ITfInputProcessorProfiles, GUID_TFCAT_CATEGORY_OF_TIP,
-            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
+            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
             GUID_TFCAT_TIPCAP_UIELEMENTENABLED, GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
             TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR,
         },
     },
 };
 
-use crate::{CLSID_TEXT_SERVICE, GUID_PROFILE, LANGID_CHINESE_SIMPLIFIED};
+use crate::{CLSID_TEXT_SERVICE, GUID_PROFILE, LANGID_CHINESE_SIMPLIFIED, PROFILE_ICON_INDEX};
 
 struct ComApartment(bool);
 
@@ -48,9 +46,15 @@ impl Drop for ComApartment {
     }
 }
 
-fn init_com_apartment() -> ComApartment {
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-    ComApartment(initialized)
+fn init_com_apartment() -> Result<ComApartment> {
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if result.is_ok() {
+        Ok(ComApartment(true))
+    } else if result == RPC_E_CHANGED_MODE {
+        Ok(ComApartment(false))
+    } else {
+        Err(result.into())
+    }
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -89,18 +93,10 @@ struct CategoryRegistration {
     item: windows::core::GUID,
 }
 
-fn category_registrations() -> [CategoryRegistration; 5] {
+fn category_registrations() -> [CategoryRegistration; 4] {
     [
         CategoryRegistration {
-            category: GUID_TFCAT_CATEGORY_OF_TIP,
-            item: GUID_TFCAT_TIP_KEYBOARD,
-        },
-        CategoryRegistration {
             category: GUID_TFCAT_TIP_KEYBOARD,
-            item: CLSID_TEXT_SERVICE,
-        },
-        CategoryRegistration {
-            category: GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
             item: CLSID_TEXT_SERVICE,
         },
         CategoryRegistration {
@@ -109,6 +105,10 @@ fn category_registrations() -> [CategoryRegistration; 5] {
         },
         CategoryRegistration {
             category: GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
             item: CLSID_TEXT_SERVICE,
         },
     ]
@@ -133,40 +133,28 @@ unsafe fn register_profile(
     profile_desc: &[u16],
     icon_path: &[u16],
 ) -> Result<()> {
-    profiles.Register(&CLSID_TEXT_SERVICE)?;
-
     if let Some(profile_mgr) = profile_mgr {
-        let _ = profile_mgr.UnregisterProfile(
-            &CLSID_TEXT_SERVICE,
-            LANGID_CHINESE_SIMPLIFIED,
-            &GUID_PROFILE,
-            0,
-        );
         profile_mgr.RegisterProfile(
             &CLSID_TEXT_SERVICE,
             LANGID_CHINESE_SIMPLIFIED,
             &GUID_PROFILE,
             profile_desc,
             icon_path,
-            0,
+            PROFILE_ICON_INDEX,
             HKL::default(),
             0,
             BOOL::from(true),
             0,
         )?;
     } else {
-        let _ = profiles.RemoveLanguageProfile(
-            &CLSID_TEXT_SERVICE,
-            LANGID_CHINESE_SIMPLIFIED,
-            &GUID_PROFILE,
-        );
+        profiles.Register(&CLSID_TEXT_SERVICE)?;
         profiles.AddLanguageProfile(
             &CLSID_TEXT_SERVICE,
             LANGID_CHINESE_SIMPLIFIED,
             &GUID_PROFILE,
             profile_desc,
             icon_path,
-            0,
+            PROFILE_ICON_INDEX,
         )?;
     }
 
@@ -190,7 +178,7 @@ unsafe fn register_profile(
 
 fn tip_install_string() -> String {
     format!(
-        "0x{:04X}:{}{};",
+        "0x{:04X}:{}{}",
         LANGID_CHINESE_SIMPLIFIED,
         guid_to_string(&CLSID_TEXT_SERVICE),
         guid_to_string(&GUID_PROFILE)
@@ -213,8 +201,12 @@ unsafe fn uninstall_tip_for_current_user() {
 
 unsafe fn call_install_layout_or_tip(tip: PCWSTR, flags: u32) -> Result<BOOL> {
     let input_dll = to_wide("input.dll");
-    let module = LoadLibraryW(PCWSTR(input_dll.as_ptr()))?;
-    let Some(proc) = GetProcAddress(module, PCSTR(b"InstallLayoutOrTip\0".as_ptr())) else {
+    let module = LoadLibraryExW(
+        PCWSTR(input_dll.as_ptr()),
+        None,
+        LOAD_LIBRARY_SEARCH_SYSTEM32,
+    )?;
+    let Some(proc) = GetProcAddress(module, PCSTR(c"InstallLayoutOrTip".as_ptr().cast())) else {
         let error = Error::from_win32();
         let _ = FreeLibrary(module);
         return Err(error);
@@ -286,26 +278,10 @@ fn dll_path() -> Result<String> {
     Ok(String::from_utf16_lossy(&buf[..len]))
 }
 
-fn profile_icon_path(dll: &str) -> Result<PathBuf> {
-    let dll_path = Path::new(dll);
-    let Some(dir) = dll_path.parent() else {
-        return Err(error_message("KeyTao TSF DLL path has no parent directory"));
-    };
-    let icon = dir.join("keytao.ico");
-    if icon.is_file() {
-        Ok(icon)
-    } else {
-        Err(error_message(format!(
-            "KeyTao TSF profile icon is missing: {}",
-            icon.display()
-        )))
-    }
-}
-
 // Public API
 
 pub fn register() -> Result<()> {
-    let _com = init_com_apartment();
+    let _com = init_com_apartment()?;
     let dll = dll_path()?;
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
@@ -339,8 +315,7 @@ pub fn register() -> Result<()> {
             CLSCTX_INPROC_SERVER,
         )?;
         let profile_desc = to_wide("KeyTao");
-        let icon_path = profile_icon_path(&dll)?;
-        let icon_path = to_wide(&icon_path.to_string_lossy());
+        let icon_path = to_wide(&dll);
 
         let profile_mgr = profiles.cast::<ITfInputProcessorProfileMgr>().ok();
         register_profile(
@@ -367,7 +342,7 @@ pub fn register() -> Result<()> {
 }
 
 pub fn unregister() -> Result<()> {
-    let _com = init_com_apartment();
+    let _com = init_com_apartment()?;
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
     unsafe {

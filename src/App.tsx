@@ -536,6 +536,7 @@ export default function App() {
   }, [localSchemaInfo?.schemas.join(",")])
 
   useEffect(() => {
+    let windowsImeDisposed = false
     const p = platform()
     const map: Record<string, OSType> = {
       macos: "macos", windows: "windows", linux: "linux",
@@ -577,26 +578,31 @@ export default function App() {
         .catch((e) => setLinuxImeError(String(e)))
     }
     if (os === "windows") {
-      listen<WindowsImeStatus>("windows-ime-status", (e) => {
-        setWindowsImeStatus(e.payload)
-        setWindowsImeError(e.payload.registration_error ?? null)
-        setIsManagingWindowsIme(e.payload.registration_busy)
-      }).then((fn) => { unlistenWindowsImeRef.current = fn })
-
-      window.setTimeout(() => {
+      void (async () => {
+        const unlisten = await listen<WindowsImeStatus>("windows-ime-status", (e) => {
+          setWindowsImeStatus(e.payload)
+          setWindowsImeError(e.payload.registration_error ?? null)
+          setIsManagingWindowsIme(e.payload.registration_busy)
+        })
+        if (windowsImeDisposed) {
+          unlisten()
+          return
+        }
+        unlistenWindowsImeRef.current = unlisten
         setIsManagingWindowsIme(true)
         setWindowsImeError(null)
-        invoke<WindowsImeStatus>("windows_ime_ensure_registered")
-          .then((status) => {
-            setWindowsImeStatus(status)
-            setWindowsImeError(status.registration_error ?? null)
-            setIsManagingWindowsIme(status.registration_busy)
-          })
-          .catch((e) => {
-            setWindowsImeError(String(e))
-            setIsManagingWindowsIme(false)
-          })
-      }, 0)
+        const status = await invoke<WindowsImeStatus>("windows_ime_ensure_registered")
+        if (!windowsImeDisposed) {
+          setWindowsImeStatus(status)
+          setWindowsImeError(status.registration_error ?? null)
+          setIsManagingWindowsIme(status.registration_busy)
+        }
+      })().catch((e) => {
+        if (!windowsImeDisposed) {
+          setWindowsImeError(String(e))
+          setIsManagingWindowsIme(false)
+        }
+      })
     }
     if (os === "macos") {
       invoke<MacosImeStatus>("macos_ime_status")
@@ -620,6 +626,7 @@ export default function App() {
     }).then((fn) => { unlistenInstallRef.current = fn })
 
     return () => {
+      windowsImeDisposed = true
       unlistenInstallRef.current?.()
       unlistenDeployRef.current?.()
       unlistenWindowsImeRef.current?.()
