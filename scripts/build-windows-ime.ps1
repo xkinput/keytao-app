@@ -315,7 +315,12 @@ if ($populateAppRuntime) {
     Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $appRuntimeDir
 }
 
-foreach ($runtimeDll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+$requiredRuntimeDlls = @("vcruntime140.dll", "msvcp140.dll")
+if ($Arch -ne "x86") {
+    $requiredRuntimeDlls += "vcruntime140_1.dll"
+}
+
+foreach ($runtimeDll in $requiredRuntimeDlls) {
     $source = Find-WindowsRuntimeDll $runtimeDll $Arch
     if ($source) {
         Copy-Item -Force -LiteralPath $source -Destination $runtimeDir
