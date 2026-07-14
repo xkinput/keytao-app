@@ -37,6 +37,46 @@ function Invoke-Checked([string]$Command, [string[]]$Arguments) {
     }
 }
 
+function Invoke-Download([string]$Uri, [string]$Destination) {
+    $temporaryPath = "$Destination.part"
+    Remove-Item -Force -ErrorAction SilentlyContinue $temporaryPath
+
+    $curl = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl.Source `
+            --fail `
+            --location `
+            --retry 3 `
+            --retry-delay 2 `
+            --connect-timeout 30 `
+            --silent `
+            --show-error `
+            --user-agent "keytao-librime-arm64-build" `
+            --output $temporaryPath `
+            $Uri
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download $Uri with curl.exe (exit code $LASTEXITCODE)."
+        }
+    } else {
+        Invoke-WebRequest `
+            -Uri $Uri `
+            -OutFile $temporaryPath `
+            -Headers @{ "User-Agent" = "keytao-librime-arm64-build" }
+    }
+
+    Move-Item -Force -LiteralPath $temporaryPath -Destination $Destination
+}
+
+function Expand-ZipArchive([string]$Archive, [string]$Destination) {
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $tar = Get-Command "tar.exe" -ErrorAction SilentlyContinue
+    if ($tar) {
+        Invoke-Checked $tar.Source @("-xf", $Archive, "-C", $Destination)
+    } else {
+        Expand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force
+    }
+}
+
 function Find-LuaPluginRefInVersionInfo([string]$Path) {
     if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
@@ -54,12 +94,11 @@ function Find-LuaPluginRefInVersionInfo([string]$Path) {
 }
 
 $repoRoot = Resolve-RepoRoot
-$release = if ($Version -eq "latest") {
-    Invoke-GitHubApi "https://api.github.com/repos/rime/librime/releases/latest"
+$resolvedVersion = if ($Version -eq "latest") {
+    (Invoke-GitHubApi "https://api.github.com/repos/rime/librime/releases/latest").tag_name
 } else {
-    Invoke-GitHubApi "https://api.github.com/repos/rime/librime/releases/tags/$Version"
+    $Version
 }
-$resolvedVersion = $release.tag_name
 if (-not $resolvedVersion) {
     throw "Unable to resolve the librime release tag for '$Version'."
 }
@@ -171,9 +210,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $boostRoot "boost") -PathType Contai
     if (-not (Test-Path -LiteralPath $boostArchive -PathType Leaf)) {
         $boostUrl = "https://archives.boost.io/release/$boostVersion/source/$boostFolder.zip"
         Write-Host "Downloading Boost $boostVersion headers"
-        Invoke-WebRequest -Uri $boostUrl -OutFile $boostArchive -Headers @{ "User-Agent" = "keytao-librime-arm64-build" }
+        Invoke-Download -Uri $boostUrl -Destination $boostArchive
     }
-    Expand-Archive -LiteralPath $boostArchive -DestinationPath $boostCacheDir -Force
+    Expand-ZipArchive -Archive $boostArchive -Destination $boostCacheDir
 }
 
 $pythonVersion = "3.12.10"
@@ -185,9 +224,9 @@ if (-not (Test-Path -LiteralPath $pythonExecutable -PathType Leaf)) {
     if (-not (Test-Path -LiteralPath $pythonArchive -PathType Leaf)) {
         $pythonUrl = "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
         Write-Host "Downloading Python $pythonVersion build interpreter"
-        Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonArchive -Headers @{ "User-Agent" = "keytao-librime-arm64-build" }
+        Invoke-Download -Uri $pythonUrl -Destination $pythonArchive
     }
-    Expand-Archive -LiteralPath $pythonArchive -DestinationPath $pythonRoot -Force
+    Expand-ZipArchive -Archive $pythonArchive -Destination $pythonRoot
 }
 
 $pythonPathFile = Join-Path $pythonRoot "python312._pth"
@@ -237,6 +276,55 @@ if (-not $generatorMatch.Success) {
 $cmakeGenerator = $generatorMatch.Groups[1].Value
 Write-Host "Using CMake generator '$cmakeGenerator' from Visual Studio $vsInstallationVersion"
 
+$openccSourceDir = Join-Path $sourceDir "deps\opencc"
+$openccHostBuildDir = Join-Path $cacheDir "opencc-host-build"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $openccHostBuildDir
+Invoke-Checked $cmakeExecutable @(
+    "-S", $openccSourceDir,
+    "-B", $openccHostBuildDir,
+    "-G", $cmakeGenerator,
+    "-A", "x64",
+    "-DBUILD_SHARED_LIBS:BOOL=OFF",
+    "-DBUILD_TESTING:BOOL=OFF",
+    "-DENABLE_GTEST:BOOL=OFF",
+    "-DENABLE_BENCHMARK:BOOL=OFF",
+    "-DBUILD_PYTHON:BOOL=OFF",
+    "-DPYTHON_EXECUTABLE:FILEPATH=$pythonExecutable"
+)
+Invoke-Checked $cmakeExecutable @(
+    "--build", $openccHostBuildDir,
+    "--config", "Release",
+    "--target", "opencc_dict"
+)
+$openccHostDict = Get-ChildItem -LiteralPath $openccHostBuildDir -Recurse -File -Filter "opencc_dict.exe" |
+    Select-Object -First 1
+if (-not $openccHostDict) {
+    throw "The OpenCC host build did not produce opencc_dict.exe."
+}
+
+$openccDataCmake = Join-Path $openccSourceDir "data\CMakeLists.txt"
+$openccDataText = Get-Content -LiteralPath $openccDataCmake -Raw
+if ($openccDataText -notmatch 'OPENCC_HOST_DICT_BIN') {
+    $openccDictNeedle = 'set(OPENCC_DICT_BIN opencc_dict)'
+    if (-not $openccDataText.Contains($openccDictNeedle)) {
+        throw "Unable to patch the OpenCC dictionary generator in $openccDataCmake."
+    }
+    $openccDictReplacement = @'
+if(DEFINED ENV{OPENCC_HOST_DICT_BIN})
+  add_executable(opencc_host_dict IMPORTED GLOBAL)
+  set_target_properties(
+    opencc_host_dict
+    PROPERTIES IMPORTED_LOCATION "$ENV{OPENCC_HOST_DICT_BIN}"
+  )
+  set(OPENCC_DICT_BIN opencc_host_dict)
+else()
+  set(OPENCC_DICT_BIN opencc_dict)
+endif()
+'@
+    $openccDataText = $openccDataText.Replace($openccDictNeedle, $openccDictReplacement)
+    Set-Content -LiteralPath $openccDataCmake -Encoding UTF8 -NoNewline -Value $openccDataText
+}
+
 $sourceCmake = Join-Path $sourceDir "src\CMakeLists.txt"
 $cmakeText = Get-Content -LiteralPath $sourceCmake -Raw
 if ($cmakeText -notmatch 'OUTPUT_NAME\s+"rime-arm64"') {
@@ -261,6 +349,7 @@ foreach ($name in @(
     "DEVTOOLS_PATH",
     "RIME_ROOT",
     "CMAKE_GENERATOR",
+    "OPENCC_HOST_DICT_BIN",
     "PYTHON_EXECUTABLE",
     "RIME_PLUGINS",
     "common_cmake_flags",
@@ -277,6 +366,7 @@ try {
     $env:DEVTOOLS_PATH = $cmakeBin
     $env:RIME_ROOT = $sourceDir
     $env:CMAKE_GENERATOR = $cmakeGenerator
+    $env:OPENCC_HOST_DICT_BIN = $openccHostDict.FullName
     $env:PYTHON_EXECUTABLE = $pythonExecutable
     $env:RIME_PLUGINS = "hchunhui/librime-lua@$resolvedLuaPluginRef"
     $env:common_cmake_flags = "-DPYTHON_EXECUTABLE:FILEPATH=$pythonExecutable"
