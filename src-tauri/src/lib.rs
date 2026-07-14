@@ -1000,6 +1000,58 @@ const WINDOWS_IME_STATUS_EVENT: &str = "windows-ime-status";
 static WINDOWS_IME_REGISTRATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
+static WINDOWS_IME_DATA_REPAIR_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+const WINDOWS_IME_ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
+
+#[cfg(target_os = "windows")]
+struct WindowsImeEngineInitGuard(windows::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl WindowsImeEngineInitGuard {
+    fn acquire() -> Result<Self, String> {
+        use windows::{
+            core::PCWSTR,
+            Win32::{
+                Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0},
+                System::Threading::{CreateMutexW, WaitForSingleObject},
+            },
+        };
+
+        let mut name: Vec<u16> = keytao_core::WINDOWS_IME_ENGINE_INIT_MUTEX_NAME
+            .encode_utf16()
+            .collect();
+        name.push(0);
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+            .map_err(|error| format!("create Windows IME engine mutex: {error}"))?;
+        let wait = unsafe { WaitForSingleObject(handle, WINDOWS_IME_ENGINE_INIT_MUTEX_TIMEOUT_MS) };
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!(
+                "wait for Windows IME engine mutex: 0x{:08x}",
+                wait.0
+            ));
+        }
+        Ok(Self(handle))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsImeEngineInitGuard {
+    fn drop(&mut self) {
+        use windows::Win32::{Foundation::CloseHandle, System::Threading::ReleaseMutex};
+
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 struct WindowsComApartment(bool);
 
 #[cfg(target_os = "windows")]
@@ -1653,6 +1705,83 @@ fn emit_windows_ime_status(app: &tauri::AppHandle, status: WindowsImeStatus) {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_ime_data_repair_required() -> bool {
+    keytao_core::default_user_data_dir()
+        .as_deref()
+        .is_some_and(keytao_core::windows_rime_build_repair_required)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_repairing_status(app: &tauri::AppHandle) -> WindowsImeStatus {
+    let mut status = windows_ime_status_with_message(
+        app,
+        "正在后台重建 Windows 输入法词典，完成前不会加载旧构建产物".into(),
+    );
+    status.registration_busy = true;
+    status.registration_state = "repairing".into();
+    status
+}
+
+#[cfg(target_os = "windows")]
+fn windows_ime_repair_failed_status(app: &tauri::AppHandle, error: String) -> WindowsImeStatus {
+    let mut status =
+        windows_ime_status_with_message(app, format!("Windows 输入法词典修复失败：{error}"));
+    status.registration_state = "repair_failed".into();
+    status.registration_error = Some(error);
+    status
+}
+
+#[cfg(target_os = "windows")]
+fn windows_repair_ime_data_blocking(app: &tauri::AppHandle) -> Result<WindowsImeStatus, String> {
+    let user_dir = keytao_core::default_user_data_dir().ok_or("无法确定 KeyTao 输入法数据目录")?;
+    if !keytao_core::windows_rime_build_repair_required(&user_dir) {
+        return Ok(windows_ime_status_with_message(
+            app,
+            "KeyTao Windows IME 已就绪".into(),
+        ));
+    }
+
+    let _engine_guard = WindowsImeEngineInitGuard::acquire()?;
+    write_keytao_ime_reload_stamp()
+        .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+    let invalidated = keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
+    tracing::info!(
+        invalidated = invalidated.len(),
+        "invalidated Windows RIME build artifacts before repair"
+    );
+    let shared =
+        windows_app_shared_data_dir(app).unwrap_or_else(keytao_core::default_shared_data_dir);
+    keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared)?;
+    write_keytao_ime_reload_stamp()
+        .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+
+    let message = format!(
+        "Windows 输入法词典修复完成，已重建 {} 个旧构建产物",
+        invalidated.len()
+    );
+    Ok(windows_ime_status_with_message(app, message))
+}
+
+#[cfg(target_os = "windows")]
+fn start_windows_ime_data_repair(app: &tauri::AppHandle) -> WindowsImeStatus {
+    let repairing = windows_ime_repairing_status(app);
+    if WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return repairing;
+    }
+
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        emit_windows_ime_status(&task_app, windows_ime_repairing_status(&task_app));
+        let final_status = windows_repair_ime_data_blocking(&task_app)
+            .unwrap_or_else(|error| windows_ime_repair_failed_status(&task_app, error));
+        WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(false, Ordering::SeqCst);
+        emit_windows_ime_status(&task_app, final_status);
+    });
+    repairing
+}
+
+#[cfg(target_os = "windows")]
 fn powershell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -1925,6 +2054,9 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
         return Ok(status);
     }
     if status.registered {
+        if windows_ime_data_repair_required() {
+            return Ok(start_windows_ime_data_repair(&app));
+        }
         let mut ready = status;
         ready.message = "KeyTao Windows IME 已就绪".into();
         return Ok(ready);
@@ -1973,6 +2105,14 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
         };
 
         let final_status = match registration_result {
+            Ok(_status) if windows_ime_data_repair_required() => {
+                WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(true, Ordering::SeqCst);
+                emit_windows_ime_status(&task_app, windows_ime_repairing_status(&task_app));
+                let repaired = windows_repair_ime_data_blocking(&task_app)
+                    .unwrap_or_else(|error| windows_ime_repair_failed_status(&task_app, error));
+                WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(false, Ordering::SeqCst);
+                repaired
+            }
             Ok(status) => status,
             Err(error) => {
                 let mut status = windows_ime_status_with_message(
@@ -2792,6 +2932,41 @@ fn verify_install(
     entries
 }
 
+fn collect_rime_package_build_id(
+    relative: &str,
+    schema_ids: &mut HashSet<String>,
+    dictionary_ids: &mut HashSet<String>,
+) {
+    let filename = relative.rsplit('/').next().unwrap_or(relative);
+    if let Some(id) = filename.strip_suffix(".schema.yaml") {
+        if !id.is_empty() {
+            schema_ids.insert(id.to_string());
+        }
+    } else if let Some(id) = filename.strip_suffix(".dict.yaml") {
+        if !id.is_empty() {
+            dictionary_ids.insert(id.to_string());
+        }
+    }
+}
+
+fn rime_package_build_ids(zip_bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|error| format!("读取方案构建清单失败: {error}"))?;
+    let mut schema_ids = HashSet::new();
+    let mut dictionary_ids = HashSet::new();
+    for index in 0..archive.len() {
+        let file = archive.by_index(index).map_err(|error| error.to_string())?;
+        if !file.is_dir() {
+            collect_rime_package_build_id(file.name(), &mut schema_ids, &mut dictionary_ids);
+        }
+    }
+    let mut schema_ids: Vec<String> = schema_ids.into_iter().collect();
+    schema_ids.sort();
+    let mut dictionary_ids: Vec<String> = dictionary_ids.into_iter().collect();
+    dictionary_ids.sort();
+    Ok((schema_ids, dictionary_ids))
+}
+
 /// Writes `content` to `path`, forcibly overwriting even read-only files.
 /// On Linux, triggers a polkit (pkexec) root-auth dialog if the file is root-owned.
 /// Returns a tag for logging: "" (normal), " [forced]", or " [root]".
@@ -2933,6 +3108,7 @@ async fn smart_install<R: tauri::Runtime>(
 
     let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
     let dest = PathBuf::from(&dest_path);
+    let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
 
     // First pass: collect zip metadata and merge candidates
     let (
@@ -3101,6 +3277,31 @@ async fn smart_install<R: tauri::Runtime>(
         }
     }
 
+    let invalidated = {
+        #[cfg(target_os = "windows")]
+        let _engine_guard = if !package_schema_ids.is_empty() || !package_dictionary_ids.is_empty()
+        {
+            Some(WindowsImeEngineInitGuard::acquire()?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "windows")]
+        if _engine_guard.is_some() {
+            keytao_core::clear_windows_rime_build_repair_marker(&dest)?;
+            write_keytao_ime_reload_stamp()
+                .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+        }
+        keytao_core::invalidate_rime_build_artifacts(
+            &dest,
+            &package_schema_ids,
+            &package_dictionary_ids,
+        )?
+    };
+    logs.extend(
+        invalidated
+            .into_iter()
+            .map(|path| format!("[INVALIDATED] {path}")),
+    );
     std::fs::remove_file(&zip_path).ok();
     emit("done", 100, "安装完成！");
 
@@ -4922,11 +5123,25 @@ pub struct DeployResult {
     pub message: String,
 }
 
+#[cfg(target_os = "windows")]
+fn windows_deploy_rime_blocking(user_dir: PathBuf, shared_data_dir: String) -> Result<(), String> {
+    let _engine_guard = WindowsImeEngineInitGuard::acquire()?;
+    keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
+    write_keytao_ime_reload_stamp()
+        .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+    keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
+    keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
+    write_keytao_ime_reload_stamp()
+        .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)
+}
+
 #[tauri::command]
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    #[cfg(not(target_os = "windows"))]
     let user = dest.to_string_lossy().into_owned();
     #[cfg(target_os = "windows")]
     let shared =
@@ -4940,7 +5155,14 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 
     let _ = app.emit("deploy-progress", "正在部署 librime...");
 
-    match tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await {
+    #[cfg(target_os = "windows")]
+    let deploy_result =
+        tokio::task::spawn_blocking(move || windows_deploy_rime_blocking(dest, shared)).await;
+    #[cfg(not(target_os = "windows"))]
+    let deploy_result =
+        tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await;
+
+    match deploy_result {
         Ok(Ok(())) => {
             let _ = app.emit("deploy-progress", "部署完成");
             // Refresh the test-input Rime session so the new schemas take effect immediately.
@@ -4949,7 +5171,7 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
                 let state: tauri::State<rime::RimeEngine> = app.state();
                 *state.engine.lock().unwrap() = Some(engine);
             }
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             match write_keytao_ime_reload_stamp() {
                 Ok(()) => {
                     let _ = app.emit("deploy-progress", "已通知系统输入法重载");
@@ -4960,6 +5182,8 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
                     tracing::warn!("IME reload stamp failed after deploy: {e}");
                 }
             }
+            #[cfg(target_os = "windows")]
+            let _ = app.emit("deploy-progress", "已通知系统输入法重载");
             Ok(DeployResult {
                 success: true,
                 message: "部署成功".into(),
@@ -5707,6 +5931,31 @@ mod tests {
             Some("1.17.0".to_owned())
         );
         assert_eq!(rime_filename_version("librime-lua.dylib"), None);
+    }
+
+    #[test]
+    fn test_collect_rime_package_build_ids() {
+        let mut schemas = HashSet::new();
+        let mut dictionaries = HashSet::new();
+        for path in [
+            "keydo.schema.yaml",
+            "nested/pinyin_simp.schema.yaml",
+            "keydo.dict.yaml",
+            "keydo.phrases.dict.yaml",
+            "default.custom.yaml",
+            "lua/keydo.lua",
+        ] {
+            collect_rime_package_build_id(path, &mut schemas, &mut dictionaries);
+        }
+
+        assert_eq!(
+            schemas,
+            HashSet::from(["keydo".to_string(), "pinyin_simp".to_string()])
+        );
+        assert_eq!(
+            dictionaries,
+            HashSet::from(["keydo".to_string(), "keydo.phrases".to_string()])
+        );
     }
 
     #[test]

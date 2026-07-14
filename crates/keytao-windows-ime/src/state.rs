@@ -2,6 +2,7 @@
 
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
+    WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
@@ -142,9 +143,7 @@ unsafe impl Send for EngineInitGuard {}
 
 impl EngineInitGuard {
     fn acquire() -> Result<Self, String> {
-        let mut name: Vec<u16> = "Local\\KeyTao.WindowsIme.EngineInit"
-            .encode_utf16()
-            .collect();
+        let mut name: Vec<u16> = WINDOWS_IME_ENGINE_INIT_MUTEX_NAME.encode_utf16().collect();
         name.push(0);
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
             .map_err(|error| format!("create engine initialization mutex: {error}"))?;

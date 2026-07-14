@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -14,6 +14,8 @@ use std::{
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+pub const WINDOWS_IME_ENGINE_INIT_MUTEX_NAME: &str = "Local\\KeyTao.WindowsIme.EngineInit";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImeState {
@@ -1637,6 +1639,11 @@ impl ImeRuntime {
         #[cfg(target_os = "windows")]
         {
             let (user_dir, _) = self.configured_dirs()?;
+            if windows_rime_build_repair_required(&user_dir) {
+                return Err(
+                    "Windows RIME build repair is pending; open the KeyTao app to finish it".into(),
+                );
+            }
             patch_windows_lua_compatibility(&user_dir)?;
         }
 
@@ -1919,6 +1926,190 @@ fn parse_schema_dependencies(content: &str) -> Vec<String> {
         .filter(|dependency| !dependency.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+const WINDOWS_RIME_BUILD_REPAIR_MARKER: &str = ".keytao-windows-build-repair-v1";
+const WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT: &str = "complete-v1\n";
+
+fn valid_rime_build_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn configured_schema_list_from_dir(user_data_dir: &Path) -> Vec<String> {
+    [
+        "default.custom.yaml",
+        "default-custom.yaml",
+        "build/default.yaml",
+        "default.yaml",
+    ]
+    .into_iter()
+    .filter_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
+    .map(|content| parse_schema_list(&content))
+    .find(|schemas| !schemas.is_empty())
+    .unwrap_or_default()
+}
+
+fn collect_schema_dictionary_ids(value: &Value, dictionary_ids: &mut HashSet<String>) {
+    match value {
+        Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let is_dictionary = key
+                    .as_str()
+                    .is_some_and(|key| key == "dictionary" || key.ends_with("/dictionary"));
+                if is_dictionary {
+                    if let Some(id) = value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|id| valid_rime_build_id(id))
+                    {
+                        dictionary_ids.insert(id.to_string());
+                    }
+                }
+                collect_schema_dictionary_ids(value, dictionary_ids);
+            }
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                collect_schema_dictionary_ids(value, dictionary_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Remove compiled outputs owned by schemas and dictionaries that are about to
+/// be replaced. librime will recreate them during the next app-owned deploy.
+pub fn invalidate_rime_build_artifacts(
+    user_data_dir: &Path,
+    schema_ids: &[String],
+    dictionary_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let build_dir = user_data_dir.join("build");
+    if !build_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut relative_paths = HashSet::new();
+    if !schema_ids.is_empty() || !dictionary_ids.is_empty() {
+        relative_paths.insert("default.yaml".to_string());
+    }
+    for id in schema_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| valid_rime_build_id(id))
+    {
+        relative_paths.insert(format!("{id}.schema.yaml"));
+        relative_paths.insert(format!("{id}.prism.bin"));
+    }
+    for id in dictionary_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| valid_rime_build_id(id))
+    {
+        relative_paths.insert(format!("{id}.table.bin"));
+        relative_paths.insert(format!("{id}.reverse.bin"));
+    }
+
+    let mut removed = Vec::new();
+    for relative in relative_paths {
+        let path = build_dir.join(&relative);
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(format!("build/{relative}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("remove {}: {error}", path.display())),
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
+pub fn windows_rime_build_repair_required(user_data_dir: &Path) -> bool {
+    if std::fs::read_to_string(user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER))
+        .is_ok_and(|content| content == WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
+    {
+        return false;
+    }
+
+    configured_schema_list_from_dir(user_data_dir)
+        .into_iter()
+        .any(|schema| {
+            is_keytao_managed_schema(&schema)
+                && user_data_dir
+                    .join(format!("{schema}.schema.yaml"))
+                    .is_file()
+        })
+}
+
+pub fn clear_windows_rime_build_repair_marker(user_data_dir: &Path) -> Result<(), String> {
+    let marker = user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove {}: {error}", marker.display())),
+    }
+}
+
+pub fn mark_windows_rime_build_repair_complete(user_data_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(user_data_dir)
+        .map_err(|error| format!("create {}: {error}", user_data_dir.display()))?;
+    let marker = user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER);
+    let temporary = user_data_dir.join(format!(
+        "{WINDOWS_RIME_BUILD_REPAIR_MARKER}.{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&temporary, WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
+        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+    if marker.exists() {
+        std::fs::remove_file(&marker)
+            .map_err(|error| format!("remove {}: {error}", marker.display()))?;
+    }
+    std::fs::rename(&temporary, &marker).map_err(|error| {
+        format!(
+            "rename {} to {}: {error}",
+            temporary.display(),
+            marker.display()
+        )
+    })
+}
+
+/// Invalidate the selected managed schemas and their dependency graph before a
+/// one-time Windows repair deployment.
+pub fn invalidate_active_windows_rime_build(user_data_dir: &Path) -> Result<Vec<String>, String> {
+    let mut pending: VecDeque<String> = configured_schema_list_from_dir(user_data_dir)
+        .into_iter()
+        .filter(|schema| is_keytao_managed_schema(schema))
+        .collect();
+    let mut schema_ids = HashSet::new();
+    let mut dictionary_ids = HashSet::new();
+
+    while let Some(schema_id) = pending.pop_front() {
+        if !valid_rime_build_id(&schema_id) || !schema_ids.insert(schema_id.clone()) {
+            continue;
+        }
+        let source = user_data_dir.join(format!("{schema_id}.schema.yaml"));
+        let Ok(content) = std::fs::read_to_string(&source) else {
+            continue;
+        };
+        if let Ok(value) = serde_yaml::from_str::<Value>(&content) {
+            collect_schema_dictionary_ids(&value, &mut dictionary_ids);
+        }
+        for dependency in parse_schema_dependencies(&content) {
+            if !schema_ids.contains(&dependency) {
+                pending.push_back(dependency);
+            }
+        }
+    }
+
+    let mut schemas: Vec<String> = schema_ids.into_iter().collect();
+    schemas.sort();
+    let mut dictionaries: Vec<String> = dictionary_ids.into_iter().collect();
+    dictionaries.sort();
+    invalidate_rime_build_artifacts(user_data_dir, &schemas, &dictionaries)
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -2754,10 +2945,12 @@ pub fn has_schemas(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        clear_windows_rime_build_repair_marker, invalidate_active_windows_rime_build,
+        invalidate_rime_build_artifacts, mark_windows_rime_build_repair_complete,
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
         parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
         patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
-        rime_log_dir,
+        rime_log_dir, windows_rime_build_repair_required,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -2789,6 +2982,104 @@ mod tests {
             parse_schema_dependencies(block),
             vec!["pinyin_simp", "liangfen"]
         );
+    }
+
+    #[test]
+    fn invalidating_package_build_artifacts_preserves_unrelated_outputs() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-build-invalidate-test-{suffix}"));
+        let build = dir.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        for name in [
+            "default.yaml",
+            "keydo.schema.yaml",
+            "keydo.prism.bin",
+            "keydo.table.bin",
+            "keydo.reverse.bin",
+            "keytao.schema.yaml",
+            "keytao.table.bin",
+        ] {
+            std::fs::write(build.join(name), name).unwrap();
+        }
+
+        let removed =
+            invalidate_rime_build_artifacts(&dir, &["keydo".to_string()], &["keydo".to_string()])
+                .unwrap();
+
+        assert_eq!(
+            removed,
+            vec![
+                "build/default.yaml",
+                "build/keydo.prism.bin",
+                "build/keydo.reverse.bin",
+                "build/keydo.schema.yaml",
+                "build/keydo.table.bin",
+            ]
+        );
+        assert!(build.join("keytao.schema.yaml").is_file());
+        assert!(build.join("keytao.table.bin").is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn windows_build_repair_invalidates_selected_schema_graph() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-windows-repair-test-{suffix}"));
+        let build = dir.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keydo\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("keydo.schema.yaml"),
+            concat!(
+                "schema:\n",
+                "  schema_id: keydo\n",
+                "  dependencies: [pinyin_simp]\n",
+                "translator:\n",
+                "  dictionary: keydo\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pinyin_simp.schema.yaml"),
+            "schema:\n  schema_id: pinyin_simp\ntranslator:\n  dictionary: pinyin_simp\n",
+        )
+        .unwrap();
+        for name in [
+            "default.yaml",
+            "keydo.schema.yaml",
+            "keydo.prism.bin",
+            "keydo.table.bin",
+            "keydo.reverse.bin",
+            "pinyin_simp.schema.yaml",
+            "pinyin_simp.prism.bin",
+            "pinyin_simp.table.bin",
+            "pinyin_simp.reverse.bin",
+            "unrelated.table.bin",
+        ] {
+            std::fs::write(build.join(name), name).unwrap();
+        }
+
+        assert!(windows_rime_build_repair_required(&dir));
+        let removed = invalidate_active_windows_rime_build(&dir).unwrap();
+        assert!(removed.contains(&"build/keydo.table.bin".to_string()));
+        assert!(removed.contains(&"build/pinyin_simp.table.bin".to_string()));
+        assert!(build.join("unrelated.table.bin").is_file());
+
+        mark_windows_rime_build_repair_complete(&dir).unwrap();
+        assert!(!windows_rime_build_repair_required(&dir));
+        clear_windows_rime_build_repair_marker(&dir).unwrap();
+        assert!(windows_rime_build_repair_required(&dir));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

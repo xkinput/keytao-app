@@ -722,7 +722,10 @@ export default function App() {
   const selectedSchemeDownloadUrl = selectedSchemeKey === "keytao" ? downloadUrl : schemeReleaseInfo?.downloadUrl
   const selectedSchemeVersion = selectedSchemeKey === "keytao" ? activePlatform?.version : schemeReleaseInfo?.version
   const selectedSchemeAsset = selectedSchemeKey === "keytao" ? selectedScheme.asset : schemeReleaseInfo?.assetName ?? selectedScheme.asset
-  const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission
+  const windowsRegistrationBusy = osType === "windows" && (
+    isManagingWindowsIme || windowsImeStatus?.registration_busy === true
+  )
+  const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission || windowsRegistrationBusy
   const systemImeAvailable = hasSystemIme(osType)
   const isMobilePlatform = osType === "android" || osType === "ios"
   const canOpenDefaultDir = osType !== "android"
@@ -747,16 +750,16 @@ export default function App() {
       !androidStorageGranted ||
       !androidSchemaInstalled
     )
-  const windowsRegistrationBusy = osType === "windows" && (
-    isManagingWindowsIme || windowsImeStatus?.registration_busy === true
-  )
   const windowsRegistrationState = windowsImeStatus?.registration_state ?? "checking"
   const windowsRegistrationLabel = (() => {
     if (windowsRegistrationBusy) {
-      return windowsRegistrationState === "registering" ? "正在注册" : "正在检测"
+      if (windowsRegistrationState === "registering") return "正在注册"
+      if (windowsRegistrationState === "repairing") return "正在修复"
+      return "正在检测"
     }
-    if (windowsImeStatus?.registered) return "已注册"
+    if (windowsRegistrationState === "repair_failed") return "修复失败"
     if (windowsRegistrationState === "failed") return "注册失败"
+    if (windowsImeStatus?.registered) return "已注册"
     if (windowsRegistrationState === "partial") return "部分注册"
     if (windowsRegistrationState === "missing_runtime") return "运行时缺失"
     return windowsImeStatus ? "未注册" : "检测中"

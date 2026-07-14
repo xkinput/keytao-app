@@ -290,6 +290,7 @@ $imeArm64LibrimeFeatures = Join-Path $imeArm64XRuntimeDir "librime-arm64-feature
 $appRimeDll = Join-Path $ReleaseDir "rime.dll"
 $hookFile = Join-Path $repoRoot "src-tauri\windows\nsis-hooks.nsh"
 $appSource = Join-Path $repoRoot "src-tauri\src\lib.rs"
+$coreSource = Join-Path $repoRoot "crates\keytao-core\src\lib.rs"
 $registrationSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\registration.rs"
 $globalsSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\globals.rs"
 $languageBarSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\language_bar.rs"
@@ -369,6 +370,7 @@ if ($Arch -eq "x64") {
 }
 Require-File $hookFile "Missing NSIS installer hook file: $hookFile"
 Require-File $appSource "Missing Tauri application source: $appSource"
+Require-File $coreSource "Missing KeyTao core source: $coreSource"
 Require-File $registrationSource "Missing Windows TSF registration source: $registrationSource"
 Require-File $globalsSource "Missing Windows TSF lifecycle source: $globalsSource"
 Require-File $languageBarSource "Missing Windows TSF language bar source: $languageBarSource"
@@ -407,7 +409,9 @@ Require-Pattern $globalsSource 'GET_MODULE_HANDLE_EX_FLAG_PIN' "The in-process T
 Require-Pattern $languageBarSource 'ITfLangBarItemButton' "Windows TSF must expose a standard Chinese/English language bar item"
 Require-Pattern $languageBarSource 'item\.Show\(BOOL::from\(true\)\)' "Windows TSF must explicitly show its language bar item after registration"
 Require-Pattern $languageBarSource 'GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION' "Windows TSF must publish its input mode through the standard conversion compartment"
-Require-Pattern $imeStateSource 'KeyTao\.WindowsIme\.EngineInit' "Windows TSF must serialize cross-process librime initialization"
+Require-Pattern $coreSource 'KeyTao\.WindowsIme\.EngineInit' "Windows IME engine mutex name must be shared by the app and TSF"
+Require-Pattern $imeStateSource 'WINDOWS_IME_ENGINE_INIT_MUTEX_NAME' "Windows TSF must use the shared cross-process engine mutex"
+Require-Pattern $appSource 'WindowsImeEngineInitGuard::acquire' "The Windows app must serialize deployment with TSF engine initialization"
 Require-Pattern $imeStateSource 'session_reset_pending' "Windows TSF focus callbacks must defer librime session reset"
 Require-Pattern $themeSource 'RegGetValueW' "Windows candidate rendering must read the system theme without spawning a child process"
 
