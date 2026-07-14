@@ -203,21 +203,39 @@ if ($pythonPathEntries -notcontains $openccScripts) {
 
 $vswhere = Find-VsWhere
 if (-not $vswhere) {
-    throw "vswhere.exe was not found. Install Visual Studio 2022 Build Tools."
+    throw "vswhere.exe was not found. Install Visual Studio Build Tools."
 }
 $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath |
     Select-Object -First 1
 if (-not $vsInstall) {
     throw "Visual Studio Build Tools does not include the ARM64 C++ toolchain."
 }
+$vsInstallationVersion = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationVersion |
+    Select-Object -First 1
+$vsMajorVersion = 0
+if (-not $vsInstallationVersion -or
+    -not [int]::TryParse(($vsInstallationVersion -split '\.')[0], [ref]$vsMajorVersion)) {
+    throw "Unable to determine the Visual Studio version at $vsInstall."
+}
 $vcvarsall = Join-Path $vsInstall "VC\Auxiliary\Build\vcvarsall.bat"
 $cmakeBin = Join-Path $vsInstall "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+$cmakeExecutable = Join-Path $cmakeBin "cmake.exe"
 if (-not (Test-Path -LiteralPath $vcvarsall -PathType Leaf)) {
     throw "vcvarsall.bat was not found under $vsInstall."
 }
-if (-not (Test-Path -LiteralPath (Join-Path $cmakeBin "cmake.exe") -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $cmakeExecutable -PathType Leaf)) {
     throw "Visual Studio CMake was not found under $vsInstall."
 }
+$cmakeHelp = (& $cmakeExecutable --help 2>&1 | Out-String)
+$generatorMatch = [regex]::Match(
+    $cmakeHelp,
+    "(?m)^\*?\s*(Visual Studio $vsMajorVersion \d{4})\s*="
+)
+if (-not $generatorMatch.Success) {
+    throw "Visual Studio $vsMajorVersion is installed, but its bundled CMake does not provide a matching generator."
+}
+$cmakeGenerator = $generatorMatch.Groups[1].Value
+Write-Host "Using CMake generator '$cmakeGenerator' from Visual Studio $vsInstallationVersion"
 
 $sourceCmake = Join-Path $sourceDir "src\CMakeLists.txt"
 $cmakeText = Get-Content -LiteralPath $sourceCmake -Raw
@@ -258,7 +276,7 @@ try {
     $env:BOOST_ROOT = $boostRoot
     $env:DEVTOOLS_PATH = $cmakeBin
     $env:RIME_ROOT = $sourceDir
-    $env:CMAKE_GENERATOR = $null
+    $env:CMAKE_GENERATOR = $cmakeGenerator
     $env:PYTHON_EXECUTABLE = $pythonExecutable
     $env:RIME_PLUGINS = "hchunhui/librime-lua@$resolvedLuaPluginRef"
     $env:common_cmake_flags = "-DPYTHON_EXECUTABLE:FILEPATH=$pythonExecutable"
@@ -270,7 +288,7 @@ try {
 set RIME_ROOT=$sourceDir
 set BOOST_ROOT=$boostRoot
 set ARCH=ARM64
-set CMAKE_GENERATOR="Visual Studio 17 2022"
+set CMAKE_GENERATOR="$cmakeGenerator"
 set PYTHON_EXECUTABLE=$pythonExecutable
 set RIME_PLUGINS=hchunhui/librime-lua@$resolvedLuaPluginRef
 "@ | Set-Content -LiteralPath (Join-Path $sourceDir "env.bat") -Encoding ASCII
