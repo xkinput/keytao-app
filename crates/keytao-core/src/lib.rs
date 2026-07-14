@@ -1637,11 +1637,7 @@ impl ImeRuntime {
         #[cfg(target_os = "windows")]
         {
             let (user_dir, _) = self.configured_dirs()?;
-            if !patch_windows_lua_compatibility(&user_dir)?.is_empty() {
-                self.deploy_locked()?;
-                *initialized = true;
-                return Ok(());
-            }
+            patch_windows_lua_compatibility(&user_dir)?;
         }
 
         self.setup_locked()?;
@@ -2324,8 +2320,20 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
         };
         std::fs::write(&path, patched)
             .map_err(|error| format!("write {}: {error}", path.display()))?;
-        let _ = std::fs::remove_file(user_data_dir.join("build").join(file_name));
         changed.push(file_name.to_string());
+
+        let compiled_path = user_data_dir.join("build").join(file_name);
+        match std::fs::read_to_string(&compiled_path) {
+            Ok(compiled) => {
+                if let Some(patched) = rewrite_lua_component_autoloads(&compiled, &bindings) {
+                    std::fs::write(&compiled_path, patched)
+                        .map_err(|error| format!("write {}: {error}", compiled_path.display()))?;
+                    changed.push(format!("build/{file_name}"));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("read {}: {error}", compiled_path.display())),
+        }
     }
 
     let helpers_path = user_data_dir.join("lua").join("helpers.lua");
@@ -2904,7 +2912,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_lua_compatibility_uses_lazy_modules_and_invalidates_schema() {
+    fn windows_lua_compatibility_patches_source_and_compiled_schema() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2935,7 +2943,19 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(dir.join("build/keydo.schema.yaml"), "stale").unwrap();
+        std::fs::write(
+            dir.join("build/keydo.schema.yaml"),
+            concat!(
+                "engine:\n",
+                "  processors:\n",
+                "    - lua_processor@keydo_select_processor\n",
+                "  translators:\n",
+                "    - lua_translator@keydo_date_time_translator\n",
+                "  filters:\n",
+                "    - lua_filter@keydo_cand_filter\n",
+            ),
+        )
+        .unwrap();
         std::fs::write(
             dir.join("lua/helpers.lua"),
             concat!(
@@ -2952,12 +2972,22 @@ mod tests {
         .unwrap();
 
         let changed = patch_windows_lua_compatibility(&dir).unwrap();
-        assert_eq!(changed, vec!["keydo.schema.yaml", "lua/helpers.lua"]);
+        assert_eq!(
+            changed,
+            vec![
+                "build/keydo.schema.yaml",
+                "keydo.schema.yaml",
+                "lua/helpers.lua"
+            ]
+        );
         let schema = std::fs::read_to_string(dir.join("keydo.schema.yaml")).unwrap();
         assert!(schema.contains("lua_processor@*keydo.processors.select"));
         assert!(schema.contains("lua_translator@*keydo.translators.date_time"));
         assert!(schema.contains("lua_filter@*keydo.filters.cand"));
-        assert!(!dir.join("build/keydo.schema.yaml").exists());
+        let compiled = std::fs::read_to_string(dir.join("build/keydo.schema.yaml")).unwrap();
+        assert!(compiled.contains("lua_processor@*keydo.processors.select"));
+        assert!(compiled.contains("lua_translator@*keydo.translators.date_time"));
+        assert!(compiled.contains("lua_filter@*keydo.filters.cand"));
         let helpers = std::fs::read_to_string(dir.join("lua/helpers.lua")).unwrap();
         assert!(helpers.contains("if not key then\n        return true"));
         assert!(helpers.contains("keycode >= 0x7f"));
