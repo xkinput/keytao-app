@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -228,6 +228,9 @@ mod desktop {
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
         let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
+        #[cfg(target_os = "windows")]
+        patch_windows_lua_compatibility(Path::new(&user_data_dir))?;
+
         #[cfg(target_os = "android")]
         {
             setup_only(user_data_dir.clone(), shared_data_dir)?;
@@ -389,6 +392,13 @@ mod desktop {
         let mut pending = std::collections::VecDeque::new();
         for schema_id in &initial_schemas {
             let compiled = compiled_schema_path(user_dir, schema_id);
+            if !compiled.is_file() {
+                let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+                if !source.is_file() {
+                    return Err(format!("missing schema source: {}", source.display()));
+                }
+                deploy_schema_file(&source)?;
+            }
             require_compiled_schema(&compiled, schema_id)?;
             pending.extend(schema_dependencies_from_file(&compiled));
         }
@@ -1624,6 +1634,16 @@ impl ImeRuntime {
             return Ok(());
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            let (user_dir, _) = self.configured_dirs()?;
+            if !patch_windows_lua_compatibility(&user_dir)?.is_empty() {
+                self.deploy_locked()?;
+                *initialized = true;
+                return Ok(());
+            }
+        }
+
         self.setup_locked()?;
         *initialized = true;
         Ok(())
@@ -2175,6 +2195,152 @@ pub fn parse_rime_lua_requires(content: &str) -> Vec<String> {
     requires
 }
 
+fn parse_rime_lua_require_bindings(content: &str) -> HashMap<String, String> {
+    let mut bindings = HashMap::new();
+    let mut in_block_comment = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_block_comment {
+            if trimmed.contains("--]]") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("--[[") {
+            in_block_comment = true;
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+
+        let Some((name, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+        if let Some(module) = extract_lua_require(trimmed) {
+            bindings.insert(name.to_string(), module);
+        }
+    }
+    bindings
+}
+
+fn rewrite_lua_component_autoloads(
+    schema_content: &str,
+    bindings: &HashMap<String, String>,
+) -> Option<String> {
+    let mut ordered_bindings: Vec<_> = bindings.iter().collect();
+    ordered_bindings.sort_by(|(left, _), (right, _)| {
+        right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+    });
+
+    let mut changed = false;
+    let mut output = String::with_capacity(schema_content.len());
+    for line in schema_content.split_inclusive('\n') {
+        let mut rewritten = line.to_string();
+        for component in [
+            "lua_processor",
+            "lua_translator",
+            "lua_filter",
+            "lua_segmentor",
+        ] {
+            for (name, module) in &ordered_bindings {
+                let old = format!("{component}@{name}");
+                let replacement = format!("{component}@*{module}");
+                let mut search_from = 0;
+                while let Some(relative) = rewritten[search_from..].find(&old) {
+                    let start = search_from + relative;
+                    let end = start + old.len();
+                    let has_boundary = rewritten[end..].chars().next().is_none_or(|character| {
+                        !character.is_ascii_alphanumeric() && character != '_'
+                    });
+                    if has_boundary {
+                        rewritten.replace_range(start..end, &replacement);
+                        search_from = start + replacement.len();
+                    } else {
+                        search_from = end;
+                    }
+                }
+            }
+        }
+        changed |= rewritten != line;
+        output.push_str(&rewritten);
+    }
+
+    changed.then_some(output)
+}
+
+fn patch_keydo_helpers(content: &str) -> Option<String> {
+    const VULNERABLE: &str =
+        "    local target_key = string.char(key_event.keycode) -- 当前按键对应字符\n\n    -- 若无目标键位，则交由其它函数进行判断\n    if not key then\n        return true\n    end";
+    const PATCHED: &str =
+        "    -- A wildcard match does not need a printable character conversion.\n    if not key then\n        return true\n    end\n\n    local keycode = key_event.keycode\n    if type(keycode) ~= \"number\" or keycode < 0x20 or keycode >= 0x7f then\n        return false\n    end\n    local target_key = string.char(keycode) -- 当前按键对应字符";
+
+    content
+        .contains("local function is_key(key, key_event)")
+        .then(|| content.replace(VULNERABLE, PATCHED))
+        .filter(|patched| patched != content)
+}
+
+/// Convert package-global Lua components to librime-lua's lazy module form.
+///
+/// Windows loads a TSF DLL into long-lived host processes such as Explorer.
+/// Replacing `rime.lua` on disk does not update the Lua VM in those processes,
+/// so a newly installed scheme must not depend on new global variables there.
+pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<String>, String> {
+    let rime_lua_path = user_data_dir.join("rime.lua");
+    let rime_lua = match std::fs::read_to_string(&rime_lua_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read {}: {error}", rime_lua_path.display())),
+    };
+    let bindings = parse_rime_lua_require_bindings(&rime_lua);
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut changed = Vec::new();
+    let entries = std::fs::read_dir(user_data_dir)
+        .map_err(|error| format!("read {}: {error}", user_data_dir.display()))?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !path.is_file() || !file_name.ends_with(".schema.yaml") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let Some(patched) = rewrite_lua_component_autoloads(&content, &bindings) else {
+            continue;
+        };
+        std::fs::write(&path, patched)
+            .map_err(|error| format!("write {}: {error}", path.display()))?;
+        let _ = std::fs::remove_file(user_data_dir.join("build").join(file_name));
+        changed.push(file_name.to_string());
+    }
+
+    let helpers_path = user_data_dir.join("lua").join("helpers.lua");
+    if let Ok(content) = std::fs::read_to_string(&helpers_path) {
+        if let Some(patched) = patch_keydo_helpers(&content) {
+            std::fs::write(&helpers_path, patched)
+                .map_err(|error| format!("write {}: {error}", helpers_path.display()))?;
+            changed.push("lua/helpers.lua".to_string());
+        }
+    }
+
+    changed.sort();
+    Ok(changed)
+}
+
 pub fn merge_rime_lua_content(
     local_content: Option<&str>,
     package_content: &str,
@@ -2186,6 +2352,12 @@ pub fn merge_rime_lua_content(
 
     let package_requires: HashSet<String> = parse_rime_lua_requires(package_content)
         .into_iter()
+        .collect();
+    let mut seen_lines: HashSet<String> = package_content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+        .map(ToOwned::to_owned)
         .collect();
     let mut renames = Vec::new();
     let mut extra_lines = Vec::new();
@@ -2217,11 +2389,13 @@ pub fn merge_rime_lua_content(
                     .replace(&format!("\"{}\"", module), &format!("\"{}\"", new_name))
                     .replace(&format!("'{}'", module), &format!("'{}'", new_name));
                 renames.push((module, new_name));
-                extra_lines.push(new_line);
-            } else {
+                if seen_lines.insert(new_line.trim().to_string()) {
+                    extra_lines.push(new_line);
+                }
+            } else if seen_lines.insert(t.to_string()) {
                 extra_lines.push(line.to_string());
             }
-        } else {
+        } else if seen_lines.insert(t.to_string()) {
             extra_lines.push(line.to_string());
         }
     }
@@ -2574,7 +2748,8 @@ mod tests {
     use super::{
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
         parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
-        preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir,
+        patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
+        rime_log_dir,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -2712,6 +2887,86 @@ mod tests {
             vec![("my_mod".to_string(), "my_mod_user".to_string())]
         );
         assert!(merged.contains("require(\"my_mod_user\")"));
+    }
+
+    #[test]
+    fn merge_rime_lua_deduplicates_runtime_statements() {
+        let local = concat!(
+            "collectgarbage(\"setpause\", 50)\n",
+            "collectgarbage(\"setpause\", 50)\n",
+            "user_flag = true\n",
+            "user_flag = true\n",
+        );
+        let package = "package_module = require(\"package_module\")\n";
+        let (merged, _) = merge_rime_lua_content(Some(local), package, &HashSet::new());
+        assert_eq!(merged.matches("collectgarbage").count(), 1);
+        assert_eq!(merged.matches("user_flag = true").count(), 1);
+    }
+
+    #[test]
+    fn windows_lua_compatibility_uses_lazy_modules_and_invalidates_schema() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-lua-compat-test-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(
+            dir.join("rime.lua"),
+            concat!(
+                "-- keydo_select_processor = require(\"ignored\")\n",
+                "keydo_select_processor = require(\"keydo.processors.select\")\n",
+                "keydo_date_time_translator = require('keydo.translators.date_time')\n",
+                "keydo_cand_filter = require(\"keydo.filters.cand\")\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("keydo.schema.yaml"),
+            concat!(
+                "engine:\n",
+                "  processors:\n",
+                "    - lua_processor@keydo_select_processor\n",
+                "  translators:\n",
+                "    - lua_translator@keydo_date_time_translator\n",
+                "  filters:\n",
+                "    - lua_filter@keydo_cand_filter\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("build/keydo.schema.yaml"), "stale").unwrap();
+        std::fs::write(
+            dir.join("lua/helpers.lua"),
+            concat!(
+                "local function is_key(key, key_event)\n",
+                "    local target_key = string.char(key_event.keycode) -- 当前按键对应字符\n\n",
+                "    -- 若无目标键位，则交由其它函数进行判断\n",
+                "    if not key then\n",
+                "        return true\n",
+                "    end\n",
+                "    return target_key == key\n",
+                "end\n",
+            ),
+        )
+        .unwrap();
+
+        let changed = patch_windows_lua_compatibility(&dir).unwrap();
+        assert_eq!(changed, vec!["keydo.schema.yaml", "lua/helpers.lua"]);
+        let schema = std::fs::read_to_string(dir.join("keydo.schema.yaml")).unwrap();
+        assert!(schema.contains("lua_processor@*keydo.processors.select"));
+        assert!(schema.contains("lua_translator@*keydo.translators.date_time"));
+        assert!(schema.contains("lua_filter@*keydo.filters.cand"));
+        assert!(!dir.join("build/keydo.schema.yaml").exists());
+        let helpers = std::fs::read_to_string(dir.join("lua/helpers.lua")).unwrap();
+        assert!(helpers.contains("if not key then\n        return true"));
+        assert!(helpers.contains("keycode >= 0x7f"));
+        assert_eq!(
+            patch_windows_lua_compatibility(&dir).unwrap(),
+            Vec::<String>::new()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
