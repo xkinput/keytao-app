@@ -209,9 +209,9 @@ Windows 用户目录为 `%APPDATA%/keytao`。TSF 前端在 key、document/contex
 %APPDATA%/keytao/keytao-ime.reload
 ```
 
-stamp 的 mtime/size 签名变化后，`start_reload_if_needed()` 标记 reload running，并在后台用 `init_without_deploy()` 创建新的 runtime/session bundle 后原子替换旧会话；focus 回调提前启动 reload，避免方案更新后的首键漏到宿主，reload 期间其余按键仍放行。部署只由主 App 完成，避免多个宿主进程并发改写 Rime build 文件。
+stamp 的 mtime/size 签名变化后，`start_reload_if_needed()` 标记 reload running，先释放旧 runtime/session 及其映射文件，再在后台用 `init_without_deploy()` 创建并安装新的 runtime/session bundle；focus 回调提前启动 reload，避免方案更新后的首键漏到宿主，reload 期间其余按键仍放行。部署只由主 App 完成，避免多个宿主进程并发改写 Rime build 文件。
 
-主 App 的方案安装、手动部署和升级修复与 TSF 后台初始化共用 `Local\KeyTao.WindowsIme.EngineInit` 命名互斥量。重建前会删除 `.keytao-windows-build-repair-v1` 完成标记并写入 reload stamp，使已加载的宿主会话在按键路径上先放行；然后只失效当前方案及其依赖的 `schema/prism/table/reverse` 产物，由主 App 后台部署，再写 reload stamp 和完成标记。TSF 在完成标记缺失时拒绝加载可能已损坏的旧构建产物，不会自行触发 deployment。
+主 App 的方案安装、手动部署和升级修复与 TSF 后台初始化共用 `Local\KeyTao.WindowsIme.EngineInit` 命名互斥量。重建前会删除 `.keytao-windows-build-repair-v1` 完成标记并写入 reload stamp，使已加载的宿主会话在按键路径上先放行；随后按微软 TSF 生命周期用 `ITfInputProcessorProfileMgr::DeactivateProfile(TF_IPPMF_FORSESSION)` 和 `ReleaseInputProcessor` 释放各宿主映射的 Rime 文件，只失效当前方案及其依赖的 `schema/prism/table/reverse` 产物，由主 App 后台部署，再写 reload stamp 和完成标记，并用新的 profile manager 恢复、校验部署前激活的 KeyTao profile。Windows 对尚在释放的 mapped/shared 文件会做最长 10 秒的有限重试。TSF 收到 reload stamp 后先释放旧 session，且在完成标记缺失时拒绝加载可能已损坏的旧构建产物，不会自行触发 deployment。
 
 ## 排查入口
 

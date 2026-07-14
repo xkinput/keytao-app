@@ -258,7 +258,7 @@ impl TsfState {
     }
 
     pub(crate) fn begin_engine_build(&mut self) -> bool {
-        if self.engine_ready() || self.engine_building {
+        if self.engine_ready() || self.engine_building || self.reload_in_progress {
             return false;
         }
         if self
@@ -293,6 +293,13 @@ impl TsfState {
             return false;
         }
         self.reload_in_progress = true;
+        self.session = None;
+        self.runtime = None;
+        self.rime_dll = None;
+        self.ime_state = None;
+        self.candidate_win.hide();
+        self.mode_hint_win.hide();
+        self.reload_clear_pending = true;
         self.reload_retry_after = None;
         true
     }

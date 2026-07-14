@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -1930,6 +1931,37 @@ fn parse_schema_dependencies(content: &str) -> Vec<String> {
 
 const WINDOWS_RIME_BUILD_REPAIR_MARKER: &str = ".keytao-windows-build-repair-v1";
 const WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT: &str = "complete-v1\n";
+const WINDOWS_BUILD_ARTIFACT_REMOVE_RETRIES: usize = 100;
+const WINDOWS_BUILD_ARTIFACT_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+fn retryable_windows_build_artifact_error(error: &std::io::Error) -> bool {
+    cfg!(target_os = "windows")
+        && (error.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32 | 33 | 1224)))
+}
+
+fn remove_rime_build_artifact(path: &Path) -> Result<bool, String> {
+    let mut retries = 0;
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error)
+                if retryable_windows_build_artifact_error(&error)
+                    && retries < WINDOWS_BUILD_ARTIFACT_REMOVE_RETRIES =>
+            {
+                retries += 1;
+                std::thread::sleep(WINDOWS_BUILD_ARTIFACT_REMOVE_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "remove {} after {retries} retries: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
 
 fn valid_rime_build_id(id: &str) -> bool {
     !id.is_empty()
@@ -2018,10 +2050,8 @@ pub fn invalidate_rime_build_artifacts(
     let mut removed = Vec::new();
     for relative in relative_paths {
         let path = build_dir.join(&relative);
-        match std::fs::remove_file(&path) {
-            Ok(()) => removed.push(format!("build/{relative}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("remove {}: {error}", path.display())),
+        if remove_rime_build_artifact(&path)? {
+            removed.push(format!("build/{relative}"));
         }
     }
     removed.sort();
@@ -2953,6 +2983,8 @@ mod tests {
         rime_log_dir, windows_rime_build_repair_required,
     };
     use std::collections::HashSet;
+    #[cfg(target_os = "windows")]
+    use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3021,6 +3053,36 @@ mod tests {
         );
         assert!(build.join("keytao.schema.yaml").is_file());
         assert!(build.join("keytao.table.bin").is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn invalidating_build_artifact_waits_for_windows_file_lock() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-build-lock-test-{suffix}"));
+        let build = dir.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let table = build.join("keydo.table.bin");
+        std::fs::write(&table, "locked").unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&table)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(locked);
+        });
+
+        let removed = invalidate_rime_build_artifacts(&dir, &[], &["keydo".to_string()]).unwrap();
+
+        release.join().unwrap();
+        assert!(removed.contains(&"build/keydo.table.bin".to_string()));
+        assert!(!table.exists());
         std::fs::remove_dir_all(dir).ok();
     }
 

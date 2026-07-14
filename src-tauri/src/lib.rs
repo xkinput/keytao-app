@@ -1083,6 +1083,158 @@ fn windows_init_com_apartment() -> Result<WindowsComApartment, String> {
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsTsfProfileManager {
+    profile_manager: windows::Win32::UI::TextServices::ITfInputProcessorProfileMgr,
+    _com: WindowsComApartment,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsTsfProfileManager {
+    fn open(context: &str) -> Result<Self, String> {
+        use windows::{
+            core::{IUnknown, Interface},
+            Win32::{
+                System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+                UI::TextServices::{
+                    CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfileMgr,
+                    ITfInputProcessorProfiles,
+                },
+            },
+        };
+
+        let com = windows_init_com_apartment()?;
+        let profiles: ITfInputProcessorProfiles = unsafe {
+            CoCreateInstance(
+                &CLSID_TF_InputProcessorProfiles,
+                None::<&IUnknown>,
+                CLSCTX_INPROC_SERVER,
+            )
+        }
+        .map_err(|error| format!("open TSF input processor profiles {context}: {error}"))?;
+        let profile_manager: ITfInputProcessorProfileMgr = profiles
+            .cast()
+            .map_err(|error| format!("open TSF profile manager {context}: {error}"))?;
+        Ok(Self {
+            profile_manager,
+            _com: com,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsImeProfileDeploymentGuard {
+    reactivate: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsImeProfileDeploymentGuard {
+    fn suspend() -> Result<Self, String> {
+        use windows::Win32::UI::{
+            Input::KeyboardAndMouse::HKL,
+            TextServices::{
+                GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE, TF_IPPMF_FORSESSION,
+                TF_PROFILETYPE_INPUTPROCESSOR,
+            },
+        };
+
+        let context = WindowsTsfProfileManager::open("for deployment")?;
+        let profile_manager = &context.profile_manager;
+
+        let mut active = TF_INPUTPROCESSORPROFILE::default();
+        let reactivate = unsafe {
+            profile_manager
+                .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
+                .is_ok()
+        } && active.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR
+            && active.langid == WINDOWS_LANGID_CHINESE_SIMPLIFIED
+            && active.clsid == WINDOWS_TEXT_SERVICE_GUID
+            && active.guidProfile == WINDOWS_PROFILE_GUID;
+
+        if reactivate {
+            unsafe {
+                profile_manager.DeactivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                    &WINDOWS_TEXT_SERVICE_GUID,
+                    &WINDOWS_PROFILE_GUID,
+                    HKL::default(),
+                    TF_IPPMF_FORSESSION,
+                )
+            }
+            .map_err(|error| format!("deactivate KeyTao TSF profile for deployment: {error}"))?;
+        }
+
+        if let Err(error) =
+            unsafe { profile_manager.ReleaseInputProcessor(&WINDOWS_TEXT_SERVICE_GUID, 0) }
+        {
+            tracing::warn!("release KeyTao TSF instances before deployment: {error}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        drop(context);
+        Ok(Self { reactivate })
+    }
+
+    fn reactivate_profile(&self) -> Result<(), String> {
+        use windows::Win32::UI::{
+            Input::KeyboardAndMouse::HKL,
+            TextServices::{
+                GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
+                TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE, TF_IPPMF_FORSESSION,
+                TF_PROFILETYPE_INPUTPROCESSOR,
+            },
+        };
+
+        if !self.reactivate {
+            return Ok(());
+        }
+        let context = WindowsTsfProfileManager::open("after deployment")?;
+        unsafe {
+            context.profile_manager.ActivateProfile(
+                TF_PROFILETYPE_INPUTPROCESSOR,
+                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                &WINDOWS_TEXT_SERVICE_GUID,
+                &WINDOWS_PROFILE_GUID,
+                HKL::default(),
+                TF_IPPMF_FORSESSION | TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE,
+            )
+        }
+        .map_err(|error| format!("reactivate KeyTao TSF profile after deployment: {error}"))?;
+
+        let mut active = TF_INPUTPROCESSORPROFILE::default();
+        unsafe {
+            context
+                .profile_manager
+                .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
+        }
+        .map_err(|error| format!("verify KeyTao TSF profile after deployment: {error}"))?;
+        if active.dwProfileType != TF_PROFILETYPE_INPUTPROCESSOR
+            || active.langid != WINDOWS_LANGID_CHINESE_SIMPLIFIED
+            || active.clsid != WINDOWS_TEXT_SERVICE_GUID
+            || active.guidProfile != WINDOWS_PROFILE_GUID
+        {
+            return Err("KeyTao TSF profile did not become active after deployment".into());
+        }
+        Ok(())
+    }
+
+    fn resume(mut self) -> Result<(), String> {
+        self.reactivate_profile()?;
+        self.reactivate = false;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsImeProfileDeploymentGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.reactivate_profile() {
+            tracing::error!("{error}");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn windows_tsf_profile_enabled() -> Result<bool, String> {
     use windows::{
         core::{IUnknown, Interface},
@@ -1742,8 +1894,15 @@ fn windows_repair_ime_data_blocking(app: &tauri::AppHandle) -> Result<WindowsIme
     }
 
     let _engine_guard = WindowsImeEngineInitGuard::acquire()?;
+    if !keytao_core::windows_rime_build_repair_required(&user_dir) {
+        return Ok(windows_ime_status_with_message(
+            app,
+            "KeyTao Windows IME 已就绪".into(),
+        ));
+    }
     write_keytao_ime_reload_stamp()
         .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     let invalidated = keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
     tracing::info!(
         invalidated = invalidated.len(),
@@ -1755,6 +1914,7 @@ fn windows_repair_ime_data_blocking(app: &tauri::AppHandle) -> Result<WindowsIme
     write_keytao_ime_reload_stamp()
         .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
     keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+    profile_guard.resume()?;
 
     let message = format!(
         "Windows 输入法词典修复完成，已重建 {} 个旧构建产物",
@@ -3291,11 +3451,22 @@ async fn smart_install<R: tauri::Runtime>(
             write_keytao_ime_reload_stamp()
                 .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
         }
-        keytao_core::invalidate_rime_build_artifacts(
+        #[cfg(target_os = "windows")]
+        let profile_guard = if _engine_guard.is_some() {
+            Some(WindowsImeProfileDeploymentGuard::suspend()?)
+        } else {
+            None
+        };
+        let invalidated = keytao_core::invalidate_rime_build_artifacts(
             &dest,
             &package_schema_ids,
             &package_dictionary_ids,
-        )?
+        )?;
+        #[cfg(target_os = "windows")]
+        if let Some(profile_guard) = profile_guard {
+            profile_guard.resume()?;
+        }
+        invalidated
     };
     logs.extend(
         invalidated
@@ -5129,11 +5300,13 @@ fn windows_deploy_rime_blocking(user_dir: PathBuf, shared_data_dir: String) -> R
     keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
     write_keytao_ime_reload_stamp()
         .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
     keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
     write_keytao_ime_reload_stamp()
         .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
-    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)
+    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+    profile_guard.resume()
 }
 
 #[tauri::command]
