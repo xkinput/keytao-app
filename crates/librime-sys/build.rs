@@ -54,6 +54,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KEYTAO_ANDROID_RIME_ROOT");
     println!("cargo:rerun-if-env-changed=KEYTAO_IOS_RIME_ROOT");
     println!("cargo:rerun-if-env-changed=KEYTAO_RIME_LINK_KIND");
+    println!("cargo:rerun-if-env-changed=KEYTAO_RIME_LIB_NAME");
     println!("cargo:rerun-if-env-changed=SDKROOT");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
@@ -67,9 +68,10 @@ fn main() {
             "dylib".to_owned()
         }
     });
+    let link_name = env::var("KEYTAO_RIME_LIB_NAME").unwrap_or_else(|_| "rime".to_owned());
     match link_kind.as_str() {
-        "static" => println!("cargo:rustc-link-lib=static=rime"),
-        _ => println!("cargo:rustc-link-lib=rime"),
+        "static" => println!("cargo:rustc-link-lib=static={link_name}"),
+        _ => println!("cargo:rustc-link-lib={link_name}"),
     }
     if target.contains("apple-ios") && link_kind == "static" {
         link_ios_static_dependencies(&lib_dir);

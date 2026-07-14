@@ -5,6 +5,7 @@
     ],
     "resources": {
       "../target/keytao-windows-ime-runtime/current": "keytao-windows-ime-runtime/current",
+      "../target/keytao-windows-ime-runtime/arm64x": "keytao-windows-ime-runtime/arm64x",
       "../target/keytao-windows-ime-runtime/x86": "keytao-windows-ime-runtime/x86",
       "../target/keytao-windows-app-runtime/*.dll": ""
     },

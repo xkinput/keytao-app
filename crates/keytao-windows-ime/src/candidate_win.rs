@@ -36,6 +36,7 @@ use crate::{globals::DLL_INSTANCE, panel::PanelRenderer};
 
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
 const MODE_HINT_TIMER_ID: usize = 1;
+const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 
 fn class_name_wide() -> Vec<u16> {
     CLASS_NAME.encode_utf16().collect()
@@ -50,13 +51,16 @@ fn module_handle() -> HMODULE {
 
 fn dpi_scale(owner_hwnd: HWND) -> f32 {
     if owner_hwnd.0.is_null() {
-        return 1.0;
+        return WINDOWS_CANDIDATE_DENSITY;
     }
-    let dpi = unsafe { GetDpiForWindow(owner_hwnd) };
+    render_scale_for_dpi(unsafe { GetDpiForWindow(owner_hwnd) })
+}
+
+fn render_scale_for_dpi(dpi: u32) -> f32 {
     if dpi == 0 {
-        1.0
+        WINDOWS_CANDIDATE_DENSITY
     } else {
-        (dpi as f32 / 96.0).clamp(1.0, 3.0)
+        (dpi as f32 / 96.0).clamp(1.0, 3.0) * WINDOWS_CANDIDATE_DENSITY
     }
 }
 
@@ -80,39 +84,6 @@ fn monitor_work_area(point: POINT) -> windows::Win32::Foundation::RECT {
             bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
         }
     }
-}
-
-fn scale_bgra(pixels: &[u8], width: u32, height: u32, scale: f32) -> (Vec<u8>, u32, u32) {
-    if (scale - 1.0).abs() < 0.01 || width == 0 || height == 0 {
-        return (pixels.to_vec(), width, height);
-    }
-
-    let output_width = ((width as f32 * scale).round() as u32).max(1);
-    let output_height = ((height as f32 * scale).round() as u32).max(1);
-    let mut output = vec![0u8; output_width as usize * output_height as usize * 4];
-    for output_y in 0..output_height {
-        let source_y = ((output_y as f32 + 0.5) / scale - 0.5).clamp(0.0, height as f32 - 1.0);
-        let y0 = source_y.floor() as u32;
-        let y1 = (y0 + 1).min(height - 1);
-        let y_weight = source_y - y0 as f32;
-        for output_x in 0..output_width {
-            let source_x = ((output_x as f32 + 0.5) / scale - 0.5).clamp(0.0, width as f32 - 1.0);
-            let x0 = source_x.floor() as u32;
-            let x1 = (x0 + 1).min(width - 1);
-            let x_weight = source_x - x0 as f32;
-            let destination = (output_y as usize * output_width as usize + output_x as usize) * 4;
-            for channel in 0..4 {
-                let sample = |x: u32, y: u32| {
-                    pixels[(y as usize * width as usize + x as usize) * 4 + channel] as f32
-                };
-                let top = sample(x0, y0) * (1.0 - x_weight) + sample(x1, y0) * x_weight;
-                let bottom = sample(x0, y1) * (1.0 - x_weight) + sample(x1, y1) * x_weight;
-                output[destination + channel] =
-                    (top * (1.0 - y_weight) + bottom * y_weight).round() as u8;
-            }
-        }
-    }
-    (output, output_width, output_height)
 }
 
 fn popup_position(caret_x: i32, caret_y: i32, width: u32, height: u32, gap: i32) -> POINT {
@@ -247,12 +218,11 @@ impl CandidateWindow {
             return;
         };
 
-        let (pixels, w, h) = renderer.render(state);
+        let scale = dpi_scale(owner_hwnd);
+        let (pixels, w, h) = renderer.render(state, scale);
         if w == 0 || h == 0 {
             return;
         }
-        let scale = dpi_scale(owner_hwnd);
-        let (pixels, w, h) = scale_bgra(&pixels, w, h, scale);
 
         let position = popup_position(caret_x, caret_y, w, h, (4.0 * scale).round() as i32);
 
@@ -294,12 +264,11 @@ impl CandidateWindow {
             return;
         };
 
-        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
+        let scale = dpi_scale(owner_hwnd);
+        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode, scale);
         if w == 0 || h == 0 {
             return;
         }
-        let scale = dpi_scale(owner_hwnd);
-        let (pixels, w, h) = scale_bgra(&pixels, w, h, scale);
 
         let position = popup_position(
             caret_x - w as i32 / 2,
@@ -413,19 +382,12 @@ impl Drop for CandidateWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::scale_bgra;
+    use super::render_scale_for_dpi;
 
     #[test]
-    fn scale_bgra_preserves_unscaled_pixels() {
-        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        assert_eq!(scale_bgra(&pixels, 2, 1, 1.0), (pixels, 2, 1));
-    }
-
-    #[test]
-    fn scale_bgra_resizes_all_channels() {
-        let pixels = vec![10, 20, 30, 40];
-        let (scaled, width, height) = scale_bgra(&pixels, 1, 1, 2.0);
-        assert_eq!((width, height), (2, 2));
-        assert_eq!(scaled, pixels.repeat(4));
+    fn render_scale_combines_monitor_dpi_with_compact_windows_density() {
+        assert!((render_scale_for_dpi(96) - 0.82).abs() < 0.001);
+        assert!((render_scale_for_dpi(144) - 1.23).abs() < 0.001);
+        assert!((render_scale_for_dpi(192) - 1.64).abs() < 0.001);
     }
 }

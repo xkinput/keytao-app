@@ -25,12 +25,14 @@ use windows::{
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
             ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
-            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
-            GUID_TFCAT_TIPCAP_UIELEMENTENABLED, GUID_TFCAT_TIP_KEYBOARD, TF_INPUTPROCESSORPROFILE,
-            TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR,
+            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
+            GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+            GUID_TFCAT_TIP_KEYBOARD,
         },
     },
 };
+
+use std::path::PathBuf;
 
 use crate::{CLSID_TEXT_SERVICE, GUID_PROFILE, LANGID_CHINESE_SIMPLIFIED, PROFILE_ICON_INDEX};
 
@@ -93,7 +95,7 @@ struct CategoryRegistration {
     item: windows::core::GUID,
 }
 
-fn category_registrations() -> [CategoryRegistration; 4] {
+fn category_registrations() -> [CategoryRegistration; 5] {
     [
         CategoryRegistration {
             category: GUID_TFCAT_TIP_KEYBOARD,
@@ -109,6 +111,10 @@ fn category_registrations() -> [CategoryRegistration; 4] {
         },
         CategoryRegistration {
             category: GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
             item: CLSID_TEXT_SERVICE,
         },
     ]
@@ -158,21 +164,6 @@ unsafe fn register_profile(
         )?;
     }
 
-    profiles.EnableLanguageProfile(
-        &CLSID_TEXT_SERVICE,
-        LANGID_CHINESE_SIMPLIFIED,
-        &GUID_PROFILE,
-        BOOL::from(true),
-    )?;
-    if let Err(e) = profiles.EnableLanguageProfileByDefault(
-        &CLSID_TEXT_SERVICE,
-        LANGID_CHINESE_SIMPLIFIED,
-        &GUID_PROFILE,
-        BOOL::from(true),
-    ) {
-        tracing::warn!("failed to enable KeyTao profile by default: {e}");
-    }
-
     Ok(())
 }
 
@@ -217,17 +208,20 @@ unsafe fn call_install_layout_or_tip(tip: PCWSTR, flags: u32) -> Result<BOOL> {
     Ok(result)
 }
 
-unsafe fn ensure_profile_enabled(profile_mgr: &ITfInputProcessorProfileMgr) -> Result<()> {
-    let mut profile = TF_INPUTPROCESSORPROFILE::default();
-    profile_mgr.GetProfile(
-        TF_PROFILETYPE_INPUTPROCESSOR,
-        LANGID_CHINESE_SIMPLIFIED,
+unsafe fn enable_profile_for_current_user(profiles: &ITfInputProcessorProfiles) -> Result<()> {
+    profiles.EnableLanguageProfile(
         &CLSID_TEXT_SERVICE,
+        LANGID_CHINESE_SIMPLIFIED,
         &GUID_PROFILE,
-        HKL::default(),
-        &mut profile,
+        BOOL::from(true),
     )?;
-    if profile.dwFlags & TF_IPP_FLAG_ENABLED == 0 {
+
+    let enabled = profiles.IsEnabledLanguageProfile(
+        &CLSID_TEXT_SERVICE,
+        LANGID_CHINESE_SIMPLIFIED,
+        &GUID_PROFILE,
+    )?;
+    if !enabled.as_bool() {
         return Err(error_message(
             "KeyTao TSF profile was registered but is not enabled for the current user",
         ));
@@ -278,11 +272,33 @@ fn dll_path() -> Result<String> {
     Ok(String::from_utf16_lossy(&buf[..len]))
 }
 
+fn com_server_path(dll: &str) -> String {
+    let path = PathBuf::from(dll);
+    let is_arm64x_target = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("keytao_windows_ime_arm64.dll")
+                || name.eq_ignore_ascii_case("keytao_windows_ime_x64.dll")
+        });
+    if !is_arm64x_target {
+        return dll.to_owned();
+    }
+
+    let wrapper = path.with_file_name("keytao_windows_ime.dll");
+    if wrapper.is_file() {
+        wrapper.to_string_lossy().into_owned()
+    } else {
+        dll.to_owned()
+    }
+}
+
 // Public API
 
 pub fn register() -> Result<()> {
     let _com = init_com_apartment()?;
     let dll = dll_path()?;
+    let inproc_server = com_server_path(&dll);
     let clsid_str = guid_to_string(&CLSID_TEXT_SERVICE);
 
     unsafe {
@@ -296,7 +312,7 @@ pub fn register() -> Result<()> {
             HKEY_CLASSES_ROOT,
             &format!("CLSID\\{}\\InprocServer32", clsid_str),
         )?;
-        reg_set_sz(key_inproc, "", &dll)?;
+        reg_set_sz(key_inproc, "", &inproc_server)?;
         reg_set_sz(key_inproc, "ThreadingModel", "Apartment")?;
         let _ = RegCloseKey(key_inproc).ok();
 
@@ -325,16 +341,14 @@ pub fn register() -> Result<()> {
             &icon_path[..icon_path.len() - 1],
         )?;
 
-        // 5. The modern profile API exposes the enabled flag that the input
-        // switcher cares about. Treat a disabled profile as registration failure.
-        if let Some(profile_mgr) = profile_mgr.as_ref() {
-            ensure_profile_enabled(profile_mgr)?;
-        }
-
-        // Add the TIP to the current user's enabled input methods. RegisterProfile
+        // 5. Add the TIP to the current user's enabled input methods. RegisterProfile
         // creates the profile, but Windows does not necessarily make it selectable
         // for the user until InstallLayoutOrTip is applied.
         install_tip_for_current_user()?;
+
+        // 6. InstallLayoutOrTip owns the current-user input list. Re-apply the
+        // enabled state afterward and verify the final state exposed by TSF.
+        enable_profile_for_current_user(&profiles)?;
     }
 
     tracing::info!("KeyTao TSF registered (CLSID={})", clsid_str);

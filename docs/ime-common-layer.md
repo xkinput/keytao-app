@@ -287,6 +287,8 @@ mask = Rime modifier mask
 
 App 的方案安装只写文件；部署才调用 `keytao_core::deploy()`。任何平台前端都不应自行合并 `default.custom.yaml` 或 `rime.lua`。
 
+桌面部署不能只相信 `full_deploy_and_wait()` 的全局返回值。`keytao-core` 会从当前 schema 的编译产物读取 `schema/dependencies`，递归部署每个依赖 schema，并在完成后验证主 schema 与全部依赖的 `build/*.schema.yaml`；随后创建真实 session、选择目标 schema 并核对 session status。任一依赖缺失、schema 选择失败或实际 schema 不匹配都会让部署失败，不能把“源文件已安装”误报为“方案可输入”。
+
 ## 打包规范
 
 桌面发行包必须把“能部署”和“能输入”需要的 runtime 一起打包，不能让主 App 和系统 IME 使用不同能力集：

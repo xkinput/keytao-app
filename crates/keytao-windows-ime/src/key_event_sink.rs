@@ -31,9 +31,10 @@ use crate::{
         RIME_RELEASE_MASK,
     },
     state::{
-        clear_input_after_composition_terminated, fallback_focus_window, hide_candidate_window,
-        poll_engine_builds, reset_input_for_focus_change, start_engine_warmup,
-        start_reload_if_needed, update_ime_windows, SharedState, WeakState,
+        apply_pending_session_reset, clear_input_after_composition_terminated,
+        fallback_focus_window, hide_candidate_window, poll_engine_builds, refresh_engine_for_focus,
+        reset_input_for_focus_change, start_engine_warmup, start_reload_if_needed,
+        update_ime_windows, update_language_bar_mode, SharedState, WeakState,
     },
 };
 
@@ -196,6 +197,22 @@ fn end_composition(
         let wide = committed.map(to_wide).unwrap_or_default();
         range.SetText(ec, 0, &wide)?;
         composition.EndComposition(ec)?;
+
+        // SetText can leave the document selection spanning the old
+        // composition range. Collapse it after the committed text so a
+        // top-up result containing both commit and new preedit starts the new
+        // composition after the committed character instead of before it.
+        if committed.is_some() {
+            let caret = range.Clone()?;
+            caret.Collapse(ec, TF_ANCHOR_END)?;
+            let mut selections = [TF_SELECTION::default()];
+            selections[0].range = std::mem::ManuallyDrop::new(Some(caret));
+            selections[0].style.ase = TF_AE_END;
+            selections[0].style.fInterimChar = BOOL::from(false);
+            let result = context.SetSelection(ec, &selections);
+            std::mem::ManuallyDrop::drop(&mut selections[0].range);
+            result?;
+        }
     }
     Ok(())
 }
@@ -413,6 +430,7 @@ fn apply_ime_state(
     if let Some((ime_state, cx, cy, owner_hwnd, document_mgr, show_mode_hint)) =
         window_update.borrow_mut().take()
     {
+        update_language_bar_mode(&state_arc, ime_state.ascii_mode);
         update_ime_windows(
             &state_arc,
             &ime_state,
@@ -485,6 +503,8 @@ fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> R
         return Ok(None);
     }
 
+    apply_pending_session_reset(shared_state);
+
     let reload_started = start_reload_if_needed(shared_state);
     let (client_id, reload_in_progress, should_clear_reload) = {
         let mut st = shared_state.borrow_mut();
@@ -515,14 +535,12 @@ pub(crate) struct KeyEventSink {
 }
 
 impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
-    fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
+    fn OnSetFocus(&self, _foreground: BOOL) -> Result<()> {
         let Some(state) = upgrade_state(&self.state) else {
             return Ok(());
         };
         reset_input_for_focus_change(&state);
-        if foreground.as_bool() {
-            start_engine_warmup(&state);
-        }
+        refresh_engine_for_focus(&state);
         Ok(())
     }
 

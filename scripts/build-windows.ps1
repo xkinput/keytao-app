@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path (Split-Path -Parent $PSCommandPath) "..")).Path
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSCommandPath) ".."))
 
 function Resolve-NativeWindowsArch {
     switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
@@ -22,7 +22,7 @@ if ($Arch -eq "native") {
 
 function Assert-SupportedWindowsPackageArch([string]$WindowsArch) {
     if ($WindowsArch -eq "arm64") {
-        throw "Windows ARM64 packages are currently unsupported because rime/librime does not publish Windows ARM64 SDK assets. Build the supported x64 package with 'powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64', or add an experimental source-built librime ARM64 pipeline before enabling this target."
+        throw "Build the universal Windows installer with -Arch x64. It includes x64, x86, native ARM64, and ARM64X text-service runtimes while keeping the desktop app x64-compatible."
     }
     if ($WindowsArch -notin @("x64", "x86")) {
         throw "Unsupported Windows package arch: $WindowsArch. Supported values: x64, x86."
@@ -177,7 +177,33 @@ $rustHostTriple = Get-RustHostTriple "rustc" @()
 if (-not $rustHostTriple) {
     throw "Unable to determine the active Rust host triple."
 }
+
+# The universal package contains an x64 desktop app and builds x86/ARM64 TIP
+# payloads through the x64-hosted MSVC cross tools. Native ARM64 Windows can
+# run this toolchain under emulation, which also matches the release runners.
+if ($Arch -eq "x64" -and $rustHostTriple -like "aarch64-*") {
+    $x64Toolchain = "stable-x86_64-pc-windows-msvc"
+    $installedToolchains = & rustup toolchain list
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to list installed Rust toolchains."
+    }
+    $toolchainPattern = "^$([regex]::Escape($x64Toolchain))(\s|$)"
+    if (-not ($installedToolchains | Where-Object { $_ -match $toolchainPattern })) {
+        & rustup toolchain install $x64Toolchain --profile minimal
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install the $x64Toolchain toolchain required by the universal Windows package."
+        }
+    }
+    $env:RUSTUP_TOOLCHAIN = $x64Toolchain
+    $rustHostTriple = Get-RustHostTriple "rustc" @()
+    if ($rustHostTriple -notlike "x86_64-*") {
+        throw "Unable to activate the $x64Toolchain toolchain on Windows ARM64."
+    }
+}
+
 $crossCompiling = $rustHostTriple -ne $target
+$nativeWindowsArch = Resolve-NativeWindowsArch
+$explicitTauriTarget = $crossCompiling -or $nativeWindowsArch -ne $Arch
 if ($crossCompiling) {
     & rustup target add $target
     if ($LASTEXITCODE -ne 0) {
@@ -241,18 +267,61 @@ try {
         throw "build-windows-ime.ps1 $Arch failed with exit code $LASTEXITCODE"
     }
 
-    . (Join-Path $repoRoot "vendor\librime\windows-$Arch\env.ps1")
-
-    $tauriArgs = @("tauri", "build", "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
-    $releaseDir = Join-Path $repoRoot "target\release"
-    if ($crossCompiling) {
-        $tauriArgs = @("tauri", "build", "--target", $target, "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
-        $releaseDir = Join-Path $repoRoot "target\$target\release"
+    if ($Arch -eq "x64") {
+        & powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1 -Arch arm64 -SkipAppRuntime
+        if ($LASTEXITCODE -ne 0) {
+            throw "build-windows-ime.ps1 arm64 failed with exit code $LASTEXITCODE"
+        }
+        & powershell -ExecutionPolicy Bypass -File scripts\build-windows-arm64x.ps1
+        if ($LASTEXITCODE -ne 0) {
+            throw "build-windows-arm64x.ps1 failed with exit code $LASTEXITCODE"
+        }
     }
 
-    & $pnpmPath @tauriArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "tauri build failed with exit code $LASTEXITCODE"
+    $tauriVendorDir = Join-Path $repoRoot "vendor\librime\windows-$Arch"
+    . (Join-Path $tauriVendorDir "env.ps1")
+    # env.ps1 can come from a cached SDK created in another checkout. Resolve
+    # every build path from this repository after importing optional settings.
+    $env:RIME_INCLUDE_DIR = Join-Path $tauriVendorDir "include"
+    $env:RIME_LIB_DIR = Join-Path $tauriVendorDir "lib"
+    $env:KEYTAO_RIME_LIB_NAME = "rime"
+    $env:KEYTAO_RIME_DLL_NAME = "rime.dll"
+    Add-PathIfExists (Join-Path $tauriVendorDir "bin")
+
+    $cargoTargetDir = if ($env:CARGO_TARGET_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+            [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+        }
+    } else {
+        Join-Path $repoRoot "target"
+    }
+
+    $tauriArgs = @("tauri", "build", "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
+    $releaseDir = Join-Path $cargoTargetDir "release"
+    if ($explicitTauriTarget) {
+        $tauriArgs = @("tauri", "build", "--target", $target, "--bundles", "nsis", "--config", "src-tauri/tauri.windows.conf.json")
+        $releaseDir = Join-Path $cargoTargetDir "$target\release"
+    }
+
+    $actualNsisDir = Join-Path $releaseDir "bundle\nsis"
+    if (Test-Path -LiteralPath $actualNsisDir) {
+        Get-ChildItem -Path $actualNsisDir -Filter "*.exe" -File | Remove-Item -Force
+    }
+
+    $previousCi = $env:CI
+    try {
+        # pnpm may need to replace node_modules when the repository is shared
+        # between macOS and Windows. Force its documented non-interactive path
+        # so packaging cannot stall or abort on a hidden confirmation prompt.
+        $env:CI = "true"
+        & $pnpmPath @tauriArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "tauri build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        $env:CI = $previousCi
     }
 
     & powershell -ExecutionPolicy Bypass -File scripts\verify-windows-bundle.ps1 -Arch $Arch -ReleaseDir $releaseDir
@@ -261,9 +330,9 @@ try {
     }
 
     $canonicalNsisDir = Join-Path $repoRoot "target\release\bundle\nsis"
-    $actualNsisDir = Join-Path $releaseDir "bundle\nsis"
     if ((Resolve-Path -LiteralPath $actualNsisDir).Path -ne (Resolve-Path -LiteralPath $canonicalNsisDir -ErrorAction SilentlyContinue).Path) {
         New-Item -ItemType Directory -Force -Path $canonicalNsisDir | Out-Null
+        Get-ChildItem -Path $canonicalNsisDir -Filter "*.exe" -File | Remove-Item -Force
         Copy-Item -Force -Path (Join-Path $actualNsisDir "*.exe") -Destination $canonicalNsisDir
     }
 } finally {

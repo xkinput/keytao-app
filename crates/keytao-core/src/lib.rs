@@ -138,7 +138,7 @@ pub fn librime_runtime_version() -> Option<String> {
 ))]
 mod desktop {
     use super::*;
-    use librime_sys::{rime_get_api, RimeCandidateListIterator, RimeTraits};
+    use librime_sys::{rime_get_api, RimeCandidateListIterator, RimeFindModule, RimeTraits};
     use rime_api::{create_session, KeyEvent, KeyStatus};
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::sync::Mutex;
@@ -240,16 +240,28 @@ mod desktop {
         }
 
         #[cfg(not(target_os = "android"))]
-        if {
-            setup_only(user_data_dir, shared_data_dir)?;
-            full_deploy_and_wait()
-        } {
-            Ok(())
-        } else {
-            Err(format!(
-                "Rime deployment failed. See librime logs in {}",
-                log_dir.display()
-            ))
+        {
+            setup_only(user_data_dir.clone(), shared_data_dir)?;
+            if !full_deploy_and_wait() {
+                return Err(format!(
+                    "Rime deployment failed. See librime logs in {}",
+                    log_dir.display()
+                ));
+            }
+
+            let user_dir = Path::new(&user_data_dir);
+            deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
+                format!(
+                    "Rime dependency deployment failed: {error}. See librime logs in {}",
+                    log_dir.display()
+                )
+            })?;
+            validate_deployed_schemas(user_dir).map_err(|error| {
+                format!(
+                    "Rime deployment validation failed: {error}. See librime logs in {}",
+                    log_dir.display()
+                )
+            })
         }
     }
 
@@ -366,6 +378,56 @@ mod desktop {
         );
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn deploy_desktop_schema_dependencies(user_dir: &Path) -> Result<(), String> {
+        let initial_schemas = parse_schema_list_from_dir(user_dir);
+        if initial_schemas.is_empty() {
+            return Err("no schema selected in default.custom.yaml".into());
+        }
+
+        let mut visited: HashSet<String> = initial_schemas.iter().cloned().collect();
+        let mut pending = std::collections::VecDeque::new();
+        for schema_id in &initial_schemas {
+            let compiled = compiled_schema_path(user_dir, schema_id);
+            require_compiled_schema(&compiled, schema_id)?;
+            pending.extend(schema_dependencies_from_file(&compiled));
+        }
+
+        while let Some(schema_id) = pending.pop_front() {
+            if !visited.insert(schema_id.clone()) {
+                continue;
+            }
+
+            let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+            if !source.is_file() {
+                continue;
+            }
+            deploy_schema_file(&source)?;
+
+            let compiled = compiled_schema_path(user_dir, &schema_id);
+            require_compiled_schema(&compiled, &schema_id)?;
+            pending.extend(schema_dependencies_from_file(&compiled));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
+        let schemas = parse_schema_list_from_dir(user_dir);
+        if schemas.is_empty() {
+            return Err("no schema selected in default.custom.yaml".into());
+        }
+
+        let session =
+            create_session().map_err(|error| format!("create validation session: {error:?}"))?;
+        for schema_id in schemas {
+            let compiled = compiled_schema_path(user_dir, &schema_id);
+            require_compiled_schema(&compiled, &schema_id)?;
+            select_schema_checked(&session, &schema_id)?;
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "android")]
     fn deploy_android_staged(user_data_dir: &str) -> Result<(), String> {
         deploy_config_file("default.yaml", "config_version")?;
@@ -424,7 +486,6 @@ mod desktop {
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
     fn deploy_schema_file(path: &Path) -> Result<(), String> {
         let path_string = path.to_string_lossy();
         let path = CString::new(path_string.as_bytes()).map_err(|_| "invalid schema path")?;
@@ -440,7 +501,6 @@ mod desktop {
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
     fn parse_schema_list_from_dir(user_dir: &Path) -> Vec<String> {
         [
             "default.custom.yaml",
@@ -455,12 +515,28 @@ mod desktop {
         .unwrap_or_default()
     }
 
-    #[cfg(target_os = "android")]
     fn schema_dependencies_from_file(path: &Path) -> Vec<String> {
         let Ok(content) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
         parse_schema_dependencies(&content)
+    }
+
+    fn compiled_schema_path(user_dir: &Path, schema_id: &str) -> PathBuf {
+        user_dir
+            .join("build")
+            .join(format!("{schema_id}.schema.yaml"))
+    }
+
+    fn require_compiled_schema(path: &Path, schema_id: &str) -> Result<(), String> {
+        if path.is_file() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema {schema_id} was not compiled to {}",
+                path.display()
+            ))
+        }
     }
 
     fn setup_rime(
@@ -527,6 +603,9 @@ mod desktop {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     unsafe fn require_lua_module() {
+        if lua_module_registered() {
+            return;
+        }
         if let Err(error) = load_unix_lua_plugin() {
             eprintln!(
                 "KeyTao: failed to load {} librime-lua plugin: {error}",
@@ -537,6 +616,9 @@ mod desktop {
 
     #[cfg(target_os = "windows")]
     unsafe fn require_lua_module() {
+        if lua_module_registered() {
+            return;
+        }
         if let Err(error) = load_windows_lua_plugin() {
             eprintln!("KeyTao: failed to load Windows librime-lua plugin: {error}");
         }
@@ -550,6 +632,11 @@ mod desktop {
         target_os = "windows"
     )))]
     unsafe fn require_lua_module() {}
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    unsafe fn lua_module_registered() -> bool {
+        !RimeFindModule(c"lua".as_ptr()).is_null()
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     unsafe fn load_unix_lua_plugin() -> Result<(), String> {
@@ -573,12 +660,19 @@ mod desktop {
                 attempted.push(format!("{display}: {}", dlerror_string()));
                 continue;
             }
+            if lua_module_registered() {
+                return Ok(());
+            }
             if let Some(require) = find_unix_lua_require_symbol(handle) {
                 let require: unsafe extern "C" fn() = std::mem::transmute(require);
                 require();
-                return Ok(());
+                if lua_module_registered() {
+                    return Ok(());
+                }
             }
-            attempted.push(format!("{display}: missing rime_require_module_lua symbol"));
+            attempted.push(format!(
+                "{display}: Lua module did not register after loading"
+            ));
         }
         lua_plugin_load_error(&candidates, &attempted)
     }
@@ -610,12 +704,19 @@ mod desktop {
                 attempted.push(format!("{display}: {}", std::io::Error::last_os_error()));
                 continue;
             }
+            if lua_module_registered() {
+                return Ok(());
+            }
             if let Some(require) = find_windows_lua_require_symbol(handle) {
                 let require: unsafe extern "C" fn() = std::mem::transmute(require);
                 require();
-                return Ok(());
+                if lua_module_registered() {
+                    return Ok(());
+                }
             }
-            attempted.push(format!("{display}: missing rime_require_module_lua symbol"));
+            attempted.push(format!(
+                "{display}: Lua module did not register after loading"
+            ));
         }
         lua_plugin_load_error(&candidates, &attempted)
     }
@@ -726,12 +827,6 @@ mod desktop {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 append_windows_runtime_lua_plugin_candidates(&mut candidates, dir);
-            }
-        }
-        if let Some(path) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path) {
-                push_lua_plugin_files(&mut candidates, &dir);
-                push_lua_plugin_files(&mut candidates, &dir.join("rime-plugins"));
             }
         }
         dedupe_paths(candidates)
@@ -992,8 +1087,17 @@ mod desktop {
         }
 
         pub(crate) fn new_with_user_data_dir(user_data_dir: Option<&Path>) -> Result<Self, String> {
+            let preferred = preferred_schema_location(user_data_dir);
+            if let Some((dir, schema_id)) = &preferred {
+                require_compiled_schema(&compiled_schema_path(dir, schema_id), schema_id)?;
+            }
             let session = create_session().map_err(|e| format!("{e:?}"))?;
-            select_preferred_schema(&session, user_data_dir);
+            if let Some((_, schema_id)) = preferred {
+                select_schema_checked(&session, &schema_id)?;
+                set_session_option(&session, "ascii_mode", false);
+            } else {
+                validate_active_schema(&session)?;
+            }
             Ok(Self { session })
         }
 
@@ -1071,15 +1175,33 @@ mod desktop {
         }
     }
 
-    fn select_preferred_schema(session: &rime_api::Session, user_data_dir: Option<&Path>) {
-        let Some(schema) = preferred_schema_id(user_data_dir) else {
-            return;
-        };
-        if let Err(error) = session.select_schema(&schema) {
-            eprintln!("KeyTao: failed to select preferred schema {schema}: {error:?}");
-        } else {
-            set_session_option(session, "ascii_mode", false);
+    fn select_schema_checked(session: &rime_api::Session, schema_id: &str) -> Result<(), String> {
+        session
+            .select_schema(schema_id)
+            .map_err(|error| format!("failed to select schema {schema_id}: {error:?}"))?;
+        let status = session
+            .status()
+            .map_err(|error| format!("read schema {schema_id} status: {error:?}"))?;
+        if status.is_disabled {
+            return Err(format!("schema {schema_id} is disabled after selection"));
         }
+        if status.schema_id() != schema_id {
+            return Err(format!(
+                "selected schema mismatch: expected {schema_id}, got {}",
+                status.schema_id()
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_active_schema(session: &rime_api::Session) -> Result<(), String> {
+        let status = session
+            .status()
+            .map_err(|error| format!("read active schema status: {error:?}"))?;
+        if status.is_disabled || status.schema_id().is_empty() {
+            return Err("Rime session has no active schema".into());
+        }
+        Ok(())
     }
 
     fn set_session_option(session: &rime_api::Session, option_name: &str, enabled: bool) {
@@ -1669,13 +1791,14 @@ fn read_optional_default_custom(base: &Path) -> Option<String> {
         .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
-fn preferred_schema_id(user_data_dir: Option<&Path>) -> Option<String> {
+fn preferred_schema_location(user_data_dir: Option<&Path>) -> Option<(PathBuf, String)> {
     if let Some(dir) = user_data_dir {
         if let Some(schema) = preferred_schema_id_from_dir(dir) {
-            return Some(schema);
+            return Some((dir.to_path_buf(), schema));
         }
     }
-    default_user_data_dir().and_then(|dir| preferred_schema_id_from_dir(&dir))
+    default_user_data_dir()
+        .and_then(|dir| preferred_schema_id_from_dir(&dir).map(|schema| (dir, schema)))
 }
 
 fn preferred_schema_id_from_dir(dir: &Path) -> Option<String> {
@@ -1762,7 +1885,6 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
     schemas
 }
 
-#[cfg(any(target_os = "android", test))]
 fn parse_schema_dependencies(content: &str) -> Vec<String> {
     let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(content) else {
         return Vec::new();

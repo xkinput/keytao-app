@@ -991,6 +991,9 @@ const WINDOWS_PE_MACHINE_X86: u16 = 0x014C;
 const WINDOWS_PE_MACHINE_X64: u16 = 0x8664;
 
 #[cfg(target_os = "windows")]
+const WINDOWS_PE_MACHINE_ARM64: u16 = 0xAA64;
+
+#[cfg(target_os = "windows")]
 const WINDOWS_IME_STATUS_EVENT: &str = "windows-ime-status";
 
 #[cfg(target_os = "windows")]
@@ -1094,23 +1097,6 @@ fn windows_enable_ime_for_current_user() -> Result<(), String> {
             CLSCTX_INPROC_SERVER,
         )
         .map_err(|e| format!("open TSF input processor profiles: {e}"))?;
-        profiles
-            .EnableLanguageProfile(
-                &WINDOWS_TEXT_SERVICE_GUID,
-                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
-                &WINDOWS_PROFILE_GUID,
-                BOOL::from(true),
-            )
-            .map_err(|e| format!("enable KeyTao TSF profile for current user: {e}"))?;
-        if let Err(error) = profiles.EnableLanguageProfileByDefault(
-            &WINDOWS_TEXT_SERVICE_GUID,
-            WINDOWS_LANGID_CHINESE_SIMPLIFIED,
-            &WINDOWS_PROFILE_GUID,
-            BOOL::from(true),
-        ) {
-            tracing::warn!("failed to enable KeyTao profile by default for current user: {error}");
-        }
-
         let mut input_dll = "input.dll".encode_utf16().collect::<Vec<_>>();
         input_dll.push(0);
         let module = LoadLibraryExW(
@@ -1140,94 +1126,146 @@ fn windows_enable_ime_for_current_user() -> Result<(), String> {
                 "add KeyTao to the current user's enabled input methods: {error}"
             ));
         }
+
+        // InstallLayoutOrTip updates the user's input list and can reset the
+        // profile flag. Enable and verify only after that operation completes.
+        profiles
+            .EnableLanguageProfile(
+                &WINDOWS_TEXT_SERVICE_GUID,
+                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                &WINDOWS_PROFILE_GUID,
+                BOOL::from(true),
+            )
+            .map_err(|e| format!("enable KeyTao TSF profile for current user: {e}"))?;
+        let enabled = profiles
+            .IsEnabledLanguageProfile(
+                &WINDOWS_TEXT_SERVICE_GUID,
+                WINDOWS_LANGID_CHINESE_SIMPLIFIED,
+                &WINDOWS_PROFILE_GUID,
+            )
+            .map_err(|e| format!("verify KeyTao TSF profile for current user: {e}"))?;
+        if !enabled.as_bool() {
+            return Err("KeyTao TSF profile remains disabled for the current user".into());
+        }
     }
 
-    match windows_tsf_profile_enabled()? {
-        true => Ok(()),
-        false => Err("KeyTao TSF profile remains disabled for the current user".into()),
-    }
+    windows_tsf_profile_enabled()?.then_some(()).ok_or_else(|| {
+        "KeyTao TSF profile is not exposed as enabled by the Windows profile manager".into()
+    })
 }
 
 #[cfg(target_os = "windows")]
 fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
+    if let Some(registered) = windows_registered_ime_path(false) {
+        if let Some(parent) = PathBuf::from(registered).parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+
+    let native_arm64 = windows_native_machine() == WINDOWS_PE_MACHINE_ARM64;
+    let runtime_names = if native_arm64 {
+        ["arm64x", "current", "x64", "x86"]
+    } else {
+        ["current", "x64", "x86", "arm64x"]
+    };
+
+    let mut add_runtime_root = |root: PathBuf| {
+        for name in runtime_names {
+            candidates.push(root.join(name));
+        }
+    };
+
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.extend([
-            resource_dir.join("current"),
-            resource_dir.join("x64"),
-            resource_dir.join("x86"),
-            resource_dir
-                .join("keytao-windows-ime-runtime")
-                .join("current"),
-            resource_dir.join("keytao-windows-ime-runtime").join("x64"),
-            resource_dir.join("keytao-windows-ime-runtime").join("x86"),
+        add_runtime_root(resource_dir.clone());
+        add_runtime_root(resource_dir.join("keytao-windows-ime-runtime"));
+        add_runtime_root(
             resource_dir
                 .join("target")
-                .join("keytao-windows-ime-runtime")
-                .join("current"),
-            resource_dir
-                .join("target")
-                .join("keytao-windows-ime-runtime")
-                .join("x64"),
+                .join("keytao-windows-ime-runtime"),
+        );
+        add_runtime_root(
             resource_dir
                 .join("resources")
-                .join("keytao-windows-ime-runtime")
-                .join("current"),
-            resource_dir
-                .join("resources")
-                .join("keytao-windows-ime-runtime")
-                .join("x64"),
+                .join("keytao-windows-ime-runtime"),
+        );
+        add_runtime_root(
             resource_dir
                 .join("_up_")
                 .join("target")
-                .join("keytao-windows-ime-runtime")
-                .join("current"),
-            resource_dir
-                .join("_up_")
-                .join("target")
-                .join("keytao-windows-ime-runtime")
-                .join("x64"),
-        ]);
+                .join("keytao-windows-ime-runtime"),
+        );
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.extend([
-                dir.join("current"),
-                dir.join("x64"),
-                dir.join("x86"),
-                dir.join("keytao-windows-ime-runtime").join("current"),
-                dir.join("keytao-windows-ime-runtime").join("x64"),
-                dir.join("keytao-windows-ime-runtime").join("x86"),
-                dir.join("resources").join("current"),
-                dir.join("resources").join("x64"),
-                dir.join("resources")
-                    .join("keytao-windows-ime-runtime")
-                    .join("current"),
-                dir.join("resources")
-                    .join("keytao-windows-ime-runtime")
-                    .join("x64"),
+            add_runtime_root(dir.to_path_buf());
+            add_runtime_root(dir.join("keytao-windows-ime-runtime"));
+            add_runtime_root(dir.join("resources"));
+            add_runtime_root(dir.join("resources").join("keytao-windows-ime-runtime"));
+            add_runtime_root(
                 dir.join("_up_")
                     .join("target")
-                    .join("keytao-windows-ime-runtime")
-                    .join("current"),
-                dir.join("_up_")
-                    .join("target")
-                    .join("keytao-windows-ime-runtime")
-                    .join("x64"),
+                    .join("keytao-windows-ime-runtime"),
+            );
+            add_runtime_root(
                 dir.join("resources")
                     .join("_up_")
                     .join("target")
-                    .join("keytao-windows-ime-runtime")
-                    .join("current"),
-                dir.join("resources")
-                    .join("_up_")
-                    .join("target")
-                    .join("keytao-windows-ime-runtime")
-                    .join("x64"),
-            ]);
+                    .join("keytao-windows-ime-runtime"),
+            );
         }
+    }
+
+    candidates
+        .into_iter()
+        .find(|dir| windows_native_ime_runtime_complete(dir, native_arm64))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_native_machine() -> u16 {
+    use windows::Win32::System::{
+        SystemInformation::IMAGE_FILE_MACHINE,
+        Threading::{GetCurrentProcess, IsWow64Process2},
+    };
+
+    let mut process_machine = IMAGE_FILE_MACHINE(0);
+    let mut native_machine = IMAGE_FILE_MACHINE(0);
+    let result = unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            Some(&mut native_machine),
+        )
+    };
+    if result.is_ok() && native_machine.0 != 0 {
+        native_machine.0
+    } else if cfg!(target_arch = "aarch64") {
+        WINDOWS_PE_MACHINE_ARM64
+    } else if cfg!(target_pointer_width = "64") {
+        WINDOWS_PE_MACHINE_X64
+    } else {
+        WINDOWS_PE_MACHINE_X86
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_native_ime_runtime_complete(dir: &Path, native_arm64: bool) -> bool {
+    let data_complete = dir.join("rime-data").join("default.yaml").is_file()
+        && dir.join("default-theme.yaml").is_file();
+    if !data_complete {
+        return false;
+    }
+
+    if native_arm64 {
+        return dir.join("keytao_windows_ime.dll").is_file()
+            && windows_pe_machine(&dir.join("keytao_windows_ime_arm64.dll"))
+                == Some(WINDOWS_PE_MACHINE_ARM64)
+            && windows_pe_machine(&dir.join("keytao_windows_ime_x64.dll"))
+                == Some(WINDOWS_PE_MACHINE_X64)
+            && windows_pe_machine(&dir.join("rime-arm64.dll")) == Some(WINDOWS_PE_MACHINE_ARM64)
+            && windows_pe_machine(&dir.join("rime.dll")) == Some(WINDOWS_PE_MACHINE_X64);
     }
 
     let expected_machine = if cfg!(target_pointer_width = "64") {
@@ -1235,10 +1273,8 @@ fn windows_ime_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     } else {
         WINDOWS_PE_MACHINE_X86
     };
-    candidates.into_iter().find(|dir| {
-        let dll = dir.join("keytao_windows_ime.dll");
-        dll.is_file() && windows_pe_machine(&dll) == Some(expected_machine)
-    })
+    windows_pe_machine(&dir.join("keytao_windows_ime.dll")) == Some(expected_machine)
+        && windows_pe_machine(&dir.join("rime.dll")) == Some(expected_machine)
 }
 
 #[cfg(target_os = "windows")]
@@ -1311,9 +1347,13 @@ fn windows_ime_x86_packaged_runtime_dir(app: &tauri::AppHandle) -> Option<PathBu
 
 #[cfg(target_os = "windows")]
 fn windows_ime_x86_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    windows_ime_x86_standard_runtime_dir()
+    windows_registered_ime_path(true)
+        .and_then(|path| PathBuf::from(path).parent().map(Path::to_path_buf))
         .filter(|dir| windows_x86_runtime_complete(dir))
         .or_else(|| windows_ime_x86_packaged_runtime_dir(app))
+        .or_else(|| {
+            windows_ime_x86_standard_runtime_dir().filter(|dir| windows_x86_runtime_complete(dir))
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -1553,7 +1593,10 @@ fn windows_ime_status_with_message(app: &tauri::AppHandle, message: String) -> W
         Err(e) => (false, format!("TSF profile 不可用：{e}")),
     };
     if cfg!(target_pointer_width = "64") {
-        profile_status.push_str(if x86_registered_dll {
+        let native_arm64 = windows_native_machine() == WINDOWS_PE_MACHINE_ARM64;
+        profile_status.push_str(if x86_registered_dll && native_arm64 {
+            "；ARM64X（ARM64/x64）/x86 COM 均已注册"
+        } else if x86_registered_dll {
             "；x64/x86 COM 均已注册"
         } else {
             "；x86 COM 尚未注册"
@@ -1623,6 +1666,22 @@ struct WindowsImeRegistrationTarget {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_ime_versioned_runtime_root() -> PathBuf {
+    let program_data = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let stamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
+    program_data
+        .join("KeyTao")
+        .join("keytao-windows-ime-runtime")
+        .join(format!(
+            "{}-{}-{stamp}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        ))
+}
+
+#[cfg(target_os = "windows")]
 fn run_regsvr32_elevated(
     targets: &[WindowsImeRegistrationTarget],
     unregister: bool,
@@ -1672,6 +1731,38 @@ fn run_regsvr32_elevated(
         .join(",\n  ");
     let unregister_arg = if unregister { "$arguments += '/u'" } else { "" };
     let prepare_runtime = if unregister { "$false" } else { "$true" };
+    let runtime_registry_script = if unregister {
+        String::new()
+    } else {
+        let native = targets
+            .iter()
+            .find(|target| !target.x86)
+            .ok_or("missing native Windows IME registration target")?;
+        let native_dir = native
+            .dll_path
+            .parent()
+            .ok_or("invalid native Windows IME registration target")?;
+        let runtime_root = native_dir
+            .parent()
+            .ok_or("invalid versioned Windows IME runtime root")?;
+        let x86_dll = targets
+            .iter()
+            .find(|target| target.x86)
+            .map(|target| windows_normal_path(&target.dll_path))
+            .unwrap_or_default();
+        format!(
+            r#"
+  $registryPath = 'HKLM:\SOFTWARE\KeyTao'
+  New-Item -Path $registryPath -Force | Out-Null
+  New-ItemProperty -Path $registryPath -Name 'WindowsImeRuntimeDir' -PropertyType String -Value {runtime_root} -Force | Out-Null
+  New-ItemProperty -Path $registryPath -Name 'WindowsImeNativeDll' -PropertyType String -Value {native_dll} -Force | Out-Null
+  New-ItemProperty -Path $registryPath -Name 'WindowsImeX86Dll' -PropertyType String -Value {x86_dll} -Force | Out-Null
+"#,
+            runtime_root = powershell_quote(&windows_normal_path(runtime_root)),
+            native_dll = powershell_quote(&windows_normal_path(&native.dll_path)),
+            x86_dll = powershell_quote(&x86_dll),
+        )
+    };
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
@@ -1712,6 +1803,7 @@ try {{
     ($failures -join [Environment]::NewLine) | Set-Content -Encoding UTF8 -Path $resultFile
     exit 5
   }}
+  {runtime_registry_script}
   "Windows IME registration completed" | Set-Content -Encoding UTF8 -Path $resultFile
   exit 0
 }} catch {{
@@ -1723,6 +1815,7 @@ try {{
         prepare_runtime = prepare_runtime,
         registrations = registrations,
         unregister_arg = unregister_arg,
+        runtime_registry_script = runtime_registry_script,
     );
     std::fs::write(&script_path, script).map_err(|e| format!("write registration script: {e}"))?;
 
@@ -1778,16 +1871,21 @@ async fn windows_ime_status(app: AppHandle) -> Result<WindowsImeStatus, String> 
 
 #[cfg(target_os = "windows")]
 fn windows_register_ime_blocking(app: &AppHandle) -> Result<WindowsImeStatus, String> {
-    let runtime_dir =
+    let source_runtime_dir =
         windows_ime_runtime_dir(app).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
-    let dll = runtime_dir.join("keytao_windows_ime.dll");
+    let runtime_root = windows_ime_versioned_runtime_root();
+    let native_runtime_name = if windows_native_machine() == WINDOWS_PE_MACHINE_ARM64 {
+        "arm64x"
+    } else {
+        "current"
+    };
+    let native_runtime_dir = runtime_root.join(native_runtime_name);
     let mut targets = Vec::new();
     if cfg!(target_pointer_width = "64") {
         let x86_source_runtime_dir = windows_ime_x86_packaged_runtime_dir(app)
             .or_else(|| windows_ime_x86_runtime_dir(app))
             .ok_or("安装包中未找到 x86 keytao_windows_ime.dll")?;
-        let x86_runtime_dir = windows_ime_x86_standard_runtime_dir()
-            .ok_or("Windows 未提供 Program Files (x86) 目录，无法安装 x86 TSF runtime")?;
+        let x86_runtime_dir = runtime_root.join("x86");
         targets.push(WindowsImeRegistrationTarget {
             label: "x86",
             source_dll_path: x86_source_runtime_dir.join("keytao_windows_ime.dll"),
@@ -1799,8 +1897,8 @@ fn windows_register_ime_blocking(app: &AppHandle) -> Result<WindowsImeStatus, St
     // canonical profile path after both COM registry views are populated.
     targets.push(WindowsImeRegistrationTarget {
         label: "native",
-        source_dll_path: dll.clone(),
-        dll_path: dll,
+        source_dll_path: source_runtime_dir.join("keytao_windows_ime.dll"),
+        dll_path: native_runtime_dir.join("keytao_windows_ime.dll"),
         x86: false,
     });
     run_regsvr32_elevated(&targets, false)?;
@@ -1823,8 +1921,13 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
     .await
     .map_err(|e| format!("读取 Windows IME 状态失败：{e}"))?;
 
-    if !status.packaged || status.registered {
+    if !status.packaged {
         return Ok(status);
+    }
+    if status.registered {
+        let mut ready = status;
+        ready.message = "KeyTao Windows IME 已就绪".into();
+        return Ok(ready);
     }
 
     let can_repair_current_user = status.registered_dll;

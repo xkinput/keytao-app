@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path (Split-Path -Parent $PSCommandPath) "..")).Path
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSCommandPath) ".."))
 
 function Add-PathIfExists([string]$Path) {
     if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -35,11 +35,8 @@ if ($Arch -eq "native") {
 }
 
 function Assert-SupportedWindowsPackageArch([string]$WindowsArch) {
-    if ($WindowsArch -eq "arm64") {
-        throw "Windows ARM64 IME runtime is currently unsupported because rime/librime does not publish Windows ARM64 SDK assets. Build the supported x64 runtime with 'powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1 -Arch x64', or add an experimental source-built librime ARM64 pipeline before enabling this target."
-    }
-    if ($WindowsArch -notin @("x64", "x86")) {
-        throw "Unsupported Windows IME runtime arch: $WindowsArch. Supported values: x64, x86."
+    if ($WindowsArch -notin @("x64", "x86", "arm64")) {
+        throw "Unsupported Windows IME runtime arch: $WindowsArch. Supported values: x64, x86, arm64."
     }
 }
 
@@ -48,6 +45,7 @@ Assert-SupportedWindowsPackageArch $Arch
 function Get-WindowsRustTarget([string]$WindowsArch) {
     switch ($WindowsArch) {
         "x64" { return "x86_64-pc-windows-msvc" }
+        "arm64" { return "aarch64-pc-windows-msvc" }
         "x86" { return "i686-pc-windows-msvc" }
         default { throw "Unsupported Windows arch: $WindowsArch" }
     }
@@ -100,6 +98,9 @@ function Get-RustHostTriple([string]$Command, [string[]]$Arguments) {
 }
 
 function Get-MsvcArchForRustHost([string]$HostTriple) {
+    if ($HostTriple -like "aarch64-*") {
+        return "arm64"
+    }
     if ($HostTriple -like "x86_64-*") {
         return "x64"
     }
@@ -160,7 +161,7 @@ function Get-WindowsLuaPluginFiles([string]$Root) {
         return @()
     }
     return @(
-        Get-ChildItem -File -Path $binDir |
+        Get-ChildItem -File -Recurse -Path $binDir |
             Where-Object {
                 $name = $_.Name.ToLowerInvariant()
                 $name.Contains("rime") -and $name.Contains("lua") -and $name.EndsWith(".dll")
@@ -168,9 +169,33 @@ function Get-WindowsLuaPluginFiles([string]$Root) {
     )
 }
 
+function Assert-MergedLibrimeLua([string]$Root, [string]$DllName) {
+    $featureFile = Join-Path $Root "librime-features.txt"
+    if (-not (Test-Path -LiteralPath $featureFile -PathType Leaf)) {
+        throw "Missing librime feature manifest: $featureFile"
+    }
+    $features = Get-Content -LiteralPath $featureFile -Raw
+    if ($features -notmatch '(?m)^librime-lua=merged\r?$') {
+        throw "Windows librime runtime does not declare merged librime-lua support: $featureFile"
+    }
+
+    $rimeDll = Join-Path $Root "bin\$DllName"
+    $rimeDllText = [System.Text.Encoding]::ASCII.GetString(
+        [System.IO.File]::ReadAllBytes($rimeDll)
+    )
+    foreach ($marker in @("lua_translator", "lua_filter", "lua_processor")) {
+        if (-not $rimeDllText.Contains($marker)) {
+            throw "Windows librime runtime $rimeDll is missing merged librime-lua marker '$marker'."
+        }
+    }
+}
+
+$rimeLibName = if ($Arch -eq "arm64") { "rime-arm64.lib" } else { "rime.lib" }
+$rimeDllName = if ($Arch -eq "arm64") { "rime-arm64.dll" } else { "rime.dll" }
 $needsFetch = -not (Test-Path (Join-Path $vendorDir "include\rime_api.h")) -or
-    -not (Test-Path (Join-Path $vendorDir "lib\rime.lib")) -or
-    -not (Test-Path (Join-Path $vendorDir "bin\rime.dll")) -or
+    -not (Test-Path (Join-Path $vendorDir "lib\$rimeLibName")) -or
+    -not (Test-Path (Join-Path $vendorDir "bin\$rimeDllName")) -or
+    -not (Test-Path (Join-Path $vendorDir "librime-features.txt")) -or
     -not (Test-Path (Join-Path $vendorDir "rime-data\default.yaml")) -or
     -not (Test-Path $envFile)
 
@@ -178,10 +203,8 @@ if ($needsFetch) {
     & (Join-Path $repoRoot "scripts\fetch-librime-windows.ps1") -Arch $Arch -Version $Version -Destination $vendorDir
 }
 
+Assert-MergedLibrimeLua $vendorDir $rimeDllName
 $luaPlugins = Get-WindowsLuaPluginFiles $vendorDir
-if (-not $luaPlugins) {
-    Write-Warning "Windows librime runtime does not include librime-lua plugin DLL in $vendorDir\bin. Official rime/librime Windows SDK assets currently do not ship it, so Windows Lua extensions will be unavailable in this build."
-}
 
 $oldErrorActionPreference = $ErrorActionPreference
 try {
@@ -190,6 +213,11 @@ try {
 } finally {
     $ErrorActionPreference = $oldErrorActionPreference
 }
+$env:RIME_INCLUDE_DIR = Join-Path $vendorDir "include"
+$env:RIME_LIB_DIR = Join-Path $vendorDir "lib"
+$env:KEYTAO_RIME_LIB_NAME = if ($Arch -eq "arm64") { "rime-arm64" } else { "rime" }
+$env:KEYTAO_RIME_DLL_NAME = if ($Arch -eq "arm64") { "rime-arm64.dll" } else { "rime.dll" }
+Add-PathIfExists (Join-Path $vendorDir "bin")
 
 $rustHostTriple = Get-RustHostTriple "rustc" @()
 if (-not $rustHostTriple) {
@@ -221,21 +249,41 @@ if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "l
 
 Initialize-MsvcEnvironment $msvcArch
 
-if ($Arch -eq "x86" -and $rustHostTriple -like "x86_64-*") {
+if ($Arch -in @("x86", "arm64") -and $rustHostTriple -like "x86_64-*") {
     $vcvarsall = Find-VcVarsAll
     if (-not $vcvarsall) {
-        throw "vcvarsall.bat is required to configure the x64-to-x86 MSVC linker."
+        throw "vcvarsall.bat is required to configure the x64-to-$Arch MSVC linker."
     }
+    $crossMsvcArch = if ($Arch -eq "x86") { "x64_x86" } else { "x64_arm64" }
+    $targetEnvName = $target.Replace("-", "_")
+    $targetEnvNameUpper = $targetEnvName.ToUpperInvariant()
     $toolDir = Join-Path $repoRoot "target\keytao-windows-tools"
     New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
-    $linkerWrapper = Join-Path $toolDir "link-i686-pc-windows-msvc.cmd"
+    $linkerWrapper = Join-Path $toolDir "link-$target.cmd"
+    $compilerWrapper = Join-Path $toolDir "cl-$target.cmd"
+    $archiverWrapper = Join-Path $toolDir "lib-$target.cmd"
     @"
 @echo off
-call "$vcvarsall" x64_x86 >nul
+call "$vcvarsall" $crossMsvcArch >nul
 link.exe %*
 exit /b %errorlevel%
 "@ | Set-Content -Encoding ASCII -Path $linkerWrapper
-    $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_LINKER = $linkerWrapper
+    @"
+@echo off
+call "$vcvarsall" $crossMsvcArch >nul
+cl.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $compilerWrapper
+    @"
+@echo off
+call "$vcvarsall" $crossMsvcArch >nul
+lib.exe %*
+exit /b %errorlevel%
+"@ | Set-Content -Encoding ASCII -Path $archiverWrapper
+    [Environment]::SetEnvironmentVariable("CARGO_TARGET_${targetEnvNameUpper}_LINKER", $linkerWrapper, "Process")
+    [Environment]::SetEnvironmentVariable("CC_$targetEnvName", $compilerWrapper, "Process")
+    [Environment]::SetEnvironmentVariable("CXX_$targetEnvName", $compilerWrapper, "Process")
+    [Environment]::SetEnvironmentVariable("AR_$targetEnvName", $archiverWrapper, "Process")
 }
 
 function Find-WindowsRuntimeDll([string]$Name, [string]$WindowsArch) {
@@ -254,12 +302,16 @@ function Find-WindowsRuntimeDll([string]$Name, [string]$WindowsArch) {
 
     if ($env:WINDIR) {
         $nativeArch = Resolve-NativeWindowsArch
-        $systemDir = if ($WindowsArch -eq "x86" -and $nativeArch -eq "x64") {
+        $systemDir = if ($WindowsArch -eq "x86" -and $nativeArch -in @("x64", "arm64")) {
             "SysWOW64"
-        } else {
+        } elseif ($WindowsArch -eq $nativeArch) {
             "System32"
+        } else {
+            $null
         }
-        $candidates += (Join-Path $env:WINDIR "$systemDir\$Name")
+        if ($systemDir) {
+            $candidates += (Join-Path $env:WINDIR "$systemDir\$Name")
+        }
     }
 
     if ($WindowsArch -eq $msvcArch) {
@@ -282,6 +334,13 @@ if (-not $DebugBuild) {
     $cargoArgs += "--release"
 }
 
+$staticCrtFlag = "-C target-feature=+crt-static"
+if (-not $env:RUSTFLAGS) {
+    $env:RUSTFLAGS = $staticCrtFlag
+} elseif ($env:RUSTFLAGS -notlike "*target-feature=+crt-static*") {
+    $env:RUSTFLAGS = "$($env:RUSTFLAGS) $staticCrtFlag"
+}
+
 Push-Location $repoRoot
 try {
     & cargo @cargoArgs
@@ -293,18 +352,30 @@ try {
 }
 
 $profile = if ($DebugBuild) { "debug" } else { "release" }
-$dll = Join-Path $repoRoot "target\$target\$profile\keytao_windows_ime.dll"
+$cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
+    if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+    }
+} else {
+    Join-Path $repoRoot "target"
+}
+$dll = Join-Path $cargoTargetRoot "$target\$profile\keytao_windows_ime.dll"
 $runtimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\$Arch"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $runtimeDir
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
 Copy-Item -Force -LiteralPath (Join-Path $repoRoot "crates\keytao-theme\default-theme.yaml") -Destination $runtimeDir
+Copy-Item -Force -LiteralPath (Join-Path $vendorDir "librime-features.txt") -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $vendorDir "rime-data") -Destination $runtimeDir
-$runtimePluginDir = Join-Path $runtimeDir "rime-plugins"
-New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
-foreach ($plugin in $luaPlugins) {
-    Copy-Item -Force -LiteralPath $plugin.FullName -Destination $runtimePluginDir
+if ($luaPlugins) {
+    $runtimePluginDir = Join-Path $runtimeDir "rime-plugins"
+    New-Item -ItemType Directory -Force -Path $runtimePluginDir | Out-Null
+    foreach ($plugin in $luaPlugins) {
+        Copy-Item -Force -LiteralPath $plugin.FullName -Destination $runtimePluginDir
+    }
 }
 
 $appRuntimeDir = Join-Path $repoRoot "target\keytao-windows-app-runtime"
@@ -332,10 +403,12 @@ foreach ($runtimeDll in $requiredRuntimeDlls) {
     }
 }
 
-$currentRuntimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\current"
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $currentRuntimeDir
-New-Item -ItemType Directory -Force -Path $currentRuntimeDir | Out-Null
-Copy-Item -Recurse -Force -Path (Join-Path $runtimeDir "*") -Destination $currentRuntimeDir
+if ($Arch -ne "arm64") {
+    $currentRuntimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\current"
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $currentRuntimeDir
+    New-Item -ItemType Directory -Force -Path $currentRuntimeDir | Out-Null
+    Copy-Item -Recurse -Force -Path (Join-Path $runtimeDir "*") -Destination $currentRuntimeDir
+}
 
 Write-Host ""
 Write-Host "Windows IME runtime is ready:"

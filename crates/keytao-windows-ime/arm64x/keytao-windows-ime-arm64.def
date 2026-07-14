@@ -1,0 +1,5 @@
+EXPORTS
+    DllGetClassObject = keytao_windows_ime_arm64.dll.DllGetClassObject
+    DllCanUnloadNow = keytao_windows_ime_arm64.dll.DllCanUnloadNow
+    DllRegisterServer = keytao_windows_ime_arm64.dll.DllRegisterServer
+    DllUnregisterServer = keytao_windows_ime_arm64.dll.DllUnregisterServer

@@ -5,9 +5,12 @@ input method framework used by Windows 7, Windows 10, and Windows 11.
 
 ## Build
 
-Install Rust, the MSVC toolchain, and LLVM/Clang. The KeyTao scripts download
-the official librime Windows SDK from GitHub releases and place it under
-`vendor\librime`.
+Install Rust, the MSVC x86/x64/ARM64/ARM64EC toolchains, and LLVM/Clang. The
+KeyTao scripts download the official x86/x64 librime SDK and build native
+ARM64 librime from the same upstream release tag. The ARM64 source build pins
+and merges the same `librime-lua` revision recorded by the official Windows
+SDK, so native ARM64 hosts expose the same Lua translators, filters, and
+processors as x86/x64 hosts.
 
 Example with Scoop:
 
@@ -34,15 +37,17 @@ directories and points `current` at x64:
 ```text
 target\keytao-windows-ime-runtime\x64
 target\keytao-windows-ime-runtime\x86
+target\keytao-windows-ime-runtime\arm64
+target\keytao-windows-ime-runtime\arm64x
 target\keytao-windows-ime-runtime\current
 ```
 
-An x64 KeyTao installer includes both x64 and x86 TIP runtimes because TSF
-loads the IME DLL into the target application process. The installer registers
-both DLLs with the matching `regsvr32.exe`. The native runtime stays below
-`%ProgramFiles%`, while the complete x86 text-service runtime is installed at
-`%ProgramFiles(x86)%\KeyTao\keytao-windows-ime-runtime\x86` as required for
-side-by-side Windows text services.
+TSF loads the IME DLL into each target process, so the package includes x86,
+x64, and ARM64 code. On Windows on ARM, an ARM64X forwarder dispatches to the
+native ARM64 target or the x64 target according to the host process. The
+installer copies the complete runtimes into a unique directory below
+`%ProgramData%\KeyTao\keytao-windows-ime-runtime` before registration. Loaded
+TIP files are therefore never overwritten during an upgrade.
 
 To only download librime:
 
@@ -77,20 +82,31 @@ Weasel or any other input method. A minimal runtime layout is:
 ```text
 KeyTao\
   keytao_windows_ime.dll
-  rime.dll / librime.dll and dependency DLLs
+  rime.dll / rime-arm64.dll with merged librime-lua
+  librime-features.txt
   rime-data\
     default.yaml
     essay.txt
     ...
 ```
 
-The input-switcher branding icon is PE resource ID 1 inside
-`keytao_windows_ime.dll`; no external profile ICO is required. The dedicated
-black-and-white icon includes 16, 20, 24, 32, 40, and 48 pixel 32-bit alpha
-frames required by the Windows IME UI guidelines.
+The input-switcher branding icon is PE resource ID 1 inside each target DLL;
+its TSF profile index is the zero-based value `0`, so no external profile ICO
+is required. It uses the same white-star identity as the macOS input source,
+rendered on a dark tile so it remains legible on the light Windows taskbar.
+Resource IDs 2 and 3 remain dedicated Chinese and English language-bar icons.
+The text service also publishes the standard input-mode conversion compartment.
+
+Candidate text uses the installed Windows font stack: a CJK face first, then
+Segoe UI Emoji and Segoe UI Symbol for missing emoji and symbol glyphs. The
+system fonts are referenced in place and are not redistributed in the package.
 
 The IME first looks for `rime-data` next to `keytao_windows_ime.dll`, then under
 `resources\rime-data` and `share\rime-data`.
+
+The build and bundle verification scripts reject a Windows runtime unless its
+feature manifest declares merged `librime-lua` support and the matching Rime
+DLL contains the Lua translator, filter, and processor registrations.
 
 ## Rime Data
 
@@ -131,9 +147,11 @@ Chinese (Simplified). To uninstall:
 regsvr32 /u .\target\x86_64-pc-windows-msvc\release\keytao_windows_ime.dll
 ```
 
-On Windows 7, use the same commands from an elevated prompt. On 64-bit systems,
-register the 64-bit DLL with `System32\regsvr32.exe` and the 32-bit DLL with
-`SysWOW64\regsvr32.exe`.
+On Windows 7, use the same commands from an elevated prompt. On x64 systems,
+register the x64 DLL with `System32\regsvr32.exe` and the x86 DLL with
+`SysWOW64\regsvr32.exe`. On ARM64 systems, register the ARM64X forwarder with
+native `System32\regsvr32.exe`; the forwarder selects the matching ARM64 or x64
+target in each host process.
 
 The TIP initializes librime without deployment. Install or update schemas with
 the KeyTao app before selecting the IME; deployment must not run inside an

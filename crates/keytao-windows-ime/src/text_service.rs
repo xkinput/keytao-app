@@ -17,11 +17,12 @@ use windows::{
 
 use crate::{
     display_attribute,
-    globals::{lock_server, DllActivityGuard},
+    globals::{lock_server, pin_module, DllActivityGuard},
     key_event_sink::KeyEventSink,
+    language_bar::LanguageBarItem,
     state::{
-        append_diagnostic, hide_ime_windows, new_shared_state, reset_input_for_focus_change,
-        start_engine_warmup, SharedState, WeakState,
+        append_diagnostic, hide_ime_windows, new_shared_state, refresh_engine_for_focus,
+        reset_input_for_focus_change, start_engine_warmup, SharedState, WeakState,
     },
 };
 
@@ -95,6 +96,7 @@ fn activate_service(
     let thread_mgr = thread_mgr.ok_or(windows::core::Error::from(
         windows::Win32::Foundation::E_INVALIDARG,
     ))?;
+    pin_module()?;
     let thread_mgr_flags = thread_mgr
         .cast::<ITfThreadMgrEx>()
         .ok()
@@ -199,18 +201,31 @@ fn activate_service(
             }
         };
 
+    let language_bar =
+        match LanguageBarItem::add(thread_mgr, client_id, std::rc::Rc::downgrade(state)) {
+            Ok(item) => Some(item),
+            Err(error) => {
+                append_diagnostic(format!("Add TSF language bar item failed: {error}"));
+                None
+            }
+        };
+
     let mut st = state.borrow_mut();
     st.key_sink = Some(key_sink_iface);
     st.thread_mgr_sink = Some(thread_sink_iface);
     st.thread_mgr_sink_cookie = Some(thread_sink_cookie);
     st.thread_focus_sink = Some(thread_focus_sink_iface);
     st.thread_focus_sink_cookie = Some(thread_focus_sink_cookie);
+    st.language_bar = language_bar;
     drop(st);
 
     tracing::info!("KeyTao TSF activated (client_id={})", client_id);
     append_diagnostic(format!(
         "TSF activated client_id={client_id} activation_flags=0x{activation_flags:08x} thread_mgr_flags=0x{thread_mgr_flags:08x}"
     ));
+    if unsafe { thread_mgr.GetFocus() }.is_ok() {
+        start_engine_warmup(state);
+    }
     Ok(())
 }
 
@@ -221,15 +236,20 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
     fn Deactivate(&self) -> Result<()> {
         reset_input_for_focus_change(&self.state);
-        let (thread_mgr, client_id, thread_sink_cookie, thread_focus_sink_cookie) = {
-            let st = self.state.borrow();
+        let (thread_mgr, client_id, thread_sink_cookie, thread_focus_sink_cookie, language_bar) = {
+            let mut st = self.state.borrow_mut();
             (
                 st.thread_mgr.clone(),
                 st.client_id,
                 st.thread_mgr_sink_cookie,
                 st.thread_focus_sink_cookie,
+                st.language_bar.take(),
             )
         };
+
+        if let Some(language_bar) = language_bar {
+            language_bar.remove();
+        }
 
         if let Some(thread_mgr) = thread_mgr {
             if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
@@ -264,6 +284,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         st.thread_mgr_sink_cookie = None;
         st.thread_focus_sink = None;
         st.thread_focus_sink_cookie = None;
+        st.language_bar = None;
         st.thread_mgr = None;
         st.ime_state = None;
         st.client_id = 0;
@@ -322,6 +343,7 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     ) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
             reset_input_for_focus_change(&state);
+            refresh_engine_for_focus(&state);
         }
         append_diagnostic(format!(
             "ThreadMgrEventSink OnSetFocus focus={}",
@@ -333,6 +355,7 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     fn OnPushContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
             reset_input_for_focus_change(&state);
+            refresh_engine_for_focus(&state);
         }
         append_diagnostic("ThreadMgrEventSink OnPushContext");
         Ok(())
@@ -356,7 +379,7 @@ struct ThreadFocusSink {
 impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
-            start_engine_warmup(&state);
+            refresh_engine_for_focus(&state);
         }
         append_diagnostic("ThreadFocusSink OnSetThreadFocus");
         Ok(())

@@ -2,6 +2,16 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
+use windows::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::HMODULE,
+        System::LibraryLoader::{
+            GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            GET_MODULE_HANDLE_EX_FLAG_PIN,
+        },
+    },
+};
 
 #[cfg(target_os = "windows")]
 pub static DLL_INSTANCE: OnceLock<isize> = OnceLock::new();
@@ -11,6 +21,26 @@ static DLL_OBJ_COUNT: AtomicI32 = AtomicI32::new(0);
 
 /// Counts LockServer(TRUE) calls.
 static DLL_LOCK_COUNT: AtomicI32 = AtomicI32::new(0);
+static DLL_PINNED: OnceLock<()> = OnceLock::new();
+
+/// Keep this in-process TIP loaded until its host process exits.
+pub fn pin_module() -> windows::core::Result<()> {
+    if DLL_PINNED.get().is_some() {
+        return Ok(());
+    }
+
+    let mut module = HMODULE::default();
+    let address = pin_module as *const () as *const u16;
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            PCWSTR(address),
+            &mut module,
+        )?;
+    }
+    let _ = DLL_PINNED.set(());
+    Ok(())
+}
 
 pub fn obj_add() {
     DLL_OBJ_COUNT.fetch_add(1, Ordering::SeqCst);

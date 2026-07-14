@@ -1450,25 +1450,7 @@ fn detect_system_effective_color_scheme() -> EffectiveColorScheme {
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(scheme) = command_output_scheme(
-            "reg",
-            &[
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-                "/v",
-                "AppsUseLightTheme",
-            ],
-            |output| {
-                let lower = output.to_ascii_lowercase();
-                if lower.contains("0x0") {
-                    Some(EffectiveColorScheme::Dark)
-                } else if lower.contains("0x1") {
-                    Some(EffectiveColorScheme::Light)
-                } else {
-                    None
-                }
-            },
-        ) {
+        if let Some(scheme) = windows_effective_color_scheme() {
             return scheme;
         }
     }
@@ -1509,6 +1491,40 @@ fn parse_effective_color_scheme(value: &str) -> Option<EffectiveColorScheme> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_effective_color_scheme() -> Option<EffectiveColorScheme> {
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+        },
+    };
+
+    let mut value = 1u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    if status != ERROR_SUCCESS || size != std::mem::size_of::<u32>() as u32 {
+        return None;
+    }
+    Some(if value == 0 {
+        EffectiveColorScheme::Dark
+    } else {
+        EffectiveColorScheme::Light
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn command_output_scheme(
     command: &str,
     args: &[&str],

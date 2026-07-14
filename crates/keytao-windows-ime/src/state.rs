@@ -13,11 +13,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::{
     core::{implement, Interface, PCWSTR},
     Win32::{
-        Foundation::{FreeLibrary, HANDLE, HMODULE},
+        Foundation::{CloseHandle, FreeLibrary, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0},
         System::LibraryLoader::{
             LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         },
+        System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
             ITfComposition, ITfContext, ITfDocumentMgr, ITfEditSession, ITfEditSession_Impl,
@@ -28,10 +29,13 @@ use windows::{
     },
 };
 
-use crate::{candidate_ui::CandidateUiManager, globals::DllActivityGuard};
+use crate::{
+    candidate_ui::CandidateUiManager, globals::DllActivityGuard, language_bar::LanguageBarItem,
+};
 
 const RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
 static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
 
 // ── Shared TsfState ───────────────────────────────────────────────────────────
@@ -53,6 +57,7 @@ pub struct TsfState {
     pub thread_mgr_flags: u32,
     pub display_attribute_atom: Option<u32>,
     pub key_sink: Option<ITfKeyEventSink>,
+    pub(crate) language_bar: Option<LanguageBarItem>,
     pub composition: Option<ITfComposition>,
     pub composition_context: Option<ITfContext>,
     pub ime_state: Option<ImeState>,
@@ -66,6 +71,7 @@ pub struct TsfState {
     pub reload_clear_pending: bool,
     reload_retry_after: Option<Instant>,
     pub shift_pressed_without_key: bool,
+    session_reset_pending: bool,
     engine_build_mailbox: Arc<EngineBuildMailbox>,
     reload_mailbox: Arc<EngineBuildMailbox>,
 }
@@ -106,6 +112,8 @@ impl EngineBuildMailbox {
 
 struct LoadedRimeDll(HMODULE);
 
+struct EngineInitGuard(HANDLE);
+
 #[implement(ITfEditSession)]
 struct CompositionEndEditSession {
     context: ITfContext,
@@ -129,6 +137,39 @@ impl ITfEditSession_Impl for CompositionEndEditSession_Impl {
 // SAFETY: The handle is retained only to keep the lazily loaded module alive
 // while the TSF text service owns the librime runtime. It is not dereferenced.
 unsafe impl Send for LoadedRimeDll {}
+
+unsafe impl Send for EngineInitGuard {}
+
+impl EngineInitGuard {
+    fn acquire() -> Result<Self, String> {
+        let mut name: Vec<u16> = "Local\\KeyTao.WindowsIme.EngineInit"
+            .encode_utf16()
+            .collect();
+        name.push(0);
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+            .map_err(|error| format!("create engine initialization mutex: {error}"))?;
+        let wait = unsafe { WaitForSingleObject(handle, ENGINE_INIT_MUTEX_TIMEOUT_MS) };
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!(
+                "wait for engine initialization mutex: 0x{:08x}",
+                wait.0
+            ));
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for EngineInitGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 
 impl Drop for LoadedRimeDll {
     fn drop(&mut self) {
@@ -157,6 +198,7 @@ impl TsfState {
             thread_mgr_flags: 0,
             display_attribute_atom: None,
             key_sink: None,
+            language_bar: None,
             composition: None,
             composition_context: None,
             ime_state: None,
@@ -170,12 +212,14 @@ impl TsfState {
             reload_clear_pending: false,
             reload_retry_after: None,
             shift_pressed_without_key: false,
+            session_reset_pending: false,
             engine_build_mailbox: Arc::new(EngineBuildMailbox::new()),
             reload_mailbox: Arc::new(EngineBuildMailbox::new()),
         }
     }
 
     pub(crate) fn build_engine() -> Result<EngineBundle, String> {
+        let _init_guard = EngineInitGuard::acquire()?;
         let user_dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
         let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
         let rime_dll = preload_rime_dll(&shared)?;
@@ -199,6 +243,12 @@ impl TsfState {
         self.reload_stamp_signature = Some(bundle.reload_stamp_signature);
         self.reload_stamp_path = Some(bundle.reload_stamp_path);
         self.rime_dll = bundle.rime_dll;
+        if self.ascii_mode {
+            self.ime_state = self
+                .session
+                .as_ref()
+                .and_then(|session| session.set_ascii_mode(true));
+        }
         self.engine_building = false;
         self.engine_error = None;
         self.engine_retry_after = None;
@@ -416,6 +466,54 @@ pub(crate) fn poll_engine_builds(shared_state: &SharedState) {
     shared_state.borrow_mut().poll_engine_builds();
 }
 
+pub(crate) fn refresh_engine_for_focus(shared_state: &SharedState) {
+    poll_engine_builds(shared_state);
+    if shared_state.borrow().engine_ready() {
+        start_reload_if_needed(shared_state);
+    } else {
+        start_engine_warmup(shared_state);
+    }
+}
+
+pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) {
+    let session = {
+        let mut state = shared_state.borrow_mut();
+        if !std::mem::take(&mut state.session_reset_pending) {
+            return;
+        }
+        state.session()
+    };
+    if let Some(session) = session {
+        let ime_state = session.reset();
+        shared_state.borrow_mut().ime_state = ime_state;
+    }
+}
+
+pub(crate) fn update_language_bar_mode(shared_state: &SharedState, ascii_mode: bool) {
+    let language_bar = shared_state.borrow().language_bar.clone();
+    if let Some(language_bar) = language_bar {
+        language_bar.update_mode(ascii_mode);
+    }
+}
+
+pub(crate) fn set_ascii_mode_from_language_bar(shared_state: &SharedState, ascii_mode: bool) {
+    reset_input_for_focus_change(shared_state);
+    poll_engine_builds(shared_state);
+    let session = shared_state.borrow().session();
+    let ime_state = session
+        .as_ref()
+        .and_then(|session| session.set_ascii_mode(ascii_mode));
+    {
+        let mut state = shared_state.borrow_mut();
+        state.ascii_mode = ascii_mode;
+        state.ime_state = ime_state;
+    }
+    if session.is_none() {
+        start_engine_warmup(shared_state);
+    }
+    update_language_bar_mode(shared_state, ascii_mode);
+}
+
 pub(crate) fn update_ime_windows(
     shared_state: &SharedState,
     ime_state: &ImeState,
@@ -461,22 +559,20 @@ pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
 }
 
 pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
-    let (active_composition, session) = {
+    let active_composition = {
         let mut st = shared_state.borrow_mut();
         st.shift_pressed_without_key = false;
+        st.session_reset_pending = true;
         let active_composition = st
             .composition
             .take()
             .zip(st.composition_context.take())
             .map(|(composition, context)| (context, composition, st.client_id));
         st.ime_state = None;
-        (active_composition, st.session())
+        active_composition
     };
     if let Some((context, composition, client_id)) = active_composition {
         request_composition_end(context, composition, client_id);
-    }
-    if let Some(session) = session {
-        let _ = session.reset();
     }
     hide_ime_windows(shared_state);
 }
@@ -497,16 +593,13 @@ pub(crate) fn clear_input_after_composition_terminated(
         return;
     }
 
-    let session = {
+    {
         let mut st = shared_state.borrow_mut();
         st.shift_pressed_without_key = false;
+        st.session_reset_pending = true;
         st.composition = None;
         st.composition_context = None;
         st.ime_state = None;
-        st.session()
-    };
-    if let Some(session) = session {
-        let _ = session.reset();
     }
     hide_ime_windows(shared_state);
 }
@@ -616,7 +709,11 @@ fn preload_rime_dll(shared_data_dir: &str) -> Result<Option<LoadedRimeDll>, Stri
     let Some(runtime_dir) = Path::new(shared_data_dir).parent() else {
         return Ok(None);
     };
-    let rime_dll = runtime_dir.join("rime.dll");
+    let rime_dll = if cfg!(target_arch = "aarch64") {
+        runtime_dir.join("rime-arm64.dll")
+    } else {
+        runtime_dir.join("rime.dll")
+    };
     if !rime_dll.is_file() {
         return Ok(None);
     }

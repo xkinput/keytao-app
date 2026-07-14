@@ -5,16 +5,51 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
-    CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+    CandidatePanelInput, PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate,
+    ThemeResolver, UiCapabilities,
 };
 use std::path::{Path as FsPath, PathBuf};
 use tiny_skia::*;
 
 // ── Font loader ───────────────────────────────────────────────────────────────
 
-/// Load the first available CJK-capable font from common Windows paths.
-pub fn load_font() -> Option<fontdue::Font> {
-    const PATHS: &[&str] = &[
+const FONT_PROBE_SIZE: f32 = 24.0;
+
+pub struct FontSet {
+    fonts: Vec<fontdue::Font>,
+}
+
+fn load_font_with_samples(path: &str, samples: &[char]) -> Option<fontdue::Font> {
+    let data = std::fs::read(path).ok()?;
+    for collection_index in 0..16 {
+        let settings = fontdue::FontSettings {
+            collection_index,
+            ..Default::default()
+        };
+        let Ok(font) = fontdue::Font::from_bytes(data.clone(), settings) else {
+            if collection_index == 0 {
+                tracing::debug!("rejected unreadable font: {path}");
+            }
+            break;
+        };
+        let has_visible_sample = samples.iter().any(|sample| {
+            if !font.has_glyph(*sample) {
+                return false;
+            }
+            let (metrics, bitmap) = font.rasterize(*sample, FONT_PROBE_SIZE);
+            metrics.width > 0 && metrics.height > 0 && bitmap.iter().any(|alpha| *alpha != 0)
+        });
+        if has_visible_sample {
+            tracing::info!("loaded font: {path} (collection index {collection_index})");
+            return Some(font);
+        }
+    }
+    None
+}
+
+/// Load a CJK text face plus Windows' system emoji and symbol fallbacks.
+pub fn load_font() -> Option<FontSet> {
+    const TEXT_PATHS: &[&str] = &[
         r"C:\Windows\Fonts\msyh.ttc", // Microsoft YaHei
         r"C:\Windows\Fonts\msyhbd.ttc",
         r"C:\Windows\Fonts\simsun.ttc",   // SimSun
@@ -22,31 +57,49 @@ pub fn load_font() -> Option<fontdue::Font> {
         r"C:\Windows\Fonts\STZHONGS.TTF", // STZhongSong
         r"C:\Windows\Fonts\NotoSansCJK-Regular.ttc",
     ];
-    for p in PATHS {
-        if let Ok(data) = std::fs::read(p) {
-            if let Ok(f) =
-                fontdue::Font::from_bytes(data.as_slice(), fontdue::FontSettings::default())
-            {
-                tracing::info!("loaded font: {p}");
-                return Some(f);
-            }
+
+    const FALLBACK_PATHS: &[&str] = &[
+        r"C:\Windows\Fonts\seguiemj.ttf", // Segoe UI Emoji
+        r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol
+        r"C:\Windows\Fonts\segoeui.ttf",  // Segoe UI
+    ];
+
+    let mut fonts = Vec::new();
+    for path in TEXT_PATHS {
+        if let Some(font) = load_font_with_samples(path, &['中', '候']) {
+            fonts.push(font);
+            break;
         }
     }
-    tracing::warn!("no CJK font found; candidate text may be blank");
-    None
+    if fonts.is_empty() {
+        tracing::warn!("no CJK font found; candidate text may be blank");
+        return None;
+    }
+
+    let fallback_samples = ['🚫', '😀', '⚠', '♥', '✓'];
+    for path in FALLBACK_PATHS {
+        if let Some(font) = load_font_with_samples(path, &fallback_samples) {
+            fonts.push(font);
+        }
+    }
+    if fonts.len() == 1 {
+        tracing::warn!("no Windows emoji or symbol fallback font found");
+    }
+
+    Some(FontSet { fonts })
 }
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
 pub struct PanelRenderer {
-    font: fontdue::Font,
+    fonts: Vec<fontdue::Font>,
     theme_resolver: ThemeResolver,
 }
 
 impl PanelRenderer {
-    pub fn new(font: fontdue::Font) -> Self {
+    pub fn new(fonts: FontSet) -> Self {
         Self {
-            font,
+            fonts: fonts.fonts,
             theme_resolver: ThemeResolver::new(
                 windows_bundled_default_theme_path()
                     .or_else(keytao_theme::default_bundled_theme_path),
@@ -56,8 +109,9 @@ impl PanelRenderer {
     }
 
     /// Render panel to a premultiplied BGRA byte buffer. Returns (bytes, width, height).
-    pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
-        let theme = self.theme_resolver.current();
+    pub fn render(&self, state: &ImeState, scale: f32) -> (Vec<u8>, u32, u32) {
+        let mut theme = self.theme_resolver.current();
+        let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme
             .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
         let font_size = theme.font.size;
@@ -187,6 +241,7 @@ impl PanelRenderer {
                     label_size,
                     font_size,
                     comment_size,
+                    scale,
                     &theme,
                 );
                 row_y += option_height + panel_gap;
@@ -198,6 +253,7 @@ impl PanelRenderer {
                     row_y,
                     nav_button,
                     font_size,
+                    scale,
                     &model.navigation,
                     &theme,
                 );
@@ -215,6 +271,7 @@ impl PanelRenderer {
                     label_size,
                     font_size,
                     comment_size,
+                    scale,
                     &theme,
                 );
                 x += option_width + panel_gap;
@@ -226,6 +283,7 @@ impl PanelRenderer {
                     y,
                     nav_button,
                     font_size,
+                    scale,
                     &model.navigation,
                     &theme,
                 );
@@ -241,15 +299,16 @@ impl PanelRenderer {
         (out, width, height)
     }
 
-    pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
-        let theme = self.theme_resolver.current();
+    pub fn render_mode_hint(&self, ascii_mode: bool, scale: f32) -> (Vec<u8>, u32, u32) {
+        let mut theme = self.theme_resolver.current();
+        let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
         let font_size = theme.mode_hint.font_size;
         let height = theme.mode_hint.height.ceil().max(1.0) as u32;
         let min_width = theme.mode_hint.width.ceil().max(1.0) as u32;
         let label = model.text;
         let text_width = self.text_width(&label, font_size);
-        let width = min_width.max((text_width + 40.0).ceil() as u32);
+        let width = min_width.max((text_width + 40.0 * scale).ceil() as u32);
 
         let Some(mut pm) = Pixmap::new(width, height) else {
             tracing::warn!("mode hint: failed to allocate pixmap {width}x{height}");
@@ -269,7 +328,7 @@ impl PanelRenderer {
         );
 
         let x = (width as f32 - text_width) * 0.5;
-        let baseline = (height as f32 + font_size) * 0.5 - 3.0;
+        let baseline = (height as f32 + font_size) * 0.5 - 3.0 * scale;
         self.draw_text(
             &mut pm,
             &label,
@@ -306,6 +365,7 @@ impl PanelRenderer {
         label_size: f32,
         font_size: f32,
         comment_size: f32,
+        scale: f32,
         theme: &keytao_theme::ResolvedImeTheme,
     ) {
         let option = &theme.candidate;
@@ -337,7 +397,7 @@ impl PanelRenderer {
         );
 
         let mut text_x = x + option.padding_x;
-        let baseline = y + (height + font_size) * 0.5 - 3.0;
+        let baseline = y + (height + font_size) * 0.5 - 3.0 * scale;
         let label_color = if candidate.selected {
             option.selected_label_color
         } else {
@@ -391,11 +451,12 @@ impl PanelRenderer {
         y: f32,
         button_size: f32,
         font_size: f32,
+        scale: f32,
         navigation: &keytao_theme::PageNavigationModel,
         theme: &keytao_theme::ResolvedImeTheme,
     ) {
         let mut nav_x = x;
-        let baseline = y + (button_size + font_size) * 0.5 - 3.0;
+        let baseline = y + (button_size + font_size) * 0.5 - 3.0 * scale;
         if navigation.can_go_previous {
             self.draw_text(
                 pm,
@@ -429,7 +490,13 @@ impl PanelRenderer {
         size: f32,
     ) {
         for ch in text.chars() {
-            let (metrics, bitmap) = self.font.rasterize(ch, size);
+            if is_zero_width_emoji_component(ch) {
+                continue;
+            }
+            let Some((metrics, bitmap)) = self.rasterize_char(ch, size) else {
+                x += size * 0.5;
+                continue;
+            };
             let gx = (x + metrics.xmin as f32) as i32;
             let gy = (baseline - metrics.height as f32 - metrics.ymin as f32) as i32;
             for row in 0..metrics.height {
@@ -457,9 +524,80 @@ impl PanelRenderer {
 
     fn text_width(&self, text: &str, size: f32) -> f32 {
         text.chars()
-            .map(|c| self.font.rasterize(c, size).0.advance_width)
+            .map(|ch| {
+                if is_zero_width_emoji_component(ch) {
+                    0.0
+                } else {
+                    self.rasterize_char(ch, size)
+                        .map(|(metrics, _)| metrics.advance_width)
+                        .unwrap_or(size * 0.5)
+                }
+            })
             .sum()
     }
+
+    fn rasterize_char(&self, ch: char, size: f32) -> Option<(fontdue::Metrics, Vec<u8>)> {
+        for font in &self.fonts {
+            if !font.has_glyph(ch) {
+                continue;
+            }
+            let (metrics, bitmap) = font.rasterize(ch, size);
+            if ch.is_whitespace()
+                || (metrics.width > 0
+                    && metrics.height > 0
+                    && bitmap.iter().any(|alpha| *alpha != 0))
+            {
+                return Some((metrics, bitmap));
+            }
+        }
+        None
+    }
+}
+
+// fontdue does not shape emoji sequences; isolated modifiers render as missing-glyph boxes.
+fn is_zero_width_emoji_component(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{fe0e}' | '\u{fe0f}' | '\u{200d}' | '\u{1f3fb}'..='\u{1f3ff}'
+    )
+}
+
+fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
+    let scale = scale.clamp(0.5, 3.0);
+
+    theme.font.size *= scale;
+    theme.font.label_size *= scale;
+    theme.font.comment_size *= scale;
+    theme.font.preedit_size *= scale;
+
+    theme.panel.border_width *= scale;
+    theme.panel.corner_radius *= scale;
+    theme.panel.padding_x *= scale;
+    theme.panel.padding_y *= scale;
+    theme.panel.gap *= scale;
+    theme.panel.min_width *= scale;
+    theme.panel.max_width *= scale;
+    theme.panel.max_height *= scale;
+    theme.panel.screen_margin *= scale;
+
+    theme.candidate.border_width *= scale;
+    theme.candidate.corner_radius *= scale;
+    theme.candidate.padding_x *= scale;
+    theme.candidate.padding_y *= scale;
+    theme.candidate.inline_gap *= scale;
+    theme.candidate.min_height *= scale;
+    theme.candidate.max_width *= scale;
+
+    theme.navigation.button_size *= scale;
+    theme.navigation.corner_radius *= scale;
+
+    theme.mode_hint.border_width *= scale;
+    theme.mode_hint.font_size *= scale;
+    theme.mode_hint.width *= scale;
+    theme.mode_hint.height *= scale;
+    theme.mode_hint.corner_radius *= scale;
+
+    scale
 }
 
 fn windows_bundled_default_theme_path() -> Option<PathBuf> {
@@ -514,7 +652,8 @@ fn lerp(a: u8, b: u8, t: f32) -> u8 {
 
 fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
     CandidatePanelInput {
-        preedit: state.preedit.clone(),
+        // TSF already renders the composition in the client edit control.
+        preedit: String::new(),
         candidates: state
             .candidates
             .iter()
@@ -598,4 +737,49 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
     pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
     pb.close();
     pb.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_zero_width_emoji_component, load_font, state_to_panel_input, PanelRenderer};
+    use keytao_core::ImeState;
+
+    #[test]
+    fn candidate_panel_does_not_duplicate_inline_preedit() {
+        let mut state = ImeState::empty();
+        state.preedit = "f".to_owned();
+
+        assert!(state_to_panel_input(&state).preedit.is_empty());
+    }
+
+    #[test]
+    fn windows_system_fonts_cover_common_emoji_and_symbols() {
+        let fonts = load_font().expect("load Windows candidate fonts");
+        let renderer = PanelRenderer::new(fonts);
+
+        for ch in ['🚫', '😀', '⚠', '♥'] {
+            let (metrics, bitmap) = renderer
+                .rasterize_char(ch, 24.0)
+                .unwrap_or_else(|| panic!("missing visible glyph for {ch}"));
+            assert!(metrics.width > 0 && metrics.height > 0);
+            assert!(bitmap.iter().any(|alpha| *alpha != 0));
+        }
+    }
+
+    #[test]
+    fn unshaped_emoji_components_do_not_consume_layout_width() {
+        for ch in [
+            '\u{fe0e}',
+            '\u{fe0f}',
+            '\u{200d}',
+            '\u{1f3fb}',
+            '\u{1f3fc}',
+            '\u{1f3fd}',
+            '\u{1f3fe}',
+            '\u{1f3ff}',
+        ] {
+            assert!(is_zero_width_emoji_component(ch));
+        }
+        assert!(!is_zero_width_emoji_component('👍'));
+    }
 }

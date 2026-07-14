@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path (Split-Path -Parent $PSCommandPath) "..")).Path
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSCommandPath) ".."))
 if (-not $ReleaseDir) {
     $ReleaseDir = Join-Path $repoRoot "target\release"
 }
@@ -33,6 +33,28 @@ function Require-Pattern([string]$Path, [string]$Pattern, [string]$Message) {
     }
 }
 
+function Require-AsciiMarkers([string]$Path, [string[]]$Markers) {
+    $text = [System.Text.Encoding]::ASCII.GetString(
+        [System.IO.File]::ReadAllBytes($Path)
+    )
+    foreach ($marker in $Markers) {
+        if (-not $text.Contains($marker)) {
+            throw "$Path is missing required runtime marker '$marker'"
+        }
+    }
+}
+
+function Require-MergedLuaManifest([string]$Path) {
+    Require-File $Path "Missing librime feature manifest: $Path"
+    $features = Get-Content -LiteralPath $Path -Raw
+    if ($features -notmatch '(?m)^librime-lua=merged\r?$') {
+        throw "$Path does not declare merged librime-lua support"
+    }
+    if ($features -notmatch '(?m)^librime-lua-ref=[0-9a-f]{7,40}\r?$') {
+        throw "$Path does not record the librime-lua source revision"
+    }
+}
+
 function Find-OnPath([string]$Name) {
     $result = & cmd.exe /d /c "where `"$Name`" 2>nul"
     if ($LASTEXITCODE -eq 0 -and $result) {
@@ -55,6 +77,49 @@ function Require-DelayLoadedDependency([string]$Dll, [string]$Dependency) {
 
     if ($output -notmatch "(?is)delay load dependencies:\s*.*$([regex]::Escape($Dependency))") {
         throw "$Dependency must be delay-loaded by $Dll; otherwise TSF may load librime while switching input methods."
+    }
+}
+
+function Require-NoCrtDependency([string]$Dll) {
+    $dumpbin = Find-OnPath "dumpbin.exe"
+    if (-not $dumpbin) {
+        Write-Warning "dumpbin.exe was not found; skipping static CRT verification for $Dll."
+        return
+    }
+
+    $output = & $dumpbin /dependents $Dll 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin.exe failed while checking CRT imports for $Dll"
+    }
+    if ($output -match "(?im)^\s*(VCRUNTIME|MSVCP|UCRTBASE)[^\s]*\.dll\s*$") {
+        throw "$Dll must statically link the Rust/MSVC CRT so background TSF work cannot call an unloaded CRT module."
+    }
+}
+
+function Require-Arm64X([string]$Dll) {
+    $dumpbin = Find-OnPath "dumpbin.exe"
+    if (-not $dumpbin) {
+        throw "dumpbin.exe is required to verify the ARM64X forwarder: $Dll"
+    }
+    $output = & $dumpbin /headers $Dll 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or $output -notmatch "(?i)ARM64X") {
+        throw "$Dll is not a valid ARM64X binary"
+    }
+}
+
+function Require-Exports([string]$Dll, [string[]]$Exports) {
+    $dumpbin = Find-OnPath "dumpbin.exe"
+    if (-not $dumpbin) {
+        throw "dumpbin.exe is required to verify COM exports: $Dll"
+    }
+    $output = & $dumpbin /exports $Dll 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "dumpbin.exe failed while checking exports for $Dll"
+    }
+    foreach ($export in $Exports) {
+        if ($output -notmatch "(?m)\b$([regex]::Escape($export))\b") {
+            throw "$Dll is missing required COM export $export"
+        }
     }
 }
 
@@ -173,33 +238,22 @@ function Verify-AuthenticodeSignature([string]$Path) {
     Write-Warning "$message. Set KEYTAO_REQUIRE_WINDOWS_SIGNATURE=1 for production release enforcement."
 }
 
-function Find-LuaPlugin([string[]]$Dirs) {
-    foreach ($dir in $Dirs) {
-        if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) {
-            continue
-        }
-        $plugin = Get-ChildItem -Path $dir -File |
-            Where-Object {
-                $name = $_.Name.ToLowerInvariant()
-                $name.Contains("rime") -and $name.Contains("lua") -and $name.EndsWith(".dll")
-            } |
-            Select-Object -First 1
-        if ($plugin) {
-            return $plugin.FullName
-        }
-    }
-    return $null
-}
-
 Require-Directory $ReleaseDir "Missing Windows release directory: $ReleaseDir"
 Require-Directory $BundleDir "Missing Windows bundle directory: $BundleDir"
 
 $nsisDir = Join-Path $BundleDir "nsis"
 Require-Directory $nsisDir "Missing Windows NSIS bundle directory: $nsisDir"
 
-$installer = Get-ChildItem -Path $nsisDir -Filter "*.exe" -File | Select-Object -First 1
-if (-not $installer) {
-    throw "Missing Windows NSIS .exe installer"
+$configPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
+$config = Get-Content $configPath -Raw | ConvertFrom-Json
+$expectedInstallerName = "$($config.productName)_$($config.version)_$Arch-setup.exe"
+$expectedInstallerPath = Join-Path $nsisDir $expectedInstallerName
+Require-File $expectedInstallerPath "Missing current Windows NSIS installer: $expectedInstallerPath"
+$installer = Get-Item -LiteralPath $expectedInstallerPath
+$unexpectedExeInstallers = Get-ChildItem -Path $nsisDir -Filter "*.exe" -File |
+    Where-Object { $_.FullName -ne $installer.FullName }
+if ($unexpectedExeInstallers) {
+    throw "Windows NSIS directory contains stale installers: $($unexpectedExeInstallers.FullName -join ', ')"
 }
 
 $forbiddenInstallers = Get-ChildItem -Path $BundleDir -Recurse -File |
@@ -214,20 +268,38 @@ $imeDll = Join-Path $imeRuntimeDir "keytao_windows_ime.dll"
 $imeRimeDll = Join-Path $imeRuntimeDir "rime.dll"
 $imeRimeData = Join-Path $imeRuntimeDir "rime-data\default.yaml"
 $imeDefaultTheme = Join-Path $imeRuntimeDir "default-theme.yaml"
+$imeLibrimeFeatures = Join-Path $imeRuntimeDir "librime-features.txt"
 $imeVcRuntime = Join-Path $imeRuntimeDir "vcruntime140.dll"
 $imeX86RuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\x86"
 $imeX86Dll = Join-Path $imeX86RuntimeDir "keytao_windows_ime.dll"
 $imeX86RimeDll = Join-Path $imeX86RuntimeDir "rime.dll"
 $imeX86RimeData = Join-Path $imeX86RuntimeDir "rime-data\default.yaml"
 $imeX86DefaultTheme = Join-Path $imeX86RuntimeDir "default-theme.yaml"
+$imeX86LibrimeFeatures = Join-Path $imeX86RuntimeDir "librime-features.txt"
 $imeX86VcRuntime = Join-Path $imeX86RuntimeDir "vcruntime140.dll"
+$imeArm64XRuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\arm64x"
+$imeArm64XForwarder = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime.dll"
+$imeArm64X64Target = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime_x64.dll"
+$imeArm64Target = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime_arm64.dll"
+$imeArm64XRimeX64 = Join-Path $imeArm64XRuntimeDir "rime.dll"
+$imeArm64XRimeArm64 = Join-Path $imeArm64XRuntimeDir "rime-arm64.dll"
+$imeArm64XRimeData = Join-Path $imeArm64XRuntimeDir "rime-data\default.yaml"
+$imeArm64XDefaultTheme = Join-Path $imeArm64XRuntimeDir "default-theme.yaml"
+$imeArm64XLibrimeFeatures = Join-Path $imeArm64XRuntimeDir "librime-features.txt"
+$imeArm64LibrimeFeatures = Join-Path $imeArm64XRuntimeDir "librime-arm64-features.txt"
 $appRimeDll = Join-Path $ReleaseDir "rime.dll"
-$imeLuaPlugin = Find-LuaPlugin @($imeRuntimeDir, (Join-Path $imeRuntimeDir "rime-plugins"))
-$appLuaPlugin = Find-LuaPlugin @($ReleaseDir, (Join-Path $ReleaseDir "rime-plugins"))
 $hookFile = Join-Path $repoRoot "src-tauri\windows\nsis-hooks.nsh"
 $appSource = Join-Path $repoRoot "src-tauri\src\lib.rs"
 $registrationSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\registration.rs"
+$globalsSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\globals.rs"
+$languageBarSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\language_bar.rs"
+$imeLibSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\lib.rs"
+$imeStateSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\state.rs"
+$themeSource = Join-Path $repoRoot "crates\keytao-theme\src\lib.rs"
 $imeBrandIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\ime-brand.ico"
+$imeBrandSvgSource = Join-Path $repoRoot "crates\keytao-windows-ime\ime-brand.svg"
+$imeChineseModeIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\mode-zh.ico"
+$imeEnglishModeIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\mode-en.ico"
 
 Require-File $appExe "Windows release payload is missing keytao-app.exe"
 Require-File $imeDll "Windows release payload is missing keytao_windows_ime.dll"
@@ -236,11 +308,17 @@ Require-File $imeRimeData "Windows IME runtime is missing rime-data\default.yaml
 Require-File $imeDefaultTheme "Windows IME runtime is missing default-theme.yaml"
 Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
 Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
+Require-File $imeBrandSvgSource "Windows IME branding source is missing ime-brand.svg"
+Require-MergedLuaManifest $imeLibrimeFeatures
+Require-AsciiMarkers $imeRimeDll @("lua_translator", "lua_filter", "lua_processor")
+Require-AsciiMarkers $appRimeDll @("lua_translator", "lua_filter", "lua_processor")
 $nativeMachine = if ($Arch -eq "x64") { [UInt16]0x8664 } else { [UInt16]0x014C }
+Require-PeMachine $appExe $nativeMachine "$Arch application"
 Require-PeMachine $imeDll $nativeMachine $Arch
 Require-PeMachine $imeRimeDll $nativeMachine $Arch
 Require-PeMachine $imeVcRuntime $nativeMachine $Arch
 Require-DelayLoadedDependency $imeDll "rime.dll"
+Require-NoCrtDependency $imeDll
 Require-EmbeddedIcon $imeDll 1
 Verify-AuthenticodeSignature $imeDll
 if ($Arch -eq "x64") {
@@ -249,56 +327,111 @@ if ($Arch -eq "x64") {
     Require-File $imeX86RimeData "Windows x86 IME runtime is missing rime-data\default.yaml"
     Require-File $imeX86DefaultTheme "Windows x86 IME runtime is missing default-theme.yaml"
     Require-File $imeX86VcRuntime "Windows x86 IME runtime is missing vcruntime140.dll"
+    Require-MergedLuaManifest $imeX86LibrimeFeatures
+    Require-AsciiMarkers $imeX86RimeDll @("lua_translator", "lua_filter", "lua_processor")
     Require-PeMachine $imeX86Dll ([UInt16]0x014C) "x86"
     Require-PeMachine $imeX86RimeDll ([UInt16]0x014C) "x86"
     Require-PeMachine $imeX86VcRuntime ([UInt16]0x014C) "x86"
     Require-DelayLoadedDependency $imeX86Dll "rime.dll"
+    Require-NoCrtDependency $imeX86Dll
     Require-EmbeddedIcon $imeX86Dll 1
     Verify-AuthenticodeSignature $imeX86Dll
-}
-if (-not $imeLuaPlugin) {
-    Write-Warning "Windows IME runtime does not include the librime-lua plugin DLL; Lua extensions will be unavailable in this Windows package."
-}
-if (-not $appLuaPlugin) {
-    Write-Warning "Windows app payload does not include the librime-lua plugin DLL next to keytao-app.exe."
+
+    Require-File $imeArm64XForwarder "Windows x64 packages must include the ARM64X TSF forwarder"
+    Require-File $imeArm64X64Target "Windows ARM64X runtime is missing its x64 TSF target"
+    Require-File $imeArm64Target "Windows ARM64X runtime is missing its native ARM64 TSF target"
+    Require-File $imeArm64XRimeX64 "Windows ARM64X runtime is missing x64 rime.dll"
+    Require-File $imeArm64XRimeArm64 "Windows ARM64X runtime is missing native rime-arm64.dll"
+    Require-File $imeArm64XRimeData "Windows ARM64X runtime is missing rime-data\default.yaml"
+    Require-File $imeArm64XDefaultTheme "Windows ARM64X runtime is missing default-theme.yaml"
+    Require-MergedLuaManifest $imeArm64XLibrimeFeatures
+    Require-MergedLuaManifest $imeArm64LibrimeFeatures
+    Require-AsciiMarkers $imeArm64XRimeX64 @("lua_translator", "lua_filter", "lua_processor")
+    Require-AsciiMarkers $imeArm64XRimeArm64 @("lua_translator", "lua_filter", "lua_processor")
+    Require-PeMachine $imeArm64XForwarder ([UInt16]0xAA64) "ARM64X"
+    Require-PeMachine $imeArm64X64Target ([UInt16]0x8664) "x64"
+    Require-PeMachine $imeArm64Target ([UInt16]0xAA64) "ARM64"
+    Require-PeMachine $imeArm64XRimeX64 ([UInt16]0x8664) "x64"
+    Require-PeMachine $imeArm64XRimeArm64 ([UInt16]0xAA64) "ARM64"
+    Require-Arm64X $imeArm64XForwarder
+    Require-Exports $imeArm64XForwarder @("DllCanUnloadNow", "DllGetClassObject", "DllRegisterServer", "DllUnregisterServer")
+    Require-DelayLoadedDependency $imeArm64X64Target "rime.dll"
+    Require-DelayLoadedDependency $imeArm64Target "rime-arm64.dll"
+    Require-NoCrtDependency $imeArm64X64Target
+    Require-NoCrtDependency $imeArm64Target
+    foreach ($targetDll in @($imeArm64X64Target, $imeArm64Target)) {
+        Require-EmbeddedIcon $targetDll 1
+        Require-EmbeddedIcon $targetDll 2
+        Require-EmbeddedIcon $targetDll 3
+        Verify-AuthenticodeSignature $targetDll
+    }
+    Verify-AuthenticodeSignature $imeArm64XForwarder
 }
 Require-File $hookFile "Missing NSIS installer hook file: $hookFile"
 Require-File $appSource "Missing Tauri application source: $appSource"
 Require-File $registrationSource "Missing Windows TSF registration source: $registrationSource"
+Require-File $globalsSource "Missing Windows TSF lifecycle source: $globalsSource"
+Require-File $languageBarSource "Missing Windows TSF language bar source: $languageBarSource"
+Require-File $imeLibSource "Missing Windows TSF library source: $imeLibSource"
+Require-File $imeStateSource "Missing Windows TSF state source: $imeStateSource"
+Require-File $themeSource "Missing shared IME theme source: $themeSource"
 Require-File $imeBrandIconSource "Missing dedicated Windows IME branding icon: $imeBrandIconSource"
+Require-File $imeChineseModeIconSource "Missing Windows IME Chinese mode icon: $imeChineseModeIconSource"
+Require-File $imeEnglishModeIconSource "Missing Windows IME English mode icon: $imeEnglishModeIconSource"
 Require-IcoFrames $imeBrandIconSource @(16, 20, 24, 32, 40, 48)
+Require-IcoFrames $imeChineseModeIconSource @(16, 20, 24, 32)
+Require-IcoFrames $imeEnglishModeIconSource @(16, 20, 24, 32)
 
 Require-Pattern $hookFile 'NSIS_HOOK_POSTINSTALL' "NSIS hook file does not define NSIS_HOOK_POSTINSTALL"
 Require-Pattern $hookFile 'NSIS_HOOK_PREUNINSTALL' "NSIS hook file does not define NSIS_HOOK_PREUNINSTALL"
 Require-Pattern $hookFile 'regsvr32\.exe' "NSIS hook file does not invoke regsvr32.exe"
 Require-Pattern $hookFile 'ExecWait.*regsvr32\.exe' "NSIS hook must wait for regsvr32.exe so TSF registration is complete before install finishes"
 Require-Pattern $hookFile 'SysWOW64\\regsvr32\.exe' "NSIS hook does not register the x86 TSF DLL"
-Require-Pattern $hookFile 'KEYTAO_IME_X86_INSTALL_DIR.*\$PROGRAMFILES32\\KeyTao' "NSIS hook must install the x86 text service under Program Files (x86)"
-Require-Pattern $hookFile 'robocopy\.exe' "NSIS hook must copy the complete x86 runtime into Program Files (x86) before registration"
-Require-Pattern $appSource 'ProgramFiles\(x86\)' "The app must locate and repair the standard Program Files (x86) text service runtime"
+Require-Pattern $hookFile 'IsNativeARM64' "NSIS hook must select the ARM64X runtime on native ARM64 Windows"
+Require-Pattern $hookFile 'ReadEnvStr.*ProgramData' "NSIS hook must resolve the system ProgramData directory"
+Require-Pattern $hookFile '\$R6\\KeyTao\\keytao-windows-ime-runtime' "NSIS hook must stage the text service outside the replaceable app directory"
+Require-Pattern $hookFile 'GetTempFileName' "NSIS hook must allocate a unique runtime directory so loaded TIP DLLs are never overwritten"
+Require-Pattern $hookFile 'WindowsImeRuntimeDir' "NSIS hook must persist the active versioned runtime for uninstall"
+Require-Pattern $hookFile 'robocopy\.exe' "NSIS hook must copy complete native and x86 runtimes before registration"
 Require-Pattern $appSource 'SourceDirectory' "The elevated app registration flow must track the x86 runtime source directory"
 Require-Pattern $appSource 'Copy-Item -Destination' "The elevated app registration flow must stage the complete x86 runtime before regsvr32"
+Require-Pattern $appSource 'windows_ime_versioned_runtime_root' "The app registration repair must use a unique versioned runtime directory"
 Require-Pattern $registrationSource 'InstallLayoutOrTip' "Windows TSF registration must call InstallLayoutOrTip so the profile is added to the current user's input methods"
 Require-Pattern $registrationSource 'PROFILE_ICON_INDEX' "Windows TSF registration must use the embedded branding icon resource"
+Require-Pattern $imeLibSource 'PROFILE_ICON_INDEX:\s*u32\s*=\s*0' "Windows TSF profile icon index must be zero-based"
+Require-Pattern $imeBrandSvgSource 'id="keytao-star"' "Windows TSF profile icon must use the KeyTao star identity"
+if ((Get-Content -Raw -LiteralPath $imeBrandSvgSource) -match '<text(?:\s|>)') {
+    throw "Windows TSF profile icon must not fall back to a text glyph"
+}
+Require-Pattern $globalsSource 'GET_MODULE_HANDLE_EX_FLAG_PIN' "The in-process TSF module must remain loaded while background engine work can execute"
+Require-Pattern $languageBarSource 'ITfLangBarItemButton' "Windows TSF must expose a standard Chinese/English language bar item"
+Require-Pattern $languageBarSource 'item\.Show\(BOOL::from\(true\)\)' "Windows TSF must explicitly show its language bar item after registration"
+Require-Pattern $languageBarSource 'GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION' "Windows TSF must publish its input mode through the standard conversion compartment"
+Require-Pattern $imeStateSource 'KeyTao\.WindowsIme\.EngineInit' "Windows TSF must serialize cross-process librime initialization"
+Require-Pattern $imeStateSource 'session_reset_pending' "Windows TSF focus callbacks must defer librime session reset"
+Require-Pattern $themeSource 'RegGetValueW' "Windows candidate rendering must read the system theme without spawning a child process"
 
-$config = Get-Content (Join-Path $repoRoot "src-tauri\tauri.windows.conf.json") -Raw | ConvertFrom-Json
-$resourceKeys = @($config.bundle.resources.PSObject.Properties.Name)
+$windowsConfig = Get-Content (Join-Path $repoRoot "src-tauri\tauri.windows.conf.json") -Raw | ConvertFrom-Json
+$resourceKeys = @($windowsConfig.bundle.resources.PSObject.Properties.Name)
 if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/current") {
     throw "Windows resources must include the IME runtime directory"
 }
 if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/x86") {
     throw "Windows resources must include the x86 IME runtime directory"
 }
+if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/arm64x") {
+    throw "Windows resources must include the ARM64X IME runtime directory"
+}
 if ($resourceKeys -notcontains "../target/keytao-windows-app-runtime/*.dll") {
     throw "Windows resources must include all app runtime DLLs at the installer root"
 }
-if ($config.bundle.resources.PSObject.Properties["../target/keytao-windows-app-runtime/*.dll"].Value -ne "") {
+if ($windowsConfig.bundle.resources.PSObject.Properties["../target/keytao-windows-app-runtime/*.dll"].Value -ne "") {
     throw "Windows app runtime DLLs must be installed next to keytao-app.exe"
 }
-if ($config.bundle.windows.nsis.installMode -ne "perMachine") {
+if ($windowsConfig.bundle.windows.nsis.installMode -ne "perMachine") {
     throw "Windows NSIS installer must use perMachine install mode for TSF registration"
 }
-if ($config.bundle.windows.nsis.installerHooks -ne "windows/nsis-hooks.nsh") {
+if ($windowsConfig.bundle.windows.nsis.installerHooks -ne "windows/nsis-hooks.nsh") {
     throw "Windows NSIS installerHooks must point to windows/nsis-hooks.nsh"
 }
 
@@ -312,11 +445,11 @@ Require-Pattern $installerScript.FullName 'nsis-hooks\.nsh' "Generated Windows i
 Require-Pattern $installerScript.FullName 'keytao_windows_ime\.dll' "Generated Windows installer script does not install keytao_windows_ime.dll"
 Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime' "Generated Windows installer script does not install the IME runtime directory"
 Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime\\x86' "Generated Windows installer script does not install the x86 IME runtime"
+Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime\\arm64x' "Generated Windows installer script does not install the ARM64X IME runtime"
 Require-Pattern $installerScript.FullName 'default-theme\.yaml' "Generated Windows installer script does not install the shared default theme"
+Require-Pattern $installerScript.FullName 'librime-features\.txt' "Generated Windows installer script does not install the librime feature manifest"
+Require-Pattern $installerScript.FullName 'librime-arm64-features\.txt' "Generated Windows installer script does not install the native ARM64 librime feature manifest"
 Require-Pattern $installerScript.FullName '/oname=.*rime\.dll' "Generated Windows installer script does not install rime.dll next to keytao-app.exe"
-if ($imeLuaPlugin -or $appLuaPlugin) {
-    Require-Pattern $installerScript.FullName 'rime.*lua.*\.dll' "Generated Windows installer script does not install the librime-lua plugin DLL"
-}
 
 Verify-AuthenticodeSignature $installer.FullName
 

@@ -1377,7 +1377,7 @@ export default function App() {
                     </div>
                   )}
                   {windowsImeStatus && (
-                    <div className="grid gap-2 text-xs">
+                    <div className="grid min-w-0 gap-2 text-xs">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant={windowsImeStatus.packaged ? "default" : "outline"} className="text-xs">
                           安装包 {windowsImeStatus.packaged ? "完整" : "缺少 IME 运行时"}
@@ -1399,24 +1399,39 @@ export default function App() {
                         </Badge>
                       </div>
                       {windowsImeStatus.runtime_dir && (
-                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-border bg-muted/40 px-3 py-2">
                           <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="text-muted-foreground">运行时：</span>
-                          <code className="font-mono truncate">{windowsImeStatus.runtime_dir}</code>
+                          <span className="shrink-0 whitespace-nowrap text-muted-foreground">运行时：</span>
+                          <code
+                            className="min-w-0 flex-1 truncate font-mono"
+                            title={windowsImeStatus.runtime_dir}
+                          >
+                            {windowsImeStatus.runtime_dir}
+                          </code>
                         </div>
                       )}
                       {windowsImeStatus.registered_path && (
-                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-border bg-muted/40 px-3 py-2">
                           <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="text-muted-foreground">已注册：</span>
-                          <code className="font-mono truncate">{windowsImeStatus.registered_path}</code>
+                          <span className="shrink-0 whitespace-nowrap text-muted-foreground">已注册：</span>
+                          <code
+                            className="min-w-0 flex-1 truncate font-mono"
+                            title={windowsImeStatus.registered_path}
+                          >
+                            {windowsImeStatus.registered_path}
+                          </code>
                         </div>
                       )}
                       {windowsImeStatus.profile_status && (
-                        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-border bg-muted/40 px-3 py-2">
                           <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="text-muted-foreground">Profile：</span>
-                          <code className="font-mono truncate">{windowsImeStatus.profile_status}</code>
+                          <span className="shrink-0 whitespace-nowrap text-muted-foreground">Profile：</span>
+                          <code
+                            className="min-w-0 flex-1 truncate font-mono"
+                            title={windowsImeStatus.profile_status}
+                          >
+                            {windowsImeStatus.profile_status}
+                          </code>
                         </div>
                       )}
                       {windowsImeStatus.message && (
