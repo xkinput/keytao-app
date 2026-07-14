@@ -184,6 +184,24 @@ if ($LASTEXITCODE -ne 0 -or -not $resolvedLuaPluginRef) {
     throw "Unable to resolve the checked-out librime-lua revision."
 }
 
+$luaModulesSource = Join-Path $luaPluginDir "src\modules.cc"
+$luaModulesText = Get-Content -LiteralPath $luaModulesSource -Raw
+if ($luaModulesText -notmatch 'keytao_librime_lua_feature_markers') {
+    $luaFeatureMarkers = @'
+
+#if defined(_WIN32)
+extern "C" __declspec(dllexport) const char* keytao_librime_lua_feature_markers() {
+  return "lua_translator,lua_filter,lua_processor";
+}
+#endif
+'@
+    Set-Content `
+        -LiteralPath $luaModulesSource `
+        -Encoding UTF8 `
+        -NoNewline `
+        -Value ($luaModulesText.TrimEnd() + $luaFeatureMarkers + "`n")
+}
+
 $luaHeader = Join-Path $luaPluginDir "thirdparty\lua5.4\lua.h"
 if (-not (Test-Path -LiteralPath $luaHeader -PathType Leaf)) {
     Push-Location $luaPluginDir
@@ -412,7 +430,12 @@ if (-not $rimeDll -or -not $rimeLib -or -not $rimeHeader) {
 $rimeDllText = [System.Text.Encoding]::ASCII.GetString(
     [System.IO.File]::ReadAllBytes($rimeDll.FullName)
 )
-foreach ($marker in @("lua_translator", "lua_filter", "lua_processor")) {
+foreach ($marker in @(
+    "keytao_librime_lua_feature_markers",
+    "lua_translator",
+    "lua_filter",
+    "lua_processor"
+)) {
     if (-not $rimeDllText.Contains($marker)) {
         throw "The librime ARM64 build is missing merged librime-lua marker '$marker'."
     }
