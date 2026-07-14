@@ -432,14 +432,16 @@ fetch_default_include_dir() {
     for header in rime_api.h rime_api_deprecated.h rime_api_stdbool.h rime_levers_api.h; do
         if [ ! -f "$include_dir/$header" ]; then
             local url="https://raw.githubusercontent.com/rime/librime/$LIBRIME_HEADERS_VERSION/src/$header"
-            local headers=(-H "User-Agent: keytao-android-runtime")
-            if [ -n "${GITHUB_TOKEN:-}" ]; then
-                headers+=(-H "Authorization: Bearer $GITHUB_TOKEN")
-            fi
             note "Downloading librime header $header from rime/librime $LIBRIME_HEADERS_VERSION" >&2
             local tmp="$include_dir/$header.tmp"
             rm -f "$tmp"
-            curl -fsSL "${CURL_RETRY_ARGS[@]}" "${headers[@]}" "$url" -o "$tmp"
+            if ! curl -fsSL "${CURL_RETRY_ARGS[@]}" \
+                -H "User-Agent: keytao-android-runtime" "$url" -o "$tmp"; then
+                [ -n "${GITHUB_TOKEN:-}" ] || return 1
+                curl -fsSL "${CURL_RETRY_ARGS[@]}" \
+                    -H "User-Agent: keytao-android-runtime" \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$tmp"
+            fi
             mv "$tmp" "$include_dir/$header"
         fi
     done
