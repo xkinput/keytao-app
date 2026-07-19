@@ -1730,7 +1730,7 @@ export default function App() {
                         <span className="text-muted-foreground">回车键</span>
                       </div>
                       <span className="text-xs text-muted-foreground/80">
-                        {enterKeyBehavior === "newline" ? "输入换行" : "跟随系统"}
+                        {enterKeyBehavior === "newline" ? "始终换行" : "智能判断"}
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
@@ -1742,7 +1742,7 @@ export default function App() {
                         disabled={isSavingAndroidImeInputSettings}
                         className="h-8 text-xs"
                       >
-                        跟随系统
+                        智能判断
                       </Button>
                       <Button
                         type="button"
@@ -1752,7 +1752,7 @@ export default function App() {
                         disabled={isSavingAndroidImeInputSettings}
                         className="h-8 text-xs"
                       >
-                        换行
+                        始终换行
                       </Button>
                     </div>
                   </div>

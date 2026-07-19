@@ -9,9 +9,13 @@ import android.icu.text.BreakIterator
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.InputType
+import android.text.Spanned
+import android.text.style.ReplacementSpan
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -307,7 +311,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val unitCount = count.coerceAtLeast(1)
         restoreAllOnNextDirectionalRestore = false
         rememberCommittedUnits(preeditUnits)
-        val beforeCursor = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val beforeCursor = connection.getTextBeforeCursor(
+            backspaceContextLimit,
+            InputConnection.GET_TEXT_WITH_STYLES,
+        ) ?: ""
         val deletedUnits = textUnits(beforeCursor).takeLast(unitCount)
         if (deletedUnits.isEmpty()) {
             backspaceRestoreStack.clear()
@@ -327,7 +334,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val connection = currentInputConnection ?: return
         backspaceRestoreStack.clear()
         rememberCommittedUnits(preeditUnits)
-        val beforeCursor = connection.getTextBeforeCursor(backspaceContextLimit, 0)?.toString().orEmpty()
+        val beforeCursor = connection.getTextBeforeCursor(
+            backspaceContextLimit,
+            InputConnection.GET_TEXT_WITH_STYLES,
+        ) ?: ""
         val recoverableUnits = textUnits(beforeCursor)
         if (recoverableUnits.isEmpty()) {
             restoreAllOnNextDirectionalRestore = false
@@ -408,19 +418,27 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    private fun textUnits(text: String): List<String> {
+    private fun textUnits(text: CharSequence): List<String> {
         if (text.isEmpty()) return emptyList()
+        val plainText = text.toString()
         val iterator = BreakIterator.getCharacterInstance(Locale.ROOT)
-        iterator.setText(text)
-        val units = mutableListOf<String>()
+        iterator.setText(plainText)
+        val graphemeRanges = mutableListOf<TextUnitRange>()
         var start = iterator.first()
         var end = iterator.next()
         while (end != BreakIterator.DONE) {
-            units.add(text.substring(start, end))
+            graphemeRanges.add(TextUnitRange(start, end))
             start = end
             end = iterator.next()
         }
-        return units
+        val replacementRanges = if (text is Spanned) {
+            text.getSpans(0, text.length, ReplacementSpan::class.java)
+                .map { span -> TextUnitRange(text.getSpanStart(span), text.getSpanEnd(span)) }
+        } else {
+            emptyList()
+        }
+        return KeytaoEditorPolicy.mergeAtomicTextRanges(graphemeRanges, replacementRanges)
+            .map { range -> plainText.substring(range.start, range.endExclusive) }
     }
 
     private fun handleSpace() {
@@ -433,22 +451,34 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun handleEnter() {
         val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
-        if (behavior == EnterKeyBehaviors.NEWLINE) {
-            commitLineBreak()
-        } else {
-            performSystemEnter()
+        val editorInfo = currentInputEditorInfo
+        val decision = KeytaoEditorPolicy.resolveEnterDecision(
+            hasComposition = composing || currentState.hasComposition,
+            forceNewline = behavior == EnterKeyBehaviors.NEWLINE,
+            inputType = editorInfo?.inputType ?: InputType.TYPE_NULL,
+            imeOptions = editorInfo?.imeOptions ?: EditorInfo.IME_ACTION_NONE,
+            actionId = editorInfo?.actionId ?: EditorInfo.IME_ACTION_UNSPECIFIED,
+            hasActionLabel = !editorInfo?.actionLabel.isNullOrEmpty(),
+        )
+        when (decision.type) {
+            EnterDecisionType.CONFIRM_COMPOSITION -> {
+                applyState(engine.processKey(AndroidKeyMapper.XK_RETURN, 0))
+            }
+            EnterDecisionType.INSERT_NEWLINE -> commitLineBreak()
+            EnterDecisionType.PERFORM_ACTION -> {
+                if (currentInputConnection?.performEditorAction(decision.actionId) != true) {
+                    sendEnterKey()
+                }
+            }
+            EnterDecisionType.SEND_ENTER_KEY -> sendEnterKey()
         }
     }
 
     private fun commitLineBreak() {
         val connection = currentInputConnection ?: return
-        val hadComposition = composing || currentState.hasComposition
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false
         connection.beginBatchEdit()
-        if (hadComposition) {
-            connection.commitText("", 1)
-        }
         connection.commitText("\n", 1)
         rememberCommittedText("\n")
         composing = false
@@ -462,20 +492,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateState(currentState)
     }
 
-    private fun performSystemEnter() {
-        if (currentState.hasComposition) {
-            applyState(engine.processKey(AndroidKeyMapper.XK_RETURN, 0))
-            return
-        }
-
-        val action = currentInputEditorInfo?.imeOptions?.and(EditorInfo.IME_MASK_ACTION)
-            ?: EditorInfo.IME_ACTION_NONE
-        if (action != EditorInfo.IME_ACTION_NONE) {
-            currentInputConnection?.performEditorAction(action)
-        } else {
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-            currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
-        }
+    private fun sendEnterKey() {
+        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
     }
 
     private fun handleMode(value: String?) {
