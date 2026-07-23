@@ -8,7 +8,7 @@ private val managedSchemaPrefixes = listOf("keytao", "txjx", "xmjd6", "keydo")
 fun isDefaultCustom(filename: String) =
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
 
-private fun isManagedSchema(schema: String) =
+fun isManagedSchema(schema: String) =
     managedSchemaPrefixes.any { schema.startsWith(it) }
 
 private fun dedupeSchemas(schemas: List<String>): List<String> {

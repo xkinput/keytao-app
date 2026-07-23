@@ -79,7 +79,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
     };
 
     let runtime = ImeRuntime::with_dirs(user, shared);
-    if let Err(e) = runtime.init() {
+    if let Err(e) = runtime.init_without_deploy() {
         eprintln!("keytao_init: runtime init failed: {e}");
         return false;
     }
@@ -124,7 +124,7 @@ pub extern "C" fn keytao_reload() -> bool {
         runtime
     };
 
-    match runtime.reload() {
+    match runtime.reload_without_deploy() {
         Ok(()) => true,
         Err(e) => {
             eprintln!("keytao_reload: runtime reload failed: {e}");

@@ -206,8 +206,8 @@ fn install_reload_watcher(engine: engine::CoreEngine) {
 
                 last_seen = current;
                 tracing::info!("reload stamp changed: {}", path.display());
-                match engine.reload() {
-                    Ok(()) => tracing::info!("librime redeployed after reload stamp change"),
+                match engine.reload_without_deploy() {
+                    Ok(()) => tracing::info!("librime reloaded after deploy stamp change"),
                     Err(e) => tracing::error!("librime reload failed: {e}"),
                 }
             }
@@ -260,7 +260,7 @@ fn main() {
             .init();
 
         let engine = engine::CoreEngine::new();
-        if let Err(e) = engine.init() {
+        if let Err(e) = engine.init_without_deploy() {
             tracing::error!("librime init failed: {e}");
             std::process::exit(1);
         }

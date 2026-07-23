@@ -310,6 +310,11 @@ rm -rf "$PKG_REPACK_DIR"
 mkdir -p "$PKG_FLAT_DIR"
 pkgutil --expand "$PKG_OUTPUT" "$PKG_EXPANDED_DIR"
 cp "$PKG_EXPANDED_DIR/PackageInfo" "$PKG_FLAT_DIR/PackageInfo"
+perl -0pi -e 's/postinstall-action="none"/postinstall-action="logout"/' "$PKG_FLAT_DIR/PackageInfo"
+if ! grep -Fq 'postinstall-action="logout"' "$PKG_FLAT_DIR/PackageInfo"; then
+    echo "ERROR: failed to mark the macOS installer as requiring logout." >&2
+    exit 1
+fi
 mkbom -s "$PKG_PAYLOAD" "$PKG_FLAT_DIR/Bom"
 (
     cd "$PKG_PAYLOAD"

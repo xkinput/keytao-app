@@ -179,22 +179,30 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 ?: readFileFromTree(root, "default-custom.yaml")
                 ?: ""
 
+            val schemas = parseSchemas(content).filter(::isManagedSchema)
             val arr = JSONArray()
-            parseSchemas(content).forEach { arr.put(it) }
+            schemas.forEach { arr.put(it) }
 
             val version = readFileFromTree(root, "version.txt")?.trim()?.takeIf { it.isNotEmpty() }
-            val installed = arr.length() > 0
-                || root.listFiles().any { it.isFile && it.name?.endsWith(".schema.yaml") == true }
+            val installed = schemas.isNotEmpty() && schemas.all { schema ->
+                root.findFile("$schema.schema.yaml")?.isFile == true
+            }
+            val build = root.findFile("build")?.takeIf { it.isDirectory }
+            val deployed = installed && build != null && schemas.all { schema ->
+                build.findFile("$schema.schema.yaml")?.isFile == true
+            }
 
             invoke.resolve(JSObject().apply {
                 put("schemas", arr)
                 if (version != null) put("version", version)
                 put("installed", installed)
+                put("deployed", deployed)
             })
         } catch (ex: Exception) {
             invoke.resolve(JSObject().apply {
                 put("schemas", JSONArray())
                 put("installed", false)
+                put("deployed", false)
             })
         }
     }
@@ -405,6 +413,13 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                         }
                     }
 
+                    root.findFile("build")?.let { build ->
+                        if (!build.delete()) {
+                            return@Thread invoke.reject("无法清理旧的 Android RIME 部署产物")
+                        }
+                        logs.add("[INVALIDATED] build")
+                    }
+
                     // Verify
                     val verifyArray = JSONArray()
                     fun addVerify(path: String, ok: Boolean, note: String) {
@@ -549,6 +564,11 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                             logs.add("[RENAMED] lua/$newName.lua")
                         }
                     }
+
+                    if (!KeytaoAndroidPaths.invalidateDeployment(root)) {
+                        return@Thread invoke.reject("无法清理旧的 Android RIME 部署产物")
+                    }
+                    logs.add("[INVALIDATED] build")
 
                     val mergedArray = JSONArray()
                     dcMergeResult?.userSchemas?.forEach { mergedArray.put(it) }

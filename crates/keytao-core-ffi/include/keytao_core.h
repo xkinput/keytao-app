@@ -26,7 +26,8 @@ typedef struct KeytaoState {
 } KeytaoState;
 
 /**
- * Initialize the Rime runtime. Must be called once before any other function.
+ * Initialize the Rime runtime from data already deployed by the KeyTao app.
+ * Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.
  */
@@ -35,8 +36,8 @@ bool keytao_init(const char *user_dir, const char *shared_dir);
 bool keytao_is_initialized(void);
 
 /**
- * Redeploy Rime data through the shared runtime. Existing sessions refresh
- * lazily on their next operation.
+ * Reload data already deployed by the KeyTao app. This function does not run
+ * deployment. Existing sessions refresh lazily on their next operation.
  */
 bool keytao_reload(void);
 

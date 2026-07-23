@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Download, FolderOpen, Keyboard, Loader2, RefreshCw, Settings } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Download, FolderOpen, Keyboard, Loader2, Play, RefreshCw, Settings } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -28,16 +28,19 @@ interface AndroidImeOnboardingProps {
   status: AndroidImeStatus | null
   storageStatus: AndroidStoragePermissionStatus | null
   schemaInstalled: boolean
+  schemaDeployed: boolean
   loading: boolean
   error: string | null
   storageError: string | null
   installError: string | null
   installingSchema: boolean
+  deployingSchema: boolean
   canInstallSchema: boolean
   onOpenSettings: () => void
   onShowPicker: () => void
   onOpenStorageSettings: () => void
   onInstallSchema: () => void
+  onDeploySchema: () => void
   onRefresh: () => void
 }
 
@@ -50,11 +53,11 @@ function StepRow({
 }: {
   done: boolean
   active: boolean
-  icon?: "keyboard" | "folder" | "download"
+  icon?: "keyboard" | "folder" | "download" | "deploy"
   title: string
   detail: string
 }) {
-  const Icon = icon === "folder" ? FolderOpen : icon === "download" ? Download : Keyboard
+  const Icon = icon === "folder" ? FolderOpen : icon === "download" ? Download : icon === "deploy" ? Play : Keyboard
   return (
     <div className={`flex gap-3 rounded-lg border px-3 py-3 ${active ? "border-primary/40 bg-primary/5" : "border-border bg-muted/20"}`}>
       <div className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border ${done ? "border-green-500/40 bg-green-500/15 text-green-400" : active ? "border-primary/40 text-primary" : "border-border text-muted-foreground"}`}>
@@ -72,23 +75,26 @@ export default function AndroidImeOnboarding({
   status,
   storageStatus,
   schemaInstalled,
+  schemaDeployed,
   loading,
   error,
   storageError,
   installError,
   installingSchema,
+  deployingSchema,
   canInstallSchema,
   onOpenSettings,
   onShowPicker,
   onOpenStorageSettings,
   onInstallSchema,
+  onDeploySchema,
   onRefresh,
 }: AndroidImeOnboardingProps) {
   const enabled = status?.enabled ?? false
   const selected = status?.selected ?? false
   const storageGranted = storageStatus?.granted ?? false
-  const ready = enabled && selected && storageGranted && schemaInstalled
-  const progress = ready ? 100 : schemaInstalled ? 92 : storageGranted ? 75 : selected ? 58 : enabled ? 38 : status ? 18 : 8
+  const ready = enabled && selected && storageGranted && schemaInstalled && schemaDeployed
+  const progress = ready ? 100 : schemaInstalled ? 90 : storageGranted ? 72 : selected ? 55 : enabled ? 36 : status ? 18 : 8
   const permissionDetail = storageStatus?.path
     ? `授权后 KeyTao 才能写入 ${storageStatus.path} 并让输入法读取方案。`
     : "授权后 KeyTao 才能写入用户目录并让输入法读取方案。"
@@ -101,8 +107,10 @@ export default function AndroidImeOnboarding({
         ? { label: "授权文件访问", icon: FolderOpen, action: onOpenStorageSettings, disabled: storageStatus ? !storageStatus.canOpenSettings : false }
         : !schemaInstalled
           ? { label: installingSchema ? "安装中..." : "安装键道方案", icon: Download, action: onInstallSchema, disabled: !canInstallSchema || installingSchema }
-          : { label: "重新检测", icon: RefreshCw, action: onRefresh, disabled: false }
-  const primaryLoading = installingSchema && !schemaInstalled
+          : !schemaDeployed
+            ? { label: deployingSchema ? "部署中..." : "部署键道方案", icon: Play, action: onDeploySchema, disabled: deployingSchema }
+            : { label: "重新检测", icon: RefreshCw, action: onRefresh, disabled: false }
+  const primaryLoading = (installingSchema && !schemaInstalled) || (deployingSchema && schemaInstalled && !schemaDeployed)
   const PrimaryIcon = primaryLoading ? Loader2 : primary.icon
   const primaryDisabled = loading || primary.disabled
 
@@ -156,7 +164,14 @@ export default function AndroidImeOnboarding({
                 active={enabled && selected && storageGranted && !schemaInstalled}
                 icon="download"
                 title="安装键道方案"
-                detail="安装完成后候选条会加载键道方案，不再提示先授权或先安装。"
+                detail="将所选键道方案写入用户目录，安装完成后还需要手动部署。"
+              />
+              <StepRow
+                done={schemaDeployed}
+                active={enabled && selected && storageGranted && schemaInstalled && !schemaDeployed}
+                icon="deploy"
+                title="部署键道方案"
+                detail="编译并启用已安装的方案，完成后输入法才可使用。"
               />
             </div>
 

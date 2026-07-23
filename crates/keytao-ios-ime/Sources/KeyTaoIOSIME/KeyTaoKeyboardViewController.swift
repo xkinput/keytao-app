@@ -470,13 +470,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func refreshInputAvailability() {
         let message: String
         let installed = engine.hasInstalledSchema()
-        let ready = installed && engine.ensureReady()
+        let deployed = engine.hasDeployedSchema()
+        let ready = installed && deployed && engine.ensureReady()
         if ready {
             message = ""
         } else if !installed && !hasFullAccess {
             message = "请在系统设置中允许 KeyTao 完全访问"
         } else if !installed {
             message = "请先在 KeyTao App 安装键道方案"
+        } else if !deployed {
+            message = "请先在 KeyTao App 部署方案"
         } else {
             message = "RIME 运行库未就绪，请重新安装 KeyTao"
         }

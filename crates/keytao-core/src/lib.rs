@@ -1637,9 +1637,21 @@ impl ImeRuntime {
             return Ok(());
         }
 
+        let (user_dir, _) = self.configured_dirs()?;
+        let schema_state = schema_install_state(&user_dir);
+        if !schema_state.installed {
+            return Err(
+                "no KeyTao scheme is installed; install one in the KeyTao app first".into(),
+            );
+        }
+        if !schema_state.deployed {
+            return Err(
+                "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
+            );
+        }
+
         #[cfg(target_os = "windows")]
         {
-            let (user_dir, _) = self.configured_dirs()?;
             if windows_rime_build_repair_required(&user_dir) {
                 return Err(
                     "Windows RIME build repair is pending; open the KeyTao app to finish it".into(),
@@ -1650,6 +1662,22 @@ impl ImeRuntime {
 
         self.setup_locked()?;
         *initialized = true;
+        Ok(())
+    }
+
+    pub fn reload_without_deploy(&self) -> Result<(), String> {
+        let mut initialized = self.0.initialized.lock().unwrap();
+        let (user_dir, _) = self.configured_dirs()?;
+        let schema_state = schema_install_state(&user_dir);
+        if !schema_state.deployed {
+            return Err(
+                "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
+            );
+        }
+
+        self.setup_locked()?;
+        *initialized = true;
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1689,7 +1717,7 @@ impl ImeRuntime {
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
         let initialized = *self.0.initialized.lock().unwrap();
         if !initialized {
-            self.init()?;
+            self.init_without_deploy()?;
         }
         let generation = self.0.generation.load(Ordering::SeqCst);
         Ok(ImeRuntimeSession {
@@ -1984,6 +2012,44 @@ fn configured_schema_list_from_dir(user_data_dir: &Path) -> Vec<String> {
     .map(|content| parse_schema_list(&content))
     .find(|schemas| !schemas.is_empty())
     .unwrap_or_default()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaInstallState {
+    pub installed: bool,
+    pub deployed: bool,
+    pub schemas: Vec<String>,
+}
+
+pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
+    let schemas = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
+        .map(|content| parse_schema_list(&content))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|schema| valid_rime_build_id(schema) && is_keytao_managed_schema(schema))
+        .collect::<Vec<_>>();
+
+    let installed = !schemas.is_empty()
+        && schemas.iter().all(|schema| {
+            user_data_dir
+                .join(format!("{schema}.schema.yaml"))
+                .is_file()
+        });
+    let deployed = installed
+        && schemas.iter().all(|schema| {
+            user_data_dir
+                .join("build")
+                .join(format!("{schema}.schema.yaml"))
+                .is_file()
+        });
+
+    SchemaInstallState {
+        installed,
+        deployed,
+        schemas,
+    }
 }
 
 fn collect_schema_dictionary_ids(value: &Value, dictionary_ids: &mut HashSet<String>) {
@@ -2980,7 +3046,7 @@ mod tests {
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
         parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
         patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
-        rime_log_dir, windows_rime_build_repair_required,
+        rime_log_dir, schema_install_state, windows_rime_build_repair_required,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
@@ -2998,6 +3064,55 @@ mod tests {
     fn parse_schema_list_strips_inline_comments() {
         let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
         assert_eq!(parse_schema_list(content), vec!["keydo"]);
+    }
+
+    #[test]
+    fn schema_install_state_requires_source_and_matching_deployment() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-schema-state-test-{suffix}"));
+        let build = dir.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+
+        let empty = schema_install_state(&dir);
+        assert!(!empty.installed);
+        assert!(!empty.deployed);
+        assert!(empty.schemas.is_empty());
+
+        std::fs::write(build.join("keytao.schema.yaml"), "schema: {}\n").unwrap();
+        let build_only = schema_install_state(&dir);
+        assert!(
+            !build_only.installed,
+            "build residue is not an installation"
+        );
+        assert!(
+            !build_only.deployed,
+            "build residue cannot be usable by itself"
+        );
+
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keydo\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("keydo.schema.yaml"), "schema: {}\n").unwrap();
+        let source_only = schema_install_state(&dir);
+        assert!(source_only.installed);
+        assert!(
+            !source_only.deployed,
+            "a newly installed scheme needs manual deployment"
+        );
+        assert_eq!(source_only.schemas, vec!["keydo"]);
+
+        std::fs::write(build.join("keydo.schema.yaml"), "schema: {}\n").unwrap();
+        let ready = schema_install_state(&dir);
+        assert!(ready.installed);
+        assert!(ready.deployed);
+        assert_eq!(ready.schemas, vec!["keydo"]);
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

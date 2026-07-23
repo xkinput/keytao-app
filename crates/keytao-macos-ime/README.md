@@ -11,7 +11,7 @@ macOS 入口是 `Sources/KeyTaoIME/main.swift`：
 1. 处理输入源注册命令，例如 `--register-input-source`、`--enable-input-source`、`--select-input-source`。
 2. 正常启动时创建 `IMKServer`，设置 `NSApplication` 为 accessory app 并进入 run loop。
 3. macOS 为每个输入上下文创建 `KeyTaoInputController`。
-4. controller 初始化时调用 `ensureEngineReady()`，底层通过 `keytao_init(userDir, sharedDir)` 部署并初始化 librime。
+4. controller 初始化时调用 `ensureEngineReady()`，底层通过 `keytao_init(userDir, sharedDir)` 只加载 App 已部署的 librime 数据，不在输入法进程中执行部署。
 5. 每个 controller 创建独立 `keytao_create_session()`。
 6. `handle(_:client:)` 把 `NSEvent` 转成 X11 keysym + Rime modifier mask，调用 `keytao_session_process_key()`。
 7. FFI 返回 `KeytaoState`，controller 再按顺序提交 `committed`、设置 marked text、更新候选窗和中英模式。
@@ -144,6 +144,11 @@ scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
 
 ```sh
 sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
+```
+
+安装器会提示注销；重新登录 macOS 后，再打开 KeyTao 手动安装方案并点击“部署”。随后可继续检查：
+
+```sh
 test -d "/Applications/KeyTao.app"
 test -x "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
 "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --list-input-sources
@@ -157,7 +162,7 @@ crates/keytao-macos-ime/build.sh --skip-pkg
 crates/keytao-macos-ime/install.sh --release
 ```
 
-正式发行走仓库根目录的 `scripts/build-macos.sh`，产物是 pkg，不产出 dmg。pkg 同时安装主 App 和系统输入法 bundle，并保证两者都带完整 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
+正式发行走仓库根目录的 `scripts/build-macos.sh`，产物是 pkg，不产出 dmg。pkg 同时安装主 App 和系统输入法 bundle，标记安装完成后需要注销，并保证两者都带完整 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
 
 常用路径：
 

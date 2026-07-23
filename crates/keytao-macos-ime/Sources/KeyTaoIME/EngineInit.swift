@@ -90,19 +90,20 @@ func consumeExternalDeployReloadRequest() -> Bool {
     return current != nil
 }
 
-// Initialize the engine as soon as the dynamic library is loaded
-// (which happens when the IMK server first creates a controller).
-// We use a dispatch_once pattern via a lazy global.
-private var _engineInitialized: Bool = {
-    initializeEngine()
-    return true
-}()
+private let engineInitLock = NSLock()
 
 func ensureEngineReady() {
-    _ = _engineInitialized
+    engineInitLock.lock()
+    defer { engineInitLock.unlock() }
+    if !keytao_is_initialized() {
+        initializeEngine()
+    }
 }
 
 func reloadEngine() -> Bool {
     ensureEngineReady()
+    if !keytao_is_initialized() {
+        return false
+    }
     return keytao_reload()
 }

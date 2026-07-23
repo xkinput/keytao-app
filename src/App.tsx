@@ -188,6 +188,7 @@ interface InstallResult {
 
 interface LocalSchemaInfo {
   installed: boolean
+  deployed: boolean
   version: string | null
   schemas: string[]
 }
@@ -737,6 +738,7 @@ export default function App() {
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
+  const androidSchemaDeployed = localSchemaInfo?.deployed ?? false
   const androidImePaddingStyle =
     osType === "android"
       ? { paddingBottom: "calc(1.5rem + var(--android-ime-inset-bottom, 0px))" }
@@ -748,7 +750,8 @@ export default function App() {
       !androidImeStatus.selected ||
       !androidStoragePermission ||
       !androidStorageGranted ||
-      !androidSchemaInstalled
+      !androidSchemaInstalled ||
+      !androidSchemaDeployed
     )
   const windowsRegistrationState = windowsImeStatus?.registration_state ?? "checking"
   const windowsRegistrationLabel = (() => {
@@ -901,6 +904,10 @@ export default function App() {
   }
 
   async function handleDeploy() {
+    if (!localSchemaInfo?.installed) {
+      setDeploySteps([{ msg: "未安装方案，请先安装", error: true }])
+      return
+    }
     setIsDeploying(true)
     const steps: DeployStep[] = [{ msg: "正在部署 librime..." }]
     setDeploySteps([...steps])
@@ -917,6 +924,16 @@ export default function App() {
       steps.push({ msg: result.message, done: true })
       setDeploySteps([...steps])
       addLogs([`[DEPLOY] ${result.message}`])
+      await handleCheckLocalSchema()
+      if (osType === "linux") {
+        try {
+          const status = await invoke<LinuxImeStatus>("linux_ime_status")
+          setLinuxImeStatus(status)
+          setLinuxImeError(null)
+        } catch (e) {
+          setLinuxImeError(String(e))
+        }
+      }
     } catch (e) {
       const msg = String(e)
       steps.push({ msg, error: true })
@@ -1061,7 +1078,6 @@ export default function App() {
       return
     }
     setIsInstalling(false)
-    await handleDeploy()
   }
 
   async function handleRefetchRelease() {
@@ -1271,16 +1287,19 @@ export default function App() {
         status={androidImeStatus}
         storageStatus={androidStoragePermission}
         schemaInstalled={androidSchemaInstalled}
+        schemaDeployed={androidSchemaDeployed}
         loading={androidSetupLoading}
         error={androidImeError}
         storageError={androidStoragePermissionError}
         installError={installError}
-        installingSchema={isInstalling || isDeploying}
+        installingSchema={isInstalling}
+        deployingSchema={isDeploying}
         canInstallSchema={Boolean(selectedSchemeDownloadUrl)}
         onOpenSettings={handleOpenAndroidImeSettings}
         onShowPicker={handleShowAndroidImePicker}
         onOpenStorageSettings={handleOpenAndroidStoragePermissionSettings}
         onInstallSchema={handleInstall}
+        onDeploySchema={handleDeploy}
         onRefresh={refreshAndroidSetupStatus}
       />
     )
@@ -1473,14 +1492,26 @@ export default function App() {
                     <Keyboard className="h-4 w-4 text-muted-foreground" />
                     macOS 系统输入法
                     <span className="ml-auto">
-                      {macosImeStatus?.installed
-                        ? <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />已安装</Badge>
-                        : <Badge variant="outline" className="text-xs">未安装</Badge>
+                      {!macosImeStatus
+                        ? <Badge variant="outline" className="text-xs">检测中</Badge>
+                        : !macosImeStatus.installed
+                          ? <Badge variant="outline" className="text-xs">系统组件缺失</Badge>
+                          : !localSchemaInfo?.installed
+                            ? <Badge variant="outline" className="text-xs">未安装方案</Badge>
+                            : !localSchemaInfo.deployed
+                              ? <Badge variant="outline" className="text-xs">待部署</Badge>
+                              : <Badge className="text-xs gap-1 bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle2 className="h-3 w-3" />可使用</Badge>
                       }
                     </span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  {macosImeStatus?.installed && (
+                    <div className="flex items-start gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2.5 text-xs text-yellow-500">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                      <span>首次安装或更新 KeyTao 后，请注销并重新登录 macOS，再到系统设置中添加 KeyTao 输入法。</span>
+                    </div>
+                  )}
                   {macosImeStatus?.app_path && (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
                       <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1930,26 +1961,32 @@ export default function App() {
                       <span>{androidStoragePermissionError}</span>
                     </div>
                   )}
-                        {localSchemaInfo !== null && (
-                          <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${localSchemaInfo.installed
-                            ? "bg-green-500/10 border-green-500/30 text-green-400"
-                            : "bg-muted/40 border-border text-muted-foreground"
-                            }`}>
-                            {localSchemaInfo.installed
-                              ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                              : <Info className="h-3.5 w-3.5 shrink-0" />
-                            }
-                            <span>
-                              {localSchemaInfo.installed
-                                ? `已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}${installedScheme ? ` · ${installedScheme.label}` : ""}`
-                                : "未检测到已安装的键道方案"
-                              }
-                              {localSchemaInfo.installed && localSchemaInfo.schemas.length > 0 && (
-                                <span className="ml-1 text-muted-foreground/80">({localSchemaInfo.schemas.join(", ")})</span>
-                              )}
-                            </span>
-                          </div>
+                  {localSchemaInfo !== null && (
+                    <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${localSchemaInfo.deployed
+                      ? "bg-green-500/10 border-green-500/30 text-green-400"
+                      : localSchemaInfo.installed
+                        ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-500"
+                        : "bg-muted/40 border-border text-muted-foreground"
+                      }`}>
+                      {localSchemaInfo.deployed
+                        ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        : localSchemaInfo.installed
+                          ? <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                          : <Info className="h-3.5 w-3.5 shrink-0" />
+                      }
+                      <span className="min-w-0">
+                        {!localSchemaInfo.installed
+                          ? "未安装，请先安装方案"
+                          : localSchemaInfo.deployed
+                            ? `已安装并部署${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}${installedScheme ? ` · ${installedScheme.label}` : ""}`
+                            : `方案已安装${localSchemaInfo.version ? ` ${localSchemaInfo.version}` : ""}${installedScheme ? ` · ${installedScheme.label}` : ""}，请手动部署后使用`
+                        }
+                        {localSchemaInfo.installed && localSchemaInfo.schemas.length > 0 && (
+                          <span className="ml-1 text-muted-foreground/80">({localSchemaInfo.schemas.join(", ")})</span>
                         )}
+                      </span>
+                    </div>
+                  )}
                         {(releaseError || schemeReleaseError) && (
                           <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
                             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -2020,7 +2057,14 @@ export default function App() {
                               {isOpeningDictManager ? "打开中..." : "词库管理器"}
                             </Button>
                           )}
-                          <Button variant="outline" size="sm" onClick={handleDeploy} disabled={isBusy} className="gap-1.5">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleDeploy}
+                            disabled={isBusy || !localSchemaInfo?.installed}
+                            className="gap-1.5"
+                            title={localSchemaInfo?.installed ? "部署当前方案" : "请先安装方案"}
+                          >
                             <Play className="h-3.5 w-3.5" />
                             部署
                           </Button>

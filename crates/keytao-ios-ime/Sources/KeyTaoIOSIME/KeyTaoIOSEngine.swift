@@ -51,30 +51,51 @@ enum KeyTaoIOSPaths {
     }
 
     static func hasInstalledSchema(userRoot: URL) -> Bool {
-        if hasInstalledSchemaFiles(at: userRoot) {
-            return true
+        let schemas = configuredSchemas(userRoot: userRoot)
+        return !schemas.isEmpty && schemas.allSatisfy {
+            FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
         }
-        if let sharedData = sharedDataDir(userRoot: userRoot), hasInstalledSchemaFiles(at: sharedData) {
-            return true
-        }
-        return false
     }
 
-    static func seedPackagedRimeDataIfNeeded(userRoot: URL) {
-        guard !hasInstalledSchemaFiles(at: userRoot) else {
-            return
-        }
-        guard let packagedData = packagedRimeDataDir(), hasInstalledSchemaFiles(at: packagedData) else {
-            return
-        }
-        copyDirectoryContents(from: packagedData, to: userRoot)
+    static func hasDeployedSchema(userRoot: URL) -> Bool {
+        let schemas = configuredSchemas(userRoot: userRoot)
+        let build = userRoot.appendingPathComponent("build", isDirectory: true)
+        return !schemas.isEmpty
+            && schemas.allSatisfy {
+                FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
+            }
+            && schemas.allSatisfy {
+                FileManager.default.fileExists(atPath: build.appendingPathComponent("\($0).schema.yaml").path)
+            }
     }
 
-    private static func hasInstalledSchemaFiles(at root: URL) -> Bool {
-        let fileManager = FileManager.default
-        return fileManager.fileExists(atPath: root.appendingPathComponent("keytao.schema.yaml").path)
-            || fileManager.fileExists(atPath: root.appendingPathComponent("build/keytao.schema.yaml").path)
-            || fileManager.fileExists(atPath: root.appendingPathComponent("build/keytao.table.bin").path)
+    private static func configuredSchemas(userRoot: URL) -> [String] {
+        let config = ["default.custom.yaml", "default-custom.yaml"]
+            .map { userRoot.appendingPathComponent($0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+        guard let config, let content = try? String(contentsOf: config, encoding: .utf8) else {
+            return []
+        }
+
+        return content.split(separator: "\n").compactMap { rawLine in
+            let line = rawLine.split(separator: "#", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard line.hasPrefix("- schema:") else {
+                return nil
+            }
+            let schema = String(line.dropFirst("- schema:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            guard !schema.isEmpty,
+                  schema.unicodeScalars.allSatisfy({
+                      CharacterSet.alphanumerics.contains($0) || "_-.".unicodeScalars.contains($0)
+                  }) else {
+                return nil
+            }
+            return schema
+        }.filter { schema in
+            ["keytao", "txjx", "xmjd6", "keydo"].contains { schema.hasPrefix($0) }
+        }
     }
 
     static func ensureUserRoot(_ url: URL) {
@@ -115,50 +136,6 @@ enum KeyTaoIOSPaths {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("default.yaml").path)
     }
 
-    private static func packagedRimeDataDir() -> URL? {
-        if let url = Bundle.main.resourceURL?.appendingPathComponent("rime-data", isDirectory: true),
-           hasDefaultYaml(at: url) {
-            return url
-        }
-        if let url = KeyTaoIOSBundle.url(forResource: "rime-data"), hasDefaultYaml(at: url) {
-            return url
-        }
-        return nil
-    }
-
-    private static func copyDirectoryContents(from source: URL, to destination: URL) {
-        let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: source,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return
-        }
-
-        for case let sourceURL as URL in enumerator {
-            let relativePath = sourceURL.path.replacingOccurrences(of: source.path + "/", with: "")
-            guard !relativePath.isEmpty else {
-                continue
-            }
-            let destinationURL = destination.appendingPathComponent(relativePath)
-            let isDirectory = (try? sourceURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            do {
-                if isDirectory {
-                    try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
-                } else {
-                    try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if fileManager.fileExists(atPath: destinationURL.path) {
-                        try fileManager.removeItem(at: destinationURL)
-                    }
-                    try fileManager.copyItem(at: sourceURL, to: destinationURL)
-                }
-            } catch {
-                continue
-            }
-        }
-    }
-
     private static func applicationSupportRoot() -> URL {
         let fileManager = FileManager.default
         if let url = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
@@ -184,7 +161,6 @@ final class KeyTaoIOSEngine {
         self.reloadStampSignature = Self.fileSignature(reloadStamp)
         KeyTaoIOSPaths.ensureUserRoot(userRoot)
         KeyTaoIOSPaths.seedDefaultKeyboardIfNeeded(userRoot: userRoot)
-        KeyTaoIOSPaths.seedPackagedRimeDataIfNeeded(userRoot: userRoot)
     }
 
     deinit {
@@ -198,11 +174,18 @@ final class KeyTaoIOSEngine {
         guard KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot) else {
             return false
         }
+        guard KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot) else {
+            return false
+        }
         return initializeRuntime()
     }
 
     func hasInstalledSchema() -> Bool {
         KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot)
+    }
+
+    func hasDeployedSchema() -> Bool {
+        KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot)
     }
 
     func resolveTheme(systemColorScheme: KeyTaoEffectiveColorScheme?) -> KeyTaoImeTheme {

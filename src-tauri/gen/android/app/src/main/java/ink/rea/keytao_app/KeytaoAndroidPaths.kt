@@ -23,14 +23,30 @@ object KeytaoAndroidPaths {
     fun rimeDataDir(): File = File(userRoot(), "rime-data")
 
     fun hasInstalledSchema(root: File = userRoot()): Boolean {
-        return root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
-            File(root, "default.custom.yaml").isFile ||
-            hasDeployedSchema(root)
+        val schemas = configuredSchemas(root)
+        return schemas.isNotEmpty() && schemas.all { File(root, "$it.schema.yaml").isFile }
     }
 
     fun hasDeployedSchema(root: File = userRoot()): Boolean {
-        return File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true ||
-            File(root, "build").listFiles()?.any { it.isFile && it.name.endsWith(".table.bin") } == true
+        val schemas = configuredSchemas(root)
+        val build = File(root, "build")
+        return schemas.isNotEmpty() &&
+            schemas.all { File(root, "$it.schema.yaml").isFile } &&
+            schemas.all { File(build, "$it.schema.yaml").isFile }
+    }
+
+    fun invalidateDeployment(root: File = userRoot()): Boolean {
+        val build = File(root, "build")
+        return !build.exists() || build.deleteRecursively()
+    }
+
+    private fun configuredSchemas(root: File): List<String> {
+        val config = sequenceOf("default.custom.yaml", "default-custom.yaml")
+            .map { File(root, it) }
+            .firstOrNull { it.isFile }
+            ?: return emptyList()
+        return runCatching { parseSchemas(config.readText()).filter(::isManagedSchema) }
+            .getOrDefault(emptyList())
     }
 
     fun isWritable(root: File = userRoot()): Boolean {

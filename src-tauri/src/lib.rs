@@ -4576,6 +4576,7 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
 
         Ok(LocalSchemaInfo {
             installed,
+            deployed: result["deployed"].as_bool().unwrap_or(false),
             version,
             schemas,
         })
@@ -4945,6 +4946,7 @@ async fn macos_uninstall_ime() -> Result<(), String> {
 #[derive(Serialize, Clone)]
 pub struct LocalSchemaInfo {
     pub installed: bool,
+    pub deployed: bool,
     pub version: Option<String>,
     pub schemas: Vec<String>,
 }
@@ -5236,53 +5238,28 @@ fn check_local_schema<R: tauri::Runtime>(
     let Some(dir) = dir else {
         return LocalSchemaInfo {
             installed: false,
+            deployed: false,
             version: None,
             schemas: vec![],
         };
     };
 
-    let version = std::fs::read_to_string(dir.join("version.txt"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let schemas = read_local_schemas(dir.to_string_lossy().into_owned());
-    let has_schema_file = |base: &Path| {
-        std::fs::read_dir(base)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok())
-            .any(|entry| {
-                let path = entry.path();
-                path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".schema.yaml"))
-            })
-    };
-    let has_build_artifact = std::fs::read_dir(dir.join("build"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .any(|entry| {
-            let path = entry.path();
-            path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.ends_with(".schema.yaml") || name.ends_with(".table.bin")
-                    })
-        });
-    let installed = !schemas.is_empty() || has_schema_file(&dir) || has_build_artifact;
+    let state = keytao_core::schema_install_state(&dir);
+    let version = state
+        .installed
+        .then(|| {
+            std::fs::read_to_string(dir.join("version.txt"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .flatten();
 
     LocalSchemaInfo {
-        installed,
+        installed: state.installed,
+        deployed: state.deployed,
         version,
-        schemas,
+        schemas: state.schemas,
     }
 }
 
@@ -5357,6 +5334,15 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
             }
             #[cfg(target_os = "windows")]
             let _ = app.emit("deploy-progress", "已通知系统输入法重载");
+            #[cfg(target_os = "linux")]
+            match launch_keytao_ime(&app, true) {
+                Ok(status) => {
+                    let _ = app.emit("deploy-progress", status.message);
+                }
+                Err(error) => {
+                    let _ = app.emit("deploy-progress", format!("Linux 输入法启动失败：{error}"));
+                }
+            }
             Ok(DeployResult {
                 success: true,
                 message: "部署成功".into(),
