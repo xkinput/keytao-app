@@ -38,6 +38,14 @@ keyboard:
   verticalGap: 5
   outerInset: 5
   maxKeyHeight: 54
+  floating:
+    margin: 8
+    portrait:
+      enabled: false
+      scale: 0.88
+    landscape:
+      enabled: true
+      scale: 0.72
   rows:
     - [
         { label: "q", hint: "1", value: "q", longPress: { type: input, value: "1" } },

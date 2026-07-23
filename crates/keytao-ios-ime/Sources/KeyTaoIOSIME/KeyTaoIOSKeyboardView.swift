@@ -73,6 +73,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var config: KeyTaoIOSImeConfig
     private var theme: KeyTaoImeTheme
     private var state: KeyTaoImeState
+    private var floatingPresentation = false
     private var availabilityMessage: String?
     private var layerMode: KeyTaoKeyboardLayer = .letters
     private var shiftState: KeyTaoShiftState = .off
@@ -157,6 +158,14 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     func update(theme: KeyTaoImeTheme) {
         self.theme = theme
+        invalidateLayoutAndDisplay()
+    }
+
+    func updateFloatingPresentation(enabled: Bool) {
+        guard floatingPresentation != enabled else {
+            return
+        }
+        floatingPresentation = enabled
         invalidateLayoutAndDisplay()
     }
 
@@ -480,7 +489,22 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawBackground() {
-        // The root UIInputView(.keyboard) supplies the system keyboard material.
+        guard floatingPresentation else {
+            // The root UIInputView(.keyboard) supplies the system keyboard material.
+            return
+        }
+        let borderWidth = max(0.5, theme.panel.borderWidth)
+        let inset = borderWidth / 2
+        let panelRect = bounds.insetBy(dx: inset, dy: inset)
+        let path = UIBezierPath(
+            roundedRect: panelRect,
+            cornerRadius: theme.panel.cornerRadius
+        )
+        theme.panel.background.uiColor.setFill()
+        path.fill()
+        theme.panel.borderColor.uiColor.setStroke()
+        path.lineWidth = borderWidth
+        path.stroke()
     }
 
     private func drawCandidateBar() {
@@ -729,11 +753,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         var secondaryFont = themedFont(size: secondarySize, weight: theme.font.weight)
         let primaryWidth = primary.size(withAttributes: [.font: primaryFont]).width
         let secondaryWidth = secondary.size(withAttributes: [.font: secondaryFont]).width
-        let gap: CGFloat = 5
+        let gap: CGFloat = rect.width < 44 ? 3 : 5
         let total = primaryWidth + secondaryWidth + gap
         let maxWidth = max(1, rect.width - 10)
         if total > maxWidth {
-            let scale = max(0.78, maxWidth / total)
+            let scale = max(0.6, maxWidth / total)
             primarySize *= scale
             secondarySize *= scale
             primaryFont = themedFont(size: primarySize, weight: theme.font.weight)
@@ -1244,8 +1268,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let barHeight = config.candidateBarHeightDp
         let leftPadding = theme.panel.gap * 1.5
+        let compactToolbar = bounds.width < 300
         let logoLeft = logoRect().minX
-        let maxRight = logoLeft - 8
+        let maxRight = logoLeft - (compactToolbar ? 4 : 8)
         let chipHeight = min(34, barHeight - 12)
         let top = (barHeight - chipHeight) / 2
         let actions = toolbarActions()
@@ -1254,10 +1279,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         var x = leftPadding
         var rects: [ToolbarRect] = []
         for (action, width) in zip(actions, widths) {
-            if x + width > maxRight {
+            let remainingWidth = maxRight - x
+            if remainingWidth <= 0 {
                 break
             }
-            let rect = CGRect(x: x, y: top, width: width, height: chipHeight)
+            let rect = CGRect(x: x, y: top, width: min(width, remainingWidth), height: chipHeight)
             rects.append(ToolbarRect(action: action, rect: rect))
             x = rect.maxX + gap
         }
@@ -1275,7 +1301,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func logoRect() -> CGRect {
-        let size: CGFloat = 30
+        let size: CGFloat = bounds.width < 300 ? 24 : 30
         let leftPadding = theme.panel.gap * 1.5
         let barHeight = config.candidateBarHeightDp
         return CGRect(x: bounds.width - leftPadding - size, y: (barHeight - size) / 2, width: size, height: size)
@@ -1433,7 +1459,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func toolbarChipWidth(_ action: ToolbarAction, horizontalPadding: CGFloat = 22, minimumWidth: CGFloat? = nil) -> CGFloat {
         if action.icon != nil && (action.secondaryLabel?.isEmpty ?? true) {
-            return max(minimumWidth ?? 46, 46)
+            return minimumWidth ?? 46
         }
         let labelWidth = textWidth(action.label, size: theme.font.labelSize)
         let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: theme.font.commentSize) } ?? 0
@@ -1448,7 +1474,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return naturalGap
         }
         let naturalTotal = actions.map { toolbarChipWidth($0) }.reduce(0, +) + naturalGap * CGFloat(actions.count - 1)
-        return naturalTotal <= availableWidth ? naturalGap : 4
+        return naturalTotal <= availableWidth ? naturalGap : 3
     }
 
     private func toolbarChipWidths(for actions: [ToolbarAction], availableWidth: CGFloat, gap: CGFloat) -> [CGFloat] {
@@ -1461,16 +1487,22 @@ final class KeyTaoIOSKeyboardView: UIView {
             return natural
         }
 
-        let compact = actions.map { toolbarChipWidth($0, horizontalPadding: 16, minimumWidth: 42) }
+        let compact = actions.map { toolbarChipWidth($0, horizontalPadding: 12, minimumWidth: 38) }
         let compactTotal = compact.reduce(0, +) + gap * CGFloat(max(0, actions.count - 1))
         if compactTotal <= availableWidth {
             return compact
         }
 
         let minimums = actions.map { toolbarMinimumChipWidth($0) }
-        let minimumTotal = minimums.reduce(0, +) + gap * CGFloat(max(0, actions.count - 1))
-        guard minimumTotal < compactTotal, availableWidth > minimumTotal else {
-            return compact
+        let gapTotal = gap * CGFloat(max(0, actions.count - 1))
+        let minimumContentWidth = minimums.reduce(0, +)
+        let availableContentWidth = max(0, availableWidth - gapTotal)
+        guard minimumContentWidth > 0 else {
+            return minimums
+        }
+        if minimumContentWidth >= availableContentWidth {
+            let scale = availableContentWidth / minimumContentWidth
+            return minimums.map { $0 * scale }
         }
 
         let overflow = compactTotal - availableWidth
@@ -1486,12 +1518,12 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func toolbarMinimumChipWidth(_ action: ToolbarAction) -> CGFloat {
         if action.icon != nil && (action.secondaryLabel?.isEmpty ?? true) {
-            return 40
+            return 34
         }
-        let labelWidth = textWidth(action.label, size: max(12, theme.font.labelSize * 0.82))
-        let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: max(11, theme.font.commentSize * 0.82)) } ?? 0
-        let inlineGap: CGFloat = secondaryWidth > 0 ? 5 : 0
-        return max(labelWidth + secondaryWidth + inlineGap + 10, secondaryWidth > 0 ? 44 : 38)
+        let labelWidth = textWidth(action.label, size: max(11, theme.font.labelSize * 0.72))
+        let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: max(10, theme.font.commentSize * 0.72)) } ?? 0
+        let inlineGap: CGFloat = secondaryWidth > 0 ? 3 : 0
+        return max(labelWidth + secondaryWidth + inlineGap + 6, secondaryWidth > 0 ? 38 : 34)
     }
 
     private func activeRows() -> [[KeyTaoKeySpec]] {

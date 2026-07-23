@@ -3762,6 +3762,10 @@ pub struct AndroidImeInputSettings {
     pub haptics_enabled: bool,
     pub haptic_intensity: u8,
     pub enter_key_behavior: String,
+    pub floating_portrait_enabled: bool,
+    pub floating_portrait_scale: u8,
+    pub floating_landscape_enabled: bool,
+    pub floating_landscape_scale: u8,
     pub config_path: Option<String>,
     pub reload_stamp_path: Option<String>,
     pub message: String,
@@ -4338,11 +4342,47 @@ fn android_ime_haptics_settings_from_config(
             .get("enterKeyBehavior")
             .and_then(|value| value.as_str()),
     );
+    let keyboard_path = root.join("keyboard.yaml");
+    let keyboard = keytao_theme::resolve_keyboard_from_paths(
+        None,
+        keyboard_path.is_file().then_some(keyboard_path.as_path()),
+    );
+    let floating = config.get("floating").and_then(|value| value.as_object());
+    let portrait = floating
+        .and_then(|value| value.get("portrait"))
+        .and_then(|value| value.as_object());
+    let landscape = floating
+        .and_then(|value| value.get("landscape"))
+        .and_then(|value| value.as_object());
+    let floating_portrait_enabled = portrait
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(keyboard.floating.portrait.enabled);
+    let floating_portrait_scale = floating_scale_percent(
+        portrait
+            .and_then(|value| value.get("scale"))
+            .and_then(|value| value.as_f64()),
+        keyboard.floating.portrait.scale,
+    );
+    let floating_landscape_enabled = landscape
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(keyboard.floating.landscape.enabled);
+    let floating_landscape_scale = floating_scale_percent(
+        landscape
+            .and_then(|value| value.get("scale"))
+            .and_then(|value| value.as_f64()),
+        keyboard.floating.landscape.scale,
+    );
 
     AndroidImeInputSettings {
         haptics_enabled,
         haptic_intensity,
         enter_key_behavior,
+        floating_portrait_enabled,
+        floating_portrait_scale,
+        floating_landscape_enabled,
+        floating_landscape_scale,
         config_path: Some(path_string(path)),
         reload_stamp_path: Some(path_string({
             #[cfg(target_os = "ios")]
@@ -4356,6 +4396,13 @@ fn android_ime_haptics_settings_from_config(
         })),
         message,
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn floating_scale_percent(value: Option<f64>, default_scale: f32) -> u8 {
+    let value = value.unwrap_or(default_scale as f64);
+    let ratio = if value > 1.5 { value / 100.0 } else { value };
+    (ratio.clamp(0.70, 1.0) * 100.0).round() as u8
 }
 
 #[tauri::command]
@@ -4391,6 +4438,10 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     haptics_enabled: bool,
     haptic_intensity: u8,
     enter_key_behavior: String,
+    floating_portrait_enabled: bool,
+    floating_portrait_scale: u8,
+    floating_landscape_enabled: bool,
+    floating_landscape_scale: u8,
 ) -> Result<AndroidImeInputSettings, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -4419,6 +4470,40 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
             "enterKeyBehavior".into(),
             serde_json::Value::String(normalize_enter_key_behavior(Some(&enter_key_behavior))),
         );
+        let mut floating = config
+            .get("floating")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut portrait = floating
+            .get("portrait")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        portrait.insert(
+            "enabled".into(),
+            serde_json::Value::Bool(floating_portrait_enabled),
+        );
+        portrait.insert(
+            "scale".into(),
+            serde_json::Value::from(floating_portrait_scale.clamp(70, 100) as f64 / 100.0),
+        );
+        floating.insert("portrait".into(), serde_json::Value::Object(portrait));
+        let mut landscape = floating
+            .get("landscape")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        landscape.insert(
+            "enabled".into(),
+            serde_json::Value::Bool(floating_landscape_enabled),
+        );
+        landscape.insert(
+            "scale".into(),
+            serde_json::Value::from(floating_landscape_scale.clamp(70, 100) as f64 / 100.0),
+        );
+        floating.insert("landscape".into(), serde_json::Value::Object(landscape));
+        config.insert("floating".into(), serde_json::Value::Object(floating));
 
         let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
             .map_err(|e| format!("序列化移动端输入法配置失败: {e}"))?;
@@ -4454,6 +4539,10 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         let _ = haptics_enabled;
         let _ = haptic_intensity;
         let _ = enter_key_behavior;
+        let _ = floating_portrait_enabled;
+        let _ = floating_portrait_scale;
+        let _ = floating_landscape_enabled;
+        let _ = floating_landscape_scale;
         Err("Mobile IME input settings are only available on Android and iOS".into())
     }
 }

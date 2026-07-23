@@ -15,7 +15,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
     private var keyboardView: KeyTaoIOSKeyboardView?
+    private var keyboardContainer: UIView?
     private var heightConstraint: NSLayoutConstraint?
+    private var keyboardWidthConstraint: NSLayoutConstraint?
+    private var keyboardHeightConstraint: NSLayoutConstraint?
+    private var keyboardBottomConstraint: NSLayoutConstraint?
+    private var baseKeyboardConfig: KeyTaoIOSImeConfig?
+    private var currentTheme: KeyTaoImeTheme = .fallback
+    private var lastPresentationLandscape: Bool?
     private var currentState = KeyTaoImeState.empty
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
@@ -45,26 +52,34 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
         let systemColorScheme = currentSystemColorScheme()
         let theme = engine.resolveTheme(systemColorScheme: systemColorScheme)
+        let config = engine.loadConfig(systemColorScheme: systemColorScheme)
         let view = KeyTaoIOSKeyboardView(
-            config: engine.loadConfig(systemColorScheme: systemColorScheme),
+            config: config,
             theme: theme,
             state: currentState
         )
+        let container = UIView(frame: .zero)
+        container.backgroundColor = .clear
+        container.translatesAutoresizingMaskIntoConstraints = false
         view.delegate = self
         view.translatesAutoresizingMaskIntoConstraints = false
+        self.view.backgroundColor = .clear
+        self.view.isOpaque = false
         applyInterfaceStyle(for: theme)
         view.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
-        self.view.addSubview(view)
+        self.view.addSubview(container)
+        container.addSubview(view)
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
-            view.topAnchor.constraint(equalTo: self.view.topAnchor),
-            view.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+            container.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-        heightConstraint = self.view.heightAnchor.constraint(equalToConstant: view.preferredHeight)
-        heightConstraint?.priority = .defaultHigh
-        heightConstraint?.isActive = true
+        currentTheme = theme
+        keyboardContainer = container
         keyboardView = view
+        applyKeyboardPresentation(config: config, force: true)
         refreshInputAvailability()
     }
 
@@ -73,9 +88,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         reloadIfNeeded()
         let systemColorScheme = currentSystemColorScheme()
         keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
-        keyboardView?.update(config: engine.loadConfig(systemColorScheme: systemColorScheme))
+        let config = engine.loadConfig(systemColorScheme: systemColorScheme)
+        applyKeyboardPresentation(config: config, force: true)
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
-        heightConstraint?.constant = keyboardView?.preferredHeight ?? 316
         refreshInputAvailability()
         keyboardView?.update(state: currentState)
     }
@@ -89,10 +104,33 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
-        guard previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle else {
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+            updateThemeForCurrentAppearance()
+        }
+        applyKeyboardPresentationIfOrientationChanged()
+    }
+
+    public override func viewWillTransition(
+        to size: CGSize,
+        with coordinator: UIViewControllerTransitionCoordinator
+    ) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.applyKeyboardPresentationIfOrientationChanged(force: true)
+        }
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyKeyboardPresentationIfOrientationChanged()
+        guard let container = keyboardContainer,
+              container.layer.shadowOpacity > 0 else {
             return
         }
-        updateThemeForCurrentAppearance()
+        container.layer.shadowPath = UIBezierPath(
+            roundedRect: container.bounds,
+            cornerRadius: currentTheme.panel.cornerRadius
+        ).cgPath
     }
 
     public override func textWillChange(_ textInput: UITextInput?) {
@@ -503,19 +541,114 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentState = engine.state().withoutTransientCommit()
         let systemColorScheme = currentSystemColorScheme()
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
-        keyboardView?.update(config: engine.loadConfig(systemColorScheme: systemColorScheme))
+        applyKeyboardPresentation(
+            config: engine.loadConfig(systemColorScheme: systemColorScheme),
+            force: true
+        )
     }
 
     private func updateThemeForCurrentAppearance(systemColorScheme: KeyTaoEffectiveColorScheme? = nil) {
         let theme = engine.resolveTheme(systemColorScheme: systemColorScheme ?? currentSystemColorScheme())
+        currentTheme = theme
         applyInterfaceStyle(for: theme)
         keyboardView?.update(theme: theme)
+        updateFloatingAppearance()
     }
 
     private func applyInterfaceStyle(for theme: KeyTaoImeTheme) {
         let style: UIUserInterfaceStyle = theme.ui.effectiveColorScheme == "dark" ? .dark : .light
         self.view.overrideUserInterfaceStyle = style
         keyboardView?.overrideUserInterfaceStyle = style
+    }
+
+    private func applyKeyboardPresentationIfOrientationChanged(force: Bool = false) {
+        guard let config = baseKeyboardConfig else {
+            return
+        }
+        let isLandscape = currentInterfaceIsLandscape()
+        guard force || lastPresentationLandscape != isLandscape else {
+            return
+        }
+        applyKeyboardPresentation(config: config, force: true)
+    }
+
+    private func applyKeyboardPresentation(config: KeyTaoIOSImeConfig, force: Bool = false) {
+        guard let keyboardView,
+              let container = keyboardContainer else {
+            return
+        }
+        baseKeyboardConfig = config
+        let isLandscape = currentInterfaceIsLandscape()
+        let profile = config.floating.profile(isLandscape: isLandscape)
+        if !force, lastPresentationLandscape == isLandscape,
+           keyboardView.currentConfig() == config.scaledForFloating(profile) {
+            return
+        }
+        lastPresentationLandscape = isLandscape
+        let floating = profile.enabled
+        let presentedConfig = config.scaledForFloating(profile)
+        keyboardView.update(config: presentedConfig)
+        keyboardView.updateFloatingPresentation(enabled: floating)
+
+        NSLayoutConstraint.deactivate(
+            [keyboardWidthConstraint, keyboardHeightConstraint, keyboardBottomConstraint, heightConstraint]
+                .compactMap { $0 }
+        )
+        keyboardWidthConstraint = container.widthAnchor.constraint(
+            equalTo: self.view.widthAnchor,
+            multiplier: floating ? profile.scale : 1
+        )
+        keyboardHeightConstraint = container.heightAnchor.constraint(
+            equalToConstant: presentedConfig.keyboardHeightDp + presentedConfig.candidateBarHeightDp
+        )
+        let margin = floating ? config.floating.marginDp : 0
+        keyboardBottomConstraint = container.bottomAnchor.constraint(
+            equalTo: self.view.bottomAnchor,
+            constant: -margin
+        )
+        heightConstraint = self.view.heightAnchor.constraint(
+            equalToConstant: presentedConfig.keyboardHeightDp
+                + presentedConfig.candidateBarHeightDp
+                + margin * 2
+        )
+        heightConstraint?.priority = .defaultHigh
+        NSLayoutConstraint.activate(
+            [keyboardWidthConstraint, keyboardHeightConstraint, keyboardBottomConstraint, heightConstraint]
+                .compactMap { $0 }
+        )
+        updateFloatingAppearance()
+    }
+
+    private func updateFloatingAppearance() {
+        guard let keyboardView,
+              let container = keyboardContainer,
+              let config = baseKeyboardConfig else {
+            return
+        }
+        let floating = config.floating.profile(isLandscape: currentInterfaceIsLandscape()).enabled
+        let radius = floating ? currentTheme.panel.cornerRadius : 0
+        keyboardView.layer.cornerRadius = radius
+        keyboardView.layer.cornerCurve = .continuous
+        keyboardView.layer.masksToBounds = floating
+        container.layer.shadowColor = UIColor.black.cgColor
+        container.layer.shadowOpacity = floating && currentTheme.panel.shadow ? 0.2 : 0
+        container.layer.shadowRadius = floating ? 9 : 0
+        container.layer.shadowOffset = floating ? CGSize(width: 0, height: 3) : .zero
+        container.layer.shadowPath = floating
+            ? UIBezierPath(roundedRect: container.bounds, cornerRadius: radius).cgPath
+            : nil
+    }
+
+    private func currentInterfaceIsLandscape() -> Bool {
+        if let orientation = view.window?.windowScene?.interfaceOrientation,
+           orientation != .unknown {
+            return orientation.isLandscape
+        }
+        if traitCollection.verticalSizeClass == .compact {
+            return true
+        }
+        let screenBounds = UIScreen.main.bounds
+        return screenBounds.width > screenBounds.height
     }
 
     private func currentSystemColorScheme() -> KeyTaoEffectiveColorScheme {

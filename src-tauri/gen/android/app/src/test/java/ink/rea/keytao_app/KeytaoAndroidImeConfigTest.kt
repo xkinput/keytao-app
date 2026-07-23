@@ -157,6 +157,36 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `parse config keeps independent floating profiles and scales geometry`() {
+        val config = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              "keyboardHeightDp": 300,
+              "candidateBarHeightDp": 60,
+              "horizontalGapDp": 6,
+              "floating": {
+                "margin": 10,
+                "portrait": { "enabled": true, "scale": 0.8 },
+                "landscape": { "enabled": false, "scale": 92 }
+              },
+              "rows": [[{ "label": "a", "value": "a" }]]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(10f, config.floating.marginDp)
+        assertEquals(true, config.floating.portrait.enabled)
+        assertEquals(0.8f, config.floating.portrait.scale)
+        assertEquals(false, config.floating.landscape.enabled)
+        assertEquals(0.92f, config.floating.landscape.scale)
+
+        val scaled = config.scaledForFloating(config.floating.portrait)
+        assertEquals(240, scaled.keyboardHeightDp)
+        assertEquals(48, scaled.candidateBarHeightDp)
+        assertEquals(4.8f, scaled.horizontalGapDp)
+    }
+
+    @Test
     fun `default m long press goes through rime input path`() {
         val config = KeytaoAndroidImeConfig.parse("""{ "rows": [] }""")
         val mKey = config.rows

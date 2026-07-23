@@ -175,11 +175,27 @@ pub struct KeyboardTheme {
     pub vertical_gap: f32,
     pub outer_inset: f32,
     pub max_key_height: f32,
+    pub floating: KeyboardFloatingTheme,
     pub rows: Vec<Vec<KeyboardKeyTheme>>,
     pub number_rows: Vec<Vec<KeyboardKeyTheme>>,
     pub symbol_rows: Vec<Vec<KeyboardKeyTheme>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub layers: BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardFloatingTheme {
+    pub margin: f32,
+    pub portrait: KeyboardFloatingProfileTheme,
+    pub landscape: KeyboardFloatingProfileTheme,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardFloatingProfileTheme {
+    pub enabled: bool,
+    pub scale: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -903,10 +919,27 @@ impl Default for KeyboardTheme {
             vertical_gap: 5.0,
             outer_inset: 5.0,
             max_key_height: 54.0,
+            floating: KeyboardFloatingTheme::default(),
             rows: Vec::new(),
             number_rows: Vec::new(),
             symbol_rows: Vec::new(),
             layers: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for KeyboardFloatingTheme {
+    fn default() -> Self {
+        Self {
+            margin: 8.0,
+            portrait: KeyboardFloatingProfileTheme {
+                enabled: false,
+                scale: 0.88,
+            },
+            landscape: KeyboardFloatingProfileTheme {
+                enabled: true,
+                scale: 0.72,
+            },
         }
     }
 }
@@ -919,6 +952,11 @@ fn sanitize_keyboard(mut keyboard: KeyboardTheme) -> KeyboardTheme {
     keyboard.vertical_gap = clamp(keyboard.vertical_gap, 0.0, 24.0);
     keyboard.outer_inset = clamp(keyboard.outer_inset, 0.0, 32.0);
     keyboard.max_key_height = clamp(keyboard.max_key_height, 36.0, 84.0);
+    keyboard.floating.margin = clamp(keyboard.floating.margin, 0.0, 24.0);
+    keyboard.floating.portrait.scale =
+        clamp(keyboard.floating.portrait.scale, 0.70, 1.0);
+    keyboard.floating.landscape.scale =
+        clamp(keyboard.floating.landscape.scale, 0.70, 1.0);
     keyboard.layers.retain(|name, rows| {
         !name.trim().is_empty()
             && name != "letters"
@@ -1114,6 +1152,7 @@ struct PartialKeyboardTheme {
     outer_inset: Option<f32>,
     #[serde(alias = "maxKeyHeightDp")]
     max_key_height: Option<f32>,
+    floating: Option<PartialKeyboardFloatingTheme>,
     rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     number_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
     symbol_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
@@ -1124,6 +1163,22 @@ struct PartialKeyboardTheme {
         deserialize_with = "optional_keyboard_layers"
     )]
     layers: Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>,
+}
+
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialKeyboardFloatingTheme {
+    #[serde(alias = "marginDp")]
+    margin: Option<f32>,
+    portrait: Option<PartialKeyboardFloatingProfileTheme>,
+    landscape: Option<PartialKeyboardFloatingProfileTheme>,
+}
+
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialKeyboardFloatingProfileTheme {
+    enabled: Option<bool>,
+    scale: Option<f32>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1169,6 +1224,7 @@ impl PartialKeyboardTheme {
             || self.vertical_gap.is_some()
             || self.outer_inset.is_some()
             || self.max_key_height.is_some()
+            || self.floating.is_some()
             || self.rows.is_some()
             || self.number_rows.is_some()
             || self.symbol_rows.is_some()
@@ -1301,6 +1357,9 @@ impl KeyboardTheme {
         assign(&mut self.vertical_gap, partial.vertical_gap);
         assign(&mut self.outer_inset, partial.outer_inset);
         assign(&mut self.max_key_height, partial.max_key_height);
+        if let Some(floating) = partial.floating {
+            self.floating.apply(floating);
+        }
         assign(&mut self.rows, partial.rows);
         assign(&mut self.number_rows, partial.number_rows);
         assign(&mut self.symbol_rows, partial.symbol_rows);
@@ -1309,6 +1368,25 @@ impl KeyboardTheme {
                 self.layers.extend(layers);
             }
         }
+    }
+}
+
+impl KeyboardFloatingTheme {
+    fn apply(&mut self, partial: PartialKeyboardFloatingTheme) {
+        assign(&mut self.margin, partial.margin);
+        if let Some(portrait) = partial.portrait {
+            self.portrait.apply(portrait);
+        }
+        if let Some(landscape) = partial.landscape {
+            self.landscape.apply(landscape);
+        }
+    }
+}
+
+impl KeyboardFloatingProfileTheme {
+    fn apply(&mut self, partial: PartialKeyboardFloatingProfileTheme) {
+        assign(&mut self.enabled, partial.enabled);
+        assign(&mut self.scale, partial.scale);
     }
 }
 
@@ -1602,9 +1680,37 @@ mod tests {
         assert_eq!(keyboard.number_rows[0][0].label, "+");
         assert_eq!(keyboard.symbol_rows[0][0].label, "中文");
         assert_eq!(keyboard.symbol_rows[1][0].label, "【");
+        assert!(!keyboard.floating.portrait.enabled);
+        assert_eq!(keyboard.floating.portrait.scale, 0.88);
+        assert!(keyboard.floating.landscape.enabled);
+        assert_eq!(keyboard.floating.landscape.scale, 0.72);
         let json = resolved_keyboard_json(&keyboard).unwrap();
         assert!(json.contains("\"numberRows\""));
         assert!(json.contains("\"symbols_arrows\""));
+        assert!(json.contains("\"floating\""));
+    }
+
+    #[test]
+    fn keyboard_yaml_merges_and_clamps_floating_profiles() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-keyboard-floating-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "floating:\n  margin: 40\n  portrait:\n    enabled: true\n    scale: 0.42\n  landscape:\n    enabled: false\n    scale: 0.94\n",
+        )
+        .unwrap();
+
+        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        assert_eq!(keyboard.floating.margin, 24.0);
+        assert!(keyboard.floating.portrait.enabled);
+        assert_eq!(keyboard.floating.portrait.scale, 0.70);
+        assert!(!keyboard.floating.landscape.enabled);
+        assert_eq!(keyboard.floating.landscape.scale, 0.94);
     }
 
     #[test]

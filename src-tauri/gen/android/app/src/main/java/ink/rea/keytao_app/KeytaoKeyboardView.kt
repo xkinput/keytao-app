@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
@@ -17,6 +18,7 @@ import android.os.Vibrator
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -86,6 +88,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
     private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
+    private var floatingPresentation = false
     private var state: KeytaoImeState = KeytaoImeState.empty()
     private var shiftState = ShiftState.OFF
     private var keyboardLayer = "letters"
@@ -212,6 +215,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         theme = next
         candidateWidthCache.clear()
         invalidateKeyboardLayoutCache()
+        invalidateOutline()
+        invalidate()
+    }
+
+    fun updateFloatingPresentation(enabled: Boolean) {
+        if (floatingPresentation == enabled) return
+        floatingPresentation = enabled
+        clipToOutline = enabled
+        elevation = if (enabled) dp(8f) else 0f
+        outlineProvider = if (enabled) floatingOutlineProvider else ViewOutlineProvider.BACKGROUND
+        invalidateOutline()
         invalidate()
     }
 
@@ -593,6 +607,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawBackground(canvas: Canvas) {
+        if (floatingPresentation) {
+            val strokeWidth = max(1f, dp(1f))
+            val halfStroke = strokeWidth / 2f
+            val panelRect = RectF(
+                halfStroke,
+                halfStroke,
+                width.toFloat() - halfStroke,
+                height.toFloat() - halfStroke,
+            )
+            val radius = dp(theme.panelCornerRadiusDp)
+            paint.style = Paint.Style.FILL
+            paint.color = panelBackgroundColor()
+            canvas.drawRoundRect(panelRect, radius, radius, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = strokeWidth
+            paint.color = theme.panelBorder.toArgb()
+            canvas.drawRoundRect(panelRect, radius, radius, paint)
+            return
+        }
         paint.style = Paint.Style.FILL
         paint.color = panelBackgroundColor()
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
@@ -1068,20 +1101,53 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawToolbar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
-        val logoSize = dp(30f)
-        val logoGap = dp(8f)
+        val actions = toolbarActions()
+        val preferredWidths = actions.map(::toolbarChipWidth)
+        val minimumWidths = actions.map(::minimumToolbarChipWidth)
+        val availableWidth = (width - leftPadding * 2f).coerceAtLeast(0f)
+        val preferredTotal = preferredWidths.sum() +
+            dp(6f) * (actions.size - 1).coerceAtLeast(0) +
+            dp(8f) +
+            dp(30f)
+        val compression = if (preferredTotal > 0f) {
+            (availableWidth / preferredTotal).coerceIn(0.6f, 1f)
+        } else {
+            1f
+        }
+        val logoSize = max(dp(18f), dp(30f) * compression)
+        val logoGap = max(dp(2f), dp(8f) * compression)
+        val gap = max(dp(2f), dp(6f) * compression)
         val logoLeft = width - leftPadding - logoSize
         val maxRight = logoLeft - logoGap
-        val actions = toolbarActions()
         val rects = mutableListOf<ToolbarRect>()
-        val gap = dp(6f)
         val chipHeight = minOf(dp(34f), barHeight - dp(12f))
+        val widthBudget = (maxRight - leftPadding - gap * (actions.size - 1).coerceAtLeast(0))
+            .coerceAtLeast(0f)
+        val preferredWidthTotal = preferredWidths.sum()
+        val minimumWidthTotal = minimumWidths.sum()
+        val chipWidths = when {
+            preferredWidthTotal <= widthBudget -> preferredWidths
+            minimumWidthTotal >= widthBudget && minimumWidthTotal > 0f -> {
+                val scale = widthBudget / minimumWidthTotal
+                minimumWidths.map { it * scale }
+            }
+            else -> {
+                val flexibleWidth = preferredWidthTotal - minimumWidthTotal
+                val progress = if (flexibleWidth > 0f) {
+                    ((widthBudget - minimumWidthTotal) / flexibleWidth).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+                preferredWidths.mapIndexed { index, preferred ->
+                    minimumWidths[index] + (preferred - minimumWidths[index]) * progress
+                }
+            }
+        }
         var x = leftPadding
         val top = (barHeight - chipHeight) / 2f
 
-        for (action in actions) {
-            val chipWidth = toolbarChipWidth(action)
-            if (x + chipWidth > maxRight) break
+        for ((index, action) in actions.withIndex()) {
+            val chipWidth = chipWidths[index]
             val rect = RectF(x, top, x + chipWidth, top + chipHeight)
             val toolbarRect = ToolbarRect(
                 action.label,
@@ -1097,7 +1163,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
 
         toolbarRects = rects
-        drawKeytaoLogo(canvas, barHeight, leftPadding)
+        drawKeytaoLogo(canvas, barHeight, leftPadding, logoSize)
     }
 
     private fun drawClipboardSuggestionBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
@@ -1170,6 +1236,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return (labelWidth + inlineGap + secondaryWidth + dp(22f)).coerceAtLeast(
             if (secondaryWidth > 0f) dp(58f) else dp(48f)
         )
+    }
+
+    private fun minimumToolbarChipWidth(action: ToolbarAction): Float {
+        return when {
+            action.icon != null && action.secondaryLabel.isNullOrBlank() -> dp(28f)
+            !action.secondaryLabel.isNullOrBlank() -> dp(46f)
+            else -> dp(38f)
+        }
     }
 
     private fun drawFunctionPanelBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
@@ -1372,8 +1446,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
-    private fun drawKeytaoLogo(canvas: Canvas, barHeight: Float, leftPadding: Float) {
-        val size = dp(30f)
+    private fun drawKeytaoLogo(canvas: Canvas, barHeight: Float, leftPadding: Float, size: Float = dp(30f)) {
         val left = width - leftPadding - size
         val top = (barHeight - size) / 2f
         val rect = RectF(left, top, left + size, top + size)
@@ -2713,6 +2786,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
 
     private fun sp(value: Float): Float = value * resources.displayMetrics.scaledDensity
+
+    private val floatingOutlineProvider = object : ViewOutlineProvider() {
+        override fun getOutline(view: View, outline: Outline) {
+            outline.setRoundRect(
+                0,
+                0,
+                view.width,
+                view.height,
+                dp(theme.panelCornerRadiusDp),
+            )
+        }
+    }
 
     companion object {
         private const val longPressDelayMs = 420L

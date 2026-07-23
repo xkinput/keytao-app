@@ -2,6 +2,11 @@
   "keyboardHeightDp": 246,
   "candidateBarHeightDp": 52,
   "keyboardBottomInsetDp": 48,
+  "floating": {
+    "margin": 8,
+    "portrait": { "enabled": false, "scale": 0.88 },
+    "landscape": { "enabled": true, "scale": 0.72 }
+  },
   "haptics": {
     "enabled": true,
     "intensity": 42

@@ -368,3 +368,18 @@ jobs:
         run: |
           set -euo pipefail
           pnpm build:ios -- --no-sign --ci
+
+      - name: Upload unsigned iOS IPA to release
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ipa="src-tauri/gen/apple/build/arm64/KeyTao.ipa"
+          manifest="$RUNNER_TEMP/keytao-ios-ipa-files.txt"
+          renamed="src-tauri/gen/apple/build/arm64/keytao-app-${VERSION}-ios-arm64-unsigned.ipa"
+          test -f "$ipa"
+          unzip -t "$ipa" >/dev/null
+          unzip -Z1 "$ipa" > "$manifest"
+          grep -Fx 'Payload/KeyTao.app/KeyTao' "$manifest" >/dev/null
+          grep -Fx 'Payload/KeyTao.app/PlugIns/KeyTaoKeyboard.appex/KeyTaoKeyboard' "$manifest" >/dev/null
+          cp "$ipa" "$renamed"
+          gh release upload "${GITHUB_REF_NAME}" "$renamed" --clobber

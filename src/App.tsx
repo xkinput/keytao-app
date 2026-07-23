@@ -280,6 +280,10 @@ interface AndroidImeInputSettings {
   hapticsEnabled: boolean
   hapticIntensity: number
   enterKeyBehavior: EnterKeyBehavior
+  floatingPortraitEnabled: boolean
+  floatingPortraitScale: number
+  floatingLandscapeEnabled: boolean
+  floatingLandscapeScale: number
   configPath: string | null
   reloadStampPath: string | null
   message: string
@@ -412,6 +416,8 @@ export default function App() {
   const [androidImeInputError, setAndroidImeInputError] = useState<string | null>(null)
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
   const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
+  const [floatingPortraitScaleDraft, setFloatingPortraitScaleDraft] = useState<number | null>(null)
+  const [floatingLandscapeScaleDraft, setFloatingLandscapeScaleDraft] = useState<number | null>(null)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -660,6 +666,14 @@ export default function App() {
   }, [androidImeInputSettings?.hapticIntensity])
 
   useEffect(() => {
+    setFloatingPortraitScaleDraft(null)
+  }, [androidImeInputSettings?.floatingPortraitScale])
+
+  useEffect(() => {
+    setFloatingLandscapeScaleDraft(null)
+  }, [androidImeInputSettings?.floatingLandscapeScale])
+
+  useEffect(() => {
     if (osType !== "android") return
 
     const root = document.documentElement
@@ -735,6 +749,12 @@ export default function App() {
   const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
   const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
   const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
+  const floatingPortraitEnabled = androidImeInputSettings?.floatingPortraitEnabled ?? false
+  const floatingPortraitScale =
+    floatingPortraitScaleDraft ?? androidImeInputSettings?.floatingPortraitScale ?? 88
+  const floatingLandscapeEnabled = androidImeInputSettings?.floatingLandscapeEnabled ?? true
+  const floatingLandscapeScale =
+    floatingLandscapeScaleDraft ?? androidImeInputSettings?.floatingLandscapeScale ?? 72
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
@@ -1006,26 +1026,49 @@ export default function App() {
   }
 
   async function handleUpdateAndroidImeInputSettings(
-    patch: Partial<Pick<AndroidImeInputSettings, "hapticsEnabled" | "hapticIntensity" | "enterKeyBehavior">>,
+    patch: Partial<
+      Pick<
+        AndroidImeInputSettings,
+        | "hapticsEnabled"
+        | "hapticIntensity"
+        | "enterKeyBehavior"
+        | "floatingPortraitEnabled"
+        | "floatingPortraitScale"
+        | "floatingLandscapeEnabled"
+        | "floatingLandscapeScale"
+      >
+    >,
   ) {
     if (!["android", "ios"].includes(osType) || isSavingAndroidImeInputSettings) return
     const current = {
       hapticsEnabled: androidImeInputSettings?.hapticsEnabled ?? true,
       hapticIntensity: androidImeInputSettings?.hapticIntensity ?? 42,
       enterKeyBehavior: androidImeInputSettings?.enterKeyBehavior ?? ("system" as EnterKeyBehavior),
+      floatingPortraitEnabled: androidImeInputSettings?.floatingPortraitEnabled ?? false,
+      floatingPortraitScale: androidImeInputSettings?.floatingPortraitScale ?? 88,
+      floatingLandscapeEnabled: androidImeInputSettings?.floatingLandscapeEnabled ?? true,
+      floatingLandscapeScale: androidImeInputSettings?.floatingLandscapeScale ?? 72,
     }
     const next = {
       ...current,
       ...patch,
       hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
+      floatingPortraitScale: Math.round(patch.floatingPortraitScale ?? current.floatingPortraitScale),
+      floatingLandscapeScale: Math.round(patch.floatingLandscapeScale ?? current.floatingLandscapeScale),
     }
     next.enterKeyBehavior = next.enterKeyBehavior === "newline" ? "newline" : "system"
     next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
+    next.floatingPortraitScale = Math.min(100, Math.max(70, next.floatingPortraitScale))
+    next.floatingLandscapeScale = Math.min(100, Math.max(70, next.floatingLandscapeScale))
     if (
       androidImeInputSettings &&
       next.hapticsEnabled === androidImeInputSettings.hapticsEnabled &&
       next.hapticIntensity === androidImeInputSettings.hapticIntensity &&
-      next.enterKeyBehavior === androidImeInputSettings.enterKeyBehavior
+      next.enterKeyBehavior === androidImeInputSettings.enterKeyBehavior &&
+      next.floatingPortraitEnabled === androidImeInputSettings.floatingPortraitEnabled &&
+      next.floatingPortraitScale === androidImeInputSettings.floatingPortraitScale &&
+      next.floatingLandscapeEnabled === androidImeInputSettings.floatingLandscapeEnabled &&
+      next.floatingLandscapeScale === androidImeInputSettings.floatingLandscapeScale
     ) {
       return
     }
@@ -1045,6 +1088,14 @@ export default function App() {
 
   function commitAndroidHapticIntensity(value: number) {
     void handleUpdateAndroidImeInputSettings({ hapticIntensity: value })
+  }
+
+  function commitFloatingPortraitScale(value: number) {
+    void handleUpdateAndroidImeInputSettings({ floatingPortraitScale: value })
+  }
+
+  function commitFloatingLandscapeScale(value: number) {
+    void handleUpdateAndroidImeInputSettings({ floatingLandscapeScale: value })
   }
 
   async function handleInstall() {
@@ -1704,12 +1755,8 @@ export default function App() {
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                    {androidHapticsEnabled ? (
-                      <Vibrate className="h-4 w-4 text-muted-foreground" />
-                    ) : (
-                      <VibrateOff className="h-4 w-4 text-muted-foreground" />
-                    )}
-                    移动端输入反馈
+                    <Keyboard className="h-4 w-4 text-muted-foreground" />
+                    移动端键盘
                     {isSavingAndroidImeInputSettings && (
                       <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-muted-foreground" />
                     )}
@@ -1786,6 +1833,60 @@ export default function App() {
                         始终换行
                       </Button>
                     </div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2 text-xs">
+                        <Rows3 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">横屏悬浮</span>
+                        <span className="font-mono text-muted-foreground/80">{floatingLandscapeScale}%</span>
+                      </div>
+                      <Switch
+                        checked={floatingLandscapeEnabled}
+                        onCheckedChange={(checked) =>
+                          handleUpdateAndroidImeInputSettings({ floatingLandscapeEnabled: checked })
+                        }
+                        disabled={isSavingAndroidImeInputSettings}
+                        aria-label="切换横屏悬浮键盘"
+                      />
+                    </div>
+                    <Slider
+                      min={70}
+                      max={100}
+                      step={1}
+                      value={[floatingLandscapeScale]}
+                      onValueChange={([value]) => setFloatingLandscapeScaleDraft(value)}
+                      onValueCommit={([value]) => commitFloatingLandscapeScale(value)}
+                      disabled={!floatingLandscapeEnabled || isSavingAndroidImeInputSettings}
+                      aria-label="横屏悬浮键盘大小"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2 text-xs">
+                        <Columns3 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">竖屏悬浮</span>
+                        <span className="font-mono text-muted-foreground/80">{floatingPortraitScale}%</span>
+                      </div>
+                      <Switch
+                        checked={floatingPortraitEnabled}
+                        onCheckedChange={(checked) =>
+                          handleUpdateAndroidImeInputSettings({ floatingPortraitEnabled: checked })
+                        }
+                        disabled={isSavingAndroidImeInputSettings}
+                        aria-label="切换竖屏悬浮键盘"
+                      />
+                    </div>
+                    <Slider
+                      min={70}
+                      max={100}
+                      step={1}
+                      value={[floatingPortraitScale]}
+                      onValueChange={([value]) => setFloatingPortraitScaleDraft(value)}
+                      onValueCommit={([value]) => commitFloatingPortraitScale(value)}
+                      disabled={!floatingPortraitEnabled || isSavingAndroidImeInputSettings}
+                      aria-label="竖屏悬浮键盘大小"
+                    />
                   </div>
                   {androidImeInputSettings?.configPath && (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.Configuration
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 object KeyCommandTypes {
     const val INPUT = "input"
@@ -76,6 +77,21 @@ data class KeySpec(
     val stack: List<KeyStackItem> = emptyList(),
 )
 
+data class FloatingKeyboardProfile(
+    val enabled: Boolean,
+    val scale: Float,
+)
+
+data class FloatingKeyboardConfig(
+    val marginDp: Float,
+    val portrait: FloatingKeyboardProfile,
+    val landscape: FloatingKeyboardProfile,
+) {
+    fun profile(isLandscape: Boolean): FloatingKeyboardProfile {
+        return if (isLandscape) landscape else portrait
+    }
+}
+
 data class KeytaoAndroidImeConfig(
     val keyboardHeightDp: Int,
     val candidateBarHeightDp: Int,
@@ -84,6 +100,7 @@ data class KeytaoAndroidImeConfig(
     val verticalGapDp: Float,
     val outerInsetDp: Float,
     val maxKeyHeightDp: Float,
+    val floating: FloatingKeyboardConfig,
     val hapticsEnabled: Boolean,
     val hapticIntensity: Int,
     val enterKeyBehavior: String,
@@ -111,7 +128,24 @@ data class KeytaoAndroidImeConfig(
         return if (hasLayer(value)) value else "letters"
     }
 
+    fun scaledForFloating(profile: FloatingKeyboardProfile): KeytaoAndroidImeConfig {
+        val scale = profile.scale.coerceIn(minFloatingScale, 1f)
+        if (!profile.enabled || scale >= 0.999f) return this
+        return copy(
+            keyboardHeightDp = (keyboardHeightDp * scale).roundToInt().coerceAtLeast(120),
+            candidateBarHeightDp = (candidateBarHeightDp * scale).roundToInt().coerceAtLeast(32),
+            keyboardBottomInsetDp = (keyboardBottomInsetDp * scale).roundToInt(),
+            horizontalGapDp = horizontalGapDp * scale,
+            verticalGapDp = verticalGapDp * scale,
+            outerInsetDp = outerInsetDp * scale,
+            maxKeyHeightDp = (maxKeyHeightDp * scale).coerceAtLeast(30f),
+            swipeThresholdDp = (swipeThresholdDp * scale).coerceAtLeast(12f),
+        )
+    }
+
     companion object {
+        private const val minFloatingScale = 0.70f
+
         fun load(context: Context): KeytaoAndroidImeConfig {
             ensureDefaultKeyboardConfig()
             val userConfig = KeytaoAndroidPaths.imeConfigFile()
@@ -123,7 +157,7 @@ data class KeytaoAndroidImeConfig(
             val userKeyboard = resolvedUserKeyboard()
             val defaultRoot = JSONObject(defaultJson)
             val themeKeyboard = resolvedThemeKeyboard(context)
-            return runCatching {
+            val parsed = runCatching {
                 val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: themeKeyboard ?: defaultRoot
                 val fallbackRoot = when {
                     userKeyboard != null && userJson != null -> JSONObject(userJson)
@@ -136,6 +170,10 @@ data class KeytaoAndroidImeConfig(
                 }
                 parseRoot(root, fallbackRoot)
             }.getOrElse { parseRoot(themeKeyboard ?: defaultRoot, defaultRoot) }
+            return applyRuntimeSettings(
+                parsed,
+                userJson?.let { runCatching { JSONObject(it) }.getOrNull() },
+            )
         }
 
         fun parse(json: String): KeytaoAndroidImeConfig {
@@ -160,6 +198,7 @@ data class KeytaoAndroidImeConfig(
             val customRows = layerRows(root, fallbackRoot)
             val haptics = root.optJSONObject("haptics")
             val fallbackHaptics = fallbackRoot?.optJSONObject("haptics")
+            val floating = parseFloatingConfig(root, fallbackRoot)
             return KeytaoAndroidImeConfig(
                 keyboardHeightDp = mergedInt(root, fallbackRoot, listOf("height", "heightDp", "keyboardHeightDp"), 246)
                     .coerceIn(160, 420),
@@ -183,6 +222,7 @@ data class KeytaoAndroidImeConfig(
                 maxKeyHeightDp = mergedDouble(root, fallbackRoot, listOf("maxKeyHeight", "maxKeyHeightDp"), 54.0)
                     .toFloat()
                     .coerceIn(36f, 84f),
+                floating = floating,
                 hapticsEnabled = mergedBoolean(root, fallbackRoot, haptics, fallbackHaptics, "enabled", "hapticsEnabled", true),
                 hapticIntensity = mergedInt(root, fallbackRoot, haptics, fallbackHaptics, "intensity", "hapticIntensity", 42)
                     .coerceIn(1, 100),
@@ -194,6 +234,114 @@ data class KeytaoAndroidImeConfig(
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
                 symbolRows = symbolRows.ifEmpty { defaultSymbolRows() },
                 customRows = customRows,
+            )
+        }
+
+        private fun parseFloatingConfig(root: JSONObject, fallbackRoot: JSONObject?): FloatingKeyboardConfig {
+            val floating = root.optJSONObject("floating")
+            val fallbackFloating = fallbackRoot?.optJSONObject("floating")
+            return FloatingKeyboardConfig(
+                marginDp = mergedFloatingDouble(floating, fallbackFloating, "margin", 8.0)
+                    .toFloat()
+                    .coerceIn(0f, 24f),
+                portrait = parseFloatingProfile(
+                    floating?.optJSONObject("portrait"),
+                    fallbackFloating?.optJSONObject("portrait"),
+                    defaultEnabled = false,
+                    defaultScale = 0.88f,
+                ),
+                landscape = parseFloatingProfile(
+                    floating?.optJSONObject("landscape"),
+                    fallbackFloating?.optJSONObject("landscape"),
+                    defaultEnabled = true,
+                    defaultScale = 0.72f,
+                ),
+            )
+        }
+
+        private fun parseFloatingProfile(
+            root: JSONObject?,
+            fallbackRoot: JSONObject?,
+            defaultEnabled: Boolean,
+            defaultScale: Float,
+        ): FloatingKeyboardProfile {
+            val enabled = when {
+                root?.has("enabled") == true -> root.optBoolean("enabled", defaultEnabled)
+                fallbackRoot?.has("enabled") == true -> fallbackRoot.optBoolean("enabled", defaultEnabled)
+                else -> defaultEnabled
+            }
+            val scale = mergedFloatingDouble(root, fallbackRoot, "scale", defaultScale.toDouble())
+            return FloatingKeyboardProfile(enabled, normalizeFloatingScale(scale))
+        }
+
+        private fun mergedFloatingDouble(
+            root: JSONObject?,
+            fallbackRoot: JSONObject?,
+            name: String,
+            defaultValue: Double,
+        ): Double {
+            return when {
+                root?.has(name) == true -> root.optDouble(name, defaultValue)
+                fallbackRoot?.has(name) == true -> fallbackRoot.optDouble(name, defaultValue)
+                else -> defaultValue
+            }
+        }
+
+        private fun normalizeFloatingScale(value: Double): Float {
+            val ratio = if (value > 1.5) value / 100.0 else value
+            return ratio.toFloat().coerceIn(minFloatingScale, 1f)
+        }
+
+        private fun applyRuntimeSettings(
+            config: KeytaoAndroidImeConfig,
+            runtimeRoot: JSONObject?,
+        ): KeytaoAndroidImeConfig {
+            if (runtimeRoot == null) return config
+            val haptics = runtimeRoot.optJSONObject("haptics")
+            val floating = runtimeRoot.optJSONObject("floating")
+            return config.copy(
+                hapticsEnabled = when {
+                    haptics?.has("enabled") == true -> haptics.optBoolean("enabled", config.hapticsEnabled)
+                    runtimeRoot.has("hapticsEnabled") -> runtimeRoot.optBoolean("hapticsEnabled", config.hapticsEnabled)
+                    else -> config.hapticsEnabled
+                },
+                hapticIntensity = when {
+                    haptics?.has("intensity") == true -> haptics.optInt("intensity", config.hapticIntensity)
+                    runtimeRoot.has("hapticIntensity") -> runtimeRoot.optInt("hapticIntensity", config.hapticIntensity)
+                    else -> config.hapticIntensity
+                }.coerceIn(1, 100),
+                enterKeyBehavior = if (runtimeRoot.has("enterKeyBehavior")) {
+                    normalizeEnterKeyBehavior(runtimeRoot.optString("enterKeyBehavior"))
+                } else {
+                    config.enterKeyBehavior
+                },
+                floating = config.floating.copy(
+                    marginDp = floating?.optDouble("margin", config.floating.marginDp.toDouble())
+                        ?.toFloat()
+                        ?.coerceIn(0f, 24f)
+                        ?: config.floating.marginDp,
+                    portrait = applyRuntimeFloatingProfile(config.floating.portrait, floating?.optJSONObject("portrait")),
+                    landscape = applyRuntimeFloatingProfile(config.floating.landscape, floating?.optJSONObject("landscape")),
+                ),
+            )
+        }
+
+        private fun applyRuntimeFloatingProfile(
+            profile: FloatingKeyboardProfile,
+            runtime: JSONObject?,
+        ): FloatingKeyboardProfile {
+            if (runtime == null) return profile
+            return profile.copy(
+                enabled = if (runtime.has("enabled")) {
+                    runtime.optBoolean("enabled", profile.enabled)
+                } else {
+                    profile.enabled
+                },
+                scale = if (runtime.has("scale")) {
+                    normalizeFloatingScale(runtime.optDouble("scale", profile.scale.toDouble()))
+                } else {
+                    profile.scale
+                },
             )
         }
 

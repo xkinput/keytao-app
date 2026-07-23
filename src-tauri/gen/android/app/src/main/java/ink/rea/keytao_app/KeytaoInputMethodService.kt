@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.icu.text.BreakIterator
 import android.os.Handler
@@ -17,6 +19,8 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -30,6 +34,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
     private var clipboardManager: ClipboardManager? = null
     private var keyboardView: KeytaoKeyboardView? = null
+    private var keyboardHost: KeytaoKeyboardHost? = null
     private var currentState = KeytaoImeState.empty()
     private var composing = false
     private var selectionModeActive = false
@@ -59,14 +64,24 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onCreateInputView(): View {
+        window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        val host = KeytaoKeyboardHost(this)
         val view = KeytaoKeyboardView(this)
         view.listener = this
-        view.updateConfig(KeytaoAndroidImeConfig.load(this))
+        host.addView(
+            view,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
         view.updateTheme(KeytaoThemeResolver.resolve(this))
         view.updateState(currentState)
+        keyboardHost = host
         keyboardView = view
+        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
         refreshInputAvailability()
-        return view
+        return host
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
@@ -83,7 +98,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             currentState = engine.state().withoutTransientCommit()
         }
         keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
-        keyboardView?.updateConfig(KeytaoAndroidImeConfig.load(this))
+        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
         refreshInputAvailability()
         keyboardView?.updateState(currentState)
     }
@@ -91,6 +106,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
+        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
+    }
+
+    private fun applyKeyboardPresentation(config: KeytaoAndroidImeConfig) {
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val profile = config.floating.profile(isLandscape)
+        keyboardHost?.updatePresentation(profile.enabled, profile.scale, config.floating.marginDp)
+        keyboardView?.updateFloatingPresentation(profile.enabled)
+        keyboardView?.updateConfig(config.scaledForFloating(profile))
     }
 
     override fun onFinishInput() {
