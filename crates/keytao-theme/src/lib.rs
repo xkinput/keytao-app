@@ -16,6 +16,8 @@ use std::{
 pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
 pub const DEFAULT_KEYBOARD_YAML: &str = include_str!("../default-keyboard.yaml");
+pub const MIN_CANDIDATE_FONT_SIZE: f32 = 10.0;
+pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -869,7 +871,11 @@ impl ResolvedImeTheme {
 
     fn sanitized(mut self) -> Self {
         self.version = THEME_SCHEMA_VERSION;
-        self.font.size = clamp(self.font.size, 10.0, 36.0);
+        self.font.size = clamp(
+            self.font.size,
+            MIN_CANDIDATE_FONT_SIZE,
+            MAX_CANDIDATE_FONT_SIZE,
+        );
         self.font.label_size = clamp(self.font.label_size, 9.0, 28.0);
         self.font.comment_size = clamp(self.font.comment_size, 9.0, 28.0);
         self.font.preedit_size = clamp(self.font.preedit_size, 9.0, 28.0);

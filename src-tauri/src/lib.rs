@@ -293,6 +293,7 @@ pub struct ImeUiSettings {
     pub effective_color_scheme: keytao_theme::EffectiveColorScheme,
     pub orientation: keytao_theme::PanelOrientation,
     pub accent_color: String,
+    pub font_size: f32,
     pub theme_path: Option<String>,
     pub theme_exists: bool,
     pub reload_stamp_path: Option<String>,
@@ -326,6 +327,7 @@ fn ime_ui_settings_from_paths(
         effective_color_scheme: theme.ui.effective_color_scheme,
         orientation: theme.panel.orientation,
         accent_color: color_to_hex(accent_color),
+        font_size: theme.font.size,
         theme_exists: theme_path.is_file(),
         theme_path: Some(path_string(theme_path)),
         reload_stamp_path,
@@ -346,11 +348,13 @@ fn write_ime_ui_settings_to_path(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
+    font_size: f32,
 ) -> Result<(), String> {
     if let Some(parent) = theme_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
     }
     let accent_color = normalize_hex_color(&accent_color)?;
+    let font_size = normalize_ime_font_size(font_size)?;
 
     let mut root = if theme_path.is_file() {
         let content = std::fs::read_to_string(&theme_path)
@@ -398,6 +402,12 @@ fn write_ime_ui_settings_to_path(
         serde_yaml::Value::String(orientation.into()),
     );
 
+    let font_mapping = yaml_child_mapping(mapping, "font", "主题字体配置必须是 YAML mapping")?;
+    font_mapping.insert(
+        serde_yaml::Value::String("size".into()),
+        serde_yaml::to_value(font_size).map_err(|e| format!("序列化候选字号失败: {e}"))?,
+    );
+
     let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
     std::fs::write(&theme_path, content)
         .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
@@ -408,15 +418,27 @@ fn write_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
+    font_size: f32,
 ) -> Result<(), String> {
     let theme_path = ime_theme_path()?;
-    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)
+    write_ime_ui_settings_to_path(
+        &theme_path,
+        color_scheme,
+        orientation,
+        accent_color,
+        font_size,
+    )
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn write_ime_ui_color_scheme(color_scheme: keytao_theme::UiColorScheme) -> Result<(), String> {
     let current = ime_ui_settings_with_message(String::new())?;
-    write_ime_ui_settings(color_scheme, current.orientation, current.accent_color)
+    write_ime_ui_settings(
+        color_scheme,
+        current.orientation,
+        current.accent_color,
+        current.font_size,
+    )
 }
 
 fn yaml_child_mapping<'a>(
@@ -443,6 +465,16 @@ fn normalize_hex_color(value: &str) -> Result<String, String> {
         return Err("主题色必须是 #RRGGBB 格式".into());
     }
     Ok(format!("#{}", hex.to_ascii_uppercase()))
+}
+
+fn normalize_ime_font_size(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("候选字号必须是有效数字".into());
+    }
+    Ok(value.clamp(
+        keytao_theme::MIN_CANDIDATE_FONT_SIZE,
+        keytao_theme::MAX_CANDIDATE_FONT_SIZE,
+    ))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -5564,8 +5596,9 @@ fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
+    font_size: f32,
 ) -> Result<ImeUiSettings, String> {
-    write_ime_ui_settings(color_scheme, orientation, accent_color)?;
+    write_ime_ui_settings(color_scheme, orientation, accent_color, font_size)?;
     let reload_message = match write_keytao_ime_reload_stamp() {
         Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
         Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
@@ -5591,6 +5624,7 @@ fn set_ime_ui_color_scheme<R: tauri::Runtime>(
         color_scheme,
         current.orientation,
         current.accent_color,
+        current.font_size,
     )?;
     let reload_message = match write_android_reload_stamp(&root) {
         Ok(path) => format!(
@@ -5624,6 +5658,7 @@ fn set_ime_ui_color_scheme(
         color_scheme,
         current.orientation,
         current.accent_color,
+        current.font_size,
     )?;
     let reload_message = match write_ios_reload_stamp(&root) {
         Ok(path) => format!(
@@ -5646,10 +5681,17 @@ fn set_ime_ui_settings<R: tauri::Runtime>(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
+    font_size: f32,
 ) -> Result<ImeUiSettings, String> {
     let root = android_keytao_root(&app)?;
     let theme_path = root.join("theme.yaml");
-    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)?;
+    write_ime_ui_settings_to_path(
+        &theme_path,
+        color_scheme,
+        orientation,
+        accent_color,
+        font_size,
+    )?;
     let reload_message = match write_android_reload_stamp(&root) {
         Ok(path) => format!(
             "已保存 Android 输入法 UI 配置并通知输入法重载：{}",
@@ -5671,10 +5713,17 @@ fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
     accent_color: String,
+    font_size: f32,
 ) -> Result<ImeUiSettings, String> {
     let root = ios_keytao_root(&app)?;
     let theme_path = root.join("theme.yaml");
-    write_ime_ui_settings_to_path(&theme_path, color_scheme, orientation, accent_color)?;
+    write_ime_ui_settings_to_path(
+        &theme_path,
+        color_scheme,
+        orientation,
+        accent_color,
+        font_size,
+    )?;
     let reload_message = match write_ios_reload_stamp(&root) {
         Ok(path) => format!(
             "已保存 iOS 输入法 UI 配置并通知输入法重载：{}",
@@ -6167,6 +6216,55 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn test_write_ime_ui_settings_persists_candidate_font_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-ime-ui-settings-test-{}",
+            std::process::id()
+        ));
+        let theme_path = dir.join("theme.yaml");
+        std::fs::create_dir_all(&dir).expect("create theme dir");
+        std::fs::write(&theme_path, "candidate:\n  labelSuffix: ')'\n")
+            .expect("write existing theme");
+
+        write_ime_ui_settings_to_path(
+            &theme_path,
+            keytao_theme::UiColorScheme::Dark,
+            keytao_theme::PanelOrientation::Horizontal,
+            "#123456".into(),
+            27.0,
+        )
+        .expect("write IME UI settings");
+
+        let theme = keytao_theme::ThemeResolver::new(None, Some(theme_path.clone())).current();
+        assert_eq!(theme.font.size, 27.0);
+        assert_eq!(
+            theme.panel.orientation,
+            keytao_theme::PanelOrientation::Horizontal
+        );
+        assert_eq!(theme.candidate.label_suffix, ")");
+
+        let settings = ime_ui_settings_from_paths(theme_path, None, String::new())
+            .expect("read IME UI settings");
+        assert_eq!(settings.font_size, 27.0);
+        assert_eq!(settings.accent_color, "#123456");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_normalize_ime_font_size_clamps_and_rejects_non_finite_values() {
+        assert_eq!(
+            normalize_ime_font_size(4.0).expect("clamp minimum"),
+            keytao_theme::MIN_CANDIDATE_FONT_SIZE
+        );
+        assert_eq!(
+            normalize_ime_font_size(99.0).expect("clamp maximum"),
+            keytao_theme::MAX_CANDIDATE_FONT_SIZE
+        );
+        assert!(normalize_ime_font_size(f32::NAN).is_err());
+    }
 
     // ── parse_rime_lua_requires ───────────────────────────────────────────────
 

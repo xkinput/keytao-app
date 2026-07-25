@@ -44,6 +44,7 @@ import {
   Moon,
   Palette,
   Paintbrush,
+  Type,
   Columns3,
   Rows3,
   Vibrate,
@@ -69,6 +70,9 @@ const RIME_DICT_MANAGER_URL_SCHEME = "rime-dict"
 const DESKTOP_RIME_DICT_MANAGER_PLATFORMS: OSType[] = ["windows", "macos", "linux"]
 const DEFAULT_IME_ACCENT_COLOR = "#3B73D9"
 const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
+const DEFAULT_IME_FONT_SIZE = 20
+const MIN_IME_FONT_SIZE = 10
+const MAX_IME_FONT_SIZE = 36
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 const AUTH_TOKEN_STORAGE_KEY = "keytao.auth.token"
 const AUTH_USER_STORAGE_KEY = "keytao.auth.user"
@@ -269,6 +273,7 @@ interface ImeUiSettings {
   effectiveColorScheme: ImeEffectiveColorScheme
   orientation: ImeCandidateOrientation
   accentColor: string
+  fontSize: number
   themePath: string | null
   themeExists: boolean
   reloadStampPath: string | null
@@ -412,6 +417,7 @@ export default function App() {
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
   const [imeUiError, setImeUiError] = useState<string | null>(null)
   const [isSavingImeUiSettings, setIsSavingImeUiSettings] = useState(false)
+  const [imeFontSizeDraft, setImeFontSizeDraft] = useState<number | null>(null)
   const [androidImeInputSettings, setAndroidImeInputSettings] = useState<AndroidImeInputSettings | null>(null)
   const [androidImeInputError, setAndroidImeInputError] = useState<string | null>(null)
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
@@ -736,6 +742,7 @@ export default function App() {
   const canOpenDefaultDir = osType !== "android"
   const canOpenRimeDictManager = DESKTOP_RIME_DICT_MANAGER_PLATFORMS.includes(osType)
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
+  const imeFontSize = imeFontSizeDraft ?? imeUiSettings?.fontSize ?? DEFAULT_IME_FONT_SIZE
   const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
   const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
   const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
@@ -967,20 +974,22 @@ export default function App() {
   }
 
   async function handleUpdateImeUiSettings(
-    patch: Partial<Pick<ImeUiSettings, "colorScheme" | "orientation" | "accentColor">>,
+    patch: Partial<Pick<ImeUiSettings, "colorScheme" | "orientation" | "accentColor" | "fontSize">>,
   ) {
     if (isSavingImeUiSettings) return
     const current = {
       colorScheme: imeUiSettings?.colorScheme ?? "auto",
       orientation: imeUiSettings?.orientation ?? "horizontal",
       accentColor: imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR,
+      fontSize: imeUiSettings?.fontSize ?? DEFAULT_IME_FONT_SIZE,
     }
     const next = { ...current, ...patch }
     if (
       imeUiSettings &&
       next.colorScheme === imeUiSettings.colorScheme &&
       next.orientation === imeUiSettings.orientation &&
-      next.accentColor === imeUiSettings.accentColor
+      next.accentColor === imeUiSettings.accentColor &&
+      next.fontSize === imeUiSettings.fontSize
     ) {
       return
     }
@@ -994,6 +1003,15 @@ export default function App() {
       setImeUiError(String(e))
     } finally {
       setIsSavingImeUiSettings(false)
+    }
+  }
+
+  async function commitImeFontSize(fontSize: number) {
+    setImeFontSizeDraft(fontSize)
+    try {
+      await handleUpdateImeUiSettings({ fontSize })
+    } finally {
+      setImeFontSizeDraft(null)
     }
   }
 
@@ -1675,6 +1693,27 @@ export default function App() {
                           </Button>
                         )
                       })}
+                    </div>
+                  )}
+                  {!isMobilePlatform && (
+                    <div className="space-y-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-3 text-xs">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Type className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-muted-foreground">候选字号</span>
+                        </div>
+                        <span className="font-mono text-muted-foreground">{Math.round(imeFontSize)}</span>
+                      </div>
+                      <Slider
+                        min={MIN_IME_FONT_SIZE}
+                        max={MAX_IME_FONT_SIZE}
+                        step={1}
+                        value={[imeFontSize]}
+                        onValueChange={([value]) => setImeFontSizeDraft(value)}
+                        onValueCommit={([value]) => void commitImeFontSize(value)}
+                        disabled={isSavingImeUiSettings}
+                        aria-label="候选字号"
+                      />
                     </div>
                   )}
                   <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs sm:grid-cols-[minmax(8.5rem,1fr)_auto] sm:items-center">
