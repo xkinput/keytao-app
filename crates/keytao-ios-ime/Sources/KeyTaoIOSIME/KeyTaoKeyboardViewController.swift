@@ -14,13 +14,22 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
+    private let layoutStateStore = KeyTaoIOSKeyboardLayoutStateStore()
     private var keyboardView: KeyTaoIOSKeyboardView?
-    private var keyboardContainer: UIView?
+    private var keyboardContainer: KeyTaoResizableKeyboardContainerView?
+    private var layoutSideButton: UIButton?
     private var heightConstraint: NSLayoutConstraint?
     private var keyboardWidthConstraint: NSLayoutConstraint?
     private var keyboardHeightConstraint: NSLayoutConstraint?
-    private var keyboardBottomConstraint: NSLayoutConstraint?
+    private var keyboardLeadingConstraint: NSLayoutConstraint?
+    private var keyboardTopConstraint: NSLayoutConstraint?
     private var baseKeyboardConfig: KeyTaoIOSImeConfig?
+    private var layoutState = KeyTaoIOSKeyboardLayoutState(enabled: false, scale: 0.88)
+    private var layoutPresentation = KeyTaoIOSKeyboardLayoutPresentation(
+        mode: .full,
+        alternativeMode: .oneHanded,
+        side: .right
+    )
     private var currentTheme: KeyTaoImeTheme = .fallback
     private var lastPresentationLandscape: Bool?
     private var currentState = KeyTaoImeState.empty
@@ -58,9 +67,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             theme: theme,
             state: currentState
         )
-        let container = UIView(frame: .zero)
+        let container = KeyTaoResizableKeyboardContainerView(frame: .zero)
         container.backgroundColor = .clear
         container.translatesAutoresizingMaskIntoConstraints = false
+        container.onStateChanged = { [weak self] state, finished in
+            self?.handleLayoutStateChanged(state, finished: finished)
+        }
+        let sideButton = UIButton(type: .system)
+        sideButton.isHidden = true
+        sideButton.accessibilityIdentifier = "keytao-layout-side-toggle"
+        sideButton.addTarget(self, action: #selector(switchOneHandedSide), for: .touchUpInside)
         view.delegate = self
         view.translatesAutoresizingMaskIntoConstraints = false
         self.view.backgroundColor = .clear
@@ -68,9 +84,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         applyInterfaceStyle(for: theme)
         view.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
         self.view.addSubview(container)
+        self.view.addSubview(sideButton)
         container.addSubview(view)
         NSLayoutConstraint.activate([
-            container.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             view.topAnchor.constraint(equalTo: container.topAnchor),
@@ -78,6 +94,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         ])
         currentTheme = theme
         keyboardContainer = container
+        layoutSideButton = sideButton
         keyboardView = view
         applyKeyboardPresentation(config: config, force: true)
         refreshInputAvailability()
@@ -123,6 +140,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         applyKeyboardPresentationIfOrientationChanged()
+        updateKeyboardPositionConstraints()
+        updateLayoutSideButton()
         guard let container = keyboardContainer,
               container.layer.shadowOpacity > 0 else {
             return
@@ -191,6 +210,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             openContainingApp(page: command.value)
         case KeyTaoCommandType.edit:
             handleEditAction(command.value.orEmpty, value: command.fallbackValue)
+        case KeyTaoCommandType.floating:
+            toggleKeyboardLayout()
         case KeyTaoCommandType.panel:
             break
         default:
@@ -552,7 +573,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentTheme = theme
         applyInterfaceStyle(for: theme)
         keyboardView?.update(theme: theme)
-        updateFloatingAppearance()
+        updateLayoutAppearance()
+        updateLayoutSideButton()
     }
 
     private func applyInterfaceStyle(for theme: KeyTaoImeTheme) {
@@ -573,68 +595,261 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func applyKeyboardPresentation(config: KeyTaoIOSImeConfig, force: Bool = false) {
-        guard let keyboardView,
-              let container = keyboardContainer else {
+        guard let keyboardView else {
             return
         }
         baseKeyboardConfig = config
         let isLandscape = currentInterfaceIsLandscape()
-        let profile = config.floating.profile(isLandscape: isLandscape)
+        let fallbackProfile = config.floating.profile(isLandscape: isLandscape)
+        let state = layoutStateStore.load(isLandscape: isLandscape, fallback: fallbackProfile)
+        let presentation = keyboardLayoutPresentation(state: state, isLandscape: isLandscape)
+        let profile = keyboardLayoutProfile(state: state, presentation: presentation)
         if !force, lastPresentationLandscape == isLandscape,
+           layoutState == state,
+           layoutPresentation == presentation,
            keyboardView.currentConfig() == config.scaledForFloating(profile) {
             return
         }
         lastPresentationLandscape = isLandscape
-        let floating = profile.enabled
+        layoutState = state
+        layoutPresentation = presentation
+        applyKeyboardPresentation(config: config, state: state)
+    }
+
+    private func applyKeyboardPresentation(
+        config: KeyTaoIOSImeConfig,
+        state: KeyTaoIOSKeyboardLayoutState
+    ) {
+        guard let keyboardView,
+              let container = keyboardContainer else {
+            return
+        }
+        let normalized = state.normalized()
+        let isLandscape = currentInterfaceIsLandscape()
+        let presentation = keyboardLayoutPresentation(state: normalized, isLandscape: isLandscape)
+        let profile = keyboardLayoutProfile(state: normalized, presentation: presentation)
+        layoutState = normalized
+        layoutPresentation = presentation
         let presentedConfig = config.scaledForFloating(profile)
         keyboardView.update(config: presentedConfig)
-        keyboardView.updateFloatingPresentation(enabled: floating)
+        keyboardView.updateLayoutPresentation(presentation)
 
         NSLayoutConstraint.deactivate(
-            [keyboardWidthConstraint, keyboardHeightConstraint, keyboardBottomConstraint, heightConstraint]
+            [
+                keyboardWidthConstraint,
+                keyboardHeightConstraint,
+                keyboardLeadingConstraint,
+                keyboardTopConstraint,
+                heightConstraint,
+            ]
                 .compactMap { $0 }
         )
         keyboardWidthConstraint = container.widthAnchor.constraint(
             equalTo: self.view.widthAnchor,
-            multiplier: floating ? profile.scale : 1
+            multiplier: presentation.isCompact ? normalized.scale : 1
         )
         keyboardHeightConstraint = container.heightAnchor.constraint(
             equalToConstant: presentedConfig.keyboardHeightDp + presentedConfig.candidateBarHeightDp
         )
-        let margin = floating ? config.floating.marginDp : 0
-        keyboardBottomConstraint = container.bottomAnchor.constraint(
-            equalTo: self.view.bottomAnchor,
-            constant: -margin
+        keyboardLeadingConstraint = container.leadingAnchor.constraint(
+            equalTo: self.view.leadingAnchor
         )
+        keyboardTopConstraint = container.topAnchor.constraint(
+            equalTo: self.view.topAnchor
+        )
+        let margin = presentation.isCompact ? config.floating.marginDp : 0
         heightConstraint = self.view.heightAnchor.constraint(
             equalToConstant: presentedConfig.keyboardHeightDp
                 + presentedConfig.candidateBarHeightDp
-                + margin * 2
+                + (presentation.isCompact ? margin * 2 : 0)
         )
         heightConstraint?.priority = .defaultHigh
         NSLayoutConstraint.activate(
-            [keyboardWidthConstraint, keyboardHeightConstraint, keyboardBottomConstraint, heightConstraint]
+            [
+                keyboardWidthConstraint,
+                keyboardHeightConstraint,
+                keyboardLeadingConstraint,
+                keyboardTopConstraint,
+                heightConstraint,
+            ]
                 .compactMap { $0 }
         )
-        updateFloatingAppearance()
+        container.configure(state: normalized, presentation: presentation)
+        self.view.layoutIfNeeded()
+        updateKeyboardPositionConstraints()
+        updateLayoutAppearance()
+        updateLayoutSideButton()
     }
 
-    private func updateFloatingAppearance() {
-        guard let keyboardView,
-              let container = keyboardContainer,
+    private func handleLayoutStateChanged(
+        _ state: KeyTaoIOSKeyboardLayoutState,
+        finished: Bool
+    ) {
+        guard layoutPresentation.isCompact,
               let config = baseKeyboardConfig else {
             return
         }
-        let floating = config.floating.profile(isLandscape: currentInterfaceIsLandscape()).enabled
-        let radius = floating ? currentTheme.panel.cornerRadius : 0
+        let normalized = state.normalized()
+        let scaleChanged = abs(normalized.scale - layoutState.scale) >= 0.001
+        layoutState = normalized
+        if scaleChanged {
+            applyKeyboardPresentation(config: config, state: normalized)
+        } else {
+            keyboardContainer?.configure(
+                state: normalized,
+                presentation: layoutPresentation
+            )
+            updateKeyboardPositionConstraints()
+            self.view.layoutIfNeeded()
+            updateLayoutSideButton()
+        }
+        if finished {
+            layoutStateStore.save(
+                isLandscape: currentInterfaceIsLandscape(),
+                state: normalized
+            )
+        }
+    }
+
+    private func toggleKeyboardLayout() {
+        guard let config = baseKeyboardConfig else {
+            return
+        }
+        let next = KeyTaoIOSKeyboardLayoutState(
+            enabled: !layoutState.enabled,
+            scale: layoutState.scale,
+            side: layoutState.side
+        ).normalized()
+        layoutStateStore.save(
+            isLandscape: currentInterfaceIsLandscape(),
+            state: next
+        )
+        applyKeyboardPresentation(config: config, state: next)
+    }
+
+    @objc private func switchOneHandedSide() {
+        guard layoutPresentation.isCompact,
+              let config = baseKeyboardConfig else {
+            return
+        }
+        let next = KeyTaoIOSKeyboardLayoutState(
+            enabled: true,
+            scale: layoutState.scale,
+            side: layoutState.side.opposite
+        ).normalized()
+        layoutStateStore.save(
+            isLandscape: currentInterfaceIsLandscape(),
+            state: next
+        )
+        applyKeyboardPresentation(config: config, state: next)
+    }
+
+    private func keyboardLayoutPresentation(
+        state: KeyTaoIOSKeyboardLayoutState,
+        isLandscape: Bool
+    ) -> KeyTaoIOSKeyboardLayoutPresentation {
+        let alternativeMode: KeyTaoIOSKeyboardLayoutMode = isLandscape ? .split : .oneHanded
+        return KeyTaoIOSKeyboardLayoutPresentation(
+            mode: state.enabled ? alternativeMode : .full,
+            alternativeMode: alternativeMode,
+            side: state.side
+        )
+    }
+
+    private func keyboardLayoutProfile(
+        state: KeyTaoIOSKeyboardLayoutState,
+        presentation: KeyTaoIOSKeyboardLayoutPresentation
+    ) -> KeyTaoFloatingKeyboardProfile {
+        KeyTaoFloatingKeyboardProfile(
+            enabled: presentation.isEnabled,
+            scale: state.scale
+        )
+    }
+
+    private func updateKeyboardPositionConstraints() {
+        guard let config = baseKeyboardConfig,
+              let leading = keyboardLeadingConstraint,
+              let top = keyboardTopConstraint else {
+            return
+        }
+        guard layoutPresentation.isCompact else {
+            leading.constant = 0
+            top.constant = 0
+            return
+        }
+        let margin = config.floating.marginDp
+        let hostWidth = self.view.bounds.width
+        let keyboardWidth = hostWidth * layoutState.scale
+        leading.constant = layoutState.side == .left
+            ? margin
+            : max(margin, hostWidth - margin - keyboardWidth)
+        top.constant = margin
+    }
+
+    private func updateLayoutSideButton() {
+        guard let button = layoutSideButton,
+              let container = keyboardContainer,
+              layoutPresentation.isCompact else {
+            layoutSideButton?.isHidden = true
+            return
+        }
+        let emptyRect: CGRect
+        if layoutState.side == .left {
+            emptyRect = CGRect(
+                x: container.frame.maxX,
+                y: 0,
+                width: max(0, self.view.bounds.width - container.frame.maxX),
+                height: self.view.bounds.height
+            )
+        } else {
+            emptyRect = CGRect(
+                x: 0,
+                y: 0,
+                width: max(0, container.frame.minX),
+                height: self.view.bounds.height
+            )
+        }
+        guard emptyRect.width >= 36 else {
+            button.isHidden = true
+            return
+        }
+        let size = min(44, emptyRect.width - 8, emptyRect.height - 16)
+        button.frame = CGRect(
+            x: emptyRect.midX - size / 2,
+            y: emptyRect.midY - size / 2,
+            width: size,
+            height: size
+        )
+        let destination: KeyTaoIOSKeyboardSide = layoutState.side.opposite
+        button.setImage(
+            UIImage(systemName: destination == .left ? "chevron.left" : "chevron.right"),
+            for: .normal
+        )
+        button.accessibilityLabel = destination == .left ? "切换到左侧单手键盘" : "切换到右侧单手键盘"
+        button.tintColor = currentTheme.candidate.labelColor.uiColor
+        button.backgroundColor = currentTheme.panel.background.uiColor.withAlphaComponent(0.82)
+        button.layer.cornerRadius = min(8, size * 0.24)
+        button.layer.borderWidth = max(0.5, currentTheme.panel.borderWidth)
+        button.layer.borderColor = currentTheme.panel.borderColor.uiColor.cgColor
+        button.isHidden = false
+        self.view.bringSubviewToFront(button)
+    }
+
+    private func updateLayoutAppearance() {
+        guard let keyboardView,
+              let container = keyboardContainer else {
+            return
+        }
+        let compact = layoutPresentation.isCompact
+        let radius = compact ? currentTheme.panel.cornerRadius : 0
         keyboardView.layer.cornerRadius = radius
         keyboardView.layer.cornerCurve = .continuous
-        keyboardView.layer.masksToBounds = floating
+        keyboardView.layer.masksToBounds = compact
         container.layer.shadowColor = UIColor.black.cgColor
-        container.layer.shadowOpacity = floating && currentTheme.panel.shadow ? 0.2 : 0
-        container.layer.shadowRadius = floating ? 9 : 0
-        container.layer.shadowOffset = floating ? CGSize(width: 0, height: 3) : .zero
-        container.layer.shadowPath = floating
+        container.layer.shadowOpacity = compact && currentTheme.panel.shadow ? 0.2 : 0
+        container.layer.shadowRadius = compact ? 9 : 0
+        container.layer.shadowOffset = compact ? CGSize(width: 0, height: 3) : .zero
+        container.layer.shadowPath = compact
             ? UIBezierPath(roundedRect: container.bounds, cornerRadius: radius).cgPath
             : nil
     }
@@ -759,6 +974,7 @@ private extension KeyTaoKeyCommand {
             KeyTaoCommandType.shift,
             KeyTaoCommandType.directInput,
             KeyTaoCommandType.edit,
+            KeyTaoCommandType.floating,
             KeyTaoCommandType.panel:
             return false
         default:

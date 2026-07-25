@@ -20,6 +20,7 @@ private enum KeyTaoToolbarIcon {
     case selection
     case clipboard
     case emoji
+    case layout
     case back
     case settings
 }
@@ -73,7 +74,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var config: KeyTaoIOSImeConfig
     private var theme: KeyTaoImeTheme
     private var state: KeyTaoImeState
-    private var floatingPresentation = false
+    private var layoutPresentation = KeyTaoIOSKeyboardLayoutPresentation(
+        mode: .full,
+        alternativeMode: .oneHanded,
+        side: .right
+    )
     private var availabilityMessage: String?
     private var layerMode: KeyTaoKeyboardLayer = .letters
     private var shiftState: KeyTaoShiftState = .off
@@ -161,11 +166,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
-    func updateFloatingPresentation(enabled: Bool) {
-        guard floatingPresentation != enabled else {
+    func updateLayoutPresentation(_ presentation: KeyTaoIOSKeyboardLayoutPresentation) {
+        guard layoutPresentation != presentation else {
             return
         }
-        floatingPresentation = enabled
+        layoutPresentation = presentation
         invalidateLayoutAndDisplay()
     }
 
@@ -256,6 +261,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         } else {
             drawKeyboard()
         }
+        drawLayoutInteractionHints()
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -489,7 +495,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawBackground() {
-        guard floatingPresentation else {
+        guard layoutPresentation.isCompact else {
             // The root UIInputView(.keyboard) supplies the system keyboard material.
             return
         }
@@ -798,6 +804,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawClipboardIcon(in: iconRect)
         case .emoji:
             drawEmojiIcon(in: iconRect)
+        case .layout:
+            drawLayoutIcon(in: iconRect)
         case .back:
             drawBackIcon(in: iconRect)
         case .settings:
@@ -818,6 +826,38 @@ final class KeyTaoIOSKeyboardView: UIView {
                     cornerRadius: cell * 0.22
                 ).stroke()
             }
+        }
+    }
+
+    private func drawLayoutIcon(in rect: CGRect) {
+        let window = CGRect(
+            x: rect.minX + rect.width * 0.06,
+            y: rect.minY + rect.height * 0.14,
+            width: rect.width * 0.88,
+            height: rect.height * 0.72
+        )
+        UIBezierPath(roundedRect: window, cornerRadius: rect.width * 0.10).stroke()
+        switch layoutPresentation.displayedMode {
+        case .oneHanded:
+            let width = window.width * 0.54
+            let x = layoutPresentation.side == .left ? window.minX : window.maxX - width
+            UIBezierPath(
+                roundedRect: CGRect(x: x, y: window.minY, width: width, height: window.height),
+                cornerRadius: rect.width * 0.07
+            ).stroke()
+        case .split:
+            let gap = window.width * 0.18
+            let width = (window.width - gap) / 2
+            UIBezierPath(
+                roundedRect: CGRect(x: window.minX, y: window.minY, width: width, height: window.height),
+                cornerRadius: rect.width * 0.07
+            ).stroke()
+            UIBezierPath(
+                roundedRect: CGRect(x: window.maxX - width, y: window.minY, width: width, height: window.height),
+                cornerRadius: rect.width * 0.07
+            ).stroke()
+        case .full:
+            break
         }
     }
 
@@ -1039,6 +1079,49 @@ final class KeyTaoIOSKeyboardView: UIView {
         let maximumRowWidth = max(1, bounds.width - keyboardOuterInset() * 2)
         let referenceUnitWidth = keyboardReferenceUnitWidth(rows: rows, horizontalGap: horizontalGap)
 
+        func appendSplitRow(
+            _ row: [KeyTaoKeySpec],
+            rowIndex: Int,
+            y: CGFloat,
+            rowHeight: CGFloat,
+            sticky: Bool,
+            hasLeadingSpans: Bool
+        ) -> Bool {
+            guard layoutPresentation.mode == .split,
+                  layerMode == .letters,
+                  rowIndex < rows.count - 1,
+                  row.count >= 7,
+                  !hasLeadingSpans,
+                  row.allSatisfy({ keyRowSpan($0) == 1 }) else {
+                return false
+            }
+            let splitIndex = (row.count + 1) / 2
+            let leftKeys = Array(row[..<splitIndex])
+            let rightKeys = Array(row[splitIndex...])
+            let centerGap = min(96, max(52, bounds.width * 0.10))
+            let groupAvailableWidth = max(1, (maximumRowWidth - centerGap) / 2)
+            let referenceWeight = max(rowWeight(leftKeys), rowWeight(rightKeys))
+            let referenceCount = max(leftKeys.count, rightKeys.count)
+            let referenceGapWidth = horizontalGap * CGFloat(max(0, referenceCount - 1))
+            let unitWidth = max(1, (groupAvailableWidth - referenceGapWidth) / referenceWeight)
+
+            func appendGroup(_ keys: [KeyTaoKeySpec], startX: CGFloat) {
+                var x = startX
+                for key in keys {
+                    let width = unitWidth * keyWeight(key)
+                    let rect = CGRect(x: x, y: y, width: width, height: rowHeight)
+                    next.append(KeyRect(spec: key, rect: rect, sticky: sticky))
+                    x = rect.maxX + horizontalGap
+                }
+            }
+
+            let rightWidth = unitWidth * rowWeight(rightKeys)
+                + horizontalGap * CGFloat(max(0, rightKeys.count - 1))
+            appendGroup(leftKeys, startX: keyboardOuterInset())
+            appendGroup(rightKeys, startX: bounds.width - keyboardOuterInset() - rightWidth)
+            return true
+        }
+
         func appendRows(
             _ layoutRows: [[KeyTaoKeySpec]],
             rowIndexOffset: Int,
@@ -1052,6 +1135,18 @@ final class KeyTaoIOSKeyboardView: UIView {
             for (localRowIndex, row) in layoutRows.enumerated() {
                 let rowIndex = rowIndexOffset + localRowIndex
                 guard !row.isEmpty else {
+                    activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
+                    y += rowHeight + verticalGap
+                    continue
+                }
+                if appendSplitRow(
+                    row,
+                    rowIndex: rowIndex,
+                    y: y,
+                    rowHeight: rowHeight,
+                    sticky: sticky,
+                    hasLeadingSpans: !activeLeadingSpans.isEmpty
+                ) {
                     activeLeadingSpans = advanceRowSpans(activeLeadingSpans)
                     y += rowHeight + verticalGap
                     continue
@@ -1573,6 +1668,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             icon: .function
         )
         let languageToggle = languageToggleAction()
+        let layoutModeName = layoutPresentation.displayedMode == .split ? "分栏" : "单手"
+        let layout = ToolbarAction(
+            label: layoutPresentation.isEnabled ? "退出\(layoutModeName)" : layoutModeName,
+            command: KeyTaoKeyCommand(type: KeyTaoCommandType.floating, value: nil, fallbackValue: nil),
+            selected: layoutPresentation.isEnabled,
+            icon: .layout
+        )
         if layerMode == .symbols {
             return [
                 function,
@@ -1580,6 +1682,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: state.asciiMode),
                 ToolbarAction(label: "123", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "numbers", fallbackValue: nil)),
                 ToolbarAction(label: "ABC", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil)),
+                layout,
             ]
         } else {
             return [
@@ -1588,8 +1691,31 @@ final class KeyTaoIOSKeyboardView: UIView {
                 ToolbarAction(label: "选择", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "selection", fallbackValue: nil), icon: .selection),
                 ToolbarAction(label: "剪贴板", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "clipboard", fallbackValue: nil), icon: .clipboard),
                 ToolbarAction(label: "Emoji", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "emoji", fallbackValue: nil), icon: .emoji),
+                layout,
             ]
         }
+    }
+
+    private func drawLayoutInteractionHints() {
+        guard layoutPresentation.isCompact else {
+            return
+        }
+        let color = theme.candidate.commentColor.uiColor.withAlphaComponent(0.6)
+        color.setFill()
+        let handleWidth = max(2, theme.candidate.borderWidth)
+        let handleHeight = min(30, bounds.height * 0.12)
+        let x = layoutPresentation.side == .left
+            ? bounds.maxX - handleWidth - 2
+            : bounds.minX + 2
+        UIBezierPath(
+            roundedRect: CGRect(
+                x: x,
+                y: bounds.midY - handleHeight / 2,
+                width: handleWidth,
+                height: handleHeight
+            ),
+            cornerRadius: handleWidth / 2
+        ).fill()
     }
 
     private func languageToggleAction() -> ToolbarAction {

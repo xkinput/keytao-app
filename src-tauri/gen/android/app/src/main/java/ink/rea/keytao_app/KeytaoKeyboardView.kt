@@ -80,7 +80,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     )
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
-    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, BACK, SETTINGS }
+    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, ONE_HANDED, FLOATING, BACK, SETTINGS }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD, EMOJI }
 
@@ -88,7 +88,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
     private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
-    private var floatingPresentation = false
+    private var keyboardLayoutMode = KeyboardLayoutMode.FULL
+    private var oneHandedSide = KeyboardSide.RIGHT
+    private var oneHandedAvailable = true
     private var state: KeytaoImeState = KeytaoImeState.empty()
     private var shiftState = ShiftState.OFF
     private var keyboardLayer = "letters"
@@ -219,12 +221,29 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun updateFloatingPresentation(enabled: Boolean) {
-        if (floatingPresentation == enabled) return
-        floatingPresentation = enabled
-        clipToOutline = enabled
-        elevation = if (enabled) dp(8f) else 0f
-        outlineProvider = if (enabled) floatingOutlineProvider else ViewOutlineProvider.BACKGROUND
+    fun updateLayoutPresentation(
+        mode: KeyboardLayoutMode,
+        oneHandedSide: KeyboardSide,
+        oneHandedAvailable: Boolean,
+    ) {
+        if (
+            keyboardLayoutMode == mode &&
+            this.oneHandedSide == oneHandedSide &&
+            this.oneHandedAvailable == oneHandedAvailable
+        ) {
+            return
+        }
+        keyboardLayoutMode = mode
+        this.oneHandedSide = oneHandedSide
+        this.oneHandedAvailable = oneHandedAvailable
+        val compact = mode != KeyboardLayoutMode.FULL
+        clipToOutline = compact
+        elevation = when (mode) {
+            KeyboardLayoutMode.FLOATING -> dp(8f)
+            KeyboardLayoutMode.ONE_HANDED -> dp(4f)
+            KeyboardLayoutMode.FULL -> 0f
+        }
+        outlineProvider = if (compact) floatingOutlineProvider else ViewOutlineProvider.BACKGROUND
         invalidateOutline()
         invalidate()
     }
@@ -364,6 +383,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         } else {
             drawKeyboard(canvas)
         }
+        drawFloatingInteractionHints(canvas)
     }
 
     override fun onDetachedFromWindow() {
@@ -607,7 +627,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun drawBackground(canvas: Canvas) {
-        if (floatingPresentation) {
+        if (keyboardLayoutMode != KeyboardLayoutMode.FULL) {
             val strokeWidth = max(1f, dp(1f))
             val halfStroke = strokeWidth / 2f
             val panelRect = RectF(
@@ -1360,6 +1380,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ToolbarIcon.SELECTION -> drawSelectionToolbarIcon(canvas, iconRect)
             ToolbarIcon.CLIPBOARD -> drawClipboardToolbarIcon(canvas, iconRect)
             ToolbarIcon.EMOJI -> drawEmojiToolbarIcon(canvas, iconRect)
+            ToolbarIcon.ONE_HANDED -> drawOneHandedToolbarIcon(canvas, iconRect)
+            ToolbarIcon.FLOATING -> drawFloatingToolbarIcon(canvas, iconRect)
             ToolbarIcon.BACK -> drawBackToolbarIcon(canvas, iconRect)
             ToolbarIcon.SETTINGS -> drawSettingsToolbarIcon(canvas, iconRect)
         }
@@ -1382,6 +1404,50 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 canvas.drawRoundRect(RectF(left, top, left + cell, top + cell), cell * 0.22f, cell * 0.22f, paint)
             }
         }
+    }
+
+    private fun drawFloatingToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val window = RectF(
+            rect.left + rect.width() * 0.10f,
+            rect.top + rect.height() * 0.16f,
+            rect.right - rect.width() * 0.10f,
+            rect.bottom - rect.height() * 0.16f,
+        )
+        canvas.drawRoundRect(window, rect.width() * 0.10f, rect.width() * 0.10f, paint)
+        val arrow = Path().apply {
+            moveTo(rect.left + rect.width() * 0.30f, rect.top + rect.height() * 0.32f)
+            lineTo(rect.left + rect.width() * 0.18f, rect.top + rect.height() * 0.32f)
+            lineTo(rect.left + rect.width() * 0.18f, rect.top + rect.height() * 0.47f)
+            moveTo(rect.left + rect.width() * 0.18f, rect.top + rect.height() * 0.32f)
+            lineTo(rect.left + rect.width() * 0.38f, rect.top + rect.height() * 0.52f)
+            moveTo(rect.right - rect.width() * 0.30f, rect.bottom - rect.height() * 0.32f)
+            lineTo(rect.right - rect.width() * 0.18f, rect.bottom - rect.height() * 0.32f)
+            lineTo(rect.right - rect.width() * 0.18f, rect.bottom - rect.height() * 0.47f)
+            moveTo(rect.right - rect.width() * 0.18f, rect.bottom - rect.height() * 0.32f)
+            lineTo(rect.right - rect.width() * 0.38f, rect.bottom - rect.height() * 0.52f)
+        }
+        canvas.drawPath(arrow, paint)
+    }
+
+    private fun drawOneHandedToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val window = RectF(
+            rect.left + rect.width() * 0.08f,
+            rect.top + rect.height() * 0.08f,
+            rect.right - rect.width() * 0.08f,
+            rect.bottom - rect.height() * 0.08f,
+        )
+        canvas.drawRoundRect(window, rect.width() * 0.10f, rect.width() * 0.10f, paint)
+        val keyboardWidth = window.width() * 0.60f
+        val keyboardRect = if (oneHandedSide == KeyboardSide.LEFT) {
+            RectF(window.left, window.top, window.left + keyboardWidth, window.bottom)
+        } else {
+            RectF(window.right - keyboardWidth, window.top, window.right, window.bottom)
+        }
+        canvas.drawRoundRect(keyboardRect, rect.width() * 0.08f, rect.width() * 0.08f, paint)
+        val separatorX = if (oneHandedSide == KeyboardSide.LEFT) keyboardRect.right else keyboardRect.left
+        canvas.drawLine(separatorX, keyboardRect.top, separatorX, keyboardRect.bottom, paint)
     }
 
     private fun drawSelectionToolbarIcon(canvas: Canvas, rect: RectF) {
@@ -1958,23 +2024,82 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun toolbarActions(): List<ToolbarAction> {
         val function = ToolbarAction("功能", KeyCommand.panel("home"), icon = ToolbarIcon.FUNCTION)
         val languageToggle = languageToggleAction()
+        val oneHanded = ToolbarAction(
+            if (keyboardLayoutMode == KeyboardLayoutMode.ONE_HANDED) "退出单手" else "单手",
+            KeyCommand(KeyCommandTypes.ONE_HANDED),
+            selected = keyboardLayoutMode == KeyboardLayoutMode.ONE_HANDED,
+            icon = ToolbarIcon.ONE_HANDED,
+        )
+        val floating = ToolbarAction(
+            if (keyboardLayoutMode == KeyboardLayoutMode.FLOATING) "退出悬浮" else "悬浮",
+            KeyCommand(KeyCommandTypes.FLOATING),
+            selected = keyboardLayoutMode == KeyboardLayoutMode.FLOATING,
+            icon = ToolbarIcon.FLOATING,
+        )
+        val layoutActions = buildList {
+            if (oneHandedAvailable) add(oneHanded)
+            add(floating)
+        }
         return if (keyboardLayer == "symbols") {
-            listOf(
+            buildList {
+                addAll(listOf(
                 function,
                 ToolbarAction("中", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !state.asciiMode),
                 ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode),
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers")),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters")),
-            )
+                ))
+                addAll(layoutActions)
+            }
         } else {
-            listOf(
+            buildList {
+                addAll(listOf(
                 function,
                 languageToggle,
                 ToolbarAction("选择", KeyCommand.panel("selection"), icon = ToolbarIcon.SELECTION),
                 ToolbarAction("剪贴板", KeyCommand.panel("clipboard"), icon = ToolbarIcon.CLIPBOARD),
                 ToolbarAction("Emoji", KeyCommand.panel("emoji"), icon = ToolbarIcon.EMOJI),
-            )
+                ))
+                addAll(layoutActions)
+            }
         }
+    }
+
+    private fun drawFloatingInteractionHints(canvas: Canvas) {
+        if (keyboardLayoutMode != KeyboardLayoutMode.FLOATING) return
+        val color = Color.argb(
+            150,
+            theme.commentColor.red,
+            theme.commentColor.green,
+            theme.commentColor.blue,
+        )
+        paint.style = Paint.Style.FILL
+        paint.color = color
+        val handleWidth = min(dp(30f), width * 0.12f)
+        val handleHeight = max(dp(2f), dp(theme.candidateBorderWidthDp))
+        canvas.drawRoundRect(
+            RectF(
+                width / 2f - handleWidth / 2f,
+                dp(2f),
+                width / 2f + handleWidth / 2f,
+                dp(2f) + handleHeight,
+            ),
+            handleHeight / 2f,
+            handleHeight / 2f,
+            paint,
+        )
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(dp(1.4f), dp(theme.candidateBorderWidthDp))
+        paint.strokeCap = Paint.Cap.ROUND
+        val inset = dp(5f)
+        val size = dp(9f)
+        val corner = Path().apply {
+            moveTo(width - inset - size, height - inset)
+            lineTo(width - inset, height - inset)
+            lineTo(width - inset, height - inset - size)
+        }
+        canvas.drawPath(corner, paint)
     }
 
     private fun languageToggleAction(): ToolbarAction {
@@ -2053,6 +2178,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun effectiveKeyboardBottomInsetDp(): Int {
+        if (keyboardLayoutMode == KeyboardLayoutMode.FLOATING) return 0
         return config.keyboardBottomInsetDp.takeIf { it > 0 } ?: androidSystemBottomInsetDp
     }
 

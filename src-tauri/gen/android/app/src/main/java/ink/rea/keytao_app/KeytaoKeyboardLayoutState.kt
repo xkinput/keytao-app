@@ -1,0 +1,138 @@
+package ink.rea.keytao_app
+
+import android.content.Context
+
+enum class KeyboardLayoutMode(val preferenceValue: String) {
+    FULL("full"),
+    ONE_HANDED("one_handed"),
+    FLOATING("floating");
+
+    companion object {
+        fun fromPreference(value: String?): KeyboardLayoutMode? {
+            return entries.firstOrNull { it.preferenceValue == value }
+        }
+    }
+}
+
+enum class KeyboardSide(val preferenceValue: String) {
+    LEFT("left"),
+    RIGHT("right");
+
+    val opposite: KeyboardSide
+        get() = if (this == LEFT) RIGHT else LEFT
+
+    companion object {
+        fun fromPreference(value: String?): KeyboardSide? {
+            return entries.firstOrNull { it.preferenceValue == value }
+        }
+    }
+}
+
+data class KeyboardLayoutState(
+    val mode: KeyboardLayoutMode,
+    val floatingScale: Float,
+    val floatingHorizontalPosition: Float = 0.5f,
+    val floatingVerticalPosition: Float = 1f,
+    val oneHandedScale: Float = DEFAULT_ONE_HANDED_SCALE,
+    val oneHandedSide: KeyboardSide = KeyboardSide.RIGHT,
+) {
+    fun normalized(allowOneHanded: Boolean = true): KeyboardLayoutState {
+        return copy(
+            mode = if (!allowOneHanded && mode == KeyboardLayoutMode.ONE_HANDED) {
+                KeyboardLayoutMode.FULL
+            } else {
+                mode
+            },
+            floatingScale = floatingScale.coerceIn(MIN_SCALE, MAX_SCALE),
+            floatingHorizontalPosition = floatingHorizontalPosition.coerceIn(0f, 1f),
+            floatingVerticalPosition = floatingVerticalPosition.coerceIn(0f, 1f),
+            oneHandedScale = oneHandedScale.coerceIn(MIN_ONE_HANDED_SCALE, MAX_ONE_HANDED_SCALE),
+        )
+    }
+
+    val activeScale: Float
+        get() = when (mode) {
+            KeyboardLayoutMode.FULL -> 1f
+            KeyboardLayoutMode.ONE_HANDED -> oneHandedScale
+            KeyboardLayoutMode.FLOATING -> floatingScale
+        }
+
+    companion object {
+        const val MIN_SCALE = 0.70f
+        const val MAX_SCALE = 1f
+        const val MIN_ONE_HANDED_SCALE = 0.78f
+        const val MAX_ONE_HANDED_SCALE = 0.92f
+        const val DEFAULT_ONE_HANDED_SCALE = 0.86f
+    }
+}
+
+class KeytaoKeyboardLayoutStateStore(context: Context) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    fun load(isLandscape: Boolean, fallback: FloatingKeyboardProfile): KeyboardLayoutState {
+        val prefix = orientationPrefix(isLandscape)
+        val fallbackMode = if (fallback.enabled) KeyboardLayoutMode.FLOATING else KeyboardLayoutMode.FULL
+        val storedMode = KeyboardLayoutMode.fromPreference(preferences.getString("${prefix}_mode", null))
+        val migratedMode = if (preferences.contains("${prefix}_enabled")) {
+            if (preferences.getBoolean("${prefix}_enabled", fallback.enabled)) {
+                KeyboardLayoutMode.FLOATING
+            } else {
+                KeyboardLayoutMode.FULL
+            }
+        } else {
+            fallbackMode
+        }
+        return KeyboardLayoutState(
+            mode = storedMode ?: migratedMode,
+            floatingScale = when {
+                preferences.contains("${prefix}_floating_scale") -> {
+                    preferences.getFloat("${prefix}_floating_scale", fallback.scale)
+                }
+                preferences.contains("${prefix}_scale") -> {
+                    preferences.getFloat("${prefix}_scale", fallback.scale)
+                }
+                else -> fallback.scale
+            },
+            floatingHorizontalPosition = preferences.getFloat(
+                "${prefix}_floating_horizontal_position",
+                preferences.getFloat("${prefix}_horizontal_position", 0.5f),
+            ),
+            floatingVerticalPosition = preferences.getFloat(
+                "${prefix}_floating_vertical_position",
+                preferences.getFloat("${prefix}_vertical_position", 1f),
+            ),
+            oneHandedScale = preferences.getFloat(
+                "${prefix}_one_handed_scale",
+                KeyboardLayoutState.DEFAULT_ONE_HANDED_SCALE,
+            ),
+            oneHandedSide = KeyboardSide.fromPreference(
+                preferences.getString("${prefix}_one_handed_side", null),
+            ) ?: KeyboardSide.RIGHT,
+        ).normalized(allowOneHanded = !isLandscape)
+    }
+
+    fun save(isLandscape: Boolean, state: KeyboardLayoutState) {
+        val prefix = orientationPrefix(isLandscape)
+        val normalized = state.normalized(allowOneHanded = !isLandscape)
+        preferences.edit()
+            .putString("${prefix}_mode", normalized.mode.preferenceValue)
+            .putFloat("${prefix}_floating_scale", normalized.floatingScale)
+            .putFloat("${prefix}_floating_horizontal_position", normalized.floatingHorizontalPosition)
+            .putFloat("${prefix}_floating_vertical_position", normalized.floatingVerticalPosition)
+            .putFloat("${prefix}_one_handed_scale", normalized.oneHandedScale)
+            .putString("${prefix}_one_handed_side", normalized.oneHandedSide.preferenceValue)
+            .putBoolean("${prefix}_enabled", normalized.mode == KeyboardLayoutMode.FLOATING)
+            .putFloat("${prefix}_scale", normalized.floatingScale)
+            .putFloat("${prefix}_horizontal_position", normalized.floatingHorizontalPosition)
+            .putFloat("${prefix}_vertical_position", normalized.floatingVerticalPosition)
+            .apply()
+    }
+
+    private fun orientationPrefix(isLandscape: Boolean): String {
+        return if (isLandscape) "landscape" else "portrait"
+    }
+
+    companion object {
+        private const val PREFERENCES_NAME = "keytao_floating_keyboard"
+    }
+}

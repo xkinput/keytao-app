@@ -25,6 +25,8 @@ object KeyCommandTypes {
     const val RIME_MENU = "rimeMenu"
     const val PANEL = "panel"
     const val EDIT = "edit"
+    const val ONE_HANDED = "oneHanded"
+    const val FLOATING = "floating"
 }
 
 object EnterKeyBehaviors {
@@ -131,10 +133,20 @@ data class KeytaoAndroidImeConfig(
     fun scaledForFloating(profile: FloatingKeyboardProfile): KeytaoAndroidImeConfig {
         val scale = profile.scale.coerceIn(minFloatingScale, 1f)
         if (!profile.enabled || scale >= 0.999f) return this
+        return scaledForCompact(scale, clearBottomInset = true)
+    }
+
+    fun scaledForOneHanded(requestedScale: Float): KeytaoAndroidImeConfig {
+        val scale = requestedScale.coerceIn(minOneHandedScale, 1f)
+        if (scale >= 0.999f) return this
+        return scaledForCompact(scale, clearBottomInset = false)
+    }
+
+    private fun scaledForCompact(scale: Float, clearBottomInset: Boolean): KeytaoAndroidImeConfig {
         return copy(
             keyboardHeightDp = (keyboardHeightDp * scale).roundToInt().coerceAtLeast(120),
             candidateBarHeightDp = (candidateBarHeightDp * scale).roundToInt().coerceAtLeast(32),
-            keyboardBottomInsetDp = (keyboardBottomInsetDp * scale).roundToInt(),
+            keyboardBottomInsetDp = if (clearBottomInset) 0 else keyboardBottomInsetDp,
             horizontalGapDp = horizontalGapDp * scale,
             verticalGapDp = verticalGapDp * scale,
             outerInsetDp = outerInsetDp * scale,
@@ -145,6 +157,7 @@ data class KeytaoAndroidImeConfig(
 
     companion object {
         private const val minFloatingScale = 0.70f
+        private const val minOneHandedScale = 0.78f
 
         fun load(context: Context): KeytaoAndroidImeConfig {
             ensureDefaultKeyboardConfig()

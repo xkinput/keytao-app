@@ -240,14 +240,14 @@ ensure_android_metadata() {
 contains_elf_string() {
     local file="$1"
     local pattern="$2"
-    strings "$file" 2>/dev/null | grep -Eq "$pattern"
+    strings "$file" 2>/dev/null | grep -E "$pattern" >/dev/null
 }
 
 contains_dynamic_symbol() {
     local file="$1"
     local pattern="$2"
     if command_exists nm; then
-        nm -D "$file" 2>/dev/null | grep -Eq "$pattern"
+        nm -D "$file" 2>/dev/null | grep -E "$pattern" >/dev/null
         return $?
     fi
     return 1

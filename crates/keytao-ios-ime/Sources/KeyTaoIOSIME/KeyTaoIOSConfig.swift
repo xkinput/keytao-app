@@ -21,6 +21,7 @@ public enum KeyTaoCommandType {
     public static let rimeMenu = "rimeMenu"
     public static let edit = "edit"
     public static let panel = "panel"
+    public static let floating = "floating"
 }
 
 public struct KeyTaoKeyCommand: Codable, Equatable {
