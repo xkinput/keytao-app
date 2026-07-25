@@ -5,7 +5,7 @@
   "floating": {
     "margin": 8,
     "portrait": { "enabled": false, "scale": 0.88 },
-    "landscape": { "enabled": true, "scale": 0.72 }
+    "landscape": { "enabled": true, "scale": 0.62 }
   },
   "haptics": {
     "enabled": true,

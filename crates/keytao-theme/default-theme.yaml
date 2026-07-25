@@ -45,7 +45,7 @@ keyboard:
       scale: 0.88
     landscape:
       enabled: true
-      scale: 0.72
+      scale: 0.62
   rows:
     - [
         { label: "q", hint: "1", value: "q", longPress: { type: input, value: "1" } },

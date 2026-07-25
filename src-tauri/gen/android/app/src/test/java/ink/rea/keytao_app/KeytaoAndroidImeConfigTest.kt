@@ -187,6 +187,32 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `landscape floating config supports forty five percent width with readable height`() {
+        val config = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              "keyboardHeightDp": 300,
+              "candidateBarHeightDp": 60,
+              "horizontalGapDp": 6,
+              "verticalGapDp": 5,
+              "floating": {
+                "landscape": { "enabled": true, "scale": 0.42 }
+              },
+              "rows": [[{ "label": "a", "value": "a" }]]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(0.45f, config.floating.landscape.scale)
+
+        val scaled = config.scaledForFloating(config.floating.landscape, isLandscape = true)
+        assertEquals(180, scaled.keyboardHeightDp)
+        assertEquals(36, scaled.candidateBarHeightDp)
+        assertEquals(2.7f, scaled.horizontalGapDp, 0.0001f)
+        assertEquals(3f, scaled.verticalGapDp, 0.0001f)
+    }
+
+    @Test
     fun `default m long press goes through rime input path`() {
         val config = KeytaoAndroidImeConfig.parse("""{ "rows": [] }""")
         val mKey = config.rows

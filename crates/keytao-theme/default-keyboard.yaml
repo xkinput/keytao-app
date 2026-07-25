@@ -15,6 +15,7 @@ maxKeyHeight: 54
 
 # Floating mode stays inside the system IME window. Scale is relative to the
 # full keyboard and can be overridden independently for each orientation.
+# Portrait accepts 0.70-1.00; landscape accepts 0.45-1.00.
 floating:
   margin: 8
   portrait:
@@ -22,7 +23,7 @@ floating:
     scale: 0.88
   landscape:
     enabled: true
-    scale: 0.72
+    scale: 0.62
 
 rows:
   - [

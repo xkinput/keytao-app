@@ -134,13 +134,17 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         config: KeytaoAndroidImeConfig,
         state: KeyboardLayoutState,
     ) {
-        val normalized = state.normalized(allowOneHanded = !presentationIsLandscape)
+        val normalized = state.normalized(
+            allowOneHanded = !presentationIsLandscape,
+            isLandscape = presentationIsLandscape,
+        )
         keyboardLayoutState = normalized
         val presentedConfig = when (normalized.mode) {
             KeyboardLayoutMode.FULL -> config
             KeyboardLayoutMode.ONE_HANDED -> config.scaledForOneHanded(normalized.oneHandedScale)
             KeyboardLayoutMode.FLOATING -> config.scaledForFloating(
                 FloatingKeyboardProfile(enabled = true, scale = normalized.floatingScale),
+                isLandscape = presentationIsLandscape,
             )
         }
         val theme = KeytaoThemeResolver.resolve(this)
@@ -149,6 +153,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             config.floating.marginDp,
             normalKeyboardHeightDp(config),
             androidBottomInsetDp(config).toFloat(),
+            presentationIsLandscape,
             theme,
         )
         keyboardView?.updateLayoutPresentation(
@@ -160,7 +165,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleKeyboardLayoutStateChanged(next: KeyboardLayoutState, finished: Boolean) {
-        val normalized = next.normalized(allowOneHanded = !presentationIsLandscape)
+        val normalized = next.normalized(
+            allowOneHanded = !presentationIsLandscape,
+            isLandscape = presentationIsLandscape,
+        )
         val presentationChanged = normalized.mode != keyboardLayoutState.mode ||
             kotlin.math.abs(normalized.activeScale - keyboardLayoutState.activeScale) >= 0.001f
         keyboardLayoutState = normalized
@@ -185,7 +193,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         } else {
             KeyboardLayoutMode.FLOATING
         }
-        val next = keyboardLayoutState.copy(mode = nextMode).normalized(allowOneHanded = !presentationIsLandscape)
+        val next = keyboardLayoutState.copy(mode = nextMode).normalized(
+            allowOneHanded = !presentationIsLandscape,
+            isLandscape = presentationIsLandscape,
+        )
         keyboardLayoutState = next
         keyboardLayoutStateStore.save(presentationIsLandscape, next)
         applyKeyboardPresentation(config, next)

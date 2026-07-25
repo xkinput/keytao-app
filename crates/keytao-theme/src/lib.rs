@@ -938,7 +938,7 @@ impl Default for KeyboardFloatingTheme {
             },
             landscape: KeyboardFloatingProfileTheme {
                 enabled: true,
-                scale: 0.72,
+                scale: 0.62,
             },
         }
     }
@@ -953,10 +953,8 @@ fn sanitize_keyboard(mut keyboard: KeyboardTheme) -> KeyboardTheme {
     keyboard.outer_inset = clamp(keyboard.outer_inset, 0.0, 32.0);
     keyboard.max_key_height = clamp(keyboard.max_key_height, 36.0, 84.0);
     keyboard.floating.margin = clamp(keyboard.floating.margin, 0.0, 24.0);
-    keyboard.floating.portrait.scale =
-        clamp(keyboard.floating.portrait.scale, 0.70, 1.0);
-    keyboard.floating.landscape.scale =
-        clamp(keyboard.floating.landscape.scale, 0.70, 1.0);
+    keyboard.floating.portrait.scale = clamp(keyboard.floating.portrait.scale, 0.70, 1.0);
+    keyboard.floating.landscape.scale = clamp(keyboard.floating.landscape.scale, 0.45, 1.0);
     keyboard.layers.retain(|name, rows| {
         !name.trim().is_empty()
             && name != "letters"
@@ -1683,7 +1681,7 @@ mod tests {
         assert!(!keyboard.floating.portrait.enabled);
         assert_eq!(keyboard.floating.portrait.scale, 0.88);
         assert!(keyboard.floating.landscape.enabled);
-        assert_eq!(keyboard.floating.landscape.scale, 0.72);
+        assert_eq!(keyboard.floating.landscape.scale, 0.62);
         let json = resolved_keyboard_json(&keyboard).unwrap();
         assert!(json.contains("\"numberRows\""));
         assert!(json.contains("\"symbols_arrows\""));
@@ -1699,7 +1697,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "floating:\n  margin: 40\n  portrait:\n    enabled: true\n    scale: 0.42\n  landscape:\n    enabled: false\n    scale: 0.94\n",
+            "floating:\n  margin: 40\n  portrait:\n    enabled: true\n    scale: 0.42\n  landscape:\n    enabled: false\n    scale: 0.42\n",
         )
         .unwrap();
 
@@ -1710,7 +1708,7 @@ mod tests {
         assert!(keyboard.floating.portrait.enabled);
         assert_eq!(keyboard.floating.portrait.scale, 0.70);
         assert!(!keyboard.floating.landscape.enabled);
-        assert_eq!(keyboard.floating.landscape.scale, 0.94);
+        assert_eq!(keyboard.floating.landscape.scale, 0.45);
     }
 
     #[test]

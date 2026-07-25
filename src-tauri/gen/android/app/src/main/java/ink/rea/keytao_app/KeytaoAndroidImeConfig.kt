@@ -130,33 +130,50 @@ data class KeytaoAndroidImeConfig(
         return if (hasLayer(value)) value else "letters"
     }
 
-    fun scaledForFloating(profile: FloatingKeyboardProfile): KeytaoAndroidImeConfig {
-        val scale = profile.scale.coerceIn(minFloatingScale, 1f)
-        if (!profile.enabled || scale >= 0.999f) return this
-        return scaledForCompact(scale, clearBottomInset = true)
+    fun scaledForFloating(
+        profile: FloatingKeyboardProfile,
+        isLandscape: Boolean = false,
+    ): KeytaoAndroidImeConfig {
+        val widthScale = profile.scale.coerceIn(
+            KeyboardLayoutState.minimumFloatingScale(isLandscape),
+            1f,
+        )
+        if (!profile.enabled || widthScale >= 0.999f) return this
+        return scaledForCompact(
+            horizontalScale = widthScale,
+            verticalScale = KeyboardLayoutState.heightScaleForFloatingWidth(widthScale, isLandscape),
+            clearBottomInset = true,
+        )
     }
 
     fun scaledForOneHanded(requestedScale: Float): KeytaoAndroidImeConfig {
         val scale = requestedScale.coerceIn(minOneHandedScale, 1f)
         if (scale >= 0.999f) return this
-        return scaledForCompact(scale, clearBottomInset = false)
+        return scaledForCompact(
+            horizontalScale = scale,
+            verticalScale = scale,
+            clearBottomInset = false,
+        )
     }
 
-    private fun scaledForCompact(scale: Float, clearBottomInset: Boolean): KeytaoAndroidImeConfig {
+    private fun scaledForCompact(
+        horizontalScale: Float,
+        verticalScale: Float,
+        clearBottomInset: Boolean,
+    ): KeytaoAndroidImeConfig {
         return copy(
-            keyboardHeightDp = (keyboardHeightDp * scale).roundToInt().coerceAtLeast(120),
-            candidateBarHeightDp = (candidateBarHeightDp * scale).roundToInt().coerceAtLeast(32),
+            keyboardHeightDp = (keyboardHeightDp * verticalScale).roundToInt().coerceAtLeast(120),
+            candidateBarHeightDp = (candidateBarHeightDp * verticalScale).roundToInt().coerceAtLeast(32),
             keyboardBottomInsetDp = if (clearBottomInset) 0 else keyboardBottomInsetDp,
-            horizontalGapDp = horizontalGapDp * scale,
-            verticalGapDp = verticalGapDp * scale,
-            outerInsetDp = outerInsetDp * scale,
-            maxKeyHeightDp = (maxKeyHeightDp * scale).coerceAtLeast(30f),
-            swipeThresholdDp = (swipeThresholdDp * scale).coerceAtLeast(12f),
+            horizontalGapDp = horizontalGapDp * horizontalScale,
+            verticalGapDp = verticalGapDp * verticalScale,
+            outerInsetDp = outerInsetDp * horizontalScale,
+            maxKeyHeightDp = (maxKeyHeightDp * verticalScale).coerceAtLeast(30f),
+            swipeThresholdDp = (swipeThresholdDp * minOf(horizontalScale, verticalScale)).coerceAtLeast(12f),
         )
     }
 
     companion object {
-        private const val minFloatingScale = 0.70f
         private const val minOneHandedScale = 0.78f
 
         fun load(context: Context): KeytaoAndroidImeConfig {
@@ -262,12 +279,14 @@ data class KeytaoAndroidImeConfig(
                     fallbackFloating?.optJSONObject("portrait"),
                     defaultEnabled = false,
                     defaultScale = 0.88f,
+                    minimumScale = KeyboardLayoutState.MIN_PORTRAIT_FLOATING_SCALE,
                 ),
                 landscape = parseFloatingProfile(
                     floating?.optJSONObject("landscape"),
                     fallbackFloating?.optJSONObject("landscape"),
                     defaultEnabled = true,
-                    defaultScale = 0.72f,
+                    defaultScale = 0.62f,
+                    minimumScale = KeyboardLayoutState.MIN_LANDSCAPE_FLOATING_SCALE,
                 ),
             )
         }
@@ -277,6 +296,7 @@ data class KeytaoAndroidImeConfig(
             fallbackRoot: JSONObject?,
             defaultEnabled: Boolean,
             defaultScale: Float,
+            minimumScale: Float,
         ): FloatingKeyboardProfile {
             val enabled = when {
                 root?.has("enabled") == true -> root.optBoolean("enabled", defaultEnabled)
@@ -284,7 +304,7 @@ data class KeytaoAndroidImeConfig(
                 else -> defaultEnabled
             }
             val scale = mergedFloatingDouble(root, fallbackRoot, "scale", defaultScale.toDouble())
-            return FloatingKeyboardProfile(enabled, normalizeFloatingScale(scale))
+            return FloatingKeyboardProfile(enabled, normalizeFloatingScale(scale, minimumScale))
         }
 
         private fun mergedFloatingDouble(
@@ -300,9 +320,9 @@ data class KeytaoAndroidImeConfig(
             }
         }
 
-        private fun normalizeFloatingScale(value: Double): Float {
+        private fun normalizeFloatingScale(value: Double, minimumScale: Float): Float {
             val ratio = if (value > 1.5) value / 100.0 else value
-            return ratio.toFloat().coerceIn(minFloatingScale, 1f)
+            return ratio.toFloat().coerceIn(minimumScale, 1f)
         }
 
         private fun applyRuntimeSettings(
@@ -333,8 +353,16 @@ data class KeytaoAndroidImeConfig(
                         ?.toFloat()
                         ?.coerceIn(0f, 24f)
                         ?: config.floating.marginDp,
-                    portrait = applyRuntimeFloatingProfile(config.floating.portrait, floating?.optJSONObject("portrait")),
-                    landscape = applyRuntimeFloatingProfile(config.floating.landscape, floating?.optJSONObject("landscape")),
+                    portrait = applyRuntimeFloatingProfile(
+                        config.floating.portrait,
+                        floating?.optJSONObject("portrait"),
+                        KeyboardLayoutState.MIN_PORTRAIT_FLOATING_SCALE,
+                    ),
+                    landscape = applyRuntimeFloatingProfile(
+                        config.floating.landscape,
+                        floating?.optJSONObject("landscape"),
+                        KeyboardLayoutState.MIN_LANDSCAPE_FLOATING_SCALE,
+                    ),
                 ),
             )
         }
@@ -342,6 +370,7 @@ data class KeytaoAndroidImeConfig(
         private fun applyRuntimeFloatingProfile(
             profile: FloatingKeyboardProfile,
             runtime: JSONObject?,
+            minimumScale: Float,
         ): FloatingKeyboardProfile {
             if (runtime == null) return profile
             return profile.copy(
@@ -351,7 +380,7 @@ data class KeytaoAndroidImeConfig(
                     profile.enabled
                 },
                 scale = if (runtime.has("scale")) {
-                    normalizeFloatingScale(runtime.optDouble("scale", profile.scale.toDouble()))
+                    normalizeFloatingScale(runtime.optDouble("scale", profile.scale.toDouble()), minimumScale)
                 } else {
                     profile.scale
                 },

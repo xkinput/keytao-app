@@ -40,6 +40,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     private var marginPx = 0
     private var normalHeightPx = 0
     private var safeBottomInsetPx = 0
+    private var isLandscape = false
     private var dragMode = DragMode.NONE
     private var dragStartX = 0f
     private var dragStartY = 0f
@@ -74,9 +75,14 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         marginDp: Float,
         normalHeightDp: Float,
         safeBottomInsetDp: Float,
+        isLandscape: Boolean,
         theme: KeytaoImeTheme,
     ) {
-        layoutState = nextState.normalized()
+        this.isLandscape = isLandscape
+        layoutState = nextState.normalized(
+            allowOneHanded = !isLandscape,
+            isLandscape = isLandscape,
+        )
         marginPx = (marginDp.coerceIn(0f, 24f) * resources.displayMetrics.density).roundToInt()
         normalHeightPx = (normalHeightDp.coerceAtLeast(1f) * resources.displayMetrics.density).roundToInt()
         safeBottomInsetPx = (safeBottomInsetDp.coerceIn(0f, 80f) * resources.displayMetrics.density).roundToInt()
@@ -216,7 +222,10 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         } else {
             resizedGeometry(event.x - dragStartX, event.y - dragStartY)
         }
-        layoutState = next.normalized()
+        layoutState = next.normalized(
+            allowOneHanded = !isLandscape,
+            isLandscape = isLandscape,
+        )
         requestLayout()
         listener?.onLayoutStateChanged(layoutState, finished)
     }
@@ -232,18 +241,35 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
 
     private fun resizedGeometry(deltaX: Float, deltaY: Float): KeyboardLayoutState {
         val baseWidth = dragStartRect.width() / dragStartScale.coerceAtLeast(0.01f)
-        val baseHeight = dragStartRect.height() / dragStartScale.coerceAtLeast(0.01f)
+        val dragStartHeightScale = KeyboardLayoutState.heightScaleForFloatingWidth(
+            dragStartScale,
+            isLandscape,
+        )
+        val baseHeight = dragStartRect.height() / dragStartHeightScale.coerceAtLeast(0.01f)
         val scaleCandidates = mutableListOf<Float>()
         if (dragMode.hasLeftEdge()) scaleCandidates += dragStartScale - deltaX / baseWidth
         if (dragMode.hasRightEdge()) scaleCandidates += dragStartScale + deltaX / baseWidth
-        if (dragMode.hasTopEdge()) scaleCandidates += dragStartScale - deltaY / baseHeight
-        if (dragMode.hasBottomEdge()) scaleCandidates += dragStartScale + deltaY / baseHeight
+        if (dragMode.hasTopEdge()) {
+            scaleCandidates += KeyboardLayoutState.widthScaleForFloatingHeight(
+                dragStartHeightScale - deltaY / baseHeight,
+                isLandscape,
+            )
+        }
+        if (dragMode.hasBottomEdge()) {
+            scaleCandidates += KeyboardLayoutState.widthScaleForFloatingHeight(
+                dragStartHeightScale + deltaY / baseHeight,
+                isLandscape,
+            )
+        }
         val nextScale = scaleCandidates
             .maxByOrNull { abs(it - dragStartScale) }
-            ?.coerceIn(KeyboardLayoutState.MIN_SCALE, KeyboardLayoutState.MAX_SCALE)
+            ?.coerceIn(
+                KeyboardLayoutState.minimumFloatingScale(isLandscape),
+                KeyboardLayoutState.MAX_SCALE,
+            )
             ?: dragStartScale
         val width = baseWidth * nextScale
-        val height = baseHeight * nextScale
+        val height = baseHeight * KeyboardLayoutState.heightScaleForFloatingWidth(nextScale, isLandscape)
         val left = when {
             dragMode.hasLeftEdge() -> dragStartRect.right - width
             dragMode.hasRightEdge() -> dragStartRect.left

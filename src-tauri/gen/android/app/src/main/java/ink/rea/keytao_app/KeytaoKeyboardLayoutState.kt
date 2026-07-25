@@ -36,14 +36,17 @@ data class KeyboardLayoutState(
     val oneHandedScale: Float = DEFAULT_ONE_HANDED_SCALE,
     val oneHandedSide: KeyboardSide = KeyboardSide.RIGHT,
 ) {
-    fun normalized(allowOneHanded: Boolean = true): KeyboardLayoutState {
+    fun normalized(
+        allowOneHanded: Boolean = true,
+        isLandscape: Boolean = false,
+    ): KeyboardLayoutState {
         return copy(
             mode = if (!allowOneHanded && mode == KeyboardLayoutMode.ONE_HANDED) {
                 KeyboardLayoutMode.FULL
             } else {
                 mode
             },
-            floatingScale = floatingScale.coerceIn(MIN_SCALE, MAX_SCALE),
+            floatingScale = floatingScale.coerceIn(minimumFloatingScale(isLandscape), MAX_SCALE),
             floatingHorizontalPosition = floatingHorizontalPosition.coerceIn(0f, 1f),
             floatingVerticalPosition = floatingVerticalPosition.coerceIn(0f, 1f),
             oneHandedScale = oneHandedScale.coerceIn(MIN_ONE_HANDED_SCALE, MAX_ONE_HANDED_SCALE),
@@ -57,12 +60,49 @@ data class KeyboardLayoutState(
             KeyboardLayoutMode.FLOATING -> floatingScale
         }
 
+    fun floatingHeightScale(isLandscape: Boolean): Float {
+        return heightScaleForFloatingWidth(floatingScale, isLandscape)
+    }
+
     companion object {
-        const val MIN_SCALE = 0.70f
+        const val MIN_SCALE = 0.45f
+        const val MIN_PORTRAIT_FLOATING_SCALE = 0.70f
+        const val MIN_LANDSCAPE_FLOATING_SCALE = MIN_SCALE
         const val MAX_SCALE = 1f
+        const val LANDSCAPE_HEIGHT_BOOST_END_SCALE = 0.70f
+        const val MIN_LANDSCAPE_HEIGHT_SCALE = 0.60f
         const val MIN_ONE_HANDED_SCALE = 0.78f
         const val MAX_ONE_HANDED_SCALE = 0.92f
         const val DEFAULT_ONE_HANDED_SCALE = 0.86f
+
+        fun minimumFloatingScale(isLandscape: Boolean): Float {
+            return if (isLandscape) MIN_LANDSCAPE_FLOATING_SCALE else MIN_PORTRAIT_FLOATING_SCALE
+        }
+
+        fun heightScaleForFloatingWidth(widthScale: Float, isLandscape: Boolean): Float {
+            val normalizedWidth = widthScale.coerceIn(minimumFloatingScale(isLandscape), MAX_SCALE)
+            if (!isLandscape || normalizedWidth >= LANDSCAPE_HEIGHT_BOOST_END_SCALE) {
+                return normalizedWidth
+            }
+            val progress = (normalizedWidth - MIN_LANDSCAPE_FLOATING_SCALE) /
+                (LANDSCAPE_HEIGHT_BOOST_END_SCALE - MIN_LANDSCAPE_FLOATING_SCALE)
+            return MIN_LANDSCAPE_HEIGHT_SCALE + progress *
+                (LANDSCAPE_HEIGHT_BOOST_END_SCALE - MIN_LANDSCAPE_HEIGHT_SCALE)
+        }
+
+        fun widthScaleForFloatingHeight(heightScale: Float, isLandscape: Boolean): Float {
+            if (!isLandscape) {
+                return heightScale.coerceIn(MIN_PORTRAIT_FLOATING_SCALE, MAX_SCALE)
+            }
+            val normalizedHeight = heightScale.coerceIn(MIN_LANDSCAPE_HEIGHT_SCALE, MAX_SCALE)
+            if (normalizedHeight >= LANDSCAPE_HEIGHT_BOOST_END_SCALE) {
+                return normalizedHeight
+            }
+            val progress = (normalizedHeight - MIN_LANDSCAPE_HEIGHT_SCALE) /
+                (LANDSCAPE_HEIGHT_BOOST_END_SCALE - MIN_LANDSCAPE_HEIGHT_SCALE)
+            return MIN_LANDSCAPE_FLOATING_SCALE + progress *
+                (LANDSCAPE_HEIGHT_BOOST_END_SCALE - MIN_LANDSCAPE_FLOATING_SCALE)
+        }
     }
 }
 
@@ -108,12 +148,12 @@ class KeytaoKeyboardLayoutStateStore(context: Context) {
             oneHandedSide = KeyboardSide.fromPreference(
                 preferences.getString("${prefix}_one_handed_side", null),
             ) ?: KeyboardSide.RIGHT,
-        ).normalized(allowOneHanded = !isLandscape)
+        ).normalized(allowOneHanded = !isLandscape, isLandscape = isLandscape)
     }
 
     fun save(isLandscape: Boolean, state: KeyboardLayoutState) {
         val prefix = orientationPrefix(isLandscape)
-        val normalized = state.normalized(allowOneHanded = !isLandscape)
+        val normalized = state.normalized(allowOneHanded = !isLandscape, isLandscape = isLandscape)
         preferences.edit()
             .putString("${prefix}_mode", normalized.mode.preferenceValue)
             .putFloat("${prefix}_floating_scale", normalized.floatingScale)

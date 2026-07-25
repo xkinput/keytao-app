@@ -4363,6 +4363,7 @@ fn android_ime_haptics_settings_from_config(
             .and_then(|value| value.get("scale"))
             .and_then(|value| value.as_f64()),
         keyboard.floating.portrait.scale,
+        0.70,
     );
     let floating_landscape_enabled = landscape
         .and_then(|value| value.get("enabled"))
@@ -4373,6 +4374,7 @@ fn android_ime_haptics_settings_from_config(
             .and_then(|value| value.get("scale"))
             .and_then(|value| value.as_f64()),
         keyboard.floating.landscape.scale,
+        0.45,
     );
 
     AndroidImeInputSettings {
@@ -4399,10 +4401,10 @@ fn android_ime_haptics_settings_from_config(
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn floating_scale_percent(value: Option<f64>, default_scale: f32) -> u8 {
+fn floating_scale_percent(value: Option<f64>, default_scale: f32, minimum_scale: f64) -> u8 {
     let value = value.unwrap_or(default_scale as f64);
     let ratio = if value > 1.5 { value / 100.0 } else { value };
-    (ratio.clamp(0.70, 1.0) * 100.0).round() as u8
+    (ratio.clamp(minimum_scale, 1.0) * 100.0).round() as u8
 }
 
 #[tauri::command]
@@ -4500,7 +4502,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         );
         landscape.insert(
             "scale".into(),
-            serde_json::Value::from(floating_landscape_scale.clamp(70, 100) as f64 / 100.0),
+            serde_json::Value::from(floating_landscape_scale.clamp(45, 100) as f64 / 100.0),
         );
         floating.insert("landscape".into(), serde_json::Value::Object(landscape));
         config.insert("floating".into(), serde_json::Value::Object(floating));
