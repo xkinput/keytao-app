@@ -64,6 +64,20 @@ data class KeyboardLayoutState(
         return heightScaleForFloatingWidth(floatingScale, isLandscape)
     }
 
+    fun resolveHostHeight(
+        availableHeight: Int,
+        normalHeight: Int,
+        childHeight: Int,
+        margin: Int,
+    ): Int {
+        val viewportHeight = availableHeight.takeIf { it > 0 } ?: normalHeight
+        return when (mode) {
+            KeyboardLayoutMode.FLOATING -> viewportHeight
+            KeyboardLayoutMode.ONE_HANDED -> (childHeight + margin * 2).coerceAtMost(viewportHeight)
+            KeyboardLayoutMode.FULL -> childHeight.coerceAtMost(viewportHeight)
+        }.coerceAtLeast(1)
+    }
+
     companion object {
         const val MIN_SCALE = 0.45f
         const val MIN_PORTRAIT_FLOATING_SCALE = 0.70f
@@ -103,6 +117,13 @@ data class KeyboardLayoutState(
             return MIN_LANDSCAPE_FLOATING_SCALE + progress *
                 (LANDSCAPE_HEIGHT_BOOST_END_SCALE - MIN_LANDSCAPE_FLOATING_SCALE)
         }
+    }
+}
+
+object FloatingHandleInteraction {
+    fun isTap(deltaX: Float, deltaY: Float, touchSlop: Float): Boolean {
+        val threshold = touchSlop.coerceAtLeast(0f)
+        return deltaX * deltaX + deltaY * deltaY <= threshold * threshold
     }
 }
 

@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Region
 import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.icu.text.BreakIterator
@@ -35,6 +36,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var clipboardManager: ClipboardManager? = null
     private var keyboardView: KeytaoKeyboardView? = null
     private var keyboardHost: KeytaoKeyboardHost? = null
+    private val floatingTouchableRegion = Region()
+    private val keyboardHostLocation = IntArray(2)
     private val keyboardLayoutStateStore by lazy { KeytaoKeyboardLayoutStateStore(applicationContext) }
     private var baseKeyboardConfig: KeytaoAndroidImeConfig? = null
     private var keyboardLayoutState = KeyboardLayoutState(
@@ -95,6 +98,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
         refreshInputAvailability()
         return host
+    }
+
+    override fun onComputeInsets(outInsets: Insets) {
+        super.onComputeInsets(outInsets)
+        val host = keyboardHost ?: return
+        if (!host.populateFloatingTouchableRegion(floatingTouchableRegion)) return
+
+        host.getLocationInWindow(keyboardHostLocation)
+        floatingTouchableRegion.translate(keyboardHostLocation[0], keyboardHostLocation[1])
+
+        val hostBottom = keyboardHostLocation[1] + host.height
+        outInsets.contentTopInsets = hostBottom
+        outInsets.visibleTopInsets = hostBottom
+        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+        outInsets.touchableRegion.set(floatingTouchableRegion)
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {

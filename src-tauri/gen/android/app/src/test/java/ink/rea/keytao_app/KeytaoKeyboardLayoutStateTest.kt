@@ -1,6 +1,8 @@
 package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeytaoKeyboardLayoutStateTest {
@@ -77,5 +79,68 @@ class KeytaoKeyboardLayoutStateTest {
         assertEquals(1f, base.activeScale)
         assertEquals(0.88f, base.copy(mode = KeyboardLayoutMode.ONE_HANDED).activeScale)
         assertEquals(0.74f, base.copy(mode = KeyboardLayoutMode.FLOATING).activeScale)
+    }
+
+    @Test
+    fun `floating layout occupies the complete ime viewport`() {
+        val floating = KeyboardLayoutState(
+            mode = KeyboardLayoutMode.FLOATING,
+            floatingScale = 0.74f,
+        )
+        val oneHanded = floating.copy(mode = KeyboardLayoutMode.ONE_HANDED)
+        val full = floating.copy(mode = KeyboardLayoutMode.FULL)
+
+        assertEquals(
+            1600,
+            floating.resolveHostHeight(
+                availableHeight = 1600,
+                normalHeight = 620,
+                childHeight = 480,
+                margin = 12,
+            ),
+        )
+        assertEquals(
+            504,
+            oneHanded.resolveHostHeight(
+                availableHeight = 1600,
+                normalHeight = 620,
+                childHeight = 480,
+                margin = 12,
+            ),
+        )
+        assertEquals(
+            480,
+            full.resolveHostHeight(
+                availableHeight = 1600,
+                normalHeight = 620,
+                childHeight = 480,
+                margin = 12,
+            ),
+        )
+    }
+
+    @Test
+    fun `floating drag handle tap toggles controls without treating drags as taps`() {
+        assertTrue(
+            FloatingHandleInteraction.isTap(
+                deltaX = 3f,
+                deltaY = -4f,
+                touchSlop = 8f,
+            ),
+        )
+        assertFalse(
+            FloatingHandleInteraction.isTap(
+                deltaX = 9f,
+                deltaY = 1f,
+                touchSlop = 8f,
+            ),
+        )
+        assertFalse(
+            FloatingHandleInteraction.isTap(
+                deltaX = 2f,
+                deltaY = 9f,
+                touchSlop = 8f,
+            ),
+        )
     }
 }
