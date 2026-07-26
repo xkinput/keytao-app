@@ -39,7 +39,7 @@ require_glob() {
 payload_contains() {
     local payload="$1"
     local path="$2"
-    if ! printf '%s\n' "$payload" | grep -Fxq "$path"; then
+    if ! grep -Fxq -- "$path" <<<"$payload"; then
         echo "ERROR: pkg payload is missing $path" >&2
         exit 1
     fi
@@ -104,7 +104,7 @@ payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/R
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/Resources/rime-data/default.yaml"
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app/Contents/Frameworks/rime-plugins/librime-lua.dylib"
 
-if printf '%s\n' "$PAYLOAD_FILES" | grep -E '(^|/)\._|/\.__' >/dev/null; then
+if grep -E '(^|/)\._|/\.__' <<<"$PAYLOAD_FILES" >/dev/null; then
     echo "WARNING: pkg payload contains AppleDouble metadata entries." >&2
 fi
 
@@ -161,11 +161,11 @@ if [ "$MAIN_ARCHS" != "$IME_ARCHS" ] || [ "$MAIN_ARCHS" != "$FFI_ARCHS" ]; then
     exit 1
 fi
 for arch in $MAIN_ARCHS; do
-    if ! printf '%s\n' "$MAIN_RIME_ARCHS" | grep -Eq "(^| )$arch( |$)"; then
+    if ! grep -Eq "(^| )$arch( |$)" <<<"$MAIN_RIME_ARCHS"; then
         echo "ERROR: main app librime does not contain $arch" >&2
         exit 1
     fi
-    if ! printf '%s\n' "$IME_RIME_ARCHS" | grep -Eq "(^| )$arch( |$)"; then
+    if ! grep -Eq "(^| )$arch( |$)" <<<"$IME_RIME_ARCHS"; then
         echo "ERROR: IME librime does not contain $arch" >&2
         exit 1
     fi
