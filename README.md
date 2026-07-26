@@ -9,6 +9,7 @@
 - [macOS IME](crates/keytao-macos-ime/IMPL.md)
 - [Windows IME](crates/keytao-windows-ime/IMPL.md)
 - [Android IME](src-tauri/gen/android/app/IMPL.md)
+- [iOS IME](crates/keytao-ios-ime/IMPL.md)
 
 ## 工作逻辑
 
@@ -18,7 +19,7 @@
 4. 系统输入法进程启动后读取同一个用户目录，并通过 `ImeRuntime` 创建独立 session。
 5. 平台输入法把按键转换成 X11 keysym + Rime modifier mask，调用 `ImeRuntimeSession::process_key_result` 或 FFI per-session API。
 6. librime 返回统一的 `ImeState`：`committed` 用平台原生接口提交，`preedit` 用平台 composition/marked-text 接口更新，`candidates` 由平台候选窗口展示。
-7. 部署后 Linux daemon、macOS IMK、Windows TSF 和 Android `InputMethodService` 都会通过用户目录下的 reload stamp 刷新。
+7. 部署后 Linux daemon、macOS IMK、Windows TSF、Android `InputMethodService` 和 iOS 键盘扩展都会通过用户目录下的 reload stamp 刷新。
 
 ## 输入法架构
 
@@ -26,7 +27,7 @@
 
 - `keytao-core` 负责 librime setup、deploy、session、reload generation、modifier mask 和 `ImeState` 抽取。
 - `keytao-core-ffi` 给 macOS 等非 Rust 前端暴露 per-session C ABI。
-- Linux/macOS/Windows/Android 平台层只负责系统输入法协议、原生 key event 转换、commit/preedit/candidate UI 和诊断。
+- Linux/macOS/Windows/Android/iOS 平台层只负责系统输入法协议、原生 key event 转换、commit/preedit/candidate UI 和诊断。
 
 这样做的好处是：librime 调度只实现一次，词库重新部署和 session 刷新有统一入口，平台接入更薄；`theme.yaml` 由 `crates/keytao-theme` 解析成共享主题和 UI model，再由各平台 renderer 映射到自己的窗口或系统候选服务。
 
@@ -40,6 +41,7 @@
 - macOS 版本包含正式支持的 IMKit 系统输入法 bundle
 - Windows 版本包含实验性 TSF 系统输入法 DLL
 - Android 版本包含正式支持的 `InputMethodService` 系统输入法，native engine 通过 JNI 接入 `keytao-core`，Android ABI 的 `librime` runtime 通过 `scripts/android-librime-runtime.sh` 导入并同步到 APK
+- iOS 版本包含 `UIInputViewController` 键盘扩展，主 App 与键盘通过 App Group 共享方案、主题和部署状态
 
 ## 平台状态
 
@@ -49,7 +51,7 @@
 | macOS | 已支持 | 已支持，基于 IMKit，安装到 `/Library/Input Methods/KeyTao.app` |
 | Windows | 已支持 | 实验性支持，基于 TSF TIP，注册 `keytao_windows_ime.dll` |
 | Android | 已支持 | 已支持，基于 `InputMethodService`，发行包内置 Android ABI 的 native `librime` runtime 和基础 `rime-data` |
-| iOS | 手动导入 | 暂无系统键盘 extension |
+| iOS / iPadOS | 已支持 | 已支持，基于 `UIInputViewController` 自定义键盘扩展；Release 提供需自行签名的 unsigned IPA |
 
 ## 数据与部署
 
@@ -59,6 +61,7 @@
 - Windows 用户目录：`%APPDATA%/keytao`
 - Linux 用户目录：`$XDG_DATA_HOME/keytao`，通常是 `~/.local/share/keytao`
 - Android 用户目录：`/storage/emulated/0/keytao`
+- iOS / iPadOS 用户目录：App Group `group.ink.rea.keytao-app` 容器下的 `keytao`
 
 App 的“安装方案”只负责写文件；“部署”才会让 librime 编译并加载新配置。`rime.lua` 是否生效，取决于它是否安装到了系统输入法实际使用的用户目录，并且是否完成部署。
 
@@ -66,7 +69,8 @@ App 的“安装方案”只负责写文件；“部署”才会让 librime 编�
 
 前往 [Releases](https://github.com/xkinput/keytao-app/releases) 下载对应平台的安装包。
 
-Linux 安装方式见 [docs/linux-install.md](docs/linux-install.md)。
+- Linux 安装方式见 [docs/linux-install.md](docs/linux-install.md)。
+- iOS / iPadOS IPA 签名与安装方式见 [docs/ios-install.md](docs/ios-install.md)。
 
 ## 发行打包
 
@@ -75,7 +79,7 @@ KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，安装完成后要求注销并重新登录，不构建 dmg。
 - Linux 只构建 `deb` 和 `rpm`，不构建 AppImage 或 tarball。deb/rpm 同时安装图形 App、`keytao-ime` 和包内 runtime，保证可以作为系统输入法安装。
 - Windows release 只构建 x64 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/current` 资源目录。官方 librime Windows 发布包目前没有 ARM64 SDK，Windows ARM64 包需要另做实验性源码构建链路后再开启。
-- macOS、Linux、Windows 和 Android 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。
+- macOS、Linux、Windows、Android 和 iOS 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。iOS Release 上传 unsigned IPA，安装前需要按 [iOS / iPadOS 签名与安装指南](docs/ios-install.md) 完成签名。
 
 ### 通用准备
 
