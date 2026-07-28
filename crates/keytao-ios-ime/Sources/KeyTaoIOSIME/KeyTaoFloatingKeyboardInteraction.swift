@@ -6,15 +6,6 @@ enum KeyTaoIOSKeyboardLayoutMode: Equatable {
     case split
 }
 
-enum KeyTaoIOSKeyboardSide: String, Equatable {
-    case left
-    case right
-
-    var opposite: KeyTaoIOSKeyboardSide {
-        self == .left ? .right : .left
-    }
-}
-
 struct KeyTaoIOSKeyboardLayoutPresentation: Equatable {
     var mode: KeyTaoIOSKeyboardLayoutMode
     var alternativeMode: KeyTaoIOSKeyboardLayoutMode
@@ -30,23 +21,6 @@ struct KeyTaoIOSKeyboardLayoutPresentation: Equatable {
 
     var displayedMode: KeyTaoIOSKeyboardLayoutMode {
         mode == .full ? alternativeMode : mode
-    }
-}
-
-struct KeyTaoIOSKeyboardLayoutState: Equatable {
-    static let minimumScale: CGFloat = 0.70
-    static let maximumScale: CGFloat = 0.94
-
-    var enabled: Bool
-    var scale: CGFloat
-    var side: KeyTaoIOSKeyboardSide = .right
-
-    func normalized() -> KeyTaoIOSKeyboardLayoutState {
-        KeyTaoIOSKeyboardLayoutState(
-            enabled: enabled,
-            scale: min(max(scale, Self.minimumScale), Self.maximumScale),
-            side: side
-        )
     }
 }
 
@@ -74,13 +48,19 @@ final class KeyTaoIOSKeyboardLayoutStateStore {
             scale: defaults.object(forKey: scaleKey) == nil
                 ? fallback.scale
                 : defaults.double(forKey: scaleKey),
-            side: side
+            side: side,
+            orientation: KeyTaoFloatingOrientation(isLandscape: isLandscape)
         ).normalized()
     }
 
     func save(isLandscape: Bool, state: KeyTaoIOSKeyboardLayoutState) {
         let prefix = orientationPrefix(isLandscape)
-        let normalized = state.normalized()
+        // The slot decides the floor, not whatever orientation the state was
+        // built with: a landscape scale must never be stored under the portrait
+        // key without being clamped to the portrait minimum first.
+        var stored = state
+        stored.orientation = KeyTaoFloatingOrientation(isLandscape: isLandscape)
+        let normalized = stored.normalized()
         defaults.set(normalized.enabled, forKey: "\(prefix)_enabled")
         defaults.set(normalized.scale, forKey: "\(prefix)_scale")
         defaults.set(normalized.side.rawValue, forKey: "\(prefix)_side")
@@ -181,7 +161,8 @@ final class KeyTaoResizableKeyboardContainerView: UIView, UIGestureRecognizerDel
         state = KeyTaoIOSKeyboardLayoutState(
             enabled: true,
             scale: nextScale,
-            side: presentation.side
+            side: presentation.side,
+            orientation: state.orientation
         ).normalized()
         onStateChanged?(state, finished)
     }

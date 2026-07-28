@@ -3,7 +3,6 @@ import CKeytaoCore
 
 enum KeyTaoIOSPaths {
     static let appGroupIdentifier = "group.ink.rea.keytao-app"
-    static let reloadStampFileName = "keytao-ime.reload"
 
     static func userRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["KEYTAO_IOS_USER_DATA_DIR"], !override.isEmpty {
@@ -44,10 +43,6 @@ enum KeyTaoIOSPaths {
 
     static func configFile(userRoot: URL) -> URL {
         userRoot.appendingPathComponent("ios_ime.json")
-    }
-
-    static func reloadStampFile(userRoot: URL) -> URL {
-        userRoot.appendingPathComponent(reloadStampFileName)
     }
 
     static func hasInstalledSchema(userRoot: URL) -> Bool {
@@ -102,14 +97,17 @@ enum KeyTaoIOSPaths {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
+    /// Drops the bundled layout into the App Group so that users have a
+    /// `keyboard.yaml` to edit. Only writes when nothing usable is there: the
+    /// extension must never overwrite a layout the user has customised, and the
+    /// resolver falls back to the built-in layout on its own anyway.
     static func seedDefaultKeyboardIfNeeded(userRoot: URL) {
         let url = keyboardFile(userRoot: userRoot)
-        guard let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
+        if let existing = try? String(contentsOf: url, encoding: .utf8),
+           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return
         }
-        if FileManager.default.fileExists(atPath: url.path),
-           let existing = try? String(contentsOf: url, encoding: .utf8),
-           !shouldRefreshDefaultKeyboard(existing: existing, bundled: yaml) {
+        guard let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
             return
         }
         do {
@@ -118,18 +116,6 @@ enum KeyTaoIOSPaths {
         } catch {
             return
         }
-    }
-
-    private static func shouldRefreshDefaultKeyboard(existing: String, bundled: String) -> Bool {
-        let trimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != bundled else {
-            return trimmed.isEmpty
-        }
-        return existing.contains("# KeyTao IME default keyboard layout.")
-            && existing.contains("layers: {}")
-            && !existing.contains("symbols_en:")
-            && !existing.contains("label: \"英文\"")
-            && bundled.contains("symbols_en:")
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {
@@ -145,22 +131,64 @@ enum KeyTaoIOSPaths {
     }
 }
 
+/// What the linked librime can do through its own entry points, decoded from
+/// the `KEYTAO_CAP_*` mask.
+///
+/// A missing capability makes the common layer synthesize a key stroke whose
+/// meaning depends on the schema, so a control that needs one has to be hidden
+/// instead of quietly typing characters into the composition (D4). Nothing here
+/// is hard-coded per platform: the vendored iOS librime happens to be 1.8.5
+/// today, but every consumer asks the mask rather than the OS.
+struct KeyTaoEngineCapabilities: Equatable {
+    var candidateSelection: Bool
+    var globalCandidateSelection: Bool
+    var candidateHighlight: Bool
+    var candidateDeletion: Bool
+    var nativePaging: Bool
+
+    /// The ABI-level answer, available before `keytao_init()` and constant for
+    /// the life of the process.
+    static let current = KeyTaoEngineCapabilities(mask: keytao_engine_capabilities())
+
+    init(mask: UInt32) {
+        func has(_ bit: Int32) -> Bool {
+            mask & UInt32(bitPattern: bit) != 0
+        }
+        candidateSelection = has(KEYTAO_CAP_CANDIDATE_SELECTION)
+        globalCandidateSelection = has(KEYTAO_CAP_GLOBAL_CANDIDATE_SELECTION)
+        candidateHighlight = has(KEYTAO_CAP_CANDIDATE_HIGHLIGHT)
+        candidateDeletion = has(KEYTAO_CAP_CANDIDATE_DELETION)
+        nativePaging = has(KEYTAO_CAP_NATIVE_PAGING)
+    }
+}
+
 final class KeyTaoIOSEngine {
     let userRoot: URL
-    private let reloadStamp: URL
     private var session: UnsafeMutableRawPointer?
     private var lastState = KeyTaoImeState.empty
     private var lastDisplaySchemaName = ""
-    private var reloadStampSignature: String?
+    private var lastTheme: KeyTaoImeTheme?
+    private var lastThemeColorScheme: KeyTaoEffectiveColorScheme?
+    private var lastConfig: KeyTaoIOSImeConfig?
+    private let startupQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.startup", qos: .userInitiated)
+    private var startupInFlight = false
+    private var startupCompletions: [(Bool) -> Void] = []
 
     private(set) var nativeReady = false
 
+    /// What the librime behind the current session can do.
+    ///
+    /// `keytao_session_capabilities()` is the authoritative per-session answer,
+    /// but it reports 0 — every control off — for a null or retired handle.
+    /// That is the safe answer for a handle that cannot reach librime and the
+    /// wrong one for a keyboard whose runtime is still starting: the layout
+    /// would drop its paging keys and grow them back a frame later. So the
+    /// ABI-level mask stands in until a session exists, and because both are
+    /// derived from the same librime the swap is invisible in practice.
+    private(set) var capabilities = KeyTaoEngineCapabilities.current
+
     init(userRoot: URL = KeyTaoIOSPaths.userRoot()) {
         self.userRoot = userRoot
-        self.reloadStamp = KeyTaoIOSPaths.reloadStampFile(userRoot: userRoot)
-        self.reloadStampSignature = Self.fileSignature(reloadStamp)
-        KeyTaoIOSPaths.ensureUserRoot(userRoot)
-        KeyTaoIOSPaths.seedDefaultKeyboardIfNeeded(userRoot: userRoot)
     }
 
     deinit {
@@ -180,6 +208,83 @@ final class KeyTaoIOSEngine {
         return initializeRuntime()
     }
 
+    /// Keyboard extensions are launched on demand by the host and must show an
+    /// interactive first frame straight away, so the App Group seeding plus
+    /// `keytao_init` and the session handshake run on a private serial queue.
+    /// Only the resulting session pointer crosses back to the main queue, where
+    /// every other member of this class is read and written.
+    func ensureReadyAsync(_ completion: @escaping (Bool) -> Void) {
+        if nativeReady {
+            completion(true)
+            return
+        }
+        startupCompletions.append(completion)
+        guard !startupInFlight else {
+            return
+        }
+        startupInFlight = true
+        let userRoot = self.userRoot
+        startupQueue.async { [weak self] in
+            KeyTaoIOSPaths.ensureUserRoot(userRoot)
+            KeyTaoIOSPaths.seedDefaultKeyboardIfNeeded(userRoot: userRoot)
+            let prepared = Self.prepareRuntime(userRoot: userRoot)
+            DispatchQueue.main.async {
+                guard let self else {
+                    if let prepared {
+                        keytao_destroy_session(prepared)
+                    }
+                    return
+                }
+                let ready = self.installPreparedSession(prepared)
+                self.startupInFlight = false
+                let pending = self.startupCompletions
+                self.startupCompletions = []
+                for completion in pending {
+                    completion(ready)
+                }
+            }
+        }
+    }
+
+    private static func prepareRuntime(userRoot: URL) -> UnsafeMutableRawPointer? {
+        guard KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot),
+              KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot),
+              let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot) else {
+            return nil
+        }
+        let ok = userRoot.path.withCString { userPtr in
+            sharedDir.path.withCString { sharedPtr in
+                keytao_init(userPtr, sharedPtr)
+            }
+        }
+        guard ok else {
+            return nil
+        }
+        return keytao_create_session()
+    }
+
+    private func installPreparedSession(_ prepared: UnsafeMutableRawPointer?) -> Bool {
+        if nativeReady {
+            // A synchronous ensureReady() won the race; drop the spare session.
+            if let prepared {
+                keytao_destroy_session(prepared)
+            }
+            return true
+        }
+        guard let prepared else {
+            nativeReady = false
+            return false
+        }
+        if let session {
+            keytao_destroy_session(session)
+        }
+        session = prepared
+        nativeReady = true
+        refreshCapabilities()
+        lastState = state().withoutTransientCommit()
+        return true
+    }
+
     func hasInstalledSchema() -> Bool {
         KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot)
     }
@@ -188,30 +293,53 @@ final class KeyTaoIOSEngine {
         KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot)
     }
 
+    /// Shared App Group files are written by the containing app while the
+    /// extension may be reading them, so a resolve that comes back empty (a
+    /// half-written YAML) keeps the last good result instead of snapping the UI
+    /// back to the built-in defaults.
     func resolveTheme(systemColorScheme: KeyTaoEffectiveColorScheme?) -> KeyTaoImeTheme {
         let userTheme = KeyTaoIOSPaths.themeFile(userRoot: userRoot)
-        return KeyTaoIOSThemeResolver.resolve(
-            userThemePath: FileManager.default.fileExists(atPath: userTheme.path) ? userTheme.path : nil,
+        let path = FileManager.default.fileExists(atPath: userTheme.path) ? userTheme.path : nil
+        guard let json = KeyTaoIOSThemeResolver.resolveJson(
+            userThemePath: path,
             systemColorScheme: systemColorScheme
-        )
+        ), let theme = KeyTaoIOSThemeResolver.decode(json: json) else {
+            if let lastTheme, lastThemeColorScheme == systemColorScheme {
+                return lastTheme
+            }
+            return KeyTaoIOSThemeResolver.resolve(
+                userThemePath: path,
+                systemColorScheme: systemColorScheme
+            )
+        }
+        lastTheme = theme
+        lastThemeColorScheme = systemColorScheme
+        return theme
     }
 
-    func loadConfig(systemColorScheme: KeyTaoEffectiveColorScheme?) -> KeyTaoIOSImeConfig {
+    func loadConfig() -> KeyTaoIOSImeConfig {
         let userKeyboard = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot)
         let userConfig = KeyTaoIOSPaths.configFile(userRoot: userRoot)
-        let userTheme = KeyTaoIOSPaths.themeFile(userRoot: userRoot)
-        let resolvedThemeJson = KeyTaoIOSThemeResolver.resolveJson(
-            userThemePath: FileManager.default.fileExists(atPath: userTheme.path) ? userTheme.path : nil,
-            systemColorScheme: systemColorScheme
-        )
         let resolvedKeyboardJson = KeyTaoIOSKeyboardConfigResolver.resolveJson(
             userKeyboardPath: FileManager.default.fileExists(atPath: userKeyboard.path) ? userKeyboard.path : nil
         )
-        return KeyTaoIOSImeConfig.load(
+        if resolvedKeyboardJson == nil, let lastConfig {
+            return lastConfig
+        }
+        let config = KeyTaoIOSImeConfig.load(
             resolvedKeyboardJson: resolvedKeyboardJson,
-            userConfigURL: FileManager.default.fileExists(atPath: userConfig.path) ? userConfig : nil,
-            resolvedThemeJson: resolvedThemeJson
+            userConfigURL: FileManager.default.fileExists(atPath: userConfig.path) ? userConfig : nil
         )
+        lastConfig = config
+        return config
+    }
+
+    /// Drops everything that can be rebuilt on demand; the session and the
+    /// deployed schemas stay put so that typing keeps working.
+    func releaseCaches() {
+        lastTheme = nil
+        lastThemeColorScheme = nil
+        lastConfig = nil
     }
 
     func state() -> KeyTaoImeState {
@@ -277,6 +405,61 @@ final class KeyTaoIOSEngine {
         return stable
     }
 
+    /// The single Enter implementation shared by all five front ends: hand
+    /// `XK_Return` to Rime and let the common layer fall back to committing the
+    /// raw input when Rime declines it.
+    func processEnter() -> KeyTaoImeState {
+        guard let session, let state = decodeState(keytao_session_process_enter_json(session)) else {
+            return lastState.withoutTransientCommit()
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
+    }
+
+    /// Flush whatever Rime has converted so far, for the "input context ends,
+    /// keep the text" paths.
+    func commitComposition() -> KeyTaoImeState {
+        guard let session, let state = decodeState(keytao_session_commit_composition_json(session)) else {
+            return lastState.withoutTransientCommit()
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
+    }
+
+    /// Sensitive host fields (D9): stop feeding keys to Rime entirely, so no
+    /// preedit, no candidates and no user-dictionary learning can happen.
+    @discardableResult
+    func setInputPolicy(composing: Bool, learning: Bool) -> KeyTaoImeState {
+        guard let session,
+              let state = decodeState(keytao_session_set_input_policy_json(session, composing, learning)) else {
+            return lastState.withoutTransientCommit()
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
+    }
+
+    /// Maps a single character to an X11 keysym through the common layer; 0
+    /// means "do not hand this to Rime, commit it as-is".
+    static func keysym(for text: String) -> UInt32? {
+        guard !text.isEmpty else {
+            return nil
+        }
+        let keysym = text.withCString { keytao_text_to_keysym($0) }
+        return keysym == 0 ? nil : keysym
+    }
+
+    /// Converts a Unicode scalar offset from `ImeState` into the UTF-16 unit
+    /// offset UIKit expects.
+    static func utf16Offset(in text: String, charOffset: Int) -> Int {
+        guard charOffset > 0 else {
+            return 0
+        }
+        return text.withCString { Int(keytao_utf16_offset_from_chars($0, UInt32(charOffset))) }
+    }
+
     func setAsciiMode(_ enabled: Bool) -> KeyTaoImeState {
         guard let session, let state = decodeState(keytao_session_set_ascii_mode_json(session, enabled)) else {
             var empty = KeyTaoImeState.empty
@@ -294,20 +477,25 @@ final class KeyTaoIOSEngine {
         }
         let ok = keytao_reload()
         if ok {
-            reloadStampSignature = Self.fileSignature(reloadStamp)
+            refreshCapabilities()
             lastState = state().withoutTransientCommit()
         }
         return ok
     }
 
+    /// Stamp detection lives in the common layer (`ReloadStamp`), so the
+    /// signature the containing app reports and the one the keyboard compares
+    /// come from the same function.
     func reloadIfNeeded() -> Bool {
-        if !nativeReady {
-            return ensureReady()
-        }
-        guard let signature = Self.fileSignature(reloadStamp), signature != reloadStampSignature else {
+        guard nativeReady else {
             return false
         }
-        return reload()
+        guard keytao_reload_if_stamp_changed() else {
+            return false
+        }
+        refreshCapabilities()
+        lastState = state().withoutTransientCommit()
+        return true
     }
 
     func close() {
@@ -316,34 +504,33 @@ final class KeyTaoIOSEngine {
         }
         session = nil
         nativeReady = false
+        refreshCapabilities()
     }
 
     private func initializeRuntime() -> Bool {
-        guard let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot) else {
+        guard let prepared = Self.prepareRuntime(userRoot: userRoot) else {
             nativeReady = false
             return false
         }
-
-        let ok = userRoot.path.withCString { userPtr in
-            sharedDir.path.withCString { sharedPtr in
-                keytao_init(userPtr, sharedPtr)
-            }
-        }
-        guard ok else {
-            nativeReady = false
-            return false
-        }
-
         if let session {
             keytao_destroy_session(session)
         }
-        session = keytao_create_session()
-        nativeReady = session != nil
-        if nativeReady {
-            lastState = state().withoutTransientCommit()
-            reloadStampSignature = Self.fileSignature(reloadStamp)
+        session = prepared
+        nativeReady = true
+        refreshCapabilities()
+        lastState = state().withoutTransientCommit()
+        return true
+    }
+
+    /// Re-reads the `KEYTAO_CAP_*` mask for whatever session is installed now.
+    /// Called on every session install, drop and reload, so no caller ever has
+    /// to reason about which handle a cached mask belonged to.
+    private func refreshCapabilities() {
+        guard let session else {
+            capabilities = .current
+            return
         }
-        return nativeReady
+        capabilities = KeyTaoEngineCapabilities(mask: keytao_session_capabilities(session))
     }
 
     private func decodeState(_ ptr: UnsafeMutablePointer<CChar>?) -> KeyTaoImeState? {
@@ -370,14 +557,5 @@ final class KeyTaoIOSEngine {
         }
         lastDisplaySchemaName = name
         return state
-    }
-
-    private static func fileSignature(_ url: URL) -> String? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
-            return nil
-        }
-        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return "\(size):\(modified)"
     }
 }

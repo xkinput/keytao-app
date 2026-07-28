@@ -3,14 +3,20 @@ import os
 
 private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
-private let rimeKeyReturn: UInt32 = 0xff0d
-private let rimeKeyEscape: UInt32 = 0xff1b
 private let rimeKeyF4: UInt32 = 0xffc1
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
+
+/// `UIInputView` subclass that opts the keyboard into the standard system click
+/// sound; whether it is audible is the user's "Keyboard Clicks" preference.
+private final class KeyTaoInputView: UIInputView, UIInputViewAudioFeedback {
+    var enableInputClicksWhenVisible: Bool { true }
+}
 
 open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboardViewDelegate {
     private static let clipboardHistoryLimit = 24
     private static let expandedCandidateLimit = 96
+    private static let queuedCommandLimit = 32
+    private static let deleteAllBatchLimit = 4096
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -18,6 +24,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var keyboardView: KeyTaoIOSKeyboardView?
     private var keyboardContainer: KeyTaoResizableKeyboardContainerView?
     private var layoutSideButton: UIButton?
+    private var inputModeSwitchButton: UIButton?
     private var heightConstraint: NSLayoutConstraint?
     private var keyboardWidthConstraint: NSLayoutConstraint?
     private var keyboardHeightConstraint: NSLayoutConstraint?
@@ -37,6 +44,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private var clipboardHistory: [String] = []
     private var backspaceRestoreStack: [String] = []
+    private var hostTraits = KeyTaoHostTraits.default
+    private var markedTextActive = false
+    private var hostTextMutationDepth = 0
+    private var runtimeStarting = false
+    private var queuedCommands: [KeyTaoKeyCommand] = []
+    /// Starts at the ABI-level answer, which is already available while the
+    /// runtime boots, then follows the live session's own mask.
+    private var engineCapabilities = KeyTaoEngineCapabilities.current
 
     public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
         keyTaoKeyboardLog.info("KeyTao keyboard init")
@@ -49,7 +64,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     public override func loadView() {
-        let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
+        let inputView = KeyTaoInputView(frame: .zero, inputViewStyle: .keyboard)
         inputView.allowsSelfSizing = true
         self.inputView = inputView
         self.view = inputView
@@ -61,7 +76,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
         let systemColorScheme = currentSystemColorScheme()
         let theme = engine.resolveTheme(systemColorScheme: systemColorScheme)
-        let config = engine.loadConfig(systemColorScheme: systemColorScheme)
+        let config = engine.loadConfig()
         let view = KeyTaoIOSKeyboardView(
             config: config,
             theme: theme,
@@ -77,14 +92,25 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         sideButton.isHidden = true
         sideButton.accessibilityIdentifier = "keytao-layout-side-toggle"
         sideButton.addTarget(self, action: #selector(switchOneHandedSide), for: .touchUpInside)
+        // Transparent overlay on top of the drawn globe key. Binding
+        // handleInputModeList(from:with:) to .allTouchEvents is Apple's
+        // documented way to get "tap advances, long press opens the picker".
+        let switchButton = UIButton(type: .custom)
+        switchButton.isHidden = true
+        switchButton.backgroundColor = .clear
+        switchButton.accessibilityIdentifier = "keytao-key-keyboardpicker"
+        switchButton.accessibilityLabel = "切换键盘"
+        switchButton.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
         view.delegate = self
         view.translatesAutoresizingMaskIntoConstraints = false
         self.view.backgroundColor = .clear
         self.view.isOpaque = false
         applyInterfaceStyle(for: theme)
+        view.update(engineCapabilities: engineCapabilities)
         view.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
         self.view.addSubview(container)
         self.view.addSubview(sideButton)
+        self.view.addSubview(switchButton)
         container.addSubview(view)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -95,28 +121,56 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentTheme = theme
         keyboardContainer = container
         layoutSideButton = sideButton
+        inputModeSwitchButton = switchButton
         keyboardView = view
+        view.update(hapticsAvailable: hasFullAccess)
         applyKeyboardPresentation(config: config, force: true)
-        refreshInputAvailability()
+        applyHostTraits()
+        startRuntimeIfNeeded()
     }
 
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // The keyboard is coming back for a (possibly different) input context:
+        // start from a clean composition instead of resurrecting whatever the
+        // librime session still held from the previous one.
+        resetInputContextCaches()
         reloadIfNeeded()
         let systemColorScheme = currentSystemColorScheme()
+        keyboardView?.update(hapticsAvailable: hasFullAccess)
         keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
-        let config = engine.loadConfig(systemColorScheme: systemColorScheme)
+        let config = engine.loadConfig()
         applyKeyboardPresentation(config: config, force: true)
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
-        refreshInputAvailability()
+        applyHostTraits()
+        startRuntimeIfNeeded()
         keyboardView?.update(state: currentState)
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // Equivalent of macOS deactivateServer / Android onFinishInput: the
+        // input context is over, so nothing may survive into the next one.
+        resetInputContextCaches()
     }
 
     public override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        guard hostTextMutationDepth == 0 else {
+            return
+        }
         reloadIfNeeded()
         keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
+        applyHostTraits()
         updateThemeForCurrentAppearance()
+    }
+
+    public override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        clipboardHistory.removeAll()
+        queuedCommands.removeAll()
+        engine.releaseCaches()
+        keyboardView?.releaseCaches()
     }
 
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -137,11 +191,17 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
     }
 
+    public override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
+    }
+
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         applyKeyboardPresentationIfOrientationChanged()
         updateKeyboardPositionConstraints()
         updateLayoutSideButton()
+        updateInputModeSwitchButton()
         guard let container = keyboardContainer,
               container.layer.shadowOpacity > 0 else {
             return
@@ -154,19 +214,47 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     public override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
-        if currentState.hasComposition {
-            apply(engine.reset())
+        guard hostTextMutationDepth == 0 else {
+            return
         }
+        resetInputContextCaches()
     }
 
     public override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
-        if currentState.hasComposition {
-            apply(engine.reset())
+        guard hostTextMutationDepth == 0 else {
+            return
         }
+        resetInputContextCaches()
+    }
+
+    /// Everything bound to "the text field the user is in right now": the Rime
+    /// composition, the host marked text, the backspace restore stack and the
+    /// clipboard snapshot. Called whenever the input context ends or changes.
+    private func resetInputContextCaches() {
+        backspaceRestoreStack.removeAll()
+        clipboardHistory.removeAll()
+        clearHostMarkedText()
+        keyboardView?.resetShiftForNewContext()
+        guard engine.nativeReady else {
+            currentState = currentState.withoutTransientCommit()
+            keyboardView?.update(state: currentState)
+            return
+        }
+        currentState = engine.reset().withoutTransientCommit()
+        keyboardView?.update(state: currentState)
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didTrigger command: KeyTaoKeyCommand) {
+        // The runtime is still coming up on the startup queue. Queue the key
+        // instead of committing it raw, otherwise the first few characters of
+        // every cold start would land in the host as latin letters.
+        if runtimeStarting && command.requiresInstalledSchema {
+            if queuedCommands.count < Self.queuedCommandLimit {
+                queuedCommands.append(command)
+            }
+            return
+        }
         if !inputAvailable && command.requiresInstalledSchema {
             if commitFallbackInput(for: command) {
                 return
@@ -195,13 +283,15 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.mode:
             handleMode(command.value)
         case KeyTaoCommandType.keyboardPicker:
+            // Reached only when the transparent handleInputModeList overlay is
+            // not in place (expanded panel, custom layout position).
             advanceToNextInputMode()
         case KeyTaoCommandType.keyboardMode:
             keyboardView?.setLayer(command.value)
         case KeyTaoCommandType.nextCandidatePage:
-            apply(engine.changePage(backward: false))
+            changeCandidatePage(backward: false)
         case KeyTaoCommandType.previousCandidatePage:
-            apply(engine.changePage(backward: true))
+            changeCandidatePage(backward: true)
         case KeyTaoCommandType.reset:
             apply(engine.reset())
         case KeyTaoCommandType.rimeMenu:
@@ -217,6 +307,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         default:
             break
         }
+    }
+
+    /// The layout drops paging keys when the runtime cannot turn a page
+    /// natively, but swipes, long presses and key stacks can carry the same
+    /// command, so the capability is checked here as well: without
+    /// `RimeChangePage` the common layer synthesizes `-`/`=`, which a schema
+    /// without the default paging bindings types into the composition (D4).
+    private func changeCandidatePage(backward: Bool) {
+        guard engineCapabilities.nativePaging else {
+            showMessage("当前 RIME 运行库不支持候选翻页")
+            return
+        }
+        apply(engine.changePage(backward: backward))
     }
 
     private func commitFallbackInput(for command: KeyTaoKeyCommand) -> Bool {
@@ -236,6 +339,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didSelectCandidate index: Int, global: Bool) {
         if !inputAvailable {
             showUnavailableMessage()
+            return
+        }
+        // Both entry points exist in the vendored librime 1.8.5; the guard keeps
+        // a future runtime without them from falling back to sending a select
+        // key, which lands in the composition when the schema has none (D4).
+        let supported = global
+            ? engineCapabilities.globalCandidateSelection
+            : engineCapabilities.candidateSelection
+        guard supported else {
+            showMessage("当前 RIME 运行库不支持点击选词")
             return
         }
         apply(global ? engine.selectCandidateGlobal(index) : engine.selectCandidate(index))
@@ -260,25 +373,34 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         completion(clipboardHistory)
     }
 
+    /// Every mode goes through Rime first (D6). English mode is a librime
+    /// option, not a keyboard-side shortcut: with `ascii_mode` on the schema's
+    /// punctuation, `ascii_composer` and `key_binder` rules still apply, and
+    /// librime rejects whatever it does not want so the host path below runs.
     private func handleTextInput(_ text: String, fallbackValue: String?) {
         guard !text.isEmpty else {
             return
         }
         let fallbackText = fallbackValue ?? text
-        if currentState.asciiMode {
+        // Secure and non-composing hosts (D9) are the only bypass: the session
+        // policy already refuses to compose there, so do not even build a key.
+        if hostTraits.bypassesRime {
             commitDirect(fallbackText)
             return
         }
-        guard let key = rimeKey(from: text) else {
+        guard let key = KeyTaoIOSEngine.keysym(for: text) else {
             commitDirect(fallbackText)
             return
         }
         let result = engine.processKey(key)
-        if !result.accepted && !result.hasComposition {
-            commitDirect(fallbackText)
-        } else {
+        if result.accepted {
             apply(result)
+            return
         }
+        // The common layer maps every printable character to a keysym, so Rime
+        // gets a say even for full-width punctuation. When it declines, the
+        // character still has to reach the host or it would be dropped.
+        applyRejectedKeyFallback(result, text: fallbackText)
     }
 
     private func handleRimeInput(_ sequence: String, fallbackValue: String?) {
@@ -286,29 +408,51 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         let fallbackText = fallbackValue ?? sequence
-        if currentState.asciiMode {
+        if hostTraits.bypassesRime {
             commitDirect(fallbackText)
             return
         }
 
-        var latest: KeyTaoImeState?
-        for scalar in sequence.unicodeScalars {
-            guard scalar.value >= 0x20 && scalar.value < 0x7f else {
-                _ = engine.reset()
+        // The key falls back as a whole only while nothing has been sent yet:
+        // once a prefix is inside Rime, replaying the declared fallback text
+        // would duplicate whatever that prefix already committed.
+        var keys: [UInt32] = []
+        keys.reserveCapacity(sequence.count)
+        for character in sequence {
+            guard let key = KeyTaoIOSEngine.keysym(for: String(character)) else {
                 commitDirect(fallbackText)
                 return
             }
-            let result = engine.processKey(scalar.value)
-            if !result.accepted && !result.hasComposition {
-                _ = engine.reset()
-                commitDirect(fallbackText)
-                return
+            keys.append(key)
+        }
+
+        // Each keystroke of the sequence is applied before the next one is sent:
+        // a mid-sequence auto-commit has to reach the host right away, otherwise
+        // the following state would overwrite it and the text would be lost.
+        var consumed = 0
+        for key in keys {
+            let result = engine.processKey(key)
+            if result.accepted {
+                apply(result)
+                consumed += 1
+                continue
             }
-            latest = result
+            // Rime declined this keystroke: apply what it still returned, then
+            // hand the host only the part of the sequence Rime never consumed.
+            let rejectedText = consumed == 0
+                ? fallbackText
+                : String(sequence.dropFirst(consumed))
+            applyRejectedKeyFallback(result, text: rejectedText)
+            return
         }
-        if let latest {
-            apply(latest)
+    }
+
+    private func applyRejectedKeyFallback(_ result: KeyTaoImeState, text: String) {
+        apply(result)
+        if currentState.hasComposition {
+            apply(engine.commitComposition())
         }
+        insertHostText(text)
     }
 
     private func handleBackspace() {
@@ -341,32 +485,49 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func deleteOneBeforeCursorForRestore() -> Bool {
         resetCompositionBeforeBackspaceGesture()
-        guard let before = textDocumentProxy.documentContextBeforeInput,
-              let deleted = before.last else {
+        return withHostTextMutation {
+            guard let before = textDocumentProxy.documentContextBeforeInput,
+                  let deleted = before.last else {
+                textDocumentProxy.deleteBackward()
+                return false
+            }
             textDocumentProxy.deleteBackward()
-            return false
+            backspaceRestoreStack.append(String(deleted))
+            return true
         }
-        textDocumentProxy.deleteBackward()
-        backspaceRestoreStack.append(String(deleted))
-        return true
     }
 
+    /// `documentContextBeforeInput` only returns the slice the host chose to
+    /// hand over, so "delete everything before the caret" has to re-read it
+    /// after every batch until the host stops giving text back.
     private func deleteAllBeforeCursorForRestore() {
         resetCompositionBeforeBackspaceGesture()
-        guard let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty else {
-            return
+        withHostTextMutation {
+            var deleted = 0
+            while deleted < Self.deleteAllBatchLimit {
+                guard let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty else {
+                    return
+                }
+                for _ in before {
+                    textDocumentProxy.deleteBackward()
+                    deleted += 1
+                    if deleted >= Self.deleteAllBatchLimit {
+                        break
+                    }
+                }
+                backspaceRestoreStack.append(contentsOf: before.reversed().map { String($0) })
+            }
         }
-        for _ in before {
-            textDocumentProxy.deleteBackward()
-        }
-        backspaceRestoreStack.append(contentsOf: before.reversed().map { String($0) })
     }
 
     private func restoreOneBackspaceText() -> Bool {
         guard let text = backspaceRestoreStack.popLast() else {
             return false
         }
-        textDocumentProxy.insertText(text)
+        clearHostMarkedText()
+        withHostTextMutation {
+            textDocumentProxy.insertText(text)
+        }
         return true
     }
 
@@ -378,7 +539,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         while let text = backspaceRestoreStack.popLast() {
             restored.append(text)
         }
-        textDocumentProxy.insertText(restored)
+        clearHostMarkedText()
+        withHostTextMutation {
+            textDocumentProxy.insertText(restored)
+        }
     }
 
     private func resetCompositionBeforeBackspaceGesture() {
@@ -386,13 +550,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         _ = engine.reset()
+        clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
     }
 
     private func handleEnter() {
         if currentState.hasComposition {
-            apply(engine.processKey(rimeKeyReturn))
+            // Single cross-platform Enter semantics: hand XK_Return to Rime and
+            // let the common layer decide, never commit the preedit literally.
+            apply(engine.processEnter())
             return
         }
         let behavior = keyboardView?.currentConfig().enterKeyBehavior ?? KeyTaoEnterKeyBehavior.system
@@ -404,20 +571,28 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func commitLineBreak() {
-        textDocumentProxy.insertText("\n")
+        insertHostText("\n")
     }
 
     private func performSystemEnter() {
         // Custom keyboards expose text insertion only; the host control interprets Return semantics.
-        textDocumentProxy.insertText("\n")
+        insertHostText("\n")
     }
 
+    /// Space is a key like any other (D6): a schema may bind it in `key_binder`
+    /// and `full_shape` turns it into U+3000, so Rime decides even when there is
+    /// no composition to select from.
     private func handleSpace() {
-        if currentState.hasComposition {
-            apply(engine.processKey(rimeKeySpace))
-        } else {
+        if hostTraits.bypassesRime {
             commitDirect(" ")
+            return
         }
+        let result = engine.processKey(rimeKeySpace)
+        if result.accepted {
+            apply(result)
+            return
+        }
+        applyRejectedKeyFallback(result, text: " ")
     }
 
     private func handleMode(_ value: String?) {
@@ -456,6 +631,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func pasteClipboard() {
         clearCompositionBeforeEdit()
+        guard hasFullAccess else {
+            showMessage("请在系统设置中允许 KeyTao 完全访问后使用剪贴板")
+            return
+        }
         guard let text = currentClipboardText() else {
             showMessage("剪贴板为空")
             return
@@ -465,17 +644,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func moveToLineBoundary(start: Bool) {
         clearCompositionBeforeEdit()
-        if start {
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            let offset = -(before.split(separator: "\n", omittingEmptySubsequences: false).last?.count ?? before.count)
-            if offset != 0 {
-                textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
-            }
-        } else {
-            let after = textDocumentProxy.documentContextAfterInput ?? ""
-            let offset = after.split(separator: "\n", omittingEmptySubsequences: false).first?.count ?? after.count
-            if offset != 0 {
-                textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+        withHostTextMutation {
+            if start {
+                let before = textDocumentProxy.documentContextBeforeInput ?? ""
+                let offset = -(before.split(separator: "\n", omittingEmptySubsequences: false).last?.count ?? before.count)
+                if offset != 0 {
+                    textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+                }
+            } else {
+                let after = textDocumentProxy.documentContextAfterInput ?? ""
+                let offset = after.split(separator: "\n", omittingEmptySubsequences: false).first?.count ?? after.count
+                if offset != 0 {
+                    textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+                }
             }
         }
     }
@@ -485,16 +666,23 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         _ = engine.reset()
+        clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
     }
 
+    /// Reading `UIPasteboard.general.string` needs Full Access, and since iOS 16
+    /// it also raises the system paste prompt. `hasStrings` is metadata only, so
+    /// it lets an empty clipboard be reported without bothering the user.
     private func currentClipboardText() -> String? {
-        UIPasteboard.general.string?.takeIfNotEmpty
+        guard hasFullAccess, UIPasteboard.general.hasStrings else {
+            return nil
+        }
+        return UIPasteboard.general.string?.takeIfNotEmpty
     }
 
     private func rememberCurrentClipboard() {
-        guard let text = currentClipboardText() else {
+        guard !hostTraits.isSensitive, let text = currentClipboardText() else {
             return
         }
         clipboardHistory.removeAll { $0 == text }
@@ -508,29 +696,159 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard !text.isEmpty else {
             return
         }
-        backspaceRestoreStack.removeAll()
         if currentState.hasComposition {
             _ = engine.reset()
         }
-        textDocumentProxy.insertText(text)
+        insertHostText(text)
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
     }
 
     private func apply(_ state: KeyTaoImeState) {
         if !state.committed.isEmpty {
-            backspaceRestoreStack.removeAll()
-            textDocumentProxy.insertText(state.committed)
+            insertHostText(state.committed)
         }
         currentState = state.withoutTransientCommit()
+        updateHostMarkedText()
         keyboardView?.update(state: currentState)
     }
 
+    // MARK: - Host text
+
+    private var hostMarkedTextEnabled: Bool {
+        baseKeyboardConfig?.hostMarkedTextEnabled ?? true
+    }
+
+    /// Every write into the host goes through here so that our own
+    /// textWillChange / selectionWillChange callbacks do not look like the user
+    /// moving to a different field. The guard is released on the next main-queue
+    /// turn because the proxy notifies back asynchronously for some hosts.
+    @discardableResult
+    private func withHostTextMutation<Result>(_ body: () -> Result) -> Result {
+        hostTextMutationDepth += 1
+        let result = body()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.hostTextMutationDepth > 0 else {
+                return
+            }
+            self.hostTextMutationDepth -= 1
+        }
+        return result
+    }
+
+    private func insertHostText(_ text: String) {
+        guard !text.isEmpty else {
+            return
+        }
+        backspaceRestoreStack.removeAll()
+        clearHostMarkedText()
+        withHostTextMutation {
+            textDocumentProxy.insertText(text)
+        }
+    }
+
+    /// iOS 13+ lets a keyboard extension show the pending composition inside the
+    /// host field via marked text, which is the standard CJK channel: the host
+    /// suppresses autocorrect over it and groups undo around it. The candidate
+    /// bar keeps rendering the preedit as well, so hosts that ignore proxy
+    /// marked text still show it somewhere.
+    private func updateHostMarkedText() {
+        let preedit = currentState.candidatePanel.preedit ?? currentState.preedit
+        guard hostMarkedTextEnabled, !preedit.isEmpty else {
+            clearHostMarkedText()
+            return
+        }
+        let selected = markedTextSelectedRange(in: preedit)
+        withHostTextMutation {
+            textDocumentProxy.setMarkedText(preedit, selectedRange: selected)
+        }
+        markedTextActive = true
+    }
+
+    /// `unmarkText()` only finalises the marked text, it does not remove it, so
+    /// the composition has to be replaced with an empty string first. Otherwise
+    /// the preedit would stay in the document next to the text Rime commits.
+    private func clearHostMarkedText() {
+        guard markedTextActive else {
+            return
+        }
+        markedTextActive = false
+        withHostTextMutation {
+            textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            textDocumentProxy.unmarkText()
+        }
+    }
+
+    /// `ImeState` offsets are Unicode scalars (D8); UIKit wants UTF-16 units.
+    private func markedTextSelectedRange(in preedit: String) -> NSRange {
+        if currentState.selEnd > currentState.selStart {
+            let start = KeyTaoIOSEngine.utf16Offset(in: preedit, charOffset: currentState.selStart)
+            let end = KeyTaoIOSEngine.utf16Offset(in: preedit, charOffset: currentState.selEnd)
+            if end > start, end <= preedit.utf16.count {
+                return NSRange(location: start, length: end - start)
+            }
+        }
+        let caret = KeyTaoIOSEngine.utf16Offset(in: preedit, charOffset: currentState.cursor)
+        return NSRange(location: min(caret, preedit.utf16.count), length: 0)
+    }
+
+    /// `keytao_init` plus the librime session handshake are the only slow part
+    /// of a cold keyboard start, so they run off the main thread and the UI
+    /// shows a loading hint until they land.
+    private func startRuntimeIfNeeded() {
+        if engine.nativeReady {
+            refreshInputAvailability()
+            return
+        }
+        guard !runtimeStarting else {
+            return
+        }
+        runtimeStarting = true
+        keyboardView?.updateAvailability(message: "正在加载键道方案…")
+        engine.ensureReadyAsync { [weak self] _ in
+            guard let self else {
+                return
+            }
+            self.runtimeStarting = false
+            self.refreshInputAvailability()
+            self.applyInputPolicyForHost()
+            self.flushQueuedCommands()
+        }
+    }
+
+    private func flushQueuedCommands() {
+        guard !queuedCommands.isEmpty else {
+            return
+        }
+        let pending = queuedCommands
+        queuedCommands.removeAll()
+        guard let keyboardView else {
+            return
+        }
+        for command in pending {
+            self.keyboardView(keyboardView, didTrigger: command)
+        }
+    }
+
+    /// Re-reads what the session behind the engine can do and hands it to the
+    /// view. Runs on every availability refresh, which covers the cold start,
+    /// every `viewWillAppear` and every reload, so a session rebuilt against a
+    /// different librime cannot leave the UI offering controls it lost.
+    private func refreshEngineCapabilities() {
+        let capabilities = engine.capabilities
+        guard capabilities != engineCapabilities else {
+            return
+        }
+        engineCapabilities = capabilities
+        keyboardView?.update(engineCapabilities: capabilities)
+    }
+
     private func refreshInputAvailability() {
+        refreshEngineCapabilities()
         let message: String
         let installed = engine.hasInstalledSchema()
         let deployed = engine.hasDeployedSchema()
-        let ready = installed && deployed && engine.ensureReady()
+        let ready = installed && deployed && engine.nativeReady
         if ready {
             message = ""
         } else if !installed && !hasFullAccess {
@@ -559,13 +877,52 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard engine.reloadIfNeeded() else {
             return
         }
+        refreshEngineCapabilities()
         currentState = engine.state().withoutTransientCommit()
         let systemColorScheme = currentSystemColorScheme()
         updateThemeForCurrentAppearance(systemColorScheme: systemColorScheme)
         applyKeyboardPresentation(
-            config: engine.loadConfig(systemColorScheme: systemColorScheme),
+            config: engine.loadConfig(),
             force: true
         )
+    }
+
+    // MARK: - Host traits
+
+    /// `textDocumentProxy` inherits `UITextInputTraits`; it is the only channel
+    /// through which an iOS host declares what it expects from the keyboard.
+    private func applyHostTraits() {
+        let traits = KeyTaoHostTraits(proxy: textDocumentProxy)
+        guard traits != hostTraits else {
+            return
+        }
+        let previouslySensitive = hostTraits.isSensitive
+        hostTraits = traits
+        if traits.isSensitive && !previouslySensitive {
+            clipboardHistory.removeAll()
+            backspaceRestoreStack.removeAll()
+        }
+        applyInputPolicyForHost()
+        keyboardView?.update(hostTraits: traits)
+        if let layer = traits.forcedLayer {
+            keyboardView?.setLayer(layer)
+        }
+    }
+
+    /// Secure or non-composing host fields must never reach librime: no
+    /// preedit, no candidates, and nothing that could be learnt into the user
+    /// dictionary (D9).
+    private func applyInputPolicyForHost() {
+        guard engine.nativeReady else {
+            return
+        }
+        let composing = !hostTraits.bypassesRime
+        let state = engine.setInputPolicy(composing: composing, learning: composing)
+        if !composing {
+            clearHostMarkedText()
+        }
+        currentState = state.withoutTransientCommit()
+        keyboardView?.update(state: currentState)
     }
 
     private func updateThemeForCurrentAppearance(systemColorScheme: KeyTaoEffectiveColorScheme? = nil) {
@@ -679,6 +1036,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         updateKeyboardPositionConstraints()
         updateLayoutAppearance()
         updateLayoutSideButton()
+        updateInputModeSwitchButton()
     }
 
     private func handleLayoutStateChanged(
@@ -718,7 +1076,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let next = KeyTaoIOSKeyboardLayoutState(
             enabled: !layoutState.enabled,
             scale: layoutState.scale,
-            side: layoutState.side
+            side: layoutState.side,
+            orientation: layoutState.orientation
         ).normalized()
         layoutStateStore.save(
             isLandscape: currentInterfaceIsLandscape(),
@@ -735,7 +1094,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let next = KeyTaoIOSKeyboardLayoutState(
             enabled: true,
             scale: layoutState.scale,
-            side: layoutState.side.opposite
+            side: layoutState.side.opposite,
+            orientation: layoutState.orientation
         ).normalized()
         layoutStateStore.save(
             isLandscape: currentInterfaceIsLandscape(),
@@ -762,7 +1122,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     ) -> KeyTaoFloatingKeyboardProfile {
         KeyTaoFloatingKeyboardProfile(
             enabled: presentation.isEnabled,
-            scale: state.scale
+            scale: state.scale,
+            orientation: state.orientation
         )
     }
 
@@ -835,6 +1196,21 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         self.view.bringSubviewToFront(button)
     }
 
+    private func updateInputModeSwitchButton() {
+        guard let button = inputModeSwitchButton else {
+            return
+        }
+        guard needsInputModeSwitchKey,
+              let keyboardView,
+              let frame = keyboardView.inputModeSwitchKeyFrame() else {
+            button.isHidden = true
+            return
+        }
+        button.frame = keyboardView.convert(frame, to: self.view)
+        button.isHidden = false
+        self.view.bringSubviewToFront(button)
+    }
+
     private func updateLayoutAppearance() {
         guard let keyboardView,
               let container = keyboardContainer else {
@@ -854,16 +1230,18 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             : nil
     }
 
+    /// Keyboard extensions have no scene of their own, and on iPad the host
+    /// window can be a narrow column while the device is landscape, so the
+    /// keyboard's own bounds and size classes decide the layout.
     private func currentInterfaceIsLandscape() -> Bool {
-        if let orientation = view.window?.windowScene?.interfaceOrientation,
-           orientation != .unknown {
-            return orientation.isLandscape
+        let bounds = view.bounds
+        if bounds.width > 0, bounds.height > 0 {
+            return bounds.width > bounds.height * 1.2
         }
         if traitCollection.verticalSizeClass == .compact {
             return true
         }
-        let screenBounds = UIScreen.main.bounds
-        return screenBounds.width > screenBounds.height
+        return traitCollection.horizontalSizeClass == .regular
     }
 
     private func currentSystemColorScheme() -> KeyTaoEffectiveColorScheme {
@@ -871,9 +1249,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return simulatorScheme
         }
 
+        // The host's keyboardAppearance is an explicit request and outranks the
+        // device style; a dark UI app on a light device asks for .dark here.
+        switch textDocumentProxy.keyboardAppearance {
+        case .dark, .alert:
+            return .dark
+        case .light:
+            return .light
+        default:
+            break
+        }
+
         let systemStyles: [UIUserInterfaceStyle?] = [
             view.window?.windowScene?.traitCollection.userInterfaceStyle,
-            UIScreen.main.traitCollection.userInterfaceStyle,
             UITraitCollection.current.userInterfaceStyle,
             traitCollection.userInterfaceStyle,
             view.traitCollection.userInterfaceStyle,
@@ -889,12 +1277,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             }
         }
 
-        switch textDocumentProxy.keyboardAppearance {
-        case .dark, .alert:
-            return .dark
-        default:
-            return .light
-        }
+        return .light
     }
 
     private func simulatorSystemColorScheme() -> KeyTaoEffectiveColorScheme? {
@@ -917,6 +1300,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func showUnavailableMessage() {
+        startRuntimeIfNeeded()
+        guard !runtimeStarting else {
+            return
+        }
         refreshInputAvailability()
         showMessage(unavailableMessage)
     }
@@ -938,16 +1325,110 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
     }
 
-    private func rimeKey(from text: String) -> UInt32? {
-        let scalars = Array(text.unicodeScalars)
-        guard scalars.count == 1 else {
+}
+
+/// The `UITextInputTraits` the host declares on its `textDocumentProxy`.
+struct KeyTaoHostTraits: Equatable {
+    var returnKeyType: UIReturnKeyType
+    var keyboardType: UIKeyboardType
+    var autocapitalizationType: UITextAutocapitalizationType
+    var isSecureTextEntry: Bool
+
+    static let `default` = KeyTaoHostTraits(
+        returnKeyType: .default,
+        keyboardType: .default,
+        autocapitalizationType: .sentences,
+        isSecureTextEntry: false
+    )
+
+    init(
+        returnKeyType: UIReturnKeyType,
+        keyboardType: UIKeyboardType,
+        autocapitalizationType: UITextAutocapitalizationType,
+        isSecureTextEntry: Bool
+    ) {
+        self.returnKeyType = returnKeyType
+        self.keyboardType = keyboardType
+        self.autocapitalizationType = autocapitalizationType
+        self.isSecureTextEntry = isSecureTextEntry
+    }
+
+    init(proxy: UITextDocumentProxy) {
+        self.init(
+            returnKeyType: proxy.returnKeyType ?? .default,
+            keyboardType: proxy.keyboardType ?? .default,
+            autocapitalizationType: proxy.autocapitalizationType ?? .sentences,
+            isSecureTextEntry: proxy.isSecureTextEntry ?? false
+        )
+    }
+
+    /// Password-like fields: nothing may reach Rime, nothing may be cached.
+    var isSensitive: Bool {
+        isSecureTextEntry
+    }
+
+    /// Hosts that asked for digits or an address do not want Rime conversion;
+    /// keys go straight to the document. `.asciiCapable` is deliberately not in
+    /// this list: it only says the keyboard may show ASCII, and plenty of hosts
+    /// set it on fields where users still type Chinese.
+    var bypassesRime: Bool {
+        if isSensitive {
+            return true
+        }
+        switch keyboardType {
+        case .numberPad, .decimalPad, .phonePad, .namePhonePad, .asciiCapableNumberPad,
+             .numbersAndPunctuation, .emailAddress, .URL, .webSearch:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Layer the host effectively requires, or nil when the user stays in
+    /// control of the layer.
+    var forcedLayer: String? {
+        switch keyboardType {
+        case .numberPad, .decimalPad, .phonePad, .namePhonePad, .asciiCapableNumberPad:
+            return KeyTaoKeyboardLayer.numbers.id
+        default:
             return nil
         }
-        let value = scalars[0].value
-        guard value >= 0x20 && value < 0x7f else {
+    }
+
+    /// Label the Return key must carry, following the host's declared action.
+    var returnKeyLabel: String? {
+        switch returnKeyType {
+        case .go:
+            return "前往"
+        case .google, .yahoo, .search:
+            return "搜索"
+        case .join:
+            return "加入"
+        case .next:
+            return "下一项"
+        case .route:
+            return "路线"
+        case .send:
+            return "发送"
+        case .done:
+            return "完成"
+        case .emergencyCall:
+            return "紧急呼叫"
+        case .continue:
+            return "继续"
+        default:
             return nil
         }
-        return value
+    }
+
+    /// Shift state the host expects at the start of a fresh composition.
+    var wantsAutoShift: Bool {
+        switch autocapitalizationType {
+        case .words, .sentences, .allCharacters:
+            return true
+        default:
+            return false
+        }
     }
 }
 

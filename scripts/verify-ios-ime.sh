@@ -54,6 +54,36 @@ echo "Checking Swift iOS keyboard sources"
         Sources/KeyTaoIOSIME/*.swift
 )
 
+# Apple requires every custom keyboard to offer a way out to another keyboard.
+# The effective layout comes from user-editable keyboard.yaml, so the guarantee
+# has to live in the view: assert the switch key is injected, that the layout
+# path really consumes needsInputModeSwitchKey, and that both the short tap and
+# the long press entry points exist.
+echo "Checking custom keyboard switch-key requirement"
+KEYBOARD_VIEW="$IOS_IME_DIR/Sources/KeyTaoIOSIME/KeyTaoIOSKeyboardView.swift"
+KEYBOARD_VC="$IOS_IME_DIR/Sources/KeyTaoIOSIME/KeyTaoKeyboardViewController.swift"
+if ! grep -q 'func applyInputModeSwitchKey' "$KEYBOARD_VIEW"; then
+    echo "ERROR: KeyTaoIOSKeyboardView must inject a keyboardPicker key into the active layout." >&2
+    exit 1
+fi
+if ! grep -q 'return applyInputModeSwitchKey(to: rows)' "$KEYBOARD_VIEW"; then
+    echo "ERROR: activeRows() must run the layout through applyInputModeSwitchKey()." >&2
+    exit 1
+fi
+if ! grep -q 'guard showsInputModeSwitchKey' "$KEYBOARD_VIEW" &&
+    ! grep -q 'if showsInputModeSwitchKey' "$KEYBOARD_VIEW"; then
+    echo "ERROR: showsInputModeSwitchKey is stored but never read; the switch key would disappear." >&2
+    exit 1
+fi
+if ! grep -q 'handleInputModeList(from:with:)' "$KEYBOARD_VC"; then
+    echo "ERROR: the switch key must expose handleInputModeList(from:with:) for the keyboard picker." >&2
+    exit 1
+fi
+if ! grep -q 'advanceToNextInputMode()' "$KEYBOARD_VC"; then
+    echo "ERROR: keyboardPicker commands must call advanceToNextInputMode()." >&2
+    exit 1
+fi
+
 runtime_root="${KEYTAO_IOS_RIME_ROOT:-$PROJECT_DIR/vendor/librime/ios}"
 case "$RUST_TARGET" in
     aarch64-apple-ios) runtime_name="iphoneos-arm64" ;;

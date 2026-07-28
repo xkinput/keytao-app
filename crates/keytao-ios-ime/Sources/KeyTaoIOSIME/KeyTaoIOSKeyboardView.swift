@@ -83,6 +83,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var layerMode: KeyTaoKeyboardLayer = .letters
     private var shiftState: KeyTaoShiftState = .off
     private var showsInputModeSwitchKey = true
+    private var capabilities = KeyTaoEngineCapabilities.current
+    private var hostTraits = KeyTaoHostTraits.default
+    private var hapticsAvailable = true
     private var lastShiftTap = Date.distantPast
     private var functionPanelActive = false
     private var functionPanelMode: KeyTaoFunctionPanelMode = .home
@@ -128,7 +131,14 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var longPressWorkItem: DispatchWorkItem?
     private var repeatTimer: Timer?
     private let hapticGenerator = UIImpactFeedbackGenerator(style: .light)
-    private lazy var logoImage = Self.loadLogoImage()
+    private var cachedLogoImage: UIImage?
+    private var logoImage: UIImage? {
+        if let cachedLogoImage {
+            return cachedLogoImage
+        }
+        cachedLogoImage = Self.loadLogoImage()
+        return cachedLogoImage
+    }
 
     init(config: KeyTaoIOSImeConfig, theme: KeyTaoImeTheme, state: KeyTaoImeState) {
         self.config = config
@@ -195,8 +205,81 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     func updateInputModeSwitchKey(visible: Bool) {
+        guard showsInputModeSwitchKey != visible else {
+            return
+        }
         showsInputModeSwitchKey = visible
         invalidateLayoutAndDisplay()
+    }
+
+    /// Controls that need a librime entry point the running build does not
+    /// export are dropped instead of being drawn and then synthesizing a key
+    /// stroke: paging keys leave the layout, candidates stop taking taps.
+    func update(engineCapabilities: KeyTaoEngineCapabilities) {
+        guard capabilities != engineCapabilities else {
+            return
+        }
+        capabilities = engineCapabilities
+        invalidateLayoutAndDisplay()
+    }
+
+    func update(hostTraits: KeyTaoHostTraits) {
+        guard self.hostTraits != hostTraits else {
+            return
+        }
+        self.hostTraits = hostTraits
+        if state.asciiMode, hostTraits.autocapitalizationType == .allCharacters {
+            shiftState = .locked
+        }
+        invalidateLayoutAndDisplay()
+    }
+
+    /// Called when the keyboard enters a fresh input context so that a host
+    /// asking for capitalisation starts with the one-shot shift armed. Only
+    /// meaningful in English mode: shifted letters are not part of any Rime
+    /// speller alphabet, so Chinese input must never start capitalised.
+    func resetShiftForNewContext() {
+        guard state.asciiMode else {
+            if shiftState == .once {
+                shiftState = .off
+                invalidateLayoutAndDisplay()
+            }
+            return
+        }
+        let next: KeyTaoShiftState = hostTraits.autocapitalizationType == .allCharacters
+            ? .locked
+            : (hostTraits.wantsAutoShift ? .once : .off)
+        // Never stomp a caps-lock the user set by hand.
+        guard shiftState != .locked, shiftState != next else {
+            return
+        }
+        shiftState = next
+        lastShiftTap = .distantPast
+        invalidateLayoutAndDisplay()
+    }
+
+    /// Frame of the "switch keyboard" key in this view's coordinate space, so
+    /// that the controller can park its handleInputModeList overlay on it.
+    func inputModeSwitchKeyFrame() -> CGRect? {
+        guard !candidatePanelExpanded, !functionPanelActive else {
+            return nil
+        }
+        return keyRects.first { $0.spec.action?.type == KeyTaoCommandType.keyboardPicker }?.rect
+    }
+
+    func releaseCaches() {
+        cancelExpandedCandidateRequest()
+        expandedCandidates = []
+        expandedCandidatesLoading = false
+        clipboardItems = []
+        cachedLogoImage = nil
+        invalidateLayoutAndDisplay()
+    }
+
+    /// Haptics need Full Access; without it `UIFeedbackGenerator` silently does
+    /// nothing, so the keyboard stops asking for it.
+    func update(hapticsAvailable: Bool) {
+        self.hapticsAvailable = hapticsAvailable
     }
 
     func toggleShift() {
@@ -374,6 +457,11 @@ final class KeyTaoIOSKeyboardView: UIView {
             clearPressedState()
             if let command = candidate.command {
                 handlePanelCommand(command)
+            } else if !isSelectable(candidate) {
+                // The controller refuses the selection and says why. Nothing is
+                // committed, so the panel must not collapse and the tap must not
+                // feel like it worked.
+                delegate?.keyboardView(self, didSelectCandidate: candidate.selectIndex, global: candidate.global)
             } else {
                 closeCandidatePanelIfNeeded(afterCandidateSelection: candidate.global)
                 performConfiguredHaptic()
@@ -479,7 +567,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         for candidate in candidateRects {
             let element = UIAccessibilityElement(accessibilityContainer: self)
             element.accessibilityFrameInContainerSpace = candidate.rect
-            element.accessibilityTraits = .button
+            // A candidate the runtime cannot select is still worth reading out,
+            // but announcing it as a button would promise an action that the
+            // controller is about to refuse.
+            element.accessibilityTraits = isSelectable(candidate) ? .button : .staticText
             element.accessibilityIdentifier = "keytao-candidate-\(candidate.identifierIndex)"
             elements.append(element)
         }
@@ -1439,17 +1530,15 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func rimePanelItems() -> [CandidateDrawItem] {
         let source = !expandedCandidates.isEmpty
             ? expandedCandidates
-            : (!state.allCandidates.isEmpty
-                ? state.allCandidates
-                : (!state.candidates.isEmpty
-                    ? state.candidates
-                    : state.candidatePanel.candidates.map {
-                        KeyTaoCandidate(
-                            text: $0.text,
-                            comment: $0.comment,
-                            index: panelCandidateGlobalIndex($0.index)
-                        )
-                    }))
+            : (!state.candidates.isEmpty
+                ? state.candidates
+                : state.candidatePanel.candidates.map {
+                    KeyTaoCandidate(
+                        text: $0.text,
+                        comment: $0.comment,
+                        index: panelCandidateGlobalIndex($0.index)
+                    )
+                })
         let selected = selectedGlobalCandidateIndex()
         return source.enumerated().map { index, candidate in
             let globalIndex = candidate.index ?? index
@@ -1622,13 +1711,78 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func activeRows() -> [[KeyTaoKeySpec]] {
-        let rows = config.rows(for: layerMode)
-        guard layerMode == .letters, shouldUseInlineNumberRow() else {
+        var rows = config.rows(for: layerMode)
+        if layerMode == .letters, shouldUseInlineNumberRow() {
+            rows = rows.enumerated().map { index, row in
+                index == 0 ? inlineNumberRow(row) : row
+            }
+        }
+        rows = applyEngineCapabilities(to: rows)
+        return applyInputModeSwitchKey(to: rows)
+    }
+
+    /// Without `RimeChangePage` the common layer degrades paging to a
+    /// synthesized `-`/`=`. A schema that does not import the default
+    /// `paging_with_minus_equal` bindings types those characters into the
+    /// composition instead of turning the page, so the key is removed from the
+    /// layout rather than offered as a control that corrupts the code (D4).
+    /// The runtime is asked for the bit; nothing here assumes an OS.
+    private func applyEngineCapabilities(to rows: [[KeyTaoKeySpec]]) -> [[KeyTaoKeySpec]] {
+        guard !capabilities.nativePaging else {
             return rows
         }
-        return rows.enumerated().map { index, row in
-            index == 0 ? inlineNumberRow(row) : row
+        let filtered = rows
+            .map { row in row.filter { !$0.isCandidatePagingKey } }
+            .filter { !$0.isEmpty }
+        // A layout made of nothing but paging keys would collapse the keyboard
+        // and take Apple's mandatory switch key with it, so keep it drawn and
+        // let the controller refuse the command instead.
+        return filtered.isEmpty ? rows : filtered
+    }
+
+    /// Apple requires every custom keyboard to offer a way out to another
+    /// keyboard whenever `needsInputModeSwitchKey` is true. The layout comes
+    /// from user-editable YAML, so the key is enforced here instead of trusting
+    /// whatever `keyboard.yaml` happens to contain.
+    private func applyInputModeSwitchKey(to rows: [[KeyTaoKeySpec]]) -> [[KeyTaoKeySpec]] {
+        guard !rows.isEmpty else {
+            return rows
         }
+        let hasSwitchKey = rows.contains { row in
+            row.contains { $0.action?.type == KeyTaoCommandType.keyboardPicker }
+        }
+        if showsInputModeSwitchKey {
+            guard !hasSwitchKey else {
+                return rows
+            }
+            var next = rows
+            let index = next.count - 1
+            next[index] = insertingInputModeSwitchKey(into: next[index])
+            return next
+        }
+        guard hasSwitchKey else {
+            return rows
+        }
+        return rows.map { row in
+            row.filter { $0.action?.type != KeyTaoCommandType.keyboardPicker }
+        }
+    }
+
+    private func insertingInputModeSwitchKey(into row: [KeyTaoKeySpec]) -> [KeyTaoKeySpec] {
+        let switchKey = KeyTaoKeySpec(
+            label: "🌐",
+            weight: Self.inputModeSwitchKeyWeight,
+            action: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardPicker, value: nil, fallbackValue: nil)
+        )
+        var next = row
+        // Keep the row's total weight stable by taking the width out of the
+        // widest key (the space bar in every shipped layout).
+        if let widest = next.indices.max(by: { keyWeight(next[$0]) < keyWeight(next[$1]) }),
+           keyWeight(next[widest]) - Self.inputModeSwitchKeyWeight >= 1 {
+            next[widest].weight = keyWeight(next[widest]) - Self.inputModeSwitchKeyWeight
+        }
+        next.insert(switchKey, at: 0)
+        return next
     }
 
     private func shouldUseInlineNumberRow() -> Bool {
@@ -1833,13 +1987,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             expandedCandidatesLoading = false
             return
         }
-        if !state.allCandidates.isEmpty {
-            expandedCandidates = state.allCandidates
-            expandedCandidatesLoading = false
-            invalidateLayoutAndDisplay()
-            return
-        }
-
         let token = nextExpandRequestToken()
         expandedCandidatesLoading = true
         let workItem = DispatchWorkItem { [weak self] in
@@ -2243,6 +2390,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         if key.action?.type == KeyTaoCommandType.shift {
             return shiftState == .locked ? "⇪" : key.label
         }
+        if key.action?.type == KeyTaoCommandType.enter, let label = hostTraits.returnKeyLabel {
+            return label
+        }
         if key.action?.type == KeyTaoCommandType.space {
             return state.schemaName.isEmpty ? key.label : state.schemaName
         }
@@ -2303,11 +2453,34 @@ final class KeyTaoIOSKeyboardView: UIView {
         return ["，", "。", ",", "."].contains(label) || ["，", "。", ",", "."].contains(value)
     }
 
+    /// Whether tapping this cell can do anything. Panel rows carry their own
+    /// command and never reach librime, so only real candidates are gated: a
+    /// tap on one needs `RimeSelectCandidate`/`RimeSelectCandidateOnCurrentPage`
+    /// or the common layer falls back to sending the schema's select key, which
+    /// a schema without `menu/select_keys` types into the composition (D4).
+    private func isSelectable(_ candidate: CandidateRect) -> Bool {
+        if candidate.command != nil {
+            return true
+        }
+        return candidate.global
+            ? capabilities.globalCandidateSelection
+            : capabilities.candidateSelection
+    }
+
     private func panelCandidateGlobalIndex(_ localIndex: Int) -> Int {
         let pageSize = state.pageSize > 0 ? state.pageSize : max(state.candidatePanel.candidates.count, 1)
         return state.page * pageSize + localIndex
     }
 
+    /// The highlight drawn on a candidate is librime's own
+    /// `highlighted_candidate_index` — what Space is about to commit — so it
+    /// stays truthful on a runtime without `RimeHighlightCandidateOnCurrentPage`
+    /// and is deliberately not gated on `capabilities.candidateHighlight`.
+    /// That bit buys moving the highlight from the frontend (hover, arrow keys);
+    /// this keyboard offers no such gesture and draws no hover state, so there
+    /// is nothing for it to switch off. Anything added here that would call
+    /// `keytao_session_highlight_candidate` has to check it first, or the
+    /// common layer degrades the move to a no-op the user cannot see.
     private func selectedGlobalCandidateIndex() -> Int {
         panelCandidateGlobalIndex(state.highlightedCandidateIndex)
     }
@@ -2618,8 +2791,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         return luminance < 128
     }
 
+    /// Standard key feedback: the system click sound is always requested (iOS
+    /// honours the user's "Keyboard Clicks" setting), haptics only when the
+    /// config asks for them and Full Access makes them work at all.
     private func performConfiguredHaptic(strong: Bool = false) {
-        guard config.hapticsEnabled else {
+        UIDevice.current.playInputClick()
+        guard config.hapticsEnabled, hapticsAvailable else {
             return
         }
         hapticGenerator.impactOccurred(intensity: min(1, max(0.15, CGFloat(config.hapticIntensity) / (strong ? 60 : 100))))
@@ -2689,9 +2866,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private var pixel: CGFloat {
-        1 / max(UIScreen.main.scale, 1)
+        1 / max(traitCollection.displayScale, 1)
     }
 
+    private static let inputModeSwitchKeyWeight: CGFloat = 1.05
     private static let longPressDelayMs = 420
     private static let backspaceRepeatIntervalMs = 72
     private static let expandedCandidateLoadDelayMs = 180
@@ -2702,6 +2880,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         "🎉", "❤️", "💔", "⭐", "🌟", "✅", "❌", "❓",
         "☕", "🍵", "🍻", "🍚", "🍜", "🌙", "☀️", "🌧️",
     ]
+}
+
+extension KeyTaoIOSKeyboardView: UIInputViewAudioFeedback {
+    var enableInputClicksWhenVisible: Bool { true }
 }
 
 private extension Int {
@@ -2727,6 +2909,14 @@ private extension KeyTaoKeyCommand {
 private extension KeyTaoKeySpec {
     var isTextInputKey: Bool {
         action?.isTextInputCommand ?? true
+    }
+
+    var isCandidatePagingKey: Bool {
+        guard let type = action?.type else {
+            return false
+        }
+        return type == KeyTaoCommandType.nextCandidatePage
+            || type == KeyTaoCommandType.previousCandidatePage
     }
 }
 

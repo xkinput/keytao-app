@@ -46,9 +46,13 @@ public struct KeyTaoModeHintModel: Codable, Equatable {
 
 public struct KeyTaoImeState: Codable, Equatable {
     public var preedit: String
+    /// Caret inside `preedit`, in Unicode scalars. Convert with
+    /// `keytao_utf16_offset_from_chars` before handing it to UIKit.
     public var cursor: Int
+    /// Converted/selected span inside `preedit`, also in Unicode scalars.
+    public var selStart: Int
+    public var selEnd: Int
     public var candidates: [KeyTaoCandidate]
-    public var allCandidates: [KeyTaoCandidate]
     public var highlightedCandidateIndex: Int
     public var pageSize: Int
     public var page: Int
@@ -75,8 +79,9 @@ public struct KeyTaoImeState: Codable, Equatable {
     public static let empty = KeyTaoImeState(
         preedit: "",
         cursor: 0,
+        selStart: 0,
+        selEnd: 0,
         candidates: [],
-        allCandidates: [],
         highlightedCandidateIndex: 0,
         pageSize: 0,
         page: 0,
@@ -89,6 +94,93 @@ public struct KeyTaoImeState: Codable, Equatable {
         candidatePanel: .empty,
         modeHint: .empty
     )
+
+    public enum CodingKeys: String, CodingKey {
+        case preedit
+        case cursor
+        case selStart
+        case selEnd
+        case candidates
+        case highlightedCandidateIndex
+        case pageSize
+        case page
+        case isLastPage
+        case committed
+        case selectKeys
+        case asciiMode
+        case schemaName
+        case accepted
+        case candidatePanel
+        case modeHint
+    }
+
+    // Decoded field by field so that a runtime that adds or drops a key in the
+    // shared state JSON degrades that one field instead of failing the whole
+    // decode, which would leave the keyboard without any state at all.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let empty = Self.empty
+        preedit = Self.field(container, .preedit, empty.preedit)
+        cursor = Self.field(container, .cursor, empty.cursor)
+        selStart = Self.field(container, .selStart, empty.selStart)
+        selEnd = Self.field(container, .selEnd, empty.selEnd)
+        candidates = Self.field(container, .candidates, empty.candidates)
+        highlightedCandidateIndex = Self.field(container, .highlightedCandidateIndex, empty.highlightedCandidateIndex)
+        pageSize = Self.field(container, .pageSize, empty.pageSize)
+        page = Self.field(container, .page, empty.page)
+        isLastPage = Self.field(container, .isLastPage, empty.isLastPage)
+        committed = Self.field(container, .committed, empty.committed)
+        selectKeys = Self.field(container, .selectKeys, empty.selectKeys)
+        asciiMode = Self.field(container, .asciiMode, empty.asciiMode)
+        schemaName = Self.field(container, .schemaName, empty.schemaName)
+        accepted = Self.field(container, .accepted, empty.accepted)
+        candidatePanel = Self.field(container, .candidatePanel, empty.candidatePanel)
+        modeHint = Self.field(container, .modeHint, empty.modeHint)
+    }
+
+    private static func field<Value: Decodable>(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        _ key: CodingKeys,
+        _ fallback: Value
+    ) -> Value {
+        ((try? container.decodeIfPresent(Value.self, forKey: key)) ?? nil) ?? fallback
+    }
+
+    public init(
+        preedit: String,
+        cursor: Int,
+        selStart: Int,
+        selEnd: Int,
+        candidates: [KeyTaoCandidate],
+        highlightedCandidateIndex: Int,
+        pageSize: Int,
+        page: Int,
+        isLastPage: Bool,
+        committed: String,
+        selectKeys: String,
+        asciiMode: Bool,
+        schemaName: String,
+        accepted: Bool,
+        candidatePanel: KeyTaoPanelModel,
+        modeHint: KeyTaoModeHintModel
+    ) {
+        self.preedit = preedit
+        self.cursor = cursor
+        self.selStart = selStart
+        self.selEnd = selEnd
+        self.candidates = candidates
+        self.highlightedCandidateIndex = highlightedCandidateIndex
+        self.pageSize = pageSize
+        self.page = page
+        self.isLastPage = isLastPage
+        self.committed = committed
+        self.selectKeys = selectKeys
+        self.asciiMode = asciiMode
+        self.schemaName = schemaName
+        self.accepted = accepted
+        self.candidatePanel = candidatePanel
+        self.modeHint = modeHint
+    }
 }
 
 extension KeyTaoImeState {

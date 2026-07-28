@@ -195,71 +195,6 @@ public enum KeyTaoEnterKeyBehavior {
     }
 }
 
-public struct KeyTaoFloatingKeyboardProfile: Codable, Equatable {
-    public var enabled: Bool
-    public var scale: CGFloat
-
-    public init(enabled: Bool, scale: CGFloat) {
-        self.enabled = enabled
-        let ratio = scale > 1.5 ? scale / 100 : scale
-        self.scale = Swift.min(Swift.max(ratio, 0.70), 1)
-    }
-}
-
-public struct KeyTaoFloatingKeyboardConfig: Codable, Equatable {
-    public var marginDp: CGFloat
-    public var portrait: KeyTaoFloatingKeyboardProfile
-    public var landscape: KeyTaoFloatingKeyboardProfile
-
-    private enum CodingKeys: String, CodingKey {
-        case margin
-        case marginDp
-        case portrait
-        case landscape
-    }
-
-    public init(
-        marginDp: CGFloat = 8,
-        portrait: KeyTaoFloatingKeyboardProfile = .init(enabled: false, scale: 0.88),
-        landscape: KeyTaoFloatingKeyboardProfile = .init(enabled: true, scale: 0.72)
-    ) {
-        self.marginDp = Swift.min(Swift.max(marginDp, 0), 24)
-        self.portrait = portrait
-        self.landscape = landscape
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let margin = (try? container.decode(CGFloat.self, forKey: .margin))
-            ?? (try? container.decode(CGFloat.self, forKey: .marginDp))
-            ?? 8
-        let portrait = (try? container.decode(KeyTaoPartialFloatingProfile.self, forKey: .portrait))
-        let landscape = (try? container.decode(KeyTaoPartialFloatingProfile.self, forKey: .landscape))
-        self.init(
-            marginDp: margin,
-            portrait: KeyTaoFloatingKeyboardProfile(
-                enabled: portrait?.enabled ?? false,
-                scale: portrait?.scale ?? 0.88
-            ),
-            landscape: KeyTaoFloatingKeyboardProfile(
-                enabled: landscape?.enabled ?? true,
-                scale: landscape?.scale ?? 0.72
-            )
-        )
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(marginDp, forKey: .margin)
-        try container.encode(portrait, forKey: .portrait)
-        try container.encode(landscape, forKey: .landscape)
-    }
-
-    public func profile(isLandscape: Bool) -> KeyTaoFloatingKeyboardProfile {
-        isLandscape ? landscape : portrait
-    }
-}
-
 public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var keyboardHeightDp: CGFloat
     public var candidateBarHeightDp: CGFloat
@@ -272,6 +207,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var hapticsEnabled: Bool
     public var hapticIntensity: Int
     public var enterKeyBehavior: String
+    /// Show the pending composition inside the host field via
+    /// `UITextDocumentProxy.setMarkedText`. Off falls back to showing the
+    /// preedit only in the candidate bar, for hosts whose proxy mishandles it.
+    public var hostMarkedTextEnabled: Bool
     public var swipeThresholdDp: CGFloat
     public var rows: [[KeyTaoKeySpec]]
     public var numberRows: [[KeyTaoKeySpec]]
@@ -291,6 +230,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case hapticsEnabled
         case hapticIntensity
         case enterKeyBehavior
+        case hostMarkedText
         case swipeThresholdDp
         case rows
         case numberRows
@@ -317,6 +257,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         hapticsEnabled: Bool,
         hapticIntensity: Int,
         enterKeyBehavior: String = KeyTaoEnterKeyBehavior.system,
+        hostMarkedTextEnabled: Bool = true,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
         numberRows: [[KeyTaoKeySpec]],
@@ -334,6 +275,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.hapticsEnabled = hapticsEnabled
         self.hapticIntensity = hapticIntensity
         self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(enterKeyBehavior)
+        self.hostMarkedTextEnabled = hostMarkedTextEnabled
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
         self.numberRows = Self.normalizeNumberRows(numberRows)
@@ -394,6 +336,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(
             try? container.decode(String.self, forKey: .enterKeyBehavior)
         )
+        self.hostMarkedTextEnabled = (try? container.decode(Bool.self, forKey: .hostMarkedText))
+            ?? Self.fallback.hostMarkedTextEnabled
         self.swipeThresholdDp = Self.clamp(
             (try? container.decode(CGFloat.self, forKey: .swipeThresholdDp)) ?? Self.fallback.swipeThresholdDp,
             min: 12,
@@ -416,18 +360,17 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         )
     }
 
+    // theme.yaml no longer carries the mobile layout; keyboard.yaml resolved
+    // through keytao_resolve_keyboard_json is the only layout source.
     public static func load(
         resolvedKeyboardJson: String? = nil,
-        userConfigURL: URL?,
-        resolvedThemeJson: String? = nil
+        userConfigURL: URL?
     ) -> KeyTaoIOSImeConfig {
         let base: KeyTaoIOSImeConfig
         if let keyboardConfig = decodeKeyboard(json: resolvedKeyboardJson) {
             base = keyboardConfig
         } else if let userConfigURL, let config = decode(url: userConfigURL) {
             base = config
-        } else if let themeConfig = decodeThemeKeyboard(json: resolvedThemeJson) {
-            base = themeConfig
         } else {
             var bundled: KeyTaoIOSImeConfig?
             for url in [bundledConfigURL()].compactMap({ $0 }) {
@@ -477,6 +420,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try haptics.encode(hapticsEnabled, forKey: .enabled)
         try haptics.encode(hapticIntensity, forKey: .intensity)
         try container.encode(enterKeyBehavior, forKey: .enterKeyBehavior)
+        try container.encode(hostMarkedTextEnabled, forKey: .hostMarkedText)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
         try container.encode(numberRows, forKey: .numberRows)
@@ -491,33 +435,6 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             return nil
         }
         return try? JSONDecoder().decode(KeyTaoIOSImeConfig.self, from: data)
-    }
-
-    private static func decodeThemeKeyboard(json: String?) -> KeyTaoIOSImeConfig? {
-        guard let json,
-              let data = json.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(KeyTaoThemeKeyboardRoot.self, from: data),
-              let keyboard = payload.keyboard else {
-            return nil
-        }
-        return KeyTaoIOSImeConfig(
-            keyboardHeightDp: keyboard.height ?? Self.fallback.keyboardHeightDp,
-            candidateBarHeightDp: keyboard.candidateBarHeight ?? Self.fallback.candidateBarHeightDp,
-            keyboardBottomInsetDp: keyboard.bottomInset ?? Self.fallback.keyboardBottomInsetDp,
-            horizontalGapDp: keyboard.horizontalGap ?? Self.fallback.horizontalGapDp,
-            verticalGapDp: keyboard.verticalGap ?? Self.fallback.verticalGapDp,
-            outerInsetDp: keyboard.outerInset ?? Self.fallback.outerInsetDp,
-            maxKeyHeightDp: keyboard.maxKeyHeight ?? Self.fallback.maxKeyHeightDp,
-            floating: keyboard.floating ?? Self.fallback.floating,
-            hapticsEnabled: Self.fallback.hapticsEnabled,
-            hapticIntensity: Self.fallback.hapticIntensity,
-            enterKeyBehavior: Self.fallback.enterKeyBehavior,
-            swipeThresholdDp: Self.fallback.swipeThresholdDp,
-            rows: keyboard.rows ?? Self.fallback.rows,
-            numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
-            symbolRows: keyboard.symbolRows ?? Self.fallback.symbolRows,
-            customRows: keyboard.layerRows ?? Self.fallback.customRows
-        )
     }
 
     private static func decodeKeyboard(json: String?) -> KeyTaoIOSImeConfig? {
@@ -586,6 +503,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         if let enterKeyBehavior = runtime.enterKeyBehavior {
             next.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(enterKeyBehavior)
         }
+        if let hostMarkedText = runtime.hostMarkedText {
+            next.hostMarkedTextEnabled = hostMarkedText
+        }
         if let floating = runtime.floating {
             next.floating.marginDp = Self.clamp(
                 floating.margin ?? floating.marginDp ?? next.floating.marginDp,
@@ -593,10 +513,16 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 max: 24
             )
             if let portrait = floating.portrait {
-                next.floating.portrait = portrait.applying(to: next.floating.portrait)
+                next.floating.portrait = portrait.applying(
+                    to: next.floating.portrait,
+                    orientation: .portrait
+                )
             }
             if let landscape = floating.landscape {
-                next.floating.landscape = landscape.applying(to: next.floating.landscape)
+                next.floating.landscape = landscape.applying(
+                    to: next.floating.landscape,
+                    orientation: .landscape
+                )
             }
         }
         return next
@@ -765,10 +691,6 @@ enum KeyTaoIOSKeyboardConfigResolver {
     }
 }
 
-private struct KeyTaoThemeKeyboardRoot: Decodable {
-    var keyboard: KeyTaoThemeKeyboard?
-}
-
 private struct KeyTaoThemeKeyboard: Decodable {
     var height: CGFloat?
     var candidateBarHeight: CGFloat?
@@ -788,25 +710,6 @@ private struct KeyTaoThemeKeyboard: Decodable {
     }
 }
 
-private struct KeyTaoPartialFloatingProfile: Decodable {
-    var enabled: Bool?
-    var scale: CGFloat?
-
-    func applying(to profile: KeyTaoFloatingKeyboardProfile) -> KeyTaoFloatingKeyboardProfile {
-        KeyTaoFloatingKeyboardProfile(
-            enabled: enabled ?? profile.enabled,
-            scale: scale ?? profile.scale
-        )
-    }
-}
-
-private struct KeyTaoPartialFloatingConfig: Decodable {
-    var margin: CGFloat?
-    var marginDp: CGFloat?
-    var portrait: KeyTaoPartialFloatingProfile?
-    var landscape: KeyTaoPartialFloatingProfile?
-}
-
 private struct KeyTaoIOSRuntimeHaptics: Decodable {
     var enabled: Bool?
     var intensity: Int?
@@ -817,6 +720,7 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var hapticsEnabled: Bool?
     var hapticIntensity: Int?
     var enterKeyBehavior: String?
+    var hostMarkedText: Bool?
     var floating: KeyTaoPartialFloatingConfig?
 }
 

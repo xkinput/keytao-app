@@ -224,15 +224,18 @@ enum KeyTaoIOSThemeResolver {
         return String(cString: ptr)
     }
 
+    static func decode(json: String?) -> KeyTaoImeTheme? {
+        guard let json, let data = json.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(KeyTaoImeTheme.self, from: data)
+    }
+
     static func resolve(
         userThemePath: String?,
         systemColorScheme: KeyTaoEffectiveColorScheme?
     ) -> KeyTaoImeTheme {
-        guard let json = resolveJson(userThemePath: userThemePath, systemColorScheme: systemColorScheme),
-              let data = json.data(using: .utf8) else {
-            return .fallback
-        }
-        return (try? JSONDecoder().decode(KeyTaoImeTheme.self, from: data)) ?? .fallback
+        decode(json: resolveJson(userThemePath: userThemePath, systemColorScheme: systemColorScheme)) ?? .fallback
     }
 
     private static func withOptionalCString<Result>(
