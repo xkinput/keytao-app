@@ -1,7 +1,6 @@
 package ink.rea.keytao_app
 
 import android.content.Context
-import android.content.res.Configuration
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -18,6 +17,7 @@ object KeyCommandTypes {
     const val MODE = "mode"
     const val OPEN_PAGE = "openPage"
     const val KEYBOARD_PICKER = "keyboardPicker"
+    const val NEXT_INPUT_METHOD = "nextInputMethod"
     const val KEYBOARD_MODE = "keyboardMode"
     const val NEXT_PAGE = "nextCandidatePage"
     const val PREVIOUS_PAGE = "previousCandidatePage"
@@ -176,34 +176,54 @@ data class KeytaoAndroidImeConfig(
     companion object {
         private const val minOneHandedScale = 0.78f
 
+        private var cachedSignature: String? = null
+        private var cachedConfig: KeytaoAndroidImeConfig? = null
+
+        /**
+         * Write the bundled keyboard.yaml when the user has none. Blocking and
+         * writing, so it belongs on a background thread — [load] never does it.
+         */
+        fun ensureDefaults(context: Context) {
+            ensureDefaultKeyboardConfig(context)
+        }
+
+        /**
+         * Parsing means reading keyboard.yaml plus android_ime.json and crossing
+         * JNI twice, so the result is cached until one of those files changes.
+         * Only the cache miss touches the disk; the steady state costs two stats.
+         */
+        @Synchronized
         fun load(context: Context): KeytaoAndroidImeConfig {
-            ensureDefaultKeyboardConfig()
-            val userConfig = KeytaoAndroidPaths.imeConfigFile()
+            val userConfig = KeytaoAndroidPaths.imeConfigFile(context)
+            val userKeyboardFile = KeytaoAndroidPaths.keyboardFile(context)
+            val signature = "${fileSignature(userConfig)}|${fileSignature(userKeyboardFile)}"
+            cachedConfig?.let { config ->
+                if (signature == cachedSignature) return config
+            }
             val defaultJson = context.resources
                 .openRawResource(R.raw.keytao_android_ime)
                 .bufferedReader()
                 .use { it.readText() }
             val userJson = userConfig.takeIf { it.isFile }?.readText()
-            val userKeyboard = resolvedUserKeyboard()
+            val userKeyboard = resolvedUserKeyboard(context)
             val defaultRoot = JSONObject(defaultJson)
-            val themeKeyboard = resolvedThemeKeyboard(context)
             val parsed = runCatching {
-                val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: themeKeyboard ?: defaultRoot
+                val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: defaultRoot
                 val fallbackRoot = when {
                     userKeyboard != null && userJson != null -> JSONObject(userJson)
-                    userKeyboard != null && themeKeyboard != null -> themeKeyboard
                     userKeyboard != null -> defaultRoot
-                    userJson != null && themeKeyboard != null -> themeKeyboard
                     userJson != null -> defaultRoot
-                    themeKeyboard != null -> defaultRoot
                     else -> null
                 }
                 parseRoot(root, fallbackRoot)
-            }.getOrElse { parseRoot(themeKeyboard ?: defaultRoot, defaultRoot) }
-            return applyRuntimeSettings(
+            }.getOrElse { parseRoot(defaultRoot, null) }
+            val config = applyRuntimeSettings(
                 parsed,
                 userJson?.let { runCatching { JSONObject(it) }.getOrNull() },
             )
+            cachedSignature = signature
+            cachedConfig = config
+            return config
         }
 
         fun parse(json: String): KeytaoAndroidImeConfig {
@@ -418,8 +438,8 @@ data class KeytaoAndroidImeConfig(
             }
         }
 
-        private fun ensureDefaultKeyboardConfig() {
-            val file = KeytaoAndroidPaths.keyboardFile()
+        private fun ensureDefaultKeyboardConfig(context: Context) {
+            val file = KeytaoAndroidPaths.keyboardFile(context)
             val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
             if (file.isFile) {
                 val existing = runCatching { file.readText() }.getOrNull()
@@ -442,29 +462,19 @@ data class KeytaoAndroidImeConfig(
                 bundled.contains("symbols_en:")
         }
 
-        private fun resolvedUserKeyboard(): JSONObject? {
+        /**
+         * The mobile layout lives in keyboard.yaml only; keytao-theme dropped the
+         * `keyboard:` section from the shared theme model, so theme.yaml is no
+         * longer consulted for key rows.
+         */
+        private fun resolvedUserKeyboard(context: Context): JSONObject? {
             return runCatching {
-                val userKeyboard = KeytaoAndroidPaths.keyboardFile()
+                val userKeyboard = KeytaoAndroidPaths.keyboardFile(context)
                 if (!userKeyboard.isFile) return@runCatching null
                 val json = KeytaoNativeBridge.resolveKeyboardJson(null, userKeyboard.absolutePath)
                     ?: return@runCatching null
                 JSONObject(json)
             }.getOrNull()
-        }
-
-        private fun resolvedThemeKeyboard(context: Context): JSONObject? {
-            return runCatching {
-                val userTheme = KeytaoAndroidPaths.themeFile()
-                val userThemePath = userTheme.takeIf { it.isFile }?.absolutePath
-                val json = KeytaoNativeBridge.resolveThemeJson(null, userThemePath, systemColorScheme(context))
-                    ?: return@runCatching null
-                JSONObject(json).optJSONObject("keyboard")
-            }.getOrNull()
-        }
-
-        private fun systemColorScheme(context: Context): String {
-            val nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-            return if (nightMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
         }
 
         private fun mergedInt(root: JSONObject, fallbackRoot: JSONObject?, names: List<String>, defaultValue: Int): Int {

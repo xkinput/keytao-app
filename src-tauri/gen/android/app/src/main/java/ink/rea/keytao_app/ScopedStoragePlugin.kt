@@ -4,8 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
@@ -62,11 +60,11 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun keytaoRoot(invoke: Invoke) {
         try {
-            val root = KeytaoAndroidPaths.userRoot()
+            val root = KeytaoAndroidPaths.userRoot(activity)
             invoke.resolve(JSObject().apply {
                 put("path", root.absolutePath)
-                put("themePath", KeytaoAndroidPaths.themeFile().absolutePath)
-                put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile().absolutePath)
+                put("themePath", KeytaoAndroidPaths.themeFile(activity).absolutePath)
+                put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile(activity).absolutePath)
                 put("writable", KeytaoAndroidPaths.isWritable(root))
             })
         } catch (ex: Exception) {
@@ -485,9 +483,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
         Thread {
             try {
-                val root = KeytaoAndroidPaths.userRoot()
+                val root = KeytaoAndroidPaths.userRoot(activity)
                 if (!KeytaoAndroidPaths.isWritable(root)) {
-                    return@Thread invoke.reject("无法写入 ${root.absolutePath}，请授予 KeyTao 文件访问权限后重试")
+                    return@Thread invoke.reject("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
                 }
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
@@ -596,7 +594,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun deployImeData(invoke: Invoke) {
-        if (!KeytaoAndroidPaths.hasInstalledSchema()) {
+        if (!KeytaoAndroidPaths.hasInstalledSchema(KeytaoAndroidPaths.userRoot(activity))) {
             return invoke.reject("请先安装键道方案")
         }
         KeytaoRimeDeployClient.deploy(activity) { result ->
@@ -615,8 +613,9 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun writeImeReloadStamp(invoke: Invoke) {
         try {
-            val stamp = KeytaoAndroidPaths.reloadStampFile()
-            stamp.writeText(System.currentTimeMillis().toString())
+            val stamp = KeytaoAndroidPaths.reloadStampFile(activity)
+            stamp.parentFile?.mkdirs()
+            stamp.writeText(System.nanoTime().toString())
             invoke.resolve(JSObject().apply { put("path", stamp.absolutePath) })
         } catch (ex: Exception) {
             invoke.reject(ex.message ?: "Failed to write reload stamp")
@@ -694,26 +693,25 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    private fun hasManageExternalStoragePermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
-    }
-
+    /**
+     * KeyTao data lives in app-specific storage, which needs no runtime
+     * permission at all. The command is kept so the onboarding UI keeps working;
+     * it now only reports whether the directory is usable, and
+     * `requiresManageAllFiles` is permanently false.
+     */
     private fun resolveStoragePermissionStatus(): JSObject {
-        val root = KeytaoAndroidPaths.userRoot()
+        val root = KeytaoAndroidPaths.userRoot(activity)
         val writable = KeytaoAndroidPaths.isWritable(root)
-        val hasManageAccess = hasManageExternalStoragePermission()
-        val requiresManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasManageAccess
-        val granted = hasManageAccess && writable
-        val message = when {
-            granted -> "已授予 KeyTao 文件访问权限：${root.absolutePath}"
-            requiresManageAllFiles -> "请授予 KeyTao 所有文件访问权限后安装键道方案"
-            else -> "请授予 KeyTao 文件访问权限后安装键道方案"
+        val message = if (writable) {
+            "KeyTao 数据目录可用：${root.absolutePath}"
+        } else {
+            "无法写入 ${root.absolutePath}，请检查设备存储空间"
         }
         return JSObject().apply {
             put("path", root.absolutePath)
-            put("granted", granted)
+            put("granted", writable)
             put("writable", writable)
-            put("requiresManageAllFiles", requiresManageAllFiles)
+            put("requiresManageAllFiles", false)
             put("canOpenSettings", true)
             put("message", message)
         }
@@ -721,24 +719,13 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun openStoragePermissionSettings() {
         val packageUri = Uri.parse("package:${activity.packageName}")
-        val intents = mutableListOf<Intent>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            intents.add(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri))
-            intents.add(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            activity.startActivity(intent)
+        } catch (ex: Throwable) {
+            throw Exception(ex.message ?: "No Android application settings activity found")
         }
-        intents.add(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
-
-        var lastError: Throwable? = null
-        for (intent in intents) {
-            try {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                activity.startActivity(intent)
-                return
-            } catch (ex: Throwable) {
-                lastError = ex
-            }
-        }
-        throw Exception(lastError?.message ?: "No Android storage permission settings activity found")
     }
 
     private fun writeFileBytes(root: DocumentFile, relativePath: String, content: ByteArray, logs: MutableList<String>, merged: Boolean = false) {

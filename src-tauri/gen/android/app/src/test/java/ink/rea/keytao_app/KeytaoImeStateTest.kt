@@ -1,22 +1,20 @@
 package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeytaoImeStateTest {
     @Test
-    fun `parse state keeps schema name and all candidates`() {
+    fun `parse state keeps schema name and the current page`() {
         val state = KeytaoImeState.fromJson(
             """
             {
               "preedit": "",
               "cursor": 0,
+              "selStart": 0,
+              "selEnd": 0,
               "candidates": [{ "text": "键道6", "comment": null }],
-              "allCandidates": [
-                { "text": "键道6", "comment": null },
-                { "text": "中 → 英", "comment": "" },
-                { "text": "半角 → 全角", "comment": null }
-              ],
               "highlightedCandidateIndex": 0,
               "pageSize": 6,
               "page": 0,
@@ -40,13 +38,31 @@ class KeytaoImeStateTest {
 
         assertEquals("键道6", state.schemaName)
         assertEquals(6, state.pageSize)
-        assertEquals(3, state.allCandidates.size)
-        assertEquals(2, state.allCandidates[2].index)
-        assertEquals("半角 → 全角", state.allCandidates[2].text)
+        assertEquals(1, state.candidates.size)
+        assertEquals("键道6", state.candidates[0].text)
+        assertTrue(state.candidatePanel.navigation.canGoNext)
     }
 
     @Test
-    fun `parse state does not copy current page into all candidates`() {
+    fun `the caret and the active segment survive the json round trip`() {
+        val state = KeytaoImeState.fromJson(
+            """
+            {
+              "preedit": "你ui",
+              "cursor": 1,
+              "selStart": 1,
+              "selEnd": 3
+            }
+            """.trimIndent()
+        )!!
+
+        assertEquals(1, state.cursor)
+        assertEquals(1, state.selStart)
+        assertEquals(3, state.selEnd)
+    }
+
+    @Test
+    fun `the full candidate list is never inferred from the current page`() {
         val state = KeytaoImeState.fromJson(
             """
             {
@@ -61,6 +77,6 @@ class KeytaoImeStateTest {
         )!!
 
         assertEquals(1, state.candidates.size)
-        assertEquals(0, state.allCandidates.size)
+        assertEquals(1, state.candidatePanel.candidates.size)
     }
 }

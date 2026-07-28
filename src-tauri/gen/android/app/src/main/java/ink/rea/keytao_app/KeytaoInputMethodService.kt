@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
@@ -9,12 +10,14 @@ import android.graphics.Region
 import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.icu.text.BreakIterator
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.Spanned
 import android.text.style.ReplacementSpan
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -24,6 +27,8 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listener {
     private lateinit var engine: KeytaoImeEngine
@@ -46,26 +51,50 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     )
     private var presentationIsLandscape = false
     private var currentState = KeytaoImeState.empty()
+
+    /**
+     * Where the editor put our composing region, in absolute UTF-16 offsets, or
+     * -1 while we do not know. Seeded by `onUpdateSelection`, which is the only
+     * place the framework reports it, and carried forward across the commits we
+     * make ourselves.
+     */
+    private var composingRegionStart = -1
     private var composing = false
+        set(value) {
+            field = value
+            // The tracked region only describes a live composition; keeping it
+            // past the end of one would aim setSelection at stale offsets.
+            if (!value) composingRegionStart = -1
+        }
     private var selectionModeActive = false
     private var shiftPressedWithoutKey = false
     private var pendingShiftKeyCode = 0
     private var inputAvailable = false
-    private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
+    // Readiness is probed on a background thread, so the first frames of the
+    // keyboard must say "still starting up" rather than accuse the user of not
+    // having installed a schema.
+    private var unavailableMessage = preparingMessage
     private val backspaceRestoreStack = mutableListOf<String>()
     private val recentCommittedUnits = mutableListOf<String>()
     private var restoreAllOnNextDirectionalRestore = false
+    private var privacyMode = InputPrivacyMode()
+    private var directInputEditor = false
+    private var clipboardListenerRegistered = false
+    private var availabilityRefreshPending = false
+    private var systemBottomInsetDp = -1
+    private val graphemeIterator: BreakIterator by lazy {
+        BreakIterator.getCharacterInstance(Locale.ROOT)
+    }
 
     override fun onCreate() {
         super.onCreate()
         engine = KeytaoImeEngine(applicationContext)
         clipboardManager = getSystemService(ClipboardManager::class.java)
-        clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
-        rememberCurrentClipboard(suggest = false)
+        scheduleAvailabilityRefresh()
     }
 
     override fun onDestroy() {
-        clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
+        unregisterClipboardListener()
         if (::engine.isInitialized) {
             engine.close()
         }
@@ -79,6 +108,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         host.listener = object : KeytaoKeyboardHost.Listener {
             override fun onLayoutStateChanged(state: KeyboardLayoutState, finished: Boolean) {
                 handleKeyboardLayoutStateChanged(state, finished)
+            }
+
+            override fun onSystemBottomInsetChanged(insetPx: Int) {
+                handleSystemBottomInsetChanged(insetPx)
             }
         }
         val view = KeytaoKeyboardView(this)
@@ -96,7 +129,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardHost = host
         keyboardView = view
         applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
-        refreshInputAvailability()
+        view.updateSystemBottomInsetDp(systemBottomInsetDp)
+        view.updateInputMethodSwitching(canOfferNextInputMethod())
+        applyAvailability()
         return host
     }
 
@@ -117,20 +152,129 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        val ready = refreshInputAvailability()
-        currentState = if (ready) engine.reset().withoutTransientCommit() else KeytaoImeState.empty()
+        // doStartInput() skips doFinishInput() when restarting, so the editor can
+        // still hold a composing region from the previous round.
+        if (restarting) {
+            currentInputConnection?.finishComposingText()
+        }
+        applyEditorInfo(attribute)
+        val ready = applyAvailability()
+        currentState = if (ready) engine.clearComposition().withoutTransientCommit() else KeytaoImeState.empty()
         composing = false
+        selectionModeActive = false
+        backspaceRestoreStack.clear()
+        restoreAllOnNextDirectionalRestore = false
+        recentCommittedUnits.clear()
         keyboardView?.updateState(currentState)
+        scheduleAvailabilityRefresh()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
-        if (engine.reloadIfNeeded()) {
-            currentState = engine.state().withoutTransientCommit()
-        }
+        applyEditorInfo(info)
+        registerClipboardListener()
         keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
         applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
-        refreshInputAvailability()
+        keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
+        applyAvailability()
+        keyboardView?.updateState(currentState)
+        scheduleReloadIfNeeded()
+        scheduleAvailabilityRefresh()
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        unregisterClipboardListener()
+        keyboardView?.clearRecentClipboardSuggestion()
+        super.onFinishInputView(finishingInput)
+    }
+
+    /**
+     * Apply what the editor declared about itself: privacy contract first, then
+     * the keyboard shape (layer and Enter label) it asked for.
+     */
+    private fun applyEditorInfo(info: EditorInfo?) {
+        val inputType = info?.inputType ?: InputType.TYPE_NULL
+        val imeOptions = info?.imeOptions ?: EditorInfo.IME_ACTION_NONE
+        val nextPrivacy = KeytaoEditorPolicy.resolvePrivacyMode(inputType, imeOptions)
+        directInputEditor = KeytaoEditorPolicy.isDirectInputEditor(inputType)
+        if (nextPrivacy != privacyMode) {
+            privacyMode = nextPrivacy
+            if (!nextPrivacy.allowsClipboard) {
+                clipboardHistory.clear()
+                keyboardView?.clearRecentClipboardSuggestion()
+            }
+            if (!nextPrivacy.allowsTextRecall) {
+                backspaceRestoreStack.clear()
+                recentCommittedUnits.clear()
+                restoreAllOnNextDirectionalRestore = false
+            }
+        }
+        engine.setInputPolicy(
+            composing = privacyMode.allowsComposing,
+            learning = privacyMode.allowsLearning,
+        )?.let { state ->
+            currentState = state.withoutTransientCommit()
+            composing = false
+        }
+        val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
+        keyboardView?.updateEditorPresentation(
+            enterLabel = KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = inputType,
+                imeOptions = imeOptions,
+                actionLabel = info?.actionLabel,
+                forceNewline = behavior == EnterKeyBehaviors.NEWLINE,
+            ),
+            requestedLayer = KeytaoEditorPolicy.resolveInitialLayer(inputType),
+        )
+    }
+
+    /**
+     * The framework reports every caret move here, including the ones an app makes
+     * behind our back. A composition that no longer covers the caret must be given
+     * up, otherwise the next setComposingText rewrites text at the old position.
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(
+            oldSelStart,
+            oldSelEnd,
+            newSelStart,
+            newSelEnd,
+            candidatesStart,
+            candidatesEnd,
+        )
+        selectionModeActive = newSelStart != newSelEnd
+        composingRegionStart = if (candidatesStart >= 0 && candidatesEnd >= candidatesStart) {
+            candidatesStart
+        } else {
+            -1
+        }
+        if (!composing && !currentState.hasComposition) return
+        val insideComposition = candidatesStart >= 0 &&
+            candidatesEnd >= candidatesStart &&
+            newSelStart >= candidatesStart &&
+            newSelEnd <= candidatesEnd
+        if (insideComposition) return
+        abandonCompositionAfterExternalEdit()
+    }
+
+    private fun abandonCompositionAfterExternalEdit() {
+        currentInputConnection?.finishComposingText()
+        composing = false
+        backspaceRestoreStack.clear()
+        restoreAllOnNextDirectionalRestore = false
+        recentCommittedUnits.clear()
+        currentState = if (inputAvailable) {
+            engine.clearComposition().withoutTransientCommit()
+        } else {
+            KeytaoImeState.empty(asciiMode = currentState.asciiMode)
+        }
         keyboardView?.updateState(currentState)
     }
 
@@ -238,14 +382,27 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return (config.keyboardHeightDp + config.candidateBarHeightDp + androidBottomInsetDp(config)).toFloat()
     }
 
+    /**
+     * The system inset is the floor; `keyboardBottomInsetDp` is only the user's
+     * extra offset on top of it. Before the first WindowInsets pass we keep the
+     * historical constant so the bottom row is never flush with the screen edge.
+     */
     private fun androidBottomInsetDp(config: KeytaoAndroidImeConfig): Int {
-        return config.keyboardBottomInsetDp.takeIf { it > 0 } ?: defaultAndroidBottomInsetDp
+        val system = if (systemBottomInsetDp >= 0) systemBottomInsetDp else defaultAndroidBottomInsetDp
+        return max(system, config.keyboardBottomInsetDp)
     }
 
     override fun onFinishInput() {
+        // finishComposingText() already puts the composing text into the editor,
+        // so Rime only needs its own composition discarded — committing here too
+        // would duplicate the text.
         currentInputConnection?.finishComposingText()
         composing = false
-        currentState = if (inputAvailable) engine.reset().withoutTransientCommit() else KeytaoImeState.empty()
+        currentState = if (inputAvailable) {
+            engine.clearComposition().withoutTransientCommit()
+        } else {
+            KeytaoImeState.empty()
+        }
         keyboardView?.updateState(currentState)
         super.onFinishInput()
     }
@@ -266,14 +423,19 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return super.onKeyDown(keyCode, event)
         }
         val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return super.onKeyDown(keyCode, event)
-        if (currentState.asciiMode && !currentState.hasComposition && key.keyCode != AndroidKeyMapper.XK_F4) {
+        if (!privacyMode.allowsComposing || directInputEditor) {
             return super.onKeyDown(keyCode, event)
         }
-        if (shouldBypassHardwareKey(key, event)) {
+        // ascii_mode deliberately plays no part here: English mode still needs
+        // librime's ascii_composer to see the key. keytao-core owns the rule.
+        if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
             return super.onKeyDown(keyCode, event)
         }
         val result = engine.processKey(key.keyCode, key.modifiers)
-        if (!result.accepted && !result.hasComposition) return super.onKeyDown(keyCode, event)
+        if (!result.accepted && !result.hasComposition) {
+            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
+            return super.onKeyDown(keyCode, event)
+        }
         applyState(result)
         return true
     }
@@ -295,6 +457,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (result.accepted || result.hasComposition) {
             applyState(result)
         } else {
+            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
             applyState(engine.setAsciiMode(!currentState.asciiMode))
         }
         return true
@@ -317,6 +480,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.MODE -> handleMode(command.value)
             KeyCommandTypes.OPEN_PAGE -> openAppPage(command.value)
             KeyCommandTypes.KEYBOARD_PICKER -> showKeyboardPicker()
+            KeyCommandTypes.NEXT_INPUT_METHOD -> switchToNextKeyboard()
             KeyCommandTypes.KEYBOARD_MODE -> keyboardView?.setKeyboardLayer(command.value)
             KeyCommandTypes.NEXT_PAGE -> applyState(engine.changePage(backward = false))
             KeyCommandTypes.PREVIOUS_PAGE -> applyState(engine.changePage(backward = true))
@@ -358,14 +522,26 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onRequestClipboardHistory(callback: (List<String>) -> Unit) {
+        if (!privacyMode.allowsClipboard) {
+            callback(emptyList())
+            return
+        }
         rememberCurrentClipboard(suggest = false)
         callback(clipboardHistory.toList())
     }
 
+    /** Sensitive or digits-only editors never build a composition. */
+    private fun bypassesComposition(): Boolean {
+        return !inputAvailable || !privacyMode.allowsComposing || directInputEditor
+    }
+
     private fun handleTextInput(text: String, fallbackValue: String? = null) {
         if (text.isEmpty()) return
+        // ascii_mode is not a bypass reason: the keyboard already resolved the
+        // English variant of the key, librime's ascii_composer still has to see
+        // it, and a rejected key falls back to the editor below.
         val fallbackText = fallbackValue ?: text
-        if (currentState.asciiMode) {
+        if (bypassesComposition()) {
             commitDirect(fallbackText)
             return
         }
@@ -382,6 +558,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
         val result = engine.processKey(key.keyCode, key.modifiers)
         if (!result.accepted && !result.hasComposition) {
+            // The key still has to reach the editor, but whatever Rime flushed
+            // on its way to rejecting it goes in first.
+            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
             commitDirect(fallbackText)
         } else {
             applyState(result)
@@ -391,31 +570,35 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun handleRimeInput(sequence: String, fallbackValue: String?) {
         if (sequence.isEmpty()) return
         val fallbackText = fallbackValue ?: sequence
-        if (currentState.asciiMode) {
+        // Same rule as handleTextInput: ascii_mode is not a bypass reason. Rime's
+        // ascii_composer rejects the code in English mode and the driver below
+        // falls back to the literal text.
+        if (bypassesComposition()) {
             commitDirect(fallbackText)
             return
         }
+        KeytaoRimeInput.feedSequence(rimeKeySink, sequence, fallbackText)
+    }
 
-        var latest: KeytaoImeState? = null
-        val codePoints = sequence.codePoints().toArray()
-        for (codePoint in codePoints) {
-            val text = String(Character.toChars(codePoint))
-            val key = AndroidKeyMapper.fromText(text)
-            if (key == null) {
-                engine.reset()
-                commitDirect(fallbackText)
-                return
-            }
-            val result = engine.processKey(key.keyCode, key.modifiers)
-            if (!result.accepted && !result.hasComposition) {
-                engine.reset()
-                commitDirect(fallbackText)
-                return
-            }
-            latest = result
+    private val rimeKeySink = object : KeytaoRimeKeySink {
+        override val hostComposing: Boolean get() = composing
+
+        override fun processText(text: String): KeytaoImeState? {
+            val key = AndroidKeyMapper.fromText(text) ?: return null
+            return engine.processKey(key.keyCode, key.modifiers)
         }
 
-        latest?.let { applyState(it) }
+        override fun applyState(state: KeytaoImeState) {
+            this@KeytaoInputMethodService.applyState(state)
+        }
+
+        override fun resetEngine() {
+            engine.reset()
+        }
+
+        override fun commitDirect(text: String) {
+            this@KeytaoInputMethodService.commitDirect(text)
+        }
     }
 
     private fun handleBackspace() {
@@ -428,6 +611,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (result.accepted || result.hasComposition) {
             applyState(result)
         } else {
+            // Same order as every other fallback: whatever Rime flushed before
+            // declining the key goes in first, and the stale composing region is
+            // cleared before the host is asked to delete anything.
+            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
             deleteOneBeforeCursorForRestore(resetComposition = false)
             composing = false
             currentState = engine.reset().withoutTransientCommit()
@@ -455,10 +642,29 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return deleteBeforeCursorForRestore(1, resetComposition = false)
     }
 
+    /**
+     * `deleteSurroundingText` deletes around the selection and leaves the selected
+     * text in place, so a selection has to be removed with an empty commit first.
+     */
+    private fun deleteSelectionForRestore(connection: InputConnection): Boolean {
+        val selected = runCatching { connection.getSelectedText(0) }.getOrNull()
+        if (selected.isNullOrEmpty()) return false
+        backspaceRestoreStack.clear()
+        if (privacyMode.allowsTextRecall) {
+            backspaceRestoreStack.addAll(textUnits(selected).asReversed())
+        }
+        restoreAllOnNextDirectionalRestore = false
+        recentCommittedUnits.clear()
+        connection.commitText("", 1)
+        selectionModeActive = false
+        return true
+    }
+
     private fun deleteBeforeCursorForRestore(count: Int, resetComposition: Boolean = true): Boolean {
         val preeditUnits = if (resetComposition) textUnits(currentState.preedit) else emptyList()
         if (resetComposition) clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return false
+        if (deleteSelectionForRestore(connection)) return true
         val unitCount = count.coerceAtLeast(1)
         restoreAllOnNextDirectionalRestore = false
         rememberCommittedUnits(preeditUnits)
@@ -483,6 +689,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val preeditUnits = textUnits(currentState.preedit)
         clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return
+        if (deleteSelectionForRestore(connection)) return
         backspaceRestoreStack.clear()
         rememberCommittedUnits(preeditUnits)
         val beforeCursor = connection.getTextBeforeCursor(
@@ -562,7 +769,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun rememberCommittedUnits(units: List<String>) {
-        if (units.isEmpty()) return
+        if (units.isEmpty() || !privacyMode.allowsTextRecall) return
         recentCommittedUnits.addAll(units)
         while (recentCommittedUnits.size > recentCommittedUnitLimit) {
             recentCommittedUnits.removeAt(0)
@@ -572,7 +779,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun textUnits(text: CharSequence): List<String> {
         if (text.isEmpty()) return emptyList()
         val plainText = text.toString()
-        val iterator = BreakIterator.getCharacterInstance(Locale.ROOT)
+        val iterator = graphemeIterator
         iterator.setText(plainText)
         val graphemeRanges = mutableListOf<TextUnitRange>()
         var start = iterator.first()
@@ -612,9 +819,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             hasActionLabel = !editorInfo?.actionLabel.isNullOrEmpty(),
         )
         when (decision.type) {
-            EnterDecisionType.CONFIRM_COMPOSITION -> {
-                applyState(engine.processKey(AndroidKeyMapper.XK_RETURN, 0))
-            }
+            // keytao-core owns the Enter contract: Return goes to Rime and core
+            // falls back to committing the raw input when Rime declines it.
+            EnterDecisionType.CONFIRM_COMPOSITION -> applyState(engine.processEnter())
             EnterDecisionType.INSERT_NEWLINE -> commitLineBreak()
             EnterDecisionType.PERFORM_ACTION -> {
                 if (currentInputConnection?.performEditorAction(decision.actionId) != true) {
@@ -644,8 +851,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun sendEnterKey() {
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-        currentInputConnection?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        sendKeyStroke(KeyEvent.KEYCODE_ENTER)
     }
 
     private fun handleMode(value: String?) {
@@ -728,11 +934,30 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         selectionModeActive = false
     }
 
+    /**
+     * FLAG_KEEP_TOUCH_MODE matters: ViewRootImpl consumes the first navigation or
+     * Enter key that would take the host out of touch mode, so without it the
+     * cursor-move and Enter keys we inject can silently do nothing.
+     */
     private fun sendKeyStroke(keyCode: Int, metaState: Int = 0) {
         val connection = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
-        connection.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, metaState))
-        connection.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, metaState))
+        connection.sendKeyEvent(softKeyEvent(now, KeyEvent.ACTION_DOWN, keyCode, metaState))
+        connection.sendKeyEvent(softKeyEvent(now, KeyEvent.ACTION_UP, keyCode, metaState))
+    }
+
+    private fun softKeyEvent(time: Long, action: Int, keyCode: Int, metaState: Int): KeyEvent {
+        return KeyEvent(
+            time,
+            time,
+            action,
+            keyCode,
+            0,
+            metaState,
+            KeyCharacterMap.VIRTUAL_KEYBOARD,
+            0,
+            KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE,
+        )
     }
 
     private fun performContextAction(action: Int, fallback: () -> Unit = {}) {
@@ -748,13 +973,43 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateState(currentState)
     }
 
+    /**
+     * The clipboard is only watched while an input view is up, and only for as
+     * long as the editor allows it — a password field must never see a paste chip.
+     */
+    private fun registerClipboardListener() {
+        if (clipboardListenerRegistered || !privacyMode.allowsClipboard) return
+        val manager = clipboardManager ?: return
+        manager.addPrimaryClipChangedListener(clipboardListener)
+        clipboardListenerRegistered = true
+        rememberCurrentClipboard(suggest = false)
+    }
+
+    private fun unregisterClipboardListener() {
+        if (!clipboardListenerRegistered) return
+        clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
+        clipboardListenerRegistered = false
+    }
+
     private fun currentClipboardText(): String? {
+        if (!privacyMode.allowsClipboard) return null
         val clip = clipboardManager?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
+        if (isSensitiveClip(clip.description)) return null
         return clip.getItemAt(0)
             ?.coerceToText(this)
             ?.toString()
             ?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * `ClipDescription.EXTRA_IS_SENSITIVE` is how password managers ask every
+     * clipboard consumer, the system preview included, not to show the content.
+     */
+    private fun isSensitiveClip(description: ClipDescription?): Boolean {
+        if (description == null) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        return description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
     }
 
     private fun setClipboardText(text: String) {
@@ -767,7 +1022,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun rememberClipboardText(text: String, suggest: Boolean) {
-        if (text.isBlank()) return
+        if (text.isBlank() || !privacyMode.allowsClipboard) return
         val wasFirst = clipboardHistory.firstOrNull() == text
         clipboardHistory.remove(text)
         clipboardHistory.add(0, text)
@@ -779,29 +1034,76 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    private fun refreshInputAvailability(): Boolean {
-        val writable = engine.isUserDataWritable()
-        val installed = engine.hasInstalledSchema()
-        val deployed = engine.hasDeployedSchema()
-        if (writable && installed && !engine.nativeReady) {
-            engine.ensureReady()
-        }
-        val message = when {
-            !writable -> "请授予 KeyTao 文件访问权限后安装键道方案"
-            !installed -> "请先在 KeyTao App 安装键道方案"
-            !deployed -> "请先在 KeyTao App 部署方案"
-            !engine.nativeReady -> "RIME 运行库未就绪，请重新安装 KeyTao"
-            else -> ""
-        }
-        inputAvailable = message.isEmpty()
-        unavailableMessage = message.ifEmpty { "请先在 KeyTao App 安装键道方案" }
+    /**
+     * Push the last known readiness to the keyboard. Probing the data directory
+     * and bringing librime up happens in [scheduleAvailabilityRefresh]; the
+     * lifecycle callbacks only read this snapshot.
+     */
+    private fun applyAvailability(): Boolean {
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
         return inputAvailable
     }
 
+    private fun scheduleAvailabilityRefresh() {
+        if (!::engine.isInitialized || availabilityRefreshPending) return
+        availabilityRefreshPending = true
+        engine.runInBackground {
+            val readiness = engine.refreshReadiness()
+            mainHandler.post {
+                availabilityRefreshPending = false
+                applyReadiness(readiness)
+            }
+        }
+    }
+
+    private fun scheduleReloadIfNeeded() {
+        if (!::engine.isInitialized) return
+        engine.runInBackground {
+            if (!engine.reloadIfNeeded()) return@runInBackground
+            val state = engine.state().withoutTransientCommit()
+            mainHandler.post {
+                if (!composing && !currentState.hasComposition) {
+                    currentState = state
+                    keyboardView?.updateState(currentState)
+                }
+            }
+        }
+    }
+
+    private fun applyReadiness(readiness: Readiness) {
+        val message = when (readiness) {
+            Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
+            Readiness.NOT_INSTALLED -> defaultUnavailableMessage
+            Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
+            Readiness.NATIVE_UNAVAILABLE -> "RIME 运行库未就绪，请重新安装 KeyTao"
+            Readiness.READY -> ""
+        }
+        inputAvailable = message.isEmpty()
+        unavailableMessage = message.ifEmpty { defaultUnavailableMessage }
+        keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
+    }
+
     private fun showUnavailableMessage() {
-        refreshInputAvailability()
+        scheduleAvailabilityRefresh()
         keyboardView?.showMessage(unavailableMessage)
+    }
+
+    /**
+     * IME windows are not padded for the navigation bar or the gesture handle;
+     * the real bottom inset has to come from WindowInsets instead of a constant.
+     */
+    private fun handleSystemBottomInsetChanged(insetPx: Int) {
+        val density = resources.displayMetrics.density
+        val insetDp = if (density > 0f) (insetPx / density).roundToInt() else 0
+        val clamped = insetDp.coerceIn(0, 96)
+        if (clamped == systemBottomInsetDp) return
+        systemBottomInsetDp = clamped
+        // The callback arrives inside the traversal that is about to measure us,
+        // so re-laying out is deferred to the next frame.
+        mainHandler.post {
+            keyboardView?.updateSystemBottomInsetDp(clamped)
+            baseKeyboardConfig?.let { applyKeyboardPresentation(it, keyboardLayoutState) }
+        }
     }
 
     private fun commitDirect(text: String) {
@@ -829,6 +1131,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val connection = currentInputConnection
         if (connection != null) {
             connection.beginBatchEdit()
+            // commitText replaces the composing region, so the next composition
+            // starts where the committed text ends.
+            var regionStart = composingRegionStart
             if (state.committed.isNotEmpty()) {
                 backspaceRestoreStack.clear()
                 restoreAllOnNextDirectionalRestore = false
@@ -836,11 +1141,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 rememberCommittedText(state.committed)
                 composing = false
                 selectionModeActive = false
+                if (regionStart >= 0) regionStart += state.committed.length
             }
 
             if (state.preedit.isNotEmpty()) {
                 connection.setComposingText(state.preedit, 1)
                 composing = true
+                composingRegionStart = regionStart
+                applyPreeditCaret(connection, state, regionStart)
             } else if (composing) {
                 connection.commitText("", 1)
                 composing = false
@@ -850,6 +1158,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
         currentState = state.withoutTransientCommit()
         keyboardView?.updateState(currentState)
+    }
+
+    /**
+     * `setComposingText` can only leave the caret before or after the preedit,
+     * so a schema that moved it inside needs an explicit setSelection. Rime
+     * counts Unicode scalars and `InputConnection` counts UTF-16 units, hence
+     * the conversion through keytao-core.
+     */
+    private fun applyPreeditCaret(connection: InputConnection, state: KeytaoImeState, regionStart: Int) {
+        if (regionStart < 0) return
+        val preedit = state.preedit
+        val caret = KeytaoEditorPolicy.resolveComposingCaret(
+            preeditCharCount = preedit.codePointCount(0, preedit.length),
+            cursor = state.cursor,
+            selStart = state.selStart,
+            selEnd = state.selEnd,
+        ) ?: return
+        val offset = regionStart + KeytaoNativeBridge.utf16OffsetFromChars(preedit, caret)
+        connection.setSelection(offset, offset)
     }
 
     private fun openAppPage(page: String?) {
@@ -868,38 +1195,54 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         manager?.showInputMethodPicker()
     }
 
+    /**
+     * `supportsSwitchingToNextInputMethod="true"` is a promise to the framework
+     * that the keyboard offers a way out; falling back to the picker keeps that
+     * promise on devices where no next input method is available.
+     */
+    private fun switchToNextKeyboard() {
+        val switched = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                switchToNextInputMethod(false)
+            } else {
+                val token = window?.window?.attributes?.token
+                val manager = getSystemService(InputMethodManager::class.java)
+                @Suppress("DEPRECATION")
+                token != null && manager != null && manager.switchToNextInputMethod(token, false)
+            }
+        }.getOrDefault(false)
+        if (!switched) showKeyboardPicker()
+    }
+
+    private fun canOfferNextInputMethod(): Boolean {
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                shouldOfferSwitchingToNextInputMethod()
+            } else {
+                val token = window?.window?.attributes?.token
+                val manager = getSystemService(InputMethodManager::class.java)
+                @Suppress("DEPRECATION")
+                token != null && manager != null &&
+                    manager.shouldOfferSwitchingToNextInputMethod(token)
+            }
+        }.getOrDefault(false)
+    }
+
     private fun isShiftKey(keyCode: Int): Boolean {
         return keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
     }
 
-    private fun shouldBypassHardwareKey(key: RimeKey, event: KeyEvent): Boolean {
-        if (currentState.hasComposition) return false
-        if (event.isCtrlPressed || event.isAltPressed) return true
-        return when (key.keyCode) {
-            AndroidKeyMapper.XK_SPACE,
-            AndroidKeyMapper.XK_RETURN,
-            AndroidKeyMapper.XK_BACK_SPACE,
-            AndroidKeyMapper.XK_DELETE,
-            AndroidKeyMapper.XK_TAB,
-            AndroidKeyMapper.XK_ESCAPE,
-            AndroidKeyMapper.XK_HOME,
-            AndroidKeyMapper.XK_END,
-            AndroidKeyMapper.XK_PAGE_UP,
-            AndroidKeyMapper.XK_PAGE_DOWN,
-            AndroidKeyMapper.XK_LEFT,
-            AndroidKeyMapper.XK_UP,
-            AndroidKeyMapper.XK_RIGHT,
-            AndroidKeyMapper.XK_DOWN -> true
-            else -> false
-        }
-    }
-
     companion object {
+        private const val defaultUnavailableMessage = "请先在 KeyTao App 安装键道方案"
+        private const val preparingMessage = "正在准备 KeyTao 输入法"
         private const val clipboardHistoryLimit = 24
         private const val expandedCandidateLimit = 96
-        private const val backspaceContextLimit = 8192
+
+        /** `EditorInfo.MEMORY_EFFICIENT_TEXT_LENGTH`: the budget AOSP recommends
+         *  for surrounding-text requests, which cross a binder on every call. */
+        private const val backspaceContextLimit = 2048
         private const val maxBackspaceGestureBatchCount = 96
-        private const val recentCommittedUnitLimit = 8192
+        private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48
     }
 
@@ -909,6 +1252,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.BACKSPACE,
             KeyCommandTypes.BACKSPACE_GESTURE,
             KeyCommandTypes.KEYBOARD_PICKER,
+            KeyCommandTypes.NEXT_INPUT_METHOD,
             KeyCommandTypes.KEYBOARD_MODE,
             KeyCommandTypes.SHIFT,
             KeyCommandTypes.DIRECT_INPUT,

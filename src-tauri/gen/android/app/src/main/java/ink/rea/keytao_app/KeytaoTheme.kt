@@ -145,16 +145,40 @@ data class KeytaoImeTheme(
 }
 
 object KeytaoThemeResolver {
+    private var cachedSignature: String? = null
+    private var cachedTheme: KeytaoImeTheme? = null
+
+    /**
+     * Resolving means reading theme.yaml and crossing JNI, so the result is kept
+     * until the file signature or the system colour scheme changes — showing the
+     * keyboard must not re-parse YAML on the main thread.
+     */
+    @Synchronized
     fun resolve(context: Context): KeytaoImeTheme {
-        val userTheme = KeytaoAndroidPaths.themeFile()
-        val userThemePath = userTheme.takeIf { it.isFile }?.absolutePath
-        return KeytaoImeTheme.fromJson(
-            KeytaoNativeBridge.resolveThemeJson(null, userThemePath, systemColorScheme(context))
+        val userTheme = KeytaoAndroidPaths.themeFile(context)
+        val scheme = systemColorScheme(context)
+        val signature = "${fileSignature(userTheme)}|$scheme"
+        cachedTheme?.let { theme ->
+            if (signature == cachedSignature) return theme
+        }
+        val theme = KeytaoImeTheme.fromJson(
+            KeytaoNativeBridge.resolveThemeJson(
+                null,
+                userTheme.takeIf { it.isFile }?.absolutePath,
+                scheme,
+            )
         )
+        cachedSignature = signature
+        cachedTheme = theme
+        return theme
     }
 
     private fun systemColorScheme(context: Context): String {
         val nightMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         return if (nightMode == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
     }
+}
+
+internal fun fileSignature(file: java.io.File): String {
+    return if (file.isFile) "${file.length()}:${file.lastModified()}" else "-"
 }

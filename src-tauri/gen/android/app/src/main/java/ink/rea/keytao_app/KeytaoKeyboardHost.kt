@@ -8,9 +8,11 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.Region
 import android.graphics.RectF
+import android.os.Build
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.WindowInsets
 import android.widget.FrameLayout
 import kotlin.math.abs
 import kotlin.math.max
@@ -19,6 +21,9 @@ import kotlin.math.roundToInt
 class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     interface Listener {
         fun onLayoutStateChanged(state: KeyboardLayoutState, finished: Boolean)
+
+        /** Real bottom avoidance for this window, in pixels. */
+        fun onSystemBottomInsetChanged(insetPx: Int)
     }
 
     private enum class DragMode {
@@ -43,6 +48,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     private var marginPx = 0
     private var normalHeightPx = 0
     private var safeBottomInsetPx = 0
+    private var reportedBottomInsetPx = -1
     private var isLandscape = false
     private var dragMode = DragMode.NONE
     private var dragStartX = 0f
@@ -95,6 +101,27 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
                 (36f * resources.displayMetrics.density).roundToInt(),
             ),
         )
+    }
+
+    /**
+     * An IME window is not padded for the navigation bar or the gesture handle,
+     * so the keyboard has to read the real bottom inset itself instead of
+     * assuming the three-button 48dp.
+     */
+    override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        val bottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(
+                WindowInsets.Type.navigationBars() or WindowInsets.Type.systemGestures()
+            ).bottom
+        } else {
+            @Suppress("DEPRECATION")
+            insets.systemWindowInsetBottom
+        }
+        if (bottom != reportedBottomInsetPx) {
+            reportedBottomInsetPx = bottom
+            listener?.onSystemBottomInsetChanged(bottom)
+        }
+        return super.onApplyWindowInsets(insets)
     }
 
     fun updatePresentation(

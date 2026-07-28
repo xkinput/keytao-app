@@ -131,7 +131,7 @@ object KeytaoRimeDeployClient {
             while (pending.isNotEmpty()) {
                 val schema = pending.removeFirst()
                 if (!processed.add(schema.id)) continue
-                val source = File(KeytaoAndroidPaths.userRoot(), "${schema.id}.schema.yaml")
+                val source = File(KeytaoAndroidPaths.userRoot(context), "${schema.id}.schema.yaml")
                 if (!source.isFile) {
                     if (schema.required) {
                         finish(Result(success = false, error = "缺少方案文件：${source.name}"))
@@ -146,18 +146,19 @@ object KeytaoRimeDeployClient {
         }
 
         private fun completeDeployment() {
-            if (!KeytaoAndroidPaths.hasDeployedSchema()) {
+            val userRoot = KeytaoAndroidPaths.userRoot(context)
+            if (!KeytaoAndroidPaths.hasDeployedSchema(userRoot)) {
                 finish(Result(success = false, error = "Android RIME 部署未生成方案产物"))
                 return
             }
             try {
-                val stamp = KeytaoAndroidPaths.reloadStampFile()
+                val stamp = KeytaoAndroidPaths.reloadStampFile(context)
                 stamp.parentFile?.mkdirs()
-                stamp.writeText(System.currentTimeMillis().toString())
+                stamp.writeText(System.nanoTime().toString())
                 val schemaId = initialSchemas.first()
                 val schemaName = RimeSchemaNameResolver.resolveDisplayName(
-                    KeytaoAndroidPaths.userRoot(),
-                    KeytaoAndroidPaths.rimeDataDir(),
+                    userRoot,
+                    KeytaoAndroidPaths.rimeDataDir(context),
                     schemaId,
                 )
                 finish(

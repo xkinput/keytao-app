@@ -2,9 +2,12 @@
 <input-method xmlns:android="http://schemas.android.com/apk/res/android"
     android:settingsActivity="ink.rea.keytao_app.MainActivity"
     android:supportsSwitchingToNextInputMethod="true">
+    <!-- subtypeId is pinned so changing the label or locale later does not
+         regenerate the id and reset the subtype the user already enabled. -->
     <subtype
         android:imeSubtypeLocale="zh_CN"
         android:imeSubtypeMode="keyboard"
         android:isAsciiCapable="true"
+        android:subtypeId="0x0a01b2c3"
         android:label="@string/keytao_ime_subtype_zh" />
 </input-method>

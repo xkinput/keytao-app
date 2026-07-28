@@ -56,9 +56,19 @@ object AndroidKeyMapper {
         return RimeKey(unicode, modifiers(event))
     }
 
+    /**
+     * Soft keyboard text to the keysym Rime expects.
+     *
+     * keytao-core owns the mapping (Latin-1 passes through, everything else uses
+     * X11's `0x01000000 | codepoint` form) so a layout key such as `（` (U+FF08)
+     * can never arrive as `XK_BackSpace`. A null result means "do not hand this
+     * to Rime, commit it directly".
+     */
     fun fromText(value: String): RimeKey? {
         if (value.codePointCount(0, value.length) != 1) return null
-        return RimeKey(value.codePointAt(0), 0)
+        val keysym = KeytaoNativeBridge.textToKeysym(value)
+        if (keysym == 0) return null
+        return RimeKey(keysym, 0)
     }
 
     private fun modifiers(event: KeyEvent): Int {

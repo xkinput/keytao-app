@@ -1,7 +1,11 @@
 package ink.rea.keytao_app
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -26,11 +30,17 @@ class KeytaoRimeDeployService : Service() {
             return START_NOT_STICKY
         }
 
+        // Compiling a dictionary takes tens of seconds; as a plain background
+        // service it would be a candidate for reclaim as soon as the user leaves
+        // the app, and the client could only report a timeout.
+        startDeploymentForeground()
+
         Thread(
             {
                 val result = runDeployment(intent.getStringExtra(KeytaoRimeDeployContract.extraSchemaId))
                 sendResult(receiver, result)
                 deploymentRunning.set(false)
+                stopDeploymentForeground()
                 stopSelfResult(startId)
 
                 // librime's compiler allocator retains a large native heap after finalize.
@@ -41,6 +51,63 @@ class KeytaoRimeDeployService : Service() {
             "KeyTao-Rime-Deployer",
         ).start()
         return START_NOT_STICKY
+    }
+
+    private fun startDeploymentForeground() {
+        runCatching {
+            ensureNotificationChannel()
+            val notification = buildNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    notificationId,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                )
+            } else {
+                startForeground(notificationId, notification)
+            }
+        }.onFailure { error ->
+            Log.w(tag, "Failed to enter foreground for deployment", error)
+        }
+    }
+
+    private fun stopDeploymentForeground() {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
+    }
+
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (manager.getNotificationChannel(notificationChannelId) != null) return
+        manager.createNotificationChannel(
+            NotificationChannel(
+                notificationChannelId,
+                getString(R.string.keytao_deploy_channel_name),
+                NotificationManager.IMPORTANCE_LOW,
+            )
+        )
+    }
+
+    private fun buildNotification(): Notification {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, notificationChannelId)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        return builder
+            .setContentTitle(getString(R.string.keytao_deploy_notification_title))
+            .setContentText(getString(R.string.keytao_deploy_notification_text))
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setOngoing(true)
+            .build()
     }
 
     private fun runDeployment(schemaId: String?): DeploymentResult {
@@ -98,5 +165,7 @@ class KeytaoRimeDeployService : Service() {
     companion object {
         private const val tag = "KeytaoRimeDeploy"
         private const val processExitDelayMs = 150L
+        private const val notificationChannelId = "keytao_rime_deploy"
+        private const val notificationId = 1001
     }
 }

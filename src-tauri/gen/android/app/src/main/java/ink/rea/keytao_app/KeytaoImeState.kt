@@ -33,11 +33,18 @@ data class KeytaoModeHintModel(
     val text: String = "",
 )
 
+/**
+ * `cursor`, `selStart` and `selEnd` are Unicode scalar offsets into [preedit],
+ * the unit keytao-core publishes. `InputConnection` counts UTF-16 units, so
+ * they have to go through `KeytaoNativeBridge.utf16OffsetFromChars` before they
+ * reach the editor. `selStart`/`selEnd` delimit librime's active segment.
+ */
 data class KeytaoImeState(
     val preedit: String = "",
     val cursor: Int = 0,
+    val selStart: Int = 0,
+    val selEnd: Int = 0,
     val candidates: List<KeytaoCandidate> = emptyList(),
-    val allCandidates: List<KeytaoCandidate> = emptyList(),
     val highlightedCandidateIndex: Int = 0,
     val pageSize: Int = 0,
     val page: Int = 0,
@@ -63,13 +70,13 @@ data class KeytaoImeState(
             return runCatching {
                 val root = JSONObject(json)
                 val candidates = parseCandidateArray(root.optJSONArray("candidates"))
-                val allCandidates = parseCandidateArray(root.optJSONArray("allCandidates"))
 
                 KeytaoImeState(
                     preedit = root.safeString("preedit"),
                     cursor = root.optInt("cursor"),
+                    selStart = root.optInt("selStart"),
+                    selEnd = root.optInt("selEnd"),
                     candidates = candidates,
-                    allCandidates = allCandidates,
                     highlightedCandidateIndex = root.optInt("highlightedCandidateIndex"),
                     pageSize = root.optInt("pageSize"),
                     page = root.optInt("page"),

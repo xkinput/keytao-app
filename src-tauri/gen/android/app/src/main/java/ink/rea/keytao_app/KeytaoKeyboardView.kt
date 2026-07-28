@@ -8,17 +8,28 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
+import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.AttributeSet
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewOutlineProvider
+import android.view.accessibility.AccessibilityManager
+import android.widget.Button
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
+import androidx.customview.widget.ExploreByTouchHelper
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -53,6 +64,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val rect: RectF,
         val global: Boolean = false,
         val command: KeyCommand? = null,
+        val label: String = "",
     )
     private data class CandidateDrawItem(
         val index: Int,
@@ -96,6 +108,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var keyboardLayer = "letters"
     private var schemaReady = true
     private var statusMessage: String? = null
+    private var systemBottomInsetDp = -1
+    private var enterLabelOverride: String? = null
+    private var editorRequestedLayer: String? = null
+    private var inputMethodSwitchingAvailable = false
     private var keyRects: List<KeyRect> = emptyList()
     private var candidateRects: List<CandidateRect> = emptyList()
     private var expandedCandidateRects: List<CandidateRect> = emptyList()
@@ -144,6 +160,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private val vibrator: Vibrator? = runCatching {
         @Suppress("DEPRECATION")
         context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }.getOrNull()
+    private val audioManager: AudioManager? = runCatching {
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }.getOrNull()
     private var pressedKey: KeyRect? = null
     private val activeKeyTouches = mutableMapOf<Int, KeyTouch>()
@@ -212,6 +231,47 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun currentConfig(): KeytaoAndroidImeConfig = config
+
+    fun updateSystemBottomInsetDp(value: Int) {
+        if (value == systemBottomInsetDp) return
+        systemBottomInsetDp = value
+        invalidateKeyboardLayoutCache()
+        requestLayout()
+        invalidate()
+    }
+
+    fun updateInputMethodSwitching(available: Boolean) {
+        if (available == inputMethodSwitchingAvailable) return
+        inputMethodSwitchingAvailable = available
+        invalidateExpandedCandidateItemsCache()
+        invalidate()
+    }
+
+    /**
+     * What the current editor asked for: the Enter key caption it declared through
+     * `imeOptions`/`actionLabel`, and the layer its `inputType` implies.
+     */
+    fun updateEditorPresentation(enterLabel: String?, requestedLayer: String?) {
+        val labelChanged = enterLabel != enterLabelOverride
+        val previousRequest = editorRequestedLayer
+        enterLabelOverride = enterLabel
+        editorRequestedLayer = requestedLayer
+        val targetLayer = when {
+            requestedLayer != null && config.hasLayer(requestedLayer) -> requestedLayer
+            // Leaving a numeric editor has to undo the layer it forced on us;
+            // an editor with no request never overrides the user's own choice.
+            previousRequest != null -> "letters"
+            else -> null
+        }
+        if (targetLayer != null && targetLayer != keyboardLayer) {
+            setKeyboardLayer(targetLayer)
+            return
+        }
+        if (labelChanged) {
+            invalidateKeyboardLayoutCache()
+            invalidate()
+        }
+    }
 
     fun updateTheme(next: KeytaoImeTheme) {
         theme = next
@@ -384,6 +444,151 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             drawKeyboard(canvas)
         }
         drawFloatingInteractionHints(canvas)
+        refreshAccessibilityNodes()
+    }
+
+    // The keyboard is one self-drawn View, so a screen reader can only reach the
+    // keys through virtual nodes; they are backed by the very rectangles
+    // onTouchEvent hit-tests, and activating one runs the same command path.
+
+    private data class AccessibilityTarget(
+        val id: Int,
+        val label: String,
+        val rect: RectF,
+        val activate: () -> Unit,
+    )
+
+    private val accessibilityHelper = KeyboardAccessibilityHelper()
+    private val accessibilityManager: AccessibilityManager? = runCatching {
+        context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+    }.getOrNull()
+    private var accessibilityNodeSignature: String? = null
+
+    init {
+        ViewCompat.setAccessibilityDelegate(this, accessibilityHelper)
+        contentDescription = context.getString(R.string.keytao_keyboard_description)
+    }
+
+    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
+        return accessibilityHelper.dispatchHoverEvent(event) || super.dispatchHoverEvent(event)
+    }
+
+    private fun refreshAccessibilityNodes() {
+        if (accessibilityManager?.isEnabled != true) return
+        val signature = buildString {
+            append(keyboardLayer).append('|')
+            append(shiftState).append('|')
+            append(keyRects.size).append('|')
+            append(candidateRects.size).append('|')
+            append(expandedCandidateRects.size).append('|')
+            append(toolbarRects.size).append('|')
+            append(candidateExpandRect != null).append('|')
+            append(candidateSignature)
+        }
+        if (signature == accessibilityNodeSignature) return
+        accessibilityNodeSignature = signature
+        accessibilityHelper.invalidateRoot()
+    }
+
+    private fun accessibilityTargets(): List<AccessibilityTarget> {
+        val targets = mutableListOf<AccessibilityTarget>()
+        candidateExpandRect?.let { rect ->
+            targets.add(
+                AccessibilityTarget(accessibilityExpandNodeId, "展开候选", rect) { toggleCandidatePanel() }
+            )
+        }
+        toolbarRects.forEachIndexed { index, toolbar ->
+            targets.add(
+                AccessibilityTarget(
+                    accessibilityToolbarNodeBase + index,
+                    toolbar.label.ifBlank { toolbar.secondaryLabel.orEmpty() }.ifBlank { "工具栏按钮" },
+                    toolbar.rect,
+                ) { handleToolbarCommand(toolbar.command) }
+            )
+        }
+        candidateRects.forEachIndexed { index, candidate ->
+            targets.add(
+                AccessibilityTarget(
+                    accessibilityCandidateNodeBase + index,
+                    candidate.label.ifBlank { "候选 ${candidate.index + 1}" },
+                    candidate.rect,
+                ) { listener?.onCandidate(candidate.index, candidate.global) }
+            )
+        }
+        expandedCandidateRects.forEachIndexed { index, candidate ->
+            targets.add(
+                AccessibilityTarget(
+                    accessibilityExpandedNodeBase + index,
+                    candidate.label.ifBlank { "候选 ${candidate.index + 1}" },
+                    candidate.rect,
+                ) {
+                    val command = candidate.command
+                    if (command != null) {
+                        handlePanelCommand(command)
+                    } else {
+                        closeCandidatePanel()
+                        listener?.onCandidate(candidate.index, candidate.global)
+                    }
+                }
+            )
+        }
+        keyRects.forEachIndexed { index, key ->
+            targets.add(
+                AccessibilityTarget(
+                    accessibilityKeyNodeBase + index,
+                    displayLabel(key.spec).ifBlank { key.spec.label }.ifBlank { "按键" },
+                    key.rect,
+                ) { activateKey(key) }
+            )
+        }
+        return targets
+    }
+
+    private inner class KeyboardAccessibilityHelper : ExploreByTouchHelper(this@KeytaoKeyboardView) {
+        override fun getVirtualViewAt(x: Float, y: Float): Int {
+            return accessibilityTargets().firstOrNull { it.rect.contains(x, y) }?.id ?: HOST_ID
+        }
+
+        override fun getVisibleVirtualViews(virtualViewIds: MutableList<Int>) {
+            accessibilityTargets().forEach { virtualViewIds.add(it.id) }
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onPopulateNodeForVirtualView(
+            virtualViewId: Int,
+            node: AccessibilityNodeInfoCompat,
+        ) {
+            val target = accessibilityTargets().firstOrNull { it.id == virtualViewId }
+            if (target == null) {
+                node.contentDescription = ""
+                node.setBoundsInParent(Rect(0, 0, 1, 1))
+                return
+            }
+            node.className = Button::class.java.name
+            node.contentDescription = target.label
+            node.isEnabled = true
+            node.isClickable = true
+            node.addAction(AccessibilityNodeInfoCompat.ACTION_CLICK)
+            node.setBoundsInParent(
+                Rect(
+                    target.rect.left.roundToInt(),
+                    target.rect.top.roundToInt(),
+                    target.rect.right.roundToInt(),
+                    target.rect.bottom.roundToInt(),
+                )
+            )
+        }
+
+        override fun onPerformActionForVirtualView(
+            virtualViewId: Int,
+            action: Int,
+            arguments: Bundle?,
+        ): Boolean {
+            if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
+            val target = accessibilityTargets().firstOrNull { it.id == virtualViewId } ?: return false
+            target.activate()
+            return true
+        }
     }
 
     override fun onDetachedFromWindow() {
@@ -742,7 +947,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (rectRight <= x + dp(24f)) break
             val rect = RectF(x, candidateTop, rectRight, candidateTop + candidateHeight)
             drawCandidateOption(canvas, item, rect)
-            nextCandidateRects.add(CandidateRect(globalIndex, rect, global = true))
+            nextCandidateRects.add(CandidateRect(globalIndex, rect, global = true, label = item.text))
             nextVisibleGlobalIndexes.add(globalIndex)
             x = rect.right + gap
         }
@@ -839,7 +1044,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 val rect = RectF(x, y, x + chipWidth, y + rowHeight)
                 if (rect.bottom >= top && rect.top <= bottom) {
                     drawCandidateOption(canvas, item, rect)
-                    nextRects.add(CandidateRect(item.index, rect, item.global, item.command))
+                    nextRects.add(CandidateRect(item.index, rect, item.global, item.command, item.text))
                 }
                 contentBottom = max(contentBottom, rect.bottom + expandedCandidateScrollY)
                 x = rect.right + gap
@@ -877,7 +1082,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun rimePanelItems(): List<CandidateDrawItem> {
         val all = expandedCandidates
             .takeIf { it.isNotEmpty() }
-            ?: state.allCandidates.takeIf { it.isNotEmpty() }
             ?: state.candidates.map { candidate ->
                 candidate.copy(index = panelCandidateGlobalIndex(candidate.index))
             }
@@ -913,7 +1117,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append('|')
             val source = expandedCandidates
                 .takeIf { it.isNotEmpty() }
-                ?: state.allCandidates.takeIf { it.isNotEmpty() }
                 ?: state.candidates
             appendCandidateListSignature(source)
             if (functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD) {
@@ -944,13 +1147,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidateItemsCache = emptyList()
     }
 
-    private fun functionHomeItems(): List<CandidateDrawItem> = panelItems(
-        PanelItem("Rime", "方案/开关", KeyCommand.panel("rime")),
-        PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
-        PanelItem("Tab", "输入制表符", KeyCommand.edit("tab")),
-        PanelItem("行首", "移动光标", KeyCommand.edit("lineStart")),
-        PanelItem("行尾", "移动光标", KeyCommand.edit("lineEnd")),
-    )
+    private fun functionHomeItems(): List<CandidateDrawItem> {
+        val items = mutableListOf(
+            PanelItem("Rime", "方案/开关", KeyCommand.panel("rime")),
+            PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
+            PanelItem("Tab", "输入制表符", KeyCommand.edit("tab")),
+            PanelItem("行首", "移动光标", KeyCommand.edit("lineStart")),
+            PanelItem("行尾", "移动光标", KeyCommand.edit("lineEnd")),
+        )
+        // supportsSwitchingToNextInputMethod is declared in the IME metadata, so
+        // the keyboard has to offer a way out when the framework says one exists.
+        if (inputMethodSwitchingAvailable) {
+            items.add(
+                PanelItem("切换输入法", "下一个输入法", KeyCommand(KeyCommandTypes.NEXT_INPUT_METHOD))
+            )
+        }
+        items.add(PanelItem("输入法列表", "系统选择器", KeyCommand(KeyCommandTypes.KEYBOARD_PICKER)))
+        return panelItems(*items.toTypedArray())
+    }
 
     private fun selectionPanelItems(): List<CandidateDrawItem> = panelItems(
         PanelItem("多选", "开始/结束", KeyCommand.edit("toggleSelection")),
@@ -1680,6 +1894,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (key.action.type == KeyCommandTypes.SHIFT) {
             return if (shiftState == ShiftState.LOCKED) "⇪" else key.label
         }
+        if (key.action.type == KeyCommandTypes.ENTER) {
+            enterLabelOverride?.let { return it }
+        }
         if (key.action.type == KeyCommandTypes.SPACE) {
             return state.schemaName.ifBlank { key.label }
         }
@@ -2177,9 +2394,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return min(requested, available)
     }
 
+    /** Same rule as the service: the system inset is the floor, config is extra. */
     private fun effectiveKeyboardBottomInsetDp(): Int {
         if (keyboardLayoutMode == KeyboardLayoutMode.FLOATING) return 0
-        return config.keyboardBottomInsetDp.takeIf { it > 0 } ?: androidSystemBottomInsetDp
+        val system = if (systemBottomInsetDp >= 0) systemBottomInsetDp else androidSystemBottomInsetDp
+        return max(system, config.keyboardBottomInsetDp)
     }
 
     private fun toggleCandidatePanel() {
@@ -2278,14 +2497,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
         if (!canRequestExpandedCandidates()) {
             expandedCandidatesLoading = false
-            return
-        }
-
-        state.allCandidates.takeIf { it.isNotEmpty() }?.let { candidates ->
-            expandedCandidates = candidates
-            expandedCandidatesLoading = false
-            coerceExpandedCandidateScroll()
-            invalidate()
             return
         }
 
@@ -2511,13 +2722,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             return true
         }
         if (shouldAcceptKeyRelease(touch, x, y) && !touch.longPressConsumed) {
-            val command = resolveCommand(touch.key.spec, y - touch.downY, touch.key.rect, y)
-            performConfiguredHaptic()
-            clearRecentClipboardSuggestionForCommand(command)
-            listener?.onKeyCommand(command)
-            clearOneShotShiftAfter(command)
+            activateKey(touch.key, y - touch.downY, y)
         }
         return true
+    }
+
+    private fun activateKey(key: KeyRect, deltaY: Float = 0f, releaseY: Float? = null) {
+        val command = resolveCommand(key.spec, deltaY, key.rect, releaseY)
+        performConfiguredHaptic(soundEffect = keySoundEffect(command))
+        clearRecentClipboardSuggestionForCommand(command)
+        listener?.onKeyCommand(command)
+        clearOneShotShiftAfter(command)
     }
 
     private fun clearActiveKeyTouches() {
@@ -2578,7 +2793,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val action = if (deltaUnits > 0) "delete" else "restore"
         listener?.onKeyCommand(backspaceGestureCommand(action, abs(deltaUnits)))
         touch.backspaceGestureUnits = targetUnits
-        if (!final) performConfiguredHaptic()
+        if (!final) performConfiguredHaptic(soundEffect = AudioManager.FX_KEYPRESS_DELETE)
         return true
     }
 
@@ -2592,7 +2807,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
 
         listener?.onKeyCommand(backspaceGestureCommand(if (deltaY < 0f) "deleteAll" else "restoreAll"))
-        performConfiguredHaptic(strong = true)
+        performConfiguredHaptic(strong = true, soundEffect = AudioManager.FX_KEYPRESS_DELETE)
         return true
     }
 
@@ -2890,21 +3105,62 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return -(paint.descent() + paint.ascent()) / 2f
     }
 
-    private fun performConfiguredHaptic(strong: Boolean = false) {
-        if (!config.hapticsEnabled) return
-        val deviceVibrator = vibrator ?: return
-        if (!deviceVibrator.hasVibrator()) return
+    /**
+     * Key feedback has to follow the system switches, not only our own config:
+     * "touch vibration" and "keypress sound" in Settings apply to every keyboard,
+     * and a raw `Vibrator.vibrate` runs with USAGE_UNKNOWN, which bypasses them.
+     */
+    private fun performConfiguredHaptic(
+        strong: Boolean = false,
+        soundEffect: Int = AudioManager.FX_KEYPRESS_STANDARD,
+    ) {
+        performConfiguredVibration(strong)
+        playConfiguredKeySound(soundEffect)
+    }
+
+    private fun performConfiguredVibration(strong: Boolean) {
+        if (!config.hapticsEnabled || !systemSettingEnabled(Settings.System.HAPTIC_FEEDBACK_ENABLED)) {
+            return
+        }
+        val deviceVibrator = vibrator
+        if (deviceVibrator == null || !deviceVibrator.hasVibrator()) {
+            performHapticFeedback(
+                if (strong) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.KEYBOARD_TAP
+            )
+            return
+        }
         val scaled = (config.hapticIntensity * if (strong) 3.0f else 2.55f).roundToInt()
         val amplitude = scaled.coerceIn(1, 255)
         val durationMs = if (strong) 18L else 8L
         runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                deviceVibrator.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+            val effect = VibrationEffect.createOneShot(durationMs, amplitude)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                deviceVibrator.vibrate(
+                    effect,
+                    VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH),
+                )
             } else {
-                @Suppress("DEPRECATION")
-                deviceVibrator.vibrate(durationMs)
+                deviceVibrator.vibrate(effect)
             }
         }
+    }
+
+    private fun playConfiguredKeySound(soundEffect: Int) {
+        if (!systemSettingEnabled(Settings.System.SOUND_EFFECTS_ENABLED)) return
+        runCatching { audioManager?.playSoundEffect(soundEffect) }
+    }
+
+    private fun systemSettingEnabled(name: String): Boolean {
+        return runCatching {
+            Settings.System.getInt(context.contentResolver, name, 1) != 0
+        }.getOrDefault(true)
+    }
+
+    private fun keySoundEffect(command: KeyCommand): Int = when (command.type) {
+        KeyCommandTypes.BACKSPACE, KeyCommandTypes.BACKSPACE_GESTURE -> AudioManager.FX_KEYPRESS_DELETE
+        KeyCommandTypes.ENTER -> AudioManager.FX_KEYPRESS_RETURN
+        KeyCommandTypes.SPACE -> AudioManager.FX_KEYPRESS_SPACEBAR
+        else -> AudioManager.FX_KEYPRESS_STANDARD
     }
 
     private fun dp(value: Int): Float = dp(value.toFloat())
@@ -2932,6 +3188,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val contentTransitionDurationMs = 140L
         private const val expandedCandidateLoadDelayMs = 180L
         private const val androidSystemBottomInsetDp = 48
+
+        /** Virtual accessibility node id ranges, one block per hit-test list. */
+        private const val accessibilityExpandNodeId = 1
+        private const val accessibilityToolbarNodeBase = 1_000
+        private const val accessibilityCandidateNodeBase = 2_000
+        private const val accessibilityExpandedNodeBase = 3_000
+        private const val accessibilityKeyNodeBase = 4_000
         private val whitespaceRegex = Regex("\\s+")
         private val emojiChoices = listOf(
             "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",

@@ -3,6 +3,9 @@ package ink.rea.keytao_app
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeytaoEditorPolicyTest {
@@ -117,6 +120,202 @@ class KeytaoEditorPolicyTest {
         assertEquals(
             listOf(TextUnitRange(0, 2), TextUnitRange(2, 4)),
             ranges,
+        )
+    }
+
+    @Test
+    fun `password editors lose composition, clipboard and learning`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+            imeOptions = EditorInfo.IME_ACTION_DONE,
+        )
+
+        assertFalse(mode.allowsComposing)
+        assertFalse(mode.allowsLearning)
+        assertFalse(mode.allowsClipboard)
+        assertFalse(mode.allowsTextRecall)
+    }
+
+    @Test
+    fun `numeric password variant counts as a password editor`() {
+        assertTrue(
+            KeytaoEditorPolicy.isPasswordEditor(
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            )
+        )
+    }
+
+    @Test
+    fun `incognito editors lose composing because that is the only way to stop learning`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_TEXT,
+            imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING,
+        )
+
+        assertFalse(mode.allowsComposing)
+        assertFalse(mode.allowsLearning)
+        assertFalse(mode.allowsClipboard)
+    }
+
+    @Test
+    fun `no suggestions editors lose composing so nothing reaches the user dictionary`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            imeOptions = EditorInfo.IME_ACTION_NONE,
+        )
+
+        assertFalse(mode.allowsComposing)
+        assertFalse(mode.allowsLearning)
+    }
+
+    @Test
+    fun `a no suggestions flag outside a text editor changes nothing`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            imeOptions = EditorInfo.IME_ACTION_NONE,
+        )
+
+        assertTrue(mode.allowsComposing)
+        assertTrue(mode.allowsLearning)
+    }
+
+    @Test
+    fun `ordinary text editors keep every capability`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_TEXT,
+            imeOptions = EditorInfo.IME_ACTION_SEARCH,
+        )
+
+        assertTrue(mode.allowsComposing)
+        assertTrue(mode.allowsLearning)
+        assertTrue(mode.allowsClipboard)
+        assertTrue(mode.allowsTextRecall)
+    }
+
+    @Test
+    fun `numeric editors ask for the digits layer and direct input`() {
+        assertEquals("numbers", KeytaoEditorPolicy.resolveInitialLayer(InputType.TYPE_CLASS_PHONE))
+        assertEquals("numbers", KeytaoEditorPolicy.resolveInitialLayer(InputType.TYPE_CLASS_NUMBER))
+        assertTrue(KeytaoEditorPolicy.isDirectInputEditor(InputType.TYPE_CLASS_DATETIME))
+        assertNull(KeytaoEditorPolicy.resolveInitialLayer(InputType.TYPE_CLASS_TEXT))
+        assertFalse(KeytaoEditorPolicy.isDirectInputEditor(InputType.TYPE_CLASS_TEXT))
+    }
+
+    @Test
+    fun `enter label follows the declared action`() {
+        assertEquals(
+            "搜索",
+            KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = InputType.TYPE_CLASS_TEXT,
+                imeOptions = EditorInfo.IME_ACTION_SEARCH,
+                actionLabel = null,
+                forceNewline = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `enter label prefers the editor supplied label`() {
+        assertEquals(
+            "去支付",
+            KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = InputType.TYPE_CLASS_TEXT,
+                imeOptions = EditorInfo.IME_ACTION_GO,
+                actionLabel = " 去支付 ",
+                forceNewline = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `multiline editors keep the layout label`() {
+        assertNull(
+            KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+                imeOptions = EditorInfo.IME_ACTION_SEND,
+                actionLabel = null,
+                forceNewline = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `an editor without an action never inherits a layout action word`() {
+        assertEquals(
+            "↵",
+            KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = InputType.TYPE_CLASS_NUMBER,
+                imeOptions = EditorInfo.IME_ACTION_NONE,
+                actionLabel = null,
+                forceNewline = false,
+            ),
+        )
+        assertEquals(
+            "↵",
+            KeytaoEditorPolicy.resolveEnterLabel(
+                inputType = InputType.TYPE_CLASS_TEXT,
+                imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_ENTER_ACTION,
+                actionLabel = "发送",
+                forceNewline = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `a caret at the end of the preedit needs no explicit selection`() {
+        assertNull(
+            KeytaoEditorPolicy.resolveComposingCaret(
+                preeditCharCount = 3,
+                cursor = 3,
+                selStart = 0,
+                selEnd = 3,
+            )
+        )
+    }
+
+    @Test
+    fun `a caret inside the preedit is reported in scalar offsets`() {
+        assertEquals(
+            1,
+            KeytaoEditorPolicy.resolveComposingCaret(
+                preeditCharCount = 3,
+                cursor = 1,
+                selStart = 1,
+                selEnd = 3,
+            )
+        )
+    }
+
+    @Test
+    fun `an out of range cursor falls back to a collapsed selection`() {
+        assertEquals(
+            2,
+            KeytaoEditorPolicy.resolveComposingCaret(
+                preeditCharCount = 4,
+                cursor = -1,
+                selStart = 2,
+                selEnd = 2,
+            )
+        )
+        assertNull(
+            KeytaoEditorPolicy.resolveComposingCaret(
+                preeditCharCount = 4,
+                cursor = 9,
+                selStart = 0,
+                selEnd = 4,
+            )
+        )
+    }
+
+    @Test
+    fun `an empty preedit never asks for a selection`() {
+        assertNull(
+            KeytaoEditorPolicy.resolveComposingCaret(
+                preeditCharCount = 0,
+                cursor = 0,
+                selStart = 0,
+                selEnd = 0,
+            )
         )
     }
 

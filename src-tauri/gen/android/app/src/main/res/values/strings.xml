@@ -3,4 +3,8 @@
     <string name="main_activity_title">KeyTao</string>
     <string name="keytao_ime_name">KeyTao 输入法</string>
     <string name="keytao_ime_subtype_zh">中文</string>
+    <string name="keytao_deploy_channel_name">方案部署</string>
+    <string name="keytao_deploy_notification_title">KeyTao 正在部署方案</string>
+    <string name="keytao_deploy_notification_text">正在编译词库，请勿关闭 KeyTao</string>
+    <string name="keytao_keyboard_description">KeyTao 软键盘</string>
 </resources>

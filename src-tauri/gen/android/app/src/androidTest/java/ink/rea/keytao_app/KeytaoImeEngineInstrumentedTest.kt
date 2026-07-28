@@ -9,20 +9,39 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.MethodSorters
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * Fixed order because the cases share one user directory: the composition case
+ * installs and deploys, the source-only case then drops the build output again.
+ * Name ordering runs them in exactly that sequence.
+ */
 @RunWith(AndroidJUnit4::class)
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class KeytaoImeEngineInstrumentedTest {
     @Test
     fun sourceOnlyInstallDoesNotDeployOnEnsureReady() {
         val context = ApplicationProvider.getApplicationContext<Context>()
+        // A fresh install has an empty user directory — installing a scheme is a
+        // user action in the app, never something the IME does. Reproduce the
+        // post-install state here; gating is all this case needs, so a synthetic
+        // package is enough when no real one is around.
+        val source = KeytaoSchemaFixture.install(context, allowSynthetic = true)
+        assertTrue(
+            "test fixture should install a schema source (${KeytaoSchemaFixture.missingPackageHint()})",
+            source != KeytaoSchemaFixture.Source.NONE,
+        )
         val engine = KeytaoImeEngine(context)
         try {
+            // Source-only means no build output, whatever an earlier case left behind.
+            assertTrue("build output should be removable", KeytaoAndroidPaths.invalidateDeployment(engine.userDir))
             assertTrue("schema source should be installed in ${engine.userDir}", engine.hasInstalledSchema())
             assertFalse("schema should not be deployed before this check", engine.hasDeployedSchema())
             assertFalse("ensureReady must not run full deploy on IME hot path", engine.ensureReady())
@@ -48,10 +67,14 @@ class KeytaoImeEngineInstrumentedTest {
         assertFalse("input argument is required", input.isBlank())
 
         val context = ApplicationProvider.getApplicationContext<Context>()
+        // Real candidates need a real package, so no synthetic fallback here.
+        val source = KeytaoSchemaFixture.install(context, allowSynthetic = false)
+        assumeTrue(KeytaoSchemaFixture.missingPackageHint(), source != KeytaoSchemaFixture.Source.NONE)
+
         val engine = KeytaoImeEngine(context)
         try {
             assertTrue("native bridge should load", KeytaoNativeBridge.loaded)
-            assertTrue("schema should be installed in ${engine.userDir}", engine.hasInstalledSchema())
+            assertTrue("schema should be installed in ${engine.userDir} (from $source)", engine.hasInstalledSchema())
             if (deployBeforeTest) {
                 assertTrue("engine should deploy schema data", engine.deployNow())
             } else {
@@ -72,7 +95,7 @@ class KeytaoImeEngineInstrumentedTest {
                 state = engine.processKey(key!!.keyCode, key.modifiers)
             }
 
-            val candidates = state.allCandidates.ifEmpty { state.candidates }
+            val candidates = engine.allCandidates(96).ifEmpty { state.candidates }
             val candidateTexts = candidates.map { it.text }
             Log.i(
                 tag,
@@ -98,7 +121,7 @@ class KeytaoImeEngineInstrumentedTest {
         assumeTrue("fixtureRoot argument is required", fixtureRootPath.isNotBlank())
 
         val fixtureRoot = File(fixtureRootPath)
-        val userRoot = KeytaoAndroidPaths.userRoot()
+        val userRoot = KeytaoAndroidPaths.userRoot(ApplicationProvider.getApplicationContext<Context>())
         assertTrue("fixture root should exist: $fixtureRoot", fixtureRoot.isDirectory)
         userRoot.listFiles().orEmpty().forEach(File::deleteRecursively)
 
@@ -155,7 +178,7 @@ class KeytaoImeEngineInstrumentedTest {
             assertTrue("unsupported key: $char", key != null)
             state = engine.processKey(key!!.keyCode, key.modifiers)
         }
-        val candidates = state.allCandidates.ifEmpty { state.candidates }.map { it.text }
+        val candidates = engine.allCandidates(96).ifEmpty { state.candidates }.map { it.text }
         Log.i(tag, "fixture=${case.fixture}, schema=${state.schemaName}, candidates=$candidates")
         assertEquals(case.schemaName, state.schemaName)
         assertTrue("expected ${case.candidate} in $candidates", candidates.contains(case.candidate))
