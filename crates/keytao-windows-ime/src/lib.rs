@@ -16,7 +16,9 @@
 mod candidate_ui;
 mod candidate_win;
 mod display_attribute;
+mod edit_session;
 mod globals;
+mod input_context;
 mod key_event_sink;
 mod key_map;
 mod language_bar;

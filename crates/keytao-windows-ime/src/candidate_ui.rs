@@ -222,11 +222,11 @@ impl CandidateUiManager {
             self.ui_element_mgr = Some(ui_element_mgr);
         }
 
-        if !self.host_allows_window {
-            if let (Some(manager), Some(element_id)) = (&self.ui_element_mgr, self.ui_element_id) {
-                unsafe {
-                    let _ = manager.UpdateUIElement(element_id);
-                }
+        // `pbShow=TRUE` only means the TIP may draw its own window; the advised
+        // ITfUIElementSinks (accessibility, automation) still need every change.
+        if let (Some(manager), Some(element_id)) = (&self.ui_element_mgr, self.ui_element_id) {
+            unsafe {
+                let _ = manager.UpdateUIElement(element_id);
             }
         }
 

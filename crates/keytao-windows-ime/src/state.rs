@@ -2,7 +2,7 @@
 
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
-    WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
+    InputContextPolicy, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
@@ -12,9 +12,11 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::{
-    core::{implement, Interface, PCWSTR},
+    core::{Interface, PCWSTR},
     Win32::{
-        Foundation::{CloseHandle, FreeLibrary, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0},
+        Foundation::{
+            CloseHandle, FreeLibrary, HANDLE, HMODULE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0,
+        },
         System::LibraryLoader::{
             LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
             LOAD_LIBRARY_SEARCH_SYSTEM32,
@@ -22,21 +24,34 @@ use windows::{
         System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
-            ITfComposition, ITfContext, ITfDocumentMgr, ITfEditSession, ITfEditSession_Impl,
-            ITfKeyEventSink, ITfThreadFocusSink, ITfThreadMgr, ITfThreadMgrEventSink,
-            GUID_PROP_ATTRIBUTE, TF_CONTEXT_EDIT_CONTEXT_FLAGS, TF_ES_ASYNC, TF_ES_READWRITE,
-            TF_TMAE_UIELEMENTENABLEDONLY, TF_TMF_UIELEMENTENABLEDONLY,
+            ITfComposition, ITfContext, ITfContextOwnerCompositionServices, ITfDocumentMgr,
+            ITfKeyEventSink, ITfSource, ITfTextLayoutSink, ITfThreadFocusSink, ITfThreadMgr,
+            ITfThreadMgrEventSink, GUID_PROP_ATTRIBUTE, TF_TMAE_UIELEMENTENABLEDONLY,
+            TF_TMF_UIELEMENTENABLEDONLY,
         },
     },
 };
 
 use crate::{
-    candidate_ui::CandidateUiManager, globals::DllActivityGuard, language_bar::LanguageBarItem,
+    candidate_ui::CandidateUiManager,
+    edit_session::with_write_session,
+    globals::DllActivityGuard,
+    input_context::{inspect_context, ContextInputState},
+    language_bar::LanguageBarItem,
 };
 
-const RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
+/// How often the key path may stat the reload stamp. Focus changes always
+/// force a fresh read, so a schema update is still picked up before the first
+/// key of the next focus; this only keeps typing off the file system.
+const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How soon a context whose probes came back `Unknown` may be inspected again
+/// from the key path. An unanswered probe fails closed, so without a retry a
+/// single refused read session would keep the field in pass-through until the
+/// next focus change; inspecting costs a synchronous read session, so a host
+/// that never grants one must not get one request per keystroke.
+const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
 
 // ── Shared TsfState ───────────────────────────────────────────────────────────
@@ -71,17 +86,67 @@ pub struct TsfState {
     pub reload_in_progress: bool,
     pub reload_clear_pending: bool,
     reload_retry_after: Option<Instant>,
+    reload_stamp_checked_at: Option<Instant>,
+    reload_stamp_changed: bool,
     pub shift_pressed_without_key: bool,
     session_reset_pending: bool,
+    /// What TSF says about the focused context (password field, disabled
+    /// keyboard, empty context). Refreshed on focus changes.
+    pub input_context: ContextInputState,
+    /// Cached `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`. A closed keyboard passes
+    /// every keystroke through unaltered.
+    pub keyboard_open: bool,
+    /// Whether the running session already runs with the sensitive policy;
+    /// `None` after an engine (re)build, so the policy is pushed again.
+    input_policy_applied: Option<bool>,
+    /// Earliest instant at which an unanswered `input_context` probe may be
+    /// retried. Cleared by every inspection, so a fresh context is probed at
+    /// once and only a repeatedly failing one is throttled.
+    input_context_retry_after: Option<Instant>,
+    /// Context of the last key event, used by candidate-window clicks which
+    /// arrive outside any TSF callback.
+    pub key_context: Option<ITfContext>,
+    /// Last caret position the host reported. Reused while the layout is not
+    /// computed yet (`TF_E_NOLAYOUT`) so the panel never jumps to a corner.
+    pub last_caret: Option<CaretPosition>,
+    layout_sink: Option<LayoutSinkRegistration>,
+    compartment_sinks: Vec<CompartmentSinkRegistration>,
+    /// Sinks on the focused context's `KEYBOARD_DISABLED` / `EMPTYCONTEXT`
+    /// compartments. Unlike the thread-manager ones these live on the context,
+    /// so they are re-advised whenever the focus moves.
+    context_compartment_sinks: Vec<CompartmentSinkRegistration>,
+    /// The context `context_compartment_sinks` are advised on.
+    context_sink_context: Option<ITfContext>,
     engine_build_mailbox: Arc<EngineBuildMailbox>,
     reload_mailbox: Arc<EngineBuildMailbox>,
+}
+
+/// Caret position in screen coordinates plus the window the candidate popup is
+/// owned by.
+#[derive(Clone, Copy)]
+pub struct CaretPosition {
+    pub x: i32,
+    pub y: i32,
+    pub owner_hwnd: HWND,
+}
+
+pub(crate) struct LayoutSinkRegistration {
+    pub(crate) source: ITfSource,
+    pub(crate) cookie: u32,
+    pub(crate) sink: ITfTextLayoutSink,
+    pub(crate) context: ITfContext,
+}
+
+pub(crate) struct CompartmentSinkRegistration {
+    pub(crate) source: ITfSource,
+    pub(crate) cookie: u32,
 }
 
 pub(crate) struct EngineBundle {
     runtime: ImeRuntime,
     session: ImeRuntimeSession,
     reload_stamp_path: PathBuf,
-    reload_stamp_signature: String,
+    reload_stamp_signature: Option<String>,
     rime_dll: Option<LoadedRimeDll>,
 }
 
@@ -114,26 +179,6 @@ impl EngineBuildMailbox {
 struct LoadedRimeDll(HMODULE);
 
 struct EngineInitGuard(HANDLE);
-
-#[implement(ITfEditSession)]
-struct CompositionEndEditSession {
-    context: ITfContext,
-    composition: ITfComposition,
-    _dll_guard: DllActivityGuard,
-}
-
-impl ITfEditSession_Impl for CompositionEndEditSession_Impl {
-    fn DoEditSession(&self, edit_cookie: u32) -> windows::core::Result<()> {
-        unsafe {
-            let range = self.composition.GetRange()?;
-            if let Ok(property) = self.context.GetProperty(&GUID_PROP_ATTRIBUTE) {
-                let _ = property.Clear(edit_cookie, &range);
-            }
-            range.SetText(edit_cookie, 0, &[])?;
-            self.composition.EndComposition(edit_cookie)
-        }
-    }
-}
 
 // SAFETY: The handle is retained only to keep the lazily loaded module alive
 // while the TSF text service owns the librime runtime. It is not dereferenced.
@@ -202,7 +247,7 @@ impl TsfState {
             composition_context: None,
             ime_state: None,
             candidate_win: crate::candidate_win::CandidateWindow::new(),
-            mode_hint_win: crate::candidate_win::CandidateWindow::new(),
+            mode_hint_win: crate::candidate_win::CandidateWindow::new_mode_hint(),
             candidate_ui: Some(CandidateUiManager::new()),
             ascii_mode: false,
             reload_stamp_path: None,
@@ -210,8 +255,20 @@ impl TsfState {
             reload_in_progress: false,
             reload_clear_pending: false,
             reload_retry_after: None,
+            reload_stamp_checked_at: None,
+            reload_stamp_changed: false,
             shift_pressed_without_key: false,
             session_reset_pending: false,
+            input_context: ContextInputState::default(),
+            keyboard_open: true,
+            input_policy_applied: None,
+            input_context_retry_after: None,
+            key_context: None,
+            last_caret: None,
+            layout_sink: None,
+            compartment_sinks: Vec::new(),
+            context_compartment_sinks: Vec::new(),
+            context_sink_context: None,
             engine_build_mailbox: Arc::new(EngineBuildMailbox::new()),
             reload_mailbox: Arc::new(EngineBuildMailbox::new()),
         }
@@ -222,11 +279,11 @@ impl TsfState {
         let user_dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
         let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
         let rime_dll = preload_rime_dll(&shared)?;
-        let reload_stamp_path = user_dir.join(RELOAD_STAMP_FILE);
+        let reload_stamp_path = ReloadStamp::path(&user_dir);
         let runtime = ImeRuntime::with_dirs(user_dir, shared);
         runtime.init_without_deploy()?;
         let session = runtime.create_session()?;
-        let reload_stamp_signature = reload_stamp_signature(&reload_stamp_path);
+        let reload_stamp_signature = ReloadStamp::signature_at(&reload_stamp_path);
         Ok(EngineBundle {
             runtime,
             session,
@@ -239,9 +296,13 @@ impl TsfState {
     pub(crate) fn install_engine(&mut self, bundle: EngineBundle) {
         self.runtime = Some(bundle.runtime);
         self.session = Some(bundle.session);
-        self.reload_stamp_signature = Some(bundle.reload_stamp_signature);
+        self.reload_stamp_signature = bundle.reload_stamp_signature;
         self.reload_stamp_path = Some(bundle.reload_stamp_path);
         self.rime_dll = bundle.rime_dll;
+        self.invalidate_reload_stamp_cache();
+        // A fresh session starts with the default policy, so the sensitive
+        // policy of the focused context has to be pushed again.
+        self.input_policy_applied = None;
         if self.ascii_mode {
             self.ime_state = self
                 .session
@@ -311,8 +372,33 @@ impl TsfState {
         let Some(path) = &self.reload_stamp_path else {
             return false;
         };
-        let signature = reload_stamp_signature(path);
+        // A missing stamp is not a reload request, matching ReloadStampWatcher.
+        let Some(signature) = ReloadStamp::signature_at(path) else {
+            return false;
+        };
         self.reload_stamp_signature.as_deref() != Some(signature.as_str())
+    }
+
+    /// `reload_needed` for the key path: stats the stamp at most every
+    /// `RELOAD_STAMP_POLL_INTERVAL` and answers from the cache in between.
+    pub(crate) fn reload_needed_cached(&mut self) -> bool {
+        if self.reload_in_progress {
+            return true;
+        }
+        let now = Instant::now();
+        if let Some(checked_at) = self.reload_stamp_checked_at {
+            if now.duration_since(checked_at) < RELOAD_STAMP_POLL_INTERVAL {
+                return self.reload_stamp_changed;
+            }
+        }
+        self.reload_stamp_checked_at = Some(now);
+        self.reload_stamp_changed = self.reload_needed();
+        self.reload_stamp_changed
+    }
+
+    pub(crate) fn invalidate_reload_stamp_cache(&mut self) {
+        self.reload_stamp_checked_at = None;
+        self.reload_stamp_changed = false;
     }
 
     pub(crate) fn finish_reload(&mut self, bundle: Result<EngineBundle, String>) {
@@ -470,10 +556,17 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
 
 pub(crate) fn poll_engine_builds(shared_state: &SharedState) {
     shared_state.borrow_mut().poll_engine_builds();
+    // A background build installs a session long after the focus change that
+    // decided the policy, and `install_engine` clears the applied marker so this
+    // pushes it onto the new session. It cannot wait for the key path: a
+    // sensitive context never gets that far, so the session would keep composing
+    // permissions it must not have.
+    sync_input_policy(shared_state);
 }
 
 pub(crate) fn refresh_engine_for_focus(shared_state: &SharedState) {
     poll_engine_builds(shared_state);
+    shared_state.borrow_mut().invalidate_reload_stamp_cache();
     if shared_state.borrow().engine_ready() {
         start_reload_if_needed(shared_state);
     } else {
@@ -492,6 +585,327 @@ pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) {
     if let Some(session) = session {
         let ime_state = session.reset();
         shared_state.borrow_mut().ime_state = ime_state;
+    }
+}
+
+/// Push the input policy of the focused context onto the running session.
+///
+/// Runs on the key path too: the engine is built in the background and may
+/// only become ready after the focus change that decided the policy.
+pub(crate) fn sync_input_policy(shared_state: &SharedState) {
+    let (session, sensitive, applied) = {
+        let st = shared_state.borrow();
+        (
+            st.session(),
+            st.input_context.is_sensitive(),
+            st.input_policy_applied,
+        )
+    };
+    if applied == Some(sensitive) {
+        return;
+    }
+    let Some(session) = session else {
+        return;
+    };
+    let policy = if sensitive {
+        InputContextPolicy::sensitive()
+    } else {
+        InputContextPolicy::default()
+    };
+    // Turning composing off discards whatever librime was holding; the cached
+    // state has to go with it so nothing is drawn for the sensitive context.
+    let _ = session.set_input_policy(policy);
+    let mut st = shared_state.borrow_mut();
+    st.input_policy_applied = Some(sensitive);
+    if sensitive {
+        st.ime_state = None;
+    }
+}
+
+/// Re-read what TSF declares about the focused context and stop composing when
+/// it is a password field, a disabled keyboard or an empty context.
+///
+/// Also moves the `KEYBOARD_DISABLED` / `EMPTYCONTEXT` sinks onto the context
+/// that was just inspected, so a host that revokes the keyboard later on is
+/// heard without waiting for the next focus change.
+pub(crate) fn refresh_input_context(shared_state: &SharedState, context: Option<&ITfContext>) {
+    let (thread_mgr, client_id) = {
+        let st = shared_state.borrow();
+        (st.thread_mgr.clone(), st.client_id)
+    };
+    let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
+    crate::text_service::advise_context_compartment_sinks(shared_state, context.as_ref());
+    let inspected = inspect_context(thread_mgr.as_ref(), context.as_ref(), client_id);
+    if apply_input_context_state(shared_state, inspected) {
+        // Ends a composition that may still be on screen as well as hiding the
+        // UI. Every caller happens to reset first today, but a context that
+        // turned out sensitive must not depend on that to stop showing preedit.
+        reset_input_for_focus_change(shared_state);
+    }
+}
+
+/// Store a freshly inspected context state and push the matching policy.
+/// Returns whether the context turned out to be sensitive.
+///
+/// Takes the state rather than inspecting itself: the compartment sink refreshes
+/// only the two compartments, while a focus change re-runs the input-scope probe
+/// as well.
+fn apply_input_context_state(shared_state: &SharedState, input_context: ContextInputState) -> bool {
+    let sensitive = input_context.is_sensitive();
+    {
+        let mut st = shared_state.borrow_mut();
+        st.input_context = input_context;
+        // A fresh answer re-arms the throttle: the next failure gets an
+        // immediate retry rather than inheriting an old deadline.
+        st.input_context_retry_after = None;
+        st.keyboard_open = crate::input_context::keyboard_is_open(st.thread_mgr.as_ref());
+    }
+    sync_input_policy(shared_state);
+    sensitive
+}
+
+/// Inspect the context again when the last attempt could not answer.
+///
+/// Runs from the key callbacks. `ContextProbe::Unknown` fails closed, which is
+/// right for the keystroke at hand but would strand an ordinary text field in
+/// pass-through forever if the refusal was momentary — hosts routinely refuse a
+/// synchronous read session while the document is locked.
+pub(crate) fn retry_input_context_if_unknown(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+) {
+    let due = {
+        let st = shared_state.borrow();
+        input_context_retry_due(
+            st.input_context.needs_retry(),
+            st.client_id,
+            st.input_context_retry_after,
+            Instant::now(),
+        )
+    };
+    if !due {
+        return;
+    }
+    refresh_input_context(shared_state, context);
+    // Set after the inspection: it clears the field, and a still-unanswered
+    // probe has to wait before costing another edit session.
+    shared_state.borrow_mut().input_context_retry_after =
+        Some(Instant::now() + INPUT_CONTEXT_RETRY_INTERVAL);
+}
+
+/// Whether an unanswered context probe may be inspected again.
+///
+/// A context that answered is left alone, an inspection without a client id
+/// cannot open the read session it needs, and a deadline in the future means
+/// the previous attempt just failed.
+fn input_context_retry_due(
+    needs_retry: bool,
+    client_id: u32,
+    retry_after: Option<Instant>,
+    now: Instant,
+) -> bool {
+    needs_retry && client_id != 0 && retry_after.is_none_or(|deadline| now >= deadline)
+}
+
+/// A `KEYBOARD_DISABLED` / `EMPTYCONTEXT` compartment on the focused context
+/// changed.
+///
+/// The host may have done this while a composition was already on screen, so a
+/// context that just became sensitive has its preedit, candidate window and
+/// native composition torn down here rather than at the next focus change.
+pub(crate) fn apply_context_compartment_change(shared_state: &SharedState) {
+    let (thread_mgr, context, previous) = {
+        let st = shared_state.borrow();
+        (
+            st.thread_mgr.clone(),
+            st.context_sink_context.clone(),
+            st.input_context,
+        )
+    };
+    let refreshed = crate::input_context::refresh_context_compartments(
+        thread_mgr.as_ref(),
+        context.as_ref(),
+        previous,
+    );
+    let sensitive = apply_input_context_state(shared_state, refreshed);
+    if sensitive && !previous.is_sensitive() {
+        // Ends the composition through a queued write session; the document is
+        // very likely still locked underneath this callback.
+        reset_input_for_focus_change(shared_state);
+    }
+}
+
+/// Drop whatever is still on screen for a context that has just been blocked.
+///
+/// Safe to call from `OnTestKeyDown` / `OnTestKeyUp`: the composition is ended
+/// through a queued write session, never inside the callback, and the early
+/// return keeps the common "blocked and nothing to clean" case free.
+pub(crate) fn clear_input_for_blocked_context(shared_state: &SharedState) {
+    let has_input = {
+        let st = shared_state.borrow();
+        st.composition.is_some() || st.ime_state.is_some()
+    };
+    if !has_input {
+        return;
+    }
+    reset_input_for_focus_change(shared_state);
+}
+
+pub(crate) fn set_keyboard_open_state(shared_state: &SharedState, open: bool) {
+    shared_state.borrow_mut().keyboard_open = open;
+    if !open {
+        reset_input_for_focus_change(shared_state);
+    }
+}
+
+/// Declare the thread compartments a keyboard TIP owns: the keyboard is open
+/// and, unless the user already switched, in native (Chinese) conversion mode.
+pub(crate) fn publish_initial_compartments(shared_state: &SharedState) {
+    let (thread_mgr, client_id, ascii_mode) = {
+        let st = shared_state.borrow();
+        (st.thread_mgr.clone(), st.client_id, st.ascii_mode)
+    };
+    crate::input_context::set_keyboard_open(thread_mgr.as_ref(), client_id, true);
+    shared_state.borrow_mut().keyboard_open = true;
+    update_language_bar_mode(shared_state, ascii_mode);
+}
+
+/// `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` changed (system Ctrl+Space, the input
+/// indicator). A closed keyboard stops composing and passes keys through.
+pub(crate) fn apply_open_close_change(shared_state: &SharedState) {
+    let (thread_mgr, current) = {
+        let st = shared_state.borrow();
+        (st.thread_mgr.clone(), st.keyboard_open)
+    };
+    let open = crate::input_context::keyboard_is_open(thread_mgr.as_ref());
+    if open == current {
+        return;
+    }
+    set_keyboard_open_state(shared_state, open);
+}
+
+/// `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` changed. The language bar
+/// writes the same value back, so only an actual difference reaches Rime.
+pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
+    let (thread_mgr, current) = {
+        let st = shared_state.borrow();
+        (st.thread_mgr.clone(), st.ascii_mode)
+    };
+    let Some(ascii_mode) = crate::input_context::conversion_mode_is_ascii(thread_mgr.as_ref())
+    else {
+        return;
+    };
+    if ascii_mode == current {
+        return;
+    }
+    set_ascii_mode_from_language_bar(shared_state, ascii_mode);
+}
+
+/// True when neither the context nor the system state allows composing.
+pub(crate) fn input_is_blocked(shared_state: &SharedState, context: Option<&ITfContext>) -> bool {
+    let (thread_mgr, keyboard_open, sensitive) = {
+        let st = shared_state.borrow();
+        (
+            st.thread_mgr.clone(),
+            st.keyboard_open,
+            st.input_context.is_sensitive(),
+        )
+    };
+    if !keyboard_open || sensitive {
+        return true;
+    }
+    crate::input_context::keyboard_is_disabled(thread_mgr.as_ref(), context)
+}
+
+pub(crate) fn store_layout_sink(shared_state: &SharedState, registration: LayoutSinkRegistration) {
+    let previous = shared_state.borrow_mut().layout_sink.replace(registration);
+    drop_layout_sink(previous);
+}
+
+pub(crate) fn clear_layout_sink(shared_state: &SharedState) {
+    let previous = shared_state.borrow_mut().layout_sink.take();
+    drop_layout_sink(previous);
+}
+
+pub(crate) fn layout_sink_context(shared_state: &SharedState) -> Option<ITfContext> {
+    shared_state
+        .borrow()
+        .layout_sink
+        .as_ref()
+        .map(|registration| registration.context.clone())
+}
+
+fn drop_layout_sink(registration: Option<LayoutSinkRegistration>) {
+    let Some(registration) = registration else {
+        return;
+    };
+    unsafe {
+        let _ = registration.source.UnadviseSink(registration.cookie);
+    }
+    drop(registration.sink);
+}
+
+pub(crate) fn store_compartment_sink(
+    shared_state: &SharedState,
+    registration: CompartmentSinkRegistration,
+) {
+    shared_state
+        .borrow_mut()
+        .compartment_sinks
+        .push(registration);
+}
+
+pub(crate) fn clear_compartment_sinks(shared_state: &SharedState) {
+    let registrations = std::mem::take(&mut shared_state.borrow_mut().compartment_sinks);
+    unadvise_all(registrations);
+}
+
+/// True when the context sinks are already advised on exactly this context, so
+/// a refresh does not have to churn the registrations.
+pub(crate) fn context_compartment_sinks_cover(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+) -> bool {
+    let st = shared_state.borrow();
+    match (st.context_sink_context.as_ref(), context) {
+        // COM identity: the same context handed out twice is the same pointer.
+        (Some(advised), Some(wanted)) => advised.as_raw() == wanted.as_raw(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn store_context_compartment_sinks(
+    shared_state: &SharedState,
+    context: Option<ITfContext>,
+    registrations: Vec<CompartmentSinkRegistration>,
+) {
+    let previous = {
+        let mut st = shared_state.borrow_mut();
+        st.context_sink_context = context;
+        std::mem::replace(&mut st.context_compartment_sinks, registrations)
+    };
+    unadvise_all(previous);
+}
+
+/// Unadvise the focused context's compartment sinks and forget the context.
+///
+/// The registration keeps a reference to a host object, so it must not outlive
+/// the focus that created it.
+pub(crate) fn clear_context_compartment_sinks(shared_state: &SharedState) {
+    let registrations = {
+        let mut st = shared_state.borrow_mut();
+        st.context_sink_context = None;
+        std::mem::take(&mut st.context_compartment_sinks)
+    };
+    unadvise_all(registrations);
+}
+
+fn unadvise_all(registrations: Vec<CompartmentSinkRegistration>) {
+    for registration in registrations {
+        unsafe {
+            let _ = registration.source.UnadviseSink(registration.cookie);
+        }
     }
 }
 
@@ -543,20 +957,28 @@ pub(crate) fn update_ime_windows(
             allow_fallback_window,
         )
     });
+    let weak_state = Rc::downgrade(shared_state);
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
-            candidate_win.show(ime_state, caret_x, caret_y, owner_hwnd);
+            candidate_win.show(ime_state, caret_x, caret_y, owner_hwnd, &weak_state);
         } else {
             candidate_win.hide();
         }
         if show_mode_hint {
-            mode_hint_win.show_mode_hint(ime_state.ascii_mode, caret_x, caret_y, owner_hwnd);
+            mode_hint_win.show_mode_hint(
+                ime_state.ascii_mode,
+                caret_x,
+                caret_y,
+                owner_hwnd,
+                &weak_state,
+            );
         }
     });
 }
 
 pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
+    clear_layout_sink(shared_state);
     with_detached_candidate_ui(shared_state, CandidateUiManager::end);
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         candidate_win.hide();
@@ -565,22 +987,42 @@ pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
 }
 
 pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
-    let active_composition = {
-        let mut st = shared_state.borrow_mut();
-        st.shift_pressed_without_key = false;
-        st.session_reset_pending = true;
-        let active_composition = st
-            .composition
-            .take()
-            .zip(st.composition_context.take())
-            .map(|(composition, context)| (context, composition, st.client_id));
-        st.ime_state = None;
-        active_composition
-    };
+    let active_composition = take_active_composition(shared_state);
     if let Some((context, composition, client_id)) = active_composition {
         request_composition_end(context, composition, client_id);
     }
     hide_ime_windows(shared_state);
+}
+
+/// Same cleanup, but the composition is guaranteed to be gone by the time this
+/// returns. Used where TSF releases the text service right after the call
+/// (`Deactivate`) or where the thread stops pumping our sessions
+/// (`OnKillThreadFocus`); a queued session would simply never run.
+pub(crate) fn terminate_input_now(shared_state: &SharedState) {
+    let active_composition = take_active_composition(shared_state);
+    if let Some((context, composition, client_id)) = active_composition {
+        end_composition_now(&context, composition, client_id);
+    }
+    hide_ime_windows(shared_state);
+}
+
+fn take_active_composition(
+    shared_state: &SharedState,
+) -> Option<(ITfContext, ITfComposition, u32)> {
+    let mut st = shared_state.borrow_mut();
+    st.shift_pressed_without_key = false;
+    st.session_reset_pending = true;
+    let active_composition = st
+        .composition
+        .take()
+        .zip(st.composition_context.take())
+        .map(|(composition, context)| (context, composition, st.client_id));
+    st.ime_state = None;
+    st.last_caret = None;
+    // The panel is about to be hidden, so no click can still be pending; the
+    // stale context must not keep the host object alive.
+    st.key_context = None;
+    active_composition
 }
 
 pub(crate) fn clear_input_after_composition_terminated(
@@ -614,19 +1056,51 @@ fn request_composition_end(context: ITfContext, composition: ITfComposition, cli
     if client_id == 0 {
         return;
     }
-    let edit_session: ITfEditSession = CompositionEndEditSession {
-        context: context.clone(),
-        composition,
-        _dll_guard: DllActivityGuard::new(),
-    }
-    .into();
-    let flags = TF_CONTEXT_EDIT_CONTEXT_FLAGS(TF_ES_ASYNC.0 | TF_ES_READWRITE.0);
-    let result = unsafe { context.RequestEditSession(client_id, &edit_session, flags) }
-        .and_then(|session_result| session_result.ok());
+    let result =
+        crate::edit_session::with_async_write_session(&context, client_id, move |ec, ctx| {
+            clear_composition_range(ec, ctx, &composition)
+        });
     if let Err(error) = result {
         append_diagnostic(format!(
             "failed to end composition after focus change: {error}"
         ));
+    }
+}
+
+fn end_composition_now(context: &ITfContext, composition: ITfComposition, client_id: u32) {
+    if client_id != 0 {
+        let composition_for_session = composition.clone();
+        let cleared = with_write_session(context, client_id, move |ec, ctx| {
+            clear_composition_range(ec, ctx, &composition_for_session)
+        });
+        if cleared.is_ok() {
+            return;
+        }
+    }
+    // The host refused a synchronous lock. TerminateComposition works outside
+    // one, and a null view terminates every composition this TIP owns in the
+    // context; the text stays in the document but no dangling composition range
+    // survives the text service.
+    if let Ok(services) = context.cast::<ITfContextOwnerCompositionServices>() {
+        let terminated = unsafe { services.TerminateComposition(None) };
+        if let Err(error) = terminated {
+            append_diagnostic(format!("failed to terminate composition: {error}"));
+        }
+    }
+}
+
+fn clear_composition_range(
+    edit_cookie: u32,
+    context: &ITfContext,
+    composition: &ITfComposition,
+) -> windows::core::Result<()> {
+    unsafe {
+        let range = composition.GetRange()?;
+        if let Ok(property) = context.GetProperty(&GUID_PROP_ATTRIBUTE) {
+            let _ = property.Clear(edit_cookie, &range);
+        }
+        range.SetText(edit_cookie, 0, &[])?;
+        composition.EndComposition(edit_cookie)
     }
 }
 
@@ -653,7 +1127,7 @@ fn with_detached_windows<R>(
             ),
             std::mem::replace(
                 &mut st.mode_hint_win,
-                crate::candidate_win::CandidateWindow::new(),
+                crate::candidate_win::CandidateWindow::new_mode_hint(),
             ),
         )
     };
@@ -694,21 +1168,6 @@ fn with_detached_candidate_ui<R>(
 
 fn has_rime_base_data(dir: &Path) -> bool {
     dir.join("default.yaml").is_file()
-}
-
-fn reload_stamp_signature(path: &Path) -> String {
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            format!("{}:{}", metadata.len(), modified)
-        }
-        Err(_) => "missing".to_string(),
-    }
 }
 
 fn preload_rime_dll(shared_data_dir: &str) -> Result<Option<LoadedRimeDll>, String> {
@@ -778,4 +1237,53 @@ fn dll_related_dirs() -> Vec<PathBuf> {
 
 pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {
     unsafe { GetFocus() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{input_context_retry_due, INPUT_CONTEXT_RETRY_INTERVAL};
+    use std::time::Instant;
+
+    #[test]
+    fn a_context_that_answered_is_not_probed_again() {
+        let now = Instant::now();
+        assert!(!input_context_retry_due(false, 1, None, now));
+        // Even long after the throttle would have expired.
+        assert!(!input_context_retry_due(
+            false,
+            1,
+            Some(now - INPUT_CONTEXT_RETRY_INTERVAL),
+            now
+        ));
+    }
+
+    #[test]
+    fn an_unanswered_probe_is_retried_at_once_then_throttled() {
+        let now = Instant::now();
+        // No deadline yet: the first key after the failed inspection retries.
+        assert!(input_context_retry_due(true, 1, None, now));
+        // A retry just ran; the next keystroke must not cost another session.
+        assert!(!input_context_retry_due(
+            true,
+            1,
+            Some(now + INPUT_CONTEXT_RETRY_INTERVAL),
+            now
+        ));
+        // Once the interval has passed it is due again.
+        assert!(input_context_retry_due(
+            true,
+            1,
+            Some(now - INPUT_CONTEXT_RETRY_INTERVAL),
+            now
+        ));
+    }
+
+    #[test]
+    fn without_a_client_id_there_is_nothing_to_probe_with() {
+        // `inspect_context` needs an edit cookie, and a read session cannot be
+        // requested before Activate handed one out. Retrying would only burn
+        // the throttle and keep the context stuck in pass-through.
+        let now = Instant::now();
+        assert!(!input_context_retry_due(true, 0, None, now));
+    }
 }

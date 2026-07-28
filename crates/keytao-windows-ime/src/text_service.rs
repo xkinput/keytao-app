@@ -18,11 +18,17 @@ use windows::{
 use crate::{
     display_attribute,
     globals::{lock_server, pin_module, DllActivityGuard},
+    input_context::CONTEXT_SENSITIVITY_COMPARTMENTS,
     key_event_sink::KeyEventSink,
     language_bar::LanguageBarItem,
     state::{
-        append_diagnostic, hide_ime_windows, new_shared_state, refresh_engine_for_focus,
-        reset_input_for_focus_change, start_engine_warmup, SharedState, WeakState,
+        append_diagnostic, apply_context_compartment_change, apply_conversion_mode_change,
+        apply_open_close_change, clear_compartment_sinks, clear_context_compartment_sinks,
+        context_compartment_sinks_cover, hide_ime_windows, new_shared_state,
+        publish_initial_compartments, refresh_engine_for_focus, refresh_input_context,
+        reset_input_for_focus_change, start_engine_warmup, store_compartment_sink,
+        store_context_compartment_sinks, terminate_input_now, CompartmentSinkRegistration,
+        SharedState, WeakState,
     },
 };
 
@@ -219,6 +225,9 @@ fn activate_service(
     st.language_bar = language_bar;
     drop(st);
 
+    advise_compartment_sinks(state, thread_mgr);
+    publish_initial_compartments(state);
+
     tracing::info!("KeyTao TSF activated (client_id={})", client_id);
     append_diagnostic(format!(
         "TSF activated client_id={client_id} activation_flags=0x{activation_flags:08x} thread_mgr_flags=0x{thread_mgr_flags:08x}"
@@ -226,7 +235,78 @@ fn activate_service(
     if unsafe { thread_mgr.GetFocus() }.is_ok() {
         start_engine_warmup(state);
     }
+    refresh_input_context(state, None);
     Ok(())
+}
+
+/// A keyboard TIP must follow `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` and should
+/// follow `..._INPUTMODE_CONVERSION`; both live on the thread manager.
+fn advise_compartment_sinks(state: &SharedState, thread_mgr: &ITfThreadMgr) {
+    let Ok(compartment_mgr) = thread_mgr.cast::<ITfCompartmentMgr>() else {
+        return;
+    };
+    for guid in [
+        GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+        GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
+    ] {
+        let Some(registration) = advise_compartment_sink(state, &compartment_mgr, &guid) else {
+            continue;
+        };
+        store_compartment_sink(state, registration);
+    }
+}
+
+/// Follow the focused context's `KEYBOARD_DISABLED` / `EMPTYCONTEXT`
+/// compartments.
+///
+/// These live on the context rather than on the thread manager, so unlike the
+/// sinks above they have to move with the focus: the previous context's
+/// registrations are unadvised here. Without them a host that disables a
+/// context mid-composition is not heard at all — the key path would keep
+/// passing keys through while the old preedit, candidate window and native
+/// composition stayed on screen.
+pub(crate) fn advise_context_compartment_sinks(state: &SharedState, context: Option<&ITfContext>) {
+    if context_compartment_sinks_cover(state, context) {
+        return;
+    }
+    let Some(context) = context else {
+        clear_context_compartment_sinks(state);
+        return;
+    };
+    let Ok(compartment_mgr) = context.cast::<ITfCompartmentMgr>() else {
+        // Nothing to listen on. Drop the old registrations anyway; they belong
+        // to a context that no longer has the focus.
+        clear_context_compartment_sinks(state);
+        return;
+    };
+    let registrations = CONTEXT_SENSITIVITY_COMPARTMENTS
+        .iter()
+        .filter_map(|guid| advise_compartment_sink(state, &compartment_mgr, guid))
+        .collect();
+    store_context_compartment_sinks(state, Some(context.clone()), registrations);
+}
+
+fn advise_compartment_sink(
+    state: &SharedState,
+    compartment_mgr: &ITfCompartmentMgr,
+    guid: &GUID,
+) -> Option<CompartmentSinkRegistration> {
+    let compartment = unsafe { compartment_mgr.GetCompartment(guid) }.ok()?;
+    let source = compartment.cast::<ITfSource>().ok()?;
+    let sink: ITfCompartmentEventSink = CompartmentSink {
+        state: std::rc::Rc::downgrade(state),
+        _dll_guard: DllActivityGuard::new(),
+    }
+    .into();
+    // AdviseSink holds the only reference we need; the cookie is what has to
+    // survive until the registration is dropped.
+    match unsafe { source.AdviseSink(&ITfCompartmentEventSink::IID, &sink) } {
+        Ok(cookie) => Some(CompartmentSinkRegistration { source, cookie }),
+        Err(error) => {
+            append_diagnostic(format!("Advise compartment sink failed: {error}"));
+            None
+        }
+    }
 }
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
@@ -235,7 +315,11 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     }
 
     fn Deactivate(&self) -> Result<()> {
-        reset_input_for_focus_change(&self.state);
+        // TSF releases its last reference right after this returns, so a queued
+        // edit session would never run — end the composition synchronously.
+        terminate_input_now(&self.state);
+        clear_compartment_sinks(&self.state);
+        clear_context_compartment_sinks(&self.state);
         let (thread_mgr, client_id, thread_sink_cookie, thread_focus_sink_cookie, language_bar) = {
             let mut st = self.state.borrow_mut();
             (
@@ -275,10 +359,10 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
         let mut st = self.state.borrow_mut();
 
-        // reset_input_for_focus_change requested an asynchronous end before the
-        // sinks and client id are released; clear any disconnected handles too.
+        // The composition is already gone; clear any disconnected handles too.
         st.composition = None;
         st.composition_context = None;
+        st.key_context = None;
         st.key_sink = None;
         st.thread_mgr_sink = None;
         st.thread_mgr_sink_cookie = None;
@@ -344,6 +428,8 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         if let Some(state) = self.state.upgrade() {
             reset_input_for_focus_change(&state);
             refresh_engine_for_focus(&state);
+            let context = pdimfocus.and_then(|manager| unsafe { manager.GetTop() }.ok());
+            refresh_input_context(&state, context.as_ref());
         }
         append_diagnostic(format!(
             "ThreadMgrEventSink OnSetFocus focus={}",
@@ -352,10 +438,11 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         Ok(())
     }
 
-    fn OnPushContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
+    fn OnPushContext(&self, pic: Option<&ITfContext>) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
             reset_input_for_focus_change(&state);
             refresh_engine_for_focus(&state);
+            refresh_input_context(&state, pic);
         }
         append_diagnostic("ThreadMgrEventSink OnPushContext");
         Ok(())
@@ -364,8 +451,44 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     fn OnPopContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
             reset_input_for_focus_change(&state);
+            refresh_input_context(&state, None);
         }
         append_diagnostic("ThreadMgrEventSink OnPopContext");
+        Ok(())
+    }
+}
+
+// ── ITfCompartmentEventSink ───────────────────────────────────────────────────
+
+/// Keeps the system on/off state and the conversion-mode indicator in step with
+/// Rime: Ctrl+Space and the input indicator write these compartments.
+///
+/// The same object serves the focused context's `KEYBOARD_DISABLED` /
+/// `EMPTYCONTEXT` compartments; `OnChange` tells them apart by GUID.
+#[implement(ITfCompartmentEventSink)]
+struct CompartmentSink {
+    state: WeakState,
+    _dll_guard: DllActivityGuard,
+}
+
+impl ITfCompartmentEventSink_Impl for CompartmentSink_Impl {
+    fn OnChange(&self, rguid: *const GUID) -> Result<()> {
+        if rguid.is_null() {
+            return Ok(());
+        }
+        let Some(state) = self.state.upgrade() else {
+            return Ok(());
+        };
+        let guid = unsafe { *rguid };
+        if guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+            apply_open_close_change(&state);
+        } else if guid == GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION {
+            apply_conversion_mode_change(&state);
+        } else if CONTEXT_SENSITIVITY_COMPARTMENTS.contains(&guid) {
+            // Re-inspects the context but leaves the registrations alone: this
+            // sink must not be unadvised from inside its own callback.
+            apply_context_compartment_change(&state);
+        }
         Ok(())
     }
 }
@@ -380,6 +503,7 @@ impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
             refresh_engine_for_focus(&state);
+            refresh_input_context(&state, None);
         }
         append_diagnostic("ThreadFocusSink OnSetThreadFocus");
         Ok(())
@@ -387,7 +511,9 @@ impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
 
     fn OnKillThreadFocus(&self) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
-            reset_input_for_focus_change(&state);
+            // The thread stops pumping our edit sessions once focus is gone, so
+            // a queued composition end would hang around in the document.
+            terminate_input_now(&state);
         }
         append_diagnostic("ThreadFocusSink OnKillThreadFocus");
         Ok(())

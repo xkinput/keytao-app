@@ -1,0 +1,95 @@
+//! `ITfEditSession` plumbing shared by the key path and the context probes.
+//!
+//! TSF only hands out an edit cookie inside a session, so every document read
+//! or write goes through one of the helpers below.
+
+use std::cell::UnsafeCell;
+
+use windows::{
+    core::{implement, Result},
+    Win32::UI::TextServices::{
+        ITfContext, ITfEditSession, ITfEditSession_Impl, ITfRange, TF_CONTEXT_EDIT_CONTEXT_FLAGS,
+        TF_ES_ASYNC, TF_ES_READ, TF_ES_READWRITE, TF_ES_SYNC, TF_SELECTION,
+    },
+};
+
+use crate::globals::DllActivityGuard;
+
+type EditFn = Box<dyn FnOnce(u32, &ITfContext) -> Result<()>>;
+
+#[implement(ITfEditSession)]
+struct EditSession {
+    context: ITfContext,
+    f: UnsafeCell<Option<EditFn>>,
+    _dll_guard: DllActivityGuard,
+}
+
+impl ITfEditSession_Impl for EditSession_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        let f = unsafe { &mut *self.f.get() }.take();
+        match f {
+            Some(f) => f(ec, &self.context),
+            None => Ok(()),
+        }
+    }
+}
+
+fn request_session(
+    context: &ITfContext,
+    client_id: u32,
+    flags: u32,
+    f: impl FnOnce(u32, &ITfContext) -> Result<()> + 'static,
+) -> Result<()> {
+    let session = EditSession {
+        context: context.clone(),
+        f: UnsafeCell::new(Some(Box::new(f))),
+        _dll_guard: DllActivityGuard::new(),
+    };
+    let iface: ITfEditSession = session.into();
+    unsafe {
+        let hr_session =
+            context.RequestEditSession(client_id, &iface, TF_CONTEXT_EDIT_CONTEXT_FLAGS(flags))?;
+        hr_session.ok()
+    }
+}
+
+pub(crate) fn with_write_session(
+    context: &ITfContext,
+    client_id: u32,
+    f: impl FnOnce(u32, &ITfContext) -> Result<()> + 'static,
+) -> Result<()> {
+    request_session(context, client_id, TF_ES_SYNC.0 | TF_ES_READWRITE.0, f)
+}
+
+/// Queued write session for cleanup that may wait for the document to unlock.
+/// Never use it when the text service is about to be released — TSF drops the
+/// client id and the queued session with it.
+pub(crate) fn with_async_write_session(
+    context: &ITfContext,
+    client_id: u32,
+    f: impl FnOnce(u32, &ITfContext) -> Result<()> + 'static,
+) -> Result<()> {
+    request_session(context, client_id, TF_ES_ASYNC.0 | TF_ES_READWRITE.0, f)
+}
+
+/// Read-only counterpart. Hosts may refuse a synchronous session while the
+/// document is locked, so callers must treat an error as "unknown", never as a
+/// negative answer.
+pub(crate) fn with_read_session(
+    context: &ITfContext,
+    client_id: u32,
+    f: impl FnOnce(u32, &ITfContext) -> Result<()> + 'static,
+) -> Result<()> {
+    request_session(context, client_id, TF_ES_SYNC.0 | TF_ES_READ.0, f)
+}
+
+/// Take ownership of the range `ITfContext::GetSelection` filled in.
+///
+/// The field is a `ManuallyDrop`, so leaving it in place leaks the interface
+/// reference TSF handed out.
+pub(crate) fn take_selection_range(selection: &mut TF_SELECTION) -> Option<ITfRange> {
+    core::mem::ManuallyDrop::into_inner(core::mem::replace(
+        &mut selection.range,
+        core::mem::ManuallyDrop::new(None),
+    ))
+}

@@ -5,7 +5,8 @@
 //! Windows VK codes directly.
 
 pub use keytao_core::{
-    key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+    key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER,
+    RIME_RELEASE_MASK,
 };
 
 const XK_PAGE_UP: u32 = 0xFF55;
@@ -13,7 +14,12 @@ const XK_PAGE_DOWN: u32 = 0xFF56;
 const TOUCH_KEYBOARD_NEXT_PAGE: u32 = 0xF003;
 const TOUCH_KEYBOARD_PREVIOUS_PAGE: u32 = 0xF004;
 
-/// Read the current state of Shift, Control, Alt and return an X11 modifier mask.
+/// Read Shift, Control, Alt, the Windows key and the CapsLock toggle into an
+/// X11 modifier mask.
+///
+/// CapsLock is reported as `RIME_MOD_LOCK`; `keytao_core` folds it into the
+/// keysym and strips the bit before librime sees the key, so the engine
+/// receives the character the layout actually produces.
 pub fn current_mod_mask() -> u32 {
     let mut mask = 0u32;
     unsafe {
@@ -27,8 +33,21 @@ pub fn current_mod_mask() -> u32 {
         if GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 {
             mask |= RIME_MOD_ALT;
         }
+        if GetKeyState(VK_LWIN.0 as i32) as u16 & 0x8000 != 0
+            || GetKeyState(VK_RWIN.0 as i32) as u16 & 0x8000 != 0
+        {
+            mask |= RIME_MOD_SUPER;
+        }
+        if GetKeyState(VK_CAPITAL.0 as i32) as u16 & 0x0001 != 0 {
+            mask |= RIME_MOD_LOCK;
+        }
     }
     mask
+}
+
+/// Whether CapsLock or Shift (but not both) is in effect for letter keys.
+fn letters_are_uppercase(mods: u32) -> bool {
+    (mods & RIME_MOD_LOCK != 0) != (mods & RIME_MOD_SHIFT != 0)
 }
 
 /// Convert a Windows Virtual Key code to an X11 keysym.
@@ -43,8 +62,10 @@ pub fn vk_to_keysym(vk: u16, lparam: isize, mods: u32) -> Option<u32> {
         // --- Printable ASCII letters ---
         // Match Linux/macOS semantics: the keysym reflects the produced
         // printable character while the modifier mask still carries Shift.
+        // CapsLock and Shift cancel each other out, which is what the layout
+        // produces and what librime's ascii_composer expects to see.
         key if is_letter_vk(key) => {
-            let base = if mods & RIME_MOD_SHIFT != 0 {
+            let base = if letters_are_uppercase(mods) {
                 b'A'
             } else {
                 b'a'
@@ -110,6 +131,12 @@ fn printable_keysym(
     lparam: isize,
     mods: u32,
 ) -> Option<u32> {
+    if mods & RIME_MOD_CONTROL != 0 {
+        // ToUnicodeEx folds Control chords into control characters (Ctrl+[ →
+        // U+001B), which would reach librime as an unrelated keysym. Rime wants
+        // the unmodified character plus the Control mask.
+        return fallback_printable_keysym(key, mods);
+    }
     match translated_printable_keysym(vk, lparam) {
         PrintableTranslation::Character(keysym) => Some(keysym),
         PrintableTranslation::DeadKey => None,
@@ -363,39 +390,41 @@ pub fn is_shift_vk(vk: u16) -> bool {
     shift_keysym_for_vk(vk).is_some()
 }
 
+/// Solo-Shift tracking: Shift toggles Chinese/English only when no other key
+/// was pressed while it was held.
+///
+/// This has to be fed from `OnTestKeyDown`, which TSF calls for every key —
+/// `OnKeyDown` only runs for keys the test callback claimed, so a flag kept
+/// there alone would never be cleared by a passed-through key and, worse,
+/// would never be set at all because Shift itself is never claimed.
+pub fn shift_pending_after_key_down(vk: u16) -> bool {
+    is_shift_vk(vk)
+}
+
 pub fn is_enter_vk(vk: u16) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     matches!(VIRTUAL_KEY(vk), VK_RETURN)
 }
 
-pub fn candidate_index_for_select_key(
-    vk: u16,
-    mods: u32,
-    state: &keytao_core::ImeState,
-) -> Option<usize> {
-    if mods & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
-        return None;
-    }
-    if is_space_vk(vk) {
-        return key_policy::highlighted_candidate_index(state);
-    }
-
-    let ch = ascii_char_for_vk(vk)?;
-    key_policy::candidate_index_for_char(ch, state)
-}
-
 pub fn should_bypass_empty_composition(vk: u16, mods: u32, state: &keytao_core::ImeState) -> bool {
     key_policy::should_bypass_empty_composition_key(is_nonstarter_vk(vk), mods, state)
 }
 
-/// Returns true for keys the IME should intercept.
-/// Used in OnTestKeyDown to tell TSF we own this keystroke.
+/// Returns true for keys the IME may handle, i.e. the keys `OnTestKeyDown`
+/// claims so that TSF calls `OnKeyDown` for them.
+///
+/// TSF never calls `OnKeyDown` for a key the test callback declined, so this is
+/// deliberately an over-approximation: every key that can reach librime is
+/// claimed here and released again in `OnKeyDown` when librime does not accept
+/// it (`should_consume_processed_state`). The one rule both callbacks must
+/// agree on is which keys never reach librime at all — that rule lives in
+/// `key_policy::should_bypass_empty_composition_key` and is mirrored below.
 pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-    // Never eat keys with Ctrl/Alt (let application handle shortcuts)
-    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
+    // Windows-key chords belong to the shell.
+    if key_policy::is_system_reserved_modifier(mods) {
         return false;
     }
 
@@ -403,22 +432,26 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
         return false;
     }
 
-    let vk = VIRTUAL_KEY(vk);
-    if vk == VK_PACKET {
+    let key = VIRTUAL_KEY(vk);
+    if key == VK_PACKET {
         return packet_keysym()
             .map(|sym| has_composition || is_touch_keyboard_page_key(sym))
             .unwrap_or(false);
     }
 
-    if vk == VK_F4 {
-        return true;
+    if key == VK_F4 {
+        // Alt+F4 closes the host window and is never a schema switcher hotkey.
+        return mods & RIME_MOD_ALT == 0;
     }
 
     if has_composition {
-        is_nonstarter_vk(vk.0) || is_letter_vk(vk) || ascii_char_for_vk(vk.0).is_some()
-    } else {
-        is_letter_vk(vk)
+        return is_nonstarter_vk(vk) || produces_text_vk(key);
     }
+
+    // Without a composition the navigation and editing keys belong to the
+    // application; everything printable — letters, digits and OEM punctuation —
+    // is offered to librime so that the punctuator can emit full-width forms.
+    !is_nonstarter_vk(vk) && produces_text_vk(key)
 }
 
 fn packet_keysym() -> Option<u32> {
@@ -450,10 +483,19 @@ fn is_letter_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) ->
     (VK_A.0..=VK_Z.0).contains(&vk.0)
 }
 
-fn is_space_vk(vk: u16) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_SPACE};
+/// Every key `vk_to_keysym` turns into a printable character.
+fn produces_text_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    is_letter_vk(vk) || is_printable_vk(vk) || is_numpad_text_vk(vk)
+}
 
-    VIRTUAL_KEY(vk) == VK_SPACE
+fn is_numpad_text_vk(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    (VK_NUMPAD0.0..=VK_NUMPAD9.0).contains(&vk.0)
+        || matches!(
+            vk,
+            VK_MULTIPLY | VK_ADD | VK_SUBTRACT | VK_DECIMAL | VK_DIVIDE
+        )
 }
 
 fn is_nonstarter_vk(vk: u16) -> bool {
@@ -478,42 +520,30 @@ fn is_nonstarter_vk(vk: u16) -> bool {
     )
 }
 
-fn ascii_char_for_vk(vk: u16) -> Option<char> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
-    let ch = match VIRTUAL_KEY(vk) {
-        VK_0 | VK_NUMPAD0 => '0',
-        VK_1 | VK_NUMPAD1 => '1',
-        VK_2 | VK_NUMPAD2 => '2',
-        VK_3 | VK_NUMPAD3 => '3',
-        VK_4 | VK_NUMPAD4 => '4',
-        VK_5 | VK_NUMPAD5 => '5',
-        VK_6 | VK_NUMPAD6 => '6',
-        VK_7 | VK_NUMPAD7 => '7',
-        VK_8 | VK_NUMPAD8 => '8',
-        VK_9 | VK_NUMPAD9 => '9',
-        VK_OEM_MINUS => '-',
-        VK_OEM_PLUS => '=',
-        VK_OEM_COMMA => ',',
-        VK_OEM_PERIOD => '.',
-        VK_OEM_1 => ';',
-        VK_OEM_2 => '/',
-        VK_OEM_3 => '`',
-        VK_OEM_4 => '[',
-        VK_OEM_5 => '\\',
-        VK_OEM_6 => ']',
-        VK_OEM_7 => '\'',
-        _ => return None,
-    };
-    Some(ch)
-}
-
 #[cfg(test)]
 mod tests {
-    use keytao_core::{Candidate, ImeState, RIME_MOD_SHIFT};
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_1, VK_OEM_1};
+    use keytao_core::{
+        key_policy, Candidate, ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK,
+        RIME_MOD_SHIFT, RIME_MOD_SUPER,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_1, VK_A, VK_BACK, VK_F4, VK_OEM_1, VK_OEM_COMMA, VK_RETURN, VK_SHIFT, VK_SPACE,
+    };
 
-    use super::{candidate_index_for_select_key, fallback_printable_keysym, unicode_to_keysym};
+    use super::{
+        fallback_printable_keysym, letters_are_uppercase, shift_pending_after_key_down,
+        should_bypass_empty_composition, should_eat_key, unicode_to_keysym, vk_to_keysym,
+    };
+
+    fn composing_state() -> ImeState {
+        let mut state = ImeState::empty();
+        state.preedit = "ni".into();
+        state.candidates.push(Candidate {
+            text: "你".into(),
+            comment: None,
+        });
+        state
+    }
 
     #[test]
     fn fallback_printable_mapping_respects_shift() {
@@ -529,22 +559,78 @@ mod tests {
     }
 
     #[test]
-    fn shifted_select_key_does_not_choose_candidate() {
-        let mut state = ImeState::empty();
-        state.candidates.push(Candidate {
-            text: "candidate".into(),
-            comment: None,
-        });
-        assert_eq!(candidate_index_for_select_key(VK_1.0, 0, &state), Some(0));
+    fn unicode_keysym_uses_x11_unicode_encoding() {
+        assert_eq!(unicode_to_keysym('a'), 0x61);
+        assert_eq!(unicode_to_keysym('键'), 0x0100_0000 | '键' as u32);
+    }
+
+    #[test]
+    fn caps_lock_and_shift_cancel_out_for_letters() {
+        assert!(!letters_are_uppercase(0));
+        assert!(letters_are_uppercase(RIME_MOD_SHIFT));
+        assert!(letters_are_uppercase(RIME_MOD_LOCK));
+        assert!(!letters_are_uppercase(RIME_MOD_LOCK | RIME_MOD_SHIFT));
+
+        assert_eq!(vk_to_keysym(VK_A.0, 0, RIME_MOD_LOCK), Some('A' as u32));
         assert_eq!(
-            candidate_index_for_select_key(VK_1.0, RIME_MOD_SHIFT, &state),
-            None
+            vk_to_keysym(VK_A.0, 0, RIME_MOD_LOCK | RIME_MOD_SHIFT),
+            Some('a' as u32)
         );
     }
 
     #[test]
-    fn unicode_keysym_uses_x11_unicode_encoding() {
-        assert_eq!(unicode_to_keysym('a'), 0x61);
-        assert_eq!(unicode_to_keysym('键'), 0x0100_0000 | '键' as u32);
+    fn punctuation_reaches_rime_without_a_composition() {
+        // Chinese punctuation only works if the punctuator sees the key, so the
+        // test callback has to claim it (cross-3 / windows-2).
+        assert!(should_eat_key(VK_OEM_COMMA.0, false, 0));
+        assert!(should_eat_key(VK_1.0, false, 0));
+        assert!(should_eat_key(VK_A.0, false, 0));
+    }
+
+    #[test]
+    fn editing_keys_are_left_to_the_application_without_a_composition() {
+        let empty = ImeState::empty();
+        for vk in [VK_BACK, VK_RETURN, VK_SPACE] {
+            assert!(!should_eat_key(vk.0, false, 0));
+            assert!(should_bypass_empty_composition(vk.0, 0, &empty));
+        }
+        // With a composition the same keys belong to librime.
+        let composing = composing_state();
+        for vk in [VK_BACK, VK_RETURN, VK_SPACE] {
+            assert!(should_eat_key(vk.0, true, 0));
+            assert!(!should_bypass_empty_composition(vk.0, 0, &composing));
+        }
+    }
+
+    #[test]
+    fn control_and_alt_chords_are_offered_to_rime() {
+        // Rime binds Control+grave and the emacs editing keys; OnKeyDown hands
+        // them back to the host when librime declines (D6 / core-8).
+        assert!(should_eat_key(VK_A.0, false, RIME_MOD_CONTROL));
+        assert!(should_eat_key(VK_A.0, true, RIME_MOD_ALT));
+        assert!(!should_bypass_empty_composition(
+            VK_A.0,
+            RIME_MOD_CONTROL,
+            &ImeState::empty()
+        ));
+    }
+
+    #[test]
+    fn solo_shift_survives_keys_the_test_callback_declines() {
+        // Shift arms the toggle; any other key down disarms it, including keys
+        // that are passed through to the host and never reach OnKeyDown.
+        assert!(shift_pending_after_key_down(VK_SHIFT.0));
+        assert!(!shift_pending_after_key_down(VK_A.0));
+        assert!(!shift_pending_after_key_down(VK_BACK.0));
+        assert!(!should_eat_key(VK_BACK.0, false, 0));
+    }
+
+    #[test]
+    fn shell_and_window_chords_are_never_claimed() {
+        assert!(!should_eat_key(VK_A.0, true, RIME_MOD_SUPER));
+        assert!(!should_eat_key(VK_F4.0, false, RIME_MOD_ALT));
+        assert!(should_eat_key(VK_F4.0, false, 0));
+        assert!(!should_eat_key(VK_SHIFT.0, true, 0));
+        assert!(key_policy::is_system_reserved_modifier(RIME_MOD_SUPER));
     }
 }

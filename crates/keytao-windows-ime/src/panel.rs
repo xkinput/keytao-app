@@ -96,6 +96,58 @@ pub struct PanelRenderer {
     theme_resolver: ThemeResolver,
 }
 
+/// A clickable area inside the rendered panel, in panel-local pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl PanelRect {
+    fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x: x.floor() as i32,
+            y: y.floor() as i32,
+            width: width.ceil() as i32,
+            height: height.ceil() as i32,
+        }
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+
+/// Where the candidate options and the paging buttons ended up, so the window
+/// can turn a click into `select_candidate` / `change_page`.
+#[derive(Clone, Debug, Default)]
+pub struct PanelHitAreas {
+    /// Index-aligned with the candidates of the current page.
+    pub candidates: Vec<PanelRect>,
+    pub previous_page: Option<PanelRect>,
+    pub next_page: Option<PanelRect>,
+}
+
+pub struct RenderedPanel {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub hit_areas: PanelHitAreas,
+}
+
+impl RenderedPanel {
+    fn empty() -> Self {
+        Self {
+            pixels: Vec::new(),
+            width: 0,
+            height: 0,
+            hit_areas: PanelHitAreas::default(),
+        }
+    }
+}
+
 impl PanelRenderer {
     pub fn new(fonts: FontSet) -> Self {
         Self {
@@ -108,8 +160,9 @@ impl PanelRenderer {
         }
     }
 
-    /// Render panel to a premultiplied BGRA byte buffer. Returns (bytes, width, height).
-    pub fn render(&self, state: &ImeState, scale: f32) -> (Vec<u8>, u32, u32) {
+    /// Render panel to a premultiplied BGRA byte buffer plus the hit areas the
+    /// window needs for mouse selection.
+    pub fn render(&self, state: &ImeState, scale: f32) -> RenderedPanel {
         let mut theme = self.theme_resolver.current();
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme
@@ -200,8 +253,9 @@ impl PanelRenderer {
 
         let Some(mut pm) = Pixmap::new(width, height) else {
             tracing::warn!("candidate panel: failed to allocate pixmap {width}x{height}");
-            return (Vec::new(), 0, 0);
+            return RenderedPanel::empty();
         };
+        let mut hit_areas = PanelHitAreas::default();
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
         draw_rounded_rect(
             &mut pm,
@@ -244,6 +298,12 @@ impl PanelRenderer {
                     scale,
                     &theme,
                 );
+                hit_areas.candidates.push(PanelRect::new(
+                    panel_pad_x,
+                    row_y,
+                    *option_width,
+                    option_height,
+                ));
                 row_y += option_height + panel_gap;
             }
             if nav_count > 0 {
@@ -256,6 +316,14 @@ impl PanelRenderer {
                     scale,
                     &model.navigation,
                     &theme,
+                );
+                navigation_hit_areas(
+                    &mut hit_areas,
+                    panel_pad_x,
+                    row_y,
+                    nav_button,
+                    panel_gap,
+                    &model.navigation,
                 );
             }
         } else {
@@ -274,6 +342,9 @@ impl PanelRenderer {
                     scale,
                     &theme,
                 );
+                hit_areas
+                    .candidates
+                    .push(PanelRect::new(x, y, *option_width, option_height));
                 x += option_width + panel_gap;
             }
             if nav_count > 0 {
@@ -287,6 +358,14 @@ impl PanelRenderer {
                     &model.navigation,
                     &theme,
                 );
+                navigation_hit_areas(
+                    &mut hit_areas,
+                    x + panel_gap,
+                    y,
+                    nav_button,
+                    panel_gap,
+                    &model.navigation,
+                );
             }
         }
 
@@ -296,7 +375,12 @@ impl PanelRenderer {
             px.swap(0, 2); // R ↔ B
         }
 
-        (out, width, height)
+        RenderedPanel {
+            pixels: out,
+            width,
+            height,
+            hit_areas,
+        }
     }
 
     pub fn render_mode_hint(&self, ascii_mode: bool, scale: f32) -> (Vec<u8>, u32, u32) {
@@ -551,6 +635,25 @@ impl PanelRenderer {
             }
         }
         None
+    }
+}
+
+/// Mirrors the button placement in `PanelRenderer::draw_navigation_row`.
+fn navigation_hit_areas(
+    hit_areas: &mut PanelHitAreas,
+    x: f32,
+    y: f32,
+    button_size: f32,
+    gap: f32,
+    navigation: &keytao_theme::PageNavigationModel,
+) {
+    let mut nav_x = x;
+    if navigation.can_go_previous {
+        hit_areas.previous_page = Some(PanelRect::new(nav_x, y, button_size, button_size));
+        nav_x += button_size + gap;
+    }
+    if navigation.can_go_next {
+        hit_areas.next_page = Some(PanelRect::new(nav_x, y, button_size, button_size));
     }
 }
 
