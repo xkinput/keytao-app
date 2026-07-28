@@ -137,7 +137,6 @@ pub struct InstallResult {
 const API_BASE: &str = "https://keytao.rea.ink";
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
-const IME_RELOAD_STAMP_FILE: &str = "keytao-ime.reload";
 #[cfg(target_os = "ios")]
 const IOS_APP_GROUP_IDENTIFIER: &str = "group.ink.rea.keytao-app";
 
@@ -173,7 +172,7 @@ fn rime_get_data_dir<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Option<Stri
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reload_stamp_path() -> Option<PathBuf> {
-    keytao_core::default_user_data_dir().map(|dir| dir.join(IME_RELOAD_STAMP_FILE))
+    keytao_core::ReloadStamp::default_path()
 }
 
 #[cfg(target_os = "ios")]
@@ -209,22 +208,12 @@ fn ios_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathB
 
 #[cfg(target_os = "ios")]
 fn ios_reload_stamp_path(root: &Path) -> PathBuf {
-    root.join(IME_RELOAD_STAMP_FILE)
+    keytao_core::ReloadStamp::path(root)
 }
 
 #[cfg(target_os = "ios")]
 fn write_ios_reload_stamp(root: &Path) -> Result<PathBuf, String> {
-    let stamp = ios_reload_stamp_path(root);
-    if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建 iOS 输入法目录失败: {e}"))?;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    std::fs::write(&stamp, format!("{now}\n"))
-        .map_err(|e| format!("写入 iOS 输入法重载标记失败 {}: {e}", stamp.display()))?;
-    Ok(stamp)
+    keytao_core::ReloadStamp::write(root).map_err(|e| format!("写入 iOS 输入法重载标记失败: {e}"))
 }
 
 #[cfg(target_os = "ios")]
@@ -262,19 +251,10 @@ fn ios_app_shared_data_dir<R: tauri::Runtime>(
         .map(|dir| dir.to_string_lossy().into_owned())
 }
 
+/// Same signature the input methods compare, so what the app reports and what a
+/// frontend acts on can never drift apart.
 fn file_signature(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            format!("{}:{}", metadata.len(), modified)
-        }
-        Err(_) => "missing".into(),
-    }
+    keytao_core::ReloadStamp::signature_at(path).unwrap_or_else(|| "missing".into())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -343,6 +323,43 @@ fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String
     ime_ui_settings_from_paths(theme_path, reload_stamp_path, message)
 }
 
+/// Replace a file's contents in a single step so a concurrent reader never
+/// sees a half-written file. The input methods (notably the iOS keyboard
+/// extension, which shares these files through the App Group container) poll
+/// the shared configuration while the app rewrites it, and a plain
+/// `fs::write` truncates before it writes.
+///
+/// The temporary file is created in the destination directory, so the final
+/// `rename` stays inside one filesystem and is therefore atomic.
+fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("keytao");
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let outcome = std::fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(content)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    outcome
+}
+
 fn write_ime_ui_settings_to_path(
     theme_path: &Path,
     color_scheme: keytao_theme::UiColorScheme,
@@ -409,7 +426,7 @@ fn write_ime_ui_settings_to_path(
     );
 
     let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
-    std::fs::write(&theme_path, content)
+    write_file_atomic(theme_path, content.as_bytes())
         .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
 }
 
@@ -924,16 +941,9 @@ fn process_has_wayland_socket(pid: u32) -> bool {
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn write_keytao_ime_reload_stamp() -> Result<(), String> {
-    let dir =
-        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    let stamp = dir.join(IME_RELOAD_STAMP_FILE);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::fs::write(&stamp, format!("{now}\n"))
-        .map_err(|e| format!("写入 keytao-ime 重载标记失败 {}: {e}", stamp.display()))
+    keytao_core::ReloadStamp::write_default()
+        .map(|_| ())
+        .map_err(|e| format!("写入 keytao-ime 重载标记失败: {e}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -2810,7 +2820,7 @@ fn write_default_reload_stamp<R: tauri::Runtime>(
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        write_keytao_ime_reload_stamp().map(|()| Some(root.join(IME_RELOAD_STAMP_FILE)))
+        write_keytao_ime_reload_stamp().map(|()| Some(keytao_core::ReloadStamp::path(root)))
     }
 }
 
@@ -3571,6 +3581,17 @@ fn optional_jni_text(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<String>
     }
 }
 
+/// Like [`optional_jni_text`] but keeps the text as typed: a soft keyboard's
+/// space key must stay a space instead of being trimmed away.
+#[cfg(target_os = "android")]
+fn optional_jni_raw_text(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let value = env.get_string(&value).ok()?;
+    Some(value.to_string_lossy().into_owned())
+}
+
 #[cfg(target_os = "android")]
 fn optional_jni_effective_color_scheme(
     env: &mut JNIEnv<'_>,
@@ -3595,7 +3616,56 @@ fn jni_string(env: &mut JNIEnv<'_>, value: &str) -> jstring {
 }
 
 #[cfg(target_os = "android")]
+mod android_log {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    const ANDROID_LOG_ERROR: i32 = 6;
+    const TAG: &str = "KeytaoNative";
+
+    #[link(name = "log")]
+    extern "C" {
+        fn __android_log_write(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
+    }
+
+    pub fn error(message: &str) {
+        let (Ok(tag), Ok(text)) = (CString::new(TAG), CString::new(message)) else {
+            return;
+        };
+        unsafe { __android_log_write(ANDROID_LOG_ERROR, tag.as_ptr(), text.as_ptr()) };
+    }
+}
+
+/// Run `body` and turn a panic into `default`.
+///
+/// Unwinding out of an `extern "system"` function aborts the process, and for
+/// the `:ime` process that means the keyboard disappears mid-typing, so every
+/// JNI export funnels through here.
+#[cfg(target_os = "android")]
+fn android_jni_guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
+                message
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.as_str()
+            } else {
+                "unknown panic"
+            };
+            android_log::error(&format!("{name}: panicked: {message}"));
+            default
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
 static ANDROID_IME_RUNTIME: Mutex<Option<keytao_core::ImeRuntime>> = Mutex::new(None);
+
+/// Directories the live runtime was built for, so a reinitialize can tell
+/// whether it may reuse it instead of tearing librime down behind its back.
+#[cfg(target_os = "android")]
+static ANDROID_IME_RUNTIME_DIRS: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
 
 #[cfg(target_os = "android")]
 static ANDROID_IME_USER_THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -3652,8 +3722,9 @@ static ANDROID_IME_THEME_RESOLVER: Mutex<Option<AndroidThemeResolverState>> = Mu
 struct AndroidImeStateJson {
     preedit: String,
     cursor: usize,
+    sel_start: usize,
+    sel_end: usize,
     candidates: Vec<keytao_core::Candidate>,
-    all_candidates: Vec<keytao_core::Candidate>,
     highlighted_candidate_index: usize,
     page_size: usize,
     page: usize,
@@ -3694,8 +3765,9 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
     let value = AndroidImeStateJson {
         preedit: state.preedit,
         cursor: state.cursor,
+        sel_start: state.sel_start,
+        sel_end: state.sel_end,
         candidates: state.candidates,
-        all_candidates: state.all_candidates,
         highlighted_candidate_index: state.highlighted_candidate_index,
         page_size: state.page_size,
         page: state.page,
@@ -3803,6 +3875,45 @@ pub struct AndroidImeInputSettings {
     pub message: String,
 }
 
+/// Point the cached theme at this user directory and drop the resolver built
+/// for the previous one.
+#[cfg(target_os = "android")]
+fn android_set_user_theme_path(path: PathBuf) {
+    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
+        *theme_path = Some(path);
+    }
+    if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
+        *resolver = None;
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_install_runtime(runtime: keytao_core::ImeRuntime, user_dir: &Path, shared_dir: &str) {
+    if let Ok(mut dirs) = ANDROID_IME_RUNTIME_DIRS.lock() {
+        *dirs = Some((user_dir.to_path_buf(), shared_dir.to_string()));
+    }
+    if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
+        *slot = Some(runtime);
+    }
+}
+
+/// The live runtime when it was built for these directories. Reloading through
+/// it makes every session it handed out drop its engine before librime is
+/// finalized, so a session the IME still holds cannot keep the previous
+/// deployment's config and dictionaries alive.
+#[cfg(target_os = "android")]
+fn android_runtime_for(user_dir: &Path, shared_dir: &str) -> Option<keytao_core::ImeRuntime> {
+    let matches = ANDROID_IME_RUNTIME_DIRS.lock().ok().is_some_and(|dirs| {
+        dirs.as_ref().is_some_and(|(known_user, known_shared)| {
+            known_user == user_dir && known_shared == shared_dir
+        })
+    });
+    if !matches {
+        return None;
+    }
+    ANDROID_IME_RUNTIME.lock().ok()?.as_ref().cloned()
+}
+
 #[cfg(target_os = "android")]
 fn android_session<'a>(session: jlong) -> Option<&'a keytao_core::ImeRuntimeSession> {
     if session == 0 {
@@ -3820,18 +3931,20 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
     user_theme_path: JString<'_>,
     system_color_scheme: JString<'_>,
 ) -> jstring {
-    let default_path = optional_jni_path(&mut env, default_theme_path);
-    let user_path = optional_jni_path(&mut env, user_theme_path);
-    let system_scheme = optional_jni_effective_color_scheme(&mut env, system_color_scheme)
-        .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
-    if let Ok(mut current) = ANDROID_IME_SYSTEM_COLOR_SCHEME.lock() {
-        *current = system_scheme;
-    }
-    let theme = android_cached_theme(default_path, user_path, system_scheme);
-    match keytao_theme::resolved_theme_json(&theme) {
-        Ok(json) => jni_string(&mut env, &json),
-        Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
-    }
+    android_jni_guard("nativeResolveThemeJson", std::ptr::null_mut(), || {
+        let default_path = optional_jni_path(&mut env, default_theme_path);
+        let user_path = optional_jni_path(&mut env, user_theme_path);
+        let system_scheme = optional_jni_effective_color_scheme(&mut env, system_color_scheme)
+            .unwrap_or(keytao_theme::EffectiveColorScheme::Light);
+        if let Ok(mut current) = ANDROID_IME_SYSTEM_COLOR_SCHEME.lock() {
+            *current = system_scheme;
+        }
+        let theme = android_cached_theme(default_path, user_path, system_scheme);
+        match keytao_theme::resolved_theme_json(&theme) {
+            Ok(json) => jni_string(&mut env, &json),
+            Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
+        }
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3840,7 +3953,9 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDefault
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
 ) -> jstring {
-    jni_string(&mut env, keytao_theme::default_keyboard_yaml())
+    android_jni_guard("nativeDefaultKeyboardYaml", std::ptr::null_mut(), || {
+        jni_string(&mut env, keytao_theme::default_keyboard_yaml())
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3851,14 +3966,18 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
     default_keyboard_path: JString<'_>,
     user_keyboard_path: JString<'_>,
 ) -> jstring {
-    let default_path = optional_jni_path(&mut env, default_keyboard_path);
-    let user_path = optional_jni_path(&mut env, user_keyboard_path);
-    let keyboard =
-        keytao_theme::resolve_keyboard_from_paths(default_path.as_deref(), user_path.as_deref());
-    match keytao_theme::resolved_keyboard_json(&keyboard) {
-        Ok(json) => jni_string(&mut env, &json),
-        Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
-    }
+    android_jni_guard("nativeResolveKeyboardJson", std::ptr::null_mut(), || {
+        let default_path = optional_jni_path(&mut env, default_keyboard_path);
+        let user_path = optional_jni_path(&mut env, user_keyboard_path);
+        let keyboard = keytao_theme::resolve_keyboard_from_paths(
+            default_path.as_deref(),
+            user_path.as_deref(),
+        );
+        match keytao_theme::resolved_keyboard_json(&keyboard) {
+            Ok(json) => jni_string(&mut env, &json),
+            Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
+        }
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3867,7 +3986,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,
 ) -> jboolean {
-    1
+    android_jni_guard("nativeEngineAvailable", 0, || 1)
 }
 
 #[cfg(target_os = "android")]
@@ -3879,31 +3998,34 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployS
     shared_dir: JString<'_>,
     schema_id: JString<'_>,
 ) -> jstring {
-    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-        return jni_string(
-            &mut env,
-            r#"{"success":false,"error":"missing user directory"}"#,
-        );
-    };
-    let shared_dir = optional_jni_path(&mut env, shared_dir)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(keytao_core::default_shared_data_dir);
-    let schema_id = optional_jni_text(&mut env, schema_id);
-    let result = match schema_id {
-        Some(schema_id) => keytao_core::deploy_android_schema(
-            user_dir.to_string_lossy().into_owned(),
-            shared_dir,
-            schema_id,
-        ),
-        None => {
-            keytao_core::deploy_android_config(user_dir.to_string_lossy().into_owned(), shared_dir)
-        }
-    };
-    let payload = match result {
-        Ok(schemas) => serde_json::json!({ "success": true, "schemas": schemas }),
-        Err(error) => serde_json::json!({ "success": false, "error": error }),
-    };
-    jni_string(&mut env, &payload.to_string())
+    android_jni_guard("nativeDeployStep", std::ptr::null_mut(), || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return jni_string(
+                &mut env,
+                r#"{"success":false,"error":"missing user directory"}"#,
+            );
+        };
+        let shared_dir = optional_jni_path(&mut env, shared_dir)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        let schema_id = optional_jni_text(&mut env, schema_id);
+        let result = match schema_id {
+            Some(schema_id) => keytao_core::deploy_android_schema(
+                user_dir.to_string_lossy().into_owned(),
+                shared_dir,
+                schema_id,
+            ),
+            None => keytao_core::deploy_android_config(
+                user_dir.to_string_lossy().into_owned(),
+                shared_dir,
+            ),
+        };
+        let payload = match result {
+            Ok(schemas) => serde_json::json!({ "success": true, "schemas": schemas }),
+            Err(error) => serde_json::json!({ "success": false, "error": error }),
+        };
+        jni_string(&mut env, &payload.to_string())
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3915,34 +4037,28 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     shared_dir: JString<'_>,
     deploy: jboolean,
 ) -> jboolean {
-    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-        return 0;
-    };
-    let user_theme_path = user_dir.join("theme.yaml");
-    let shared_dir = optional_jni_path(&mut env, shared_dir)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(keytao_core::default_shared_data_dir);
+    android_jni_guard("nativeInit", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        let user_theme_path = user_dir.join("theme.yaml");
+        let shared_dir = optional_jni_path(&mut env, shared_dir)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
 
-    let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
-    let init_result = if deploy != 0 {
-        runtime.init()
-    } else {
-        runtime.init_without_deploy()
-    };
-    if init_result.is_err() {
-        return 0;
-    }
-    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
-        *theme_path = Some(user_theme_path);
-    }
-    if let Ok(mut theme_resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
-        *theme_resolver = None;
-    }
-    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
-        return 0;
-    };
-    *slot = Some(runtime);
-    1
+        let runtime = keytao_core::ImeRuntime::with_dirs(user_dir.clone(), shared_dir.clone());
+        let init_result = if deploy != 0 {
+            runtime.init()
+        } else {
+            runtime.init_without_deploy()
+        };
+        if init_result.is_err() {
+            return 0;
+        }
+        android_set_user_theme_path(user_theme_path);
+        android_install_runtime(runtime, &user_dir, &shared_dir);
+        1
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3953,43 +4069,42 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
     user_dir: JString<'_>,
     shared_dir: JString<'_>,
 ) -> jboolean {
-    let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
-        return 0;
-    };
-    let user_theme_path = user_dir.join("theme.yaml");
-    let shared_dir = optional_jni_path(&mut env, shared_dir)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(keytao_core::default_shared_data_dir);
+    android_jni_guard("nativeReinitialize", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        let user_theme_path = user_dir.join("theme.yaml");
+        let shared_dir = optional_jni_path(&mut env, shared_dir)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
 
-    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
-        return 0;
-    };
-    *slot = None;
-    drop(slot);
-    if keytao_core::reinitialize_android(
-        user_dir.to_string_lossy().into_owned(),
-        shared_dir.clone(),
-    )
-    .is_err()
-    {
-        return 0;
-    }
+        // The runtime knows every session it handed out, so reloading through it
+        // drops their engines before librime is finalized. Going around it would
+        // leave a session the IME still holds pointing at a torn-down librime.
+        if let Some(runtime) = android_runtime_for(&user_dir, &shared_dir) {
+            if runtime.reload_without_deploy().is_ok() {
+                android_set_user_theme_path(user_theme_path);
+                return 1;
+            }
+        }
 
-    let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
-    if runtime.init_without_deploy().is_err() {
-        return 0;
-    }
-    if let Ok(mut theme_path) = ANDROID_IME_USER_THEME_PATH.lock() {
-        *theme_path = Some(user_theme_path);
-    }
-    if let Ok(mut theme_resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
-        *theme_resolver = None;
-    }
-    let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() else {
-        return 0;
-    };
-    *slot = Some(runtime);
-    1
+        if let Ok(mut slot) = ANDROID_IME_RUNTIME.lock() {
+            *slot = None;
+        }
+        if keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared_dir.clone())
+            .is_err()
+        {
+            return 0;
+        }
+
+        let runtime = keytao_core::ImeRuntime::with_dirs(user_dir.clone(), shared_dir.clone());
+        if runtime.init_without_deploy().is_err() {
+            return 0;
+        }
+        android_set_user_theme_path(user_theme_path);
+        android_install_runtime(runtime, &user_dir, &shared_dir);
+        1
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -3998,17 +4113,19 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCreateS
     _env: JNIEnv<'_>,
     _receiver: JObject<'_>,
 ) -> jlong {
-    let Ok(slot) = ANDROID_IME_RUNTIME.lock() else {
-        return 0;
-    };
-    let Some(runtime) = slot.as_ref().cloned() else {
-        return 0;
-    };
-    drop(slot);
-    match runtime.create_session() {
-        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
-        Err(_) => 0,
-    }
+    android_jni_guard("nativeCreateSession", 0, || {
+        let Ok(slot) = ANDROID_IME_RUNTIME.lock() else {
+            return 0;
+        };
+        let Some(runtime) = slot.as_ref().cloned() else {
+            return 0;
+        };
+        drop(slot);
+        match runtime.create_session() {
+            Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+            Err(_) => 0,
+        }
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4018,14 +4135,16 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDestroy
     _receiver: JObject<'_>,
     session: jlong,
 ) {
-    if session == 0 {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(
-            session as *mut keytao_core::ImeRuntimeSession,
-        ));
-    }
+    android_jni_guard("nativeDestroySession", (), || {
+        if session == 0 {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(
+                session as *mut keytao_core::ImeRuntimeSession,
+            ));
+        }
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4035,10 +4154,12 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSession
     _receiver: JObject<'_>,
     session: jlong,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(session.state(), false))
+    android_jni_guard("nativeSessionState", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(session.state(), false))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4050,13 +4171,35 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeProcess
     keyval: jint,
     modifiers: jint,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(result) = session.process_key_result(keyval as u32, modifiers as u32) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_result_json(result))
+    android_jni_guard("nativeProcessKey", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(result) = session.process_key_result(keyval as u32, modifiers as u32) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_result_json(result))
+    })
+}
+
+/// `Return` handling shared by every frontend: librime decides, and only if it
+/// passes the key back is the raw input committed.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeProcessEnter(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeProcessEnter", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(result) = session.process_enter() else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_result_json(result))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4067,13 +4210,55 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectC
     session: jlong,
     index: jint,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(state) = session.select_candidate(index.max(0) as usize) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(state, true))
+    android_jni_guard("nativeSelectCandidate", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.select_candidate_on_page(index.max(0) as usize) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// Move the highlight without committing, for candidate hover and navigation.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHighlightCandidate(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    index: jint,
+) -> jstring {
+    android_jni_guard("nativeHighlightCandidate", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.highlight_candidate_on_page(index.max(0) as usize) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// Forget a learned phrase, the action behind "delete candidate" gestures.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeleteCandidate(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    index: jint,
+) -> jstring {
+    android_jni_guard("nativeDeleteCandidate", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.delete_candidate_on_page(index.max(0) as usize) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4084,13 +4269,15 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectC
     session: jlong,
     index: jint,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(state) = session.select_candidate_global(index.max(0) as usize) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(state, true))
+    android_jni_guard("nativeSelectCandidateGlobal", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.select_candidate_global(index.max(0) as usize) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4101,13 +4288,15 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeAllCand
     session: jlong,
     limit: jint,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(candidates) = session.all_candidates_limited(limit.max(0) as usize) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_candidates_json(candidates))
+    android_jni_guard("nativeAllCandidates", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(candidates) = session.all_candidates_limited(limit.max(0) as usize) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_candidates_json(candidates))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4118,13 +4307,15 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeChangeP
     session: jlong,
     backward: jboolean,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(state) = session.change_page(backward != 0) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(state, true))
+    android_jni_guard("nativeChangePage", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.change_page(backward != 0) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4134,13 +4325,111 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReset(
     _receiver: JObject<'_>,
     session: jlong,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(state) = session.reset() else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(state, true))
+    android_jni_guard("nativeReset", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.reset() else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// Commit what is being composed; the path to take when the input context ends
+/// and the composition must not be lost.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCommitComposition(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeCommitComposition", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.commit_composition() else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// Discard what is being composed; the path to take when the input context ends
+/// and the composition must not reach the editor.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeClearComposition(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeClearComposition", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.clear_composition() else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// Declare what the current editor allows. Password and PIN fields pass
+/// `composing = false`, which stops keys from reaching librime at all, so no
+/// preedit appears and nothing is learned. Returns the state to apply.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSetInputPolicy(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    composing: jboolean,
+    learning: jboolean,
+) -> jstring {
+    android_jni_guard("nativeSetInputPolicy", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.set_input_policy(keytao_core::InputContextPolicy {
+            composing: composing != 0,
+            learning: learning != 0,
+        }) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInputPolicyComposing(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jboolean {
+    android_jni_guard("nativeInputPolicyComposing", 0, || {
+        match android_session(session) {
+            Some(session) if session.input_policy().composing => 1,
+            _ => 0,
+        }
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInputPolicyLearning(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jboolean {
+    android_jni_guard("nativeInputPolicyLearning", 0, || {
+        match android_session(session) {
+            Some(session) if session.input_policy().learning => 1,
+            _ => 0,
+        }
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4150,14 +4439,10 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeGetAsci
     _receiver: JObject<'_>,
     session: jlong,
 ) -> jboolean {
-    let Some(session) = android_session(session) else {
-        return 0;
-    };
-    if session.is_ascii_mode() {
-        1
-    } else {
-        0
-    }
+    android_jni_guard("nativeGetAsciiMode", 0, || match android_session(session) {
+        Some(session) if session.is_ascii_mode() => 1,
+        _ => 0,
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4168,13 +4453,141 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSetAsci
     session: jlong,
     enabled: jboolean,
 ) -> jstring {
-    let Some(session) = android_session(session) else {
-        return std::ptr::null_mut();
-    };
-    let Some(state) = session.set_ascii_mode(enabled != 0) else {
-        return std::ptr::null_mut();
-    };
-    jni_string(&mut env, &android_state_json(state, true))
+    android_jni_guard("nativeSetAsciiMode", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(state) = session.set_ascii_mode(enabled != 0) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &android_state_json(state, true))
+    })
+}
+
+/// The X11 keysym a soft keyboard key should send, or 0 when the text is not a
+/// single typable character and has to be committed directly instead.
+///
+/// Latin-1 maps onto itself and everything else uses X11's `0x01000000 | cp`
+/// encoding, so `（` (U+FF08) never arrives as `XK_BackSpace`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeTextToKeysym(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    text: JString<'_>,
+) -> jint {
+    android_jni_guard("nativeTextToKeysym", 0, || {
+        let Some(text) = optional_jni_raw_text(&mut env, text) else {
+            return 0;
+        };
+        keytao_core::key_policy::keysym_for_text(&text).unwrap_or(0) as jint
+    })
+}
+
+/// Whether a keysym is `Return` or keypad `Return`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeIsEnterKey(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    keyval: jint,
+) -> jboolean {
+    android_jni_guard("nativeIsEnterKey", 0, || {
+        if keytao_core::key_policy::is_enter_key(keyval as u32) {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// Whether a key must be handed straight to the editor instead of librime.
+///
+/// `ascii_mode` deliberately plays no part: English mode still needs librime's
+/// `ascii_composer` to see the key, and Control/Alt chords carry Rime's own
+/// switcher hotkeys, so only window-system modifiers pass through early.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeShouldBypassKey(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    keyval: jint,
+    modifiers: jint,
+) -> jboolean {
+    android_jni_guard("nativeShouldBypassKey", 0, || {
+        let Some(session) = android_session(session) else {
+            return 0;
+        };
+        let state = session.state();
+        if keytao_core::key_policy::should_bypass_empty_composition(
+            keyval as u32,
+            modifiers as u32,
+            &state,
+        ) {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// Map a Unicode scalar offset into `text` to a UTF-16 code unit offset, the
+/// unit `InputConnection` counts in.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeUtf16OffsetFromChars(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    text: JString<'_>,
+    char_offset: jint,
+) -> jint {
+    android_jni_guard("nativeUtf16OffsetFromChars", 0, || {
+        let Some(text) = optional_jni_raw_text(&mut env, text) else {
+            return 0;
+        };
+        keytao_core::utf16_offset_from_chars(&text, char_offset.max(0) as usize) as jint
+    })
+}
+
+/// Signature of the reload signal in `user_dir`, or null when no deployment has
+/// requested a reload yet. The format is keytao-core's; the IME must not invent
+/// its own, otherwise the same deployment reloads on some platforms only.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReloadStampSignature(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeReloadStampSignature", std::ptr::null_mut(), || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return std::ptr::null_mut();
+        };
+        match keytao_core::ReloadStamp::current_signature(&user_dir) {
+            Some(signature) => jni_string(&mut env, &signature),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Path of the reload signal inside `user_dir`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReloadStampPath(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeReloadStampPath", std::ptr::null_mut(), || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(
+            &mut env,
+            &keytao_core::ReloadStamp::path(&user_dir).to_string_lossy(),
+        )
+    })
 }
 
 #[tauri::command]
@@ -4290,22 +4703,13 @@ fn android_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<P
 
 #[cfg(target_os = "android")]
 fn android_reload_stamp_path(root: &Path) -> PathBuf {
-    root.join(IME_RELOAD_STAMP_FILE)
+    keytao_core::ReloadStamp::path(root)
 }
 
 #[cfg(target_os = "android")]
 fn write_android_reload_stamp(root: &Path) -> Result<PathBuf, String> {
-    let stamp = android_reload_stamp_path(root);
-    if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建 Android 输入法目录失败: {e}"))?;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    std::fs::write(&stamp, now.to_string())
-        .map_err(|e| format!("写入 Android 输入法重载标记失败 {}: {e}", stamp.display()))?;
-    Ok(stamp)
+    keytao_core::ReloadStamp::write(root)
+        .map_err(|e| format!("写入 Android 输入法重载标记失败: {e}"))
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -4541,7 +4945,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
 
         let content = serde_json::to_string_pretty(&serde_json::Value::Object(config))
             .map_err(|e| format!("序列化移动端输入法配置失败: {e}"))?;
-        std::fs::write(&path, format!("{content}\n"))
+        write_file_atomic(&path, format!("{content}\n").as_bytes())
             .map_err(|e| format!("写入移动端输入法配置失败 {}: {e}", path.display()))?;
 
         #[cfg(target_os = "android")]
@@ -5428,22 +5832,39 @@ async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
 
     let _ = app.emit("deploy-progress", "正在部署 librime...");
 
+    // The test-input session must be closed before the deployment, not replaced
+    // after it: librime keeps its config and dictionary caches alive as long as
+    // a session references them, so deploying underneath a live session would
+    // rebuild the artifacts and keep serving the stale ones.
+    #[cfg(target_os = "linux")]
+    let runtime = {
+        let state: tauri::State<rime::RimeEngine> = app.state();
+        state.suspend_for_deploy(user, shared)
+    };
+
     #[cfg(target_os = "windows")]
     let deploy_result =
         tokio::task::spawn_blocking(move || windows_deploy_rime_blocking(dest, shared)).await;
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     let deploy_result =
         tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await;
+    #[cfg(target_os = "linux")]
+    let deploy_result = tokio::task::spawn_blocking(move || runtime.reload()).await;
+
+    // Reopen the test input, on the new schemas after a successful deployment
+    // and on the previous ones after a failed one — either way it must not stay
+    // closed until the next setup.
+    #[cfg(target_os = "linux")]
+    {
+        let state: tauri::State<rime::RimeEngine> = app.state();
+        if let Err(error) = state.resume() {
+            tracing::warn!("test input session unavailable after deploy: {error}");
+        }
+    }
 
     match deploy_result {
         Ok(Ok(())) => {
             let _ = app.emit("deploy-progress", "部署完成");
-            // Refresh the test-input Rime session so the new schemas take effect immediately.
-            #[cfg(target_os = "linux")]
-            if let Ok(engine) = keytao_core::Engine::new() {
-                let state: tauri::State<rime::RimeEngine> = app.state();
-                *state.engine.lock().unwrap() = Some(engine);
-            }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             match write_keytao_ime_reload_stamp() {
                 Ok(()) => {
@@ -5486,13 +5907,16 @@ async fn rime_deploy_default<R: tauri::Runtime>(
         .0
         .run_mobile_plugin("deployImeData", ())
         .map_err(|e| e.to_string())?;
-    let path = result["path"]
-        .as_str()
-        .unwrap_or("/storage/emulated/0/keytao/keytao-ime.reload");
+    // The Kotlin side owns the data directory (app-specific storage), so there is
+    // no path constant to fall back to here.
     let schema_name = result["schemaName"].as_str().unwrap_or("KeyTao");
+    let message = match result["path"].as_str() {
+        Some(path) => format!("Android RIME 已部署 {schema_name}，并通知输入法重载：{path}"),
+        None => format!("Android RIME 已部署 {schema_name}，并通知输入法重载"),
+    };
     Ok(DeployResult {
         success: true,
-        message: format!("Android RIME 已部署 {schema_name}，并通知输入法重载：{path}"),
+        message,
     })
 }
 
@@ -5869,7 +6293,7 @@ pub struct DebugLogs {
 #[tauri::command]
 async fn read_debug_logs() -> Result<DebugLogs, String> {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
-    let ime = read_tmp_logs("keytao-ime.log", "No keytao-ime.log found", cutoff);
+    let ime = read_ime_logs(cutoff);
     let app = read_tmp_logs("keytao-app.log", "No keytao-app.log found", cutoff);
     #[cfg(target_os = "macos")]
     let macos_ime = Some(read_macos_ime_logs(cutoff));
@@ -5885,6 +6309,29 @@ async fn read_debug_logs() -> Result<DebugLogs, String> {
 fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) -> DebugLogFile {
     let paths = collect_tmp_log_paths(prefix);
     read_log_paths(paths, missing_message, cutoff, Some(prefix))
+}
+
+/// Where the keytao-ime daemon keeps its log, mirroring the daemon's own
+/// choice: the log is derived from what the user types, so on Linux it lives in
+/// the per-user state directory instead of a world-readable `/tmp`.  The other
+/// platforms simply have no such directory.
+fn ime_state_log_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
+    Some(base.join("keytao").join("log"))
+}
+
+/// Read the keytao-ime daemon log; `/tmp` is only consulted for logs older
+/// releases left behind.
+fn read_ime_logs(cutoff: OffsetDateTime) -> DebugLogFile {
+    const PREFIX: &str = "keytao-ime.log";
+    let mut paths = ime_state_log_dir()
+        .map(|dir| collect_dir_log_paths(&dir))
+        .unwrap_or_default();
+    paths.extend(collect_tmp_log_paths(PREFIX));
+    read_log_paths(paths, "No keytao-ime.log found", cutoff, Some(PREFIX))
 }
 
 #[cfg(target_os = "macos")]
@@ -5951,7 +6398,6 @@ fn read_log_paths(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn collect_dir_log_paths(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -6740,5 +7186,150 @@ mod tests {
             !merged.contains("require(\"bar\")"),
             "in-comment require leaked"
         );
+    }
+
+    // ── JNI export manifest ───────────────────────────────────────────────────
+
+    /// Every `.rs` file of this crate, so that moving an export into a new
+    /// module cannot slip it past the manifest test below.
+    fn crate_source_files() -> Vec<PathBuf> {
+        fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, files);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        files.sort();
+        assert!(!files.is_empty(), "no crate sources found");
+        files
+    }
+
+    /// Every `Java_*` export must funnel through `android_jni_guard`: unwinding
+    /// out of an `extern "system"` function aborts the `:ime` process, so a
+    /// panic in any export would take the keyboard down mid-typing.
+    ///
+    /// The exports are compiled out on the host, so the manifest is read off the
+    /// sources: an export's body has to *open* with an
+    /// `android_jni_guard("<method name>", …)` call, since that is the only
+    /// shape in which the guard covers the whole body.
+    ///
+    /// Returns `(guarded, unguarded)` method names for the given sources.
+    fn scan_jni_export_guards(sources: &[(String, String)]) -> (Vec<String>, Vec<String>) {
+        // Built at run time so this scanner never matches its own source.
+        let declaration = format!("fn {}_", "Java");
+
+        let mut guarded: Vec<String> = Vec::new();
+        let mut unguarded: Vec<String> = Vec::new();
+
+        for (label, text) in sources {
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                // Matched anywhere in the line rather than as a prefix, so an
+                // indented, `unsafe`, or attribute-prefixed export cannot slip
+                // past the scanner unnoticed.
+                let Some(offset) = line.find(&declaration) else {
+                    continue;
+                };
+                // `Java_<package>_<class>_<method>`, with `_1` standing in for
+                // the underscores inside the Java identifiers.
+                let symbol = line[offset + "fn ".len()..].trim();
+                let symbol = symbol.split('(').next().unwrap_or(symbol).trim();
+                let name = symbol.rsplit('_').next().unwrap_or(symbol);
+
+                let mut cursor = index;
+                while cursor < lines.len() && !lines[cursor].trim_end().ends_with('{') {
+                    cursor += 1;
+                }
+                let opens_with_guard = lines
+                    .get(cursor + 1..)
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|line| !line.trim().is_empty())
+                    .is_some_and(|line| line.contains(&format!("android_jni_guard(\"{name}\"")));
+                if opens_with_guard {
+                    guarded.push(name.to_owned());
+                } else {
+                    unguarded.push(format!("{label}: {name}"));
+                }
+            }
+        }
+
+        (guarded, unguarded)
+    }
+
+    #[test]
+    fn every_jni_export_is_panic_guarded() {
+        let sources: Vec<(String, String)> = crate_source_files()
+            .into_iter()
+            .map(|source| {
+                let text = std::fs::read_to_string(&source)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", source.display()));
+                (source.display().to_string(), text)
+            })
+            .collect();
+
+        let (guarded, unguarded) = scan_jni_export_guards(&sources);
+
+        assert!(
+            unguarded.is_empty(),
+            "JNI exports whose body does not open with android_jni_guard: {unguarded:?}"
+        );
+        // A stale scanner would otherwise report an empty manifest as a pass.
+        for expected in ["nativeEngineAvailable", "nativeProcessKey", "nativeInit"] {
+            assert!(
+                guarded.iter().any(|name| name == expected),
+                "scanner did not find `{expected}`; it no longer matches the exports"
+            );
+        }
+    }
+
+    /// The scanner has to fail on the shapes it exists to catch, including the
+    /// ones a plain prefix match would walk past.
+    ///
+    /// The fixtures are assembled at run time for the same reason the scanner
+    /// builds its needle that way: a literal export declaration in this file
+    /// would be picked up by the crate-wide scan above.
+    #[test]
+    fn jni_export_scanner_rejects_unguarded_shapes() {
+        let signature = format!(
+            "pub extern \"system\" fn {}_a_B_nativeThing(env: JNIEnv<'_>) -> jboolean {{",
+            "Java"
+        );
+        let unsafe_signature = format!(
+            "    pub unsafe extern \"system\" fn {}_a_B_nativeThing(env: JNIEnv<'_>) -> jboolean {{",
+            "Java"
+        );
+        let plain = format!("#[no_mangle]\n{signature}\n    1\n}}\n");
+        let indented =
+            format!("mod inner {{\n    #[no_mangle]\n{unsafe_signature}\n        1\n    }}\n}}\n");
+        let guarded = format!(
+            "#[no_mangle]\n{signature}\n    android_jni_guard(\"nativeThing\", 0, || 1)\n}}\n"
+        );
+
+        for (label, source) in [("plain", plain), ("indented", indented)] {
+            let (_, unguarded) = scan_jni_export_guards(&[(label.into(), source)]);
+            assert_eq!(
+                unguarded,
+                vec![format!("{label}: nativeThing")],
+                "{label} export was not reported"
+            );
+        }
+
+        let (found, unguarded) = scan_jni_export_guards(&[("guarded".into(), guarded)]);
+        assert!(unguarded.is_empty());
+        assert_eq!(found, vec!["nativeThing".to_owned()]);
     }
 }

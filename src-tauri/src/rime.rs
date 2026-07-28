@@ -1,29 +1,75 @@
 //! Tauri adapter layer — thin glue between keytao-core and Tauri's IPC.
 //! All platform logic, IME state types, and librime calls live in `keytao-core`.
 
-use keytao_core::{default_shared_data_dir, default_user_data_dir, deploy, Engine, ImeState};
+use keytao_core::{
+    default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
+};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Mutex,
+    Mutex, MutexGuard,
 };
 use tauri::Manager;
 
 // ── Managed state ─────────────────────────────────────────────────────────────
 
+/// The in-app test input, running on the process-wide [`ImeRuntime`].
+///
+/// It deliberately does not keep an `Engine` of its own: librime holds its
+/// compiled config and its dictionaries behind `weak_ptr`s and only re-reads a
+/// deployment once the last session referencing them is gone, so an engine
+/// outside the runtime's session registry would keep the app serving the old
+/// dictionaries after every deploy.
+#[derive(Default)]
 pub struct RimeEngine {
-    pub engine: Mutex<Option<Engine>>,
+    inner: Mutex<TestInput>,
 }
 
-impl Default for RimeEngine {
-    fn default() -> Self {
-        Self {
-            engine: Mutex::new(None),
-        }
+#[derive(Default)]
+struct TestInput {
+    runtime: Option<ImeRuntime>,
+    session: Option<ImeRuntimeSession>,
+}
+
+impl RimeEngine {
+    /// Close the test input and hand back the runtime to deploy on.
+    ///
+    /// The session has to be gone *before* the deployment rather than replaced
+    /// after it: a redeploy under a live session rebuilds the artifacts and
+    /// then keeps serving the cached ones.
+    pub fn suspend_for_deploy(&self, user_data_dir: String, shared_data_dir: String) -> ImeRuntime {
+        let runtime = ImeRuntime::with_dirs(user_data_dir, shared_data_dir);
+        let mut inner = self.lock();
+        inner.session = None;
+        inner.runtime = Some(runtime.clone());
+        runtime
+    }
+
+    /// Open the test input again on the runtime the last deployment ran on.
+    pub fn resume(&self) -> Result<(), String> {
+        let mut inner = self.lock();
+        let runtime = inner
+            .runtime
+            .clone()
+            .ok_or("Rime runtime not initialised")?;
+        inner.session = Some(runtime.create_session()?);
+        Ok(())
+    }
+
+    fn session(&self) -> Result<ImeRuntimeSession, String> {
+        self.lock()
+            .session
+            .clone()
+            .ok_or_else(|| "Rime session not initialised".to_owned())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, TestInput> {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 
-unsafe impl Send for RimeEngine {}
-unsafe impl Sync for RimeEngine {}
+fn session_unavailable() -> String {
+    "Rime session is unavailable".to_owned()
+}
 
 // ── Overlay: track the PID to restore focus after text injection ──────────────
 
@@ -51,13 +97,11 @@ pub async fn rime_setup(
     };
     let shared = shared_data_dir.unwrap_or_else(default_shared_data_dir);
 
-    tokio::task::spawn_blocking(move || deploy(user, shared))
+    let runtime = state.suspend_for_deploy(user, shared);
+    tokio::task::spawn_blocking(move || runtime.reload())
         .await
         .map_err(|e| e.to_string())??;
-
-    let engine = Engine::new()?;
-    *state.engine.lock().unwrap() = Some(engine);
-    Ok(())
+    state.resume()
 }
 
 #[tauri::command]
@@ -66,9 +110,11 @@ pub fn rime_process_key(
     mask: i32,
     state: tauri::State<'_, RimeEngine>,
 ) -> Result<ImeState, String> {
-    let guard = state.engine.lock().unwrap();
-    let engine = guard.as_ref().ok_or("Rime session not initialised")?;
-    Ok(engine.process_key(keycode as u32, mask as u32))
+    state
+        .session()?
+        .process_key_result(keycode as u32, mask as u32)
+        .map(|result| result.state)
+        .ok_or_else(session_unavailable)
 }
 
 #[tauri::command]
@@ -76,9 +122,10 @@ pub fn rime_select_candidate(
     index: usize,
     state: tauri::State<'_, RimeEngine>,
 ) -> Result<ImeState, String> {
-    let guard = state.engine.lock().unwrap();
-    let engine = guard.as_ref().ok_or("Rime session not initialised")?;
-    Ok(engine.select_candidate(index))
+    state
+        .session()?
+        .select_candidate_on_page(index)
+        .ok_or_else(session_unavailable)
 }
 
 #[tauri::command]
@@ -86,23 +133,24 @@ pub fn rime_change_page(
     backward: bool,
     state: tauri::State<'_, RimeEngine>,
 ) -> Result<ImeState, String> {
-    let guard = state.engine.lock().unwrap();
-    let engine = guard.as_ref().ok_or("Rime session not initialised")?;
-    Ok(engine.change_page(backward))
+    state
+        .session()?
+        .change_page(backward)
+        .ok_or_else(session_unavailable)
 }
 
 #[tauri::command]
 pub fn rime_reset(state: tauri::State<'_, RimeEngine>) -> ImeState {
-    let guard = state.engine.lock().unwrap();
-    guard
-        .as_ref()
-        .map(|e| e.reset())
+    state
+        .session()
+        .ok()
+        .and_then(|session| session.reset())
         .unwrap_or_else(ImeState::empty)
 }
 
 #[tauri::command]
 pub fn rime_is_ready(state: tauri::State<'_, RimeEngine>) -> bool {
-    state.engine.lock().unwrap().is_some()
+    state.session().is_ok()
 }
 
 #[tauri::command]
