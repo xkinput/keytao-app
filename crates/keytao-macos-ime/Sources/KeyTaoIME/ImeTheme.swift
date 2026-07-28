@@ -244,6 +244,23 @@ final class ImeThemeManager {
     private let lock = NSLock()
     private var cachedTheme = ImeTheme.default
     private var cachedSignature: String?
+    private var pushedColorScheme: EffectiveThemeColorScheme?
+
+    /// Point the shared runtime at the same theme files this renderer reads, so
+    /// the candidate panel model it builds for the JSON state uses the user's
+    /// theme instead of the built-in defaults.
+    func installThemeSources() {
+        let defaultPath = defaultThemeURL()?.path
+        let userPath = userThemeURL()?.path
+        withOptionalCString(defaultPath) { defaultPtr in
+            withOptionalCString(userPath) { userPtr in
+                keytao_set_theme_paths(defaultPtr, userPtr)
+            }
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        pushSystemColorSchemeLocked(systemColorScheme())
+    }
 
     func theme() -> ImeTheme {
         lock.lock()
@@ -251,10 +268,12 @@ final class ImeThemeManager {
 
         let defaultURL = defaultThemeURL()
         let userURL = userThemeURL()
+        let colorScheme = systemColorScheme()
+        pushSystemColorSchemeLocked(colorScheme)
         let signatureParts = [defaultURL, userURL]
             .compactMap { $0 }
             .map { "\($0.path):\(fileSignature(for: $0))" }
-        let signature = (signatureParts + ["system:\(systemAppearanceSignature())"])
+        let signature = (signatureParts + ["system:\(colorScheme.rawValue)"])
             .joined(separator: "|")
 
         if signature == cachedSignature {
@@ -264,11 +283,19 @@ final class ImeThemeManager {
         let theme = loadTheme(
             defaultPath: defaultURL?.path,
             userPath: userURL?.path,
-            systemColorScheme: systemColorScheme()
+            systemColorScheme: colorScheme
         ) ?? .default
         cachedSignature = signature
         cachedTheme = theme
         return theme
+    }
+
+    /// Hand the appearance to the runtime instead of letting keytao-theme probe
+    /// for it: probing means spawning `defaults` from inside the IME process.
+    private func pushSystemColorSchemeLocked(_ scheme: EffectiveThemeColorScheme) {
+        guard scheme != pushedColorScheme else { return }
+        pushedColorScheme = scheme
+        scheme.rawValue.withCString { keytao_set_system_color_scheme($0) }
     }
 
     private func loadTheme(
@@ -356,10 +383,6 @@ final class ImeThemeManager {
         let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
         return "\(modified):\(size)"
-    }
-
-    private func systemAppearanceSignature() -> String {
-        systemColorScheme().rawValue
     }
 
     private func systemColorScheme() -> EffectiveThemeColorScheme {

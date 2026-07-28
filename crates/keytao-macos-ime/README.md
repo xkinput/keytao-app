@@ -11,24 +11,26 @@ macOS 入口是 `Sources/KeyTaoIME/main.swift`：
 1. 处理输入源注册命令，例如 `--register-input-source`、`--enable-input-source`、`--select-input-source`。
 2. 正常启动时创建 `IMKServer`，设置 `NSApplication` 为 accessory app 并进入 run loop。
 3. macOS 为每个输入上下文创建 `KeyTaoInputController`。
-4. controller 初始化时调用 `ensureEngineReady()`，底层通过 `keytao_init(userDir, sharedDir)` 只加载 App 已部署的 librime 数据，不在输入法进程中执行部署。
-5. 每个 controller 创建独立 `keytao_create_session()`。
-6. `handle(_:client:)` 把 `NSEvent` 转成 X11 keysym + Rime modifier mask，调用 `keytao_session_process_key()`。
-7. FFI 返回 `KeytaoState`，controller 再按顺序提交 `committed`、设置 marked text、更新候选窗和中英模式。
-8. App 部署后写 `~/Library/keytao/keytao-ime.reload`，输入法在激活或按键时发现变化，调用 `keytao_reload()`，由通用 runtime 刷新 session。
+4. 进程启动时 `KeyTaoRuntime.start()` 声明 UI 能力、注入主题路径，并在后台队列上调用 `keytao_init(userDir, sharedDir)`——只加载 App 已部署的 librime 数据，不在输入法进程中执行部署，也不在 IMK 回调线程上阻塞。
+5. 每个 controller 创建独立 `keytao_create_session()`；runtime 尚未就绪时先放行按键，就绪后由通知补建。
+6. `handle(_:client:)` 把 `NSEvent` 转成 X11 keysym + Rime modifier mask（文本→keysym 走 `keytao_text_to_keysym()`），bypass 判定走 `keytao_key_policy_should_bypass()`，Enter 走 `keytao_session_process_enter_json()`，其余走 `keytao_session_process_key_json()`。
+7. FFI 返回状态 JSON，controller 解成 `KeyTaoImeState`，按顺序提交 `committed`、设置分段 marked text、按 `candidatePanel` / `modeHint` 更新候选窗和中英提示。
+8. App 部署后写 `~/Library/keytao/keytao-ime.reload`，输入法用 `DispatchSource` 监听该文件（激活时再兜底检查一次），调用 `keytao_reload_if_stamp_changed()`，由通用 runtime 刷新 session。
 
 ## 通用层与 librime 位置
 
 - macOS IMK 入口：`crates/keytao-macos-ime/Sources/KeyTaoIME/main.swift`
-- engine 初始化和目录解析：`Sources/KeyTaoIME/EngineInit.swift`
+- runtime 启动、目录解析、reload 监听：`Sources/KeyTaoIME/EngineInit.swift`
+- 状态 JSON 的 Swift DTO 与偏移换算：`Sources/KeyTaoIME/ImeState.swift`
 - 按键、preedit、候选状态应用：`Sources/KeyTaoIME/InputController.swift`
 - AppKit 候选窗：`Sources/KeyTaoIME/CandidatePanel.swift`
 - AppKit 模式提示：`Sources/KeyTaoIME/ModeIndicatorPanel.swift`
+- FFI 契约手动冒烟：`Smoke/main.swift` + `smoke.sh`
 - C FFI：`crates/keytao-core-ffi/src/lib.rs`，per-session API 复用 `ImeRuntimeSession`
 - 通用 librime runtime/wrapper：`crates/keytao-core/src/lib.rs`
 - librime 调用点：`keytao_core::deploy()` 里的 `setup()`、`initialize()`、`full_deploy_and_wait()`，以及 `Engine::process_key_result()` 里的 `session.process_key(KeyEvent::new(...))`
 
-macOS IMK 层只是 AppKit/InputMethodKit adapter：Swift 通过 FFI 创建 session、发送 X11 keysym + Rime modifier mask、接收 `KeytaoState`，不直接访问 librime context/menu/status。
+macOS IMK 层只是 AppKit/InputMethodKit adapter：Swift 通过 FFI 创建 session、发送 X11 keysym + Rime modifier mask、接收状态 JSON，不直接访问 librime context/menu/status，也不自己实现候选 label、高亮和翻页可用性。
 
 ## Mermaid 简图
 
@@ -45,7 +47,7 @@ flowchart TD
     Runtime["ImeRuntime / ImeRuntimeSession<br/>keytao-core"]
     Core["通用层 keytao-core<br/>Engine wrapper"]
     Librime["librime dylib<br/>setup / initialize / process_key"]
-    State["KeytaoState / ImeState<br/>committed / preedit / candidates / ascii_mode"]
+    State["状态 JSON / ImeState<br/>committed / preedit / candidatePanel / modeHint"]
     CandidatePanel["CandidatePanel.swift<br/>AppKit NSPanel"]
     ModeHint["ModeIndicatorPanel.swift<br/>AppKit HUD"]
     Client["macOS client app<br/>IMKTextInput"]
@@ -55,13 +57,13 @@ flowchart TD
     Main --> TIS
     Main --> IMK
     IMK -->|"每个输入上下文"| Controller
-    Controller -->|"ensureEngineReady"| EngineInit
+    Controller -->|"KeyTaoRuntime.start"| EngineInit
     EngineInit -->|"keytao_init(user, shared)"| FFI
     FFI --> Runtime
     Runtime --> Core
     Core --> Librime
-    Stamp -->|"activate / handle 时检查"| Controller
-    Controller -->|"keytao_reload()"| FFI
+    Stamp -->|"DispatchSource 文件监听"| EngineInit
+    EngineInit -->|"keytao_reload_if_stamp_changed()"| FFI
     Controller -->|"NSEvent -> X11 keysym + modifiers"| FFI
     FFI -->|"keytao_session_process_key"| Runtime
     Runtime --> Core
@@ -80,10 +82,11 @@ flowchart TD
 | --- | --- | --- |
 | IMK 入口 | `Sources/KeyTaoIME/main.swift` | 命令行注册入口、创建 `IMKServer`、启动 accessory run loop |
 | 输入源管理 | `Sources/KeyTaoIME/InputSourceInstaller.swift` | TIS 注册、启用、选择、禁用旧输入源 |
-| engine 初始化 | `Sources/KeyTaoIME/EngineInit.swift` | 解析用户目录/共享目录、调用 FFI 初始化、检查 reload stamp |
+| engine 初始化 | `Sources/KeyTaoIME/EngineInit.swift` | 解析用户目录/共享目录、后台初始化 runtime、声明 UI 能力、监听 reload stamp |
 | 输入控制器 | `Sources/KeyTaoIME/InputController.swift` | 按键转换、session 生命周期、提交文本、marked text、候选选择、Shift 切换 |
 | 主题 | `Sources/KeyTaoIME/ImeTheme.swift` | 通过 `keytao-core-ffi` 读取通用主题 JSON，输出候选窗/模式提示样式 |
-| 候选窗 | `Sources/KeyTaoIME/CandidatePanel.swift` | AppKit `NSPanel` 候选展示、点击选词、翻页按钮、主题渲染 |
+| 状态 DTO | `Sources/KeyTaoIME/ImeState.swift` | 解码 FFI 状态 JSON（含 `candidatePanel` / `modeHint`）、Unicode 标量 → UTF-16 换算 |
+| 候选窗 | `Sources/KeyTaoIME/CandidatePanel.swift` | 把 `CandidatePanelModel` 映射到 AppKit `NSPanel`：候选展示、点击选词、翻页按钮、主题渲染 |
 | 模式提示 | `Sources/KeyTaoIME/ModeIndicatorPanel.swift` | 中/英提示和主题渲染 |
 | FFI | `crates/keytao-core-ffi/src/lib.rs` | 给 Swift 暴露 per-session C ABI，并复用 `ImeRuntimeSession` |
 | 通用层 | `crates/keytao-core/src/lib.rs` | librime deploy/runtime/session/state wrapper |
@@ -93,12 +96,13 @@ flowchart TD
 ```text
 NSEvent
   -> KeyTaoInputController
-  -> X11 keysym + Rime modifier mask
-  -> keytao_session_process_key()
+  -> X11 keysym + Rime modifier mask (keytao_text_to_keysym)
+  -> keytao_key_policy_should_bypass / keytao_session_process_enter_json / keytao_session_process_key_json
   -> keytao-core::ImeRuntimeSession
   -> keytao-core::Engine
   -> librime session.process_key()
-  -> KeytaoState
+  -> 状态 JSON (ImeState + CandidatePanelModel + ModeHintModel)
+  -> KeyTaoImeState
   -> insertText / setMarkedText / CandidatePanel / ModeIndicatorPanel
 ```
 

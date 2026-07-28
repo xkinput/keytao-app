@@ -39,4 +39,7 @@ _ = imkServer
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+// Bring the shared runtime up before the first client connects, so librime
+// initialization never happens inside a synchronous IMKit callback.
+KeyTaoRuntime.shared.start()
 app.run()

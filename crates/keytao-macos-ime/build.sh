@@ -35,6 +35,35 @@ APP="$BUILD_DIR/KeyTao.app"
 VENDOR_DIR="$WORKSPACE_DIR/vendor/librime/macos-universal"
 VENDOR_ENV="$VENDOR_DIR/env.sh"
 
+# The single source of truth for the version is the workspace; package.json is
+# kept in sync with it by scripts/sync-version.mjs.
+resolve_package_version() {
+    if [ -n "${KEYTAO_VERSION:-}" ]; then
+        printf '%s\n' "$KEYTAO_VERSION"
+        return 0
+    fi
+    local version=""
+    if command -v node >/dev/null 2>&1 && [ -f "$WORKSPACE_DIR/package.json" ]; then
+        version="$(node -p "JSON.parse(require('fs').readFileSync('$WORKSPACE_DIR/package.json', 'utf8')).version" 2>/dev/null || true)"
+    fi
+    if [ -z "$version" ]; then
+        version="$(awk '
+            /^\[workspace\.package\]/ { section = 1; next }
+            /^\[/ { section = 0 }
+            section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
+        ' "$WORKSPACE_DIR/Cargo.toml")"
+    fi
+    printf '%s\n' "${version:-0.0.0}"
+}
+
+# CFBundleVersion must stay numeric for the Installer's version comparison, so
+# a prerelease label like 1.2.1-alpha.42 becomes 1.2.1.42.
+numeric_bundle_version() {
+    local sanitized
+    sanitized="$(printf '%s' "$1" | sed -E 's/[^0-9.]+/./g; s/\.+/./g; s/^\.//; s/\.$//')"
+    printf '%s\n' "${sanitized:-0}"
+}
+
 bundle_dylib_deps() {
     local binary="$1"
     local dep
@@ -214,6 +243,14 @@ mkdir -p "$APP/Contents/Frameworks"
 mkdir -p "$APP/Contents/Resources"
 
 cp "$SCRIPT_DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
+# The Installer compares CFBundleVersion (BundleIsVersionChecked) to decide
+# whether to replace an installed bundle, so the IME has to carry the workspace
+# version instead of a frozen 1.0.0.
+PACKAGE_VERSION="$(resolve_package_version)"
+BUNDLE_VERSION="$(numeric_bundle_version "$PACKAGE_VERSION")"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $PACKAGE_VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUNDLE_VERSION" "$APP/Contents/Info.plist"
+echo "    IME bundle version: $PACKAGE_VERSION (CFBundleVersion $BUNDLE_VERSION)"
 cp "$SCRIPT_DIR/Resources/keytao-menu-icon.pdf" "$APP/Contents/Resources/"
 cp "$SCRIPT_DIR/Resources/KeyTaoInputSource.icns" "$APP/Contents/Resources/"
 cp "$WORKSPACE_DIR/crates/keytao-theme/default-theme.yaml" "$APP/Contents/Resources/"
@@ -387,7 +424,6 @@ cat > "$PKG_SCRIPTS/postinstall" << 'SCRIPTEOF'
 killall KeyTaoIME 2>/dev/null || true
 killall imklaunchagent 2>/dev/null || true
 killall TextInputMenuAgent 2>/dev/null || true
-killall cfprefsd 2>/dev/null || true
 # Give Launch Services time to index the new bundle
 sleep 2
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
@@ -408,7 +444,7 @@ COPYFILE_DISABLE=1 pkgbuild \
     --component-plist "$PKG_COMPONENTS" \
     --scripts "$PKG_SCRIPTS" \
     --identifier "ink.rea.inputmethod.keytao-package" \
-    --version "1.0.0" \
+    --version "$PACKAGE_VERSION" \
     --install-location "/" \
     "$BUILD_DIR/KeyTao.pkg" 2>&1
 

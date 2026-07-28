@@ -15,11 +15,14 @@ final class ModeIndicatorPanel: NSPanel {
         configure()
     }
 
-    func show(asciiMode: Bool, near cursorRect: NSRect) {
+    /// The hint text comes from keytao-theme's mode hint model, so macOS shows
+    /// exactly what the other frontends show.
+    func show(modeHint: KeyTaoModeHintModel, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
         let theme = ImeThemeManager.shared.theme()
+        level = windowLevel
         apply(theme)
 
-        label.stringValue = asciiMode ? theme.modeHint.englishText : theme.modeHint.chineseText
+        label.stringValue = modeHint.text
         let size = NSSize(width: theme.modeHint.width, height: theme.modeHint.height)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)

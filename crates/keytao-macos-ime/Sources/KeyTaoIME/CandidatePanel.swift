@@ -16,6 +16,7 @@ class CandidatePanel: NSPanel {
     private var stackTrailingConstraint: NSLayoutConstraint?
     private var stackTopConstraint: NSLayoutConstraint?
     private var stackBottomConstraint: NSLayoutConstraint?
+    private var orientation: CandidatePanelOrientation = .vertical
 
     // MARK: - Init
 
@@ -79,39 +80,36 @@ class CandidatePanel: NSPanel {
 
     // MARK: - Update
 
-    func update(texts: [String], comments: [String],
-                highlightedIndex: Int,
-                page: Int, isLastPage: Bool, selectKeys: String,
-                near cursorRect: NSRect) {
+    /// Renders the panel model keytao-theme already built: labels, highlight and
+    /// page availability are decided there, so every frontend shows the same
+    /// candidate list.
+    func update(model: KeyTaoPanelModel, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
         let theme = ImeThemeManager.shared.theme()
-        apply(theme)
+        level = windowLevel
+        apply(theme, orientation: model.orientation)
 
         stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        let keys = Array(selectKeys.isEmpty ? "1234567890" : selectKeys)
-        let selectedIndex = highlightedIndex.clamped(to: 0...Swift.max(texts.count - 1, 0))
-
-        for (i, text) in texts.enumerated() {
+        for (position, candidate) in model.candidates.enumerated() {
             let option = CandidateOptionView(
-                label: "\(keys[safe: i] ?? Character("?"))\(theme.candidate.labelSuffix)",
-                text: text,
-                comment: comments[safe: i] ?? "",
-                highlighted: i == selectedIndex,
+                label: candidate.label,
+                text: candidate.text,
+                comment: candidate.comment ?? "",
+                highlighted: candidate.selected,
                 theme: theme
             )
-            let idx = i
             option.target = self
-            option.tag = idx
+            option.tag = candidate.index
             option.action = #selector(candidateClicked(_:))
             stackView.addArrangedSubview(option)
 
-            if theme.candidate.separatorVisible && i < texts.count - 1 {
+            if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
                 stackView.addArrangedSubview(makeSeparator(theme: theme))
             }
         }
 
-        if page > 0 || !isLastPage {
-            addNavigation(page: page, isLastPage: isLastPage, theme: theme)
+        if model.navigation.canGoPrevious || model.navigation.canGoNext {
+            addNavigation(navigation: model.navigation, theme: theme)
         }
 
         contentView?.layoutSubtreeIfNeeded()
@@ -145,15 +143,16 @@ class CandidatePanel: NSPanel {
         orderFront(nil)
     }
 
-    private func apply(_ theme: ImeTheme) {
+    private func apply(_ theme: ImeTheme, orientation: CandidatePanelOrientation) {
+        self.orientation = orientation
         hasShadow = theme.panel.shadow
         containerView.layer?.backgroundColor = theme.panel.background.cgColor
         containerView.layer?.cornerRadius = theme.panel.cornerRadius
         containerView.layer?.borderColor = theme.panel.borderColor.cgColor
         containerView.layer?.borderWidth = theme.panel.borderWidth
 
-        stackView.orientation = theme.panel.orientation == .vertical ? .vertical : .horizontal
-        stackView.alignment = theme.panel.orientation == .vertical ? .leading : .centerY
+        stackView.orientation = orientation == .vertical ? .vertical : .horizontal
+        stackView.alignment = orientation == .vertical ? .leading : .centerY
         stackView.spacing = theme.panel.gap
         stackLeadingConstraint?.constant = theme.panel.paddingX
         stackTrailingConstraint?.constant = -theme.panel.paddingX
@@ -172,26 +171,26 @@ class CandidatePanel: NSPanel {
 
     // MARK: - View factories
 
-    private func addNavigation(page: Int, isLastPage: Bool, theme: ImeTheme) {
-        if theme.panel.orientation == .vertical {
+    private func addNavigation(navigation: KeyTaoPanelNavigation, theme: ImeTheme) {
+        if orientation == .vertical {
             let row = NSStackView()
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = theme.panel.gap
-            if page > 0 {
+            if navigation.canGoPrevious {
                 row.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
             }
-            if !isLastPage {
+            if navigation.canGoNext {
                 row.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
             }
             stackView.addArrangedSubview(row)
             return
         }
 
-        if page > 0 {
+        if navigation.canGoPrevious {
             stackView.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
         }
-        if !isLastPage {
+        if navigation.canGoNext {
             stackView.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
         }
     }
@@ -207,7 +206,7 @@ class CandidatePanel: NSPanel {
         let separator = NSView()
         separator.wantsLayer = true
         separator.layer?.backgroundColor = theme.candidate.separatorColor.cgColor
-        if theme.panel.orientation == .vertical {
+        if orientation == .vertical {
             separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
             separator.widthAnchor.constraint(greaterThanOrEqualToConstant: theme.panel.minWidth - theme.panel.paddingX * 2).isActive = true
         } else {
@@ -403,20 +402,5 @@ private final class CandidateNavigationButton: NSControl {
         layer?.backgroundColor = (hovered ? theme.navigation.hoverBackground : ThemeColor(red: 0, green: 0, blue: 0, alpha: 0)).cgColor
         layer?.cornerRadius = theme.navigation.cornerRadius
         label.textColor = theme.navigation.foreground.nsColor
-    }
-}
-
-// MARK: – Safe array subscript
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        guard index >= 0 && index < count else { return nil }
-        return self[index]
-    }
-}
-
-private extension Int {
-    func clamped(to range: ClosedRange<Int>) -> Int {
-        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }

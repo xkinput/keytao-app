@@ -270,7 +270,6 @@ cat > "$PKG_SCRIPTS/postinstall" << 'SCRIPTEOF'
 killall KeyTaoIME 2>/dev/null || true
 killall imklaunchagent 2>/dev/null || true
 killall TextInputMenuAgent 2>/dev/null || true
-killall cfprefsd 2>/dev/null || true
 sleep 2
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "/Applications/KeyTao.app"

@@ -182,6 +182,22 @@ if [ "$IME_BUNDLE_ID" != "ink.rea.inputmethod.keytao" ]; then
     exit 1
 fi
 
+PKG_VERSION="$(sed -n 's/.*<pkg-info[^>]*[[:space:]]version="\([^"]*\)".*/\1/p' "$PACKAGE_INFO" | head -1)"
+IME_APP_VERSION="$(plist_value "$IME_APP/Contents/Info.plist" CFBundleShortVersionString)"
+echo "pkg version: $PKG_VERSION"
+echo "IME bundle version: $IME_APP_VERSION"
+if [ "$IME_APP_VERSION" != "$PKG_VERSION" ]; then
+    echo "ERROR: IME bundle version $IME_APP_VERSION does not match pkg version $PKG_VERSION" >&2
+    exit 1
+fi
+
+# cfprefsd owns preference writes for every process on the machine; an installer
+# has no business terminating it.
+if grep -Fq 'killall cfprefsd' "$POSTINSTALL"; then
+    echo "ERROR: postinstall must not kill the system preferences daemon" >&2
+    exit 1
+fi
+
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --register-input-source' "$POSTINSTALL"
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --disable-legacy-input-sources' "$POSTINSTALL"
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --enable-input-source' "$POSTINSTALL"

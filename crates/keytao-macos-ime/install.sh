@@ -33,7 +33,6 @@ echo "==> Stopping running KeyTao IME processes..."
 killall KeyTaoIME 2>/dev/null || true
 killall imklaunchagent 2>/dev/null || true
 killall TextInputMenuAgent 2>/dev/null || true
-killall cfprefsd 2>/dev/null || true
 sleep 1
 
 echo "==> Unregistering old KeyTao input method bundles..."
@@ -67,7 +66,6 @@ killall imklaunchagent 2>/dev/null || true
 killall KeyboardSettings 2>/dev/null || true
 killall "System Settings" 2>/dev/null || true
 killall SystemUIServer 2>/dev/null || true
-killall cfprefsd 2>/dev/null || true
 sleep 1
 
 "$KEYTAO_BIN" --register-input-source

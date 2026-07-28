@@ -6,9 +6,17 @@ import CKeytaoCore
 private let rimeModifierShift: UInt32 = 0x0001
 private let rimeModifierControl: UInt32 = 0x0004
 private let rimeModifierAlt: UInt32 = 0x0008
+private let rimeModifierSuper: UInt32 = 1 << 26
 private let rimeReleaseMask: UInt32 = 1 << 30
 private let rimeKeyReturn: UInt32 = 0xff0d
+private let rimeKeyKeypadEnter: UInt32 = 0xff8d
 private let rimeKeyF4: UInt32 = 0xffc1
+private let rimeKeyShiftLeft: UInt32 = 0xffe1
+private let rimeKeyShiftRight: UInt32 = 0xffe2
+
+/// Modifiers whose presence means the key press belongs to a chord, not to a
+/// solo `Shift` tap.
+private let chordModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
 
 /// KeyTao's IMKInputController subclass.
 /// macOS creates one controller per client context and routes key events here.
@@ -20,22 +28,33 @@ final class KeyTaoInputController: IMKInputController {
     private var lastModifierFlags: NSEvent.ModifierFlags = []
     private var shiftPressedWithoutKey = false
     private var hasComposition = false
+    private var isActive = false
     private var asciiMode = false
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
+    private var reloadObserver: NSObjectProtocol?
 
     // MARK: Lifecycle
 
     override init!(server: IMKServer!, delegate: Any!, client: Any!) {
         super.init(server: server, delegate: delegate, client: client)
-        ensureEngineReady()
+        KeyTaoRuntime.shared.start()
+        // Null until the runtime is up; ensureSession() picks it up later
+        // instead of blocking this callback on librime initialization.
         session = keytao_create_session()
-        if session == nil {
-            NSLog("KeyTao: failed to create Rime session")
+        reloadObserver = NotificationCenter.default.addObserver(
+            forName: KeyTaoRuntime.didReloadNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.runtimeDidReload()
         }
     }
 
     deinit {
+        if let reloadObserver {
+            NotificationCenter.default.removeObserver(reloadObserver)
+        }
         if let session {
             keytao_destroy_session(session)
         }
@@ -52,15 +71,31 @@ final class KeyTaoInputController: IMKInputController {
 
     override func activateServer(_ sender: Any!) {
         let client = sender as? IMKTextInput
-        reloadSessionIfNeeded(client: client)
+        isActive = true
+        KeyTaoRuntime.shared.checkForReload()
         ensureSession()
         refreshSessionState(from: client)
     }
 
     override func deactivateServer(_ sender: Any!) {
-        resetSession()
+        // The composition belongs to the client that is going away, so it has to
+        // be handed back before the session is dropped; otherwise the client
+        // keeps underlined marked text nobody owns any more.
+        if hasComposition {
+            endComposition(commit: true, client: sender as? IMKTextInput)
+        }
         hideCandidates()
         hideModeIndicator()
+        isActive = false
+        lastModifierFlags = []
+        shiftPressedWithoutKey = false
+    }
+
+    /// The system asks for every visible piece of input method UI to go away.
+    override func hidePalettes() {
+        hideCandidates()
+        hideModeIndicator()
+        super.hidePalettes()
     }
 
     // MARK: Key handling
@@ -68,41 +103,50 @@ final class KeyTaoInputController: IMKInputController {
     /// Called for key events in the client app. Return true only when librime consumes it.
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event else { return false }
-        let client = sender as? IMKTextInput
-        reloadSessionIfNeeded(client: client)
 
         if event.type == .flagsChanged {
-            return handleFlagsChanged(event, client: client)
+            return handleFlagsChanged(event, client: sender as? IMKTextInput)
         }
-
         guard event.type == .keyDown else { return false }
-        if event.modifierFlags.contains(.command) {
+
+        // Every key press ends the solo-Shift window, chords included. Deciding
+        // this from lastModifierFlags at release time loses Cmd+Shift+key, whose
+        // key down the system may never route here.
+        shiftPressedWithoutKey = false
+
+        let modifiers = rimeModifiers(from: event.modifierFlags)
+        if modifiers & rimeModifierSuper != 0 {
+            // Command chords are reserved by the window system; librime never
+            // binds them on macOS.
             return false
         }
-        if event.modifierFlags.contains(.shift) {
-            shiftPressedWithoutKey = false
-        }
+
         guard let session = ensureSession() else { return false }
 
         let keyval = rimeKeyValue(from: event)
         if keyval == 0 {
+            // Nothing librime can be told about this key. Handing it to the app
+            // while marked text is still on screen would interleave the two, so
+            // the composition is closed first.
+            if hasComposition {
+                commitComposition(sender)
+            }
             return false
         }
-        if asciiMode && !hasComposition && keyval != rimeKeyF4 {
+        // The key set lives in keytao-core::key_policy, not here. The cached
+        // flag only skips the call in the case the shared rule already answers
+        // "never bypass while something is composing".
+        if !hasComposition, keytao_key_policy_should_bypass(session, keyval, modifiers) {
             return false
         }
 
-        let modifiers = rimeModifiers(from: event.modifierFlags)
-        if shouldBypassWithoutComposition(keyval: keyval, modifiers: modifiers) {
-            return false
-        }
+        let usesEnterPath = keytao_key_policy_is_enter(keyval)
+            && modifiers & (rimeModifierControl | rimeModifierAlt) == 0
+        let json = usesEnterPath
+            ? keytao_session_process_enter_json(session)
+            : keytao_session_process_key_json(session, keyval, modifiers)
+        guard let state = KeyTaoImeState.consuming(json) else { return false }
 
-        guard let statePtr = keytao_session_process_key(session, keyval, modifiers) else {
-            return false
-        }
-        defer { keytao_free_state(statePtr) }
-
-        let state = KeyTaoStateView(statePtr.pointee)
         apply(state, to: sender)
         return state.accepted
     }
@@ -110,40 +154,49 @@ final class KeyTaoInputController: IMKInputController {
     // MARK: Commit / cancel
 
     override func commitComposition(_ sender: Any!) {
-        guard let session = ensureSession() else {
+        guard hasComposition else {
             hideCandidates()
+            hideModeIndicator()
             return
         }
-
-        if let statePtr = keytao_session_process_key(session, rimeKeyReturn, 0) {
-            defer { keytao_free_state(statePtr) }
-            apply(KeyTaoStateView(statePtr.pointee), to: sender)
-        }
+        endComposition(commit: true, client: sender as? IMKTextInput)
         hideCandidates()
+        hideModeIndicator()
     }
 
     override func cancelComposition() {
-        resetSession()
+        endComposition(commit: false, client: client())
         hideCandidates()
+        hideModeIndicator()
     }
 
-    override func mouseDown(
-        onCharacterIndex index: Int,
-        coordinate point: NSPoint,
-        withModifier flags: Int,
-        continueTracking keepTracking: UnsafeMutablePointer<ObjCBool>!,
-        client sender: Any!
-    ) -> Bool {
-        keepTracking.pointee = false
-        if hasComposition {
-            commitComposition(sender)
+    /// Ends the composition session in both directions: librime forgets it and
+    /// the client is left without marked text.
+    private func endComposition(commit: Bool, client: IMKTextInput?) {
+        guard let session else {
+            clearMarkedText(client: client)
+            return
         }
-        return false
+
+        let json = commit
+            ? keytao_session_commit_composition_json(session)
+            : keytao_session_clear_composition_json(session)
+        if let state = KeyTaoImeState.consuming(json) {
+            apply(state, to: client)
+        }
+
+        if hasComposition {
+            // librime kept something composing; the session is over regardless.
+            if let state = KeyTaoImeState.consuming(keytao_session_clear_composition_json(session)) {
+                asciiMode = state.asciiMode
+            }
+            clearMarkedText(client: client)
+        }
     }
 
     // MARK: State application
 
-    private func apply(_ state: KeyTaoStateView, to sender: Any?) {
+    private func apply(_ state: KeyTaoImeState, to sender: Any?) {
         let client = sender as? IMKTextInput
         rememberCursorRect(for: client, reason: "beforeApply")
 
@@ -157,14 +210,14 @@ final class KeyTaoInputController: IMKInputController {
             )
         }
 
-        updateMarkedText(state.preedit, cursor: state.cursor, client: client)
-        updateCompositionFlag(state)
+        updateMarkedText(state, client: client)
+        hasComposition = state.hasComposition
         asciiMode = state.asciiMode
 
-        if state.candidates.isEmpty {
+        if state.candidatePanel.candidates.isEmpty {
             hideCandidates()
         } else {
-            showCandidates(state, client: client)
+            showCandidates(state.candidatePanel, client: client)
         }
     }
 
@@ -181,8 +234,11 @@ final class KeyTaoInputController: IMKInputController {
         )
     }
 
-    private func updateMarkedText(_ preedit: String, cursor: Int, client: IMKTextInput?) {
-        lastPreeditCursor = min(max(cursor, 0), preedit.utf16.count)
+    private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?) {
+        let preedit = state.preedit
+        let length = preedit.utf16.count
+        // ImeState counts in Unicode scalars, IMKit's NSRange counts UTF-16.
+        lastPreeditCursor = preedit.keytaoUtf16Offset(fromCharacterOffset: state.cursor)
         guard let client else { return }
 
         if preedit.isEmpty {
@@ -192,30 +248,56 @@ final class KeyTaoInputController: IMKInputController {
             return
         }
 
-        let markedRange = NSRange(location: 0, length: preedit.utf16.count)
-        let selection = NSRange(
-            location: lastPreeditCursor,
-            length: 0
+        let selectionStart = min(
+            preedit.keytaoUtf16Offset(fromCharacterOffset: state.selStart),
+            length
         )
-        let attrs = mark(forStyle: kTSMHiliteSelectedRawText, at: markedRange)
-        let marked = NSAttributedString(
-            string: preedit,
-            attributes: attrs as? [NSAttributedString.Key: Any]
+        let selectionEnd = min(
+            max(preedit.keytaoUtf16Offset(fromCharacterOffset: state.selEnd), selectionStart),
+            length
         )
+
+        let marked = NSMutableAttributedString(string: preedit)
+        // What Rime already converted, what it is converting now, and what is
+        // still raw input each get the style macOS input methods use for it.
+        mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
+        if selectionEnd > selectionStart {
+            mark(
+                marked,
+                NSRange(location: selectionStart, length: selectionEnd - selectionStart),
+                style: kTSMHiliteSelectedRawText
+            )
+            mark(
+                marked,
+                NSRange(location: selectionEnd, length: length - selectionEnd),
+                style: kTSMHiliteRawText
+            )
+        } else {
+            mark(
+                marked,
+                NSRange(location: selectionStart, length: length - selectionStart),
+                style: kTSMHiliteSelectedRawText
+            )
+        }
+
         client.setMarkedText(
             marked,
-            selectionRange: selection,
+            selectionRange: NSRange(location: min(lastPreeditCursor, length), length: 0),
             replacementRange: NSRange(location: NSNotFound, length: 0)
         )
     }
 
-    private func updateCompositionFlag(_ state: KeyTaoStateView) {
-        hasComposition = !state.preedit.isEmpty || !state.candidates.isEmpty
+    private func mark(_ text: NSMutableAttributedString, _ range: NSRange, style: Int) {
+        guard range.length > 0, range.location >= 0 else { return }
+        guard let attributes = mark(forStyle: style, at: range) as? [NSAttributedString.Key: Any] else {
+            return
+        }
+        text.addAttributes(attributes, range: range)
     }
 
     // MARK: Candidate window helpers
 
-    private func showCandidates(_ state: KeyTaoStateView, client: IMKTextInput?) {
+    private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?) {
         let panel = candidatePanel ?? CandidatePanel()
         candidatePanel = panel
 
@@ -227,12 +309,8 @@ final class KeyTaoInputController: IMKInputController {
         }
 
         panel.update(
-            texts: state.candidates.map(\.text),
-            comments: state.candidates.map(\.comment),
-            highlightedIndex: state.highlightedCandidateIndex,
-            page: state.page,
-            isLastPage: state.isLastPage,
-            selectKeys: state.selectKeys,
+            model: model,
+            windowLevel: panelLevel(for: client),
             near: cursorRect(for: client)
         )
     }
@@ -241,32 +319,43 @@ final class KeyTaoInputController: IMKInputController {
         candidatePanel?.orderOut(nil)
     }
 
-    private func showModeIndicator(asciiMode: Bool, client: IMKTextInput?) {
+    private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?) {
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
-        panel.show(asciiMode: asciiMode, near: cursorRect(for: client))
+        panel.show(
+            modeHint: modeHint,
+            windowLevel: panelLevel(for: client),
+            near: cursorRect(for: client)
+        )
     }
 
     private func hideModeIndicator() {
         modeIndicatorPanel?.orderOut(nil)
     }
 
+    /// IMKit tells the input method which level the client's window sits at, and
+    /// expects self-drawn candidate windows one level above it.
+    private func panelLevel(for client: IMKTextInput?) -> NSWindow.Level {
+        guard let client else { return .popUpMenu }
+        let clientLevel = Int(client.windowLevel())
+        guard clientLevel > 0 else { return .popUpMenu }
+        return NSWindow.Level(rawValue: max(clientLevel + 1, NSWindow.Level.popUpMenu.rawValue))
+    }
+
     private func handleCandidateSelection(index: Int, client: IMKTextInput?) {
         guard let session = ensureSession() else { return }
-        guard let statePtr = keytao_session_select_candidate(session, UInt32(index)) else {
-            return
-        }
-        defer { keytao_free_state(statePtr) }
-        apply(KeyTaoStateView(statePtr.pointee), to: client)
+        guard let state = KeyTaoImeState.consuming(
+            keytao_session_select_candidate_json(session, UInt32(index))
+        ) else { return }
+        apply(state, to: client)
     }
 
     private func handlePageChange(backward: Bool, client: IMKTextInput?) {
         guard let session = ensureSession() else { return }
-        guard let statePtr = keytao_session_change_page(session, backward) else {
-            return
-        }
-        defer { keytao_free_state(statePtr) }
-        apply(KeyTaoStateView(statePtr.pointee), to: client)
+        guard let state = KeyTaoImeState.consuming(
+            keytao_session_change_page_json(session, backward)
+        ) else { return }
+        apply(state, to: client)
     }
 
     private func cursorRect(for client: IMKTextInput?) -> NSRect {
@@ -359,60 +448,42 @@ final class KeyTaoInputController: IMKInputController {
         if let session {
             return session
         }
-        ensureEngineReady()
         session = keytao_create_session()
         if session == nil {
-            NSLog("KeyTao: failed to create Rime session")
+            // The runtime is not up yet; retrying happens in the background so
+            // this callback stays cheap and keys keep reaching the application.
+            KeyTaoRuntime.shared.requestInitialization()
         }
         return session
     }
 
-    @discardableResult
-    private func reloadSessionIfNeeded(client: IMKTextInput?) -> Bool {
-        guard consumeExternalDeployReloadRequest() else {
-            return false
+    private func runtimeDidReload() {
+        guard isActive else {
+            hasComposition = false
+            hideCandidates()
+            hideModeIndicator()
+            return
         }
 
-        NSLog("KeyTao: external deploy detected, reloading runtime and session")
+        let client = client()
         if hasComposition {
             clearMarkedText(client: client)
         }
         hideCandidates()
         hideModeIndicator()
-        guard reloadEngine() else {
-            NSLog("KeyTao: runtime reload failed")
-            return false
-        }
-        hasComposition = false
-
+        ensureSession()
         refreshSessionState(from: client)
-        return true
-    }
-
-    private func resetSession() {
-        guard let session else {
-            hasComposition = false
-            return
-        }
-        if let statePtr = keytao_session_reset(session) {
-            let state = KeyTaoStateView(statePtr.pointee)
-            asciiMode = state.asciiMode
-            keytao_free_state(statePtr)
-        }
-        hasComposition = false
     }
 
     private func refreshSessionState(from client: IMKTextInput?) {
         guard let session = ensureSession() else { return }
-        guard let statePtr = keytao_session_state(session) else { return }
-        defer { keytao_free_state(statePtr) }
-        let state = KeyTaoStateView(statePtr.pointee)
-        updateCompositionFlag(state)
+        guard let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
+        hasComposition = state.hasComposition
         asciiMode = state.asciiMode
-        if state.candidates.isEmpty {
+        if state.candidatePanel.candidates.isEmpty {
             hideCandidates()
         } else {
-            showCandidates(state, client: client)
+            showCandidates(state.candidatePanel, client: client)
         }
     }
 
@@ -423,22 +494,22 @@ final class KeyTaoInputController: IMKInputController {
         let changedFlags = lastModifierFlags.symmetricDifference(newFlags)
         defer { lastModifierFlags = newFlags }
 
+        if !newFlags.isDisjoint(with: chordModifiers) {
+            shiftPressedWithoutKey = false
+        }
+
         guard changedFlags.contains(.shift) else {
             return false
         }
 
         if newFlags.contains(.shift) {
-            shiftPressedWithoutKey = true
+            shiftPressedWithoutKey = newFlags.isDisjoint(with: chordModifiers)
             return false
         }
 
         let wasSoloShift = shiftPressedWithoutKey
-            && !lastModifierFlags.contains(.command)
-            && !lastModifierFlags.contains(.control)
-            && !lastModifierFlags.contains(.option)
-            && !newFlags.contains(.command)
-            && !newFlags.contains(.control)
-            && !newFlags.contains(.option)
+            && lastModifierFlags.isDisjoint(with: chordModifiers)
+            && newFlags.isDisjoint(with: chordModifiers)
         shiftPressedWithoutKey = false
 
         guard wasSoloShift else {
@@ -446,16 +517,16 @@ final class KeyTaoInputController: IMKInputController {
         }
         guard let session = ensureSession() else { return false }
 
-        let keyval: UInt32 = Int(event.keyCode) == kVK_RightShift ? 0xffe2 : 0xffe1
-        guard let statePtr = keytao_session_process_key(session, keyval, rimeReleaseMask) else {
+        let keyval: UInt32 = Int(event.keyCode) == kVK_RightShift ? rimeKeyShiftRight : rimeKeyShiftLeft
+        guard let state = KeyTaoImeState.consuming(
+            keytao_session_process_key_json(session, keyval, rimeReleaseMask)
+        ) else {
             return toggleAsciiMode(client: client)
         }
-        defer { keytao_free_state(statePtr) }
 
-        let state = KeyTaoStateView(statePtr.pointee)
         apply(state, to: client)
         if state.accepted {
-            showModeIndicator(asciiMode: state.asciiMode, client: client)
+            showModeIndicator(state.modeHint, client: client)
             return true
         }
         return toggleAsciiMode(client: client)
@@ -464,18 +535,15 @@ final class KeyTaoInputController: IMKInputController {
     private func toggleAsciiMode(client: IMKTextInput?) -> Bool {
         guard let session = ensureSession() else { return false }
         if hasComposition {
-            resetSession()
-            updateMarkedText("", cursor: 0, client: client)
+            endComposition(commit: false, client: client)
             hideCandidates()
         }
 
-        guard let statePtr = keytao_session_set_ascii_mode(session, !asciiMode) else {
-            return false
-        }
-        defer { keytao_free_state(statePtr) }
-        let state = KeyTaoStateView(statePtr.pointee)
+        guard let state = KeyTaoImeState.consuming(
+            keytao_session_set_ascii_mode_json(session, !asciiMode)
+        ) else { return false }
         apply(state, to: client)
-        showModeIndicator(asciiMode: state.asciiMode, client: client)
+        showModeIndicator(state.modeHint, client: client)
         return true
     }
 
@@ -504,13 +572,13 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     @objc private func redeployKeyTao() {
-        guard reloadEngine() else {
+        guard KeyTaoRuntime.shared.reloadNow() else {
             NSLog("KeyTao: manual runtime reload failed")
             return
         }
         hasComposition = false
         hideCandidates()
-        refreshSessionState(from: nil)
+        refreshSessionState(from: client())
         NSSound(named: NSSound.Name("Glass"))?.play()
     }
 
@@ -531,45 +599,41 @@ final class KeyTaoInputController: IMKInputController {
 
     private func rimeKeyValue(from event: NSEvent) -> UInt32 {
         switch Int(event.keyCode) {
-        case kVK_Return:        return rimeKeyReturn
-        case kVK_Delete:        return 0xff08
-        case kVK_ForwardDelete: return 0xffff
-        case kVK_Escape:        return 0xff1b
-        case kVK_Space:         return 0x0020
-        case kVK_LeftArrow:     return 0xff51
-        case kVK_RightArrow:    return 0xff53
-        case kVK_UpArrow:       return 0xff52
-        case kVK_DownArrow:     return 0xff54
-        case kVK_Home:          return 0xff50
-        case kVK_End:           return 0xff57
-        case kVK_PageUp:        return 0xff55
-        case kVK_PageDown:      return 0xff56
-        case kVK_Tab:           return 0xff09
-        case kVK_F4:            return rimeKeyF4
+        case kVK_Return:           return rimeKeyReturn
+        case kVK_ANSI_KeypadEnter: return rimeKeyKeypadEnter
+        case kVK_Delete:           return 0xff08
+        case kVK_ForwardDelete:    return 0xffff
+        case kVK_Escape:           return 0xff1b
+        case kVK_Space:            return 0x0020
+        case kVK_LeftArrow:        return 0xff51
+        case kVK_RightArrow:       return 0xff53
+        case kVK_UpArrow:          return 0xff52
+        case kVK_DownArrow:        return 0xff54
+        case kVK_Home:             return 0xff50
+        case kVK_End:              return 0xff57
+        case kVK_PageUp:           return 0xff55
+        case kVK_PageDown:         return 0xff56
+        case kVK_Tab:              return 0xff09
+        case kVK_F4:               return rimeKeyF4
         default:
-            return printableAsciiKeyValue(from: event)
+            return keysym(from: event)
         }
     }
 
-    private func printableAsciiKeyValue(from event: NSEvent) -> UInt32 {
-        let text = printableAsciiText(from: event)
-        guard let scalar = text.unicodeScalars.first else { return 0 }
-
-        if scalar.value >= 0x20 && scalar.value < 0x7f {
-            return scalar.value
-        }
-        return 0
+    /// Text-to-keysym lives in keytao-core so that every frontend encodes
+    /// non-Latin-1 characters the same way instead of colliding with the X11
+    /// function key block. 0 means "not something librime can be told about".
+    private func keysym(from event: NSEvent) -> UInt32 {
+        let text = typedText(from: event)
+        guard !text.isEmpty else { return 0 }
+        return text.withCString { keytao_text_to_keysym($0) }
     }
 
-    private func printableAsciiText(from event: NSEvent) -> String {
+    private func typedText(from event: NSEvent) -> String {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if !flags.contains(.command),
-           !flags.contains(.control),
-           !flags.contains(.option),
+        if flags.isDisjoint(with: chordModifiers),
            let text = event.characters,
-           let scalar = text.unicodeScalars.first,
-           scalar.value >= 0x20,
-           scalar.value < 0x7f {
+           !text.isEmpty {
             return text
         }
         return event.charactersIgnoringModifiers ?? event.characters ?? ""
@@ -580,63 +644,10 @@ final class KeyTaoInputController: IMKInputController {
         if flags.contains(.shift) { mask |= rimeModifierShift }
         if flags.contains(.control) { mask |= rimeModifierControl }
         if flags.contains(.option) { mask |= rimeModifierAlt }
+        // X11 and Rime call the window system's own modifier Super; on macOS
+        // that is Command.
+        if flags.contains(.command) { mask |= rimeModifierSuper }
         return mask
-    }
-
-    private func shouldBypassWithoutComposition(keyval: UInt32, modifiers: UInt32) -> Bool {
-        if hasComposition {
-            return false
-        }
-        if modifiers & (rimeModifierControl | rimeModifierAlt) != 0 {
-            return true
-        }
-        return keyval == 0x0020
-            || keyval == 0xff08
-            || keyval == 0xffff
-            || keyval == 0xff09
-            || keyval == rimeKeyReturn
-            || keyval == 0xff1b
-            || (keyval >= 0xff50 && keyval <= 0xff58)
-    }
-}
-
-private struct KeyTaoCandidate {
-    let text: String
-    let comment: String
-}
-
-private struct KeyTaoStateView {
-    let preedit: String
-    let cursor: Int
-    let candidates: [KeyTaoCandidate]
-    let highlightedCandidateIndex: Int
-    let page: Int
-    let isLastPage: Bool
-    let committed: String
-    let selectKeys: String
-    let asciiMode: Bool
-    let accepted: Bool
-
-    init(_ state: KeytaoState) {
-        preedit = state.preedit.map { String(cString: $0) } ?? ""
-        cursor = Int(state.cursor)
-        highlightedCandidateIndex = Int(state.highlighted_candidate_index)
-        page = Int(state.page)
-        isLastPage = state.is_last_page
-        committed = state.committed.map { String(cString: $0) } ?? ""
-        selectKeys = state.select_keys.map { String(cString: $0) } ?? ""
-        asciiMode = state.ascii_mode
-        accepted = state.accepted
-
-        let count = Int(state.candidate_count)
-        var parsedCandidates: [KeyTaoCandidate] = []
-        parsedCandidates.reserveCapacity(count)
-        for index in 0..<count {
-            let text = state.candidate_texts?[index].map { String(cString: $0) } ?? ""
-            let comment = state.candidate_comments?[index].map { String(cString: $0) } ?? ""
-            parsedCandidates.append(KeyTaoCandidate(text: text, comment: comment))
-        }
-        candidates = parsedCandidates
     }
 }
 
