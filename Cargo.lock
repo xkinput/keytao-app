@@ -2585,7 +2585,6 @@ dependencies = [
  "libc",
  "memmap2 0.9.10",
  "serde",
- "time",
  "tiny-skia",
  "tokio",
  "tracing",
