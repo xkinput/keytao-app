@@ -9,10 +9,25 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
     },
     time::Duration,
 };
+
+/// A poisoned lock only means some other caller panicked while holding it; the
+/// input method must keep working, so the data is recovered instead of
+/// propagating the panic (a panic across an FFI boundary aborts the process).
+fn lock_ignore_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn read_ignore_poison<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -21,9 +36,18 @@ pub const WINDOWS_IME_ENGINE_INIT_MUTEX_NAME: &str = "Local\\KeyTao.WindowsIme.E
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImeState {
     pub preedit: String,
+    /// Caret position inside `preedit`, counted in Unicode scalars.
+    ///
+    /// librime reports UTF-8 byte offsets; the conversion happens here so that
+    /// every frontend starts from the same unit and only has to map it to its
+    /// own (UTF-16 on macOS/Windows/Android, scalars on IBus).
     pub cursor: usize,
+    /// Start of the selected (already converted) range inside `preedit`, in
+    /// Unicode scalars. Equal to `sel_end` when nothing is selected.
+    pub sel_start: usize,
+    /// End of the selected range inside `preedit`, in Unicode scalars.
+    pub sel_end: usize,
     pub candidates: Vec<Candidate>,
-    pub all_candidates: Vec<Candidate>,
     pub highlighted_candidate_index: usize,
     pub page_size: usize,
     pub page: usize,
@@ -32,6 +56,109 @@ pub struct ImeState {
     pub select_keys: Option<String>,
     pub ascii_mode: bool,
     pub schema_name: String,
+}
+
+/// What a frontend allows the engine to do for the current input context.
+///
+/// Password fields, PIN entries and "no suggestions" contexts must not produce
+/// a composition and must not teach the user dictionary anything, so the
+/// frontend declares that once per context instead of filtering keys itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputContextPolicy {
+    /// Whether keys may reach librime at all. With `false` every key is
+    /// reported as not accepted and no preedit or candidate is produced.
+    pub composing: bool,
+    /// Whether the context may contribute to user learning. Enforced by never
+    /// handing librime a composing key, so it only has an effect together with
+    /// `composing: false`; frontends also use it for their own history stores.
+    pub learning: bool,
+}
+
+impl Default for InputContextPolicy {
+    fn default() -> Self {
+        Self {
+            composing: true,
+            learning: true,
+        }
+    }
+}
+
+impl InputContextPolicy {
+    /// Policy for password, PIN and other sensitive contexts.
+    pub fn sensitive() -> Self {
+        Self {
+            composing: false,
+            learning: false,
+        }
+    }
+}
+
+/// What the librime the process is linked against can do through its own
+/// entry points, as opposed to through synthesized key strokes.
+///
+/// The vendored iOS librime is 1.8.5 and predates paging and highlighting, and
+/// a user-supplied system librime can be anything, so a frontend must be able
+/// to ask instead of assume: a capability that is missing degrades to a
+/// fallback that depends on the schema (a select key, `-`/`=`, `Escape`) and
+/// therefore silently misbehaves on schemas that bind those keys differently.
+/// Frontends disable the affected UI instead of offering a control that types
+/// characters into the composition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineCapabilities {
+    /// `RimeSelectCandidateOnCurrentPage`. Without it, clicking a candidate
+    /// sends the matching `menu/select_keys` character.
+    pub candidate_selection: bool,
+    /// `RimeSelectCandidate` (selection by index in the whole list).
+    pub global_candidate_selection: bool,
+    /// `RimeHighlightCandidateOnCurrentPage`. Without it, moving the highlight
+    /// without committing is a no-op.
+    pub candidate_highlight: bool,
+    /// `RimeDeleteCandidateOnCurrentPage`. Without it, forgetting a learned
+    /// phrase from the candidate menu is a no-op.
+    pub candidate_deletion: bool,
+    /// `RimeChangePage`. Without it, paging replays the `-`/`=` bindings of the
+    /// default `key_binder` preset, which many schemas do not import.
+    pub native_paging: bool,
+    /// `RimeCommitComposition`. Without it, committing sends `Return`.
+    pub commit_composition: bool,
+    /// `RimeClearComposition`. Without it, discarding sends `Escape`.
+    pub clear_composition: bool,
+}
+
+impl EngineCapabilities {
+    /// Everything degraded — what a frontend sees when librime is not linked
+    /// in at all.
+    pub const fn none() -> Self {
+        Self {
+            candidate_selection: false,
+            global_candidate_selection: false,
+            candidate_highlight: false,
+            candidate_deletion: false,
+            native_paging: false,
+            commit_composition: false,
+            clear_composition: false,
+        }
+    }
+
+    /// Whether a frontend may offer page up/down controls.
+    pub const fn supports_native_paging(&self) -> bool {
+        self.native_paging
+    }
+
+    /// Whether a frontend may offer click-to-select on the candidate list.
+    pub const fn supports_candidate_selection(&self) -> bool {
+        self.candidate_selection
+    }
+
+    /// Whether a frontend may offer hover/arrow highlighting.
+    pub const fn supports_candidate_highlight(&self) -> bool {
+        self.candidate_highlight
+    }
+
+    /// Whether a frontend may offer "forget this phrase".
+    pub const fn supports_candidate_deletion(&self) -> bool {
+        self.candidate_deletion
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,8 +178,9 @@ impl ImeState {
         Self {
             preedit: String::new(),
             cursor: 0,
+            sel_start: 0,
+            sel_end: 0,
             candidates: vec![],
-            all_candidates: vec![],
             highlighted_candidate_index: 0,
             page_size: 0,
             page: 0,
@@ -63,6 +191,28 @@ impl ImeState {
             schema_name: String::new(),
         }
     }
+}
+
+/// Convert a UTF-8 byte offset into `text` (what librime reports) to a Unicode
+/// scalar offset (what [`ImeState`] exposes). An offset that lands inside a
+/// character rounds up to the next boundary; one past the end clamps to the
+/// end.
+pub fn char_offset_from_utf8(text: &str, byte_offset: usize) -> usize {
+    if byte_offset >= text.len() {
+        return text.chars().count();
+    }
+    text.char_indices()
+        .position(|(index, _)| index >= byte_offset)
+        .unwrap_or_else(|| text.chars().count())
+}
+
+/// Convert a Unicode scalar offset into `text` to a UTF-16 code unit offset,
+/// the unit used by IMKit, TSF and Android's `InputConnection`.
+pub fn utf16_offset_from_chars(text: &str, char_offset: usize) -> usize {
+    text.chars()
+        .take(char_offset)
+        .map(char::len_utf16)
+        .sum::<usize>()
 }
 
 #[cfg(any(
@@ -103,6 +253,7 @@ fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     target_os = "ios"
 ))]
 pub fn librime_runtime_version() -> Option<String> {
+    let _rime = desktop::rime_api_lock();
     unsafe {
         let api = librime_sys::rime_get_api();
         let get_version = (*api).get_version?;
@@ -141,19 +292,127 @@ pub fn librime_runtime_version() -> Option<String> {
 ))]
 mod desktop {
     use super::*;
-    use librime_sys::{rime_get_api, RimeCandidateListIterator, RimeFindModule, RimeTraits};
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    use librime_sys::RimeFindModule;
+    use librime_sys::{rime_get_api, RimeApi, RimeCandidateListIterator, RimeTraits};
     use rime_api::{create_session, KeyEvent, KeyStatus};
+    use std::cell::Cell;
     use std::ffi::{c_char, c_void, CStr, CString};
-    use std::sync::Mutex;
-    #[cfg(not(target_os = "android"))]
-    use std::sync::OnceLock;
+    use std::mem::ManuallyDrop;
+    use std::sync::{Mutex, MutexGuard};
 
-    // Desktop initializes once; Android also supports a controlled no-deploy restart.
-    #[cfg(not(target_os = "android"))]
-    static RIME_INITED: OnceLock<()> = OnceLock::new();
-    #[cfg(target_os = "android")]
+    /// librime makes no thread-safety promise: `Service` keeps its session map,
+    /// `ConfigComponent` its config cache and `DictionaryComponent` its table and
+    /// prism caches in plain unsynchronised globals. Every call into rime_api
+    /// therefore runs under this process-wide lock.
+    ///
+    /// The lock is reentrant so that a composite operation (create session,
+    /// process key + read state, deploy) can hold it across the smaller helpers
+    /// that also take it. It is never held across platform I/O outside librime.
+    static RIME_API_LOCK: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static RIME_API_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Whether librime is currently initialized. `reinitialize_rime` finalizes
+    /// and initializes again so that a redeploy is not served from the caches
+    /// above.
     static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
     static DEPLOY_RESULT: Mutex<Option<bool>> = Mutex::new(None);
+
+    /// Deployments serialize against each other — they rename dictionaries
+    /// around, share `DEPLOY_RESULT` and must not interleave — but they must
+    /// not serialize against key handling, so the librime lock is only taken
+    /// for the rime_api calls themselves and never across the path walking,
+    /// YAML parsing and result validation around them.
+    static DEPLOY_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct RimeApiGuard {
+        guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl Drop for RimeApiGuard {
+        fn drop(&mut self) {
+            self.guard.take();
+            RIME_API_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    /// Serialize the current thread against every other librime caller.
+    pub(crate) fn rime_api_lock() -> RimeApiGuard {
+        let already_held = RIME_API_LOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            depth.set(current.saturating_add(1));
+            current > 0
+        });
+        if already_held {
+            return RimeApiGuard { guard: None };
+        }
+        RimeApiGuard {
+            guard: Some(lock_ignore_poison(&RIME_API_LOCK)),
+        }
+    }
+
+    /// librime's `RIME_STRUCT_HAS_MEMBER` for `RimeApi`.
+    ///
+    /// The bindings are generated from the header that was on the build
+    /// machine, but the library loaded at run time can be older — a system
+    /// librime on Linux, a user-supplied one on Windows. Every member past
+    /// `data_size` is then memory librime never wrote, so reading the function
+    /// pointer at all is undefined behaviour, not just a null check.
+    fn api_has_member(api: *const RimeApi, member_offset: usize) -> bool {
+        if api.is_null() {
+            return false;
+        }
+        // SAFETY: `data_size` is the first member of every rime struct, so it
+        // is present in every ABI this crate can be loaded against.
+        let data_size = unsafe { (*api).data_size };
+        if data_size <= 0 {
+            return false;
+        }
+        member_offset < std::mem::size_of::<std::ffi::c_int>() + data_size as usize
+    }
+
+    /// The `member` entry point of `api`, or `None` when the loaded librime is
+    /// older than the member — see [`api_has_member`].
+    ///
+    /// Only valid inside an `unsafe` block that holds the librime lock.
+    macro_rules! rime_api_member {
+        ($api:expr, $member:ident) => {{
+            let api: *const RimeApi = $api;
+            if api_has_member(api, std::mem::offset_of!(RimeApi, $member)) {
+                (*api).$member
+            } else {
+                None
+            }
+        }};
+    }
+
+    // `change_page` only exists in the headers of librime 1.9 and newer, see
+    // [`engine_capabilities`].
+    #[cfg(all(test, not(target_os = "ios")))]
+    mod api_member_tests {
+        use super::api_has_member;
+        use librime_sys::RimeApi;
+        use std::ffi::c_int;
+        use std::mem::{offset_of, size_of};
+
+        #[test]
+        fn members_past_data_size_are_reported_as_missing() {
+            librime_sys::rime_struct!(api: RimeApi);
+            assert!(api_has_member(&api, offset_of!(RimeApi, setup)));
+            assert!(api_has_member(&api, offset_of!(RimeApi, change_page)));
+
+            // An ABI that ends right after `setup`, the way a librime older
+            // than these bindings looks.
+            let after_setup = offset_of!(RimeApi, setup) + size_of::<usize>();
+            api.data_size = (after_setup - size_of::<c_int>()) as c_int;
+            assert!(api_has_member(&api, offset_of!(RimeApi, setup)));
+            assert!(!api_has_member(&api, offset_of!(RimeApi, change_page)));
+
+            assert!(!api_has_member(std::ptr::null(), 0));
+        }
+    }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     extern "C" {
@@ -184,39 +443,51 @@ mod desktop {
     }
 
     pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        #[cfg(target_os = "android")]
-        {
-            let mut initialized = RIME_INITIALIZED
-                .lock()
-                .map_err(|_| "Rime lifecycle lock is poisoned")?;
-            if !*initialized {
-                initialize_rime(&user_data_dir, &shared_data_dir);
-                *initialized = true;
-            }
+        let _rime = rime_api_lock();
+        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+        if !*initialized {
+            initialize_rime(&user_data_dir, &shared_data_dir);
+            *initialized = true;
         }
-        #[cfg(not(target_os = "android"))]
-        RIME_INITED.get_or_init(|| initialize_rime(&user_data_dir, &shared_data_dir));
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
-    pub fn reinitialize_android(
+    /// Tear librime down, leaving the process without an instance.
+    ///
+    /// Only for callers that already drained every live engine — see
+    /// [`crate::reinitialize`], the entry point that does.
+    pub(crate) fn finalize_rime() -> Result<(), String> {
+        let _rime = rime_api_lock();
+        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+        if !*initialized {
+            return Ok(());
+        }
+        unsafe {
+            let api = rime_get_api();
+            let finalize = (*api)
+                .finalize
+                .ok_or("librime finalize API is unavailable")?;
+            finalize();
+        }
+        *initialized = false;
+        Ok(())
+    }
+
+    /// Finalize librime and initialize it again.
+    ///
+    /// librime caches compiled config, tables and prisms behind `weak_ptr`s that
+    /// are only re-read once the last reference is gone, so reloading after a
+    /// deployment means tearing the whole engine down. Callers must have dropped
+    /// every live session first, otherwise the sessions outlive their engine —
+    /// which is why the crate-level [`crate::reinitialize`] is the only public
+    /// way in.
+    pub(crate) fn reinitialize_rime(
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<(), String> {
-        let mut initialized = RIME_INITIALIZED
-            .lock()
-            .map_err(|_| "Rime lifecycle lock is poisoned")?;
-        if *initialized {
-            unsafe {
-                let api = rime_get_api();
-                let finalize = (*api)
-                    .finalize
-                    .ok_or("librime finalize API is unavailable")?;
-                finalize();
-            }
-            *initialized = false;
-        }
+        let _rime = rime_api_lock();
+        finalize_rime()?;
+        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
         initialize_rime(&user_data_dir, &shared_data_dir);
         *initialized = true;
         Ok(())
@@ -229,6 +500,7 @@ mod desktop {
     /// exhausting the app process while producing the same build artifacts.
     /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
         #[cfg(target_os = "windows")]
@@ -276,6 +548,7 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<Vec<String>, String> {
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         deploy_config_file("default.yaml", "config_version")?;
         let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
@@ -292,6 +565,7 @@ mod desktop {
         shared_data_dir: String,
         schema_id: String,
     ) -> Result<Vec<String>, String> {
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
         if !source.is_file() {
@@ -430,13 +704,17 @@ mod desktop {
         if schemas.is_empty() {
             return Err("no schema selected in default.custom.yaml".into());
         }
+        // Reading the build directory is plain file I/O and stays out of the
+        // librime lock; only the validation session below needs it.
+        for schema_id in &schemas {
+            require_compiled_schema(&compiled_schema_path(user_dir, schema_id), schema_id)?;
+        }
 
+        let _rime = rime_api_lock();
         let session =
             create_session().map_err(|error| format!("create validation session: {error:?}"))?;
-        for schema_id in schemas {
-            let compiled = compiled_schema_path(user_dir, &schema_id);
-            require_compiled_schema(&compiled, &schema_id)?;
-            select_schema_checked(&session, &schema_id)?;
+        for schema_id in &schemas {
+            select_schema_checked(&session, schema_id)?;
         }
         Ok(())
     }
@@ -485,6 +763,7 @@ mod desktop {
 
     #[cfg(target_os = "android")]
     fn deploy_config_file(file_name: &str, version_key: &str) -> Result<(), String> {
+        let _rime = rime_api_lock();
         let file_name = CString::new(file_name).map_err(|_| "invalid config file name")?;
         let version_key = CString::new(version_key).map_err(|_| "invalid config version key")?;
         unsafe {
@@ -500,6 +779,7 @@ mod desktop {
     }
 
     fn deploy_schema_file(path: &Path) -> Result<(), String> {
+        let _rime = rime_api_lock();
         let path_string = path.to_string_lossy();
         let path = CString::new(path_string.as_bytes()).map_err(|_| "invalid schema path")?;
         unsafe {
@@ -1024,12 +1304,11 @@ mod desktop {
             return;
         };
         if message_type == "deploy" {
-            if let Ok(mut result) = DEPLOY_RESULT.lock() {
-                match message_value.as_str() {
-                    "success" => *result = Some(true),
-                    "failure" => *result = Some(false),
-                    _ => {}
-                }
+            let mut result = lock_ignore_poison(&DEPLOY_RESULT);
+            match message_value.as_str() {
+                "success" => *result = Some(true),
+                "failure" => *result = Some(false),
+                _ => {}
             }
         }
     }
@@ -1043,7 +1322,9 @@ mod desktop {
 
     #[cfg(not(target_os = "android"))]
     fn full_deploy_and_wait() -> bool {
-        if let Ok(mut result) = DEPLOY_RESULT.lock() {
+        let _rime = rime_api_lock();
+        {
+            let mut result = lock_ignore_poison(&DEPLOY_RESULT);
             *result = None;
         }
         unsafe {
@@ -1058,10 +1339,7 @@ mod desktop {
                 join_maintenance_thread();
             }
         }
-        DEPLOY_RESULT
-            .lock()
-            .map(|result| *result == Some(true))
-            .unwrap_or(false)
+        *lock_ignore_poison(&DEPLOY_RESULT) == Some(true)
     }
 
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
@@ -1081,16 +1359,65 @@ mod desktop {
 
     /// An active rime input session.
     pub struct Engine {
-        session: rime_api::Session,
+        session: ManuallyDrop<rime_api::Session>,
     }
 
-    // SAFETY: Session holds only a usize (session_id).
-    // librime's C API is documented as thread-safe across different sessions.
+    // SAFETY: Session holds only a usize (session_id) and librime itself is not
+    // thread-safe, so every method — including `Drop`, which destroys the
+    // session — serializes on `RIME_API_LOCK` before touching rime_api.
     unsafe impl Send for Engine {}
     unsafe impl Sync for Engine {}
 
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            let _rime = rime_api_lock();
+            // SAFETY: `session` is initialized in `new_with_user_data_dir` and
+            // dropped exactly once, here, while the librime lock is held.
+            unsafe { ManuallyDrop::drop(&mut self.session) };
+        }
+    }
+
     fn key_event(keycode: u32, mask: u32) -> KeyEvent {
         KeyEvent::new(keycode as _, mask as _)
+    }
+
+    /// Which of the candidate, paging and composition entry points the linked
+    /// librime actually exports.
+    ///
+    /// `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi` has no
+    /// `change_page` and no `highlight_candidate_on_current_page` field at all,
+    /// so those two are answered at compile time. Remove the `cfg` once the
+    /// vendored iOS librime is rebuilt from 1.9 or newer.
+    pub(crate) fn engine_capabilities() -> EngineCapabilities {
+        let _rime = rime_api_lock();
+        // SAFETY: the librime lock is held and only the function pointers of
+        // the static API table are read, each one gated on `data_size`.
+        unsafe {
+            let api = rime_get_api();
+            if api.is_null() {
+                return EngineCapabilities::none();
+            }
+
+            #[cfg(target_os = "ios")]
+            let (native_paging, candidate_highlight) = (false, false);
+            #[cfg(not(target_os = "ios"))]
+            let (native_paging, candidate_highlight) = (
+                rime_api_member!(api, change_page).is_some(),
+                rime_api_member!(api, highlight_candidate_on_current_page).is_some(),
+            );
+
+            EngineCapabilities {
+                candidate_selection: rime_api_member!(api, select_candidate_on_current_page)
+                    .is_some(),
+                global_candidate_selection: rime_api_member!(api, select_candidate).is_some(),
+                candidate_highlight,
+                candidate_deletion: rime_api_member!(api, delete_candidate_on_current_page)
+                    .is_some(),
+                native_paging,
+                commit_composition: rime_api_member!(api, commit_composition).is_some(),
+                clear_composition: rime_api_member!(api, clear_composition).is_some(),
+            }
+        }
     }
 
     impl Engine {
@@ -1099,19 +1426,42 @@ mod desktop {
             Self::new_with_user_data_dir(None)
         }
 
+        /// What this librime can do natively, see [`EngineCapabilities`].
+        pub fn capabilities(&self) -> EngineCapabilities {
+            engine_capabilities()
+        }
+
+        /// Whether [`Engine::change_page`] pages through librime instead of
+        /// replaying the `-`/`=` bindings.
+        pub fn supports_native_paging(&self) -> bool {
+            engine_capabilities().supports_native_paging()
+        }
+
+        /// Whether [`Engine::select_candidate_on_page`] selects through librime
+        /// instead of sending a select key.
+        pub fn supports_candidate_selection(&self) -> bool {
+            engine_capabilities().supports_candidate_selection()
+        }
+
         pub(crate) fn new_with_user_data_dir(user_data_dir: Option<&Path>) -> Result<Self, String> {
+            // Locating and checking the compiled schema is file I/O; the
+            // librime lock is only taken once the session is actually created.
             let preferred = preferred_schema_location(user_data_dir);
             if let Some((dir, schema_id)) = &preferred {
                 require_compiled_schema(&compiled_schema_path(dir, schema_id), schema_id)?;
             }
+            let _rime = rime_api_lock();
             let session = create_session().map_err(|e| format!("{e:?}"))?;
             if let Some((_, schema_id)) = preferred {
+                // ascii_mode is left to the schema switches and to ascii_composer;
+                // a session must not silently override the user's mode.
                 select_schema_checked(&session, &schema_id)?;
-                set_session_option(&session, "ascii_mode", false);
             } else {
                 validate_active_schema(&session)?;
             }
-            Ok(Self { session })
+            Ok(Self {
+                session: ManuallyDrop::new(session),
+            })
         }
 
         pub fn process_key(&self, keycode: u32, mask: u32) -> ImeState {
@@ -1119,34 +1469,101 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
+            let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
             KeyProcessResult {
-                state: extract_state(&self.session),
+                state: extract_state_with_commit(&self.session),
                 accepted: matches!(status, KeyStatus::Accept),
             }
         }
 
+        /// Read-only snapshot: `RimeGetCommit` consumes the pending commit, so a
+        /// query must never call it or the text would never reach the client.
         pub fn state(&self) -> ImeState {
-            extract_state(&self.session)
+            let _rime = rime_api_lock();
+            extract_state_readonly(&self.session)
         }
 
+        /// Pick the `index`-th candidate of the current page.
+        ///
+        /// Kept as the historical name of [`Engine::select_candidate_on_page`].
         pub fn select_candidate(&self, index: usize) -> ImeState {
-            let state = extract_state(&self.session);
-            let select_keys = state.select_keys.as_deref().unwrap_or("1234567890");
+            self.select_candidate_on_page(index)
+        }
+
+        /// Pick the `index`-th candidate of the current page through librime's
+        /// own API, so that selection does not depend on `menu/select_keys`
+        /// being long enough or on the schema's alphabet.
+        pub fn select_candidate_on_page(&self, index: usize) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; the entry point is optional in
+            // older ABIs, so a missing pointer falls back to the select key.
+            let handled = unsafe {
+                let api = rime_get_api();
+                rime_api_member!(api, select_candidate_on_current_page)
+                    .map(|select| select(self.session.session_id, index))
+            };
+            if handled.is_none() {
+                self.send_select_key(index);
+            }
+            extract_state_with_commit(&self.session)
+        }
+
+        /// Move the highlight without committing, for hover/arrow interactions.
+        pub fn highlight_candidate_on_page(&self, index: usize) -> ImeState {
+            let _rime = rime_api_lock();
+            // `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi`
+            // predates `highlight_candidate_on_current_page` (added in 1.9), so
+            // the field does not exist at compile time and moving the highlight
+            // without committing degrades to a no-op. Remove the gate once the
+            // vendored iOS librime is rebuilt from 1.9 or newer.
+            #[cfg(target_os = "ios")]
+            let _ = index;
+            // SAFETY: the librime lock is held; the pointer is checked.
+            #[cfg(not(target_os = "ios"))]
+            unsafe {
+                let api = rime_get_api();
+                if let Some(highlight) = rime_api_member!(api, highlight_candidate_on_current_page)
+                {
+                    highlight(self.session.session_id, index);
+                }
+            }
+            extract_state_with_commit(&self.session)
+        }
+
+        /// Forget the `index`-th candidate of the current page (user dictionary
+        /// entries only; librime ignores the request for other candidates).
+        pub fn delete_candidate_on_page(&self, index: usize) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; the pointer is checked.
+            unsafe {
+                let api = rime_get_api();
+                if let Some(delete) = rime_api_member!(api, delete_candidate_on_current_page) {
+                    delete(self.session.session_id, index);
+                }
+            }
+            extract_state_with_commit(&self.session)
+        }
+
+        /// Fallback for ABIs without `select_candidate_on_current_page`.
+        fn send_select_key(&self, index: usize) {
+            let select_keys = session_select_keys(&self.session);
+            let select_keys = select_keys.as_deref().unwrap_or(DEFAULT_SELECT_KEYS);
             if let Some(key) = select_keys.chars().nth(index) {
                 self.session.process_key(key_event(key as u32, 0));
             }
-            extract_state(&self.session)
         }
 
         pub fn select_candidate_global(&self, index: usize) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; the pointer is checked.
             unsafe {
                 let api = rime_get_api();
-                if let Some(select_candidate) = (*api).select_candidate {
+                if let Some(select_candidate) = rime_api_member!(api, select_candidate) {
                     select_candidate(self.session.session_id, index);
                 }
             }
-            extract_state(&self.session)
+            extract_state_with_commit(&self.session)
         }
 
         pub fn all_candidates(&self) -> Vec<Candidate> {
@@ -1154,21 +1571,147 @@ mod desktop {
         }
 
         pub fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate> {
+            let _rime = rime_api_lock();
             extract_all_candidates(&self.session, max_count).unwrap_or_default()
         }
 
+        /// Turn a candidate page through librime instead of replaying the
+        /// `-`/`=` bindings, which only exist when a schema imports the default
+        /// `key_binder` paging preset.
         pub fn change_page(&self, backward: bool) -> ImeState {
-            let kc = if backward { b'-' as u32 } else { b'=' as u32 };
-            self.session.process_key(key_event(kc, 0));
-            extract_state(&self.session)
+            let _rime = rime_api_lock();
+            // `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi`
+            // predates `change_page` (added in 1.9), so the field does not exist
+            // at compile time and paging always takes the synthetic-key path.
+            // Remove the gate once the vendored iOS librime is rebuilt from 1.9
+            // or newer.
+            #[cfg(target_os = "ios")]
+            let handled = false;
+            // SAFETY: the librime lock is held; a missing pointer falls back to
+            // the historical synthetic key.
+            #[cfg(not(target_os = "ios"))]
+            let handled = unsafe {
+                let api = rime_get_api();
+                rime_api_member!(api, change_page)
+                    .map(|change_page| change_page(self.session.session_id, i32::from(backward)))
+                    .is_some()
+            };
+            if !handled {
+                let kc = if backward { b'-' as u32 } else { b'=' as u32 };
+                self.session.process_key(key_event(kc, 0));
+            }
+            extract_state_with_commit(&self.session)
         }
 
+        /// Drop the composition without committing anything.
+        ///
+        /// Kept as the historical name of [`Engine::clear_composition`].
         pub fn reset(&self) -> ImeState {
-            self.session.process_key(key_event(0xff1b, 0)); // XK_Escape
-            extract_state(&self.session)
+            self.clear_composition()
+        }
+
+        /// Discard the composition through librime, so that the outcome does
+        /// not depend on how a schema bound `Escape`.
+        pub fn clear_composition(&self) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; a missing pointer falls back to
+            // the historical synthetic key.
+            let handled = unsafe {
+                let api = rime_get_api();
+                rime_api_member!(api, clear_composition).map(|clear| {
+                    clear(self.session.session_id);
+                })
+            };
+            if handled.is_none() {
+                self.session
+                    .process_key(key_event(key_policy::XK_ESCAPE, 0));
+            }
+            extract_state_with_commit(&self.session)
+        }
+
+        /// Commit whatever librime currently holds, the way a frontend has to
+        /// finish a composition when the input context goes away.
+        pub fn commit_composition(&self) -> ImeState {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held; a missing pointer falls back to
+            // handing Return to the schema's editor.
+            let handled = unsafe {
+                let api = rime_get_api();
+                rime_api_member!(api, commit_composition)
+                    .map(|commit| commit(self.session.session_id))
+            };
+            if handled.is_none() {
+                self.session
+                    .process_key(key_event(key_policy::XK_RETURN, 0));
+            }
+            extract_state_with_commit(&self.session)
+        }
+
+        /// The raw input string librime is composing from, before any editor or
+        /// filter rewrote it for display.
+        pub fn raw_input(&self) -> Option<String> {
+            let _rime = rime_api_lock();
+            self.raw_input_locked()
+        }
+
+        fn raw_input_locked(&self) -> Option<String> {
+            // SAFETY: the librime lock is held; the pointer is checked and the
+            // returned buffer is owned by librime and only read here.
+            unsafe {
+                let api = rime_get_api();
+                let get_input = rime_api_member!(api, get_input)?;
+                cstr_to_str(get_input(self.session.session_id))
+            }
+        }
+
+        /// Commit the raw input and drop the composition.
+        ///
+        /// This is the documented fallback for `Return` when the schema's
+        /// editor passes the key back: the typed code must reach the client
+        /// instead of being thrown away with the composition.
+        pub fn commit_raw_input(&self) -> ImeState {
+            let _rime = rime_api_lock();
+            let raw = self.raw_input_locked().unwrap_or_default();
+            if raw.is_empty() {
+                return extract_state_with_commit(&self.session);
+            }
+            let mut state = self.clear_composition();
+            let pending = state.committed.take();
+            state.committed = Some(match pending {
+                Some(pending) => format!("{pending}{raw}"),
+                None => raw,
+            });
+            state
+        }
+
+        /// `Return` handling shared by every frontend: librime decides first,
+        /// and only when it passes the key while a composition exists does the
+        /// raw input get committed (see [`Engine::commit_raw_input`]).
+        pub fn process_enter(&self) -> KeyProcessResult {
+            let _rime = rime_api_lock();
+            let composing = !extract_state_readonly(&self.session).preedit.is_empty();
+            let result = self.process_key_result(key_policy::XK_RETURN, 0);
+            if result.accepted || !composing {
+                return result;
+            }
+            let mut state = self.commit_raw_input();
+            // Whatever librime had already produced still has to reach the
+            // client, and it was produced before the raw input.
+            if let Some(pending) = result.state.committed {
+                let raw = state.committed.take();
+                state.committed = Some(match raw {
+                    Some(raw) => format!("{pending}{raw}"),
+                    None => pending,
+                });
+            }
+            KeyProcessResult {
+                state,
+                accepted: true,
+            }
         }
 
         pub fn current_schema_name(&self) -> String {
+            let _rime = rime_api_lock();
             self.session
                 .status()
                 .map(|s| s.schema_name().to_string())
@@ -1176,15 +1719,24 @@ mod desktop {
         }
 
         pub fn is_ascii_mode(&self) -> bool {
+            let _rime = rime_api_lock();
             self.session
                 .status()
                 .map(|s| s.is_ascii_mode)
                 .unwrap_or(false)
         }
 
-        pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
+        /// Set the session option without reading any state back, so that a
+        /// pending commit stays pending (see [`Engine::state`]).
+        pub fn apply_ascii_mode(&self, enabled: bool) {
+            let _rime = rime_api_lock();
             set_session_option(&self.session, "ascii_mode", enabled);
-            extract_state(&self.session)
+        }
+
+        pub fn set_ascii_mode(&self, enabled: bool) -> ImeState {
+            let _rime = rime_api_lock();
+            set_session_option(&self.session, "ascii_mode", enabled);
+            extract_state_with_commit(&self.session)
         }
     }
 
@@ -1223,15 +1775,30 @@ mod desktop {
         };
         unsafe {
             let api = rime_get_api();
-            if let Some(set_option) = (*api).set_option {
+            if let Some(set_option) = rime_api_member!(api, set_option) {
                 set_option(session.session_id, option.as_ptr(), i32::from(enabled));
             }
         }
     }
 
-    fn extract_state(session: &rime_api::Session) -> ImeState {
+    /// Snapshot after a state-changing call: takes the pending commit with it.
+    fn extract_state_with_commit(session: &rime_api::Session) -> ImeState {
         let committed = session.commit().map(|c| c.text().to_string());
+        extract_state(session, committed)
+    }
 
+    /// Snapshot for read-only queries: leaves the pending commit for the next
+    /// key event so that no text is dropped on the floor.
+    fn extract_state_readonly(session: &rime_api::Session) -> ImeState {
+        extract_state(session, None)
+    }
+
+    fn session_select_keys(session: &rime_api::Session) -> Option<String> {
+        let ctx = session.context()?;
+        ctx.menu().select_keys.map(|keys: &str| keys.to_string())
+    }
+
+    fn extract_state(session: &rime_api::Session, committed: Option<String>) -> ImeState {
         let Some(ctx) = session.context() else {
             return ImeState {
                 committed,
@@ -1241,7 +1808,10 @@ mod desktop {
 
         let comp = ctx.composition();
         let preedit = comp.preedit.unwrap_or("").to_string();
-        let cursor = comp.cursor_pos;
+        // librime counts in UTF-8 bytes; the contract is Unicode scalars.
+        let cursor = char_offset_from_utf8(&preedit, comp.cursor_pos);
+        let sel_start = char_offset_from_utf8(&preedit, comp.sel_start);
+        let sel_end = char_offset_from_utf8(&preedit, comp.sel_end);
 
         let menu = ctx.menu();
         let candidates: Vec<Candidate> = menu
@@ -1263,8 +1833,9 @@ mod desktop {
         ImeState {
             preedit,
             cursor,
+            sel_start,
+            sel_end,
             candidates,
-            all_candidates: Vec::new(),
             highlighted_candidate_index: menu.highlighted_candidate_index,
             page_size: menu.page_size,
             page: menu.page_no,
@@ -1285,9 +1856,9 @@ mod desktop {
         }
         unsafe {
             let api = rime_get_api();
-            let candidate_list_begin = (*api).candidate_list_begin?;
-            let candidate_list_next = (*api).candidate_list_next?;
-            let candidate_list_end = (*api).candidate_list_end?;
+            let candidate_list_begin = rime_api_member!(api, candidate_list_begin)?;
+            let candidate_list_next = rime_api_member!(api, candidate_list_next)?;
+            let candidate_list_end = rime_api_member!(api, candidate_list_end)?;
             let mut iterator =
                 std::mem::MaybeUninit::<RimeCandidateListIterator>::zeroed().assume_init();
             if candidate_list_begin(session.session_id, &mut iterator) == 0 {
@@ -1340,15 +1911,57 @@ mod desktop {
 ))]
 pub use desktop::{deploy, setup_only, Engine};
 #[cfg(target_os = "android")]
-pub use desktop::{deploy_android_config, deploy_android_schema, reinitialize_android};
+pub use desktop::{deploy_android_config, deploy_android_schema};
 
-pub const RIME_MOD_SHIFT: u32 = 0x0001;
-pub const RIME_MOD_CONTROL: u32 = 0x0004;
-pub const RIME_MOD_ALT: u32 = 0x0008;
+/// What the linked librime can do natively, see [`EngineCapabilities`].
+///
+/// Answerable before librime is initialized: it only inspects the ABI.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn engine_capabilities() -> EngineCapabilities {
+    desktop::engine_capabilities()
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+)))]
+pub fn engine_capabilities() -> EngineCapabilities {
+    EngineCapabilities::none()
+}
+
+// Rime modifier bits, mirroring librime's `RimeModifier` in key_table.h.
+pub const RIME_MOD_SHIFT: u32 = 1 << 0;
+/// CapsLock. Never forwarded to librime — see
+/// [`key_policy::normalize_key_for_modifiers`], which folds it into the keysym.
+pub const RIME_MOD_LOCK: u32 = 1 << 1;
+pub const RIME_MOD_CONTROL: u32 = 1 << 2;
+pub const RIME_MOD_ALT: u32 = 1 << 3;
+pub const RIME_MOD_SUPER: u32 = 1 << 26;
+pub const RIME_MOD_HYPER: u32 = 1 << 27;
+pub const RIME_MOD_META: u32 = 1 << 28;
 pub const RIME_RELEASE_MASK: u32 = 1 << 30;
 
+/// Candidate label fallback when a schema publishes no `menu/select_keys`.
+///
+/// Labels only: intercepting these characters as selection keys would steal
+/// digits from schemas that spell codes with them, so key handling uses
+/// [`key_policy::candidate_index_for_char`], which has no fallback.
+pub const DEFAULT_SELECT_KEYS: &str = "1234567890";
+
 pub mod key_policy {
-    use super::{ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL};
+    use super::{
+        ImeState, RIME_MOD_CONTROL, RIME_MOD_HYPER, RIME_MOD_LOCK, RIME_MOD_META, RIME_MOD_SHIFT,
+        RIME_MOD_SUPER,
+    };
 
     pub const XK_SPACE: u32 = 0x0020;
     pub const XK_BACK_SPACE: u32 = 0xff08;
@@ -1363,9 +1976,24 @@ pub mod key_policy {
     pub const XK_PAGE_UP: u32 = 0xff55;
     pub const XK_PAGE_DOWN: u32 = 0xff56;
     pub const XK_END: u32 = 0xff57;
+    pub const XK_BEGIN: u32 = 0xff58;
     pub const XK_DELETE: u32 = 0xffff;
     pub const XK_KP_ENTER: u32 = 0xff8d;
     pub const XK_F4: u32 = 0xffc1;
+
+    /// X11 encodes a keysym for an arbitrary Unicode scalar as
+    /// `0x01000000 | codepoint`.
+    pub const XK_UNICODE_BASE: u32 = 0x0100_0000;
+
+    /// What a frontend should do with `Return`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EnterAction {
+        /// Nothing is being composed: the host application owns the key.
+        Bypass,
+        /// Hand `XK_Return` to librime; if the schema's editor passes it back,
+        /// commit the raw input instead of dropping the composition.
+        ForwardToRime,
+    }
 
     pub fn is_enter_key(sym: u32) -> bool {
         matches!(sym, XK_RETURN | XK_KP_ENTER)
@@ -1379,10 +2007,35 @@ pub mod key_policy {
         matches!(
             sym,
             XK_SPACE | XK_BACK_SPACE | XK_DELETE | XK_TAB | XK_RETURN | XK_ESCAPE | XK_HOME
-                ..=XK_END | XK_KP_ENTER
+                ..=XK_BEGIN | XK_KP_ENTER
         )
     }
 
+    /// `Return` is never handled by the frontend on its own: librime decides,
+    /// because only the schema's editor knows whether `Return` confirms the
+    /// highlighted candidate or commits the raw code.
+    pub fn enter_action(state: &ImeState) -> EnterAction {
+        if state.preedit.is_empty() && state.candidates.is_empty() {
+            EnterAction::Bypass
+        } else {
+            EnterAction::ForwardToRime
+        }
+    }
+
+    /// Modifiers the window system reserves for itself (Command on macOS, the
+    /// Windows/Super key elsewhere). Everything else — including Control and
+    /// Alt — is offered to librime first, because Rime's switcher hotkeys and
+    /// the schemas' `key_binder` bindings live there.
+    pub fn is_system_reserved_modifier(mods: u32) -> bool {
+        mods & (RIME_MOD_SUPER | RIME_MOD_HYPER | RIME_MOD_META) != 0
+    }
+
+    /// Whether a key must be passed straight to the application.
+    ///
+    /// `ascii_mode` is deliberately not part of this decision: in English mode
+    /// librime's `ascii_composer` still has to see the keys to run `Shift`
+    /// switching, punctuation and the schema's bindings, and it reports the
+    /// key as not accepted when the application should get it.
     pub fn should_bypass_empty_composition(sym: u32, mods: u32, state: &ImeState) -> bool {
         should_bypass_empty_composition_key(is_nonstarter_key(sym), mods, state)
     }
@@ -1395,7 +2048,7 @@ pub mod key_policy {
         if !state.preedit.is_empty() || !state.candidates.is_empty() {
             return false;
         }
-        if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0 {
+        if is_system_reserved_modifier(mods) {
             return true;
         }
         is_nonstarter
@@ -1413,17 +2066,89 @@ pub mod key_policy {
         }
     }
 
+    /// Map a typed character to a candidate index.
+    ///
+    /// Only the select keys the schema actually published count. There is no
+    /// `1234567890` fallback here: that fallback belongs to candidate labels,
+    /// and using it for key handling would swallow digits that a schema spells
+    /// codes with. When a schema publishes no select keys, the key belongs to
+    /// librime's own selector.
     pub fn candidate_index_for_char(ch: char, state: &ImeState) -> Option<usize> {
         if state.candidates.is_empty() {
             return None;
         }
-        let keys = state.select_keys.as_deref().unwrap_or("1234567890");
+        let keys = state.select_keys.as_deref()?;
         keys.chars().position(|candidate_key| candidate_key == ch)
     }
 
     pub fn candidate_index_for_select_key(sym: u32, state: &ImeState) -> Option<usize> {
-        let ch = char::from_u32(sym)?;
+        let ch = char_for_keysym(sym)?;
         candidate_index_for_char(ch, state)
+    }
+
+    /// The X11 keysym for a character, or `None` for characters that cannot be
+    /// typed (control codes).
+    ///
+    /// Latin-1 maps onto itself, everything else uses the Unicode encoding.
+    /// Sending a raw code point instead would land in the function key block:
+    /// `（` (U+FF08) would arrive as `XK_BackSpace`.
+    pub fn keysym_for_char(ch: char) -> Option<u32> {
+        if ch.is_control() {
+            return None;
+        }
+        let codepoint = ch as u32;
+        if codepoint <= 0x00ff {
+            Some(codepoint)
+        } else {
+            Some(XK_UNICODE_BASE | codepoint)
+        }
+    }
+
+    /// The character a keysym stands for, inverse of [`keysym_for_char`].
+    pub fn char_for_keysym(sym: u32) -> Option<char> {
+        let codepoint = if sym & 0xff00_0000 == XK_UNICODE_BASE {
+            sym & 0x00ff_ffff
+        } else if sym <= 0x00ff {
+            sym
+        } else {
+            return None;
+        };
+        char::from_u32(codepoint).filter(|ch| !ch.is_control())
+    }
+
+    /// The keysym for a piece of text a soft keyboard produced, or `None` when
+    /// the text is not a single typable character and has to be committed
+    /// directly instead.
+    pub fn keysym_for_text(text: &str) -> Option<u32> {
+        let mut chars = text.chars();
+        let first = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        keysym_for_char(first)
+    }
+
+    /// Fold `Shift`/`CapsLock` into the keysym and drop the Lock bit.
+    ///
+    /// Rime expects the keysym to carry the character that was actually typed
+    /// while the mask carries only real modifiers, so a locked `a` must arrive
+    /// as `A` and never as `a` plus a Lock bit that librime would treat as an
+    /// unknown modifier.
+    pub fn normalize_key_for_modifiers(sym: u32, mods: u32) -> (u32, u32) {
+        let uppercase = (mods & RIME_MOD_LOCK != 0) != (mods & RIME_MOD_SHIFT != 0);
+        let mods = mods & !RIME_MOD_LOCK;
+        let Some(ch) = char_for_keysym(sym) else {
+            return (sym, mods);
+        };
+        if !ch.is_ascii_alphabetic() {
+            return (sym, mods);
+        }
+        let folded = if uppercase {
+            ch.to_ascii_uppercase()
+        } else {
+            ch.to_ascii_lowercase()
+        };
+        (folded as u32, mods)
     }
 
     pub fn candidate_index_for_space_or_select_key(sym: u32, state: &ImeState) -> Option<usize> {
@@ -1440,16 +2165,45 @@ pub mod key_policy {
     }
 }
 
+/// Drop everything librime has no name for (NumLock, mouse buttons, XKB
+/// groups) and keep the modifiers Rime's `key_binder` can bind, including
+/// Super/Hyper/Meta so that a frontend can express Command/Windows chords.
+/// CapsLock is folded into the keysym instead, see
+/// [`key_policy::normalize_key_for_modifiers`].
 pub fn rime_modifier_mask(mask: u32) -> u32 {
-    mask & (RIME_MOD_SHIFT | RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_RELEASE_MASK)
+    mask & (RIME_MOD_SHIFT
+        | RIME_MOD_CONTROL
+        | RIME_MOD_ALT
+        | RIME_MOD_SUPER
+        | RIME_MOD_HYPER
+        | RIME_MOD_META
+        | RIME_RELEASE_MASK)
 }
 
 #[cfg(test)]
 mod ime_runtime_tests {
     use super::{
-        key_policy, rime_modifier_mask, Candidate, ImeState, RIME_MOD_CONTROL, RIME_MOD_SHIFT,
-        RIME_RELEASE_MASK,
+        char_offset_from_utf8, key_policy, rime_modifier_mask, utf16_offset_from_chars, Candidate,
+        ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK, RIME_MOD_META,
+        RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
     };
+
+    fn state_with_candidates(select_keys: Option<&str>) -> ImeState {
+        let mut state = ImeState::empty();
+        state.preedit = "ab".to_owned();
+        state.candidates = vec![
+            Candidate {
+                text: "first".to_owned(),
+                comment: None,
+            },
+            Candidate {
+                text: "second".to_owned(),
+                comment: None,
+            },
+        ];
+        state.select_keys = select_keys.map(str::to_owned);
+        state
+    }
 
     #[test]
     fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {
@@ -1462,6 +2216,15 @@ mod ime_runtime_tests {
             rime_modifier_mask(RIME_RELEASE_MASK | 0x10),
             RIME_RELEASE_MASK
         );
+        assert_eq!(rime_modifier_mask(RIME_MOD_LOCK), 0);
+    }
+
+    #[test]
+    fn rime_modifier_mask_keeps_super_and_meta() {
+        assert_eq!(
+            rime_modifier_mask(RIME_MOD_SUPER | RIME_MOD_META),
+            RIME_MOD_SUPER | RIME_MOD_META
+        );
     }
 
     #[test]
@@ -1470,11 +2233,6 @@ mod ime_runtime_tests {
         assert!(key_policy::should_bypass_empty_composition(
             key_policy::XK_BACK_SPACE,
             0,
-            &empty
-        ));
-        assert!(key_policy::should_bypass_empty_composition(
-            b'a' as u32,
-            RIME_MOD_CONTROL,
             &empty
         ));
 
@@ -1488,6 +2246,46 @@ mod ime_runtime_tests {
     }
 
     #[test]
+    fn key_policy_offers_control_and_alt_chords_to_rime() {
+        let empty = ImeState::empty();
+        // Rime's switcher hotkey and every schema binding lives here, so the
+        // key must reach librime and only be forwarded when it is not accepted.
+        assert!(!key_policy::should_bypass_empty_composition(
+            b'`' as u32,
+            RIME_MOD_CONTROL,
+            &empty
+        ));
+        assert!(!key_policy::should_bypass_empty_composition(
+            b'a' as u32,
+            RIME_MOD_ALT,
+            &empty
+        ));
+    }
+
+    #[test]
+    fn key_policy_bypasses_system_reserved_chords() {
+        let empty = ImeState::empty();
+        assert!(key_policy::should_bypass_empty_composition(
+            b'a' as u32,
+            RIME_MOD_SUPER,
+            &empty
+        ));
+        assert!(key_policy::is_system_reserved_modifier(RIME_MOD_META));
+        assert!(!key_policy::is_system_reserved_modifier(RIME_MOD_CONTROL));
+    }
+
+    #[test]
+    fn key_policy_ignores_ascii_mode() {
+        let mut english = ImeState::empty();
+        english.ascii_mode = true;
+        assert!(!key_policy::should_bypass_empty_composition(
+            b'a' as u32,
+            0,
+            &english
+        ));
+    }
+
+    #[test]
     fn key_policy_candidate_selection_requires_candidates() {
         let mut state = ImeState::empty();
         state.preedit = "ab".to_owned();
@@ -1496,16 +2294,7 @@ mod ime_runtime_tests {
             None
         );
 
-        state.candidates = vec![
-            Candidate {
-                text: "first".to_owned(),
-                comment: None,
-            },
-            Candidate {
-                text: "second".to_owned(),
-                comment: None,
-            },
-        ];
+        let mut state = state_with_candidates(Some("12"));
         state.highlighted_candidate_index = 9;
         assert_eq!(
             key_policy::candidate_index_for_space_or_select_key(key_policy::XK_SPACE, &state),
@@ -1515,6 +2304,135 @@ mod ime_runtime_tests {
             key_policy::candidate_index_for_select_key(b'2' as u32, &state),
             Some(1)
         );
+    }
+
+    #[test]
+    fn key_policy_candidate_selection_requires_published_select_keys() {
+        // Without select_keys the digit belongs to the schema's speller, so the
+        // frontend must not steal it; librime's own selector still handles it.
+        let state = state_with_candidates(None);
+        assert_eq!(
+            key_policy::candidate_index_for_select_key(b'2' as u32, &state),
+            None
+        );
+        assert_eq!(
+            key_policy::candidate_index_for_space_or_select_key(b'2' as u32, &state),
+            None
+        );
+    }
+
+    #[test]
+    fn key_policy_enter_is_decided_by_rime_while_composing() {
+        assert_eq!(
+            key_policy::enter_action(&ImeState::empty()),
+            key_policy::EnterAction::Bypass
+        );
+        assert_eq!(
+            key_policy::enter_action(&state_with_candidates(None)),
+            key_policy::EnterAction::ForwardToRime
+        );
+    }
+
+    #[test]
+    fn keysym_for_char_never_lands_in_the_function_key_block() {
+        assert_eq!(key_policy::keysym_for_char('a'), Some(0x61));
+        assert_eq!(key_policy::keysym_for_char('¥'), Some(0xa5));
+        // U+FF08 must not become XK_BackSpace (0xff08).
+        assert_eq!(
+            key_policy::keysym_for_char('（'),
+            Some(key_policy::XK_UNICODE_BASE | 0xff08)
+        );
+        assert_eq!(key_policy::keysym_for_char('\u{7f}'), None);
+        assert_eq!(key_policy::keysym_for_char('\n'), None);
+    }
+
+    #[test]
+    fn keysym_for_text_accepts_single_characters_only() {
+        assert_eq!(key_policy::keysym_for_text("a"), Some(0x61));
+        assert_eq!(key_policy::keysym_for_text("ab"), None);
+        assert_eq!(key_policy::keysym_for_text(""), None);
+        assert_eq!(
+            key_policy::keysym_for_text("，"),
+            Some(key_policy::XK_UNICODE_BASE | 0xff0c)
+        );
+    }
+
+    #[test]
+    fn char_for_keysym_is_the_inverse_of_keysym_for_char() {
+        for ch in ['a', 'Z', '9', '-', '¥', '（', '中'] {
+            let sym = key_policy::keysym_for_char(ch).expect("typable");
+            assert_eq!(key_policy::char_for_keysym(sym), Some(ch));
+        }
+        assert_eq!(key_policy::char_for_keysym(key_policy::XK_BACK_SPACE), None);
+        assert_eq!(key_policy::char_for_keysym(key_policy::XK_RETURN), None);
+    }
+
+    #[test]
+    fn normalize_key_for_modifiers_folds_caps_lock_into_the_keysym() {
+        assert_eq!(
+            key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_LOCK),
+            (b'A' as u32, 0)
+        );
+        assert_eq!(
+            key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_LOCK | RIME_MOD_SHIFT),
+            (b'a' as u32, RIME_MOD_SHIFT)
+        );
+        assert_eq!(
+            key_policy::normalize_key_for_modifiers(b'a' as u32, RIME_MOD_SHIFT),
+            (b'A' as u32, RIME_MOD_SHIFT)
+        );
+        // Non-letters keep their keysym; only the Lock bit is dropped.
+        assert_eq!(
+            key_policy::normalize_key_for_modifiers(b'1' as u32, RIME_MOD_LOCK),
+            (b'1' as u32, 0)
+        );
+        assert_eq!(
+            key_policy::normalize_key_for_modifiers(
+                key_policy::XK_BACK_SPACE,
+                RIME_MOD_LOCK | RIME_MOD_CONTROL
+            ),
+            (key_policy::XK_BACK_SPACE, RIME_MOD_CONTROL)
+        );
+    }
+
+    #[test]
+    fn input_context_policy_defaults_to_composing() {
+        assert_eq!(
+            InputContextPolicy::default(),
+            InputContextPolicy {
+                composing: true,
+                learning: true
+            }
+        );
+        assert_eq!(
+            InputContextPolicy::sensitive(),
+            InputContextPolicy {
+                composing: false,
+                learning: false
+            }
+        );
+    }
+
+    #[test]
+    fn cursor_offsets_are_converted_to_unicode_scalars() {
+        let preedit = "中文ab";
+        assert_eq!(char_offset_from_utf8(preedit, 0), 0);
+        assert_eq!(char_offset_from_utf8(preedit, 3), 1);
+        assert_eq!(char_offset_from_utf8(preedit, 6), 2);
+        // Byte offsets inside a character clamp to its boundary, out of range
+        // offsets clamp to the end.
+        assert_eq!(char_offset_from_utf8(preedit, 4), 2);
+        assert_eq!(char_offset_from_utf8(preedit, 999), 4);
+        assert_eq!(char_offset_from_utf8("", 0), 0);
+    }
+
+    #[test]
+    fn char_offsets_convert_to_utf16_units() {
+        assert_eq!(utf16_offset_from_chars("中文ab", 2), 2);
+        assert_eq!(utf16_offset_from_chars("中文ab", 4), 4);
+        // Astral characters take two UTF-16 units.
+        assert_eq!(utf16_offset_from_chars("𝄞a", 1), 2);
+        assert_eq!(utf16_offset_from_chars("𝄞a", 9), 3);
     }
 
     #[test]
@@ -1574,10 +2492,154 @@ pub struct ImeRuntimeSession {
     target_os = "ios"
 ))]
 struct ImeRuntimeState {
-    initialized: Mutex<bool>,
-    generation: AtomicU64,
     user_data_dir: Option<PathBuf>,
     shared_data_dir: Option<String>,
+}
+
+/// The data directories librime is running for.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RimeDataDirs {
+    user: PathBuf,
+    shared: String,
+}
+
+/// State of the single librime instance the process has.
+///
+/// librime keeps its service, its session map and its config, table and prism
+/// caches in process globals, so initializing, finalizing and reloading are
+/// process-wide events no matter which [`ImeRuntime`] triggers them. Keeping
+/// the barrier, the generation and the session registry per runtime would let
+/// one runtime finalize librime while another runtime's sessions still hold
+/// live session ids.
+///
+/// Lock order: `initialized` → `reload_barrier` → `sessions` → session inner →
+/// librime.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+struct ProcessRimeState {
+    /// The directories librime is initialized for, `None` while it is down.
+    initialized: Mutex<Option<RimeDataDirs>>,
+    /// Bumped whenever librime was torn down; a session whose generation is
+    /// behind rebuilds its engine before its next call.
+    generation: AtomicU64,
+    /// Held for reading while a session touches its engine and for writing
+    /// while librime is torn down, so that no session call can race a
+    /// finalize/initialize cycle.
+    reload_barrier: RwLock<()>,
+    /// Every session handed out in this process. A teardown must drop their
+    /// engines before finalizing librime; entries die with their session.
+    sessions: Mutex<Vec<Weak<Mutex<ImeRuntimeSessionInner>>>>,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
+    initialized: Mutex::new(None),
+    generation: AtomicU64::new(0),
+    reload_barrier: RwLock::new(()),
+    sessions: Mutex::new(Vec::new()),
+};
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+impl ProcessRimeState {
+    /// Drop the engine of every live session so that librime is left without a
+    /// single strong reference to its cached config, tables and prisms.
+    /// The ascii_mode of each engine is carried over to its replacement.
+    /// Callers hold the reload barrier for writing.
+    fn drop_live_engines(&self) {
+        let mut sessions = lock_ignore_poison(&self.sessions);
+        sessions.retain(|session| {
+            let Some(session) = session.upgrade() else {
+                return false;
+            };
+            let mut inner = lock_ignore_poison(&session);
+            if let Some(engine) = inner.engine.take() {
+                inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+            }
+            true
+        });
+    }
+
+    fn register(&self, session: &Arc<Mutex<ImeRuntimeSessionInner>>) {
+        let mut sessions = lock_ignore_poison(&self.sessions);
+        sessions.retain(|session| session.strong_count() > 0);
+        sessions.push(Arc::downgrade(session));
+    }
+
+    /// Tear librime down when it is up for different directories, so that the
+    /// caller can bring it back up for the ones it wants. Every live engine is
+    /// dropped first, exactly like a reload.
+    fn shutdown_for_dir_change(
+        &self,
+        initialized: &mut Option<RimeDataDirs>,
+        wanted: &RimeDataDirs,
+    ) -> Result<(), String> {
+        match initialized.as_ref() {
+            None => return Ok(()),
+            Some(current) if current == wanted => return Ok(()),
+            Some(_) => {}
+        }
+        let _barrier = write_ignore_poison(&self.reload_barrier);
+        self.drop_live_engines();
+        *initialized = None;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        desktop::finalize_rime()
+    }
+}
+
+/// Finalize librime and initialize it again for these directories.
+///
+/// Every engine handed out by an [`ImeRuntime`] in this process is dropped
+/// first: librime only re-reads a deployment once the last session holding its
+/// cached config and dictionaries is gone, and a session that survived the
+/// finalize would be talking to a torn-down engine.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+    let dirs = RimeDataDirs {
+        user: PathBuf::from(&user_data_dir),
+        shared: shared_data_dir.clone(),
+    };
+    let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+    let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+    PROCESS_RIME.drop_live_engines();
+    let result = desktop::reinitialize_rime(user_data_dir, shared_data_dir);
+    PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+    *initialized = result.is_ok().then_some(dirs);
+    result
+}
+
+#[cfg(target_os = "android")]
+pub fn reinitialize_android(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+    reinitialize(user_data_dir, shared_data_dir)
 }
 
 #[cfg(any(
@@ -1588,8 +2650,15 @@ struct ImeRuntimeState {
     target_os = "ios"
 ))]
 struct ImeRuntimeSessionInner {
-    engine: Engine,
+    /// `None` between a reload and the next access; the engine is rebuilt
+    /// lazily so that the old one is already gone when librime re-reads the
+    /// deployment.
+    engine: Option<Engine>,
     generation: u64,
+    /// ascii_mode of the engine that was dropped, restored on the rebuilt one.
+    carried_ascii_mode: Option<bool>,
+    /// What the current input context allows; survives engine rebuilds.
+    policy: InputContextPolicy,
 }
 
 #[cfg(any(
@@ -1613,31 +2682,43 @@ impl ImeRuntime {
 
     fn with_optional_dirs(user_data_dir: Option<PathBuf>, shared_data_dir: Option<String>) -> Self {
         Self(Arc::new(ImeRuntimeState {
-            initialized: Mutex::new(false),
-            generation: AtomicU64::new(0),
             user_data_dir,
             shared_data_dir,
         }))
     }
 
+    /// What the linked librime can do natively, see [`EngineCapabilities`].
+    pub fn capabilities(&self) -> EngineCapabilities {
+        engine_capabilities()
+    }
+
+    /// Initialize and deploy. Idempotent per process: librime can only run for
+    /// one pair of directories, so a second runtime asking for the ones it is
+    /// already running for is a no-op instead of a second deployment.
     pub fn init(&self) -> Result<(), String> {
-        let mut initialized = self.0.initialized.lock().unwrap();
-        if *initialized {
+        let dirs = self.data_dirs()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        if initialized.as_ref() == Some(&dirs) {
             return Ok(());
         }
 
-        self.deploy_locked()?;
-        *initialized = true;
+        PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
+        deploy(
+            dirs.user.to_string_lossy().into_owned(),
+            dirs.shared.clone(),
+        )?;
+        *initialized = Some(dirs);
         Ok(())
     }
 
     pub fn init_without_deploy(&self) -> Result<(), String> {
-        let mut initialized = self.0.initialized.lock().unwrap();
-        if *initialized {
+        let dirs = self.data_dirs()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        if initialized.as_ref() == Some(&dirs) {
             return Ok(());
         }
 
-        let (user_dir, _) = self.configured_dirs()?;
+        let user_dir = dirs.user.clone();
         let schema_state = schema_install_state(&user_dir);
         if !schema_state.installed {
             return Err(
@@ -1660,37 +2741,66 @@ impl ImeRuntime {
             patch_windows_lua_compatibility(&user_dir)?;
         }
 
-        self.setup_locked()?;
-        *initialized = true;
+        PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
+        setup_only(
+            dirs.user.to_string_lossy().into_owned(),
+            dirs.shared.clone(),
+        )?;
+        *initialized = Some(dirs);
         Ok(())
     }
 
     pub fn reload_without_deploy(&self) -> Result<(), String> {
-        let mut initialized = self.0.initialized.lock().unwrap();
-        let (user_dir, _) = self.configured_dirs()?;
-        let schema_state = schema_install_state(&user_dir);
+        let dirs = self.data_dirs()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        let schema_state = schema_install_state(&dirs.user);
         if !schema_state.deployed {
             return Err(
                 "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
             );
         }
 
-        self.setup_locked()?;
-        *initialized = true;
-        self.0.generation.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+        PROCESS_RIME.drop_live_engines();
+        let result = desktop::reinitialize_rime(
+            dirs.user.to_string_lossy().into_owned(),
+            dirs.shared.clone(),
+        );
+        PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+        *initialized = result.is_ok().then_some(dirs);
+        drop(barrier);
+        result
     }
 
     pub fn reload(&self) -> Result<(), String> {
-        let mut initialized = self.0.initialized.lock().unwrap();
-        self.deploy_locked()?;
-        *initialized = true;
-        self.0.generation.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        let dirs = self.data_dirs()?;
+        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+
+        let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+        PROCESS_RIME.drop_live_engines();
+        // Deploying while an old session keeps librime's config and dictionary
+        // caches alive would rebuild the artifacts but keep serving the stale
+        // ones, so the engine is torn down first.
+        let result = (|| {
+            if initialized.is_some() {
+                desktop::reinitialize_rime(
+                    dirs.user.to_string_lossy().into_owned(),
+                    dirs.shared.clone(),
+                )?;
+            }
+            deploy(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            )
+        })();
+        PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+        *initialized = result.is_ok().then(|| dirs.clone());
+        drop(barrier);
+        result
     }
 
-    fn configured_dirs(&self) -> Result<(PathBuf, String), String> {
-        let user_dir = self
+    fn data_dirs(&self) -> Result<RimeDataDirs, String> {
+        let user = self
             .0
             .user_data_dir
             .clone()
@@ -1701,31 +2811,38 @@ impl ImeRuntime {
             .shared_data_dir
             .clone()
             .unwrap_or_else(default_shared_data_dir);
-        Ok((user_dir, shared))
-    }
-
-    fn setup_locked(&self) -> Result<(), String> {
-        let (user_dir, shared) = self.configured_dirs()?;
-        setup_only(user_dir.to_string_lossy().into_owned(), shared)
-    }
-
-    fn deploy_locked(&self) -> Result<(), String> {
-        let (user_dir, shared) = self.configured_dirs()?;
-        deploy(user_dir.to_string_lossy().into_owned(), shared)
+        Ok(RimeDataDirs { user, shared })
     }
 
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
-        let initialized = *self.0.initialized.lock().unwrap();
-        if !initialized {
+        let dirs = self.data_dirs()?;
+        if lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() != Some(&dirs) {
             self.init_without_deploy()?;
         }
-        let generation = self.0.generation.load(Ordering::SeqCst);
+
+        // Every teardown takes `initialized` before the reload barrier, so
+        // holding it here keeps librime from being finalized between the check
+        // and the session that is about to be created against it.
+        let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+        if initialized.as_ref() != Some(&dirs) {
+            return Err("librime is running for other data directories".into());
+        }
+        let barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
+        let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
+        let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
+            engine: Some(Engine::new_with_user_data_dir(
+                self.0.user_data_dir.as_deref(),
+            )?),
+            generation,
+            carried_ascii_mode: None,
+            policy: InputContextPolicy::default(),
+        }));
+        PROCESS_RIME.register(&inner);
+        drop(barrier);
+        drop(initialized);
         Ok(ImeRuntimeSession {
             shared: self.0.clone(),
-            inner: Arc::new(Mutex::new(ImeRuntimeSessionInner {
-                engine: Engine::new_with_user_data_dir(self.0.user_data_dir.as_deref())?,
-                generation,
-            })),
+            inner,
         })
     }
 }
@@ -1752,82 +2869,190 @@ impl Default for ImeRuntime {
 ))]
 impl ImeRuntimeSession {
     pub fn state(&self) -> ImeState {
-        let mut inner = self.inner.lock().unwrap();
-        if self.refresh_if_needed(&mut inner).is_err() {
-            return ImeState::empty();
-        }
-        inner.engine.state()
+        self.with_engine(Engine::state)
+            .unwrap_or_else(ImeState::empty)
     }
 
     pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
-        let mut inner = self.inner.lock().unwrap();
+        let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
+        let mask = rime_modifier_mask(mask);
+        // Reading the policy and handling the key happen in one critical
+        // section: a context that turns sensitive between the two would
+        // otherwise still hand this key to librime.
+        self.with_engine_and_policy(|engine, policy| {
+            if policy.composing {
+                engine.process_key_result(keycode, mask)
+            } else {
+                // A sensitive context never reaches librime: no composition, no
+                // candidates and nothing for the user dictionary to learn.
+                KeyProcessResult {
+                    state: engine.state(),
+                    accepted: false,
+                }
+            }
+        })
+    }
+
+    /// `Return` handling shared by every frontend, see [`Engine::process_enter`].
+    pub fn process_enter(&self) -> Option<KeyProcessResult> {
+        self.with_engine_and_policy(|engine, policy| {
+            if policy.composing {
+                engine.process_enter()
+            } else {
+                KeyProcessResult {
+                    state: engine.state(),
+                    accepted: false,
+                }
+            }
+        })
+    }
+
+    /// What the current input context allows.
+    pub fn input_policy(&self) -> InputContextPolicy {
+        lock_ignore_poison(&self.inner).policy
+    }
+
+    /// Declare what the current input context allows, e.g. on focus change.
+    ///
+    /// Turning composing off discards whatever was being composed, so the
+    /// returned state is the one the frontend has to apply. The switch and the
+    /// discard share one critical section, so a key being handled concurrently
+    /// is either fully before or fully after the switch.
+    ///
+    /// The policy is recorded even when no engine can be built, otherwise a
+    /// context that turned sensitive while librime was down would come back as
+    /// a composing one.
+    pub fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState> {
+        let _barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
+        let mut inner = lock_ignore_poison(&self.inner);
+        let previous = std::mem::replace(&mut inner.policy, policy);
         self.refresh_if_needed(&mut inner).ok()?;
-        Some(
-            inner
-                .engine
-                .process_key_result(keycode, rime_modifier_mask(mask)),
-        )
+        let engine = inner.engine.as_ref()?;
+        Some(if previous.composing && !policy.composing {
+            engine.clear_composition()
+        } else {
+            engine.state()
+        })
     }
 
     pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
-        let mut inner = self.inner.lock().unwrap();
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.select_candidate(index))
+        self.with_engine(|engine| engine.select_candidate_on_page(index))
+    }
+
+    pub fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
+        self.with_engine(|engine| engine.select_candidate_on_page(index))
+    }
+
+    pub fn highlight_candidate_on_page(&self, index: usize) -> Option<ImeState> {
+        self.with_engine(|engine| engine.highlight_candidate_on_page(index))
+    }
+
+    pub fn delete_candidate_on_page(&self, index: usize) -> Option<ImeState> {
+        self.with_engine(|engine| engine.delete_candidate_on_page(index))
     }
 
     pub fn select_candidate_global(&self, index: usize) -> Option<ImeState> {
-        let mut inner = self.inner.lock().unwrap();
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.select_candidate_global(index))
+        self.with_engine(|engine| engine.select_candidate_global(index))
+    }
+
+    /// Commit whatever is being composed; the path a frontend takes when the
+    /// input context ends and the composition must not be lost.
+    pub fn commit_composition(&self) -> Option<ImeState> {
+        self.with_engine(Engine::commit_composition)
+    }
+
+    /// Discard whatever is being composed; the path a frontend takes when the
+    /// input context ends and the composition must not reach the client.
+    pub fn clear_composition(&self) -> Option<ImeState> {
+        self.with_engine(Engine::clear_composition)
+    }
+
+    pub fn commit_raw_input(&self) -> Option<ImeState> {
+        self.with_engine(Engine::commit_raw_input)
+    }
+
+    pub fn raw_input(&self) -> Option<String> {
+        self.with_engine(Engine::raw_input).flatten()
     }
 
     pub fn all_candidates(&self) -> Option<Vec<Candidate>> {
-        let mut inner = self.inner.lock().ok()?;
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.all_candidates())
+        self.with_engine(Engine::all_candidates)
     }
 
     pub fn all_candidates_limited(&self, max_count: usize) -> Option<Vec<Candidate>> {
-        let mut inner = self.inner.lock().ok()?;
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.all_candidates_limited(max_count))
+        self.with_engine(|engine| engine.all_candidates_limited(max_count))
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
-        let mut inner = self.inner.lock().unwrap();
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.change_page(backward))
+        self.with_engine(|engine| engine.change_page(backward))
     }
 
     pub fn reset(&self) -> Option<ImeState> {
-        let mut inner = self.inner.lock().unwrap();
-        self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.reset())
+        self.with_engine(Engine::reset)
     }
 
     pub fn is_ascii_mode(&self) -> bool {
-        let mut inner = match self.inner.lock() {
-            Ok(inner) => inner,
-            Err(_) => return false,
-        };
-        if self.refresh_if_needed(&mut inner).is_err() {
-            return false;
-        }
-        inner.engine.is_ascii_mode()
+        self.with_engine(Engine::is_ascii_mode).unwrap_or(false)
     }
 
     pub fn set_ascii_mode(&self, enabled: bool) -> Option<ImeState> {
-        let mut inner = self.inner.lock().ok()?;
+        self.with_engine(|engine| engine.set_ascii_mode(enabled))
+    }
+
+    /// What the linked librime can do natively, see [`EngineCapabilities`].
+    pub fn capabilities(&self) -> EngineCapabilities {
+        engine_capabilities()
+    }
+
+    /// Whether [`ImeRuntimeSession::change_page`] pages through librime instead
+    /// of replaying the `-`/`=` bindings a schema may not have.
+    pub fn supports_native_paging(&self) -> bool {
+        engine_capabilities().supports_native_paging()
+    }
+
+    /// Whether [`ImeRuntimeSession::select_candidate_on_page`] selects through
+    /// librime instead of sending a select key the schema may not have.
+    pub fn supports_candidate_selection(&self) -> bool {
+        engine_capabilities().supports_candidate_selection()
+    }
+
+    /// Run `action` on an engine that matches the current generation,
+    /// rebuilding it first when a reload invalidated the previous one.
+    /// Lock order: reload barrier → session → librime.
+    fn with_engine<T>(&self, action: impl FnOnce(&Engine) -> T) -> Option<T> {
+        self.with_engine_and_policy(|engine, _| action(engine))
+    }
+
+    /// Same as [`ImeRuntimeSession::with_engine`], but the action also sees the
+    /// input context policy, so that policy checks and the librime call they
+    /// guard cannot be split by another thread.
+    fn with_engine_and_policy<T>(
+        &self,
+        action: impl FnOnce(&Engine, InputContextPolicy) -> T,
+    ) -> Option<T> {
+        let _barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
+        let mut inner = lock_ignore_poison(&self.inner);
         self.refresh_if_needed(&mut inner).ok()?;
-        Some(inner.engine.set_ascii_mode(enabled))
+        let policy = inner.policy;
+        Some(action(inner.engine.as_ref()?, policy))
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
-        let current = self.shared.generation.load(Ordering::SeqCst);
-        if inner.generation == current {
+        let current = PROCESS_RIME.generation.load(Ordering::SeqCst);
+        if inner.generation == current && inner.engine.is_some() {
             return Ok(());
         }
-        inner.engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
+        // Drop the previous engine before creating the replacement: librime
+        // hands a new session the cached config and dictionaries as long as any
+        // other session still references them.
+        if let Some(engine) = inner.engine.take() {
+            inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+        }
+        let engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
+        if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
+            engine.apply_ascii_mode(ascii_mode);
+        }
+        inner.engine = Some(engine);
         inner.generation = current;
         Ok(())
     }
@@ -3038,6 +4263,134 @@ pub fn has_schemas(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// ── Reload stamp ─────────────────────────────────────────────────────────────
+
+/// Name of the reload signal the app writes into the user data directory.
+pub const RELOAD_STAMP_FILE_NAME: &str = "keytao-ime.reload";
+
+/// The single implementation of the reload signal: path, write format and
+/// change detection. Frontends must not invent their own signature, otherwise
+/// the same deployment reloads on some platforms and not on others.
+///
+/// The signature is `<len>:<mtime_nanos>:<content_hash>`, so a rewrite is
+/// detected even when the timestamp resolution is coarse or the content is
+/// stable.
+pub struct ReloadStamp;
+
+impl ReloadStamp {
+    pub fn path(user_data_dir: &Path) -> PathBuf {
+        user_data_dir.join(RELOAD_STAMP_FILE_NAME)
+    }
+
+    pub fn default_path() -> Option<PathBuf> {
+        default_user_data_dir().map(|dir| Self::path(&dir))
+    }
+
+    /// Request a reload from every running frontend watching `user_data_dir`.
+    pub fn write(user_data_dir: &Path) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(user_data_dir)
+            .map_err(|error| format!("failed to create {}: {error}", user_data_dir.display()))?;
+        let stamp = Self::path(user_data_dir);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        std::fs::write(&stamp, format!("{now}\n"))
+            .map_err(|error| format!("failed to write {}: {error}", stamp.display()))?;
+        Ok(stamp)
+    }
+
+    pub fn write_default() -> Result<PathBuf, String> {
+        let dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
+        Self::write(&dir)
+    }
+
+    /// `None` when no stamp has been written yet.
+    pub fn current_signature(user_data_dir: &Path) -> Option<String> {
+        Self::signature_at(&Self::path(user_data_dir))
+    }
+
+    pub fn signature_at(path: &Path) -> Option<String> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let content_hash = std::fs::read(path)
+            .map(|bytes| fnv1a64(&bytes))
+            .unwrap_or(0);
+        Some(format!("{}:{modified}:{content_hash:016x}", metadata.len()))
+    }
+
+    /// Watcher seeded with the current signature: the first check only reports a
+    /// change if the stamp was rewritten after this call.
+    pub fn watcher(user_data_dir: &Path) -> ReloadStampWatcher {
+        ReloadStampWatcher::new(user_data_dir)
+    }
+}
+
+/// Remembers the last observed signature so frontends do not each keep their
+/// own idea of what "changed" means.
+pub struct ReloadStampWatcher {
+    path: PathBuf,
+    last_signature: Option<String>,
+}
+
+impl ReloadStampWatcher {
+    pub fn new(user_data_dir: &Path) -> Self {
+        let path = ReloadStamp::path(user_data_dir);
+        let last_signature = ReloadStamp::signature_at(&path);
+        Self {
+            path,
+            last_signature,
+        }
+    }
+
+    /// Watcher that has seen nothing yet: an existing stamp counts as a change
+    /// on the first check. Use it when the frontend must reload after a restart.
+    pub fn unseen(user_data_dir: &Path) -> Self {
+        Self {
+            path: ReloadStamp::path(user_data_dir),
+            last_signature: None,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn signature(&self) -> Option<&str> {
+        self.last_signature.as_deref()
+    }
+
+    /// A missing stamp is not a reload request, so an uninstalled or not yet
+    /// deployed app never triggers one.
+    pub fn has_changed(&mut self) -> bool {
+        let Some(current) = ReloadStamp::signature_at(&self.path) else {
+            return false;
+        };
+        if self.last_signature.as_deref() == Some(current.as_str()) {
+            return false;
+        }
+        self.last_signature = Some(current);
+        true
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3046,13 +4399,70 @@ mod tests {
         merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
         parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
         patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
-        rime_log_dir, schema_install_state, windows_rime_build_repair_required,
+        rime_log_dir, schema_install_state, windows_rime_build_repair_required, ReloadStamp,
+        ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn reload_stamp_signature_tracks_rewrites() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-reload-stamp-test-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(ReloadStamp::path(&dir), dir.join(RELOAD_STAMP_FILE_NAME));
+        assert!(
+            ReloadStamp::current_signature(&dir).is_none(),
+            "a missing stamp has no signature"
+        );
+
+        let mut watcher = ReloadStampWatcher::new(&dir);
+        assert!(!watcher.has_changed(), "a missing stamp is not a request");
+
+        let stamp = ReloadStamp::write(&dir).unwrap();
+        assert_eq!(stamp, ReloadStamp::path(&dir));
+        assert!(watcher.has_changed(), "the first stamp is a request");
+        assert!(!watcher.has_changed(), "an unchanged stamp fires once");
+
+        // Same length and same mtime resolution: only the content hash differs.
+        let signature_before = ReloadStamp::current_signature(&dir).unwrap();
+        std::fs::write(&stamp, "0123456789\n").unwrap();
+        let signature_after = ReloadStamp::current_signature(&dir).unwrap();
+        assert_ne!(signature_before, signature_after);
+        assert!(watcher.has_changed(), "a rewritten stamp is a request");
+
+        std::fs::remove_file(&stamp).unwrap();
+        assert!(!watcher.has_changed(), "a removed stamp is not a request");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reload_stamp_unseen_watcher_reports_existing_stamp() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-reload-stamp-unseen-{suffix}"));
+        ReloadStamp::write(&dir).unwrap();
+
+        let mut watcher = ReloadStampWatcher::unseen(&dir);
+        assert!(watcher.has_changed());
+        assert!(!watcher.has_changed());
+        assert_eq!(
+            watcher.signature().map(str::to_owned),
+            ReloadStamp::current_signature(&dir)
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn parse_schema_list_reads_schema_entries() {
