@@ -3,19 +3,37 @@
 //! This crate owns the cross-platform theme schema, default values, merge rules,
 //! and view models. Platform frontends render the resolved model with their own
 //! native UI stack.
+//!
+//! The shared theme covers candidate panel and mode hint semantics only. The
+//! mobile soft keyboard layout is an Android/iOS adapter concern and lives in
+//! [`mobile_layout`], resolved from its own `keyboard.yaml` document.
+
+pub mod mobile_layout;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
+use mobile_layout::PartialMobileLayout;
+
+/// Compatibility aliases for call sites that still use the pre-split names.
+/// New code should use the [`mobile_layout`] module directly.
+pub use mobile_layout::{
+    default_mobile_layout_yaml as default_keyboard_yaml,
+    mobile_layout_json as resolved_keyboard_json,
+    resolve_mobile_layout_from_paths as resolve_keyboard_from_paths,
+    MobileCommand as KeyboardCommandTheme, MobileFloatingLayout as KeyboardFloatingTheme,
+    MobileFloatingProfile as KeyboardFloatingProfileTheme, MobileKey as KeyboardKeyTheme,
+    MobileKeyStackItem as KeyboardKeyStackItemTheme, MobileLayout as KeyboardTheme,
+    DEFAULT_MOBILE_LAYOUT_YAML as DEFAULT_KEYBOARD_YAML,
+};
+
 pub const THEME_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_THEME_YAML: &str = include_str!("../default-theme.yaml");
-pub const DEFAULT_KEYBOARD_YAML: &str = include_str!("../default-keyboard.yaml");
 pub const MIN_CANDIDATE_FONT_SIZE: f32 = 10.0;
 pub const MAX_CANDIDATE_FONT_SIZE: f32 = 36.0;
 
@@ -74,7 +92,6 @@ pub struct ResolvedImeTheme {
     pub candidate: CandidateTheme,
     pub navigation: NavigationTheme,
     pub mode_hint: ModeHintTheme,
-    pub keyboard: KeyboardTheme,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -165,104 +182,6 @@ pub struct ModeHintTheme {
     pub shadow: bool,
     pub chinese_text: String,
     pub english_text: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardTheme {
-    pub height: f32,
-    pub candidate_bar_height: f32,
-    pub bottom_inset: f32,
-    pub horizontal_gap: f32,
-    pub vertical_gap: f32,
-    pub outer_inset: f32,
-    pub max_key_height: f32,
-    pub floating: KeyboardFloatingTheme,
-    pub rows: Vec<Vec<KeyboardKeyTheme>>,
-    pub number_rows: Vec<Vec<KeyboardKeyTheme>>,
-    pub symbol_rows: Vec<Vec<KeyboardKeyTheme>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub layers: BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardFloatingTheme {
-    pub margin: f32,
-    pub portrait: KeyboardFloatingProfileTheme,
-    pub landscape: KeyboardFloatingProfileTheme,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardFloatingProfileTheme {
-    pub enabled: bool,
-    pub scale: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardKeyTheme {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rime_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub style: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_action: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub swipe_up: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub swipe_down: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub long_press: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_long_press: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row_span: Option<u8>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stack: Vec<KeyboardKeyStackItemTheme>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardKeyStackItemTheme {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rime_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<KeyboardCommandTheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ascii_action: Option<KeyboardCommandTheme>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyboardCommandTheme {
-    #[serde(rename = "type")]
-    pub command_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -621,56 +540,6 @@ pub fn resolved_theme_json(theme: &ResolvedImeTheme) -> Result<String, serde_jso
     serde_json::to_string(theme)
 }
 
-pub fn default_keyboard_yaml() -> &'static str {
-    DEFAULT_KEYBOARD_YAML
-}
-
-pub fn resolve_keyboard_from_paths(
-    default_keyboard_path: Option<&Path>,
-    user_keyboard_path: Option<&Path>,
-) -> KeyboardTheme {
-    let mut keyboard = KeyboardTheme::default();
-    for partial in keyboard_partials(default_keyboard_path, user_keyboard_path) {
-        keyboard.apply(partial);
-    }
-    sanitize_keyboard(keyboard)
-}
-
-pub fn resolved_keyboard_json(keyboard: &KeyboardTheme) -> Result<String, serde_json::Error> {
-    serde_json::to_string(keyboard)
-}
-
-fn keyboard_partials(
-    default_keyboard_path: Option<&Path>,
-    user_keyboard_path: Option<&Path>,
-) -> Vec<PartialKeyboardTheme> {
-    let mut partials = Vec::new();
-    if let Some(partial) = parse_keyboard_yaml(DEFAULT_KEYBOARD_YAML) {
-        partials.push(partial);
-    }
-    for path in [default_keyboard_path, user_keyboard_path]
-        .into_iter()
-        .flatten()
-    {
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
-        };
-        if let Some(partial) = parse_keyboard_yaml(&content) {
-            partials.push(partial);
-        }
-    }
-    partials
-}
-
-fn parse_keyboard_yaml(content: &str) -> Option<PartialKeyboardTheme> {
-    if let Ok(file) = serde_yaml::from_str::<KeyboardFile>(content) {
-        return file.into_keyboard();
-    }
-    serde_yaml::from_str::<PartialTheme>(content)
-        .ok()
-        .and_then(|theme| theme.keyboard)
-}
-
 impl ResolvedImeTheme {
     fn schema_base(ui: UiTheme) -> Self {
         Self {
@@ -743,7 +612,6 @@ impl ResolvedImeTheme {
                 chinese_text: "中".to_string(),
                 english_text: "英".to_string(),
             },
-            keyboard: KeyboardTheme::default(),
         }
     }
 
@@ -828,7 +696,6 @@ impl ResolvedImeTheme {
             candidate: partial.candidate,
             navigation: partial.navigation,
             mode_hint: partial.mode_hint,
-            keyboard: partial.keyboard,
         });
     }
 
@@ -847,9 +714,6 @@ impl ResolvedImeTheme {
         }
         if let Some(mode_hint) = partial.mode_hint {
             self.mode_hint.apply(mode_hint);
-        }
-        if let Some(keyboard) = partial.keyboard {
-            self.keyboard.apply(keyboard);
         }
     }
 
@@ -903,8 +767,6 @@ impl ResolvedImeTheme {
         self.mode_hint.height = clamp(self.mode_hint.height, 28.0, 140.0);
         self.mode_hint.corner_radius = clamp(self.mode_hint.corner_radius, 0.0, 32.0);
         self.mode_hint.duration = clamp(self.mode_hint.duration, 0.15, 4.0);
-        self.keyboard.height = clamp(self.keyboard.height, 160.0, 420.0);
-        self.keyboard = sanitize_keyboard(self.keyboard);
         self
     }
 }
@@ -913,62 +775,6 @@ impl Default for ResolvedImeTheme {
     fn default() -> Self {
         builtin_default_theme(EffectiveColorScheme::Light)
     }
-}
-
-impl Default for KeyboardTheme {
-    fn default() -> Self {
-        Self {
-            height: 266.0,
-            candidate_bar_height: 52.0,
-            bottom_inset: 0.0,
-            horizontal_gap: 4.0,
-            vertical_gap: 5.0,
-            outer_inset: 5.0,
-            max_key_height: 54.0,
-            floating: KeyboardFloatingTheme::default(),
-            rows: Vec::new(),
-            number_rows: Vec::new(),
-            symbol_rows: Vec::new(),
-            layers: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for KeyboardFloatingTheme {
-    fn default() -> Self {
-        Self {
-            margin: 8.0,
-            portrait: KeyboardFloatingProfileTheme {
-                enabled: false,
-                scale: 0.88,
-            },
-            landscape: KeyboardFloatingProfileTheme {
-                enabled: true,
-                scale: 0.62,
-            },
-        }
-    }
-}
-
-fn sanitize_keyboard(mut keyboard: KeyboardTheme) -> KeyboardTheme {
-    keyboard.height = clamp(keyboard.height, 160.0, 420.0);
-    keyboard.candidate_bar_height = clamp(keyboard.candidate_bar_height, 36.0, 96.0);
-    keyboard.bottom_inset = clamp(keyboard.bottom_inset, 0.0, 80.0);
-    keyboard.horizontal_gap = clamp(keyboard.horizontal_gap, 0.0, 24.0);
-    keyboard.vertical_gap = clamp(keyboard.vertical_gap, 0.0, 24.0);
-    keyboard.outer_inset = clamp(keyboard.outer_inset, 0.0, 32.0);
-    keyboard.max_key_height = clamp(keyboard.max_key_height, 36.0, 84.0);
-    keyboard.floating.margin = clamp(keyboard.floating.margin, 0.0, 24.0);
-    keyboard.floating.portrait.scale = clamp(keyboard.floating.portrait.scale, 0.70, 1.0);
-    keyboard.floating.landscape.scale = clamp(keyboard.floating.landscape.scale, 0.45, 1.0);
-    keyboard.layers.retain(|name, rows| {
-        !name.trim().is_empty()
-            && name != "letters"
-            && name != "numbers"
-            && name != "symbols"
-            && !rows.is_empty()
-    });
-    keyboard
 }
 
 impl Default for UiTheme {
@@ -992,7 +798,10 @@ struct PartialTheme {
     navigation: Option<PartialNavigationTheme>,
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
-    keyboard: Option<PartialKeyboardTheme>,
+    /// Legacy `theme.yaml` documents may still carry the mobile keyboard
+    /// layout here. It never reaches [`ResolvedImeTheme`]; it is only read back
+    /// by [`mobile_layout::resolve_mobile_layout_from_paths`].
+    keyboard: Option<PartialMobileLayout>,
     light: Option<PartialThemeVariant>,
     #[serde(alias = "night")]
     dark: Option<PartialThemeVariant>,
@@ -1007,22 +816,6 @@ struct PartialThemeVariant {
     navigation: Option<PartialNavigationTheme>,
     #[serde(alias = "mode_hint")]
     mode_hint: Option<PartialModeHintTheme>,
-    keyboard: Option<PartialKeyboardTheme>,
-}
-
-#[derive(Default, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KeyboardFile {
-    keyboard: Option<PartialKeyboardTheme>,
-    #[serde(flatten)]
-    root: PartialKeyboardTheme,
-}
-
-impl KeyboardFile {
-    fn into_keyboard(self) -> Option<PartialKeyboardTheme> {
-        self.keyboard
-            .or_else(|| self.root.has_any_value().then_some(self.root))
-    }
 }
 
 #[derive(Default, Clone, Deserialize)]
@@ -1138,107 +931,6 @@ struct PartialModeHintTheme {
     english_text: Option<String>,
 }
 
-#[derive(Default, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PartialKeyboardTheme {
-    version: Option<u32>,
-    #[serde(alias = "keyboardHeightDp")]
-    height: Option<f32>,
-    #[serde(alias = "candidateBarHeightDp")]
-    candidate_bar_height: Option<f32>,
-    #[serde(alias = "keyboardBottomInsetDp")]
-    bottom_inset: Option<f32>,
-    #[serde(alias = "horizontalGapDp")]
-    horizontal_gap: Option<f32>,
-    #[serde(alias = "verticalGapDp")]
-    vertical_gap: Option<f32>,
-    #[serde(alias = "outerInsetDp")]
-    outer_inset: Option<f32>,
-    #[serde(alias = "maxKeyHeightDp")]
-    max_key_height: Option<f32>,
-    floating: Option<PartialKeyboardFloatingTheme>,
-    rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
-    number_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
-    symbol_rows: Option<Vec<Vec<KeyboardKeyTheme>>>,
-    #[serde(
-        default,
-        alias = "pages",
-        alias = "keyboards",
-        deserialize_with = "optional_keyboard_layers"
-    )]
-    layers: Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>,
-}
-
-#[derive(Default, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PartialKeyboardFloatingTheme {
-    #[serde(alias = "marginDp")]
-    margin: Option<f32>,
-    portrait: Option<PartialKeyboardFloatingProfileTheme>,
-    landscape: Option<PartialKeyboardFloatingProfileTheme>,
-}
-
-#[derive(Default, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PartialKeyboardFloatingProfileTheme {
-    enabled: Option<bool>,
-    scale: Option<f32>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(untagged)]
-enum PartialKeyboardLayerRows {
-    Rows(Vec<Vec<KeyboardKeyTheme>>),
-    Object { rows: Vec<Vec<KeyboardKeyTheme>> },
-}
-
-impl PartialKeyboardLayerRows {
-    fn into_rows(self) -> Vec<Vec<KeyboardKeyTheme>> {
-        match self {
-            Self::Rows(rows) | Self::Object { rows } => rows,
-        }
-    }
-}
-
-fn optional_keyboard_layers<'de, D>(
-    deserializer: D,
-) -> Result<Option<BTreeMap<String, Vec<Vec<KeyboardKeyTheme>>>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = Option::<BTreeMap<String, PartialKeyboardLayerRows>>::deserialize(deserializer)?;
-    Ok(raw.map(|layers| {
-        layers
-            .into_iter()
-            .filter_map(|(name, rows)| {
-                let rows = rows.into_rows();
-                (!rows.is_empty()).then_some((name, rows))
-            })
-            .collect()
-    }))
-}
-
-impl PartialKeyboardTheme {
-    fn has_any_value(&self) -> bool {
-        self.version.is_some()
-            || self.height.is_some()
-            || self.candidate_bar_height.is_some()
-            || self.bottom_inset.is_some()
-            || self.horizontal_gap.is_some()
-            || self.vertical_gap.is_some()
-            || self.outer_inset.is_some()
-            || self.max_key_height.is_some()
-            || self.floating.is_some()
-            || self.rows.is_some()
-            || self.number_rows.is_some()
-            || self.symbol_rows.is_some()
-            || self
-                .layers
-                .as_ref()
-                .is_some_and(|layers| !layers.is_empty())
-    }
-}
-
 impl UiTheme {
     fn apply(&mut self, partial: PartialUiTheme) {
         if let Some(color_scheme) = partial.color_scheme {
@@ -1349,48 +1041,6 @@ impl ModeHintTheme {
         if let Some(english_text) = partial.english_text {
             self.english_text = english_text;
         }
-    }
-}
-
-impl KeyboardTheme {
-    fn apply(&mut self, partial: PartialKeyboardTheme) {
-        assign(&mut self.height, partial.height);
-        assign(&mut self.candidate_bar_height, partial.candidate_bar_height);
-        assign(&mut self.bottom_inset, partial.bottom_inset);
-        assign(&mut self.horizontal_gap, partial.horizontal_gap);
-        assign(&mut self.vertical_gap, partial.vertical_gap);
-        assign(&mut self.outer_inset, partial.outer_inset);
-        assign(&mut self.max_key_height, partial.max_key_height);
-        if let Some(floating) = partial.floating {
-            self.floating.apply(floating);
-        }
-        assign(&mut self.rows, partial.rows);
-        assign(&mut self.number_rows, partial.number_rows);
-        assign(&mut self.symbol_rows, partial.symbol_rows);
-        if let Some(layers) = partial.layers {
-            if !layers.is_empty() {
-                self.layers.extend(layers);
-            }
-        }
-    }
-}
-
-impl KeyboardFloatingTheme {
-    fn apply(&mut self, partial: PartialKeyboardFloatingTheme) {
-        assign(&mut self.margin, partial.margin);
-        if let Some(portrait) = partial.portrait {
-            self.portrait.apply(portrait);
-        }
-        if let Some(landscape) = partial.landscape {
-            self.landscape.apply(landscape);
-        }
-    }
-}
-
-impl KeyboardFloatingProfileTheme {
-    fn apply(&mut self, partial: PartialKeyboardFloatingProfileTheme) {
-        assign(&mut self.enabled, partial.enabled);
-        assign(&mut self.scale, partial.scale);
     }
 }
 
@@ -1676,100 +1326,35 @@ mod tests {
     }
 
     #[test]
-    fn default_keyboard_yaml_resolves() {
-        let keyboard = resolve_keyboard_from_paths(None, None);
-        assert_eq!(keyboard.height, 266.0);
-        assert_eq!(keyboard.rows.len(), 4);
-        assert_eq!(keyboard.rows[0][0].label, "q");
-        assert_eq!(keyboard.number_rows[0][0].label, "+");
-        assert_eq!(keyboard.symbol_rows[0][0].label, "中文");
-        assert_eq!(keyboard.symbol_rows[1][0].label, "【");
-        assert!(!keyboard.floating.portrait.enabled);
-        assert_eq!(keyboard.floating.portrait.scale, 0.88);
-        assert!(keyboard.floating.landscape.enabled);
-        assert_eq!(keyboard.floating.landscape.scale, 0.62);
-        let json = resolved_keyboard_json(&keyboard).unwrap();
-        assert!(json.contains("\"numberRows\""));
-        assert!(json.contains("\"symbols_arrows\""));
-        assert!(json.contains("\"floating\""));
+    fn resolved_theme_json_carries_no_mobile_layout() {
+        let theme = resolve_theme_from_paths(None, None);
+        let json = resolved_theme_json(&theme).unwrap();
+        assert!(!json.contains("\"keyboard\""));
+        assert!(!json.contains("\"numberRows\""));
+        assert!(!json.contains("\"symbolRows\""));
+        assert!(json.contains("\"panel\""));
+        assert!(json.contains("\"modeHint\""));
     }
 
     #[test]
-    fn keyboard_yaml_merges_and_clamps_floating_profiles() {
+    fn legacy_theme_yaml_with_keyboard_section_still_resolves() {
         let path = std::env::temp_dir().join(format!(
-            "keytao-keyboard-floating-{}-{}.yaml",
+            "keytao-theme-legacy-keyboard-{}-{}.yaml",
             std::process::id(),
             line!()
         ));
         fs::write(
             &path,
-            "floating:\n  margin: 40\n  portrait:\n    enabled: true\n    scale: 0.42\n  landscape:\n    enabled: false\n    scale: 0.42\n",
+            "panel:\n  minWidth: 200\nkeyboard:\n  height: 300\n  rows:\n    - [ { label: \"z\", value: \"z\" } ]\ndark:\n  keyboard:\n    height: 320\n",
         )
         .unwrap();
 
-        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
+        let theme = resolve_theme_from_paths(None, Some(&path));
+        let json = resolved_theme_json(&theme).unwrap();
         fs::remove_file(path).ok();
 
-        assert_eq!(keyboard.floating.margin, 24.0);
-        assert!(keyboard.floating.portrait.enabled);
-        assert_eq!(keyboard.floating.portrait.scale, 0.70);
-        assert!(!keyboard.floating.landscape.enabled);
-        assert_eq!(keyboard.floating.landscape.scale, 0.45);
-    }
-
-    #[test]
-    fn keyboard_yaml_accepts_custom_layers() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-keyboard-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
-        fs::write(
-            &path,
-            "height: 300\nlayers:\n  emoji:\n    - [ { label: \"🙂\", value: \"🙂\" } ]\n",
-        )
-        .unwrap();
-
-        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
-        fs::remove_file(path).ok();
-
-        assert_eq!(keyboard.height, 300.0);
-        assert_eq!(keyboard.layers["emoji"][0][0].label, "🙂");
-    }
-
-    #[test]
-    fn keyboard_yaml_accepts_object_layer_rows() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-keyboard-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
-        fs::write(
-            &path,
-            "layers:\n  emoji:\n    rows:\n      - [ { label: \"🙂\", value: \"🙂\" } ]\n",
-        )
-        .unwrap();
-
-        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
-        fs::remove_file(path).ok();
-
-        assert_eq!(keyboard.layers["emoji"][0][0].label, "🙂");
-    }
-
-    #[test]
-    fn empty_keyboard_layers_do_not_clear_default_layers() {
-        let path = std::env::temp_dir().join(format!(
-            "keytao-keyboard-{}-{}.yaml",
-            std::process::id(),
-            line!()
-        ));
-        fs::write(&path, "layers: {}\n").unwrap();
-
-        let keyboard = resolve_keyboard_from_paths(None, Some(&path));
-        fs::remove_file(path).ok();
-
-        assert!(keyboard.layers.contains_key("symbols_en"));
-        assert!(keyboard.layers.contains_key("symbols_math"));
+        assert_eq!(theme.panel.min_width, 200.0);
+        assert!(!json.contains("\"keyboard\""));
     }
 
     #[test]

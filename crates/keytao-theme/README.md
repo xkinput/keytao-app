@@ -1,6 +1,6 @@
 # keytao-theme
 
-`keytao-theme` 是 KeyTao 输入法前端共享的主题语言和 UI model 层。它不绘制任何窗口，也不直接操作 librime；它只负责把 `theme.yaml` 解析成跨平台一致的 `ResolvedImeTheme`，再把输入法状态规整成候选窗和模式提示可以消费的 model。
+`keytao-theme` 是 KeyTao 输入法前端共享的主题语言和 UI model 层。它不绘制任何窗口，也不直接操作 librime；它只负责把 `theme.yaml` 解析成跨平台一致的 `ResolvedImeTheme`，再把输入法状态规整成候选窗和模式提示可以消费的 model。移动端软键盘布局不属于共享主题，由本 crate 的 `mobile_layout` 模块从独立的 `keyboard.yaml` 解析。
 
 ## 边界
 
@@ -14,9 +14,25 @@ ImeState-like input + platform capabilities
 
 ResolvedImeTheme + Model
   -> macOS AppKit / Linux SHM-X11 / Windows layered window / system lookup table
+
+keyboard.yaml
+  -> mobile_layout::MobileLayout
+  -> Android / iOS 软键盘 adapter
 ```
 
 共享的是主题语义和 model，不共享平台绘制实现。AppKit、Wayland/X11、Windows TSF、IBus/GNOME 的生命周期和可控视觉能力不同，各平台 renderer 只能消费同一份语言并按能力降级。
+
+## theme.yaml 与 keyboard.yaml 的职责
+
+| 文档 | 解析入口 | 产出模型 | 消费方 |
+| --- | --- | --- | --- |
+| `theme.yaml` | `resolve_theme_from_paths` / `ThemeResolver` | `ResolvedImeTheme`、`CandidatePanelModel`、`ModeHintModel` | 五个平台的候选窗与模式提示 |
+| `keyboard.yaml` | `mobile_layout::resolve_mobile_layout_from_paths` | `mobile_layout::MobileLayout` | 仅 Android / iOS 软键盘 |
+
+- `theme.yaml` 只表达跨平台可落地的视觉语义：配色方案、强调色、字体、面板、候选、模式提示。它**不再**携带键盘布局，`ResolvedImeTheme` 与其 JSON 里都没有 `keyboard` 字段，桌面平台拿到的 theme JSON 不再夹带移动端数据。
+- `keyboard.yaml` 表达软键盘的行/层/权重与按键命令（`action`、`asciiAction`、`swipeUp`、`swipeDown`、`longPress`、`stack`、`keyboardMode` 跳转）。这些语义只有自绘软键盘的平台能落地，因此不进入共享层。
+- 兼容性：旧版 `theme.yaml` 里的 `keyboard:` 段仍然可以被解析，把该文件路径传给 `resolve_mobile_layout_from_paths` 即可（它接受 `keyboard.yaml` 文档，也接受带 `keyboard:` 段的 `theme.yaml`）。但 `light:` / `dark:` 变体不再能覆盖键盘布局。
+- crate 根部保留了 `KeyboardTheme`、`resolve_keyboard_from_paths`、`resolved_keyboard_json`、`default_keyboard_yaml` 等旧名字作为别名，指向 `mobile_layout` 中的新类型与函数；新代码请直接用 `mobile_layout`。
 
 ## 主题位置
 
@@ -111,6 +127,17 @@ let model = theme.candidate_panel_model(input, &UiCapabilities::full_custom());
 ```
 
 Swift/macOS 通过 `keytao-core-ffi` 获取 normalized JSON，不直接解析 YAML。这样 YAML schema、默认值、校验和 fallback 规则只存在一份。
+
+移动端软键盘布局走独立入口：
+
+```rust
+use keytao_theme::mobile_layout;
+
+let layout = mobile_layout::resolve_mobile_layout_from_paths(None, Some(&user_keyboard_yaml));
+let json = mobile_layout::mobile_layout_json(&layout)?;
+```
+
+Android/iOS 通过 `keytao_resolve_keyboard_json`（JNI 侧为 `nativeResolveKeyboardJson`）拿到同一份 JSON，不要再从 theme JSON 里取 `keyboard` 字段。
 
 ## 降级规则
 
