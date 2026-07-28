@@ -89,6 +89,15 @@
               $out/share/applications/keytao-wayland-launcher.desktop
             substituteInPlace $out/share/applications/keytao-wayland-launcher.desktop \
               --replace-fail 'Exec=keytao-ime' "Exec=$out/bin/keytao-ime"
+
+            # ibus-daemon scans $XDG_DATA_DIRS/ibus/component on startup; without
+            # this file KeyTao only exists for as long as the running daemon
+            # remembers the RegisterComponent call.
+            install -Dm644 \
+              crates/keytao-linux-ime/keytao.xml \
+              $out/share/ibus/component/keytao.xml
+            substituteInPlace $out/share/ibus/component/keytao.xml \
+              --replace-fail '<exec>keytao-ime' "<exec>$out/bin/keytao-ime"
           '';
         };
 

@@ -9,6 +9,18 @@
     },
     "externalBin": [
       "binaries/keytao-ime"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/ibus/component/keytao.xml": "../crates/keytao-linux-ime/keytao.xml"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/ibus/component/keytao.xml": "../crates/keytao-linux-ime/keytao.xml"
+        }
+      }
+    }
   }
 }

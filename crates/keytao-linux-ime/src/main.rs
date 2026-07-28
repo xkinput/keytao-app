@@ -7,9 +7,13 @@ mod gnome_ibus_engine;
 #[cfg(target_os = "linux")]
 mod ibus_backend;
 #[cfg(target_os = "linux")]
+mod ibus_shared;
+#[cfg(target_os = "linux")]
 mod kimpanel;
 #[cfg(target_os = "linux")]
 mod panel;
+#[cfg(target_os = "linux")]
+mod reload_bus;
 #[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]
@@ -154,11 +158,11 @@ impl BackendSelection {
 }
 
 #[cfg(target_os = "linux")]
-const LOG_DIR: &str = "/tmp";
+const LEGACY_LOG_DIR: &str = "/tmp";
 #[cfg(target_os = "linux")]
 const LOG_PREFIX: &str = "keytao-ime.log";
 #[cfg(target_os = "linux")]
-const LOG_RETENTION_DAYS: i64 = 3;
+const LOG_RETENTION_DAYS: usize = 3;
 
 #[cfg(target_os = "linux")]
 fn remove_legacy_kde_env_file() {
@@ -181,33 +185,87 @@ fn remove_legacy_kde_env_file() {
     }
 }
 
+/// Peek/commit view of the reload signal keytao-core's `ReloadStamp` writes.
+///
+/// `ReloadStampWatcher::has_changed` marks the signal as seen the moment it is
+/// asked, which is wrong for a watcher that still has to act on it: a reload
+/// that fails right afterwards — the App was halfway through writing the
+/// deployment out, say — would never be retried, and the daemon would keep
+/// serving the previous dictionaries until the next deployment. The baseline
+/// therefore only moves in `commit`, and it moves to exactly the signature that
+/// was loaded, so a stamp written while librime was reloading is still picked up
+/// on the next tick.
 #[cfg(target_os = "linux")]
-fn reload_stamp_path() -> Option<std::path::PathBuf> {
-    keytao_core::default_user_data_dir().map(|dir| dir.join("keytao-ime.reload"))
+struct ReloadStampGate {
+    path: std::path::PathBuf,
+    loaded_signature: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl ReloadStampGate {
+    /// Seeded with what is on disk: a stamp older than this process describes
+    /// the deployment the daemon just started up on, not a pending request.
+    fn new(user_data_dir: &std::path::Path) -> Self {
+        let path = keytao_core::ReloadStamp::path(user_data_dir);
+        let loaded_signature = keytao_core::ReloadStamp::signature_at(&path);
+        Self {
+            path,
+            loaded_signature,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The signature a reload is pending for, without consuming the request.
+    /// A missing stamp is not a request, so a not yet deployed install never
+    /// triggers one.
+    fn pending(&self) -> Option<String> {
+        let current = keytao_core::ReloadStamp::signature_at(&self.path)?;
+        (self.loaded_signature.as_deref() != Some(current.as_str())).then_some(current)
+    }
+
+    /// Record the signature a reload actually loaded.
+    fn commit(&mut self, signature: String) {
+        self.loaded_signature = Some(signature);
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn install_reload_watcher(engine: engine::CoreEngine) {
-    let Some(path) = reload_stamp_path() else {
+    let Some(user_data_dir) = keytao_core::default_user_data_dir() else {
         tracing::warn!("cannot determine reload stamp path; dictionary reload watcher disabled");
         return;
     };
 
+    // Seeded here rather than inside the thread: the caller has just finished
+    // initialising librime, so this is the last moment at which the stamp on
+    // disk still describes the deployment the daemon actually loaded. A stamp
+    // written while the thread was waiting to be scheduled would otherwise be
+    // adopted as already loaded and never reloaded.
+    let mut gate = ReloadStampGate::new(&user_data_dir);
+
     if let Err(e) = std::thread::Builder::new()
         .name("reload-watcher".into())
         .spawn(move || {
-            let mut last_seen = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                let current = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                if current.is_none() || current == last_seen {
+                let Some(requested) = gate.pending() else {
                     continue;
-                }
+                };
 
-                last_seen = current;
-                tracing::info!("reload stamp changed: {}", path.display());
+                tracing::info!("reload stamp changed: {}", gate.path().display());
                 match engine.reload_without_deploy() {
-                    Ok(()) => tracing::info!("librime reloaded after deploy stamp change"),
+                    Ok(()) => {
+                        gate.commit(requested);
+                        tracing::info!("librime reloaded after deploy stamp change");
+                        // Sessions rebuild lazily, so the backends have to be
+                        // told to drop the preedit and candidates the previous
+                        // build produced.
+                        reload_bus::notify();
+                    }
+                    // The request stays pending: the next tick retries it.
                     Err(e) => tracing::error!("librime reload failed: {e}"),
                 }
             }
@@ -243,21 +301,7 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     {
-        use tracing_subscriber::EnvFilter;
-        prepare_rolling_log_files();
-        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix(LOG_PREFIX)
-            .latest_symlink(LOG_PREFIX)
-            .max_log_files(LOG_RETENTION_DAYS as usize)
-            .build(LOG_DIR)
-            .expect("failed to initialise keytao-ime rolling log");
-        tracing_subscriber::fmt()
-            .with_writer(file_appender)
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-            .init();
+        init_logging();
 
         let engine = engine::CoreEngine::new();
         if let Err(e) = engine.init_without_deploy() {
@@ -395,101 +439,89 @@ fn main() {
     }
 }
 
+/// Directory holding the rolling daemon log.
+///
+/// Everything the daemon writes is derived from what the user types, so the log
+/// belongs in the per-user state directory (XDG Base Directory) and not in a
+/// shared `/tmp`, where any local account could read it or squat the file name.
 #[cfg(target_os = "linux")]
-fn prepare_rolling_log_files() {
-    use std::path::Path;
-    use time::OffsetDateTime;
+fn log_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
+    let dir = base.join("keytao").join("log");
+    match create_private_dir(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            eprintln!("keytao-ime: cannot create {}: {e}", dir.display());
+            None
+        }
+    }
+}
 
-    let legacy_path = Path::new(LOG_DIR).join(LOG_PREFIX);
-    let Ok(metadata) = std::fs::symlink_metadata(&legacy_path) else {
+/// Create `dir` (and its parents) so that only the owner can list it.
+#[cfg(target_os = "linux")]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+
+    remove_legacy_tmp_logs();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let appender = log_dir().and_then(|dir| {
+        tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix(LOG_PREFIX)
+            .latest_symlink(LOG_PREFIX)
+            .max_log_files(LOG_RETENTION_DAYS)
+            .build(&dir)
+            .map_err(|e| eprintln!("keytao-ime: cannot open log in {}: {e}", dir.display()))
+            .ok()
+    });
+
+    // A log the daemon cannot open must never keep the input method from
+    // starting; stderr is picked up by the session journal.
+    match appender {
+        Some(appender) => tracing_subscriber::fmt()
+            .with_writer(appender)
+            .with_env_filter(filter)
+            .init(),
+        None => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .init(),
+    }
+}
+
+/// Drop the world-readable logs older versions left in `/tmp`.
+#[cfg(target_os = "linux")]
+fn remove_legacy_tmp_logs() {
+    let Ok(entries) = std::fs::read_dir(LEGACY_LOG_DIR) else {
         return;
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return;
-    }
-
-    let now = OffsetDateTime::now_utc();
-    let date = now.date();
-    let rotated_name = format!(
-        "{LOG_PREFIX}.{:04}-{:02}-{:02}",
-        date.year(),
-        u8::from(date.month()),
-        date.day(),
-    );
-    let rotated_path = Path::new(LOG_DIR).join(rotated_name);
-    let cutoff = now - time::Duration::days(LOG_RETENTION_DAYS);
-
-    let _ = append_recent_log_lines(&legacy_path, &rotated_path, cutoff);
-    let _ = std::fs::remove_file(legacy_path);
-}
-
-#[cfg(target_os = "linux")]
-fn append_recent_log_lines(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-    cutoff: time::OffsetDateTime,
-) -> std::io::Result<()> {
-    use std::io::{BufRead, BufReader, BufWriter, Write};
-
-    let input = std::fs::File::open(source)?;
-    let output = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(destination)?;
-    let mut writer = BufWriter::new(output);
-    let mut keep_following = true;
-
-    for line in BufReader::new(input).lines().map_while(Result::ok) {
-        if let Some(timestamp) = parse_log_timestamp(&strip_ansi_codes(&line)) {
-            keep_following = timestamp >= cutoff;
-        }
-        if keep_following {
-            writeln!(writer, "{line}")?;
+    let rotated_prefix = format!("{LOG_PREFIX}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == LOG_PREFIX || name.starts_with(&rotated_prefix) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
-    writer.flush()
-}
-
-#[cfg(target_os = "linux")]
-fn parse_log_timestamp(line: &str) -> Option<time::OffsetDateTime> {
-    use time::format_description::well_known::Rfc3339;
-
-    let bytes = line.as_bytes();
-    for index in 0..bytes.len().saturating_sub(20) {
-        if bytes[index].is_ascii_digit()
-            && bytes.get(index + 4) == Some(&b'-')
-            && bytes.get(index + 7) == Some(&b'-')
-            && bytes.get(index + 10) == Some(&b'T')
-        {
-            let end = line[index..]
-                .find(char::is_whitespace)
-                .map(|offset| index + offset)
-                .unwrap_or(line.len());
-            if let Ok(timestamp) = time::OffsetDateTime::parse(&line[index..end], &Rfc3339) {
-                return Some(timestamp);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn strip_ansi_codes(line: &str) -> String {
-    let mut output = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for code in chars.by_ref() {
-                if code.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
 }
 
 #[cfg(target_os = "linux")]
@@ -522,4 +554,59 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::ReloadStampGate;
+    use keytao_core::ReloadStamp;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("keytao-reload-gate-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_request_pending() {
+        let dir = temp_dir("retry");
+        let mut gate = ReloadStampGate::new(&dir);
+        assert_eq!(gate.pending(), None, "a missing stamp is not a request");
+
+        ReloadStamp::write(&dir).expect("write stamp");
+        let requested = gate.pending().expect("the first stamp is a request");
+        // Peeking must not consume the request: a reload that failed because the
+        // deployment was still being written has to be retried on the next tick.
+        assert_eq!(gate.pending().as_deref(), Some(requested.as_str()));
+        assert_eq!(gate.pending().as_deref(), Some(requested.as_str()));
+
+        gate.commit(requested);
+        assert_eq!(gate.pending(), None, "a loaded stamp fires once");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stamp_written_during_the_reload_is_not_swallowed() {
+        let dir = temp_dir("overlap");
+        ReloadStamp::write(&dir).expect("write stamp");
+        // Startup adopts what is on disk: that is the deployment librime was
+        // just initialised on.
+        let mut gate = ReloadStampGate::new(&dir);
+        assert_eq!(gate.pending(), None);
+
+        ReloadStamp::write(&dir).expect("rewrite stamp");
+        let requested = gate.pending().expect("a rewritten stamp is a request");
+
+        // The App deploys again while librime is still reloading. Committing the
+        // signature the reload started from must leave the newer one pending.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ReloadStamp::write(&dir).expect("rewrite stamp during reload");
+        gate.commit(requested);
+        assert!(gate.pending().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -74,12 +74,16 @@ require_runtime_listing() {
     require_listing_match "$label" "$listing" '(^|/)runtime/rime-data/opencc/'
     require_listing_match "$label" "$listing" '(^|/)runtime/lib/librime[^/]*\.so'
     require_listing_match "$label" "$listing" '(^|/)runtime/lib/rime-plugins/librime-lua\.so'
+    # ibus-daemon only keeps KeyTao in the input source list across restarts if
+    # the component XML is installed; RegisterComponent alone is transient.
+    require_listing_match "$label" "$listing" '(^|/)usr/share/ibus/component/keytao\.xml$'
 }
 
 require_command dpkg-deb
 require_command rpm
 
 echo "==> Verifying Linux runtime directory"
+require_file "$PROJECT_DIR/crates/keytao-linux-ime/keytao.xml"
 require_executable "$PROJECT_DIR/target/release/keytao-app"
 require_executable "$PROJECT_DIR/target/release/keytao-ime"
 require_file "$RUNTIME_DIR/rime-data/default.yaml"

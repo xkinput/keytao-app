@@ -1227,7 +1227,7 @@ mod tests {
         let visible_colors = pixels
             .chunks_exact(4)
             .filter(|pixel| pixel[3] > 0)
-            .copied()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
             .collect::<HashSet<_>>()
             .len();
 

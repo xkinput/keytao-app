@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  IBus component description for KeyTao.
+
+  Installed as /usr/share/ibus/component/keytao.xml.  ibus-daemon scans that
+  directory on startup, so KeyTao stays in the GNOME / ibus-setup input source
+  list across daemon restarts and can be started on demand through <exec>,
+  which the runtime-only RegisterComponent call cannot do (that registration
+  disappears with the process that made it).
+
+  <name> must match IBUS_COMPONENT_BUS_NAME in src/gnome_ibus_engine.rs and
+  <engine><name> must match the engine name reported by the factory: the
+  daemon looks the factory up by the component's bus name.
+
+  No <version> is declared on purpose; the running daemon gets the real version
+  from RegisterComponent and a hard-coded one here would go stale on release.
+-->
+<component>
+  <name>org.freedesktop.IBus.KeyTao</name>
+  <description>KeyTao Input Method</description>
+  <exec>keytao-ime --ibus-engine</exec>
+  <author>KeyTao Team</author>
+  <license>free</license>
+  <homepage>https://keytao.app</homepage>
+  <textdomain>keytao</textdomain>
+  <engines>
+    <engine>
+      <name>keytao</name>
+      <longname>键道</longname>
+      <description>KeyTao Input Method</description>
+      <language>zh</language>
+      <license>free</license>
+      <author>KeyTao Team</author>
+      <icon>input-keyboard</icon>
+      <layout>default</layout>
+      <rank>0</rank>
+      <symbol>键</symbol>
+    </engine>
+  </engines>
+</component>

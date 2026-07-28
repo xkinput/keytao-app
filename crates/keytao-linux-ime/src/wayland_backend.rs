@@ -16,7 +16,8 @@ use std::{
 };
 
 use keytao_core::{
-    key_policy, ImeState, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_RELEASE_MASK,
+    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT,
+    RIME_RELEASE_MASK,
 };
 use wayland_client::{
     delegate_noop,
@@ -48,14 +49,76 @@ use xkbcommon::xkb;
 use crate::{
     engine::{CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
+    reload_bus,
 };
 
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 const WL_KEY_RELEASED: u32 = 0;
 const WL_KEY_PRESSED: u32 = 1;
 
+const DEACTIVATE_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// `zwp_text_input_v3::content_purpose::password`.
+const TEXT_INPUT_PURPOSE_PASSWORD: u32 = 8;
+/// `zwp_text_input_v3::content_purpose::pin`.
+const TEXT_INPUT_PURPOSE_PIN: u32 = 9;
+/// `zwp_text_input_v3::content_hint`: `hidden_text | sensitive_data`.
+const TEXT_INPUT_HINT_SECRET: u32 = 0x40 | 0x80;
+/// Hint `none` and purpose `normal` — what `activate` resets the content type
+/// to, per the protocol.
+const DEFAULT_CONTENT_TYPE: (u32, u32) = (0, 0);
+
 fn is_shift_key(sym: u32) -> bool {
     sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
+}
+
+/// The session policy a `zwp_input_method_v2` content type maps to.
+///
+/// Only the conclusion is shared with the IBus path in `engine.rs`: the
+/// `zwp_text_input_v3` hint bits and purpose values are a different numbering
+/// than the IBus ones, so the constants must not be reused.
+fn content_type_policy(hint: u32, purpose: u32) -> InputContextPolicy {
+    let secret = matches!(
+        purpose,
+        TEXT_INPUT_PURPOSE_PASSWORD | TEXT_INPUT_PURPOSE_PIN
+    ) || hint & TEXT_INPUT_HINT_SECRET != 0;
+    if secret {
+        InputContextPolicy::sensitive()
+    } else {
+        InputContextPolicy::default()
+    }
+}
+
+/// `zwp_input_method_v2` preedit indices are byte offsets into the preedit
+/// string, while `ImeState::cursor` counts Unicode scalars.
+fn preedit_cursor_bytes(preedit: &str, cursor: usize) -> i32 {
+    preedit
+        .char_indices()
+        .nth(cursor)
+        .map(|(offset, _)| offset)
+        .unwrap_or(preedit.len()) as i32
+}
+
+/// Turn a `repeat_info` event into (initial delay, interval between repeats).
+///
+/// `rate` is in keys per second and zero disables repeating entirely; negative
+/// values are illegal per the protocol and are treated the same way.
+fn repeat_timings(rate: i32, delay: i32) -> Option<(Duration, Duration)> {
+    if rate <= 0 || delay < 0 {
+        return None;
+    }
+    Some((
+        Duration::from_millis(delay as u64),
+        Duration::from_micros(1_000_000 / rate as u64),
+    ))
+}
+
+/// A key the IME consumed and now has to repeat itself: with the keyboard
+/// grabbed, the compositor no longer repeats anything for us.
+struct KeyRepeat {
+    key: u32,
+    next: Instant,
+    interval: Duration,
 }
 
 struct App {
@@ -75,11 +138,15 @@ struct App {
     virtual_keymap: Option<File>,
     forwarded_keys: HashSet<u32>,
     last_key_time: u32,
-    started_at: Instant,
     serial: u32,
     active: bool,
     pending_active: Option<bool>,
     deactivate_deadline: Option<Instant>,
+    /// Double-buffered `content_type`, applied on the next `done`.
+    pending_content_type: Option<(u32, u32)>,
+    key_repeat: Option<KeyRepeat>,
+    repeat_delay: Option<Duration>,
+    repeat_interval: Option<Duration>,
 
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
@@ -117,11 +184,14 @@ impl App {
             virtual_keymap: None,
             forwarded_keys: HashSet::new(),
             last_key_time: 0,
-            started_at: Instant::now(),
             serial: 0,
             active: false,
             pending_active: None,
             deactivate_deadline: None,
+            pending_content_type: None,
+            key_repeat: None,
+            repeat_delay: None,
+            repeat_interval: None,
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
@@ -327,6 +397,145 @@ impl App {
             .into()
     }
 
+    /// Publish one `ImeState` to the client: commit first, then the new
+    /// preedit, then a single `commit(serial)` — the order
+    /// `zwp_input_method_v2.commit` prescribes.  Every path that produces a
+    /// state goes through here so none of them can forget the preedit.
+    fn apply_state_to_input_method(&self, state: &ImeState) {
+        let Some(im) = &self.input_method else { return };
+        if let Some(committed) = &state.committed {
+            if !committed.is_empty() {
+                tracing::debug!("Wayland commit_string: {} chars", committed.chars().count());
+                tracing::trace!("Wayland commit_string: {committed:?}");
+                im.commit_string(committed.clone());
+            }
+        }
+        let cursor = preedit_cursor_bytes(&state.preedit, state.cursor);
+        im.set_preedit_string(state.preedit.clone(), cursor, cursor);
+        im.commit(self.serial);
+    }
+
+    fn clear_client_preedit(&self) {
+        let Some(im) = &self.input_method else { return };
+        im.set_preedit_string(String::new(), 0, 0);
+        im.commit(self.serial);
+    }
+
+    /// Apply a `content_type` that `done` made current.
+    fn apply_content_type(&mut self, hint: u32, purpose: u32) {
+        let policy = content_type_policy(hint, purpose);
+        let previous = self.session.input_policy();
+        self.session.set_input_policy(policy);
+        if previous.composing && !policy.composing {
+            tracing::debug!("Wayland: sensitive content type, passing keys through");
+            self.cancel_key_repeat();
+            self.clear_client_preedit();
+            self.hide_panel_popup();
+        }
+    }
+
+    fn set_repeat_info(&mut self, rate: i32, delay: i32) {
+        match repeat_timings(rate, delay) {
+            Some((delay, interval)) => {
+                self.repeat_delay = Some(delay);
+                self.repeat_interval = Some(interval);
+            }
+            None => {
+                self.repeat_delay = None;
+                self.repeat_interval = None;
+                self.key_repeat = None;
+            }
+        }
+    }
+
+    /// Whether the keymap marks this key as repeating.  Modifiers and keys
+    /// carrying `repeat=no` must not repeat, exactly as for an ordinary
+    /// `wl_keyboard` client.
+    fn key_repeats(&self, evdev_keycode: u32) -> bool {
+        self.xkb_keymap
+            .as_ref()
+            .is_some_and(|keymap| keymap.key_repeats(xkb::Keycode::from(evdev_keycode + 8)))
+    }
+
+    /// Start repeating a key the IME consumed.  Forwarded keys are left alone:
+    /// the client repeats those itself.
+    fn arm_key_repeat(&mut self, evdev_keycode: u32) {
+        let (Some(delay), Some(interval)) = (self.repeat_delay, self.repeat_interval) else {
+            self.key_repeat = None;
+            return;
+        };
+        if !self.key_repeats(evdev_keycode) {
+            self.key_repeat = None;
+            return;
+        }
+        self.key_repeat = Some(KeyRepeat {
+            key: evdev_keycode,
+            next: Instant::now() + delay,
+            interval,
+        });
+    }
+
+    fn cancel_key_repeat(&mut self) {
+        self.key_repeat = None;
+    }
+
+    fn cancel_key_repeat_for(&mut self, evdev_keycode: u32) {
+        if self
+            .key_repeat
+            .as_ref()
+            .is_some_and(|repeat| repeat.key == evdev_keycode)
+        {
+            self.key_repeat = None;
+        }
+    }
+
+    fn key_repeat_due(&self) -> bool {
+        self.key_repeat
+            .as_ref()
+            .is_some_and(|repeat| Instant::now() >= repeat.next)
+    }
+
+    fn fire_key_repeat(&mut self, qh: &QueueHandle<Self>) {
+        let Some(key) = self.key_repeat.as_ref().map(|repeat| repeat.key) else {
+            return;
+        };
+        self.handle_key_event(key, wl_keyboard::KeyState::Pressed, qh);
+        // `handle_key_event` re-arms with the initial delay; once repeating has
+        // started the following presses are one interval apart.
+        if let Some(repeat) = self.key_repeat.as_mut() {
+            if repeat.key == key {
+                repeat.next = Instant::now() + repeat.interval;
+            }
+        }
+    }
+
+    /// Milliseconds until the next timer fires, or -1 when nothing is pending.
+    fn poll_timeout_ms(&self) -> i32 {
+        let deadlines = [
+            self.mode_hint_until,
+            self.deactivate_deadline,
+            self.key_repeat.as_ref().map(|repeat| repeat.next),
+        ];
+        let Some(next) = deadlines.into_iter().flatten().min() else {
+            return -1;
+        };
+        let now = Instant::now();
+        if next <= now {
+            return 0;
+        }
+        (next - now).as_millis().min(i32::MAX as u128) as i32
+    }
+
+    /// Drop the UI built from the dictionaries a reload just replaced.
+    fn handle_reload(&mut self) {
+        tracing::info!("Wayland IME: clearing composition after librime reload");
+        self.cancel_key_repeat();
+        self.session.clear_composition();
+        self.clear_client_preedit();
+        self.mode_hint_until = None;
+        self.hide_panel_popup();
+    }
+
     fn handle_key_event(
         &mut self,
         evdev_keycode: u32,
@@ -338,9 +547,18 @@ impl App {
             return;
         }
 
+        // A new press always supersedes whatever was repeating.
+        self.cancel_key_repeat();
+
         // When inactive (e.g. during debounce window after deactivate), forward
         // all keys directly to the application instead of processing them.
         if !self.active {
+            self.forward_unhandled_key(evdev_keycode, self.key_sym(evdev_keycode));
+            return;
+        }
+
+        // Password and PIN fields: nothing reaches librime and nothing is drawn.
+        if !self.session.input_policy().composing {
             self.forward_unhandled_key(evdev_keycode, self.key_sym(evdev_keycode));
             return;
         }
@@ -372,31 +590,24 @@ impl App {
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
         }
-        if key_policy::is_enter_key(sym_raw) && !before_state.preedit.is_empty() {
-            if let Some(im) = &self.input_method {
-                im.commit_string(before_state.preedit.clone());
-                im.set_preedit_string(String::new(), 0, 0);
-                im.commit(self.serial);
-            }
-            self.session.reset();
-            self.show_panel(ImeState::empty(), qh);
-            return;
-        }
-        if let Some(index) = key_policy::is_space_key(sym_raw)
-            .then(|| key_policy::highlighted_candidate_index(&before_state))
-            .flatten()
+        // Return belongs to librime: only the schema's editor knows whether it
+        // confirms the highlighted candidate or commits the raw code.  Space
+        // and the digits are ordinary keys for the same reason.
+        if key_policy::is_enter_key(sym_raw)
+            && key_policy::enter_action(&before_state) == key_policy::EnterAction::ForwardToRime
         {
-            if let Some(ime_state) = self.session.select_candidate(index) {
-                if let Some(im) = &self.input_method {
-                    if let Some(committed) = &ime_state.committed {
-                        im.commit_string(committed.clone());
-                    }
-                    im.set_preedit_string(String::new(), 0, 0);
-                    im.commit(self.serial);
-                }
-                self.show_panel(ime_state, qh);
+            let Some(result) = self.session.process_enter() else {
+                self.forward_unhandled_key(evdev_keycode, sym_raw);
+                return;
+            };
+            if !result.accepted {
+                self.forward_unhandled_key(evdev_keycode, sym_raw);
                 return;
             }
+            self.update_ascii_mode(result.state.ascii_mode, qh);
+            self.apply_state_to_input_method(&result.state);
+            self.show_panel(result.state, qh);
+            return;
         }
 
         let result = match self.session.process_key_result(sym_raw, effective_mods) {
@@ -422,35 +633,37 @@ impl App {
             ime_state.candidates.len(),
         );
 
-        if let Some(im) = &self.input_method {
-            if consumed {
-                if let Some(committed) = &ime_state.committed {
-                    im.commit_string(committed.clone());
-                }
-                let preedit = ime_state.preedit.clone();
-                let len = preedit.len() as i32;
-                im.set_preedit_string(preedit, len, len);
-                im.commit(self.serial);
+        if !consumed {
+            // librime rejected the key, but it can still have flushed a commit
+            // on the way out (the ascii_composer confirms the composition when
+            // it switches mode).  Publishing the state before forwarding is
+            // what keeps those characters from being dropped.
+            self.apply_state_to_input_method(&ime_state);
+            self.forward_unhandled_key(evdev_keycode, sym_raw);
+            self.show_panel(ime_state, qh);
+            return;
+        }
 
-                // Forward consumed Ctrl shortcuts that the app should still
-                // receive (e.g. Ctrl+` for terminal quake toggle). Match the
-                // precise list from the original linux.rs implementation.
-                if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
-                    self.forward_unhandled_key(evdev_keycode, sym_raw);
-                }
-            } else {
-                // librime processed the key but produced nothing — forward it.
-                self.forward_unhandled_key(evdev_keycode, sym_raw);
-                return;
-            }
+        self.apply_state_to_input_method(&ime_state);
+
+        // Forward consumed Ctrl shortcuts that the app should still
+        // receive (e.g. Ctrl+` for terminal quake toggle). Match the
+        // precise list from the original linux.rs implementation.
+        if key_policy::should_forward_consumed_shortcut(sym_raw, effective_mods) {
+            self.forward_unhandled_key(evdev_keycode, sym_raw);
+        } else {
+            // The compositor stopped repeating this key when the grab took it,
+            // so held Backspace/arrows/select keys have to repeat from here.
+            self.arm_key_repeat(evdev_keycode);
         }
 
         self.show_panel(ime_state, qh);
     }
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
+        self.cancel_key_repeat_for(evdev_keycode);
         let sym_raw = self.key_sym(evdev_keycode);
-        if is_shift_key(sym_raw) {
+        if is_shift_key(sym_raw) && self.session.input_policy().composing {
             if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
                 self.update_ascii_mode(result.state.ascii_mode, qh);
             }
@@ -569,6 +782,9 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
         match event {
             zwp_input_method_v2::Event::Activate => {
                 state.pending_active = Some(true);
+                // activate resets the content type together with everything
+                // else the previous text input had set.
+                state.pending_content_type = Some(DEFAULT_CONTENT_TYPE);
                 if state.keyboard_grab.is_none() {
                     state.keyboard_grab = Some(proxy.grab_keyboard(qh, ()));
                 }
@@ -578,17 +794,48 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 state.pending_active = Some(false);
                 tracing::debug!("IME deactivate pending until done");
             }
+            zwp_input_method_v2::Event::ContentType { hint, purpose } => {
+                let hint = match hint {
+                    WEnum::Value(hint) => hint.bits(),
+                    WEnum::Unknown(raw) => raw,
+                };
+                let purpose = match purpose {
+                    WEnum::Value(purpose) => purpose as u32,
+                    WEnum::Unknown(raw) => raw,
+                };
+                tracing::debug!("IME content type: hint={hint:#x} purpose={purpose}");
+                state.pending_content_type = Some((hint, purpose));
+            }
             zwp_input_method_v2::Event::Done => {
+                // `done` makes every double-buffered event since the last one
+                // current, in the order the protocol lists them.
                 state.serial = state.serial.wrapping_add(1);
-                if let Some(next_active) = state.pending_active.take() {
-                    if next_active {
+                let next_active = state.pending_active.take();
+                match next_active {
+                    Some(true) => {
                         state.deactivate_deadline = None;
                         state.active = true;
                         tracing::debug!("IME activated");
-                    } else {
-                        state.deactivate_deadline =
-                            Some(Instant::now() + Duration::from_millis(180));
+                    }
+                    Some(false) => {
+                        state.deactivate_deadline = Some(Instant::now() + DEACTIVATE_DEBOUNCE);
                         tracing::debug!("IME deactivation deferred for debounce");
+                    }
+                    None => {}
+                }
+                if let Some((hint, purpose)) = state.pending_content_type.take() {
+                    state.apply_content_type(hint, purpose);
+                }
+                if next_active == Some(true) {
+                    // activate also dropped the preedit the compositor was
+                    // holding, so a composition that survived the debounce has
+                    // to be published again or the client and Rime silently
+                    // disagree about what is being typed.  A sensitive content
+                    // type has already emptied the session by now.
+                    let current = state.session.state();
+                    if !current.preedit.is_empty() || !current.candidates.is_empty() {
+                        state.apply_state_to_input_method(&current);
+                        state.show_panel(current, qh);
                     }
                 }
             }
@@ -683,6 +930,10 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                 if let (Some(vk), Some(_)) = (&state.virtual_keyboard, &state.virtual_keymap) {
                     vk.modifiers(mods_depressed, mods_latched, mods_locked, group);
                 }
+            }
+            zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
+                tracing::debug!("keyboard grab: repeat rate={rate} delay={delay}");
+                state.set_repeat_info(rate, delay);
             }
             _ => {}
         }
@@ -784,6 +1035,8 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
     app.setup_virtual_keyboard(&qh);
     queue.roundtrip(&mut app).expect("initial roundtrip");
 
+    let reload_signal = reload_bus::subscribe();
+
     tracing::info!("Wayland IME running (popup-surface positioning)");
     loop {
         if app.wayland_unavailable {
@@ -805,35 +1058,62 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
         {
             app.deactivate_deadline = None;
             app.active = false;
-            let had_grab = app.keyboard_grab.take().is_some();
+            app.cancel_key_repeat();
+            // `grab_keyboard` hands out an object whose `release` request is a
+            // destructor; dropping the proxy alone leaves it alive in the
+            // compositor, and the next activate takes a fresh grab.
+            let had_grab = match app.keyboard_grab.take() {
+                Some(grab) => {
+                    grab.release();
+                    true
+                }
+                None => false,
+            };
             app.session.reset();
             app.mode_hint_until = None;
             app.hide_panel_popup();
             tracing::debug!("IME deactivated after debounce (had_grab={had_grab})");
         }
 
+        if app.key_repeat_due() {
+            app.fire_key_repeat(&qh);
+        }
+
         if let Err(e) = queue.flush() {
             tracing::warn!("Wayland flush error: {e}");
         }
-        let timeout_ms = if app.mode_hint_until.is_some() || app.deactivate_deadline.is_some() {
-            100
-        } else {
-            -1
-        };
-        let raw_fd = conn.as_fd().as_raw_fd();
-        let mut pfd = libc::pollfd {
-            fd: raw_fd,
+        let timeout_ms = app.poll_timeout_ms();
+        let mut pfds = vec![libc::pollfd {
+            fd: conn.as_fd().as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, timeout_ms) };
-        if ready > 0 {
+        }];
+        if let Some(signal) = &reload_signal {
+            pfds.push(libc::pollfd {
+                fd: signal.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        let ready =
+            unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms) };
+        if ready < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                tracing::warn!("Wayland poll failed: {err}");
+            }
+            continue;
+        }
+        if let Some(signal) = &reload_signal {
+            if signal.take() {
+                app.handle_reload();
+            }
+        }
+        if pfds[0].revents & libc::POLLIN != 0 {
             if let Err(e) = queue.blocking_dispatch(&mut app) {
                 tracing::warn!("Wayland dispatch error: {e}");
                 return Err(format!("Wayland connection closed: {e}"));
             }
-        } else if ready < 0 {
-            tracing::warn!("Wayland poll failed");
         }
     }
 }
@@ -848,4 +1128,54 @@ fn tempfile() -> std::io::Result<File> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content_type_policy, preedit_cursor_bytes, repeat_timings};
+    use std::time::Duration;
+
+    #[test]
+    fn repeat_info_maps_to_a_delay_and_an_interval() {
+        assert_eq!(
+            repeat_timings(25, 600),
+            Some((Duration::from_millis(600), Duration::from_millis(40)))
+        );
+        // A rate of zero disables repeating, as does an illegal negative one.
+        assert_eq!(repeat_timings(0, 600), None);
+        assert_eq!(repeat_timings(-1, 600), None);
+        assert_eq!(repeat_timings(25, -1), None);
+    }
+
+    #[test]
+    fn password_and_pin_content_types_stop_composing() {
+        // purpose password / pin
+        assert!(!content_type_policy(0, 8).composing);
+        assert!(!content_type_policy(0, 9).composing);
+        // hint hidden_text / sensitive_data on an otherwise normal field
+        assert!(!content_type_policy(0x40, 0).composing);
+        assert!(!content_type_policy(0x80, 0).composing);
+        assert!(!content_type_policy(0, 8).learning);
+    }
+
+    #[test]
+    fn ordinary_content_types_keep_composing() {
+        assert!(content_type_policy(0, 0).composing);
+        // completion + spellcheck on a free-form field
+        assert!(content_type_policy(0x3, 0).composing);
+        // terminal is purpose 13 in text-input-v3, not a secret
+        assert!(content_type_policy(0, 13).composing);
+        // date is purpose 10 there, i.e. the IBus PIN value must not leak in
+        assert!(content_type_policy(0, 10).composing);
+    }
+
+    #[test]
+    fn preedit_cursor_is_a_byte_offset() {
+        assert_eq!(preedit_cursor_bytes("nihao", 2), 2);
+        // Unicode scalar 2 of "你好ni" starts at byte 6.
+        assert_eq!(preedit_cursor_bytes("你好ni", 2), 6);
+        // Past the end clamps to the byte length rather than panicking.
+        assert_eq!(preedit_cursor_bytes("你好", 9), 6);
+        assert_eq!(preedit_cursor_bytes("", 0), 0);
+    }
 }

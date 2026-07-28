@@ -9,6 +9,16 @@ const IMPANEL_BUS_NAME: &str = "org.kde.impanel";
 const IMPANEL_OBJECT_PATH: &str = "/org/kde/impanel";
 const IMPANEL2_INTERFACE: &str = "org.kde.impanel2";
 const CANDIDATE_LAYOUT_NOT_SET: i32 = 0;
+/// Property key of the conversion-mode indicator.
+const KIMPANEL_STATUS_KEY: &str = "/KeyTao/im";
+
+/// A Kimpanel property string: `key:label:icon:text:hint`.  The Plasma applet
+/// reads `label=` out of the hint field and shows it in the tray indicator, so
+/// this is how the desktop learns whether Rime is in Chinese or ASCII mode.
+pub(crate) fn mode_property(ascii_mode: bool) -> String {
+    let label = if ascii_mode { "英" } else { "中" };
+    format!("{KIMPANEL_STATUS_KEY}:KeyTao:input-keyboard:KeyTao:menu,label={label}")
+}
 
 struct Kimpanel;
 
@@ -40,8 +50,11 @@ impl Kimpanel {
     #[zbus(signal)]
     async fn update_preedit_caret(ctxt: &SignalContext<'_>, pos: i32) -> zbus::Result<()>;
 
+    /// The Kimpanel visibility signal is `ShowPreedit` — no `Text` suffix,
+    /// unlike the IBus signal of a similar name.  The Plasma applet listens
+    /// for this name only.
     #[zbus(signal)]
-    async fn show_preedit_text(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+    async fn show_preedit(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn show_aux(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
@@ -117,19 +130,19 @@ impl KimpanelHandle {
         let _ = Kimpanel::show_aux(&self.ctxt, false).await;
         let _ = Kimpanel::update_preedit_text(&self.ctxt, "", "").await;
         let _ = Kimpanel::update_preedit_caret(&self.ctxt, 0).await;
-        let _ = Kimpanel::show_preedit_text(&self.ctxt, false).await;
+        let _ = Kimpanel::show_preedit(&self.ctxt, false).await;
         let _ = Kimpanel::show_lookup_table(&self.ctxt, false).await;
     }
 
     pub async fn update_state(&self, state: &ImeState) {
-        tracing::info!(
-            "Kimpanel: updating state, preedit={}, candidates_len={}",
-            state.preedit,
+        tracing::debug!(
+            "Kimpanel: updating state, preedit={} chars, candidates_len={}",
+            state.preedit.chars().count(),
             state.candidates.len()
         );
         if state.preedit.is_empty() {
-            if let Err(e) = Kimpanel::show_preedit_text(&self.ctxt, false).await {
-                tracing::warn!("Kimpanel: show_preedit_text(false) failed: {e}");
+            if let Err(e) = Kimpanel::show_preedit(&self.ctxt, false).await {
+                tracing::warn!("Kimpanel: show_preedit(false) failed: {e}");
             }
         } else {
             if let Err(e) = Kimpanel::update_preedit_text(&self.ctxt, &state.preedit, "").await {
@@ -139,8 +152,8 @@ impl KimpanelHandle {
             if let Err(e) = Kimpanel::update_preedit_caret(&self.ctxt, caret).await {
                 tracing::warn!("Kimpanel: update_preedit_caret failed: {e}");
             }
-            if let Err(e) = Kimpanel::show_preedit_text(&self.ctxt, true).await {
-                tracing::warn!("Kimpanel: show_preedit_text(true) failed: {e}");
+            if let Err(e) = Kimpanel::show_preedit(&self.ctxt, true).await {
+                tracing::warn!("Kimpanel: show_preedit(true) failed: {e}");
             }
         }
 
@@ -211,13 +224,22 @@ impl KimpanelHandle {
         }
     }
 
+    /// Publish the conversion mode to the desktop indicator.  Registering the
+    /// property once at startup is not enough: the applet keeps showing the
+    /// registered value until an UpdateProperty arrives.
+    pub async fn update_mode(&self, ascii_mode: bool) {
+        if let Err(e) = Kimpanel::update_property(&self.ctxt, &mode_property(ascii_mode)).await {
+            tracing::warn!("Kimpanel: update_property failed: {e}");
+        }
+    }
+
     async fn register_status(&self) {
-        let status = "/KeyTao/im:KeyTao:input-keyboard:KeyTao:menu,label=键";
-        let props = [status];
+        let status = mode_property(false);
+        let props = [status.as_str()];
         if let Err(e) = Kimpanel::register_properties(&self.ctxt, &props).await {
             tracing::warn!("Kimpanel: register_properties failed: {e}");
         }
-        if let Err(e) = Kimpanel::update_property(&self.ctxt, status).await {
+        if let Err(e) = Kimpanel::update_property(&self.ctxt, &status).await {
             tracing::warn!("Kimpanel: update_property failed: {e}");
         }
         if let Err(e) = Kimpanel::enable(&self.ctxt, true).await {
@@ -287,5 +309,46 @@ fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
         page: state.page,
         is_last_page: state.is_last_page,
         select_keys: state.select_keys.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mode_property, Kimpanel};
+
+    fn kimpanel_introspection() -> String {
+        let mut xml = String::new();
+        zbus::object_server::Interface::introspect_to_writer(&Kimpanel, &mut xml, 0);
+        xml
+    }
+
+    #[test]
+    fn mode_property_carries_the_conversion_label() {
+        assert!(mode_property(false).ends_with("label=中"));
+        assert!(mode_property(true).ends_with("label=英"));
+        assert!(mode_property(true).starts_with("/KeyTao/im:"));
+    }
+
+    #[test]
+    fn kimpanel_signal_names_match_the_protocol() {
+        let xml = kimpanel_introspection();
+        // The visibility signal is ShowPreedit; a panel listening for the
+        // protocol name never sees a signal called ShowPreeditText.
+        assert!(xml.contains("<signal name=\"ShowPreedit\">"), "{xml}");
+        assert!(!xml.contains("<signal name=\"ShowPreeditText\""), "{xml}");
+        for name in [
+            "UpdatePreeditText",
+            "UpdatePreeditCaret",
+            "ShowLookupTable",
+            "UpdateLookupTable",
+            "UpdateLookupTableCursor",
+            "ShowAux",
+            "UpdateAux",
+            "Enable",
+            "RegisterProperties",
+            "UpdateProperty",
+        ] {
+            assert!(xml.contains(&format!("<signal name=\"{name}\">")), "{xml}");
+        }
     }
 }
