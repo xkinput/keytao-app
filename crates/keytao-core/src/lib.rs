@@ -3349,6 +3349,16 @@ pub fn invalidate_rime_build_artifacts(
     Ok(removed)
 }
 
+/// Returns whether a Windows host-provided caret extent has usable bounds.
+///
+/// Width may be zero: Chromium returns width-0 rectangles for a collapsed
+/// composition extent, so this must never test `right > left`. Zero or negative
+/// height is the unambiguous signal that the host had no bounds.
+pub fn caret_extent_is_usable(left: i32, top: i32, right: i32, bottom: i32) -> bool {
+    let _ = (left, right);
+    bottom > top
+}
+
 pub fn windows_rime_build_repair_required(user_data_dir: &Path) -> bool {
     if std::fs::read_to_string(user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER))
         .is_ok_and(|content| content == WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
@@ -4394,19 +4404,40 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_windows_rime_build_repair_marker, invalidate_active_windows_rime_build,
-        invalidate_rime_build_artifacts, mark_windows_rime_build_repair_complete,
-        merge_default_custom_content, merge_rime_lua_content, parse_rime_lua_requires,
-        parse_schema_dependencies, parse_schema_list, patch_android_auxiliary_dictionary,
-        patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
-        rime_log_dir, schema_install_state, windows_rime_build_repair_required, ReloadStamp,
-        ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
+        caret_extent_is_usable, clear_windows_rime_build_repair_marker,
+        invalidate_active_windows_rime_build, invalidate_rime_build_artifacts,
+        mark_windows_rime_build_repair_complete, merge_default_custom_content,
+        merge_rime_lua_content, parse_rime_lua_requires, parse_schema_dependencies,
+        parse_schema_list, patch_android_auxiliary_dictionary, patch_windows_lua_compatibility,
+        preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir, schema_install_state,
+        windows_rime_build_repair_required, ReloadStamp, ReloadStampWatcher,
+        RELOAD_STAMP_FILE_NAME,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn caret_extent_accepts_zero_width_collapsed_rect() {
+        assert!(caret_extent_is_usable(1010, 316, 1010, 336));
+    }
+
+    #[test]
+    fn caret_extent_rejects_zero_height() {
+        assert!(!caret_extent_is_usable(73, 59, 73, 59));
+    }
+
+    #[test]
+    fn caret_extent_rejects_all_zero() {
+        assert!(!caret_extent_is_usable(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn caret_extent_rejects_inverted() {
+        assert!(!caret_extent_is_usable(10, 40, 20, 20));
+    }
 
     #[test]
     fn reload_stamp_signature_tracks_rewrites() {

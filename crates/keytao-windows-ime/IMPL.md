@@ -258,6 +258,9 @@ stamp 的路径、签名格式和变化检测统一由 `keytao_core::ReloadStamp
 
 ## 发布门槛
 
+macOS 可用 `RIME_INCLUDE_DIR="$PWD/vendor/librime/windows-x64/include" RIME_LIB_DIR="$PWD/vendor/librime/windows-x64/lib" BINDGEN_EXTRA_CLANG_ARGS="-ffreestanding" cargo check -p keytao-windows-ime --target x86_64-pc-windows-msvc --tests` 交叉类型检查 Windows TSF 代码。
+该命令不链接或运行 DLL，不能替代 Windows 真机行为验收。
+
 - Windows x64 安装包必须同时通过 x86/x64/ARM64 目标、ARM64X forwarder、delay-load、静态 CRT、三个内嵌 icon resource、版本化 runtime staging 和 NSIS 架构选择检查。
 - 微软要求第三方 IME DLL 使用可信代码签名。当前脚本会验证结构和资源，但仓库没有可提交的私钥；正式公开发行必须在 CI 注入代码签名证书并对两个 TIP DLL 及安装包签名。未签名 alpha 只能用于受控测试，Windows 安全策略仍可能阻止加载。
 - `IMMERSIVESUPPORT` 只有在 AppContainer 下验证 Program Files shared data、可写 user data ACL/代理进程和真实候选输入后才能注册。

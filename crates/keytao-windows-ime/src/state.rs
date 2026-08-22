@@ -109,6 +109,9 @@ pub struct TsfState {
     /// Last caret position the host reported. Reused while the layout is not
     /// computed yet (`TF_E_NOLAYOUT`) so the panel never jumps to a corner.
     pub last_caret: Option<CaretPosition>,
+    pub caret_retry_attempts: u8,
+    pub caret_retry_mode_hint: bool,
+    pub ime_write_session_active: bool,
     layout_sink: Option<LayoutSinkRegistration>,
     compartment_sinks: Vec<CompartmentSinkRegistration>,
     /// Sinks on the focused context's `KEYBOARD_DISABLED` / `EMPTYCONTEXT`
@@ -265,6 +268,9 @@ impl TsfState {
             input_context_retry_after: None,
             key_context: None,
             last_caret: None,
+            caret_retry_attempts: 0,
+            caret_retry_mode_hint: false,
+            ime_write_session_active: false,
             layout_sink: None,
             compartment_sinks: Vec::new(),
             context_compartment_sinks: Vec::new(),
@@ -445,14 +451,17 @@ pub fn new_shared_state() -> SharedState {
     Rc::new(RefCell::new(TsfState::new()))
 }
 
-pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
-    let enabled = FILE_DIAGNOSTICS_ENABLED.get_or_init(|| {
+pub(crate) fn diagnostics_enabled() -> bool {
+    *FILE_DIAGNOSTICS_ENABLED.get_or_init(|| {
         cfg!(debug_assertions)
             || std::env::var("KEYTAO_WINDOWS_IME_DIAGNOSTICS")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
-    });
-    if !enabled {
+    })
+}
+
+pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
+    if !diagnostics_enabled() {
         return;
     }
 
@@ -938,9 +947,8 @@ pub(crate) fn update_ime_windows(
     shared_state: &SharedState,
     ime_state: &ImeState,
     document_mgr: Option<&ITfDocumentMgr>,
-    caret_x: i32,
-    caret_y: i32,
-    owner_hwnd: windows::Win32::Foundation::HWND,
+    caret: Option<CaretPosition>,
+    owner_hwnd: HWND,
     show_mode_hint: bool,
 ) {
     let (thread_mgr, allow_fallback_window) = {
@@ -961,16 +969,21 @@ pub(crate) fn update_ime_windows(
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
-            candidate_win.show(ime_state, caret_x, caret_y, owner_hwnd, &weak_state);
+            if let Some(caret) = caret {
+                candidate_win.show(ime_state, caret.x, caret.y, caret.owner_hwnd, &weak_state);
+            }
         } else {
             candidate_win.hide();
         }
-        if show_mode_hint {
+        if caret.is_none() && ((show && allow_candidate_window) || show_mode_hint) {
+            candidate_win.arm_caret_reprobe(owner_hwnd, &weak_state);
+        }
+        if let Some(caret) = caret.filter(|_| show_mode_hint) {
             mode_hint_win.show_mode_hint(
                 ime_state.ascii_mode,
-                caret_x,
-                caret_y,
-                owner_hwnd,
+                caret.x,
+                caret.y,
+                caret.owner_hwnd,
                 &weak_state,
             );
         }
@@ -1019,6 +1032,8 @@ fn take_active_composition(
         .map(|(composition, context)| (context, composition, st.client_id));
     st.ime_state = None;
     st.last_caret = None;
+    st.caret_retry_attempts = 0;
+    st.caret_retry_mode_hint = false;
     // The panel is about to be hidden, so no click can still be pending; the
     // stale context must not keep the host object alive.
     st.key_context = None;

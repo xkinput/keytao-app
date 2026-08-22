@@ -18,7 +18,7 @@ use windows::{
         Foundation::{BOOL, E_INVALIDARG, HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::Gdi::ClientToScreen,
         UI::TextServices::*,
-        UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowRect, GUITHREADINFO},
+        UI::WindowsAndMessaging::{GetGUIThreadInfo, GUITHREADINFO},
     },
 };
 
@@ -31,18 +31,15 @@ use crate::{
         vk_to_keysym, RIME_RELEASE_MASK,
     },
     state::{
-        apply_pending_session_reset, clear_input_after_composition_terminated,
-        clear_input_for_blocked_context, clear_layout_sink, fallback_focus_window,
-        hide_candidate_window, input_is_blocked, layout_sink_context, poll_engine_builds,
-        refresh_engine_for_focus, refresh_input_context, reset_input_for_focus_change,
-        retry_input_context_if_unknown, start_engine_warmup, start_reload_if_needed,
-        store_layout_sink, sync_input_policy, update_ime_windows, update_language_bar_mode,
-        CaretPosition, LayoutSinkRegistration, SharedState, WeakState,
+        append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
+        clear_input_for_blocked_context, clear_layout_sink, diagnostics_enabled,
+        fallback_focus_window, hide_candidate_window, input_is_blocked, layout_sink_context,
+        poll_engine_builds, refresh_engine_for_focus, refresh_input_context,
+        reset_input_for_focus_change, retry_input_context_if_unknown, start_engine_warmup,
+        start_reload_if_needed, store_layout_sink, sync_input_policy, update_ime_windows,
+        update_language_bar_mode, CaretPosition, LayoutSinkRegistration, SharedState, WeakState,
     },
 };
-
-#[cfg(debug_assertions)]
-use crate::state::append_diagnostic;
 
 #[cfg(debug_assertions)]
 static KEY_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -219,7 +216,7 @@ struct CaretProbe {
 }
 
 /// Get caret screen position and the owner HWND from the current context view.
-fn probe_caret(ec: u32, context: &ITfContext) -> CaretProbe {
+fn probe_caret(ec: u32, context: &ITfContext, composition: Option<&ITfComposition>) -> CaretProbe {
     unsafe {
         let Ok(view) = context.GetActiveView() else {
             return CaretProbe {
@@ -233,46 +230,131 @@ fn probe_caret(ec: u32, context: &ITfContext) -> CaretProbe {
             .filter(|hwnd| !hwnd.0.is_null())
             .unwrap_or_else(fallback_focus_window);
 
+        let log_probe = |kind: &str,
+                         hr: u32,
+                         rect: &RECT,
+                         clipped: i32,
+                         usable: bool,
+                         shift: Option<(u32, i32)>| {
+            if !diagnostics_enabled() {
+                return;
+            }
+            if let Some((shift_hr, shifted)) = shift {
+                append_diagnostic(format!(
+                    "caret probe range={kind} hr=0x{hr:08X} rect=({},{},{},{}) clipped={clipped} usable={} ctx=0x{:x} owner=0x{:x} shift_hr=0x{shift_hr:08X} shifted={shifted}",
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    u8::from(usable),
+                    context.as_raw() as usize,
+                    owner_hwnd.0 as usize,
+                ));
+            } else if kind == "composition" {
+                append_diagnostic(format!(
+                    "caret probe range={kind} hr=0x{hr:08X} rect=({},{},{},{}) clipped={clipped} usable={} ctx=0x{:x} owner=0x{:x} shift_hr=unissued shifted=0",
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    u8::from(usable),
+                    context.as_raw() as usize,
+                    owner_hwnd.0 as usize,
+                ));
+            } else {
+                append_diagnostic(format!(
+                    "caret probe range={kind} hr=0x{hr:08X} rect=({},{},{},{}) clipped={clipped} usable={} ctx=0x{:x} owner=0x{:x}",
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    u8::from(usable),
+                    context.as_raw() as usize,
+                    owner_hwnd.0 as usize,
+                ));
+            }
+        };
+
+        let try_range = |kind: &str, range: &ITfRange, shift: Option<(u32, i32)>| {
+            let mut rect = RECT::default();
+            let mut clipped = BOOL::default();
+            let result = view.GetTextExt(ec, range, &mut rect, &mut clipped);
+            let hr = result
+                .as_ref()
+                .err()
+                .map_or(0, |error| error.code().0 as u32);
+            let usable = result.is_ok()
+                && keytao_core::caret_extent_is_usable(
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                );
+            log_probe(kind, hr, &rect, clipped.0, usable, shift);
+            usable.then_some((rect.left, rect.bottom))
+        };
+
         let mut selections = [TF_SELECTION::default()];
         let mut count: u32 = 0;
         let selection_result =
             context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selections, &mut count);
         let range = take_selection_range(&mut selections[0]);
-        if selection_result.is_err() {
-            return CaretProbe {
-                owner_hwnd,
-                position: None,
-            };
+        if selection_result.is_ok() {
+            if let Some(position) = range
+                .as_ref()
+                .and_then(|range| try_range("selection", range, None))
+            {
+                return CaretProbe {
+                    owner_hwnd,
+                    position: Some(position),
+                };
+            }
         }
-        let Some(range) = range else {
-            return CaretProbe {
-                owner_hwnd,
-                position: None,
-            };
-        };
 
-        let mut rect = RECT::default();
-        let mut clipped = BOOL::default();
-        // TF_E_NOLAYOUT means "ask again after OnLayoutChange", never "put the
-        // panel in the corner of the primary monitor".
-        if view
-            .GetTextExt(ec, &range, &mut rect, &mut clipped)
-            .is_err()
-        {
-            return CaretProbe {
-                owner_hwnd,
-                position: None,
-            };
+        if let Some(composition) = composition {
+            let range = (|| -> Result<ITfRange> {
+                let range = composition.GetRange()?;
+                let range = range.Clone()?;
+                range.Collapse(ec, TF_ANCHOR_START)?;
+                Ok(range)
+            })();
+            match range {
+                Ok(range) => {
+                    let mut shifted = 0i32;
+                    let shift_result = range.ShiftEnd(ec, 1, &mut shifted, std::ptr::null());
+                    let shift_hr = shift_result
+                        .as_ref()
+                        .err()
+                        .map_or(0, |error| error.code().0 as u32);
+                    if let Some(position) =
+                        try_range("composition", &range, Some((shift_hr, shifted)))
+                    {
+                        return CaretProbe {
+                            owner_hwnd,
+                            position: Some(position),
+                        };
+                    }
+                }
+                Err(error) => log_probe(
+                    "composition",
+                    error.code().0 as u32,
+                    &RECT::default(),
+                    0,
+                    false,
+                    None,
+                ),
+            }
         }
+
         CaretProbe {
             owner_hwnd,
-            position: Some((rect.left, rect.bottom)),
+            position: None,
         }
     }
 }
 
 /// Turn a probe into a position to draw at, remembering the last good caret.
-fn resolve_caret(shared_state: &SharedState, probe: CaretProbe) -> CaretPosition {
+fn resolve_caret(shared_state: &SharedState, probe: CaretProbe) -> Option<CaretPosition> {
     if let Some((x, y)) = probe.position {
         let caret = CaretPosition {
             x,
@@ -280,21 +362,41 @@ fn resolve_caret(shared_state: &SharedState, probe: CaretProbe) -> CaretPosition
             owner_hwnd: probe.owner_hwnd,
         };
         shared_state.borrow_mut().last_caret = Some(caret);
-        return caret;
+        if diagnostics_enabled() {
+            append_diagnostic(format!("caret resolved via=probe x={x} y={y}"));
+        }
+        return Some(caret);
     }
     let cached = shared_state.borrow().last_caret;
     if let Some(mut caret) = cached {
         if !probe.owner_hwnd.0.is_null() {
             caret.owner_hwnd = probe.owner_hwnd;
         }
-        return caret;
+        if diagnostics_enabled() {
+            append_diagnostic(format!(
+                "caret resolved via=cache x={} y={}",
+                caret.x, caret.y
+            ));
+        }
+        return Some(caret);
     }
-    fallback_caret(probe.owner_hwnd)
+    if let Some(caret) = system_caret(probe.owner_hwnd) {
+        if diagnostics_enabled() {
+            append_diagnostic(format!(
+                "caret resolved via=system x={} y={}",
+                caret.x, caret.y
+            ));
+        }
+        return Some(caret);
+    }
+    if diagnostics_enabled() {
+        append_diagnostic("caret resolved via=none x=0 y=0");
+    }
+    None
 }
 
-/// Used before the host ever reported a caret: the system caret of the
-/// foreground thread, else the top-left corner of the owner window.
-fn fallback_caret(owner_hwnd: HWND) -> CaretPosition {
+/// Use a validated system caret when the host cannot report a text extent.
+fn system_caret(owner_hwnd: HWND) -> Option<CaretPosition> {
     let owner_hwnd = if owner_hwnd.0.is_null() {
         fallback_focus_window()
     } else {
@@ -305,33 +407,24 @@ fn fallback_caret(owner_hwnd: HWND) -> CaretPosition {
             cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
         };
-        if GetGUIThreadInfo(0, &mut info).is_ok() && !info.hwndCaret.0.is_null() {
+        if GetGUIThreadInfo(0, &mut info).is_ok()
+            && !info.hwndCaret.0.is_null()
+            && info.rcCaret.bottom > info.rcCaret.top
+        {
             let mut point = POINT {
                 x: info.rcCaret.left,
                 y: info.rcCaret.bottom,
             };
             if ClientToScreen(info.hwndCaret, &mut point).as_bool() {
-                return CaretPosition {
+                return Some(CaretPosition {
                     x: point.x,
                     y: point.y,
                     owner_hwnd,
-                };
+                });
             }
         }
-        let mut rect = RECT::default();
-        if !owner_hwnd.0.is_null() && GetWindowRect(owner_hwnd, &mut rect).is_ok() {
-            return CaretPosition {
-                x: rect.left,
-                y: rect.top,
-                owner_hwnd,
-            };
-        }
     }
-    CaretPosition {
-        x: 0,
-        y: 0,
-        owner_hwnd,
-    }
+    None
 }
 
 fn apply_ime_state(
@@ -352,7 +445,11 @@ fn apply_ime_state(
     };
     let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
     let display_attribute_atom = shared_state.borrow().display_attribute_atom;
+    if has_visible_state(&ime_state) {
+        ensure_layout_sink(&state_arc, context);
+    }
 
+    state_arc.borrow_mut().ime_write_session_active = true;
     let session_result = with_write_session(context, client_id, move |ec, ctx| {
         let committed = ime_state_clone
             .committed
@@ -420,7 +517,7 @@ fn apply_ime_state(
             return Err(error);
         }
 
-        let caret = probe_caret(ec, ctx);
+        let caret = probe_caret(ec, ctx, composition.as_ref());
         let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
         let mode_changed = {
             let mut st = state_arc_for_session.borrow_mut();
@@ -440,6 +537,7 @@ fn apply_ime_state(
 
         Ok(())
     });
+    state_arc.borrow_mut().ime_write_session_active = false;
     if let Err(error) = session_result {
         reset_input_for_focus_change(&state_arc);
         append_key_diagnostic!("TSF edit session failed: {error}");
@@ -449,10 +547,14 @@ fn apply_ime_state(
     if let Some((ime_state, probe, document_mgr, show_mode_hint)) =
         window_update.borrow_mut().take()
     {
+        let owner_hwnd = probe.owner_hwnd;
         let caret = resolve_caret(&state_arc, probe);
-        if has_visible_state(&ime_state) {
-            ensure_layout_sink(&state_arc, context);
-        } else {
+        {
+            let mut st = state_arc.borrow_mut();
+            st.caret_retry_attempts = 0;
+            st.caret_retry_mode_hint = show_mode_hint && caret.is_none();
+        }
+        if !has_visible_state(&ime_state) {
             clear_layout_sink(&state_arc);
         }
         update_language_bar_mode(&state_arc, ime_state.ascii_mode);
@@ -460,9 +562,8 @@ fn apply_ime_state(
             &state_arc,
             &ime_state,
             document_mgr.as_ref(),
-            caret.x,
-            caret.y,
-            caret.owner_hwnd,
+            caret,
+            owner_hwnd,
             show_mode_hint,
         );
     }
@@ -474,46 +575,99 @@ fn apply_ime_state(
 ///
 /// Hosts that answered `TF_E_NOLAYOUT` earlier call `OnLayoutChange` once the
 /// text is laid out; scrolling and window moves report the same way.
-fn reposition_ime_windows(shared_state: &SharedState, context: &ITfContext) {
-    let (client_id, ime_state) = {
+fn reposition_ime_windows(shared_state: &SharedState, context: &ITfContext, show_mode_hint: bool) {
+    if shared_state.borrow().ime_write_session_active {
+        return;
+    }
+    let (client_id, ime_state, composition) = {
         let st = shared_state.borrow();
-        (st.client_id, st.ime_state.clone())
+        (st.client_id, st.ime_state.clone(), st.composition.clone())
     };
     let Some(ime_state) = ime_state else {
         return;
     };
-    if client_id == 0 || !has_visible_state(&ime_state) {
+    if client_id == 0 || (!has_visible_state(&ime_state) && !show_mode_hint) {
         return;
     }
+    let owner_hwnd = unsafe {
+        context
+            .GetActiveView()
+            .ok()
+            .and_then(|view| view.GetWnd().ok())
+            .filter(|hwnd| !hwnd.0.is_null())
+            .unwrap_or_else(fallback_focus_window)
+    };
+    let document_mgr = unsafe { context.GetDocumentMgr().ok() };
 
     let probe = Rc::new(RefCell::new(None));
     let probe_for_session = Rc::clone(&probe);
-    if with_read_session(context, client_id, move |ec, ctx| {
-        *probe_for_session.borrow_mut() = Some(probe_caret(ec, ctx));
+    let session_result = with_read_session(context, client_id, move |ec, ctx| {
+        *probe_for_session.borrow_mut() = Some(probe_caret(ec, ctx, composition.as_ref()));
         Ok(())
-    })
-    .is_err()
-    {
-        return;
-    }
-    let Some(probe) = probe.borrow_mut().take() else {
-        return;
+    });
+    let session_probe = probe.borrow_mut().take();
+    let probe = match session_result {
+        Ok(()) => session_probe.unwrap_or(CaretProbe {
+            owner_hwnd,
+            position: None,
+        }),
+        Err(error) => {
+            if diagnostics_enabled() {
+                append_diagnostic(format!(
+                    "reposition read session hr=0x{:08X}",
+                    error.code().0 as u32
+                ));
+            }
+            CaretProbe {
+                owner_hwnd,
+                position: None,
+            }
+        }
     };
-    if probe.position.is_none() {
-        return;
-    }
 
+    let owner_hwnd = probe.owner_hwnd;
     let caret = resolve_caret(shared_state, probe);
-    let document_mgr = unsafe { context.GetDocumentMgr().ok() };
+    if caret.is_some() {
+        let mut st = shared_state.borrow_mut();
+        st.caret_retry_attempts = 0;
+        if show_mode_hint {
+            st.caret_retry_mode_hint = false;
+        }
+    }
     update_ime_windows(
         shared_state,
         &ime_state,
         document_mgr.as_ref(),
-        caret.x,
-        caret.y,
-        caret.owner_hwnd,
-        false,
+        caret,
+        owner_hwnd,
+        show_mode_hint,
     );
+}
+
+pub(crate) fn retry_caret_probe(shared_state: &SharedState) {
+    let (attempt, context, show_mode_hint) = {
+        let mut st = shared_state.borrow_mut();
+        st.caret_retry_attempts = st.caret_retry_attempts.saturating_add(1);
+        (
+            st.caret_retry_attempts,
+            st.composition_context
+                .clone()
+                .or_else(|| st.key_context.clone()),
+            st.caret_retry_mode_hint,
+        )
+    };
+    if attempt > 6 {
+        if diagnostics_enabled() {
+            append_diagnostic(format!("caret retry attempt={attempt} gave_up"));
+        }
+        return;
+    }
+    if diagnostics_enabled() {
+        append_diagnostic(format!("caret retry attempt={attempt} fired"));
+    }
+    if let Some(context) = context {
+        reposition_ime_windows(shared_state, &context, show_mode_hint);
+    }
 }
 
 fn ensure_layout_sink(shared_state: &SharedState, context: &ITfContext) {
@@ -959,6 +1113,13 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
         lcode: TfLayoutCode,
         _pview: Option<&ITfContextView>,
     ) -> Result<()> {
+        if diagnostics_enabled() {
+            append_diagnostic(format!(
+                "layout change lcode={} ctx=0x{:x}",
+                lcode.0,
+                pic.map_or(0, |context| context.as_raw() as usize)
+            ));
+        }
         if lcode == TF_LC_DESTROY {
             return Ok(());
         }
@@ -968,7 +1129,7 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
         let Some(context) = pic else {
             return Ok(());
         };
-        reposition_ime_windows(&state, context);
+        reposition_ime_windows(&state, context, false);
         Ok(())
     }
 }

@@ -10,7 +10,7 @@
 //! adds WS_EX_TRANSPARENT so it stays click-through.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     time::{Duration, Instant},
 };
 
@@ -47,11 +47,12 @@ use crate::{
     globals::DLL_INSTANCE,
     key_event_sink::{handle_panel_click, PanelClick},
     panel::{PanelHitAreas, PanelRenderer},
-    state::WeakState,
+    state::{append_diagnostic, diagnostics_enabled, WeakState},
 };
 
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
 const MODE_HINT_TIMER_ID: usize = 1;
+const CARET_RETRY_TIMER_ID: usize = 2;
 const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -143,6 +144,7 @@ fn popup_position_in(
 struct ClickTarget {
     state: WeakState,
     hit_areas: RefCell<PanelHitAreas>,
+    caret_reprobe_pending: Cell<bool>,
 }
 
 fn click_target<'a>(hwnd: HWND) -> Option<&'a ClickTarget> {
@@ -181,6 +183,16 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_TIMER if wparam.0 == CARET_RETRY_TIMER_ID => {
+            let _ = KillTimer(hwnd, CARET_RETRY_TIMER_ID);
+            if let Some(target) = click_target(hwnd) {
+                target.caret_reprobe_pending.set(false);
+                if let Some(state) = target.state.upgrade() {
+                    crate::key_event_sink::retry_caret_probe(&state);
+                }
+            }
+            return LRESULT(0);
+        }
         WM_TIMER if wparam.0 == MODE_HINT_TIMER_ID => {
             let _ = KillTimer(hwnd, MODE_HINT_TIMER_ID);
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -203,6 +215,7 @@ unsafe extern "system" fn wnd_proc(
             return LRESULT(0);
         }
         WM_NCDESTROY => {
+            let _ = KillTimer(hwnd, CARET_RETRY_TIMER_ID);
             let raw = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if raw != 0 {
                 drop(Box::from_raw(raw as *mut ClickTarget));
@@ -265,6 +278,7 @@ impl CandidateWindow {
                     let target = Box::new(ClickTarget {
                         state: state.clone(),
                         hit_areas: RefCell::new(PanelHitAreas::default()),
+                        caret_reprobe_pending: Cell::new(false),
                     });
                     unsafe {
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as isize);
@@ -365,6 +379,36 @@ impl CandidateWindow {
         Ok(hwnd)
     }
 
+    pub fn arm_caret_reprobe(&mut self, owner_hwnd: HWND, state: &WeakState) {
+        if self.hwnd.0.is_null() && !self.ensure_window(owner_hwnd, state) {
+            return;
+        }
+        let Some(target) = click_target(self.hwnd) else {
+            return;
+        };
+        if target.caret_reprobe_pending.get() {
+            return;
+        }
+        let Some(shared_state) = state.upgrade() else {
+            return;
+        };
+        let completed_attempts = shared_state.borrow().caret_retry_attempts;
+        if completed_attempts >= 6 {
+            if diagnostics_enabled() {
+                append_diagnostic(format!("caret retry attempt={completed_attempts} gave_up"));
+            }
+            return;
+        }
+        let attempt = completed_attempts + 1;
+        let timer_id = unsafe { SetTimer(self.hwnd, CARET_RETRY_TIMER_ID, 16, None) };
+        if timer_id != 0 {
+            target.caret_reprobe_pending.set(true);
+            if diagnostics_enabled() {
+                append_diagnostic(format!("caret retry attempt={attempt} armed"));
+            }
+        }
+    }
+
     /// Show/update the panel near caret position (screen coordinates).
     pub fn show(
         &mut self,
@@ -399,6 +443,12 @@ impl CandidateWindow {
         });
         let position =
             popup_position_in(work, caret_x, caret_y, w, h, (4.0 * scale).round() as i32);
+        if diagnostics_enabled() {
+            append_diagnostic(format!(
+                "panel show caret=({caret_x},{caret_y}) pos=({},{}) size={w}x{h}",
+                position.x, position.y
+            ));
+        }
 
         if let Some(target) = click_target(self.hwnd) {
             *target.hit_areas.borrow_mut() = rendered.hit_areas;
@@ -418,13 +468,21 @@ impl CandidateWindow {
     }
 
     pub fn hide(&mut self) {
-        if self.visible && !self.hwnd.0.is_null() {
+        if !self.hwnd.0.is_null() {
+            if let Some(target) = click_target(self.hwnd) {
+                target.caret_reprobe_pending.set(false);
+            }
             unsafe {
                 let _ = KillTimer(self.hwnd, MODE_HINT_TIMER_ID);
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
+                let _ = KillTimer(self.hwnd, CARET_RETRY_TIMER_ID);
+                if self.visible {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                }
             }
-            self.visible = false;
-            self.notify_ime_event(EVENT_OBJECT_IME_HIDE);
+            if self.visible {
+                self.visible = false;
+                self.notify_ime_event(EVENT_OBJECT_IME_HIDE);
+            }
         }
     }
 
