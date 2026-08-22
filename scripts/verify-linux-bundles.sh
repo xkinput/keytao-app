@@ -76,7 +76,7 @@ require_runtime_listing() {
     require_listing_match "$label" "$listing" '(^|/)runtime/lib/rime-plugins/librime-lua\.so'
     # ibus-daemon only keeps KeyTao in the input source list across restarts if
     # the component XML is installed; RegisterComponent alone is transient.
-    require_listing_match "$label" "$listing" '(^|/)usr/share/ibus/component/keytao\.xml$'
+    require_listing_match "$label" "$listing" '(^|[[:space:]]|/)usr/share/ibus/component/keytao\.xml$'
 }
 
 require_command dpkg-deb
