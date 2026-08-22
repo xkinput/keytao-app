@@ -281,7 +281,7 @@ impl CandidateWindow {
                         caret_reprobe_pending: Cell::new(false),
                     });
                     unsafe {
-                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as isize);
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as _);
                     }
                 }
                 self.hwnd = hwnd;
