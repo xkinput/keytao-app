@@ -35,7 +35,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val mainHandler = Handler(Looper.getMainLooper())
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private val clipboardHistory = mutableListOf<String>()
+    private data class ClipboardSnapshot(val text: String, val timestamp: Long?)
+    private var clipboardSuppression: ClipboardSnapshot? = null
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
+        // A clipboard change is a new user/system event even when it writes the
+        // same text again, so a deletion suppression cannot survive it.
+        clipboardSuppression = null
         rememberCurrentClipboard(suggest = true)
     }
     private var clipboardManager: ClipboardManager? = null
@@ -76,6 +81,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var unavailableMessage = preparingMessage
     private val backspaceRestoreStack = mutableListOf<String>()
     private val recentCommittedUnits = mutableListOf<String>()
+    private var lastCommittedText: String? = null
     private var restoreAllOnNextDirectionalRestore = false
     private var privacyMode = InputPrivacyMode()
     private var directInputEditor = false
@@ -165,6 +171,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false
         recentCommittedUnits.clear()
+        lastCommittedText = null
         keyboardView?.updateState(currentState)
         scheduleAvailabilityRefresh()
     }
@@ -185,6 +192,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onFinishInputView(finishingInput: Boolean) {
         unregisterClipboardListener()
         keyboardView?.clearRecentClipboardSuggestion()
+        keyboardView?.resetClipboardClearConfirmation()
         super.onFinishInputView(finishingInput)
     }
 
@@ -201,11 +209,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             privacyMode = nextPrivacy
             if (!nextPrivacy.allowsClipboard) {
                 clipboardHistory.clear()
+                clipboardSuppression = null
                 keyboardView?.clearRecentClipboardSuggestion()
             }
             if (!nextPrivacy.allowsTextRecall) {
                 backspaceRestoreStack.clear()
                 recentCommittedUnits.clear()
+                lastCommittedText = null
                 restoreAllOnNextDirectionalRestore = false
             }
         }
@@ -528,6 +538,22 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         rememberCurrentClipboard(suggest = false)
         callback(clipboardHistory.toList())
+    }
+
+    override fun onDeleteClipboardEntry(text: String) {
+        if (!privacyMode.allowsClipboard) return
+        // History is de-duplicated on insert, so text identity is stable while
+        // the asynchronously rendered panel index may already be stale.
+        clipboardHistory.remove(text)
+        currentClipboardSnapshot()?.takeIf { it.text == text }?.let { clipboardSuppression = it }
+        keyboardView?.clearRecentClipboardSuggestion()
+    }
+
+    override fun onClearClipboardHistory() {
+        if (!privacyMode.allowsClipboard) return
+        clipboardHistory.clear()
+        clipboardSuppression = currentClipboardSnapshot()
+        keyboardView?.clearRecentClipboardSuggestion()
     }
 
     /** Sensitive or digits-only editors never build a composition. */
@@ -875,10 +901,19 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             "tab" -> commitDirect("\t")
             "lineStart" -> moveToLineBoundary(start = true)
             "lineEnd" -> moveToLineBoundary(start = false)
+            "cursorLeft" -> moveCursor(KeyEvent.KEYCODE_DPAD_LEFT)
+            "cursorRight" -> moveCursor(KeyEvent.KEYCODE_DPAD_RIGHT)
+            "cursorUp" -> moveCursor(KeyEvent.KEYCODE_DPAD_UP)
+            "cursorDown" -> moveCursor(KeyEvent.KEYCODE_DPAD_DOWN)
+            "undo" -> performUndoRedo(redo = false)
+            "redo" -> performUndoRedo(redo = true)
+            "forwardDelete" -> forwardDelete()
+            "clearAll" -> clearAllText()
             "selectAll" -> selectAllText()
             "toggleSelection" -> toggleSelectionMode()
             "selectLeft" -> extendSelection(left = true)
             "selectRight" -> extendSelection(left = false)
+            "repeatCommit" -> lastCommittedText?.let { commitDirect(it) }
             "pasteText" -> value?.takeIf { it.isNotEmpty() }?.let {
                 keyboardView?.clearRecentClipboardSuggestion()
                 commitDirect(it)
@@ -931,6 +966,42 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun moveToLineBoundary(start: Boolean) {
         clearCompositionBeforeEdit()
         sendKeyStroke(if (start) KeyEvent.KEYCODE_MOVE_HOME else KeyEvent.KEYCODE_MOVE_END)
+        selectionModeActive = false
+    }
+
+    private fun moveCursor(keyCode: Int) {
+        clearCompositionBeforeEdit()
+        sendKeyStroke(keyCode, 0)
+        selectionModeActive = false
+    }
+
+    private fun forwardDelete() {
+        clearCompositionBeforeEdit()
+        sendKeyStroke(KeyEvent.KEYCODE_FORWARD_DEL)
+        selectionModeActive = false
+    }
+
+    private fun performUndoRedo(redo: Boolean) {
+        clearCompositionBeforeEdit()
+        performContextAction(if (redo) android.R.id.redo else android.R.id.undo) {
+            val metaState = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON or (
+                if (redo) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
+            )
+            sendKeyStroke(KeyEvent.KEYCODE_Z, metaState)
+        }
+        selectionModeActive = false
+    }
+
+    private fun clearAllText() {
+        clearCompositionBeforeEdit()
+        val connection = currentInputConnection ?: return
+        performContextAction(android.R.id.selectAll) {
+            sendKeyStroke(KeyEvent.KEYCODE_A, KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON)
+        }
+        val selected = runCatching { connection.getSelectedText(0) }.getOrNull()
+        if (!selected.isNullOrEmpty()) {
+            sendKeyStroke(KeyEvent.KEYCODE_DEL)
+        }
         selectionModeActive = false
     }
 
@@ -992,14 +1063,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun currentClipboardText(): String? {
+        return currentClipboardSnapshot()?.text
+    }
+
+    private fun currentClipboardSnapshot(): ClipboardSnapshot? {
         if (!privacyMode.allowsClipboard) return null
         val clip = clipboardManager?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
         if (isSensitiveClip(clip.description)) return null
-        return clip.getItemAt(0)
+        val text = clip.getItemAt(0)
             ?.coerceToText(this)
             ?.toString()
             ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            clip.description?.timestamp
+        } else {
+            null
+        }
+        return ClipboardSnapshot(text, timestamp)
     }
 
     /**
@@ -1013,12 +1095,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun setClipboardText(text: String) {
+        // Copy/cut through KeyTao is an explicit new clipboard write.
+        clipboardSuppression = null
         clipboardManager?.setPrimaryClip(ClipData.newPlainText("KeyTao", text))
         rememberClipboardText(text, suggest = false)
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
-        currentClipboardText()?.let { rememberClipboardText(it, suggest) }
+        val snapshot = currentClipboardSnapshot()
+        clipboardSuppression?.let { suppressed ->
+            val sameClipboardWrite = snapshot?.text == suppressed.text &&
+                (suppressed.timestamp == null || snapshot.timestamp == suppressed.timestamp)
+            if (sameClipboardWrite) return
+            clipboardSuppression = null
+        }
+        snapshot?.text?.let { rememberClipboardText(it, suggest) }
     }
 
     private fun rememberClipboardText(text: String, suggest: Boolean) {
@@ -1114,6 +1205,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         connection.beginBatchEdit()
         connection.commitText(text, 1)
         rememberCommittedText(text)
+        lastCommittedText = text.takeIf { it.isNotEmpty() && privacyMode.allowsTextRecall }
         composing = false
         selectionModeActive = false
         connection.endBatchEdit()

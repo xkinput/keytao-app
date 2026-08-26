@@ -16,6 +16,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
+import android.text.TextPaint
 import android.util.AttributeSet
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
@@ -44,6 +46,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onCandidate(index: Int, global: Boolean)
         fun onRequestExpandCandidates(callback: (List<KeytaoCandidate>) -> Unit)
         fun onRequestClipboardHistory(callback: (List<String>) -> Unit)
+        fun onDeleteClipboardEntry(text: String)
+        fun onClearClipboardHistory()
     }
 
     private data class KeyRect(val spec: KeySpec, val rect: RectF, val sticky: Boolean = false)
@@ -66,6 +70,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val command: KeyCommand? = null,
         val label: String = "",
     )
+    private data class ClipboardDeleteRect(val text: String, val rect: RectF)
     private data class CandidateDrawItem(
         val index: Int,
         val label: String,
@@ -74,6 +79,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val selected: Boolean = false,
         val global: Boolean = false,
         val command: KeyCommand? = null,
+        val clipboardText: String? = null,
     )
     private data class ToolbarAction(
         val label: String,
@@ -94,7 +100,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, ONE_HANDED, FLOATING, BACK, SETTINGS }
     private enum class ShiftState { OFF, ONCE, LOCKED }
-    private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD, EMOJI }
+    private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD }
 
     var listener: Listener? = null
 
@@ -115,6 +121,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var keyRects: List<KeyRect> = emptyList()
     private var candidateRects: List<CandidateRect> = emptyList()
     private var expandedCandidateRects: List<CandidateRect> = emptyList()
+    private var clipboardDeleteRects: List<ClipboardDeleteRect> = emptyList()
     private var expandedCandidates: List<KeytaoCandidate> = emptyList()
     private var visibleCandidateGlobalIndexes: Set<Int> = emptySet()
     private var toolbarRects: List<ToolbarRect> = emptyList()
@@ -132,6 +139,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var expandedCandidatesLoading = false
     private var clipboardItemsLoading = false
     private var clipboardItems: List<String> = emptyList()
+    private var clipboardClearConfirmationPending = false
     private var recentClipboardSuggestion: String? = null
     private var expandedCandidateScrollY = 0f
     private var expandedCandidateContentHeight = 0f
@@ -169,6 +177,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var primaryKeyPointerId: Int? = null
     private var repeatingPointerId: Int? = null
     private var pressedExpandedCandidate: CandidateRect? = null
+    private var pressedClipboardDelete: ClipboardDeleteRect? = null
     private var pressedToolbar: ToolbarRect? = null
     private var toolbarTouchActive = false
     private var downX = 0f
@@ -215,7 +224,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }.getOrNull()
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
     }
 
@@ -375,6 +384,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun resetClipboardClearConfirmation() {
+        if (!clipboardClearConfirmationPending) return
+        clipboardClearConfirmationPending = false
+        invalidate()
+    }
+
     fun setKeyboardLayer(value: String?) {
         val nextLayer = config.normalizedLayer(value)
         val changed = nextLayer != keyboardLayer || candidatePanelExpanded
@@ -382,6 +397,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = FunctionPanelMode.HOME
+        clipboardClearConfirmationPending = false
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
@@ -434,6 +450,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         keyRects = emptyList()
         candidateRects = emptyList()
         expandedCandidateRects = emptyList()
+        clipboardDeleteRects = emptyList()
         toolbarRects = emptyList()
         candidateExpandRect = null
         drawBackground(canvas)
@@ -481,7 +498,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(keyRects.size).append('|')
             append(candidateRects.size).append('|')
             append(expandedCandidateRects.size).append('|')
+            append(clipboardDeleteRects.size).append('|')
             append(toolbarRects.size).append('|')
+            append(clipboardClearConfirmationPending).append('|')
             append(candidateExpandRect != null).append('|')
             append(candidateSignature)
         }
@@ -513,6 +532,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     candidate.label.ifBlank { "候选 ${candidate.index + 1}" },
                     candidate.rect,
                 ) { listener?.onCandidate(candidate.index, candidate.global) }
+            )
+        }
+        clipboardDeleteRects.forEachIndexed { index, delete ->
+            targets.add(
+                AccessibilityTarget(
+                    accessibilityClipboardDeleteNodeBase + index,
+                    "删除剪贴板历史：${delete.text}",
+                    delete.rect,
+                ) { deleteClipboardEntry(delete.text) }
             )
         }
         expandedCandidateRects.forEachIndexed { index, candidate ->
@@ -640,7 +668,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     event.y >= keyboardScrollViewportTop &&
                     event.y < keyboardScrollViewportBottom
                 stopLongPressAndRepeat()
-                pressedExpandedCandidate = if (expandedTouchActive) findExpandedCandidate(event.x, event.y) else null
+                pressedClipboardDelete = if (expandedTouchActive) findClipboardDelete(event.x, event.y) else null
+                pressedExpandedCandidate = if (expandedTouchActive && pressedClipboardDelete == null) {
+                    findExpandedCandidate(event.x, event.y)
+                } else {
+                    null
+                }
                 pressedKey = null
                 if (!candidateTouchActive && !toolbarTouchActive && !candidateExpandPressed && !expandedTouchActive) {
                     findKey(event.x, event.y)?.let { key ->
@@ -696,6 +729,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     if (!expandedDragging && abs(deltaY) > touchSlop) {
                         expandedDragging = true
                         pressedExpandedCandidate = null
+                        pressedClipboardDelete = null
                     }
                     if (expandedDragging) {
                         expandedCandidateScrollY = (expandedDownScrollY - deltaY).coerceIn(0f, maxExpandedCandidateScroll())
@@ -766,9 +800,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
                 if (expandedTouchActive) {
                     val candidate = pressedExpandedCandidate
+                    val clipboardDelete = pressedClipboardDelete
                     expandedTouchActive = false
                     pressedExpandedCandidate = null
-                    if (!expandedDragging && candidate != null && candidate.rect.contains(event.x, event.y)) {
+                    pressedClipboardDelete = null
+                    if (!expandedDragging && clipboardDelete != null && clipboardDelete.rect.contains(event.x, event.y)) {
+                        deleteClipboardEntry(clipboardDelete.text)
+                    } else if (!expandedDragging && candidate != null && candidate.rect.contains(event.x, event.y)) {
                         val command = candidate.command
                         if (command != null) {
                             handlePanelCommand(command)
@@ -972,7 +1010,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         } else {
             keyBackgroundColor()
         }
-        canvas.drawRoundRect(rect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+        canvas.drawRoundRect(rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
 
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(theme.fontSizeSp)
@@ -999,10 +1037,21 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val gap = dp(7f)
         val left = gap * 1.5f
         val right = width - left
-        val rowHeight = dp(36f)
+        val columns = panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)
+        val rowHeight = dp(
+            when (columns) {
+                4 -> 52f
+                1 -> config.clipboardRowHeightDp
+                else -> 36f
+            }
+        )
+        val cellWidth = columns?.let { columnCount ->
+            (right - left - gap * (columnCount - 1)) / columnCount
+        }
         val visibleRect = RectF(0f, top, width.toFloat(), bottom)
         val items = expandedCandidateItems()
         val nextRects = mutableListOf<CandidateRect>()
+        val nextClipboardDeleteRects = mutableListOf<ClipboardDeleteRect>()
 
         drawContentLayer(canvas, top) {
             paint.style = Paint.Style.FILL
@@ -1033,21 +1082,45 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
                 canvas.drawText(message, width / 2f, top + panelHeight / 2f + textBaselineOffset(textPaint), textPaint)
             }
-            for (item in items) {
-                val chipWidth = candidateWidth(item)
-                    .coerceAtLeast(dp(56f))
-                    .coerceAtMost(right - left)
-                if (x + chipWidth > right && x > left) {
-                    x = left
-                    y += rowHeight + gap
+            for ((index, item) in items.withIndex()) {
+                val chipWidth: Float
+                if (columns != null && cellWidth != null) {
+                    val column = index % columns
+                    val row = index / columns
+                    x = left + column * (cellWidth + gap)
+                    y = top + gap + row * (rowHeight + gap) - expandedCandidateScrollY
+                    chipWidth = cellWidth
+                } else {
+                    chipWidth = candidateWidth(item)
+                        .coerceAtLeast(dp(56f))
+                        .coerceAtMost(right - left)
+                    if (x + chipWidth > right && x > left) {
+                        x = left
+                        y += rowHeight + gap
+                    }
                 }
                 val rect = RectF(x, y, x + chipWidth, y + rowHeight)
                 if (rect.bottom >= top && rect.top <= bottom) {
                     drawCandidateOption(canvas, item, rect)
-                    nextRects.add(CandidateRect(item.index, rect, item.global, item.command, item.text))
+                    val hitRect = if (item.clipboardText != null) {
+                        RectF(rect.left, rect.top, rect.right - dp(config.clipboardDeleteHitWidthDp), rect.bottom)
+                    } else {
+                        rect
+                    }
+                    nextRects.add(CandidateRect(item.index, hitRect, item.global, item.command, item.text))
+                    item.clipboardText?.let { clipboardText ->
+                        nextClipboardDeleteRects.add(
+                            ClipboardDeleteRect(
+                                clipboardText,
+                                RectF(hitRect.right, rect.top, rect.right, rect.bottom),
+                            )
+                        )
+                    }
                 }
                 contentBottom = max(contentBottom, rect.bottom + expandedCandidateScrollY)
-                x = rect.right + gap
+                if (columns == null) {
+                    x = rect.right + gap
+                }
             }
             canvas.restore()
 
@@ -1055,7 +1128,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
 
         expandedCandidateRects = nextRects
+        clipboardDeleteRects = nextClipboardDeleteRects
         coerceExpandedCandidateScroll()
+    }
+
+    private fun panelColumns(mode: FunctionPanelMode): Int? {
+        return when (mode) {
+            FunctionPanelMode.HOME, FunctionPanelMode.SELECTION -> 4
+            FunctionPanelMode.CLIPBOARD -> 1
+            FunctionPanelMode.RIME -> null
+        }
     }
 
     private fun expandedCandidateItems(): List<CandidateDrawItem> {
@@ -1068,7 +1150,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 FunctionPanelMode.HOME -> functionHomeItems()
                 FunctionPanelMode.SELECTION -> selectionPanelItems()
                 FunctionPanelMode.CLIPBOARD -> clipboardPanelItems()
-                FunctionPanelMode.EMOJI -> emojiPanelItems()
                 FunctionPanelMode.RIME -> rimePanelItems()
             }
         } else {
@@ -1103,6 +1184,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(functionPanelActive)
             append('|')
             append(functionPanelMode)
+            append('|')
+            append(panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME) ?: "flow")
             append('|')
             append(candidateSignature)
             append('|')
@@ -1150,6 +1233,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun functionHomeItems(): List<CandidateDrawItem> {
         val items = mutableListOf(
             PanelItem("Rime", "方案/开关", KeyCommand.panel("rime")),
+            PanelItem("编辑", "方向/编辑", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "editor")),
+            PanelItem("符号", "更多符号", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_marks")),
+            PanelItem("Emoji", "分类表情", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_emoji_face")),
             PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
             PanelItem("Tab", "输入制表符", KeyCommand.edit("tab")),
             PanelItem("行首", "移动光标", KeyCommand.edit("lineStart")),
@@ -1180,29 +1266,16 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     )
 
     private fun clipboardPanelItems(): List<CandidateDrawItem> {
-        val actions = mutableListOf(
-            PanelItem("刷新", "读取系统剪贴板", KeyCommand.panel("clipboard")),
-            PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
-        )
-        clipboardItems.forEachIndexed { index, text ->
-            actions.add(
-                PanelItem(
-                    "剪贴 ${index + 1}",
-                    text.take(32),
-                    KeyCommand.directInput(text),
-                )
+        return clipboardItems.mapIndexed { index, text ->
+            val previewEnd = text.offsetByCodePoints(0, minOf(120, text.codePointCount(0, text.length)))
+            CandidateDrawItem(
+                index = -1000 - index,
+                label = "剪贴 ${index + 1}",
+                text = text.substring(0, previewEnd),
+                command = KeyCommand.directInput(text),
+                clipboardText = text,
             )
         }
-        return panelItems(*actions.toTypedArray())
-    }
-
-    private fun emojiPanelItems(): List<CandidateDrawItem> = emojiChoices.mapIndexed { index, emoji ->
-        CandidateDrawItem(
-            index = -4000 - index,
-            label = "",
-            text = emoji,
-            command = KeyCommand.directInput(emoji),
-        )
     }
 
     private fun panelItems(vararg items: PanelItem): List<CandidateDrawItem> {
@@ -1256,6 +1329,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun candidateCommentSizeSp(): Float = min(theme.commentSizeSp - 1f, 12f).coerceAtLeast(10f)
 
     private fun keyLabelSizeSp(label: String): Float {
+        if (keyboardLayer.isSymbolLayer() &&
+            !containsCjk(label) &&
+            label.codePointCount(0, label.length) <= 2
+        ) {
+            return max(theme.fontSizeSp, 22f)
+        }
         if (label.length > 2 || containsCjk(label)) {
             return min(min(theme.labelSizeSp, theme.fontSizeSp - 4f), 16f).coerceAtLeast(12f)
         }
@@ -1281,6 +1360,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun candidateInlineGapDp(): Float = min(theme.candidateInlineGapDp, 4f).coerceAtLeast(2f)
 
     private fun candidateCornerRadiusDp(): Float = min(theme.keyCornerRadiusDp, 8f).coerceAtLeast(6f)
+
+    private fun keyCornerRadiusDp(): Float = min(theme.keyCornerRadiusDp + 1f, 10f).coerceAtLeast(7f)
 
     private fun drawCandidateOption(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
         val radius = dp(candidateCornerRadiusDp())
@@ -1311,6 +1392,62 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawRoundRect(rect, radius, radius, paint)
         }
 
+        when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
+            4 -> drawCandidateGridCell(canvas, item, rect)
+            1 -> drawClipboardCandidateRow(canvas, item, rect)
+            else -> drawInlineCandidateOption(canvas, item, rect)
+        }
+    }
+
+    private fun drawCandidateGridCell(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val maxWidth = (rect.width() - dp(12f)).coerceAtLeast(0f)
+        val labelY = rect.centerY() - dp(10f)
+        val captionY = rect.centerY() + dp(10f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(candidateTextSizeSp())
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(label, rect.centerX(), labelY + textBaselineOffset(textPaint), textPaint)
+
+        val caption = listOfNotNull(item.text.takeIf { it.isNotBlank() }, item.comment?.takeIf { it.isNotBlank() })
+            .joinToString(" ")
+        textPaint.textSize = sp(candidateCommentSizeSp())
+        textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
+        val ellipsizedCaption = TextUtils.ellipsize(caption, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(ellipsizedCaption, rect.centerX(), captionY + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawClipboardCandidateRow(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val padding = dp(candidatePaddingXDp())
+        val inlineGap = dp(candidateInlineGapDp())
+        val deleteWidth = dp(config.clipboardDeleteHitWidthDp)
+        val deleteLeft = rect.right - deleteWidth
+        val centerY = rect.centerY()
+        var textX = rect.left + padding
+        textPaint.textAlign = Paint.Align.LEFT
+        if (item.label.isNotBlank()) {
+            textPaint.textSize = sp(candidateLabelSizeSp())
+            textPaint.color = if (item.selected) theme.selectedLabelColor.toArgb() else theme.labelColor.toArgb()
+            canvas.drawText(item.label, textX, centerY + textBaselineOffset(textPaint), textPaint)
+            textX += textPaint.measureText(item.label) + inlineGap
+        }
+        textPaint.textSize = sp(candidateTextSizeSp())
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val maxWidth = (deleteLeft - padding - textX).coerceAtLeast(0f)
+        val preview = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(preview, textX, centerY + textBaselineOffset(textPaint), textPaint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(1f, dp(0.7f))
+        paint.color = theme.candidateBorderColor.toArgb()
+        canvas.drawLine(deleteLeft, rect.top + dp(7f), deleteLeft, rect.bottom - dp(7f), paint)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(18f)
+        textPaint.color = theme.commentColor.toArgb()
+        canvas.drawText("✕", deleteLeft + deleteWidth / 2f, centerY + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawInlineCandidateOption(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
         textPaint.textAlign = Paint.Align.LEFT
         var textX = rect.left + dp(candidatePaddingXDp())
         val inlineGap = dp(candidateInlineGapDp())
@@ -1427,7 +1564,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         drawSurfaceShadow(canvas, item.rect, pressed)
         paint.style = Paint.Style.FILL
         paint.color = toolbarBackgroundColor(item, pressed, forceAccent = true)
-        canvas.drawRoundRect(item.rect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+        canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
 
         val padding = dp(13f)
         val inlineGap = dp(8f)
@@ -1484,8 +1621,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val chipHeight = minOf(dp(34f), barHeight - dp(12f))
         val top = (barHeight - chipHeight) / 2f
         val backAction = ToolbarAction("返回", KeyCommand.panel("close"), icon = ToolbarIcon.BACK)
+        val pasteAction = ToolbarAction("粘贴", KeyCommand.edit("paste"))
+        val clearAction = ToolbarAction(
+            if (clipboardClearConfirmationPending) "确认清空" else "清空",
+            KeyCommand.panel("clearClipboardHistory"),
+        )
         val settingsAction = ToolbarAction("设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
         val backWidth = toolbarChipWidth(backAction)
+        val pasteWidth = toolbarChipWidth(pasteAction)
+        val clearWidth = toolbarChipWidth(clearAction)
         val settingsWidth = toolbarChipWidth(settingsAction)
         val back = ToolbarRect(
             backAction.label,
@@ -1499,14 +1643,37 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             RectF(width - leftPadding - settingsWidth, top, width - leftPadding, top + chipHeight),
             icon = settingsAction.icon,
         )
-        toolbarRects = listOf(back, settings)
+        val paste = ToolbarRect(
+            pasteAction.label,
+            pasteAction.command,
+            RectF(back.rect.right + dp(6f), top, back.rect.right + dp(6f) + pasteWidth, top + chipHeight),
+        )
+        val clear = ToolbarRect(
+            clearAction.label,
+            clearAction.command,
+            RectF(paste.rect.right + dp(6f), top, paste.rect.right + dp(6f) + clearWidth, top + chipHeight),
+        )
+        val showsClear = functionPanelMode == FunctionPanelMode.CLIPBOARD && clipboardItems.isNotEmpty()
+        toolbarRects = when {
+            showsClear -> listOf(back, paste, clear, settings)
+            functionPanelMode == FunctionPanelMode.CLIPBOARD -> listOf(back, paste, settings)
+            else -> listOf(back, settings)
+        }
         drawToolbarChip(canvas, back)
+        if (functionPanelMode == FunctionPanelMode.CLIPBOARD) {
+            drawToolbarChip(canvas, paste)
+            if (showsClear) {
+                drawToolbarChip(canvas, clear)
+            }
+        }
         drawToolbarChip(canvas, settings)
 
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = sp(theme.labelSizeSp)
-        textPaint.color = theme.commentColor.toArgb()
-        canvas.drawText(functionPanelTitle(), width / 2f, barHeight / 2f + textBaselineOffset(textPaint), textPaint)
+        if (!showsClear) {
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(theme.labelSizeSp)
+            textPaint.color = theme.commentColor.toArgb()
+            canvas.drawText(functionPanelTitle(), width / 2f, barHeight / 2f + textBaselineOffset(textPaint), textPaint)
+        }
 
         if (expandedCandidatesLoading || clipboardItemsLoading) {
             paint.style = Paint.Style.FILL
@@ -1527,13 +1694,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         drawSurfaceShadow(canvas, item.rect, pressed)
         paint.style = Paint.Style.FILL
         paint.color = toolbarBackgroundColor(item, pressed, forceAccent)
-        canvas.drawRoundRect(item.rect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+        canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
 
         if (item.selected) {
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
             paint.color = theme.candidateSelectedBorderColor.toArgb()
-            canvas.drawRoundRect(item.rect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+            canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
         }
 
         textPaint.textAlign = Paint.Align.CENTER
@@ -1794,7 +1961,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             selected -> theme.keySelectedBackground.toArgb()
             else -> keyBackgroundColor(key)
         }
-        canvas.drawRoundRect(keyRect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+        canvas.drawRoundRect(keyRect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
         drawKeyOutline(canvas, key, keyRect, pressed)
 
         val label = displayLabel(key)
@@ -1834,7 +2001,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 selected -> theme.keySelectedBackground.toArgb()
                 else -> keyBackgroundColor(key)
             }
-            canvas.drawRoundRect(keyRect, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+            canvas.drawRoundRect(keyRect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
             drawKeyOutline(canvas, key, keyRect, pressed)
 
             val label = stackLabelForMode(item)
@@ -2275,7 +2442,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 languageToggle,
                 ToolbarAction("选择", KeyCommand.panel("selection"), icon = ToolbarIcon.SELECTION),
                 ToolbarAction("剪贴板", KeyCommand.panel("clipboard"), icon = ToolbarIcon.CLIPBOARD),
-                ToolbarAction("Emoji", KeyCommand.panel("emoji"), icon = ToolbarIcon.EMOJI),
+                ToolbarAction("Emoji", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_emoji_face"), icon = ToolbarIcon.EMOJI),
                 ))
                 addAll(layoutActions)
             }
@@ -2341,7 +2508,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             FunctionPanelMode.RIME -> "Rime"
             FunctionPanelMode.SELECTION -> "选择"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
-            FunctionPanelMode.EMOJI -> "Emoji"
         }
     }
 
@@ -2412,6 +2578,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun openCandidatePanel() {
         if (state.candidatePanel.candidates.isEmpty()) return
         functionPanelActive = false
+        clipboardClearConfirmationPending = false
         candidatePanelExpanded = true
         expandedCandidates = emptyList()
         pressedKey = null
@@ -2427,6 +2594,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = FunctionPanelMode.HOME
+        clipboardClearConfirmationPending = false
         recentClipboardSuggestion = null
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
@@ -2437,6 +2605,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun openFunctionPanel(mode: FunctionPanelMode = FunctionPanelMode.HOME) {
+        if (mode != FunctionPanelMode.CLIPBOARD || functionPanelMode != mode) {
+            clipboardClearConfirmationPending = false
+        }
         functionPanelActive = true
         candidatePanelExpanded = true
         functionPanelMode = mode
@@ -2479,7 +2650,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
                 "selection" -> openFunctionPanel(FunctionPanelMode.SELECTION)
                 "clipboard" -> openFunctionPanel(FunctionPanelMode.CLIPBOARD)
-                "emoji" -> openFunctionPanel(FunctionPanelMode.EMOJI)
+                "clearClipboardHistory" -> handleClearClipboardHistory()
                 else -> openFunctionPanel(FunctionPanelMode.HOME)
             }
             performConfiguredHaptic()
@@ -2550,6 +2721,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 return@onRequestClipboardHistory
             }
             clipboardItems = items
+            if (items.isEmpty()) {
+                clipboardClearConfirmationPending = false
+            }
             clipboardItemsLoading = false
             coerceExpandedCandidateScroll()
             invalidate()
@@ -2575,6 +2749,30 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedTouchActive = false
         expandedDragging = false
         pressedExpandedCandidate = null
+        pressedClipboardDelete = null
+    }
+
+    private fun deleteClipboardEntry(text: String) {
+        if (!functionPanelActive || functionPanelMode != FunctionPanelMode.CLIPBOARD) return
+        clipboardClearConfirmationPending = false
+        performConfiguredHaptic()
+        listener?.onDeleteClipboardEntry(text)
+        requestClipboardItemsAsync()
+        invalidate()
+    }
+
+    private fun handleClearClipboardHistory() {
+        if (!functionPanelActive || functionPanelMode != FunctionPanelMode.CLIPBOARD || clipboardItems.isEmpty()) {
+            clipboardClearConfirmationPending = false
+            return
+        }
+        if (!clipboardClearConfirmationPending) {
+            clipboardClearConfirmationPending = true
+            return
+        }
+        clipboardClearConfirmationPending = false
+        listener?.onClearClipboardHistory()
+        requestClipboardItemsAsync()
     }
 
     private fun resetCandidateScroll() {
@@ -2760,7 +2958,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun isRepeatableKey(key: KeySpec): Boolean {
-        return actionForMode(key).type == KeyCommandTypes.BACKSPACE
+        val command = actionForMode(key)
+        return command.type == KeyCommandTypes.BACKSPACE ||
+            (command.type == KeyCommandTypes.EDIT && command.value in repeatableEditVerbs)
     }
 
     private fun handleBackspaceDrag(
@@ -2856,6 +3056,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return expandedCandidateRects.firstOrNull { it.rect.contains(x, y) }
     }
 
+    private fun findClipboardDelete(x: Float, y: Float): ClipboardDeleteRect? {
+        return clipboardDeleteRects.firstOrNull { it.rect.contains(x, y) }
+    }
+
     private fun findToolbar(x: Float, y: Float): ToolbarRect? {
         return toolbarRects.firstOrNull { it.rect.contains(x, y) }
     }
@@ -2875,10 +3079,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawSurfaceShadow(canvas: Canvas, rect: RectF, pressed: Boolean) {
         val shadow = RectF(rect)
-        shadow.offset(0f, dp(if (pressed) 0.8f else 2.4f))
+        shadow.offset(0f, dp(if (pressed) 0.8f else 1.6f))
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(if (pressed) 26 else 44, 26, 34, 44)
-        canvas.drawRoundRect(shadow, dp(theme.keyCornerRadiusDp), dp(theme.keyCornerRadiusDp), paint)
+        paint.color = Color.argb(if (pressed) 18 else 28, 26, 34, 44)
+        canvas.drawRoundRect(shadow, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
     }
 
     private fun drawKeyOutline(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean) {
@@ -2899,7 +3103,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         } else {
             Color.argb(28, 26, 34, 44)
         }
-        val radius = dp(max(0f, theme.keyCornerRadiusDp - 1f))
+        val radius = dp(max(0f, keyCornerRadiusDp() - 1f))
         canvas.drawRoundRect(outline, radius, radius, paint)
     }
 
@@ -2951,20 +3155,26 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun isSoftAccentToolbar(item: ToolbarRect): Boolean {
-        if (item.command.type == KeyCommandTypes.MODE) return true
+        if (item.command.type in setOf(
+                KeyCommandTypes.MODE,
+                KeyCommandTypes.OPEN_PAGE,
+                KeyCommandTypes.KEYBOARD_MODE,
+                KeyCommandTypes.KEYBOARD_PICKER,
+            )
+        ) {
+            return true
+        }
         if (item.command.type == KeyCommandTypes.PANEL && item.command.value in setOf(
                 "home",
                 "selection",
                 "clipboard",
-                "emoji",
                 "close",
                 "dismissClipboard",
             )
         ) {
             return true
         }
-        if (item.command.type == KeyCommandTypes.OPEN_PAGE) return true
-        return item.label in setOf("功能", "中", "En", "中文", "英文", "选择", "剪贴板", "Emoji", "返回", "设置")
+        return false
     }
 
     private fun isToolbarPressed(item: ToolbarRect): Boolean {
@@ -3194,14 +3404,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val accessibilityToolbarNodeBase = 1_000
         private const val accessibilityCandidateNodeBase = 2_000
         private const val accessibilityExpandedNodeBase = 3_000
-        private const val accessibilityKeyNodeBase = 4_000
+        private const val accessibilityClipboardDeleteNodeBase = 4_000
+        private const val accessibilityKeyNodeBase = 5_000
         private val whitespaceRegex = Regex("\\s+")
-        private val emojiChoices = listOf(
-            "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
-            "🥰", "😇", "🙂", "😉", "😋", "🤔", "😭", "😡",
-            "👍", "👎", "👌", "🙏", "👏", "💪", "🔥", "✨",
-            "🎉", "❤️", "💔", "⭐", "🌟", "✅", "❌", "❓",
-            "☕", "🍵", "🍻", "🍚", "🍜", "🌙", "☀️", "🌧️",
+        private val repeatableEditVerbs = setOf(
+            "cursorLeft",
+            "cursorRight",
+            "cursorUp",
+            "cursorDown",
+            "forwardDelete",
         )
     }
 }

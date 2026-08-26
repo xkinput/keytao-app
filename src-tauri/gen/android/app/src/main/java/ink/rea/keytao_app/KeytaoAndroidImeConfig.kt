@@ -3,6 +3,8 @@ package ink.rea.keytao_app
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
 import kotlin.math.roundToInt
 
 object KeyCommandTypes {
@@ -97,6 +99,8 @@ data class FloatingKeyboardConfig(
 data class KeytaoAndroidImeConfig(
     val keyboardHeightDp: Int,
     val candidateBarHeightDp: Int,
+    val clipboardRowHeightDp: Float,
+    val clipboardDeleteHitWidthDp: Float,
     val keyboardBottomInsetDp: Int,
     val horizontalGapDp: Float,
     val verticalGapDp: Float,
@@ -175,12 +179,20 @@ data class KeytaoAndroidImeConfig(
 
     companion object {
         private const val minOneHandedScale = 0.78f
+        private const val keyboardSeedFileName = ".keyboard.seed"
+        private val legacyDefaultKeyboardHashes = setOf(
+            "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
+            "3ebe95295376bfeffb79c0106f86bc7e3d8631311dae0c595d330ed4c1b2805c",
+            "25ae1b176617c64fec16a55b73c9faae8abd17c3eba12d1fc67ec9f66364b854",
+            "34475509153894fcd8e53f5d21b1f6d0852b800731d670e9cfe7694cdf64df2c",
+        )
 
         private var cachedSignature: String? = null
         private var cachedConfig: KeytaoAndroidImeConfig? = null
 
         /**
-         * Write the bundled keyboard.yaml when the user has none. Blocking and
+         * Write the bundled keyboard.yaml when the user has none, or reseed it
+         * when the sidecar hash proves it is still untouched. Blocking and
          * writing, so it belongs on a background thread — [load] never does it.
          */
         fun ensureDefaults(context: Context) {
@@ -258,6 +270,18 @@ data class KeytaoAndroidImeConfig(
                     listOf("candidateBarHeight", "candidateBarHeightDp"),
                     52,
                 ).coerceIn(36, 96),
+                clipboardRowHeightDp = mergedDouble(
+                    root,
+                    fallbackRoot,
+                    listOf("clipboardRowHeight", "clipboardRowHeightDp"),
+                    44.0,
+                ).toFloat().coerceIn(44f, 44f),
+                clipboardDeleteHitWidthDp = mergedDouble(
+                    root,
+                    fallbackRoot,
+                    listOf("clipboardDeleteHitWidth", "clipboardDeleteHitWidthDp"),
+                    44.0,
+                ).toFloat().coerceIn(44f, 44f),
                 keyboardBottomInsetDp = mergedInt(root, fallbackRoot, listOf("bottomInset", "bottomInsetDp", "keyboardBottomInsetDp"), 48)
                     .coerceIn(0, 80),
                 horizontalGapDp = mergedDouble(root, fallbackRoot, listOf("horizontalGap", "horizontalGapDp"), 4.0)
@@ -440,26 +464,46 @@ data class KeytaoAndroidImeConfig(
 
         private fun ensureDefaultKeyboardConfig(context: Context) {
             val file = KeytaoAndroidPaths.keyboardFile(context)
+            val seedFile = File(KeytaoAndroidPaths.userRoot(context), keyboardSeedFileName)
             val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
+            val bundledHash = sha256(yaml)
             if (file.isFile) {
                 val existing = runCatching { file.readText() }.getOrNull()
-                if (existing != null && !shouldRefreshDefaultKeyboard(existing, yaml)) return
+                    ?: return
+                val seededHash = runCatching { seedFile.readText().trim() }.getOrNull()
+                if (!shouldRefreshDefaultKeyboard(existing, bundledHash, seededHash)) {
+                    if (sha256(existing) == bundledHash && seededHash != bundledHash) {
+                        runCatching { seedFile.writeText(bundledHash) }
+                    }
+                    return
+                }
             }
             runCatching {
                 file.parentFile?.mkdirs()
                 file.writeText(yaml)
+                seedFile.writeText(bundledHash)
             }
         }
 
-        private fun shouldRefreshDefaultKeyboard(existing: String, bundled: String): Boolean {
-            val trimmed = existing.trim()
-            if (trimmed.isEmpty()) return true
-            if (existing == bundled) return false
-            return existing.contains("# KeyTao IME default keyboard layout.") &&
-                existing.contains("layers: {}") &&
-                !existing.contains("symbols_en:") &&
-                !existing.contains("label: \"英文\"") &&
-                bundled.contains("symbols_en:")
+        private fun shouldRefreshDefaultKeyboard(
+            existing: String,
+            bundledHash: String,
+            seededHash: String?,
+        ): Boolean {
+            if (existing.isBlank()) return true
+            val existingHash = sha256(existing)
+            if (existingHash == bundledHash) return false
+            return if (seededHash.isNullOrBlank()) {
+                existingHash in legacyDefaultKeyboardHashes
+            } else {
+                existingHash == seededHash
+            }
+        }
+
+        private fun sha256(value: String): String {
+            return MessageDigest.getInstance("SHA-256")
+                .digest(value.toByteArray(Charsets.UTF_8))
+                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
         }
 
         /**
