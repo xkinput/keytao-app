@@ -102,14 +102,15 @@ numberRows:
     ]
 
 symbolRows:
-  - [
-      { label: "中文", style: "accent", action: { type: keyboardMode, value: symbols } },
-      { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-      { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-      { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-      { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-      { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-      { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+  - &symbolHeader [
+      { label: "中文", action: { type: "keyboardMode", value: "symbols" } },
+      { label: "英文", action: { type: "keyboardMode", value: "symbols_en" } },
+      { label: "数学", action: { type: "keyboardMode", value: "symbols_math" } },
+      { label: "符号", action: { type: "keyboardMode", value: "symbols_marks" } },
+      { label: "序号", action: { type: "keyboardMode", value: "symbols_numbers" } },
+      { label: "拼音", action: { type: "keyboardMode", value: "symbols_pinyin" } },
+      { label: "颜文", action: { type: "keyboardMode", value: "symbols_kaomoji" } },
+      { label: "Emoji", action: { type: "keyboardMode", value: "symbols_emoji_face" } }
     ]
   - [
       { label: "【", value: "【", asciiLabel: "[", asciiValue: "[", rimeValue: ";k" },
@@ -159,27 +160,19 @@ symbolRows:
       { label: "～", value: "～" },
       { label: "￥", value: "￥" }
     ]
-  - [
-      { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-      { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-      { label: "空格", weight: 4.6, action: { type: space } },
-      { label: "⌫", weight: 1.15, action: { type: backspace } },
-      { label: "↵", weight: 1.15, action: { type: enter } }
+  - &symbolFooter [
+      { label: "123", weight: 1.15, action: { type: "keyboardMode", value: "numbers" } },
+      { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
+      { label: "空格", weight: 4.6, action: { type: "space" } },
+      { label: "⌫", weight: 1.15, action: { type: "backspace" } },
+      { label: "↵", weight: 1.15, action: { type: "enter" } }
     ]
 
 # Extra custom keyboard pages. A key can jump here with
 # action: { type: keyboardMode, value: myPage }.
 layers:
   symbols_en:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", style: "accent", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
-      ]
+    - *symbolHeader
     - [
         { label: "[", value: "[" },
         { label: "]", value: "]" },
@@ -216,23 +209,9 @@ layers:
         { label: "=", value: "=" },
         { label: "_", value: "_" }
       ]
-    - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "Space", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
-      ]
+    - *symbolFooter
   symbols_math:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", style: "accent", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
-      ]
+    - *symbolHeader
     - [
         { label: "+", value: "+" },
         { label: "-", value: "-" },
@@ -270,104 +249,383 @@ layers:
         { label: "‰", value: "‰" }
       ]
     - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "空格", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
-      ]
-  symbols_currency:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", style: "accent", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
+        { label: "＝", value: "＝" },
+        { label: "≌", value: "≌" },
+        { label: "<", value: "<" },
+        { label: ">", value: ">" },
+        { label: "≡", value: "≡" },
+        { label: "(", value: "(" },
+        { label: ")", value: ")" },
+        { label: "[", value: "[" },
+        { label: "]", value: "]" },
+        { label: "{", value: "{" }
       ]
     - [
+        { label: "}", value: "}" },
+        { label: "*", value: "*" },
+        { label: "/", value: "/" },
+        { label: "&", value: "&" },
+        { label: "∥", value: "∥" },
+        { label: "‱", value: "‱" },
+        { label: "′", value: "′" },
+        { label: "″", value: "″" },
+        { label: "∮", value: "∮" },
+        { label: "∯", value: "∯" }
+      ]
+    - [
+        { label: "∬", value: "∬" },
+        { label: "∭", value: "∭" },
+        { label: "∰", value: "∰" },
+        { label: "∏", value: "∏" },
+        { label: "∵", value: "∵" },
+        { label: "∴", value: "∴" },
+        { label: "⊥", value: "⊥" },
+        { label: "∝", value: "∝" },
+        { label: "•", value: "•" },
+        { label: "〒", value: "〒" }
+      ]
+    - [
+        { label: "∽", value: "∽" },
+        { label: "⊙", value: "⊙" },
+        { label: "⌒", value: "⌒" },
+        { label: "∟", value: "∟" },
+        { label: "∣", value: "∣" },
+        { label: "⊕", value: "⊕" },
+        { label: "⊿", value: "⊿" },
+        { label: "∠", value: "∠" },
+        { label: "℃", value: "℃" },
+        { label: "¥", value: "¥" }
+      ]
+    - [
+        { label: "$", value: "$" },
+        { label: "€", value: "€" },
+        { label: "฿", value: "฿" },
+        { label: "￡", value: "￡" },
+        { label: "㎡", value: "㎡" },
+        { label: "m", value: "m" },
+        { label: "³", value: "³" },
+        { label: "℉", value: "℉" },
+        { label: "￥", value: "￥" },
+        { label: "£", value: "£" }
+      ]
+    - [
+        { label: "￠", value: "￠" },
+        { label: "₠", value: "₠" },
+        { label: "¹", value: "¹" },
+        { label: "²", value: "²" },
+        { label: "⁴", value: "⁴" },
+        { label: "⁵", value: "⁵" },
+        { label: "ⁿ", value: "ⁿ" },
+        { label: "⁶", value: "⁶" },
+        { label: "⁷", value: "⁷" },
+        { label: "⁸", value: "⁸" }
+      ]
+    - [
+        { label: "⁹", value: "⁹" },
+        { label: "⁰", value: "⁰" },
+        { label: "ˣ", value: "ˣ" },
+        { label: "⁺", value: "⁺" },
+        { label: "⁻", value: "⁻" },
+        { label: "⁼", value: "⁼" },
+        { label: "⁽", value: "⁽" },
+        { label: "⁾", value: "⁾" },
+        { label: "½", value: "½" },
+        { label: "⅓", value: "⅓" }
+      ]
+    - [
+        { label: "¼", value: "¼" },
+        { label: "⅔", value: "⅔" },
+        { label: "¾", value: "¾" },
+        { label: "₁", value: "₁" },
+        { label: "₂", value: "₂" },
+        { label: "₃", value: "₃" },
+        { label: "₄", value: "₄" },
+        { label: "₅", value: "₅" },
+        { label: "ₙ", value: "ₙ" },
+        { label: "₆", value: "₆" }
+      ]
+    - [
+        { label: "₇", value: "₇" },
+        { label: "₈", value: "₈" },
+        { label: "₉", value: "₉" },
+        { label: "₀", value: "₀" },
+        { label: "ₓ", value: "ₓ" },
+        { label: "₊", value: "₊" },
+        { label: "₋", value: "₋" },
+        { label: "₌", value: "₌" },
+        { label: "₍", value: "₍" },
+        { label: "₎", value: "₎" }
+      ]
+    - [
+        { label: "℅", value: "℅" },
+        { label: "∶", value: "∶" },
+        { label: "≔", value: "≔" },
+        { label: "≕", value: "≕" },
+        { label: "⩵", value: "⩵" },
+        { label: "⪡", value: "⪡" },
+        { label: "⪢", value: "⪢" },
+        { label: "⋈", value: "⋈" },
+        { label: "⨯", value: "⨯" },
+        { label: "∸", value: "∸" }
+      ]
+    - *symbolFooter
+  symbols_marks:
+    - *symbolHeader
+    - [
+        { label: "△", value: "△" },
+        { label: "▽", value: "▽" },
+        { label: "○", value: "○" },
+        { label: "◇", value: "◇" },
+        { label: "□", value: "□" },
+        { label: "☆", value: "☆" },
+        { label: "▲", value: "▲" },
+        { label: "▼", value: "▼" },
+        { label: "●", value: "●" },
+        { label: "◆", value: "◆" }
+      ]
+    - [
+        { label: "■", value: "■" },
+        { label: "★", value: "★" },
+        { label: "▷", value: "▷" },
+        { label: "◁", value: "◁" },
+        { label: "▶", value: "▶" },
+        { label: "◀", value: "◀" },
+        { label: "♻", value: "♻" },
+        { label: "♲", value: "♲" },
+        { label: "†", value: "†" },
+        { label: "⚝", value: "⚝" }
+      ]
+    - [
+        { label: "✡", value: "✡" },
+        { label: "⚹", value: "⚹" },
+        { label: "✦", value: "✦" },
+        { label: "✸", value: "✸" },
+        { label: "✹", value: "✹" },
+        { label: "×", value: "×" },
+        { label: "〄", value: "〄" },
+        { label: "☑", value: "☑" },
+        { label: "☒", value: "☒" },
+        { label: "✅", value: "✅" }
+      ]
+    - [
+        { label: "❎", value: "❎" },
+        { label: "✔", value: "✔" },
+        { label: "✘", value: "✘" },
+        { label: "✓", value: "✓" },
+        { label: "✗", value: "✗" },
+        { label: "☀", value: "☀" },
+        { label: "☼", value: "☼" },
+        { label: "☽", value: "☽" },
+        { label: "☾", value: "☾" },
+        { label: "◑", value: "◑" }
+      ]
+    - [
+        { label: "◐", value: "◐" },
+        { label: "㏂", value: "㏂" },
+        { label: "㏘", value: "㏘" },
+        { label: "☭", value: "☭" },
+        { label: "♀", value: "♀" },
+        { label: "♂", value: "♂" },
+        { label: "☹", value: "☹" },
+        { label: "☻", value: "☻" },
+        { label: "☠", value: "☠" },
+        { label: "☜", value: "☜" }
+      ]
+    - [
+        { label: "☝", value: "☝" },
+        { label: "☞", value: "☞" },
+        { label: "☚", value: "☚" },
+        { label: "☟", value: "☟" },
+        { label: "☛", value: "☛" },
+        { label: "▪", value: "▪" },
+        { label: "•", value: "•" },
+        { label: "‥", value: "‥" },
+        { label: "…", value: "…" },
+        { label: "∷", value: "∷" }
+      ]
+    - [
+        { label: "※", value: "※" },
+        { label: "♩", value: "♩" },
+        { label: "♪", value: "♪" },
+        { label: "♫", value: "♫" },
+        { label: "♬", value: "♬" },
+        { label: "§", value: "§" },
+        { label: "°", value: "°" },
+        { label: "♭", value: "♭" },
+        { label: "♯", value: "♯" },
+        { label: "♮", value: "♮" }
+      ]
+    - [
+        { label: "‖", value: "‖" },
+        { label: "¶", value: "¶" },
+        { label: "№", value: "№" },
+        { label: "◎", value: "◎" },
+        { label: "¤", value: "¤" },
+        { label: "۞", value: "۞" },
+        { label: "℗", value: "℗" },
+        { label: "®", value: "®" },
+        { label: "©", value: "©" },
+        { label: "卍", value: "卍" }
+      ]
+    - [
+        { label: "卐", value: "卐" },
+        { label: "℡", value: "℡" },
+        { label: "™", value: "™" },
+        { label: "㏇", value: "㏇" },
+        { label: "Φ", value: "Φ" },
+        { label: "⇦", value: "⇦" },
+        { label: "⇧", value: "⇧" },
+        { label: "⇨", value: "⇨" },
+        { label: "⇩", value: "⇩" },
+        { label: "⇪", value: "⇪" }
+      ]
+    - [
+        { label: "↖", value: "↖" },
+        { label: "↑", value: "↑" },
+        { label: "↗", value: "↗" },
+        { label: "←", value: "←" },
+        { label: "↔", value: "↔" },
+        { label: "→", value: "→" },
+        { label: "↙", value: "↙" },
+        { label: "↓", value: "↓" },
+        { label: "↘", value: "↘" },
+        { label: "⇄", value: "⇄" }
+      ]
+    - [
+        { label: "⇅", value: "⇅" },
+        { label: "⇆", value: "⇆" },
+        { label: "⇤", value: "⇤" },
+        { label: "↩", value: "↩" },
+        { label: "⇥", value: "⇥" },
+        { label: "▸", value: "▸" },
+        { label: "◂", value: "◂" },
+        { label: "▴", value: "▴" },
+        { label: "▾", value: "▾" },
+        { label: "◤", value: "◤" }
+      ]
+    - [
+        { label: "◥", value: "◥" },
+        { label: "◣", value: "◣" },
+        { label: "◢", value: "◢" },
+        { label: "㊤", value: "㊤" },
+        { label: "㊧", value: "㊧" },
+        { label: "㊥", value: "㊥" },
+        { label: "㊨", value: "㊨" },
+        { label: "㊦", value: "㊦" },
+        { label: "❏", value: "❏" },
+        { label: "❐", value: "❐" }
+      ]
+    - [
+        { label: "◲", value: "◲" },
+        { label: "〼", value: "〼" },
+        { label: "▢", value: "▢" },
+        { label: "▣", value: "▣" },
+        { label: "↶", value: "↶" },
+        { label: "✁", value: "✁" },
+        { label: "↷", value: "↷" },
+        { label: "✍", value: "✍" },
+        { label: "⏍", value: "⏍" },
+        { label: "ϟ", value: "ϟ" }
+      ]
+    - [
+        { label: "📝", value: "📝" },
+        { label: "✎", value: "✎" },
+        { label: "✆", value: "✆" },
+        { label: "☱", value: "☱" },
+        { label: "☰", value: "☰" },
+        { label: "☴", value: "☴" },
+        { label: "⚿", value: "⚿" },
+        { label: "⛮", value: "⛮" },
+        { label: "⚙", value: "⚙" },
+        { label: "☲", value: "☲" }
+      ]
+    - [
+        { label: "☯", value: "☯" },
+        { label: "☵", value: "☵" },
+        { label: "⛶", value: "⛶" },
+        { label: "☩", value: "☩" },
+        { label: "☐", value: "☐" },
+        { label: "☳", value: "☳" },
+        { label: "☷", value: "☷" },
+        { label: "☶", value: "☶" },
+        { label: "💬", value: "💬" },
+        { label: "🗨", value: "🗨" }
+      ]
+    - [
+        { label: "⟲", value: "⟲" },
+        { label: "ღ", value: "ღ" },
+        { label: "✈", value: "✈" },
+        { label: "☂", value: "☂" },
+        { label: "🎤", value: "🎤" },
+        { label: "🌐", value: "🌐" },
+        { label: "🔍", value: "🔍" },
         { label: "￥", value: "￥" },
         { label: "¥", value: "¥" },
-        { label: "$", value: "$" },
+        { label: "$", value: "$" }
+      ]
+    - [
         { label: "€", value: "€" },
         { label: "£", value: "£" },
         { label: "¢", value: "¢" },
         { label: "₩", value: "₩" },
         { label: "₽", value: "₽" },
         { label: "₹", value: "₹" },
-        { label: "₿", value: "₿" }
-      ]
-    - [
+        { label: "₿", value: "₿" },
         { label: "₫", value: "₫" },
         { label: "₭", value: "₭" },
-        { label: "₦", value: "₦" },
+        { label: "₦", value: "₦" }
+      ]
+    - [
         { label: "₱", value: "₱" },
         { label: "₪", value: "₪" },
         { label: "₮", value: "₮" },
         { label: "₴", value: "₴" },
         { label: "₲", value: "₲" },
         { label: "₡", value: "₡" },
-        { label: "¤", value: "¤" }
-      ]
-    - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "空格", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
-      ]
-  symbols_arrows:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", style: "accent", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
-      ]
-    - [
-        { label: "←", value: "←" },
-        { label: "→", value: "→" },
-        { label: "↑", value: "↑" },
-        { label: "↓", value: "↓" },
-        { label: "↔", value: "↔" },
         { label: "↕", value: "↕" },
-        { label: "↖", value: "↖" },
-        { label: "↗", value: "↗" },
-        { label: "↙", value: "↙" },
-        { label: "↘", value: "↘" }
-      ]
-    - [
         { label: "⇐", value: "⇐" },
         { label: "⇒", value: "⇒" },
-        { label: "⇑", value: "⇑" },
+        { label: "⇑", value: "⇑" }
+      ]
+    - [
         { label: "⇓", value: "⇓" },
         { label: "⇔", value: "⇔" },
         { label: "⇕", value: "⇕" },
-        { label: "↩", value: "↩" },
         { label: "↪", value: "↪" },
         { label: "↺", value: "↺" },
-        { label: "↻", value: "↻" }
+        { label: "↻", value: "↻" },
+        { label: "✕", value: "✕" },
+        { label: "♥", value: "♥" },
+        { label: "♡", value: "♡" },
+        { label: "♠", value: "♠" }
       ]
     - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "空格", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
+        { label: "♣", value: "♣" },
+        { label: "♦", value: "♦" },
+        { label: "☁", value: "☁" },
+        { label: "⿰", value: "⿰" },
+        { label: "⿱", value: "⿱" },
+        { label: "⿲", value: "⿲" },
+        { label: "⿳", value: "⿳" },
+        { label: "⿴", value: "⿴" },
+        { label: "⿵", value: "⿵" },
+        { label: "⿶", value: "⿶" }
       ]
+    - [
+        { label: "⿷", value: "⿷" },
+        { label: "⿸", value: "⿸" },
+        { label: "⿹", value: "⿹" },
+        { label: "⿺", value: "⿺" },
+        { label: "⿻", value: "⿻" },
+        { label: "〆", value: "〆" },
+        { label: "〇", value: "〇" },
+        { label: "々", value: "々" },
+        { label: "〓", value: "〓" },
+        { label: "〶", value: "〶" }
+      ]
+    - *symbolFooter
   symbols_numbers:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", style: "accent", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", action: { type: keyboardMode, value: symbols_shapes } }
-      ]
+    - *symbolHeader
     - [
         { label: "①", value: "①" },
         { label: "②", value: "②" },
@@ -393,62 +651,2449 @@ layers:
         { label: "Ⅴ", value: "Ⅴ" }
       ]
     - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "空格", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
-      ]
-  symbols_shapes:
-    - [
-        { label: "中文", action: { type: keyboardMode, value: symbols } },
-        { label: "英文", action: { type: keyboardMode, value: symbols_en } },
-        { label: "数学", action: { type: keyboardMode, value: symbols_math } },
-        { label: "货币", action: { type: keyboardMode, value: symbols_currency } },
-        { label: "箭头", action: { type: keyboardMode, value: symbols_arrows } },
-        { label: "编号", action: { type: keyboardMode, value: symbols_numbers } },
-        { label: "图形", style: "accent", action: { type: keyboardMode, value: symbols_shapes } }
+        { label: "⒈", value: "⒈" },
+        { label: "⒉", value: "⒉" },
+        { label: "⒊", value: "⒊" },
+        { label: "⒋", value: "⒋" },
+        { label: "⒌", value: "⒌" },
+        { label: "⒍", value: "⒍" },
+        { label: "⒎", value: "⒎" },
+        { label: "⒏", value: "⒏" },
+        { label: "⒐", value: "⒐" },
+        { label: "⒑", value: "⒑" }
       ]
     - [
-        { label: "©", value: "©" },
-        { label: "®", value: "®" },
-        { label: "™", value: "™" },
-        { label: "§", value: "§" },
-        { label: "¶", value: "¶" },
-        { label: "✓", value: "✓" },
-        { label: "✕", value: "✕" },
-        { label: "•", value: "•" },
-        { label: "°", value: "°" },
-        { label: "♪", value: "♪" }
+        { label: "⒒", value: "⒒" },
+        { label: "⒓", value: "⒓" },
+        { label: "⒔", value: "⒔" },
+        { label: "⒕", value: "⒕" },
+        { label: "⒖", value: "⒖" },
+        { label: "⒗", value: "⒗" },
+        { label: "⒘", value: "⒘" },
+        { label: "⒙", value: "⒙" },
+        { label: "⒚", value: "⒚" },
+        { label: "⒛", value: "⒛" }
       ]
     - [
-        { label: "★", value: "★" },
-        { label: "☆", value: "☆" },
-        { label: "♥", value: "♥" },
-        { label: "♡", value: "♡" },
-        { label: "◆", value: "◆" },
-        { label: "◇", value: "◇" },
-        { label: "●", value: "●" },
-        { label: "○", value: "○" },
-        { label: "■", value: "■" },
-        { label: "□", value: "□" }
+        { label: "⑹", value: "⑹" },
+        { label: "⑺", value: "⑺" },
+        { label: "⑻", value: "⑻" },
+        { label: "⑼", value: "⑼" },
+        { label: "⑽", value: "⑽" },
+        { label: "⑾", value: "⑾" },
+        { label: "⑿", value: "⑿" },
+        { label: "⒀", value: "⒀" },
+        { label: "⒁", value: "⒁" },
+        { label: "⒂", value: "⒂" }
       ]
     - [
-        { label: "△", value: "△" },
-        { label: "▲", value: "▲" },
-        { label: "▽", value: "▽" },
-        { label: "▼", value: "▼" },
-        { label: "♠", value: "♠" },
-        { label: "♣", value: "♣" },
-        { label: "♥", value: "♥" },
-        { label: "♦", value: "♦" },
-        { label: "☀", value: "☀" },
-        { label: "☁", value: "☁" }
+        { label: "⒃", value: "⒃" },
+        { label: "⒄", value: "⒄" },
+        { label: "⒅", value: "⒅" },
+        { label: "⒆", value: "⒆" },
+        { label: "⒇", value: "⒇" },
+        { label: "㈠", value: "㈠" },
+        { label: "㈡", value: "㈡" },
+        { label: "㈢", value: "㈢" },
+        { label: "㈣", value: "㈣" },
+        { label: "㈤", value: "㈤" }
       ]
     - [
-        { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
-        { label: "ABC", weight: 1.15, action: { type: keyboardMode, value: letters } },
-        { label: "空格", weight: 4.6, action: { type: space } },
-        { label: "⌫", weight: 1.15, action: { type: backspace } },
-        { label: "↵", weight: 1.15, action: { type: enter } }
+        { label: "㈥", value: "㈥" },
+        { label: "㈦", value: "㈦" },
+        { label: "㈧", value: "㈧" },
+        { label: "㈨", value: "㈨" },
+        { label: "㈩", value: "㈩" },
+        { label: "➊", value: "➊" },
+        { label: "➋", value: "➋" },
+        { label: "➌", value: "➌" },
+        { label: "➍", value: "➍" },
+        { label: "➎", value: "➎" }
+      ]
+    - [
+        { label: "➏", value: "➏" },
+        { label: "➐", value: "➐" },
+        { label: "➑", value: "➑" },
+        { label: "➒", value: "➒" },
+        { label: "➓", value: "➓" },
+        { label: "㊀", value: "㊀" },
+        { label: "㊁", value: "㊁" },
+        { label: "㊂", value: "㊂" },
+        { label: "㊃", value: "㊃" },
+        { label: "㊄", value: "㊄" }
+      ]
+    - [
+        { label: "㊅", value: "㊅" },
+        { label: "㊆", value: "㊆" },
+        { label: "㊇", value: "㊇" },
+        { label: "㊈", value: "㊈" },
+        { label: "㊉", value: "㊉" },
+        { label: "ⅰ", value: "ⅰ" },
+        { label: "ⅱ", value: "ⅱ" },
+        { label: "ⅲ", value: "ⅲ" },
+        { label: "ⅳ", value: "ⅳ" },
+        { label: "ⅴ", value: "ⅴ" }
+      ]
+    - [
+        { label: "ⅵ", value: "ⅵ" },
+        { label: "ⅶ", value: "ⅶ" },
+        { label: "ⅷ", value: "ⅷ" },
+        { label: "ⅸ", value: "ⅸ" },
+        { label: "ⅹ", value: "ⅹ" },
+        { label: "Ⅵ", value: "Ⅵ" },
+        { label: "Ⅶ", value: "Ⅶ" },
+        { label: "Ⅷ", value: "Ⅷ" },
+        { label: "Ⅸ", value: "Ⅸ" },
+        { label: "Ⅹ", value: "Ⅹ" }
+      ]
+    - *symbolFooter
+  symbols_pinyin:
+    - *symbolHeader
+    - [
+        { label: "ā", value: "ā" },
+        { label: "á", value: "á" },
+        { label: "ǎ", value: "ǎ" },
+        { label: "à", value: "à" },
+        { label: "ō", value: "ō" },
+        { label: "ó", value: "ó" },
+        { label: "ē", value: "ē" },
+        { label: "é", value: "é" },
+        { label: "ě", value: "ě" },
+        { label: "è", value: "è" }
+      ]
+    - [
+        { label: "ǒ", value: "ǒ" },
+        { label: "ò", value: "ò" },
+        { label: "ī", value: "ī" },
+        { label: "í", value: "í" },
+        { label: "ǐ", value: "ǐ" },
+        { label: "ì", value: "ì" },
+        { label: "ū", value: "ū" },
+        { label: "ú", value: "ú" },
+        { label: "ǖ", value: "ǖ" },
+        { label: "ǘ", value: "ǘ" }
+      ]
+    - [
+        { label: "ǚ", value: "ǚ" },
+        { label: "ǜ", value: "ǜ" },
+        { label: "ǔ", value: "ǔ" },
+        { label: "ù", value: "ù" },
+        { label: "ê", value: "ê" },
+        { label: "", value: "" },
+        { label: "ü", value: "ü" },
+        { label: "ń", value: "ń" },
+        { label: "ň", value: "ň" },
+        { label: "", value: "" }
+      ]
+    - [
+        { label: "ㄚ", value: "ㄚ" },
+        { label: "ㄛ", value: "ㄛ" },
+        { label: "ㄜ", value: "ㄜ" },
+        { label: "ㄧ", value: "ㄧ" },
+        { label: "ㄨ", value: "ㄨ" },
+        { label: "ㄩ", value: "ㄩ" },
+        { label: "ㄝ", value: "ㄝ" },
+        { label: "ㄞ", value: "ㄞ" },
+        { label: "ㄟ", value: "ㄟ" },
+        { label: "ㄠ", value: "ㄠ" }
+      ]
+    - [
+        { label: "ㄡ", value: "ㄡ" },
+        { label: "ㄢ", value: "ㄢ" },
+        { label: "ㄣ", value: "ㄣ" },
+        { label: "ㄤ", value: "ㄤ" },
+        { label: "ㄥ", value: "ㄥ" },
+        { label: "ㄦ", value: "ㄦ" },
+        { label: "ㄅ", value: "ㄅ" },
+        { label: "ㄆ", value: "ㄆ" },
+        { label: "ㄇ", value: "ㄇ" },
+        { label: "ㄈ", value: "ㄈ" }
+      ]
+    - [
+        { label: "ㄉ", value: "ㄉ" },
+        { label: "ㄊ", value: "ㄊ" },
+        { label: "ㄋ", value: "ㄋ" },
+        { label: "ㄌ", value: "ㄌ" },
+        { label: "ㄍ", value: "ㄍ" },
+        { label: "ㄎ", value: "ㄎ" },
+        { label: "ㄏ", value: "ㄏ" },
+        { label: "ㄐ", value: "ㄐ" },
+        { label: "ㄑ", value: "ㄑ" },
+        { label: "ㄒ", value: "ㄒ" }
+      ]
+    - [
+        { label: "ㄓ", value: "ㄓ" },
+        { label: "ㄔ", value: "ㄔ" },
+        { label: "ㄕ", value: "ㄕ" },
+        { label: "ㄖ", value: "ㄖ" },
+        { label: "ㄗ", value: "ㄗ" },
+        { label: "ㄘ", value: "ㄘ" },
+        { label: "ㄙ", value: "ㄙ" },
+        { label: "ㄪ", value: "ㄪ" },
+        { label: "ㄫ", value: "ㄫ" },
+        { label: "ㄬ", value: "ㄬ" }
+      ]
+    - *symbolFooter
+  symbols_kaomoji:
+    - *symbolHeader
+    - [
+        { label: "⎛⎝≥⏝⏝≤⎠⎞", value: "⎛⎝≥⏝⏝≤⎠⎞" },
+        { label: "^_^", value: "^_^" },
+        { label: "^ω^", value: "^ω^" }
+      ]
+    - [
+        { label: "^o^", value: "^o^" },
+        { label: "~\\(≧▽≦)/~", value: "~\\(≧▽≦)/~" },
+        { label: "*^_^*", value: "*^_^*" }
+      ]
+    - [
+        { label: "↖(^ω^)↗", value: "↖(^ω^)↗" },
+        { label: "(^o^)／", value: "(^o^)／" },
+        { label: "(=^▽^=)", value: "(=^▽^=)" }
+      ]
+    - [
+        { label: "=^_^=", value: "=^_^=" },
+        { label: "(*^ω^*)", value: "(*^ω^*)" },
+        { label: "٩(๑^o^๑)۶", value: "٩(๑^o^๑)۶" }
+      ]
+    - [
+        { label: "o(￣▽￣)o", value: "o(￣▽￣)o" },
+        { label: "Y(^_^)Y", value: "Y(^_^)Y" },
+        { label: "٩( 'ω' )و", value: "٩( 'ω' )و" }
+      ]
+    - [
+        { label: "╰(*´︶`*)╯", value: "╰(*´︶`*)╯" },
+        { label: "*罒▽罒*", value: "*罒▽罒*" },
+        { label: "ヾ ^_^♪", value: "ヾ ^_^♪" }
+      ]
+    - [
+        { label: "=￣ω￣=", value: "=￣ω￣=" },
+        { label: "︿(￣︶￣)︿", value: "︿(￣︶￣)︿" },
+        { label: "(´▽｀)ノ♪", value: "(´▽｀)ノ♪" }
+      ]
+    - [
+        { label: "乁( ˙ ω˙乁)", value: "乁( ˙ ω˙乁)" },
+        { label: "QwQ", value: "QwQ" },
+        { label: "(●—●)", value: "(●—●)" }
+      ]
+    - [
+        { label: "(๑• . •๑)", value: "(๑• . •๑)" },
+        { label: "ヾ(≧O≦)〃嗷~", value: "ヾ(≧O≦)〃嗷~" },
+        { label: "罒ω罒", value: "罒ω罒" }
+      ]
+    - [
+        { label: "(｡ì _ í｡)", value: "(｡ì _ í｡)" },
+        { label: "(๑•ี_เ•ี๑)", value: "(๑•ี_เ•ี๑)" },
+        { label: "ㄟ(≧◇≦)ㄏ", value: "ㄟ(≧◇≦)ㄏ" }
+      ]
+    - [
+        { label: "(*/ω＼*)", value: "(*/ω＼*)" },
+        { label: "●▽●", value: "●▽●" },
+        { label: "٩(๑òωó๑)۶", value: "٩(๑òωó๑)۶" }
+      ]
+    - [
+        { label: "( σ'ω')σ", value: "( σ'ω')σ" },
+        { label: "♡＾▽＾♡", value: "♡＾▽＾♡" },
+        { label: "(๑•̀ㅂ•́)و✧", value: "(๑•̀ㅂ•́)و✧" }
+      ]
+    - [
+        { label: "(ง •̀_•́)ง", value: "(ง •̀_•́)ง" },
+        { label: "(｡･ω･｡)ﾉ♡", value: "(｡･ω･｡)ﾉ♡" },
+        { label: "(☆_☆)", value: "(☆_☆)" }
+      ]
+    - [
+        { label: "(๑°3°๑)", value: "(๑°3°๑)" },
+        { label: "♪～(´ε｀　)", value: "♪～(´ε｀　)" },
+        { label: "～(^з^)-☆", value: "～(^з^)-☆" }
+      ]
+    - [
+        { label: "(´∀｀)♡", value: "(´∀｀)♡" },
+        { label: "ლ(´ڡ`ლ)", value: "ლ(´ڡ`ლ)" },
+        { label: "(＞﹏＜)", value: "(＞﹏＜)" }
+      ]
+    - [
+        { label: "T_T", value: "T_T" },
+        { label: "⊙︿⊙", value: "⊙︿⊙" },
+        { label: "〒▽〒", value: "〒▽〒" }
+      ]
+    - [
+        { label: "⊙﹏⊙", value: "⊙﹏⊙" },
+        { label: "π_π", value: "π_π" },
+        { label: "(｡•́︿•̀｡)", value: "(｡•́︿•̀｡)" }
+      ]
+    - [
+        { label: "(ToT)/~~~", value: "(ToT)/~~~" },
+        { label: "╯﹏╰", value: "╯﹏╰" },
+        { label: "ಥ_ಥ", value: "ಥ_ಥ" }
+      ]
+    - [
+        { label: "(╥╯^╰╥)", value: "(╥╯^╰╥)" },
+        { label: "(〃′o`)", value: "(〃′o`)" },
+        { label: "●﹏●", value: "●﹏●" }
+      ]
+    - [
+        { label: "(つд⊂)", value: "(つд⊂)" },
+        { label: "心塞(´-ωก`)", value: "心塞(´-ωก`)" },
+        { label: "(╥﹏╥)", value: "(╥﹏╥)" }
+      ]
+    - [
+        { label: "┭┮﹏┭┮", value: "┭┮﹏┭┮" },
+        { label: "（；´д｀）ゞ", value: "（；´д｀）ゞ" },
+        { label: "(´;︵;`)", value: "(´;︵;`)" }
+      ]
+    - [
+        { label: "(。﹏。)", value: "(。﹏。)" },
+        { label: "┗( T﹏T )┛", value: "┗( T﹏T )┛" },
+        { label: "QAQ", value: "QAQ" }
+      ]
+    - [
+        { label: "ヘ(_ _ヘ)", value: "ヘ(_ _ヘ)" },
+        { label: "╰（‵□′）╯", value: "╰（‵□′）╯" },
+        { label: "(*￣︿￣)", value: "(*￣︿￣)" }
+      ]
+    - [
+        { label: ">o<", value: ">o<" },
+        { label: "(-`ェ´-怒)", value: "(-`ェ´-怒)" },
+        { label: "ヽ(‘⌒´メ)ノ", value: "ヽ(‘⌒´メ)ノ" }
+      ]
+    - [
+        { label: "(*｀Ω´*)v", value: "(*｀Ω´*)v" },
+        { label: "(｡•ˇ‸ˇ•｡)", value: "(｡•ˇ‸ˇ•｡)" },
+        { label: "(怒｀Д´怒)", value: "(怒｀Д´怒)" }
+      ]
+    - [
+        { label: "٩(๑`^´๑)۶", value: "٩(๑`^´๑)۶" },
+        { label: "(;｀O´)o", value: "(;｀O´)o" },
+        { label: "╰_╯", value: "╰_╯" }
+      ]
+    - [
+        { label: "<(｀^´)>", value: "<(｀^´)>" },
+        { label: "（｀Δ´）！", value: "（｀Δ´）！" },
+        { label: "ψ(｀∇´)ψ", value: "ψ(｀∇´)ψ" }
+      ]
+    - [
+        { label: "(；′⌒`)", value: "(；′⌒`)" },
+        { label: "s(・｀ヘ´・;)ゞ", value: "s(・｀ヘ´・;)ゞ" },
+        { label: "(▼皿▼#)", value: "(▼皿▼#)" }
+      ]
+    - [
+        { label: "￣へ￣", value: "￣へ￣" },
+        { label: "←_←", value: "←_←" },
+        { label: "（▼へ▼メ）", value: "（▼へ▼メ）" }
+      ]
+    - [
+        { label: "☄ฺ(◣д◢)☄ฺ", value: "☄ฺ(◣д◢)☄ฺ" },
+        { label: "→_→", value: "→_→" },
+        { label: "⊙_⊙", value: "⊙_⊙" }
+      ]
+    - [
+        { label: "d(ŐдŐ๑)", value: "d(ŐдŐ๑)" },
+        { label: "⊙▽⊙", value: "⊙▽⊙" },
+        { label: "(๑ŐдŐ)b", value: "(๑ŐдŐ)b" }
+      ]
+    - [
+        { label: "╭(°A°`)╮", value: "╭(°A°`)╮" },
+        { label: "(๑òᆺó๑)", value: "(๑òᆺó๑)" },
+        { label: "⊙ω⊙", value: "⊙ω⊙" }
+      ]
+    - [
+        { label: "(⊙x⊙;)", value: "(⊙x⊙;)" },
+        { label: "┌(。Д。)┐", value: "┌(。Д。)┐" },
+        { label: "(°ー°〃)", value: "(°ー°〃)" }
+      ]
+    - [
+        { label: "︽⊙_⊙︽", value: "︽⊙_⊙︽" },
+        { label: "Σ⊙▃⊙川", value: "Σ⊙▃⊙川" },
+        { label: "ヽ(*。>Д<)o゜", value: "ヽ(*。>Д<)o゜" }
+      ]
+    - [
+        { label: "=_=", value: "=_=" },
+        { label: "╮(╯_╰)╭", value: "╮(╯_╰)╭" },
+        { label: "（︶︿︶）", value: "（︶︿︶）" }
+      ]
+    - [
+        { label: "_(:з」∠)_", value: "_(:з」∠)_" },
+        { label: "@_@", value: "@_@" },
+        { label: "╮(╯▽╰)╭", value: "╮(╯▽╰)╭" }
+      ]
+    - [
+        { label: "(＠￣ー￣＠)", value: "(＠￣ー￣＠)" },
+        { label: "_(:3」∠❀)_", value: "_(:3」∠❀)_" },
+        { label: "눈_눈", value: "눈_눈" }
+      ]
+    - [
+        { label: "╭(╯ε╰)╮", value: "╭(╯ε╰)╮" },
+        { label: "(ー_ー)!!", value: "(ー_ー)!!" },
+        { label: "_(:D)∠)_", value: "_(:D)∠)_" }
+      ]
+    - [
+        { label: "o_O", value: "o_O" },
+        { label: "╭(╯^╰)╮", value: "╭(╯^╰)╮" },
+        { label: "(；一_一)", value: "(；一_一)" }
+      ]
+    - [
+        { label: "´_>`", value: "´_>`" },
+        { label: "-_-#", value: "-_-#" },
+        { label: "┑(￣Д ￣)┍", value: "┑(￣Д ￣)┍" }
+      ]
+    - [
+        { label: "≡￣﹏￣≡", value: "≡￣﹏￣≡" },
+        { label: "○|￣|_", value: "○|￣|_" },
+        { label: "-_-||", value: "-_-||" }
+      ]
+    - [
+        { label: "ㄟ( ▔, ▔ )ㄏ", value: "ㄟ( ▔, ▔ )ㄏ" },
+        { label: "( ＿ ＿)ノ｜壁", value: "( ＿ ＿)ノ｜壁" },
+        { label: "▄█▀█●", value: "▄█▀█●" }
+      ]
+    - *symbolFooter
+  symbols_emoji_face:
+    - &emojiHeader [
+        { label: "表情", action: { type: "keyboardMode", value: "symbols_emoji_face" } },
+        { label: "手势", action: { type: "keyboardMode", value: "symbols_emoji_hand" } },
+        { label: "动物", action: { type: "keyboardMode", value: "symbols_emoji_animal" } },
+        { label: "食物", action: { type: "keyboardMode", value: "symbols_emoji_food" } },
+        { label: "旅行", action: { type: "keyboardMode", value: "symbols_emoji_travel" } },
+        { label: "物品", action: { type: "keyboardMode", value: "symbols_emoji_object" } },
+        { label: "标志", action: { type: "keyboardMode", value: "symbols_emoji_sign" } },
+        { label: "旗帜", action: { type: "keyboardMode", value: "symbols_emoji_flag" } }
+      ]
+    - [
+        { label: "😂", value: "😂" },
+        { label: "😀", value: "😀" },
+        { label: "😃", value: "😃" },
+        { label: "😄", value: "😄" },
+        { label: "😁", value: "😁" },
+        { label: "😆", value: "😆" },
+        { label: "😅", value: "😅" },
+        { label: "🤣", value: "🤣" },
+        { label: "🙂", value: "🙂" },
+        { label: "🙃", value: "🙃" }
+      ]
+    - [
+        { label: "🫠", value: "🫠" },
+        { label: "😉", value: "😉" },
+        { label: "😊", value: "😊" },
+        { label: "😇", value: "😇" },
+        { label: "🥰", value: "🥰" },
+        { label: "😍", value: "😍" },
+        { label: "🤩", value: "🤩" },
+        { label: "😘", value: "😘" },
+        { label: "😗", value: "😗" },
+        { label: "☺️", value: "☺️" }
+      ]
+    - [
+        { label: "😚", value: "😚" },
+        { label: "😙", value: "😙" },
+        { label: "🥲", value: "🥲" },
+        { label: "😋", value: "😋" },
+        { label: "😛", value: "😛" },
+        { label: "😜", value: "😜" },
+        { label: "🤪", value: "🤪" },
+        { label: "😝", value: "😝" },
+        { label: "🤑", value: "🤑" },
+        { label: "🤗", value: "🤗" }
+      ]
+    - [
+        { label: "🤭", value: "🤭" },
+        { label: "🫢", value: "🫢" },
+        { label: "🫣", value: "🫣" },
+        { label: "🤫", value: "🤫" },
+        { label: "🤔", value: "🤔" },
+        { label: "🫡", value: "🫡" },
+        { label: "🤐", value: "🤐" },
+        { label: "🤨", value: "🤨" },
+        { label: "😐", value: "😐" },
+        { label: "😑", value: "😑" }
+      ]
+    - [
+        { label: "😶", value: "😶" },
+        { label: "🫥", value: "🫥" },
+        { label: "😏", value: "😏" },
+        { label: "😒", value: "😒" },
+        { label: "🙄", value: "🙄" },
+        { label: "😬", value: "😬" },
+        { label: "🤥", value: "🤥" },
+        { label: "😌", value: "😌" },
+        { label: "😔", value: "😔" },
+        { label: "😪", value: "😪" }
+      ]
+    - [
+        { label: "🤤", value: "🤤" },
+        { label: "😴", value: "😴" },
+        { label: "😷", value: "😷" },
+        { label: "🤒", value: "🤒" },
+        { label: "🤕", value: "🤕" },
+        { label: "🤢", value: "🤢" },
+        { label: "🤮", value: "🤮" },
+        { label: "🤧", value: "🤧" },
+        { label: "🥵", value: "🥵" },
+        { label: "🥶", value: "🥶" }
+      ]
+    - [
+        { label: "🥴", value: "🥴" },
+        { label: "😵", value: "😵" },
+        { label: "🤯", value: "🤯" },
+        { label: "🤠", value: "🤠" },
+        { label: "🥳", value: "🥳" },
+        { label: "🥸", value: "🥸" },
+        { label: "😎", value: "😎" },
+        { label: "🤓", value: "🤓" },
+        { label: "🧐", value: "🧐" },
+        { label: "😕", value: "😕" }
+      ]
+    - [
+        { label: "🫤", value: "🫤" },
+        { label: "😟", value: "😟" },
+        { label: "🙁", value: "🙁" },
+        { label: "☹️", value: "☹️" },
+        { label: "😮", value: "😮" },
+        { label: "😯", value: "😯" },
+        { label: "😲", value: "😲" },
+        { label: "😳", value: "😳" },
+        { label: "🥺", value: "🥺" },
+        { label: "🥹", value: "🥹" }
+      ]
+    - [
+        { label: "😦", value: "😦" },
+        { label: "😧", value: "😧" },
+        { label: "😨", value: "😨" },
+        { label: "😰", value: "😰" },
+        { label: "😥", value: "😥" },
+        { label: "😢", value: "😢" },
+        { label: "😭", value: "😭" },
+        { label: "😱", value: "😱" },
+        { label: "😖", value: "😖" },
+        { label: "😣", value: "😣" }
+      ]
+    - [
+        { label: "😞", value: "😞" },
+        { label: "😓", value: "😓" },
+        { label: "😩", value: "😩" },
+        { label: "😫", value: "😫" },
+        { label: "🥱", value: "🥱" },
+        { label: "😤", value: "😤" },
+        { label: "😡", value: "😡" },
+        { label: "😠", value: "😠" },
+        { label: "🤬", value: "🤬" },
+        { label: "😈", value: "😈" }
+      ]
+    - [
+        { label: "👿", value: "👿" },
+        { label: "💀", value: "💀" },
+        { label: "☠️", value: "☠️" },
+        { label: "💩", value: "💩" },
+        { label: "🤡", value: "🤡" },
+        { label: "👹", value: "👹" },
+        { label: "👺", value: "👺" },
+        { label: "👻", value: "👻" },
+        { label: "👽", value: "👽" },
+        { label: "👾", value: "👾" }
+      ]
+    - [
+        { label: "🤖", value: "🤖" },
+        { label: "😺", value: "😺" },
+        { label: "😸", value: "😸" },
+        { label: "😹", value: "😹" },
+        { label: "😻", value: "😻" },
+        { label: "😼", value: "😼" },
+        { label: "😽", value: "😽" },
+        { label: "🙀", value: "🙀" },
+        { label: "😿", value: "😿" },
+        { label: "😾", value: "😾" }
+      ]
+    - [
+        { label: "🙈", value: "🙈" },
+        { label: "🙉", value: "🙉" },
+        { label: "🙊", value: "🙊" },
+        { label: "💌", value: "💌" },
+        { label: "💘", value: "💘" },
+        { label: "💝", value: "💝" },
+        { label: "💖", value: "💖" },
+        { label: "💗", value: "💗" },
+        { label: "💓", value: "💓" },
+        { label: "💞", value: "💞" }
+      ]
+    - [
+        { label: "💕", value: "💕" },
+        { label: "💟", value: "💟" },
+        { label: "❣️", value: "❣️" },
+        { label: "💔", value: "💔" },
+        { label: "❤️", value: "❤️" },
+        { label: "🧡", value: "🧡" },
+        { label: "💛", value: "💛" },
+        { label: "💚", value: "💚" },
+        { label: "💙", value: "💙" },
+        { label: "💜", value: "💜" }
+      ]
+    - [
+        { label: "🤎", value: "🤎" },
+        { label: "🖤", value: "🖤" },
+        { label: "🤍", value: "🤍" },
+        { label: "💋", value: "💋" },
+        { label: "💯", value: "💯" },
+        { label: "💢", value: "💢" },
+        { label: "💥", value: "💥" },
+        { label: "💫", value: "💫" },
+        { label: "💦", value: "💦" },
+        { label: "💨", value: "💨" }
+      ]
+    - [
+        { label: "🕳", value: "🕳" },
+        { label: "💬", value: "💬" },
+        { label: "🗨", value: "🗨" },
+        { label: "🗯", value: "🗯" },
+        { label: "💭", value: "💭" },
+        { label: "💤", value: "💤" },
+        { label: "🫨", value: "🫨" },
+        { label: "🙂‍↔️", value: "🙂‍↔️" },
+        { label: "🙂‍↕️", value: "🙂‍↕️" },
+        { label: "😶‍🌫️", value: "😶‍🌫️" }
+      ]
+    - &emojiFooter [
+        { label: "符号", weight: 1.15, action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
+        { label: "空格", weight: 4.6, action: { type: "space" } },
+        { label: "⌫", weight: 1.15, action: { type: "backspace" } },
+        { label: "↵", weight: 1.15, action: { type: "enter" } }
+      ]
+  symbols_emoji_hand:
+    - *emojiHeader
+    - [
+        { label: "👋", value: "👋" },
+        { label: "🤚", value: "🤚" },
+        { label: "🖐", value: "🖐" },
+        { label: "✋", value: "✋" },
+        { label: "🖖", value: "🖖" },
+        { label: "🫱", value: "🫱" },
+        { label: "🫲", value: "🫲" },
+        { label: "🫳", value: "🫳" },
+        { label: "🫴", value: "🫴" },
+        { label: "👌", value: "👌" }
+      ]
+    - [
+        { label: "🤌", value: "🤌" },
+        { label: "🤏", value: "🤏" },
+        { label: "✌️", value: "✌️" },
+        { label: "🤞", value: "🤞" },
+        { label: "🫰", value: "🫰" },
+        { label: "🤟", value: "🤟" },
+        { label: "🤘", value: "🤘" },
+        { label: "🤙", value: "🤙" },
+        { label: "👈", value: "👈" },
+        { label: "👉", value: "👉" }
+      ]
+    - [
+        { label: "👆", value: "👆" },
+        { label: "🖕", value: "🖕" },
+        { label: "👇", value: "👇" },
+        { label: "☝️", value: "☝️" },
+        { label: "🫵", value: "🫵" },
+        { label: "👍", value: "👍" },
+        { label: "👎", value: "👎" },
+        { label: "✊", value: "✊" },
+        { label: "👊", value: "👊" },
+        { label: "🤛", value: "🤛" }
+      ]
+    - [
+        { label: "🤜", value: "🤜" },
+        { label: "👏", value: "👏" },
+        { label: "🙌", value: "🙌" },
+        { label: "🫶", value: "🫶" },
+        { label: "👐", value: "👐" },
+        { label: "🤲", value: "🤲" },
+        { label: "🤝", value: "🤝" },
+        { label: "🙏", value: "🙏" },
+        { label: "✍️", value: "✍️" },
+        { label: "💅", value: "💅" }
+      ]
+    - [
+        { label: "🤳", value: "🤳" },
+        { label: "💪", value: "💪" },
+        { label: "🦾", value: "🦾" },
+        { label: "🦿", value: "🦿" },
+        { label: "🦵", value: "🦵" },
+        { label: "🦶", value: "🦶" },
+        { label: "👂", value: "👂" },
+        { label: "🦻", value: "🦻" },
+        { label: "👃", value: "👃" },
+        { label: "🧠", value: "🧠" }
+      ]
+    - [
+        { label: "🫀", value: "🫀" },
+        { label: "🫁", value: "🫁" },
+        { label: "🦷", value: "🦷" },
+        { label: "🦴", value: "🦴" },
+        { label: "👀", value: "👀" },
+        { label: "👁", value: "👁" },
+        { label: "👅", value: "👅" },
+        { label: "👄", value: "👄" },
+        { label: "🫦", value: "🫦" },
+        { label: "👶", value: "👶" }
+      ]
+    - [
+        { label: "🧒", value: "🧒" },
+        { label: "👦", value: "👦" },
+        { label: "👧", value: "👧" },
+        { label: "🧑", value: "🧑" },
+        { label: "👱", value: "👱" },
+        { label: "👨", value: "👨" },
+        { label: "🧔", value: "🧔" },
+        { label: "👩", value: "👩" },
+        { label: "🧓", value: "🧓" },
+        { label: "👴", value: "👴" }
+      ]
+    - [
+        { label: "👵", value: "👵" },
+        { label: "🙍", value: "🙍" },
+        { label: "🙎", value: "🙎" },
+        { label: "🙅", value: "🙅" },
+        { label: "🙆", value: "🙆" },
+        { label: "💁", value: "💁" },
+        { label: "🙋", value: "🙋" },
+        { label: "🧏", value: "🧏" },
+        { label: "🙇", value: "🙇" },
+        { label: "🤦", value: "🤦" }
+      ]
+    - [
+        { label: "🤷", value: "🤷" },
+        { label: "👮", value: "👮" },
+        { label: "🕵", value: "🕵" },
+        { label: "💂", value: "💂" },
+        { label: "🥷", value: "🥷" },
+        { label: "👷", value: "👷" },
+        { label: "🫅", value: "🫅" },
+        { label: "🤴", value: "🤴" },
+        { label: "👸", value: "👸" },
+        { label: "👳", value: "👳" }
+      ]
+    - [
+        { label: "👲", value: "👲" },
+        { label: "🧕", value: "🧕" },
+        { label: "🤵", value: "🤵" },
+        { label: "👰", value: "👰" },
+        { label: "🤰", value: "🤰" },
+        { label: "🫃", value: "🫃" },
+        { label: "🫄", value: "🫄" },
+        { label: "🤱", value: "🤱" },
+        { label: "👼", value: "👼" },
+        { label: "🎅", value: "🎅" }
+      ]
+    - [
+        { label: "🤶", value: "🤶" },
+        { label: "🦸", value: "🦸" },
+        { label: "🦹", value: "🦹" },
+        { label: "🧙", value: "🧙" },
+        { label: "🧚", value: "🧚" },
+        { label: "🧛", value: "🧛" },
+        { label: "🧜", value: "🧜" },
+        { label: "🧝", value: "🧝" },
+        { label: "🧞", value: "🧞" },
+        { label: "🧟", value: "🧟" }
+      ]
+    - [
+        { label: "🧌", value: "🧌" },
+        { label: "💆", value: "💆" },
+        { label: "💇", value: "💇" },
+        { label: "🚶", value: "🚶" },
+        { label: "🧍", value: "🧍" },
+        { label: "🧎", value: "🧎" },
+        { label: "🏃", value: "🏃" },
+        { label: "💃", value: "💃" },
+        { label: "🕺", value: "🕺" },
+        { label: "🕴", value: "🕴" }
+      ]
+    - [
+        { label: "👯", value: "👯" },
+        { label: "🧖", value: "🧖" },
+        { label: "🧗", value: "🧗" },
+        { label: "🤺", value: "🤺" },
+        { label: "🏇", value: "🏇" },
+        { label: "⛷️", value: "⛷️" },
+        { label: "🏂", value: "🏂" },
+        { label: "🏌", value: "🏌" },
+        { label: "🏄", value: "🏄" },
+        { label: "🚣", value: "🚣" }
+      ]
+    - [
+        { label: "🏊", value: "🏊" },
+        { label: "⛹️", value: "⛹️" },
+        { label: "🏋", value: "🏋" },
+        { label: "🚴", value: "🚴" },
+        { label: "🚵", value: "🚵" },
+        { label: "🤸", value: "🤸" },
+        { label: "🤼", value: "🤼" },
+        { label: "🤽", value: "🤽" },
+        { label: "🤾", value: "🤾" },
+        { label: "🤹", value: "🤹" }
+      ]
+    - [
+        { label: "🧘", value: "🧘" },
+        { label: "🛀", value: "🛀" },
+        { label: "🛌", value: "🛌" },
+        { label: "👭", value: "👭" },
+        { label: "👫", value: "👫" },
+        { label: "👬", value: "👬" },
+        { label: "💏", value: "💏" },
+        { label: "💑", value: "💑" },
+        { label: "👪", value: "👪" },
+        { label: "🗣", value: "🗣" }
+      ]
+    - [
+        { label: "👤", value: "👤" },
+        { label: "👥", value: "👥" },
+        { label: "🫂", value: "🫂" },
+        { label: "👣", value: "👣" },
+        { label: "🧑‍🦰", value: "🧑‍🦰" },
+        { label: "🧑‍🦱", value: "🧑‍🦱" },
+        { label: "🧑‍🦳", value: "🧑‍🦳" },
+        { label: "🧑‍🦲", value: "🧑‍🦲" },
+        { label: "👨‍🦰", value: "👨‍🦰" },
+        { label: "👩‍🦰", value: "👩‍🦰" }
+      ]
+    - *emojiFooter
+  symbols_emoji_animal:
+    - *emojiHeader
+    - [
+        { label: "🐵", value: "🐵" },
+        { label: "🐒", value: "🐒" },
+        { label: "🦍", value: "🦍" },
+        { label: "🦧", value: "🦧" },
+        { label: "🐶", value: "🐶" },
+        { label: "🐕", value: "🐕" },
+        { label: "🦮", value: "🦮" },
+        { label: "🐩", value: "🐩" },
+        { label: "🐺", value: "🐺" },
+        { label: "🦊", value: "🦊" }
+      ]
+    - [
+        { label: "🦝", value: "🦝" },
+        { label: "🐱", value: "🐱" },
+        { label: "🐈", value: "🐈" },
+        { label: "🦁", value: "🦁" },
+        { label: "🐯", value: "🐯" },
+        { label: "🐅", value: "🐅" },
+        { label: "🐆", value: "🐆" },
+        { label: "🐴", value: "🐴" },
+        { label: "🐎", value: "🐎" },
+        { label: "🦄", value: "🦄" }
+      ]
+    - [
+        { label: "🦓", value: "🦓" },
+        { label: "🦌", value: "🦌" },
+        { label: "🦬", value: "🦬" },
+        { label: "🐮", value: "🐮" },
+        { label: "🐂", value: "🐂" },
+        { label: "🐃", value: "🐃" },
+        { label: "🐄", value: "🐄" },
+        { label: "🐷", value: "🐷" },
+        { label: "🐖", value: "🐖" },
+        { label: "🐗", value: "🐗" }
+      ]
+    - [
+        { label: "🐽", value: "🐽" },
+        { label: "🐏", value: "🐏" },
+        { label: "🐑", value: "🐑" },
+        { label: "🐐", value: "🐐" },
+        { label: "🐪", value: "🐪" },
+        { label: "🐫", value: "🐫" },
+        { label: "🦙", value: "🦙" },
+        { label: "🦒", value: "🦒" },
+        { label: "🐘", value: "🐘" },
+        { label: "🦣", value: "🦣" }
+      ]
+    - [
+        { label: "🦏", value: "🦏" },
+        { label: "🦛", value: "🦛" },
+        { label: "🐭", value: "🐭" },
+        { label: "🐁", value: "🐁" },
+        { label: "🐀", value: "🐀" },
+        { label: "🐹", value: "🐹" },
+        { label: "🐰", value: "🐰" },
+        { label: "🐇", value: "🐇" },
+        { label: "🐿", value: "🐿" },
+        { label: "🦫", value: "🦫" }
+      ]
+    - [
+        { label: "🦔", value: "🦔" },
+        { label: "🦇", value: "🦇" },
+        { label: "🐻", value: "🐻" },
+        { label: "🐨", value: "🐨" },
+        { label: "🐼", value: "🐼" },
+        { label: "🦥", value: "🦥" },
+        { label: "🦦", value: "🦦" },
+        { label: "🦨", value: "🦨" },
+        { label: "🦘", value: "🦘" },
+        { label: "🦡", value: "🦡" }
+      ]
+    - [
+        { label: "🐾", value: "🐾" },
+        { label: "🦃", value: "🦃" },
+        { label: "🐔", value: "🐔" },
+        { label: "🐓", value: "🐓" },
+        { label: "🐣", value: "🐣" },
+        { label: "🐤", value: "🐤" },
+        { label: "🐥", value: "🐥" },
+        { label: "🐦", value: "🐦" },
+        { label: "🐧", value: "🐧" },
+        { label: "🕊", value: "🕊" }
+      ]
+    - [
+        { label: "🦅", value: "🦅" },
+        { label: "🦆", value: "🦆" },
+        { label: "🦢", value: "🦢" },
+        { label: "🦉", value: "🦉" },
+        { label: "🦤", value: "🦤" },
+        { label: "🪶", value: "🪶" },
+        { label: "🦩", value: "🦩" },
+        { label: "🦚", value: "🦚" },
+        { label: "🦜", value: "🦜" },
+        { label: "🐸", value: "🐸" }
+      ]
+    - [
+        { label: "🐊", value: "🐊" },
+        { label: "🐢", value: "🐢" },
+        { label: "🦎", value: "🦎" },
+        { label: "🐍", value: "🐍" },
+        { label: "🐲", value: "🐲" },
+        { label: "🐉", value: "🐉" },
+        { label: "🦕", value: "🦕" },
+        { label: "🦖", value: "🦖" },
+        { label: "🐳", value: "🐳" },
+        { label: "🐋", value: "🐋" }
+      ]
+    - [
+        { label: "🐬", value: "🐬" },
+        { label: "🦭", value: "🦭" },
+        { label: "🐟", value: "🐟" },
+        { label: "🐠", value: "🐠" },
+        { label: "🐡", value: "🐡" },
+        { label: "🦈", value: "🦈" },
+        { label: "🐙", value: "🐙" },
+        { label: "🐚", value: "🐚" },
+        { label: "🪸", value: "🪸" },
+        { label: "🐌", value: "🐌" }
+      ]
+    - [
+        { label: "🦋", value: "🦋" },
+        { label: "🐛", value: "🐛" },
+        { label: "🐜", value: "🐜" },
+        { label: "🐝", value: "🐝" },
+        { label: "🪲", value: "🪲" },
+        { label: "🐞", value: "🐞" },
+        { label: "🦗", value: "🦗" },
+        { label: "🪳", value: "🪳" },
+        { label: "🕷", value: "🕷" },
+        { label: "🕸", value: "🕸" }
+      ]
+    - [
+        { label: "🦂", value: "🦂" },
+        { label: "🦟", value: "🦟" },
+        { label: "🪰", value: "🪰" },
+        { label: "🪱", value: "🪱" },
+        { label: "🦠", value: "🦠" },
+        { label: "💐", value: "💐" },
+        { label: "🌸", value: "🌸" },
+        { label: "💮", value: "💮" },
+        { label: "🪷", value: "🪷" },
+        { label: "🏵", value: "🏵" }
+      ]
+    - [
+        { label: "🌹", value: "🌹" },
+        { label: "🥀", value: "🥀" },
+        { label: "🌺", value: "🌺" },
+        { label: "🌻", value: "🌻" },
+        { label: "🌼", value: "🌼" },
+        { label: "🌷", value: "🌷" },
+        { label: "🌱", value: "🌱" },
+        { label: "🪴", value: "🪴" },
+        { label: "🌲", value: "🌲" },
+        { label: "🌳", value: "🌳" }
+      ]
+    - [
+        { label: "🌴", value: "🌴" },
+        { label: "🌵", value: "🌵" },
+        { label: "🌾", value: "🌾" },
+        { label: "🌿", value: "🌿" },
+        { label: "☘️", value: "☘️" },
+        { label: "🍀", value: "🍀" },
+        { label: "🍁", value: "🍁" },
+        { label: "🍂", value: "🍂" },
+        { label: "🍃", value: "🍃" },
+        { label: "🪹", value: "🪹" }
+      ]
+    - [
+        { label: "🪺", value: "🪺" },
+        { label: "🍄", value: "🍄" },
+        { label: "🫎", value: "🫎" },
+        { label: "🫏", value: "🫏" },
+        { label: "🪿", value: "🪿" },
+        { label: "🪽", value: "🪽" },
+        { label: "🪼", value: "🪼" },
+        { label: "🐦‍🔥", value: "🐦‍🔥" },
+        { label: "🐦‍⬛", value: "🐦‍⬛" },
+        { label: "🐻‍❄️", value: "🐻‍❄️" }
+      ]
+    - *emojiFooter
+  symbols_emoji_food:
+    - *emojiHeader
+    - [
+        { label: "🍇", value: "🍇" },
+        { label: "🍈", value: "🍈" },
+        { label: "🍉", value: "🍉" },
+        { label: "🍊", value: "🍊" },
+        { label: "🍋", value: "🍋" },
+        { label: "🍌", value: "🍌" },
+        { label: "🍍", value: "🍍" },
+        { label: "🥭", value: "🥭" },
+        { label: "🍎", value: "🍎" },
+        { label: "🍏", value: "🍏" }
+      ]
+    - [
+        { label: "🍐", value: "🍐" },
+        { label: "🍑", value: "🍑" },
+        { label: "🍒", value: "🍒" },
+        { label: "🍓", value: "🍓" },
+        { label: "🫐", value: "🫐" },
+        { label: "🥝", value: "🥝" },
+        { label: "🍅", value: "🍅" },
+        { label: "🫒", value: "🫒" },
+        { label: "🥥", value: "🥥" },
+        { label: "🥑", value: "🥑" }
+      ]
+    - [
+        { label: "🍆", value: "🍆" },
+        { label: "🥔", value: "🥔" },
+        { label: "🥕", value: "🥕" },
+        { label: "🌽", value: "🌽" },
+        { label: "🌶", value: "🌶" },
+        { label: "🫑", value: "🫑" },
+        { label: "🥒", value: "🥒" },
+        { label: "🥬", value: "🥬" },
+        { label: "🥦", value: "🥦" },
+        { label: "🧄", value: "🧄" }
+      ]
+    - [
+        { label: "🧅", value: "🧅" },
+        { label: "🥜", value: "🥜" },
+        { label: "🫘", value: "🫘" },
+        { label: "🌰", value: "🌰" },
+        { label: "🍞", value: "🍞" },
+        { label: "🥐", value: "🥐" },
+        { label: "🥖", value: "🥖" },
+        { label: "🫓", value: "🫓" },
+        { label: "🥨", value: "🥨" },
+        { label: "🥯", value: "🥯" }
+      ]
+    - [
+        { label: "🥞", value: "🥞" },
+        { label: "🧇", value: "🧇" },
+        { label: "🧀", value: "🧀" },
+        { label: "🍖", value: "🍖" },
+        { label: "🍗", value: "🍗" },
+        { label: "🥩", value: "🥩" },
+        { label: "🥓", value: "🥓" },
+        { label: "🍔", value: "🍔" },
+        { label: "🍟", value: "🍟" },
+        { label: "🍕", value: "🍕" }
+      ]
+    - [
+        { label: "🌭", value: "🌭" },
+        { label: "🥪", value: "🥪" },
+        { label: "🌮", value: "🌮" },
+        { label: "🌯", value: "🌯" },
+        { label: "🫔", value: "🫔" },
+        { label: "🥙", value: "🥙" },
+        { label: "🧆", value: "🧆" },
+        { label: "🥚", value: "🥚" },
+        { label: "🍳", value: "🍳" },
+        { label: "🥘", value: "🥘" }
+      ]
+    - [
+        { label: "🍲", value: "🍲" },
+        { label: "🫕", value: "🫕" },
+        { label: "🥣", value: "🥣" },
+        { label: "🥗", value: "🥗" },
+        { label: "🍿", value: "🍿" },
+        { label: "🧈", value: "🧈" },
+        { label: "🧂", value: "🧂" },
+        { label: "🥫", value: "🥫" },
+        { label: "🍱", value: "🍱" },
+        { label: "🍘", value: "🍘" }
+      ]
+    - [
+        { label: "🍙", value: "🍙" },
+        { label: "🍚", value: "🍚" },
+        { label: "🍛", value: "🍛" },
+        { label: "🍜", value: "🍜" },
+        { label: "🍝", value: "🍝" },
+        { label: "🍠", value: "🍠" },
+        { label: "🍢", value: "🍢" },
+        { label: "🍣", value: "🍣" },
+        { label: "🍤", value: "🍤" },
+        { label: "🍥", value: "🍥" }
+      ]
+    - [
+        { label: "🥮", value: "🥮" },
+        { label: "🍡", value: "🍡" },
+        { label: "🥟", value: "🥟" },
+        { label: "🥠", value: "🥠" },
+        { label: "🥡", value: "🥡" },
+        { label: "🦀", value: "🦀" },
+        { label: "🦞", value: "🦞" },
+        { label: "🦐", value: "🦐" },
+        { label: "🦑", value: "🦑" },
+        { label: "🦪", value: "🦪" }
+      ]
+    - [
+        { label: "🍦", value: "🍦" },
+        { label: "🍧", value: "🍧" },
+        { label: "🍨", value: "🍨" },
+        { label: "🍩", value: "🍩" },
+        { label: "🍪", value: "🍪" },
+        { label: "🎂", value: "🎂" },
+        { label: "🍰", value: "🍰" },
+        { label: "🧁", value: "🧁" },
+        { label: "🥧", value: "🥧" },
+        { label: "🍫", value: "🍫" }
+      ]
+    - [
+        { label: "🍬", value: "🍬" },
+        { label: "🍭", value: "🍭" },
+        { label: "🍮", value: "🍮" },
+        { label: "🍯", value: "🍯" },
+        { label: "🍼", value: "🍼" },
+        { label: "🥛", value: "🥛" },
+        { label: "☕", value: "☕" },
+        { label: "🫖", value: "🫖" },
+        { label: "🍵", value: "🍵" },
+        { label: "🍶", value: "🍶" }
+      ]
+    - [
+        { label: "🍾", value: "🍾" },
+        { label: "🍷", value: "🍷" },
+        { label: "🍸", value: "🍸" },
+        { label: "🍹", value: "🍹" },
+        { label: "🍺", value: "🍺" },
+        { label: "🍻", value: "🍻" },
+        { label: "🥂", value: "🥂" },
+        { label: "🥃", value: "🥃" },
+        { label: "🫗", value: "🫗" },
+        { label: "🥤", value: "🥤" }
+      ]
+    - [
+        { label: "🧋", value: "🧋" },
+        { label: "🧃", value: "🧃" },
+        { label: "🧉", value: "🧉" },
+        { label: "🧊", value: "🧊" },
+        { label: "🥢", value: "🥢" },
+        { label: "🍽", value: "🍽" },
+        { label: "🍴", value: "🍴" },
+        { label: "🥄", value: "🥄" },
+        { label: "🔪", value: "🔪" },
+        { label: "🫙", value: "🫙" }
+      ]
+    - *emojiFooter
+  symbols_emoji_travel:
+    - *emojiHeader
+    - [
+        { label: "🌍", value: "🌍" },
+        { label: "🌎", value: "🌎" },
+        { label: "🌏", value: "🌏" },
+        { label: "🌐", value: "🌐" },
+        { label: "🗺", value: "🗺" },
+        { label: "🗾", value: "🗾" },
+        { label: "🧭", value: "🧭" },
+        { label: "🏔", value: "🏔" },
+        { label: "⛰️", value: "⛰️" },
+        { label: "🌋", value: "🌋" }
+      ]
+    - [
+        { label: "🗻", value: "🗻" },
+        { label: "🏕", value: "🏕" },
+        { label: "🏖", value: "🏖" },
+        { label: "🏜", value: "🏜" },
+        { label: "🏝", value: "🏝" },
+        { label: "🏞", value: "🏞" },
+        { label: "🏟", value: "🏟" },
+        { label: "🏛", value: "🏛" },
+        { label: "🏗", value: "🏗" },
+        { label: "🧱", value: "🧱" }
+      ]
+    - [
+        { label: "🪨", value: "🪨" },
+        { label: "🪵", value: "🪵" },
+        { label: "🛖", value: "🛖" },
+        { label: "🏘", value: "🏘" },
+        { label: "🏚", value: "🏚" },
+        { label: "🏠", value: "🏠" },
+        { label: "🏡", value: "🏡" },
+        { label: "🏢", value: "🏢" },
+        { label: "🏣", value: "🏣" },
+        { label: "🏤", value: "🏤" }
+      ]
+    - [
+        { label: "🏥", value: "🏥" },
+        { label: "🏦", value: "🏦" },
+        { label: "🏨", value: "🏨" },
+        { label: "🏩", value: "🏩" },
+        { label: "🏪", value: "🏪" },
+        { label: "🏫", value: "🏫" },
+        { label: "🏬", value: "🏬" },
+        { label: "🏭", value: "🏭" },
+        { label: "🏯", value: "🏯" },
+        { label: "🏰", value: "🏰" }
+      ]
+    - [
+        { label: "💒", value: "💒" },
+        { label: "🗼", value: "🗼" },
+        { label: "🗽", value: "🗽" },
+        { label: "⛪", value: "⛪" },
+        { label: "🕌", value: "🕌" },
+        { label: "🛕", value: "🛕" },
+        { label: "🕍", value: "🕍" },
+        { label: "⛩️", value: "⛩️" },
+        { label: "🕋", value: "🕋" },
+        { label: "⛲", value: "⛲" }
+      ]
+    - [
+        { label: "⛺", value: "⛺" },
+        { label: "🌁", value: "🌁" },
+        { label: "🌃", value: "🌃" },
+        { label: "🏙", value: "🏙" },
+        { label: "🌄", value: "🌄" },
+        { label: "🌅", value: "🌅" },
+        { label: "🌆", value: "🌆" },
+        { label: "🌇", value: "🌇" },
+        { label: "🌉", value: "🌉" },
+        { label: "♨️", value: "♨️" }
+      ]
+    - [
+        { label: "🎠", value: "🎠" },
+        { label: "🛝", value: "🛝" },
+        { label: "🎡", value: "🎡" },
+        { label: "🎢", value: "🎢" },
+        { label: "💈", value: "💈" },
+        { label: "🎪", value: "🎪" },
+        { label: "🚂", value: "🚂" },
+        { label: "🚃", value: "🚃" },
+        { label: "🚄", value: "🚄" },
+        { label: "🚅", value: "🚅" }
+      ]
+    - [
+        { label: "🚆", value: "🚆" },
+        { label: "🚇", value: "🚇" },
+        { label: "🚈", value: "🚈" },
+        { label: "🚉", value: "🚉" },
+        { label: "🚊", value: "🚊" },
+        { label: "🚝", value: "🚝" },
+        { label: "🚞", value: "🚞" },
+        { label: "🚋", value: "🚋" },
+        { label: "🚌", value: "🚌" },
+        { label: "🚍", value: "🚍" }
+      ]
+    - [
+        { label: "🚎", value: "🚎" },
+        { label: "🚐", value: "🚐" },
+        { label: "🚑", value: "🚑" },
+        { label: "🚒", value: "🚒" },
+        { label: "🚓", value: "🚓" },
+        { label: "🚔", value: "🚔" },
+        { label: "🚕", value: "🚕" },
+        { label: "🚖", value: "🚖" },
+        { label: "🚗", value: "🚗" },
+        { label: "🚘", value: "🚘" }
+      ]
+    - [
+        { label: "🚙", value: "🚙" },
+        { label: "🛻", value: "🛻" },
+        { label: "🚚", value: "🚚" },
+        { label: "🚛", value: "🚛" },
+        { label: "🚜", value: "🚜" },
+        { label: "🏎", value: "🏎" },
+        { label: "🏍", value: "🏍" },
+        { label: "🛵", value: "🛵" },
+        { label: "🦽", value: "🦽" },
+        { label: "🦼", value: "🦼" }
+      ]
+    - [
+        { label: "🛺", value: "🛺" },
+        { label: "🚲", value: "🚲" },
+        { label: "🛴", value: "🛴" },
+        { label: "🛹", value: "🛹" },
+        { label: "🛼", value: "🛼" },
+        { label: "🚏", value: "🚏" },
+        { label: "🛣", value: "🛣" },
+        { label: "🛤", value: "🛤" },
+        { label: "🛢", value: "🛢" },
+        { label: "⛽", value: "⛽" }
+      ]
+    - [
+        { label: "🛞", value: "🛞" },
+        { label: "🚨", value: "🚨" },
+        { label: "🚥", value: "🚥" },
+        { label: "🚦", value: "🚦" },
+        { label: "🛑", value: "🛑" },
+        { label: "🚧", value: "🚧" },
+        { label: "⚓", value: "⚓" },
+        { label: "🛟", value: "🛟" },
+        { label: "⛵", value: "⛵" },
+        { label: "🛶", value: "🛶" }
+      ]
+    - [
+        { label: "🚤", value: "🚤" },
+        { label: "🛳", value: "🛳" },
+        { label: "⛴️", value: "⛴️" },
+        { label: "🛥", value: "🛥" },
+        { label: "🚢", value: "🚢" },
+        { label: "✈️", value: "✈️" },
+        { label: "🛩", value: "🛩" },
+        { label: "🛫", value: "🛫" },
+        { label: "🛬", value: "🛬" },
+        { label: "🪂", value: "🪂" }
+      ]
+    - [
+        { label: "💺", value: "💺" },
+        { label: "🚁", value: "🚁" },
+        { label: "🚟", value: "🚟" },
+        { label: "🚠", value: "🚠" },
+        { label: "🚡", value: "🚡" },
+        { label: "🛰", value: "🛰" },
+        { label: "🚀", value: "🚀" },
+        { label: "🛸", value: "🛸" },
+        { label: "🛎", value: "🛎" },
+        { label: "🧳", value: "🧳" }
+      ]
+    - [
+        { label: "⌛", value: "⌛" },
+        { label: "⏳", value: "⏳" },
+        { label: "⌚", value: "⌚" },
+        { label: "⏰", value: "⏰" },
+        { label: "⏱️", value: "⏱️" },
+        { label: "⏲️", value: "⏲️" },
+        { label: "🕰", value: "🕰" },
+        { label: "🕛", value: "🕛" },
+        { label: "🕧", value: "🕧" },
+        { label: "🕐", value: "🕐" }
+      ]
+    - [
+        { label: "🕜", value: "🕜" },
+        { label: "🕑", value: "🕑" },
+        { label: "🕝", value: "🕝" },
+        { label: "🕒", value: "🕒" },
+        { label: "🕞", value: "🕞" },
+        { label: "🕓", value: "🕓" },
+        { label: "🕟", value: "🕟" },
+        { label: "🕔", value: "🕔" },
+        { label: "🕠", value: "🕠" },
+        { label: "🕕", value: "🕕" }
+      ]
+    - [
+        { label: "🕡", value: "🕡" },
+        { label: "🕖", value: "🕖" },
+        { label: "🕢", value: "🕢" },
+        { label: "🕗", value: "🕗" },
+        { label: "🕣", value: "🕣" },
+        { label: "🕘", value: "🕘" },
+        { label: "🕤", value: "🕤" },
+        { label: "🕙", value: "🕙" },
+        { label: "🕥", value: "🕥" },
+        { label: "🕚", value: "🕚" }
+      ]
+    - [
+        { label: "🕦", value: "🕦" },
+        { label: "🌑", value: "🌑" },
+        { label: "🌒", value: "🌒" },
+        { label: "🌓", value: "🌓" },
+        { label: "🌔", value: "🌔" },
+        { label: "🌕", value: "🌕" },
+        { label: "🌖", value: "🌖" },
+        { label: "🌗", value: "🌗" },
+        { label: "🌘", value: "🌘" },
+        { label: "🌙", value: "🌙" }
+      ]
+    - [
+        { label: "🌚", value: "🌚" },
+        { label: "🌛", value: "🌛" },
+        { label: "🌜", value: "🌜" },
+        { label: "🌡", value: "🌡" },
+        { label: "☀️", value: "☀️" },
+        { label: "🌝", value: "🌝" },
+        { label: "🌞", value: "🌞" },
+        { label: "🪐", value: "🪐" },
+        { label: "⭐", value: "⭐" },
+        { label: "🌟", value: "🌟" }
+      ]
+    - [
+        { label: "🌠", value: "🌠" },
+        { label: "🌌", value: "🌌" },
+        { label: "☁️", value: "☁️" },
+        { label: "⛅", value: "⛅" },
+        { label: "⛈️", value: "⛈️" },
+        { label: "🌤", value: "🌤" },
+        { label: "🌥", value: "🌥" },
+        { label: "🌦", value: "🌦" },
+        { label: "🌧", value: "🌧" },
+        { label: "🌨", value: "🌨" }
+      ]
+    - [
+        { label: "🌩", value: "🌩" },
+        { label: "🌪", value: "🌪" },
+        { label: "🌫", value: "🌫" },
+        { label: "🌬", value: "🌬" },
+        { label: "🌀", value: "🌀" },
+        { label: "🌈", value: "🌈" },
+        { label: "🌂", value: "🌂" },
+        { label: "☂️", value: "☂️" },
+        { label: "☔", value: "☔" },
+        { label: "⛱️", value: "⛱️" }
+      ]
+    - [
+        { label: "⚡", value: "⚡" },
+        { label: "❄️", value: "❄️" },
+        { label: "☃️", value: "☃️" },
+        { label: "⛄", value: "⛄" },
+        { label: "☄️", value: "☄️" },
+        { label: "🔥", value: "🔥" },
+        { label: "💧", value: "💧" },
+        { label: "🌊", value: "🌊" },
+        { label: "🚶‍➡️", value: "🚶‍➡️" },
+        { label: "🏃‍➡️", value: "🏃‍➡️" }
+      ]
+    - *emojiFooter
+  symbols_emoji_object:
+    - *emojiHeader
+    - [
+        { label: "🎃", value: "🎃" },
+        { label: "🎄", value: "🎄" },
+        { label: "🎆", value: "🎆" },
+        { label: "🎇", value: "🎇" },
+        { label: "🧨", value: "🧨" },
+        { label: "✨", value: "✨" },
+        { label: "🎈", value: "🎈" },
+        { label: "🎉", value: "🎉" },
+        { label: "🎊", value: "🎊" },
+        { label: "🎋", value: "🎋" }
+      ]
+    - [
+        { label: "🎍", value: "🎍" },
+        { label: "🎎", value: "🎎" },
+        { label: "🎏", value: "🎏" },
+        { label: "🎐", value: "🎐" },
+        { label: "🎑", value: "🎑" },
+        { label: "🧧", value: "🧧" },
+        { label: "🎀", value: "🎀" },
+        { label: "🎁", value: "🎁" },
+        { label: "🎗", value: "🎗" },
+        { label: "🎟", value: "🎟" }
+      ]
+    - [
+        { label: "🎫", value: "🎫" },
+        { label: "🎖", value: "🎖" },
+        { label: "🏆", value: "🏆" },
+        { label: "🏅", value: "🏅" },
+        { label: "🥇", value: "🥇" },
+        { label: "🥈", value: "🥈" },
+        { label: "🥉", value: "🥉" },
+        { label: "⚽", value: "⚽" },
+        { label: "⚾", value: "⚾" },
+        { label: "🥎", value: "🥎" }
+      ]
+    - [
+        { label: "🏀", value: "🏀" },
+        { label: "🏐", value: "🏐" },
+        { label: "🏈", value: "🏈" },
+        { label: "🏉", value: "🏉" },
+        { label: "🎾", value: "🎾" },
+        { label: "🥏", value: "🥏" },
+        { label: "🎳", value: "🎳" },
+        { label: "🏏", value: "🏏" },
+        { label: "🏑", value: "🏑" },
+        { label: "🏒", value: "🏒" }
+      ]
+    - [
+        { label: "🥍", value: "🥍" },
+        { label: "🏓", value: "🏓" },
+        { label: "🏸", value: "🏸" },
+        { label: "🥊", value: "🥊" },
+        { label: "🥋", value: "🥋" },
+        { label: "🥅", value: "🥅" },
+        { label: "⛳", value: "⛳" },
+        { label: "⛸️", value: "⛸️" },
+        { label: "🎣", value: "🎣" },
+        { label: "🤿", value: "🤿" }
+      ]
+    - [
+        { label: "🎽", value: "🎽" },
+        { label: "🎿", value: "🎿" },
+        { label: "🛷", value: "🛷" },
+        { label: "🥌", value: "🥌" },
+        { label: "🎯", value: "🎯" },
+        { label: "🪀", value: "🪀" },
+        { label: "🪁", value: "🪁" },
+        { label: "🎱", value: "🎱" },
+        { label: "🔮", value: "🔮" },
+        { label: "🪄", value: "🪄" }
+      ]
+    - [
+        { label: "🎮", value: "🎮" },
+        { label: "🕹", value: "🕹" },
+        { label: "🎰", value: "🎰" },
+        { label: "🎲", value: "🎲" },
+        { label: "🧩", value: "🧩" },
+        { label: "🧸", value: "🧸" },
+        { label: "🪅", value: "🪅" },
+        { label: "🪩", value: "🪩" },
+        { label: "🪆", value: "🪆" },
+        { label: "♠️", value: "♠️" }
+      ]
+    - [
+        { label: "♥️", value: "♥️" },
+        { label: "♦️", value: "♦️" },
+        { label: "♣️", value: "♣️" },
+        { label: "♟️", value: "♟️" },
+        { label: "🃏", value: "🃏" },
+        { label: "🀄", value: "🀄" },
+        { label: "🎴", value: "🎴" },
+        { label: "🔫", value: "🔫" },
+        { label: "🎭", value: "🎭" },
+        { label: "🖼", value: "🖼" }
+      ]
+    - [
+        { label: "🎨", value: "🎨" },
+        { label: "🧵", value: "🧵" },
+        { label: "🪡", value: "🪡" },
+        { label: "🧶", value: "🧶" },
+        { label: "🪢", value: "🪢" },
+        { label: "👓", value: "👓" },
+        { label: "🕶", value: "🕶" },
+        { label: "🥽", value: "🥽" },
+        { label: "🥼", value: "🥼" },
+        { label: "🦺", value: "🦺" }
+      ]
+    - [
+        { label: "👔", value: "👔" },
+        { label: "👕", value: "👕" },
+        { label: "👖", value: "👖" },
+        { label: "🧣", value: "🧣" },
+        { label: "🧤", value: "🧤" },
+        { label: "🧥", value: "🧥" },
+        { label: "🧦", value: "🧦" },
+        { label: "👗", value: "👗" },
+        { label: "👘", value: "👘" },
+        { label: "🥻", value: "🥻" }
+      ]
+    - [
+        { label: "🩱", value: "🩱" },
+        { label: "🩲", value: "🩲" },
+        { label: "🩳", value: "🩳" },
+        { label: "👙", value: "👙" },
+        { label: "👚", value: "👚" },
+        { label: "👛", value: "👛" },
+        { label: "👜", value: "👜" },
+        { label: "👝", value: "👝" },
+        { label: "🛍", value: "🛍" },
+        { label: "🎒", value: "🎒" }
+      ]
+    - [
+        { label: "🩴", value: "🩴" },
+        { label: "👞", value: "👞" },
+        { label: "👟", value: "👟" },
+        { label: "🥾", value: "🥾" },
+        { label: "🥿", value: "🥿" },
+        { label: "👠", value: "👠" },
+        { label: "👡", value: "👡" },
+        { label: "🩰", value: "🩰" },
+        { label: "👢", value: "👢" },
+        { label: "👑", value: "👑" }
+      ]
+    - [
+        { label: "👒", value: "👒" },
+        { label: "🎩", value: "🎩" },
+        { label: "🎓", value: "🎓" },
+        { label: "🧢", value: "🧢" },
+        { label: "🪖", value: "🪖" },
+        { label: "⛑️", value: "⛑️" },
+        { label: "📿", value: "📿" },
+        { label: "💄", value: "💄" },
+        { label: "💍", value: "💍" },
+        { label: "💎", value: "💎" }
+      ]
+    - [
+        { label: "🔇", value: "🔇" },
+        { label: "🔈", value: "🔈" },
+        { label: "🔉", value: "🔉" },
+        { label: "🔊", value: "🔊" },
+        { label: "📢", value: "📢" },
+        { label: "📣", value: "📣" },
+        { label: "📯", value: "📯" },
+        { label: "🔔", value: "🔔" },
+        { label: "🔕", value: "🔕" },
+        { label: "🎼", value: "🎼" }
+      ]
+    - [
+        { label: "🎵", value: "🎵" },
+        { label: "🎶", value: "🎶" },
+        { label: "🎙", value: "🎙" },
+        { label: "🎚", value: "🎚" },
+        { label: "🎛", value: "🎛" },
+        { label: "🎤", value: "🎤" },
+        { label: "🎧", value: "🎧" },
+        { label: "📻", value: "📻" },
+        { label: "🎷", value: "🎷" },
+        { label: "🪗", value: "🪗" }
+      ]
+    - [
+        { label: "🎸", value: "🎸" },
+        { label: "🎹", value: "🎹" },
+        { label: "🎺", value: "🎺" },
+        { label: "🎻", value: "🎻" },
+        { label: "🪕", value: "🪕" },
+        { label: "🥁", value: "🥁" },
+        { label: "🪘", value: "🪘" },
+        { label: "📱", value: "📱" },
+        { label: "📲", value: "📲" },
+        { label: "☎️", value: "☎️" }
+      ]
+    - [
+        { label: "📞", value: "📞" },
+        { label: "📟", value: "📟" },
+        { label: "📠", value: "📠" },
+        { label: "🔋", value: "🔋" },
+        { label: "🪫", value: "🪫" },
+        { label: "🔌", value: "🔌" },
+        { label: "💻", value: "💻" },
+        { label: "🖥", value: "🖥" },
+        { label: "🖨", value: "🖨" },
+        { label: "⌨️", value: "⌨️" }
+      ]
+    - [
+        { label: "🖱", value: "🖱" },
+        { label: "🖲", value: "🖲" },
+        { label: "💽", value: "💽" },
+        { label: "💾", value: "💾" },
+        { label: "💿", value: "💿" },
+        { label: "📀", value: "📀" },
+        { label: "🧮", value: "🧮" },
+        { label: "🎥", value: "🎥" },
+        { label: "🎞", value: "🎞" },
+        { label: "📽", value: "📽" }
+      ]
+    - [
+        { label: "🎬", value: "🎬" },
+        { label: "📺", value: "📺" },
+        { label: "📷", value: "📷" },
+        { label: "📸", value: "📸" },
+        { label: "📹", value: "📹" },
+        { label: "📼", value: "📼" },
+        { label: "🔍", value: "🔍" },
+        { label: "🔎", value: "🔎" },
+        { label: "🕯", value: "🕯" },
+        { label: "💡", value: "💡" }
+      ]
+    - [
+        { label: "🔦", value: "🔦" },
+        { label: "🏮", value: "🏮" },
+        { label: "🪔", value: "🪔" },
+        { label: "📔", value: "📔" },
+        { label: "📕", value: "📕" },
+        { label: "📖", value: "📖" },
+        { label: "📗", value: "📗" },
+        { label: "📘", value: "📘" },
+        { label: "📙", value: "📙" },
+        { label: "📚", value: "📚" }
+      ]
+    - [
+        { label: "📓", value: "📓" },
+        { label: "📒", value: "📒" },
+        { label: "📃", value: "📃" },
+        { label: "📜", value: "📜" },
+        { label: "📄", value: "📄" },
+        { label: "📰", value: "📰" },
+        { label: "🗞", value: "🗞" },
+        { label: "📑", value: "📑" },
+        { label: "🔖", value: "🔖" },
+        { label: "🏷", value: "🏷" }
+      ]
+    - [
+        { label: "💰", value: "💰" },
+        { label: "🪙", value: "🪙" },
+        { label: "💴", value: "💴" },
+        { label: "💵", value: "💵" },
+        { label: "💶", value: "💶" },
+        { label: "💷", value: "💷" },
+        { label: "💸", value: "💸" },
+        { label: "💳", value: "💳" },
+        { label: "🧾", value: "🧾" },
+        { label: "💹", value: "💹" }
+      ]
+    - [
+        { label: "✉️", value: "✉️" },
+        { label: "📧", value: "📧" },
+        { label: "📨", value: "📨" },
+        { label: "📩", value: "📩" },
+        { label: "📤", value: "📤" },
+        { label: "📥", value: "📥" },
+        { label: "📦", value: "📦" },
+        { label: "📫", value: "📫" },
+        { label: "📪", value: "📪" },
+        { label: "📬", value: "📬" }
+      ]
+    - [
+        { label: "📭", value: "📭" },
+        { label: "📮", value: "📮" },
+        { label: "🗳", value: "🗳" },
+        { label: "✏️", value: "✏️" },
+        { label: "✒️", value: "✒️" },
+        { label: "🖋", value: "🖋" },
+        { label: "🖊", value: "🖊" },
+        { label: "🖌", value: "🖌" },
+        { label: "🖍", value: "🖍" },
+        { label: "📝", value: "📝" }
+      ]
+    - [
+        { label: "💼", value: "💼" },
+        { label: "📁", value: "📁" },
+        { label: "📂", value: "📂" },
+        { label: "🗂", value: "🗂" },
+        { label: "📅", value: "📅" },
+        { label: "📆", value: "📆" },
+        { label: "🗒", value: "🗒" },
+        { label: "🗓", value: "🗓" },
+        { label: "📇", value: "📇" },
+        { label: "📈", value: "📈" }
+      ]
+    - [
+        { label: "📉", value: "📉" },
+        { label: "📊", value: "📊" },
+        { label: "📋", value: "📋" },
+        { label: "📌", value: "📌" },
+        { label: "📍", value: "📍" },
+        { label: "📎", value: "📎" },
+        { label: "🖇", value: "🖇" },
+        { label: "📏", value: "📏" },
+        { label: "📐", value: "📐" },
+        { label: "✂️", value: "✂️" }
+      ]
+    - [
+        { label: "🗃", value: "🗃" },
+        { label: "🗄", value: "🗄" },
+        { label: "🗑", value: "🗑" },
+        { label: "🔒", value: "🔒" },
+        { label: "🔓", value: "🔓" },
+        { label: "🔏", value: "🔏" },
+        { label: "🔐", value: "🔐" },
+        { label: "🔑", value: "🔑" },
+        { label: "🗝", value: "🗝" },
+        { label: "💣", value: "💣" }
+      ]
+    - [
+        { label: "🔨", value: "🔨" },
+        { label: "🪓", value: "🪓" },
+        { label: "⛏️", value: "⛏️" },
+        { label: "⚒️", value: "⚒️" },
+        { label: "🛠", value: "🛠" },
+        { label: "🗡", value: "🗡" },
+        { label: "⚔️", value: "⚔️" },
+        { label: "🪃", value: "🪃" },
+        { label: "🏹", value: "🏹" },
+        { label: "🛡", value: "🛡" }
+      ]
+    - [
+        { label: "🪚", value: "🪚" },
+        { label: "🔧", value: "🔧" },
+        { label: "🪛", value: "🪛" },
+        { label: "🔩", value: "🔩" },
+        { label: "⚙️", value: "⚙️" },
+        { label: "🗜", value: "🗜" },
+        { label: "⚖️", value: "⚖️" },
+        { label: "🦯", value: "🦯" },
+        { label: "🔗", value: "🔗" },
+        { label: "⛓️", value: "⛓️" }
+      ]
+    - [
+        { label: "🪝", value: "🪝" },
+        { label: "🧰", value: "🧰" },
+        { label: "🧲", value: "🧲" },
+        { label: "🪜", value: "🪜" },
+        { label: "⚗️", value: "⚗️" },
+        { label: "🧪", value: "🧪" },
+        { label: "🧫", value: "🧫" },
+        { label: "🧬", value: "🧬" },
+        { label: "🔬", value: "🔬" },
+        { label: "🔭", value: "🔭" }
+      ]
+    - [
+        { label: "📡", value: "📡" },
+        { label: "💉", value: "💉" },
+        { label: "🩸", value: "🩸" },
+        { label: "💊", value: "💊" },
+        { label: "🩹", value: "🩹" },
+        { label: "🩼", value: "🩼" },
+        { label: "🩺", value: "🩺" },
+        { label: "🩻", value: "🩻" },
+        { label: "🚪", value: "🚪" },
+        { label: "🛗", value: "🛗" }
+      ]
+    - [
+        { label: "🪞", value: "🪞" },
+        { label: "🪟", value: "🪟" },
+        { label: "🛏", value: "🛏" },
+        { label: "🛋", value: "🛋" },
+        { label: "🪑", value: "🪑" },
+        { label: "🚽", value: "🚽" },
+        { label: "🪠", value: "🪠" },
+        { label: "🚿", value: "🚿" },
+        { label: "🛁", value: "🛁" },
+        { label: "🪤", value: "🪤" }
+      ]
+    - [
+        { label: "🪒", value: "🪒" },
+        { label: "🧴", value: "🧴" },
+        { label: "🧷", value: "🧷" },
+        { label: "🧹", value: "🧹" },
+        { label: "🧺", value: "🧺" },
+        { label: "🧻", value: "🧻" },
+        { label: "🪣", value: "🪣" },
+        { label: "🧼", value: "🧼" },
+        { label: "🫧", value: "🫧" },
+        { label: "🪥", value: "🪥" }
+      ]
+    - [
+        { label: "🧽", value: "🧽" },
+        { label: "🧯", value: "🧯" },
+        { label: "🛒", value: "🛒" },
+        { label: "🧿", value: "🧿" },
+        { label: "🪬", value: "🪬" },
+        { label: "🚬", value: "🚬" },
+        { label: "⚰️", value: "⚰️" },
+        { label: "🪦", value: "🪦" },
+        { label: "⚱️", value: "⚱️" },
+        { label: "🗿", value: "🗿" }
+      ]
+    - [
+        { label: "🪧", value: "🪧" },
+        { label: "🪪", value: "🪪" },
+        { label: "🏺", value: "🏺" },
+        { label: "🪭", value: "🪭" },
+        { label: "🪮", value: "🪮" },
+        { label: "🪈", value: "🪈" },
+        { label: "🪇", value: "🪇" },
+        { label: "🪉", value: "🪉" },
+        { label: "🪏", value: "🪏" },
+        { label: "🫆", value: "🫆" }
+      ]
+    - *emojiFooter
+  symbols_emoji_sign:
+    - *emojiHeader
+    - [
+        { label: "🏧", value: "🏧" },
+        { label: "🚮", value: "🚮" },
+        { label: "🚰", value: "🚰" },
+        { label: "♿", value: "♿" },
+        { label: "🚹", value: "🚹" },
+        { label: "🚺", value: "🚺" },
+        { label: "🚻", value: "🚻" },
+        { label: "🚼", value: "🚼" },
+        { label: "🚾", value: "🚾" },
+        { label: "🛂", value: "🛂" }
+      ]
+    - [
+        { label: "🛃", value: "🛃" },
+        { label: "🛄", value: "🛄" },
+        { label: "🛅", value: "🛅" },
+        { label: "⚠️", value: "⚠️" },
+        { label: "🚸", value: "🚸" },
+        { label: "⛔", value: "⛔" },
+        { label: "🚫", value: "🚫" },
+        { label: "🚳", value: "🚳" },
+        { label: "🚭", value: "🚭" },
+        { label: "🚯", value: "🚯" }
+      ]
+    - [
+        { label: "🚱", value: "🚱" },
+        { label: "🚷", value: "🚷" },
+        { label: "📵", value: "📵" },
+        { label: "🔞", value: "🔞" },
+        { label: "☢️", value: "☢️" },
+        { label: "☣️", value: "☣️" },
+        { label: "⬆️", value: "⬆️" },
+        { label: "↗️", value: "↗️" },
+        { label: "➡️", value: "➡️" },
+        { label: "↘️", value: "↘️" }
+      ]
+    - [
+        { label: "⬇️", value: "⬇️" },
+        { label: "↙️", value: "↙️" },
+        { label: "⬅️", value: "⬅️" },
+        { label: "↖️", value: "↖️" },
+        { label: "↕️", value: "↕️" },
+        { label: "↔️", value: "↔️" },
+        { label: "↩️", value: "↩️" },
+        { label: "↪️", value: "↪️" },
+        { label: "⤴️", value: "⤴️" },
+        { label: "⤵️", value: "⤵️" }
+      ]
+    - [
+        { label: "🔃", value: "🔃" },
+        { label: "🔄", value: "🔄" },
+        { label: "🔙", value: "🔙" },
+        { label: "🔚", value: "🔚" },
+        { label: "🔛", value: "🔛" },
+        { label: "🔜", value: "🔜" },
+        { label: "🔝", value: "🔝" },
+        { label: "🛐", value: "🛐" },
+        { label: "⚛️", value: "⚛️" },
+        { label: "🕉", value: "🕉" }
+      ]
+    - [
+        { label: "✡️", value: "✡️" },
+        { label: "☸️", value: "☸️" },
+        { label: "☯️", value: "☯️" },
+        { label: "✝️", value: "✝️" },
+        { label: "☦️", value: "☦️" },
+        { label: "☪️", value: "☪️" },
+        { label: "☮️", value: "☮️" },
+        { label: "🕎", value: "🕎" },
+        { label: "🔯", value: "🔯" },
+        { label: "♈", value: "♈" }
+      ]
+    - [
+        { label: "♉", value: "♉" },
+        { label: "♊", value: "♊" },
+        { label: "♋", value: "♋" },
+        { label: "♌", value: "♌" },
+        { label: "♍", value: "♍" },
+        { label: "♎", value: "♎" },
+        { label: "♏", value: "♏" },
+        { label: "♐", value: "♐" },
+        { label: "♑", value: "♑" },
+        { label: "♒", value: "♒" }
+      ]
+    - [
+        { label: "♓", value: "♓" },
+        { label: "⛎", value: "⛎" },
+        { label: "🔀", value: "🔀" },
+        { label: "🔁", value: "🔁" },
+        { label: "🔂", value: "🔂" },
+        { label: "▶️", value: "▶️" },
+        { label: "⏩", value: "⏩" },
+        { label: "⏭️", value: "⏭️" },
+        { label: "⏯️", value: "⏯️" },
+        { label: "◀️", value: "◀️" }
+      ]
+    - [
+        { label: "⏪", value: "⏪" },
+        { label: "⏮️", value: "⏮️" },
+        { label: "🔼", value: "🔼" },
+        { label: "⏫", value: "⏫" },
+        { label: "🔽", value: "🔽" },
+        { label: "⏬", value: "⏬" },
+        { label: "⏸️", value: "⏸️" },
+        { label: "⏹️", value: "⏹️" },
+        { label: "⏺️", value: "⏺️" },
+        { label: "⏏️", value: "⏏️" }
+      ]
+    - [
+        { label: "🎦", value: "🎦" },
+        { label: "🔅", value: "🔅" },
+        { label: "🔆", value: "🔆" },
+        { label: "📶", value: "📶" },
+        { label: "📳", value: "📳" },
+        { label: "📴", value: "📴" },
+        { label: "♀️", value: "♀️" },
+        { label: "♂️", value: "♂️" },
+        { label: "⚧️", value: "⚧️" },
+        { label: "✖️", value: "✖️" }
+      ]
+    - [
+        { label: "➕", value: "➕" },
+        { label: "➖", value: "➖" },
+        { label: "➗", value: "➗" },
+        { label: "🟰", value: "🟰" },
+        { label: "♾️", value: "♾️" },
+        { label: "‼️", value: "‼️" },
+        { label: "⁉️", value: "⁉️" },
+        { label: "❓", value: "❓" },
+        { label: "❔", value: "❔" },
+        { label: "❕", value: "❕" }
+      ]
+    - [
+        { label: "❗", value: "❗" },
+        { label: "〰️", value: "〰️" },
+        { label: "💱", value: "💱" },
+        { label: "💲", value: "💲" },
+        { label: "⚕️", value: "⚕️" },
+        { label: "♻️", value: "♻️" },
+        { label: "⚜️", value: "⚜️" },
+        { label: "🔱", value: "🔱" },
+        { label: "📛", value: "📛" },
+        { label: "🔰", value: "🔰" }
+      ]
+    - [
+        { label: "⭕", value: "⭕" },
+        { label: "✅", value: "✅" },
+        { label: "☑️", value: "☑️" },
+        { label: "✔️", value: "✔️" },
+        { label: "❌", value: "❌" },
+        { label: "❎", value: "❎" },
+        { label: "➰", value: "➰" },
+        { label: "➿", value: "➿" },
+        { label: "〽️", value: "〽️" },
+        { label: "✳️", value: "✳️" }
+      ]
+    - [
+        { label: "✴️", value: "✴️" },
+        { label: "❇️", value: "❇️" },
+        { label: "©️", value: "©️" },
+        { label: "®️", value: "®️" },
+        { label: "™️", value: "™️" },
+        { label: "🔟", value: "🔟" },
+        { label: "🔠", value: "🔠" },
+        { label: "🔡", value: "🔡" },
+        { label: "🔢", value: "🔢" },
+        { label: "🔣", value: "🔣" }
+      ]
+    - [
+        { label: "🔤", value: "🔤" },
+        { label: "🅰", value: "🅰" },
+        { label: "🆎", value: "🆎" },
+        { label: "🅱", value: "🅱" },
+        { label: "🆑", value: "🆑" },
+        { label: "🆒", value: "🆒" },
+        { label: "🆓", value: "🆓" },
+        { label: "ℹ️", value: "ℹ️" },
+        { label: "🆔", value: "🆔" },
+        { label: "Ⓜ️", value: "Ⓜ️" }
+      ]
+    - [
+        { label: "🆕", value: "🆕" },
+        { label: "🆖", value: "🆖" },
+        { label: "🅾", value: "🅾" },
+        { label: "🆗", value: "🆗" },
+        { label: "🅿", value: "🅿" },
+        { label: "🆘", value: "🆘" },
+        { label: "🆙", value: "🆙" },
+        { label: "🆚", value: "🆚" },
+        { label: "🈁", value: "🈁" },
+        { label: "🈂", value: "🈂" }
+      ]
+    - [
+        { label: "🈷", value: "🈷" },
+        { label: "🈶", value: "🈶" },
+        { label: "🈯", value: "🈯" },
+        { label: "🉐", value: "🉐" },
+        { label: "🈹", value: "🈹" },
+        { label: "🈚", value: "🈚" },
+        { label: "🈲", value: "🈲" },
+        { label: "🉑", value: "🉑" },
+        { label: "🈸", value: "🈸" },
+        { label: "🈴", value: "🈴" }
+      ]
+    - [
+        { label: "🈳", value: "🈳" },
+        { label: "㊗️", value: "㊗️" },
+        { label: "㊙️", value: "㊙️" },
+        { label: "🈺", value: "🈺" },
+        { label: "🈵", value: "🈵" },
+        { label: "🔴", value: "🔴" },
+        { label: "🟠", value: "🟠" },
+        { label: "🟡", value: "🟡" },
+        { label: "🟢", value: "🟢" },
+        { label: "🔵", value: "🔵" }
+      ]
+    - [
+        { label: "🟣", value: "🟣" },
+        { label: "🟤", value: "🟤" },
+        { label: "⚫", value: "⚫" },
+        { label: "⚪", value: "⚪" },
+        { label: "🟥", value: "🟥" },
+        { label: "🟧", value: "🟧" },
+        { label: "🟨", value: "🟨" },
+        { label: "🟩", value: "🟩" },
+        { label: "🟦", value: "🟦" },
+        { label: "🟪", value: "🟪" }
+      ]
+    - [
+        { label: "🟫", value: "🟫" },
+        { label: "⬛", value: "⬛" },
+        { label: "⬜", value: "⬜" },
+        { label: "◼️", value: "◼️" },
+        { label: "◻️", value: "◻️" },
+        { label: "◾", value: "◾" },
+        { label: "◽", value: "◽" },
+        { label: "▪️", value: "▪️" },
+        { label: "▫️", value: "▫️" },
+        { label: "🔶", value: "🔶" }
+      ]
+    - [
+        { label: "🔷", value: "🔷" },
+        { label: "🔸", value: "🔸" },
+        { label: "🔹", value: "🔹" },
+        { label: "🔺", value: "🔺" },
+        { label: "🔻", value: "🔻" },
+        { label: "💠", value: "💠" },
+        { label: "🔘", value: "🔘" },
+        { label: "🔳", value: "🔳" },
+        { label: "🔲", value: "🔲" },
+        { label: "🛜", value: "🛜" }
+      ]
+    - *emojiFooter
+  symbols_emoji_flag:
+    - *emojiHeader
+    - [
+        { label: "🏁", value: "🏁" },
+        { label: "🚩", value: "🚩" },
+        { label: "🎌", value: "🎌" },
+        { label: "🏴", value: "🏴" },
+        { label: "🏳", value: "🏳" },
+        { label: "🇦🇩", value: "🇦🇩" },
+        { label: "🇦🇪", value: "🇦🇪" },
+        { label: "🇦🇫", value: "🇦🇫" },
+        { label: "🇦🇬", value: "🇦🇬" },
+        { label: "🇦🇮", value: "🇦🇮" }
+      ]
+    - [
+        { label: "🇦🇱", value: "🇦🇱" },
+        { label: "🇦🇲", value: "🇦🇲" },
+        { label: "🇦🇴", value: "🇦🇴" },
+        { label: "🇦🇶", value: "🇦🇶" },
+        { label: "🇦🇷", value: "🇦🇷" },
+        { label: "🇦🇸", value: "🇦🇸" },
+        { label: "🇦🇹", value: "🇦🇹" },
+        { label: "🇦🇺", value: "🇦🇺" },
+        { label: "🇦🇼", value: "🇦🇼" },
+        { label: "🇦🇽", value: "🇦🇽" }
+      ]
+    - [
+        { label: "🇦🇿", value: "🇦🇿" },
+        { label: "🇧🇦", value: "🇧🇦" },
+        { label: "🇧🇧", value: "🇧🇧" },
+        { label: "🇧🇩", value: "🇧🇩" },
+        { label: "🇧🇪", value: "🇧🇪" },
+        { label: "🇧🇫", value: "🇧🇫" },
+        { label: "🇧🇬", value: "🇧🇬" },
+        { label: "🇧🇭", value: "🇧🇭" },
+        { label: "🇧🇮", value: "🇧🇮" },
+        { label: "🇧🇯", value: "🇧🇯" }
+      ]
+    - [
+        { label: "🇧🇱", value: "🇧🇱" },
+        { label: "🇧🇲", value: "🇧🇲" },
+        { label: "🇧🇳", value: "🇧🇳" },
+        { label: "🇧🇴", value: "🇧🇴" },
+        { label: "🇧🇶", value: "🇧🇶" },
+        { label: "🇧🇷", value: "🇧🇷" },
+        { label: "🇧🇸", value: "🇧🇸" },
+        { label: "🇧🇹", value: "🇧🇹" },
+        { label: "🇧🇻", value: "🇧🇻" },
+        { label: "🇧🇼", value: "🇧🇼" }
+      ]
+    - [
+        { label: "🇧🇾", value: "🇧🇾" },
+        { label: "🇧🇿", value: "🇧🇿" },
+        { label: "🇨🇦", value: "🇨🇦" },
+        { label: "🇨🇨", value: "🇨🇨" },
+        { label: "🇨🇩", value: "🇨🇩" },
+        { label: "🇨🇫", value: "🇨🇫" },
+        { label: "🇨🇬", value: "🇨🇬" },
+        { label: "🇨🇭", value: "🇨🇭" },
+        { label: "🇨🇮", value: "🇨🇮" },
+        { label: "🇨🇰", value: "🇨🇰" }
+      ]
+    - [
+        { label: "🇨🇱", value: "🇨🇱" },
+        { label: "🇨🇲", value: "🇨🇲" },
+        { label: "🇨🇳", value: "🇨🇳" },
+        { label: "🇨🇴", value: "🇨🇴" },
+        { label: "🇨🇷", value: "🇨🇷" },
+        { label: "🇨🇺", value: "🇨🇺" },
+        { label: "🇨🇻", value: "🇨🇻" },
+        { label: "🇨🇼", value: "🇨🇼" },
+        { label: "🇨🇽", value: "🇨🇽" },
+        { label: "🇨🇾", value: "🇨🇾" }
+      ]
+    - [
+        { label: "🇨🇿", value: "🇨🇿" },
+        { label: "🇩🇪", value: "🇩🇪" },
+        { label: "🇩🇯", value: "🇩🇯" },
+        { label: "🇩🇰", value: "🇩🇰" },
+        { label: "🇩🇲", value: "🇩🇲" },
+        { label: "🇩🇴", value: "🇩🇴" },
+        { label: "🇩🇿", value: "🇩🇿" },
+        { label: "🇪🇨", value: "🇪🇨" },
+        { label: "🇪🇪", value: "🇪🇪" },
+        { label: "🇪🇬", value: "🇪🇬" }
+      ]
+    - [
+        { label: "🇪🇭", value: "🇪🇭" },
+        { label: "🇪🇷", value: "🇪🇷" },
+        { label: "🇪🇸", value: "🇪🇸" },
+        { label: "🇪🇹", value: "🇪🇹" },
+        { label: "🇫🇮", value: "🇫🇮" },
+        { label: "🇫🇯", value: "🇫🇯" },
+        { label: "🇫🇰", value: "🇫🇰" },
+        { label: "🇫🇲", value: "🇫🇲" },
+        { label: "🇫🇴", value: "🇫🇴" },
+        { label: "🇫🇷", value: "🇫🇷" }
+      ]
+    - [
+        { label: "🇬🇦", value: "🇬🇦" },
+        { label: "🇬🇧", value: "🇬🇧" },
+        { label: "🇬🇩", value: "🇬🇩" },
+        { label: "🇬🇪", value: "🇬🇪" },
+        { label: "🇬🇫", value: "🇬🇫" },
+        { label: "🇬🇬", value: "🇬🇬" },
+        { label: "🇬🇭", value: "🇬🇭" },
+        { label: "🇬🇮", value: "🇬🇮" },
+        { label: "🇬🇱", value: "🇬🇱" },
+        { label: "🇬🇲", value: "🇬🇲" }
+      ]
+    - [
+        { label: "🇬🇳", value: "🇬🇳" },
+        { label: "🇬🇵", value: "🇬🇵" },
+        { label: "🇬🇶", value: "🇬🇶" },
+        { label: "🇬🇷", value: "🇬🇷" },
+        { label: "🇬🇸", value: "🇬🇸" },
+        { label: "🇬🇹", value: "🇬🇹" },
+        { label: "🇬🇺", value: "🇬🇺" },
+        { label: "🇬🇼", value: "🇬🇼" },
+        { label: "🇬🇾", value: "🇬🇾" },
+        { label: "🇭🇰", value: "🇭🇰" }
+      ]
+    - [
+        { label: "🇭🇲", value: "🇭🇲" },
+        { label: "🇭🇳", value: "🇭🇳" },
+        { label: "🇭🇷", value: "🇭🇷" },
+        { label: "🇭🇹", value: "🇭🇹" },
+        { label: "🇭🇺", value: "🇭🇺" },
+        { label: "🇮🇩", value: "🇮🇩" },
+        { label: "🇮🇪", value: "🇮🇪" },
+        { label: "🇮🇱", value: "🇮🇱" },
+        { label: "🇮🇲", value: "🇮🇲" },
+        { label: "🇮🇳", value: "🇮🇳" }
+      ]
+    - [
+        { label: "🇮🇴", value: "🇮🇴" },
+        { label: "🇮🇶", value: "🇮🇶" },
+        { label: "🇮🇷", value: "🇮🇷" },
+        { label: "🇮🇸", value: "🇮🇸" },
+        { label: "🇮🇹", value: "🇮🇹" },
+        { label: "🇯🇪", value: "🇯🇪" },
+        { label: "🇯🇲", value: "🇯🇲" },
+        { label: "🇯🇴", value: "🇯🇴" },
+        { label: "🇯🇵", value: "🇯🇵" },
+        { label: "🇰🇪", value: "🇰🇪" }
+      ]
+    - [
+        { label: "🇰🇬", value: "🇰🇬" },
+        { label: "🇰🇭", value: "🇰🇭" },
+        { label: "🇰🇮", value: "🇰🇮" },
+        { label: "🇰🇲", value: "🇰🇲" },
+        { label: "🇰🇳", value: "🇰🇳" },
+        { label: "🇰🇵", value: "🇰🇵" },
+        { label: "🇰🇷", value: "🇰🇷" },
+        { label: "🇰🇼", value: "🇰🇼" },
+        { label: "🇰🇾", value: "🇰🇾" },
+        { label: "🇰🇿", value: "🇰🇿" }
+      ]
+    - [
+        { label: "🇱🇦", value: "🇱🇦" },
+        { label: "🇱🇧", value: "🇱🇧" },
+        { label: "🇱🇨", value: "🇱🇨" },
+        { label: "🇱🇮", value: "🇱🇮" },
+        { label: "🇱🇰", value: "🇱🇰" },
+        { label: "🇱🇷", value: "🇱🇷" },
+        { label: "🇱🇸", value: "🇱🇸" },
+        { label: "🇱🇹", value: "🇱🇹" },
+        { label: "🇱🇺", value: "🇱🇺" },
+        { label: "🇱🇻", value: "🇱🇻" }
+      ]
+    - [
+        { label: "🇱🇾", value: "🇱🇾" },
+        { label: "🇲🇦", value: "🇲🇦" },
+        { label: "🇲🇨", value: "🇲🇨" },
+        { label: "🇲🇩", value: "🇲🇩" },
+        { label: "🇲🇪", value: "🇲🇪" },
+        { label: "🇲🇫", value: "🇲🇫" },
+        { label: "🇲🇬", value: "🇲🇬" },
+        { label: "🇲🇭", value: "🇲🇭" },
+        { label: "🇲🇰", value: "🇲🇰" },
+        { label: "🇲🇱", value: "🇲🇱" }
+      ]
+    - [
+        { label: "🇲🇲", value: "🇲🇲" },
+        { label: "🇲🇳", value: "🇲🇳" },
+        { label: "🇲🇴", value: "🇲🇴" },
+        { label: "🇲🇵", value: "🇲🇵" },
+        { label: "🇲🇶", value: "🇲🇶" },
+        { label: "🇲🇷", value: "🇲🇷" },
+        { label: "🇲🇸", value: "🇲🇸" },
+        { label: "🇲🇹", value: "🇲🇹" },
+        { label: "🇲🇺", value: "🇲🇺" },
+        { label: "🇲🇻", value: "🇲🇻" }
+      ]
+    - [
+        { label: "🇲🇼", value: "🇲🇼" },
+        { label: "🇲🇽", value: "🇲🇽" },
+        { label: "🇲🇾", value: "🇲🇾" },
+        { label: "🇲🇿", value: "🇲🇿" },
+        { label: "🇳🇦", value: "🇳🇦" },
+        { label: "🇳🇨", value: "🇳🇨" },
+        { label: "🇳🇪", value: "🇳🇪" },
+        { label: "🇳🇫", value: "🇳🇫" },
+        { label: "🇳🇬", value: "🇳🇬" },
+        { label: "🇳🇮", value: "🇳🇮" }
+      ]
+    - [
+        { label: "🇳🇱", value: "🇳🇱" },
+        { label: "🇳🇴", value: "🇳🇴" },
+        { label: "🇳🇵", value: "🇳🇵" },
+        { label: "🇳🇷", value: "🇳🇷" },
+        { label: "🇳🇺", value: "🇳🇺" },
+        { label: "🇳🇿", value: "🇳🇿" },
+        { label: "🇴🇲", value: "🇴🇲" },
+        { label: "🇵🇦", value: "🇵🇦" },
+        { label: "🇵🇪", value: "🇵🇪" },
+        { label: "🇵🇫", value: "🇵🇫" }
+      ]
+    - [
+        { label: "🇵🇬", value: "🇵🇬" },
+        { label: "🇵🇭", value: "🇵🇭" },
+        { label: "🇵🇰", value: "🇵🇰" },
+        { label: "🇵🇱", value: "🇵🇱" },
+        { label: "🇵🇲", value: "🇵🇲" },
+        { label: "🇵🇳", value: "🇵🇳" },
+        { label: "🇵🇷", value: "🇵🇷" },
+        { label: "🇵🇸", value: "🇵🇸" },
+        { label: "🇵🇹", value: "🇵🇹" },
+        { label: "🇵🇼", value: "🇵🇼" }
+      ]
+    - [
+        { label: "🇵🇾", value: "🇵🇾" },
+        { label: "🇶🇦", value: "🇶🇦" },
+        { label: "🇷🇪", value: "🇷🇪" },
+        { label: "🇷🇴", value: "🇷🇴" },
+        { label: "🇷🇸", value: "🇷🇸" },
+        { label: "🇷🇺", value: "🇷🇺" },
+        { label: "🇷🇼", value: "🇷🇼" },
+        { label: "🇸🇦", value: "🇸🇦" },
+        { label: "🇸🇧", value: "🇸🇧" },
+        { label: "🇸🇨", value: "🇸🇨" }
+      ]
+    - [
+        { label: "🇸🇩", value: "🇸🇩" },
+        { label: "🇸🇪", value: "🇸🇪" },
+        { label: "🇸🇬", value: "🇸🇬" },
+        { label: "🇸🇭", value: "🇸🇭" },
+        { label: "🇸🇮", value: "🇸🇮" },
+        { label: "🇸🇯", value: "🇸🇯" },
+        { label: "🇸🇰", value: "🇸🇰" },
+        { label: "🇸🇱", value: "🇸🇱" },
+        { label: "🇸🇲", value: "🇸🇲" },
+        { label: "🇸🇳", value: "🇸🇳" }
+      ]
+    - [
+        { label: "🇸🇴", value: "🇸🇴" },
+        { label: "🇸🇷", value: "🇸🇷" },
+        { label: "🇸🇸", value: "🇸🇸" },
+        { label: "🇸🇹", value: "🇸🇹" },
+        { label: "🇸🇻", value: "🇸🇻" },
+        { label: "🇸🇽", value: "🇸🇽" },
+        { label: "🇸🇾", value: "🇸🇾" },
+        { label: "🇸🇿", value: "🇸🇿" },
+        { label: "🇹🇨", value: "🇹🇨" },
+        { label: "🇹🇩", value: "🇹🇩" }
+      ]
+    - [
+        { label: "🇹🇫", value: "🇹🇫" },
+        { label: "🇹🇬", value: "🇹🇬" },
+        { label: "🇹🇭", value: "🇹🇭" },
+        { label: "🇹🇯", value: "🇹🇯" },
+        { label: "🇹🇰", value: "🇹🇰" },
+        { label: "🇹🇱", value: "🇹🇱" },
+        { label: "🇹🇲", value: "🇹🇲" },
+        { label: "🇹🇳", value: "🇹🇳" },
+        { label: "🇹🇴", value: "🇹🇴" },
+        { label: "🇹🇷", value: "🇹🇷" }
+      ]
+    - [
+        { label: "🇹🇹", value: "🇹🇹" },
+        { label: "🇹🇻", value: "🇹🇻" },
+        { label: "🇹🇼", value: "🇹🇼" },
+        { label: "🇹🇿", value: "🇹🇿" },
+        { label: "🇺🇦", value: "🇺🇦" },
+        { label: "🇺🇬", value: "🇺🇬" },
+        { label: "🇺🇲", value: "🇺🇲" },
+        { label: "🇺🇸", value: "🇺🇸" },
+        { label: "🇺🇾", value: "🇺🇾" },
+        { label: "🇺🇿", value: "🇺🇿" }
+      ]
+    - [
+        { label: "🇻🇦", value: "🇻🇦" },
+        { label: "🇻🇨", value: "🇻🇨" },
+        { label: "🇻🇪", value: "🇻🇪" },
+        { label: "🇻🇬", value: "🇻🇬" },
+        { label: "🇻🇮", value: "🇻🇮" },
+        { label: "🇻🇳", value: "🇻🇳" },
+        { label: "🇻🇺", value: "🇻🇺" },
+        { label: "🇼🇫", value: "🇼🇫" },
+        { label: "🇼🇸", value: "🇼🇸" },
+        { label: "🇾🇪", value: "🇾🇪" }
+      ]
+    - [
+        { label: "🇾🇹", value: "🇾🇹" },
+        { label: "🇿🇦", value: "🇿🇦" },
+        { label: "🇿🇲", value: "🇿🇲" },
+        { label: "🇿🇼", value: "🇿🇼" },
+        { label: "🇺🇳", value: "🇺🇳" },
+        { label: "🇪🇺", value: "🇪🇺" },
+        { label: "🇽🇰", value: "🇽🇰" },
+        { label: "🇦🇨", value: "🇦🇨" },
+        { label: "🇨🇵", value: "🇨🇵" },
+        { label: "🇩🇬", value: "🇩🇬" }
+      ]
+    - *emojiFooter
+  # repeatCommit is handled by both platform controllers and replays the last
+  # direct commit without inserting this key's label as literal text.
+  editor:
+    # Mirrors preset_keyboards/editor from the reference Trime theme
+    # (Q_26键无数字.trime.yaml:526-557): side columns are width 17 vs 10,
+    # i.e. weight 1.7, and the arrow keys form a cross around 选择.
+    # The reference labels ☑ ✁ ❐ ▣ ⏍ ⎵ come from its bundled iconfont.ttf,
+    # which we do not ship, so they are spelled out instead of rendering tofu.
+    - [
+        { label: "全选", weight: 1.7, action: { type: "edit", value: "selectAll" } },
+        { label: "清除", action: { type: "edit", value: "clearAll" } },
+        { label: "英文", action: { type: "keyboardMode", value: "symbols_en" } },
+        { label: "中文", action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "返回", weight: 1.7, action: { type: "keyboardMode", value: "letters" } }
+      ]
+    - [
+        { label: "剪切", weight: 1.7, action: { type: "edit", value: "cut" } },
+        { label: "撤销", action: { type: "edit", value: "undo" } },
+        { label: "↑", action: { type: "edit", value: "cursorUp" } },
+        { label: "重做", action: { type: "edit", value: "redo" } },
+        { label: "⌫", weight: 1.7, action: { type: "backspace" } }
+      ]
+    - [
+        { label: "复制", weight: 1.7, action: { type: "edit", value: "copy" } },
+        { label: "←", action: { type: "edit", value: "cursorLeft" } },
+        { label: "选择", action: { type: "edit", value: "toggleSelection" } },
+        { label: "→", action: { type: "edit", value: "cursorRight" } },
+        { label: "空格", weight: 1.7, action: { type: "space" } }
+      ]
+    - [
+        { label: "粘贴", weight: 1.7, action: { type: "edit", value: "paste" } },
+        { label: "行首", action: { type: "edit", value: "lineStart" } },
+        { label: "↓", action: { type: "edit", value: "cursorDown" } },
+        { label: "行尾", action: { type: "edit", value: "lineEnd" } },
+        { label: "数字", weight: 1.7, action: { type: "keyboardMode", value: "numbers" } }
+      ]
+    - [
+        { label: "符号", weight: 1.7, action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "Tab", action: { type: "edit", value: "tab" } },
+        { label: "剪贴板", action: { type: "panel", value: "clipboard" } },
+        { label: "重复", action: { type: "edit", value: "repeatCommit" } },
+        { label: "↵", weight: 1.7, action: { type: "enter" } }
       ]

@@ -23,6 +23,10 @@ pub const DEFAULT_MOBILE_LAYOUT_YAML: &str = include_str!("../default-keyboard.y
 pub struct MobileLayout {
     pub height: f32,
     pub candidate_bar_height: f32,
+    /// Fixed cross-platform row height for clipboard-history entries.
+    pub clipboard_row_height: f32,
+    /// Fixed cross-platform hit width for each clipboard delete affordance.
+    pub clipboard_delete_hit_width: f32,
     pub bottom_inset: f32,
     pub horizontal_gap: f32,
     pub vertical_gap: f32,
@@ -121,6 +125,8 @@ impl Default for MobileLayout {
         Self {
             height: 266.0,
             candidate_bar_height: 52.0,
+            clipboard_row_height: 44.0,
+            clipboard_delete_hit_width: 44.0,
             bottom_inset: 0.0,
             horizontal_gap: 4.0,
             vertical_gap: 5.0,
@@ -391,6 +397,8 @@ mod tests {
     fn default_layout_yaml_resolves() {
         let layout = resolve_mobile_layout_from_paths(None, None);
         assert_eq!(layout.height, 266.0);
+        assert_eq!(layout.clipboard_row_height, 44.0);
+        assert_eq!(layout.clipboard_delete_hit_width, 44.0);
         assert_eq!(layout.rows.len(), 4);
         assert_eq!(layout.rows[0][0].label, "q");
         assert_eq!(layout.number_rows[0][0].label, "+");
@@ -402,8 +410,146 @@ mod tests {
         assert_eq!(layout.floating.landscape.scale, 0.62);
         let json = mobile_layout_json(&layout).unwrap();
         assert!(json.contains("\"numberRows\""));
-        assert!(json.contains("\"symbols_arrows\""));
+        assert!(json.contains("\"symbols_marks\""));
         assert!(json.contains("\"floating\""));
+        assert!(json.contains("\"clipboardRowHeight\":44.0"));
+        assert!(json.contains("\"clipboardDeleteHitWidth\":44.0"));
+    }
+
+    #[test]
+    fn shipped_default_layout_has_valid_layer_references() {
+        use std::collections::BTreeSet;
+
+        const KNOWN_EDIT_VERBS: &[&str] = &[
+            "clearAll",
+            "copy",
+            "cursorDown",
+            "cursorLeft",
+            "cursorRight",
+            "cursorUp",
+            "cut",
+            "forwardDelete",
+            "lineEnd",
+            "lineStart",
+            "paste",
+            "pasteText",
+            "redo",
+            "repeatCommit",
+            "selectAll",
+            "selectLeft",
+            "selectRight",
+            "tab",
+            "toggleSelection",
+            "undo",
+        ];
+        const KNOWN_PANELS: &[&str] = &["clipboard", "close", "home", "rime", "selection"];
+
+        fn collect_command_references(key: &MobileKey, references: &mut BTreeSet<String>) {
+            fn collect(command: Option<&MobileCommand>, references: &mut BTreeSet<String>) {
+                let Some(command) = command else {
+                    return;
+                };
+                let value = || {
+                    command
+                        .value
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            panic!("{} command must name a value", command.command_type)
+                        })
+                };
+                match command.command_type.as_str() {
+                    "keyboardMode" => {
+                        references.insert(value().to_owned());
+                    }
+                    "edit" => assert!(
+                        KNOWN_EDIT_VERBS.contains(&value()),
+                        "unknown edit verb {}",
+                        value()
+                    ),
+                    "panel" => {
+                        assert!(KNOWN_PANELS.contains(&value()), "unknown panel {}", value())
+                    }
+                    _ => {}
+                }
+            }
+
+            for command in [
+                key.action.as_ref(),
+                key.ascii_action.as_ref(),
+                key.swipe_up.as_ref(),
+                key.swipe_down.as_ref(),
+                key.long_press.as_ref(),
+                key.ascii_long_press.as_ref(),
+            ] {
+                collect(command, references);
+            }
+            for item in &key.stack {
+                collect(item.action.as_ref(), references);
+                collect(item.ascii_action.as_ref(), references);
+            }
+        }
+
+        let partial = parse_mobile_layout_yaml(DEFAULT_MOBILE_LAYOUT_YAML)
+            .expect("shipped default keyboard YAML must parse");
+        let rows = partial.rows.as_ref().expect("letters layer must exist");
+        let number_rows = partial
+            .number_rows
+            .as_ref()
+            .expect("numbers layer must exist");
+        let symbol_rows = partial
+            .symbol_rows
+            .as_ref()
+            .expect("symbols layer must exist");
+        let layers = partial.layers.as_ref().expect("custom layers must exist");
+
+        for (name, rows) in [
+            ("letters", rows),
+            ("numbers", number_rows),
+            ("symbols", symbol_rows),
+        ] {
+            assert!(!rows.is_empty(), "built-in layer {name} must not be empty");
+            assert!(
+                rows.iter().all(|row| !row.is_empty()),
+                "built-in layer {name} must not contain an empty row"
+            );
+        }
+
+        let reserved = ["letters", "numbers", "symbols"];
+        assert!(
+            !layers.is_empty(),
+            "shipped default must define custom layers"
+        );
+        for (name, rows) in layers {
+            assert!(
+                !reserved.contains(&name.as_str()),
+                "custom layer {name} uses a reserved name"
+            );
+            assert!(!rows.is_empty(), "custom layer {name} must not be empty");
+            assert!(
+                rows.iter().all(|row| !row.is_empty()),
+                "custom layer {name} must not contain an empty row"
+            );
+        }
+
+        let mut references = BTreeSet::new();
+        for row in rows.iter().chain(number_rows).chain(symbol_rows) {
+            for key in row {
+                collect_command_references(key, &mut references);
+            }
+        }
+        for rows in layers.values() {
+            for key in rows.iter().flatten() {
+                collect_command_references(key, &mut references);
+            }
+        }
+
+        for reference in references {
+            assert!(
+                reserved.contains(&reference.as_str()) || layers.contains_key(&reference),
+                "keyboardMode references missing layer {reference}"
+            );
+        }
     }
 
     #[test]
