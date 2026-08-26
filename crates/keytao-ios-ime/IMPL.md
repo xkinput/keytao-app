@@ -377,6 +377,16 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 - `scripts/setup-ios-ime-xcode.rb` patch Tauri 生成的 XcodeGen `project.yml`，嵌入 `KeyTaoKeyboard` extension target。
 - `scripts/verify-ios-ime.sh` / `pnpm check:ios-ime` 源码级校验。
 
+  该脚本只做源码级检查，**不编译 Swift**。在 macOS 上真正编译 iOS 代码要指定模拟器 SDK 与 target，
+  否则 `swift build` 会按 macOS 目标编译并直接失败于 `no such module 'UIKit'`：
+
+  ```bash
+  cd crates/keytao-ios-ime
+  swift build --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+    -Xswiftc -target -Xswiftc arm64-apple-ios15.0-simulator
+  ```
+
+
 ## 构建脚本与 runtime
 
 生产构建必须导入真实 iOS librime SDK。仓库不提交 iOS 二进制 runtime，导入目录必须包含：
