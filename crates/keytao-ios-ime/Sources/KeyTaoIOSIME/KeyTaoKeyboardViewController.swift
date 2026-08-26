@@ -43,7 +43,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private var clipboardHistory: [String] = []
-    private var backspaceRestoreStack: [String] = []
+    private var clipboardSuppression: (text: String, changeCount: Int)?
+    private var backspaceRestoreStack: [String] = [] {
+        didSet { keyboardView?.setNeedsDisplay() }
+    }
+    private var lastCommittedText: String?
     private var hostTraits = KeyTaoHostTraits.default
     private var markedTextActive = false
     private var hostTextMutationDepth = 0
@@ -168,6 +172,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     public override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         clipboardHistory.removeAll()
+        clipboardSuppression = nil
         queuedCommands.removeAll()
         engine.releaseCaches()
         keyboardView?.releaseCaches()
@@ -233,7 +238,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches() {
         backspaceRestoreStack.removeAll()
+        lastCommittedText = nil
         clipboardHistory.removeAll()
+        clipboardSuppression = nil
         clearHostMarkedText()
         keyboardView?.resetShiftForNewContext()
         guard engine.nativeReady else {
@@ -371,6 +378,32 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestClipboardHistory completion: @escaping ([String]) -> Void) {
         rememberCurrentClipboard()
         completion(clipboardHistory)
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteClipboardEntry text: String) {
+        guard !hostTraits.isSensitive, hasFullAccess else {
+            return
+        }
+        // History is de-duplicated on insert, so text identity is stable while
+        // the asynchronously rendered panel index may already be stale.
+        clipboardHistory.removeAll { $0 == text }
+        if currentClipboardText() == text {
+            clipboardSuppression = (text: text, changeCount: UIPasteboard.general.changeCount)
+        }
+    }
+
+    func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView) {
+        guard !hostTraits.isSensitive, hasFullAccess else {
+            return
+        }
+        clipboardHistory.removeAll()
+        clipboardSuppression = currentClipboardText().map {
+            (text: $0, changeCount: UIPasteboard.general.changeCount)
+        }
+    }
+
+    func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool {
+        !backspaceRestoreStack.isEmpty
     }
 
     /// Every mode goes through Rime first (D6). English mode is a librime
@@ -622,10 +655,53 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             moveToLineBoundary(start: true)
         case "lineEnd":
             moveToLineBoundary(start: false)
-        case "copy", "cut", "selectAll", "toggleSelection", "selectLeft", "selectRight":
-            showMessage("当前输入框不支持此编辑操作")
+        case "cursorLeft":
+            moveCursor(byCharacterOffset: -1)
+        case "cursorRight":
+            moveCursor(byCharacterOffset: 1)
+        case "cursorUp":
+            moveCursor(lineOffset: -1)
+        case "cursorDown":
+            moveCursor(lineOffset: 1)
+        case "undo":
+            clearCompositionBeforeEdit()
+            _ = restoreOneBackspaceText()
+        case "redo", "clearAll":
+            break
+        case "forwardDelete":
+            forwardDelete()
+        case "copy":
+            copySelection(cut: false)
+        case "cut":
+            copySelection(cut: true)
+        case "selectAll", "toggleSelection", "selectLeft", "selectRight":
+            break
+        case "repeatCommit":
+            if let lastCommittedText {
+                commitDirect(lastCommittedText)
+            }
         default:
             break
+        }
+    }
+
+    private func copySelection(cut: Bool) {
+        clearCompositionBeforeEdit()
+        guard !hostTraits.isSensitive else {
+            return
+        }
+        guard hasFullAccess else {
+            showMessage("请在系统设置中允许 KeyTao 完全访问后使用剪贴板")
+            return
+        }
+        guard let selectedText = textDocumentProxy.selectedText, !selectedText.isEmpty else {
+            return
+        }
+        UIPasteboard.general.string = selectedText
+        if cut {
+            withHostTextMutation {
+                textDocumentProxy.deleteBackward()
+            }
         }
     }
 
@@ -661,6 +737,58 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
     }
 
+    private func moveCursor(byCharacterOffset offset: Int) {
+        clearCompositionBeforeEdit()
+        withHostTextMutation {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+        }
+    }
+
+    /// UIKit exposes only logical text around the caret, not wrapped visual
+    /// lines, so vertical movement is best-effort within the host-provided slice.
+    private func moveCursor(lineOffset: Int) {
+        guard lineOffset == -1 || lineOffset == 1 else {
+            return
+        }
+        clearCompositionBeforeEdit()
+        withHostTextMutation {
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            let after = textDocumentProxy.documentContextAfterInput ?? ""
+            let beforeLines = before.split(separator: "\n", omittingEmptySubsequences: false)
+            let currentColumn = beforeLines.last?.utf16.count ?? 0
+            let offset: Int
+            if lineOffset < 0 {
+                guard beforeLines.count > 1 else {
+                    return
+                }
+                let previousLineLength = beforeLines[beforeLines.count - 2].utf16.count
+                offset = -currentColumn - 1 - previousLineLength + min(currentColumn, previousLineLength)
+            } else {
+                let afterLines = after.split(separator: "\n", omittingEmptySubsequences: false)
+                guard afterLines.count > 1 else {
+                    return
+                }
+                let currentLineRemainder = afterLines[0].utf16.count
+                let nextLineLength = afterLines[1].utf16.count
+                offset = currentLineRemainder + 1 + min(currentColumn, nextLineLength)
+            }
+            if offset != 0 {
+                textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+            }
+        }
+    }
+
+    private func forwardDelete() {
+        clearCompositionBeforeEdit()
+        guard textDocumentProxy.documentContextAfterInput?.isEmpty == false else {
+            return
+        }
+        withHostTextMutation {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
+            textDocumentProxy.deleteBackward()
+        }
+    }
+
     private func clearCompositionBeforeEdit() {
         if !currentState.hasComposition {
             return
@@ -682,7 +810,18 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func rememberCurrentClipboard() {
-        guard !hostTraits.isSensitive, let text = currentClipboardText() else {
+        guard !hostTraits.isSensitive else {
+            return
+        }
+        let text = currentClipboardText()
+        if let clipboardSuppression {
+            guard text != clipboardSuppression.text
+                    || UIPasteboard.general.changeCount != clipboardSuppression.changeCount else {
+                return
+            }
+            self.clipboardSuppression = nil
+        }
+        guard let text else {
             return
         }
         clipboardHistory.removeAll { $0 == text }
@@ -700,6 +839,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             _ = engine.reset()
         }
         insertHostText(text)
+        lastCommittedText = hostTraits.isSensitive ? nil : text
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
     }
@@ -900,7 +1040,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         hostTraits = traits
         if traits.isSensitive && !previouslySensitive {
             clipboardHistory.removeAll()
+            clipboardSuppression = nil
             backspaceRestoreStack.removeAll()
+            lastCommittedText = nil
         }
         applyInputPolicyForHost()
         keyboardView?.update(hostTraits: traits)

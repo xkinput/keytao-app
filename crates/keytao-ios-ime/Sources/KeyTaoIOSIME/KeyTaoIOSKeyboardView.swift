@@ -5,6 +5,17 @@ protocol KeyTaoIOSKeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didSelectCandidate index: Int, global: Bool)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestExpandedCandidates completion: @escaping ([KeyTaoCandidate]) -> Void)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestClipboardHistory completion: @escaping ([String]) -> Void)
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteClipboardEntry text: String)
+    func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView)
+    func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool
+}
+
+private final class KeyTaoActivatingAccessibilityElement: UIAccessibilityElement {
+    var activation: (() -> Bool)?
+
+    override func accessibilityActivate() -> Bool {
+        activation?() ?? false
+    }
 }
 
 private enum KeyTaoFunctionPanelMode {
@@ -12,7 +23,6 @@ private enum KeyTaoFunctionPanelMode {
     case rime
     case selection
     case clipboard
-    case emoji
 }
 
 private enum KeyTaoToolbarIcon {
@@ -45,6 +55,12 @@ final class KeyTaoIOSKeyboardView: UIView {
         var rect: CGRect
         var global: Bool
         var command: KeyTaoKeyCommand?
+        var drawingRect: CGRect? = nil
+    }
+
+    private struct ClipboardDeleteRect {
+        var text: String
+        var rect: CGRect
     }
 
     private struct CandidateDrawItem {
@@ -56,6 +72,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         var selected: Bool
         var global: Bool
         var command: KeyTaoKeyCommand?
+        var clipboardText: String? = nil
     }
 
     private struct ToolbarAction {
@@ -93,6 +110,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var expandedCandidatesLoading = false
     private var clipboardItemsLoading = false
     private var clipboardItems: [String] = []
+    private var clipboardClearConfirmationPending = false
+    private var expandedCandidateItemsCacheSignature = ""
+    private var expandedCandidateItemsCache: [CandidateDrawItem] = []
     private var expandedCandidateScrollY: CGFloat = 0
     private var expandedCandidateContentHeight: CGFloat = 0
     private var keyboardScrollY: CGFloat = 0
@@ -109,6 +129,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var keyRects: [KeyRect] = []
     private var inlineCandidateRects: [CandidateRect] = []
     private var expandedCandidateRects: [CandidateRect] = []
+    private var clipboardDeleteRects: [ClipboardDeleteRect] = []
     private var candidateRects: [CandidateRect] {
         inlineCandidateRects + expandedCandidateRects
     }
@@ -118,6 +139,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var pressedKey: KeyRect?
     private var pressedToolbar: ToolbarRect?
     private var pressedCandidate: CandidateRect?
+    private var pressedClipboardDelete: ClipboardDeleteRect?
     private var expandedTouchActive = false
     private var expandedDragging = false
     private var candidateExpandPressed = false
@@ -272,6 +294,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidates = []
         expandedCandidatesLoading = false
         clipboardItems = []
+        clipboardClearConfirmationPending = false
+        expandedCandidateItemsCacheSignature = ""
+        expandedCandidateItemsCache = []
         cachedLogoImage = nil
         invalidateLayoutAndDisplay()
     }
@@ -318,6 +343,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = .home
+        clipboardClearConfirmationPending = false
         expandedCandidates = []
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
@@ -368,12 +394,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             && candidateExpandRect?.contains(point) == true
         pressedToolbar = point.y < config.candidateBarHeightDp ? toolbarRects.first { $0.rect.contains(point) } : nil
         pressedCandidate = nil
+        pressedClipboardDelete = nil
         expandedTouchActive = false
         if pressedToolbar == nil && !candidateExpandPressed && point.y < config.candidateBarHeightDp {
             pressedCandidate = inlineCandidateRects.first { $0.rect.contains(point) }
         } else if pressedToolbar == nil && !candidateExpandPressed && candidatePanelExpanded && point.y >= config.candidateBarHeightDp {
             expandedTouchActive = true
-            pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
+            pressedClipboardDelete = clipboardDeleteRects.first { $0.rect.contains(point) }
+            if pressedClipboardDelete == nil {
+                pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
+            }
         }
         keyboardScrollTouchActive = pressedToolbar == nil
             && pressedCandidate == nil
@@ -385,6 +415,11 @@ final class KeyTaoIOSKeyboardView: UIView {
             && point.y < keyboardScrollViewportBottom
         if pressedToolbar == nil && pressedCandidate == nil && !candidateExpandPressed && !expandedTouchActive {
             pressedKey = keyRects.first { isVisibleKey($0, at: point) && $0.rect.contains(point) }
+            if let pressedKey, isUnsupportedEditKey(pressedKey.spec) {
+                self.pressedKey = nil
+                setNeedsDisplay()
+                return
+            }
             scheduleLongPressIfNeeded()
         }
         setNeedsDisplay()
@@ -400,6 +435,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             if !expandedDragging && abs(deltaY) > 6 {
                 expandedDragging = true
                 pressedCandidate = nil
+                pressedClipboardDelete = nil
             }
             if expandedDragging {
                 expandedCandidateScrollY = max(0, min(maxExpandedCandidateScroll(), touchStartScrollY - deltaY))
@@ -450,6 +486,14 @@ final class KeyTaoIOSKeyboardView: UIView {
         if let toolbar = pressedToolbar, toolbar.rect.contains(point) {
             clearPressedState()
             handleToolbarCommand(toolbar.action.command)
+            return
+        }
+
+        if let clipboardDelete = pressedClipboardDelete,
+           !expandedDragging,
+           clipboardDelete.rect.contains(point) {
+            clearPressedState()
+            deleteClipboardEntry(clipboardDelete.text)
             return
         }
 
@@ -536,6 +580,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         pressedKey = nil
         pressedToolbar = nil
         pressedCandidate = nil
+        pressedClipboardDelete = nil
         candidateExpandPressed = false
         expandedTouchActive = false
         expandedDragging = false
@@ -549,7 +594,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func rebuildInteractiveRects() {
         keyRects = keyboardLayout()
         inlineCandidateRects = inlineCandidateLayout()
-        expandedCandidateRects = candidatePanelExpanded ? expandedCandidateLayout() : []
+        if candidatePanelExpanded {
+            expandedCandidateRects = expandedCandidateLayout()
+        } else {
+            expandedCandidateRects = []
+            clipboardDeleteRects = []
+        }
         toolbarRects = toolbarLayout()
         candidateExpandRect = expandButtonRect()
     }
@@ -559,7 +609,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         for key in keyRects {
             let element = UIAccessibilityElement(accessibilityContainer: self)
             element.accessibilityFrameInContainerSpace = key.rect
-            element.accessibilityTraits = .button
+            element.accessibilityTraits = isUnsupportedEditKey(key.spec) ? [.button, .notEnabled] : .button
             element.accessibilityIdentifier = keyAccessibilityIdentifier(key.spec)
             element.accessibilityLabel = displayLabel(key.spec)
             elements.append(element)
@@ -574,12 +624,28 @@ final class KeyTaoIOSKeyboardView: UIView {
             element.accessibilityIdentifier = "keytao-candidate-\(candidate.identifierIndex)"
             elements.append(element)
         }
+        for (index, delete) in clipboardDeleteRects.enumerated() {
+            let element = KeyTaoActivatingAccessibilityElement(accessibilityContainer: self)
+            element.accessibilityFrameInContainerSpace = delete.rect
+            element.accessibilityTraits = .button
+            element.accessibilityIdentifier = "keytao-clipboard-delete-\(index)"
+            element.accessibilityLabel = "删除剪贴板历史：\(delete.text)"
+            element.activation = { [weak self] in
+                self?.deleteClipboardEntry(delete.text)
+                return self != nil
+            }
+            elements.append(element)
+        }
         for toolbar in toolbarRects {
-            let element = UIAccessibilityElement(accessibilityContainer: self)
+            let element = KeyTaoActivatingAccessibilityElement(accessibilityContainer: self)
             element.accessibilityFrameInContainerSpace = toolbar.rect
             element.accessibilityTraits = .button
             element.accessibilityIdentifier = commandAccessibilityIdentifier(toolbar.action.command, prefix: "keytao-toolbar")
             element.accessibilityLabel = toolbar.action.label
+            element.activation = { [weak self] in
+                self?.handleToolbarCommand(toolbar.action.command)
+                return self != nil
+            }
             elements.append(element)
         }
         accessibilityElements = elements
@@ -714,10 +780,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
 
         for item in items {
-            guard let rect = expandedCandidateRects.first(where: { $0.identifierIndex == item.identifierIndex })?.rect else {
+            guard let candidate = expandedCandidateRects.first(where: { $0.identifierIndex == item.identifierIndex }) else {
                 continue
             }
-            drawCandidateOption(item, rect: rect)
+            drawCandidateOption(item, rect: candidate.drawingRect ?? candidate.rect)
         }
     }
 
@@ -725,14 +791,16 @@ final class KeyTaoIOSKeyboardView: UIView {
         for toolbar in toolbarRects {
             drawToolbarChip(toolbar)
         }
-        drawText(
-            functionPanelTitle(),
-            in: CGRect(x: 0, y: 0, width: bounds.width, height: config.candidateBarHeightDp),
-            color: theme.candidate.commentColor.uiColor,
-            size: theme.font.labelSize,
-            weight: theme.font.weight,
-            alignment: .center
-        )
+        if functionPanelMode != .clipboard || clipboardItems.isEmpty {
+            drawText(
+                functionPanelTitle(),
+                in: CGRect(x: 0, y: 0, width: bounds.width, height: config.candidateBarHeightDp),
+                color: theme.candidate.commentColor.uiColor,
+                size: theme.font.labelSize,
+                weight: theme.font.weight,
+                alignment: .center
+            )
+        }
 
         if expandedCandidatesLoading || clipboardItemsLoading {
             let width: CGFloat = 44
@@ -778,6 +846,83 @@ final class KeyTaoIOSKeyboardView: UIView {
             path.stroke()
         }
 
+        switch panelColumns(for: functionPanelActive ? functionPanelMode : .rime) {
+        case 4:
+            drawCandidateGridCell(item, rect: rect)
+        case 1:
+            drawClipboardCandidateRow(item, rect: rect)
+        default:
+            drawInlineCandidateOption(item, rect: rect)
+        }
+    }
+
+    private func drawCandidateGridCell(_ item: CandidateDrawItem, rect: CGRect) {
+        let selected = item.selected
+        let contentRect = rect.insetBy(dx: 6, dy: 0)
+        let labelRect = CGRect(x: contentRect.minX, y: rect.midY - 20, width: contentRect.width, height: 20)
+        let captionRect = CGRect(x: contentRect.minX, y: rect.midY, width: contentRect.width, height: 20)
+        drawTruncatedText(
+            item.label,
+            in: labelRect,
+            color: selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            size: candidateTextSize(),
+            alignment: .center
+        )
+        let caption = [item.text, item.comment]
+            .compactMap { value in value?.isEmpty == false ? value : nil }
+            .joined(separator: " ")
+        drawTruncatedText(
+            caption,
+            in: captionRect,
+            color: selected ? theme.candidate.selectedCommentColor.uiColor : theme.candidate.commentColor.uiColor,
+            size: candidateCommentSize(),
+            alignment: .center
+        )
+    }
+
+    private func drawClipboardCandidateRow(_ item: CandidateDrawItem, rect: CGRect) {
+        let selected = item.selected
+        let paddingX = candidatePaddingX()
+        let inlineGap = candidateInlineGap()
+        let deleteWidth = config.clipboardDeleteHitWidthDp
+        let deleteRect = CGRect(x: rect.maxX - deleteWidth, y: rect.minY, width: deleteWidth, height: rect.height)
+        var x = rect.minX + paddingX
+        if !item.label.isEmpty {
+            x += drawInlineText(
+                item.label,
+                x: x,
+                centerY: rect.midY,
+                color: selected ? theme.candidate.selectedLabelColor.uiColor : theme.candidate.labelColor.uiColor,
+                size: candidateLabelSize(),
+                weight: theme.font.weight
+            ) + inlineGap
+        }
+        drawTruncatedText(
+            item.text,
+            in: CGRect(x: x, y: rect.minY, width: max(0, deleteRect.minX - paddingX - x), height: rect.height),
+            color: selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            size: candidateTextSize(),
+            alignment: .left
+        )
+
+        let divider = UIBezierPath()
+        divider.move(to: CGPoint(x: deleteRect.minX, y: rect.minY + 7))
+        divider.addLine(to: CGPoint(x: deleteRect.minX, y: rect.maxY - 7))
+        divider.lineWidth = max(pixel, 0.7)
+        theme.candidate.borderColor.uiColor.setStroke()
+        divider.stroke()
+        drawText(
+            "✕",
+            in: deleteRect,
+            color: theme.candidate.commentColor.uiColor,
+            size: 18,
+            weight: theme.font.weight,
+            alignment: .center
+        )
+    }
+
+    private func drawInlineCandidateOption(_ item: CandidateDrawItem, rect: CGRect) {
+        let selected = item.selected
         let paddingX = candidatePaddingX()
         let inlineGap = candidateInlineGap()
         var x = rect.minX + paddingX
@@ -1041,6 +1186,16 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawKey(_ key: KeyTaoKeySpec, rect: CGRect, pressed: Bool, pressedStackIndex: Int? = nil) {
+        let unsupported = isUnsupportedEditKey(key)
+        if unsupported {
+            UIGraphicsGetCurrentContext()?.saveGState()
+            UIGraphicsGetCurrentContext()?.setAlpha(0.38)
+        }
+        defer {
+            if unsupported {
+                UIGraphicsGetCurrentContext()?.restoreGState()
+            }
+        }
         if let stack = key.stack, !stack.isEmpty {
             drawStackKey(stack, key: key, rect: rect, pressedStackIndex: pressedStackIndex)
             return
@@ -1117,8 +1272,13 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func drawSurfaceShadow(_ rect: CGRect, pressed: Bool, cornerRadius: CGFloat? = nil) {
         var shadow = rect
-        shadow.origin.y += pressed ? 0.8 : 2.4
-        UIColor(red: 26 / 255, green: 34 / 255, blue: 44 / 255, alpha: pressed ? 0.05 : 0.09).setFill()
+        shadow.origin.y += pressed ? 0.8 : 1.6
+        UIColor(
+            red: 26 / 255,
+            green: 34 / 255,
+            blue: 44 / 255,
+            alpha: CGFloat(pressed ? 18 : 28) / 255
+        ).setFill()
         UIBezierPath(roundedRect: shadow, cornerRadius: cornerRadius ?? keyCornerRadius(for: rect)).fill()
     }
 
@@ -1145,6 +1305,31 @@ final class KeyTaoIOSKeyboardView: UIView {
             x = rect.midX - size.width / 2
         }
         text.draw(at: CGPoint(x: x, y: rect.midY - size.height / 2), withAttributes: attributes)
+    }
+
+    private func drawTruncatedText(
+        _ text: String,
+        in rect: CGRect,
+        color: UIColor,
+        size: CGFloat,
+        alignment: NSTextAlignment
+    ) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = .byTruncatingTail
+        let font = themedFont(size: size, weight: theme.font.weight)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph,
+        ]
+        let lineRect = CGRect(x: rect.minX, y: rect.midY - font.lineHeight / 2, width: rect.width, height: font.lineHeight)
+        text.draw(
+            with: lineRect,
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+            attributes: attributes,
+            context: nil
+        )
     }
 
     private func drawInlineText(_ text: String, x: CGFloat, centerY: CGFloat, color: UIColor, size: CGFloat, weight: KeyTaoThemeFontWeight) -> CGFloat {
@@ -1386,35 +1571,94 @@ final class KeyTaoIOSKeyboardView: UIView {
         let gap: CGFloat = 7
         let left = gap * 1.5
         let right = bounds.width - left
-        let rowHeight: CGFloat = 36
+        let columns = panelColumns(for: functionPanelActive ? functionPanelMode : .rime)
+        let rowHeight: CGFloat
+        switch columns {
+        case 4:
+            rowHeight = 52
+        case 1:
+            rowHeight = config.clipboardRowHeightDp
+        default:
+            rowHeight = 36
+        }
+        let cellWidth = columns.map { columnCount in
+            (right - left - gap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
+        }
         var x = left
         var y = top + gap - expandedCandidateScrollY
         var contentBottom = top + gap
         var rects: [CandidateRect] = []
-        for item in expandedCandidateItems() {
-            let width = min(max(candidateWidth(item), 56), right - left)
-            if x + width > right && x > left {
-                x = left
-                y += rowHeight + gap
+        var deleteRects: [ClipboardDeleteRect] = []
+        for (index, item) in expandedCandidateItems().enumerated() {
+            let width: CGFloat
+            if let columns, let cellWidth {
+                let column = index % columns
+                let row = index / columns
+                x = left + CGFloat(column) * (cellWidth + gap)
+                y = top + gap + CGFloat(row) * (rowHeight + gap) - expandedCandidateScrollY
+                width = cellWidth
+            } else {
+                width = min(max(candidateWidth(item), 56), right - left)
+                if x + width > right && x > left {
+                    x = left
+                    y += rowHeight + gap
+                }
             }
-            let rect = CGRect(x: x, y: y, width: width, height: rowHeight)
-            if rect.maxY >= top && rect.minY <= bottom {
+            let drawingRect = CGRect(x: x, y: y, width: width, height: rowHeight)
+            if drawingRect.maxY >= top && drawingRect.minY <= bottom {
+                let hitRect: CGRect
+                if let clipboardText = item.clipboardText {
+                    hitRect = CGRect(
+                        x: drawingRect.minX,
+                        y: drawingRect.minY,
+                        width: drawingRect.width - config.clipboardDeleteHitWidthDp,
+                        height: drawingRect.height
+                    )
+                    deleteRects.append(
+                        ClipboardDeleteRect(
+                            text: clipboardText,
+                            rect: CGRect(
+                                x: hitRect.maxX,
+                                y: drawingRect.minY,
+                                width: config.clipboardDeleteHitWidthDp,
+                                height: drawingRect.height
+                            )
+                        )
+                    )
+                } else {
+                    hitRect = drawingRect
+                }
                 rects.append(
                     CandidateRect(
                         identifierIndex: item.identifierIndex,
                         selectIndex: item.selectIndex,
-                        rect: rect,
+                        rect: hitRect,
                         global: item.global,
-                        command: item.command
+                        command: item.command,
+                        drawingRect: drawingRect
                     )
                 )
             }
-            contentBottom = max(contentBottom, rect.maxY + expandedCandidateScrollY)
-            x += width + gap
+            contentBottom = max(contentBottom, drawingRect.maxY + expandedCandidateScrollY)
+            if columns == nil {
+                x += width + gap
+            }
         }
         expandedCandidateContentHeight = max(contentBottom - top + gap, expandedCandidatePanelHeight())
+        clipboardDeleteRects = deleteRects
         coerceExpandedCandidateScroll()
         return rects
+    }
+
+    private func panelColumns(for mode: KeyTaoFunctionPanelMode) -> Int? {
+        switch mode {
+        case .home, .selection:
+            return 4
+        case .clipboard:
+            return 1
+        case .rime:
+            return nil
+        }
     }
 
     private func toolbarLayout() -> [ToolbarRect] {
@@ -1428,23 +1672,54 @@ final class KeyTaoIOSKeyboardView: UIView {
                 command: .panel("close"),
                 icon: .back
             )
+            let pasteAction = ToolbarAction(label: "粘贴", command: .edit("paste"))
+            let clearAction = ToolbarAction(
+                label: clipboardClearConfirmationPending ? "确认清空" : "清空",
+                command: .panel("clearClipboardHistory")
+            )
             let settingsAction = ToolbarAction(
                 label: "设置",
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
                 icon: .settings
             )
             let backWidth = toolbarChipWidth(backAction)
+            let pasteWidth = toolbarChipWidth(pasteAction)
+            let clearWidth = toolbarChipWidth(clearAction)
             let settingsWidth = toolbarChipWidth(settingsAction)
-            return [
+            var rects = [
                 ToolbarRect(
                     action: backAction,
                     rect: CGRect(x: leftPadding, y: top, width: backWidth, height: chipHeight)
                 ),
+            ]
+            if functionPanelMode == .clipboard {
+                rects.append(
+                    ToolbarRect(
+                        action: pasteAction,
+                        rect: CGRect(x: leftPadding + backWidth + 6, y: top, width: pasteWidth, height: chipHeight)
+                    )
+                )
+                if !clipboardItems.isEmpty {
+                    rects.append(
+                        ToolbarRect(
+                            action: clearAction,
+                            rect: CGRect(
+                                x: leftPadding + backWidth + 6 + pasteWidth + 6,
+                                y: top,
+                                width: clearWidth,
+                                height: chipHeight
+                            )
+                        )
+                    )
+                }
+            }
+            rects.append(
                 ToolbarRect(
                     action: settingsAction,
                     rect: CGRect(x: bounds.width - leftPadding - settingsWidth, y: top, width: settingsWidth, height: chipHeight)
-                ),
-            ]
+                )
+            )
+            return rects
         }
         if usesFullHeightSymbolKeyboard() {
             return []
@@ -1510,21 +1785,52 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func expandedCandidateItems() -> [CandidateDrawItem] {
+        let items: [CandidateDrawItem]
         if functionPanelActive {
             switch functionPanelMode {
             case .home:
-                return functionHomeItems()
+                items = functionHomeItems()
             case .rime:
-                return rimePanelItems()
+                items = rimePanelItems()
             case .selection:
-                return selectionPanelItems()
+                items = selectionPanelItems()
             case .clipboard:
-                return clipboardPanelItems()
-            case .emoji:
-                return emojiPanelItems()
+                items = clipboardPanelItems()
             }
+        } else {
+            items = rimePanelItems()
         }
-        return rimePanelItems()
+        let signature = expandedCandidateItemsSignature(items)
+        if signature == expandedCandidateItemsCacheSignature {
+            return expandedCandidateItemsCache
+        }
+        expandedCandidateItemsCacheSignature = signature
+        expandedCandidateItemsCache = items
+        return items
+    }
+
+    private func expandedCandidateItemsSignature(_ items: [CandidateDrawItem]) -> String {
+        let mode = functionPanelActive ? functionPanelMode : .rime
+        let itemSignature = items.map { item in
+            [
+                String(item.identifierIndex),
+                String(item.selectIndex),
+                item.label,
+                item.text,
+                item.comment ?? "",
+                item.selected ? "1" : "0",
+                item.global ? "1" : "0",
+                item.command?.type ?? "",
+                item.command?.value ?? "",
+                item.command?.fallbackValue ?? "",
+            ].joined(separator: "\u{0}")
+        }.joined(separator: "\u{1}")
+        return [
+            functionPanelActive ? "1" : "0",
+            functionPanelModeName(mode),
+            panelColumns(for: mode).map { String($0) } ?? "flow",
+            itemSignature,
+        ].joined(separator: "|")
     }
 
     private func rimePanelItems() -> [CandidateDrawItem] {
@@ -1558,6 +1864,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func functionHomeItems() -> [CandidateDrawItem] {
         panelItems(
             PanelItem(label: "Rime", text: "方案/开关", command: .panel("rime")),
+            PanelItem(label: "编辑", text: "方向/编辑", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "editor", fallbackValue: nil)),
+            PanelItem(label: "符号", text: "更多符号", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols_marks", fallbackValue: nil)),
+            PanelItem(label: "Emoji", text: "分类表情", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols_emoji_face", fallbackValue: nil)),
             PanelItem(label: "粘贴", text: "当前剪贴板", command: .edit("paste")),
             PanelItem(label: "Tab", text: "输入制表符", command: .edit("tab")),
             PanelItem(label: "行首", text: "移动光标", command: .edit("lineStart")),
@@ -1567,10 +1876,6 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func selectionPanelItems() -> [CandidateDrawItem] {
         panelItems(
-            PanelItem(label: "多选", text: "开始/结束", command: .edit("toggleSelection")),
-            PanelItem(label: "左选", text: "扩展一字", command: .edit("selectLeft")),
-            PanelItem(label: "右选", text: "扩展一字", command: .edit("selectRight")),
-            PanelItem(label: "全选", text: "选择全部", command: .edit("selectAll")),
             PanelItem(label: "复制", text: "复制选区", command: .edit("copy")),
             PanelItem(label: "剪切", text: "剪切选区", command: .edit("cut")),
             PanelItem(label: "粘贴", text: "当前剪贴板", command: .edit("paste")),
@@ -1581,27 +1886,17 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func clipboardPanelItems() -> [CandidateDrawItem] {
-        var items = [
-            PanelItem(label: "刷新", text: "读取系统剪贴板", command: .panel("clipboard")),
-            PanelItem(label: "粘贴", text: "当前剪贴板", command: .edit("paste")),
-        ]
-        items.append(contentsOf: clipboardItems.enumerated().map { index, text in
-            PanelItem(label: "剪贴 \(index + 1)", text: String(text.prefix(32)), command: .directInput(text))
-        })
-        return panelItems(items)
-    }
-
-    private func emojiPanelItems() -> [CandidateDrawItem] {
-        Self.emojiChoices.enumerated().map { index, emoji in
+        clipboardItems.enumerated().map { index, text in
             CandidateDrawItem(
-                identifierIndex: -4000 - index,
-                selectIndex: -4000 - index,
-                label: "",
-                text: emoji,
+                identifierIndex: -1000 - index,
+                selectIndex: -1000 - index,
+                label: "剪贴 \(index + 1)",
+                text: String(text.prefix(120)),
                 comment: nil,
                 selected: false,
                 global: false,
-                command: .directInput(emoji)
+                command: .directInput(text),
+                clipboardText: text
             )
         }
     }
@@ -1844,7 +2139,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 languageToggle,
                 ToolbarAction(label: "选择", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "selection", fallbackValue: nil), icon: .selection),
                 ToolbarAction(label: "剪贴板", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "clipboard", fallbackValue: nil), icon: .clipboard),
-                ToolbarAction(label: "Emoji", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "emoji", fallbackValue: nil), icon: .emoji),
+                ToolbarAction(label: "Emoji", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols_emoji_face", fallbackValue: nil), icon: .emoji),
                 layout,
             ]
         }
@@ -1910,8 +2205,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 openFunctionPanel(.selection)
             case "clipboard":
                 openFunctionPanel(.clipboard)
-            case "emoji":
-                openFunctionPanel(.emoji)
+            case "clearClipboardHistory":
+                handleClearClipboardHistory()
             default:
                 openFunctionPanel(.home)
             }
@@ -1938,6 +2233,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         functionPanelActive = false
         functionPanelMode = .home
+        clipboardClearConfirmationPending = false
         candidatePanelExpanded = true
         expandedCandidates = []
         resetExpandedCandidateScroll()
@@ -1951,6 +2247,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = .home
+        clipboardClearConfirmationPending = false
         expandedCandidates = []
         expandedCandidatesLoading = false
         clipboardItemsLoading = false
@@ -1966,6 +2263,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func openFunctionPanel(_ mode: KeyTaoFunctionPanelMode) {
+        if mode != .clipboard || functionPanelMode != mode {
+            clipboardClearConfirmationPending = false
+        }
         functionPanelActive = true
         candidatePanelExpanded = true
         functionPanelMode = mode
@@ -2022,11 +2322,39 @@ final class KeyTaoIOSKeyboardView: UIView {
                     return
                 }
                 self.clipboardItems = items
+                if items.isEmpty {
+                    self.clipboardClearConfirmationPending = false
+                }
                 self.clipboardItemsLoading = false
                 self.resetExpandedCandidateScroll()
                 self.invalidateLayoutAndDisplay()
             }
         })
+    }
+
+    private func deleteClipboardEntry(_ text: String) {
+        guard functionPanelActive, functionPanelMode == .clipboard else {
+            return
+        }
+        clipboardClearConfirmationPending = false
+        performConfiguredHaptic()
+        delegate?.keyboardView(self, deleteClipboardEntry: text)
+        requestClipboardItemsAsync()
+        invalidateLayoutAndDisplay()
+    }
+
+    private func handleClearClipboardHistory() {
+        guard functionPanelActive, functionPanelMode == .clipboard, !clipboardItems.isEmpty else {
+            clipboardClearConfirmationPending = false
+            return
+        }
+        if !clipboardClearConfirmationPending {
+            clipboardClearConfirmationPending = true
+            return
+        }
+        clipboardClearConfirmationPending = false
+        delegate?.keyboardViewClearClipboardHistory(self)
+        requestClipboardItemsAsync()
     }
 
     private func canRequestExpandedCandidates() -> Bool {
@@ -2098,8 +2426,19 @@ final class KeyTaoIOSKeyboardView: UIView {
             return "选择"
         case .clipboard:
             return "剪贴板"
-        case .emoji:
-            return "Emoji"
+        }
+    }
+
+    private func functionPanelModeName(_ mode: KeyTaoFunctionPanelMode) -> String {
+        switch mode {
+        case .home:
+            return "home"
+        case .rime:
+            return "rime"
+        case .selection:
+            return "selection"
+        case .clipboard:
+            return "clipboard"
         }
     }
 
@@ -2251,6 +2590,22 @@ final class KeyTaoIOSKeyboardView: UIView {
         return key.action ?? .input(key.value ?? key.label)
     }
 
+    private var unsupportedEditVerbs: Set<String> {
+        var verbs = Self.alwaysUnsupportedEditVerbs
+        if delegate?.keyboardViewCanUndo(self) != true {
+            verbs.insert("undo")
+        }
+        return verbs
+    }
+
+    private func isUnsupportedEditKey(_ key: KeyTaoKeySpec) -> Bool {
+        let command = actionForMode(key)
+        guard command.type == KeyTaoCommandType.edit, let value = command.value else {
+            return false
+        }
+        return unsupportedEditVerbs.contains(value)
+    }
+
     private func stackCommandForPoint(_ key: KeyTaoKeySpec, rect: CGRect?, releaseY: CGFloat?) -> KeyTaoKeyCommand? {
         guard let stack = key.stack, !stack.isEmpty else {
             return nil
@@ -2365,11 +2720,13 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func keySupportsLongPress(_ key: KeyTaoKeySpec) -> Bool {
-        key.longPress != nil || key.asciiLongPress != nil || key.hint?.isEmpty == false
+        key.longPress != nil || key.asciiLongPress != nil || key.hint?.isEmpty == false || isRepeatableKey(key)
     }
 
     private func isRepeatableKey(_ key: KeyTaoKeySpec) -> Bool {
-        actionForMode(key).type == KeyTaoCommandType.backspace
+        let command = actionForMode(key)
+        return command.type == KeyTaoCommandType.backspace ||
+            (command.type == KeyTaoCommandType.edit && Self.repeatableEditVerbs.contains(command.value ?? ""))
     }
 
     private func startRepeating(_ key: KeyTaoKeySpec) {
@@ -2559,6 +2916,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func keyLabelSize(for label: String) -> CGFloat {
+        if layerMode.id.isSymbolLayer && !containsCJK(label) && label.count <= 2 {
+            return max(theme.font.size, 22)
+        }
         if label.count > 2 || containsCJK(label) {
             return max(12, min(theme.font.labelSize, theme.font.size - 4, 16))
         }
@@ -2591,7 +2951,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func keyCornerRadius(for rect: CGRect) -> CGFloat {
-        min(max(6, min(theme.candidate.cornerRadius, 9)), rect.width * 0.28, rect.height * 0.28)
+        min(max(7, min(theme.candidate.cornerRadius + 1, 10)), rect.width * 0.28, rect.height * 0.28)
     }
 
     private func keyWeight(_ key: KeyTaoKeySpec) -> CGFloat {
@@ -2743,14 +3103,17 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func isSoftAccentToolbar(_ action: ToolbarAction) -> Bool {
-        if action.command.type == KeyTaoCommandType.mode || action.command.type == KeyTaoCommandType.openPage {
+        if action.command.type == KeyTaoCommandType.mode ||
+            action.command.type == KeyTaoCommandType.openPage ||
+            action.command.type == KeyTaoCommandType.keyboardMode ||
+            action.command.type == KeyTaoCommandType.keyboardPicker {
             return true
         }
         if action.command.type == KeyTaoCommandType.panel,
-           ["home", "selection", "clipboard", "emoji", "close", "dismissClipboard"].contains(action.command.value ?? "home") {
+           ["home", "selection", "clipboard", "close", "dismissClipboard"].contains(action.command.value ?? "home") {
             return true
         }
-        return ["功能", "中", "En", "中文", "英文", "选择", "剪贴板", "Emoji", "返回", "设置", "🌐"].contains(action.label)
+        return false
     }
 
     private func softenedAccentSurfaceColor(_ amount: CGFloat) -> UIColor {
@@ -2873,12 +3236,20 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let longPressDelayMs = 420
     private static let backspaceRepeatIntervalMs = 72
     private static let expandedCandidateLoadDelayMs = 180
-    private static let emojiChoices = [
-        "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
-        "🥰", "😇", "🙂", "😉", "😋", "🤔", "😭", "😡",
-        "👍", "👎", "👌", "🙏", "👏", "💪", "🔥", "✨",
-        "🎉", "❤️", "💔", "⭐", "🌟", "✅", "❌", "❓",
-        "☕", "🍵", "🍻", "🍚", "🍜", "🌙", "☀️", "🌧️",
+    private static let repeatableEditVerbs: Set<String> = [
+        "cursorLeft",
+        "cursorRight",
+        "cursorUp",
+        "cursorDown",
+        "forwardDelete",
+    ]
+    private static let alwaysUnsupportedEditVerbs: Set<String> = [
+        "selectAll",
+        "toggleSelection",
+        "selectLeft",
+        "selectRight",
+        "redo",
+        "clearAll",
     ]
 }
 

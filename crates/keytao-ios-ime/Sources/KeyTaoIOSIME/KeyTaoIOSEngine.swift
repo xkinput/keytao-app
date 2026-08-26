@@ -1,8 +1,16 @@
 import Foundation
+import CryptoKit
 import CKeytaoCore
 
 enum KeyTaoIOSPaths {
     static let appGroupIdentifier = "group.ink.rea.keytao-app"
+    private static let keyboardSeedFileName = ".keyboard.seed"
+    private static let legacyDefaultKeyboardHashes: Set<String> = [
+        "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
+        "3ebe95295376bfeffb79c0106f86bc7e3d8631311dae0c595d330ed4c1b2805c",
+        "25ae1b176617c64fec16a55b73c9faae8abd17c3eba12d1fc67ec9f66364b854",
+        "34475509153894fcd8e53f5d21b1f6d0852b800731d670e9cfe7694cdf64df2c",
+    ]
 
     static func userRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["KEYTAO_IOS_USER_DATA_DIR"], !override.isEmpty {
@@ -98,24 +106,52 @@ enum KeyTaoIOSPaths {
     }
 
     /// Drops the bundled layout into the App Group so that users have a
-    /// `keyboard.yaml` to edit. Only writes when nothing usable is there: the
-    /// extension must never overwrite a layout the user has customised, and the
-    /// resolver falls back to the built-in layout on its own anyway.
+    /// `keyboard.yaml` to edit. A reseed happens only when the sidecar hash
+    /// proves the existing file is still the last bundled layout: the extension
+    /// must never overwrite a layout the user has customised.
     static func seedDefaultKeyboardIfNeeded(userRoot: URL) {
         let url = keyboardFile(userRoot: userRoot)
-        if let existing = try? String(contentsOf: url, encoding: .utf8),
-           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return
-        }
+        let seedURL = userRoot.appendingPathComponent(keyboardSeedFileName)
         guard let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
             return
+        }
+        let bundledHash = sha256(yaml)
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let existing = try? String(contentsOf: url, encoding: .utf8) else {
+                return
+            }
+            if !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let existingHash = sha256(existing)
+                let seededHash = try? String(contentsOf: seedURL, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if existingHash == bundledHash {
+                    if seededHash != bundledHash {
+                        try? bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
+                    }
+                    return
+                }
+                let canReseed: Bool
+                if let seededHash, !seededHash.isEmpty {
+                    canReseed = existingHash == seededHash
+                } else {
+                    canReseed = legacyDefaultKeyboardHashes.contains(existingHash)
+                }
+                guard canReseed else {
+                    return
+                }
+            }
         }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try yaml.write(to: url, atomically: true, encoding: .utf8)
+            try bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
         } catch {
             return
         }
+    }
+
+    private static func sha256(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {

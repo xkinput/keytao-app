@@ -198,6 +198,8 @@ public enum KeyTaoEnterKeyBehavior {
 public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var keyboardHeightDp: CGFloat
     public var candidateBarHeightDp: CGFloat
+    public var clipboardRowHeightDp: CGFloat
+    public var clipboardDeleteHitWidthDp: CGFloat
     public var keyboardBottomInsetDp: CGFloat
     public var horizontalGapDp: CGFloat
     public var verticalGapDp: CGFloat
@@ -220,6 +222,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case keyboardHeightDp
         case candidateBarHeightDp
+        case clipboardRowHeightDp
+        case clipboardDeleteHitWidthDp
         case keyboardBottomInsetDp
         case horizontalGapDp
         case verticalGapDp
@@ -248,6 +252,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public init(
         keyboardHeightDp: CGFloat,
         candidateBarHeightDp: CGFloat,
+        clipboardRowHeightDp: CGFloat = 44,
+        clipboardDeleteHitWidthDp: CGFloat = 44,
         keyboardBottomInsetDp: CGFloat,
         horizontalGapDp: CGFloat,
         verticalGapDp: CGFloat,
@@ -266,6 +272,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     ) {
         self.keyboardHeightDp = keyboardHeightDp
         self.candidateBarHeightDp = candidateBarHeightDp
+        self.clipboardRowHeightDp = Self.clamp(clipboardRowHeightDp, min: 44, max: 44)
+        self.clipboardDeleteHitWidthDp = Self.clamp(clipboardDeleteHitWidthDp, min: 44, max: 44)
         self.keyboardBottomInsetDp = keyboardBottomInsetDp
         self.horizontalGapDp = Self.clamp(horizontalGapDp, min: 0, max: 24)
         self.verticalGapDp = Self.clamp(verticalGapDp, min: 0, max: 24)
@@ -295,6 +303,16 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             (try? container.decode(CGFloat.self, forKey: .candidateBarHeightDp)) ?? Self.fallback.candidateBarHeightDp,
             min: 36,
             max: 96
+        )
+        self.clipboardRowHeightDp = Self.clamp(
+            (try? container.decode(CGFloat.self, forKey: .clipboardRowHeightDp)) ?? Self.fallback.clipboardRowHeightDp,
+            min: 44,
+            max: 44
+        )
+        self.clipboardDeleteHitWidthDp = Self.clamp(
+            (try? container.decode(CGFloat.self, forKey: .clipboardDeleteHitWidthDp)) ?? Self.fallback.clipboardDeleteHitWidthDp,
+            min: 44,
+            max: 44
         )
         self.keyboardBottomInsetDp = Self.clamp(
             (try? container.decode(CGFloat.self, forKey: .keyboardBottomInsetDp)) ?? Self.fallback.keyboardBottomInsetDp,
@@ -410,6 +428,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(keyboardHeightDp, forKey: .keyboardHeightDp)
         try container.encode(candidateBarHeightDp, forKey: .candidateBarHeightDp)
+        try container.encode(clipboardRowHeightDp, forKey: .clipboardRowHeightDp)
+        try container.encode(clipboardDeleteHitWidthDp, forKey: .clipboardDeleteHitWidthDp)
         try container.encode(keyboardBottomInsetDp, forKey: .keyboardBottomInsetDp)
         try container.encode(horizontalGapDp, forKey: .horizontalGapDp)
         try container.encode(verticalGapDp, forKey: .verticalGapDp)
@@ -446,6 +466,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         return KeyTaoIOSImeConfig(
             keyboardHeightDp: keyboard.height ?? Self.fallback.keyboardHeightDp,
             candidateBarHeightDp: keyboard.candidateBarHeight ?? Self.fallback.candidateBarHeightDp,
+            clipboardRowHeightDp: keyboard.clipboardRowHeight ?? Self.fallback.clipboardRowHeightDp,
+            clipboardDeleteHitWidthDp: keyboard.clipboardDeleteHitWidth ?? Self.fallback.clipboardDeleteHitWidthDp,
             keyboardBottomInsetDp: keyboard.bottomInset ?? Self.fallback.keyboardBottomInsetDp,
             horizontalGapDp: keyboard.horizontalGap ?? Self.fallback.horizontalGapDp,
             verticalGapDp: keyboard.verticalGap ?? Self.fallback.verticalGapDp,
@@ -694,6 +716,8 @@ enum KeyTaoIOSKeyboardConfigResolver {
 private struct KeyTaoThemeKeyboard: Decodable {
     var height: CGFloat?
     var candidateBarHeight: CGFloat?
+    var clipboardRowHeight: CGFloat?
+    var clipboardDeleteHitWidth: CGFloat?
     var bottomInset: CGFloat?
     var horizontalGap: CGFloat?
     var verticalGap: CGFloat?
