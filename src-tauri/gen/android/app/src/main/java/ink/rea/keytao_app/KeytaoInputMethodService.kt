@@ -518,6 +518,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.PREVIOUS_PAGE -> applyState(engine.changePage(backward = true))
             KeyCommandTypes.RESET -> applyState(engine.reset())
             KeyCommandTypes.RIME_MENU -> openRimeMenu()
+            KeyCommandTypes.RIME_SCHEMA -> selectRimeSchema(command.value.orEmpty())
+            KeyCommandTypes.RIME_OPTION -> setRimeOption(
+                command.value.orEmpty(),
+                command.fallbackValue?.toBooleanStrictOrNull(),
+            )
             KeyCommandTypes.EDIT -> handleEditAction(command.value.orEmpty(), command.fallbackValue)
             KeyCommandTypes.ONE_HANDED -> toggleOneHandedKeyboard()
             KeyCommandTypes.FLOATING -> toggleFloatingKeyboard()
@@ -912,7 +917,44 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun openRimeMenu() {
-        applyState(engine.processKey(AndroidKeyMapper.XK_F4, 0))
+        refreshRimeOptions()
+    }
+
+    private fun selectRimeSchema(schemaId: String) {
+        if (schemaId.isBlank()) return
+        val state = engine.selectSchema(schemaId)
+        if (state == null) {
+            keyboardView?.showMessage("无法切换输入方案")
+            refreshRimeOptions()
+            return
+        }
+        applyState(state)
+        refreshRimeOptions()
+    }
+
+    private fun setRimeOption(optionName: String, enabled: Boolean?) {
+        if (optionName.isBlank() || enabled == null) return
+        val state = if (optionName == "ascii_mode") {
+            engine.setAsciiMode(enabled)
+        } else {
+            engine.setOption(optionName, enabled)
+        }
+        if (state == null) {
+            keyboardView?.showMessage("无法更新 Rime 选项")
+            return
+        }
+        applyState(state)
+        refreshRimeOptions()
+    }
+
+    private fun refreshRimeOptions() {
+        keyboardView?.updateRimeOptions(
+            KeytaoRimeOptionsState(
+                schemas = engine.listSchemas(),
+                currentSchema = engine.currentSchema(),
+                options = rimeOptionNames.associateWith(engine::getOption),
+            )
+        )
     }
 
     private fun handleEditAction(action: String, value: String?) {
@@ -1358,6 +1400,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val maxBackspaceGestureBatchCount = 96
         private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48
+        private val rimeOptionNames = listOf(
+            "ascii_mode",
+            "ascii_punct",
+            "full_shape",
+            "simplification",
+        )
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

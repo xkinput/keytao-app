@@ -1,5 +1,6 @@
 package ink.rea.keytao_app
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 object KeytaoNativeBridge {
@@ -120,6 +121,35 @@ object KeytaoNativeBridge {
         if (!loaded || session == 0L) return emptyList()
         return KeytaoImeState.parseCandidateArray(
             runCatching { nativeAllCandidates(session, limit.coerceAtLeast(0)) }.getOrNull()
+        )
+    }
+
+    fun listSchemas(session: Long): List<KeytaoRimeSchema> {
+        if (!loaded || session == 0L) return emptyList()
+        return KeytaoRimeSchema.parseArray(runCatching { nativeListSchemas(session) }.getOrNull())
+    }
+
+    fun currentSchema(session: Long): KeytaoRimeSchema? {
+        if (!loaded || session == 0L) return null
+        return KeytaoRimeSchema.fromJson(runCatching { nativeCurrentSchema(session) }.getOrNull())
+    }
+
+    fun selectSchema(session: Long, schemaId: String): KeytaoImeState? {
+        if (!loaded || session == 0L || schemaId.isBlank()) return null
+        return KeytaoImeState.fromJson(
+            runCatching { nativeSelectSchema(session, schemaId) }.getOrNull()
+        )
+    }
+
+    fun getOption(session: Long, optionName: String): Boolean {
+        if (!loaded || session == 0L || optionName.isBlank()) return false
+        return runCatching { nativeGetOption(session, optionName) }.getOrDefault(false)
+    }
+
+    fun setOption(session: Long, optionName: String, enabled: Boolean): KeytaoImeState? {
+        if (!loaded || session == 0L || optionName.isBlank()) return null
+        return KeytaoImeState.fromJson(
+            runCatching { nativeSetOption(session, optionName, enabled) }.getOrNull()
         )
     }
 
@@ -263,6 +293,16 @@ object KeytaoNativeBridge {
 
     external fun nativeAllCandidates(session: Long, limit: Int): String?
 
+    external fun nativeListSchemas(session: Long): String?
+
+    external fun nativeCurrentSchema(session: Long): String?
+
+    external fun nativeSelectSchema(session: Long, schemaId: String): String?
+
+    external fun nativeGetOption(session: Long, optionName: String): Boolean
+
+    external fun nativeSetOption(session: Long, optionName: String, enabled: Boolean): String?
+
     external fun nativeChangePage(session: Long, backward: Boolean): String?
 
     external fun nativeReset(session: Long): String?
@@ -292,6 +332,39 @@ object KeytaoNativeBridge {
     external fun nativeReloadStampSignature(userDir: String): String?
 
     external fun nativeReloadStampPath(userDir: String): String
+}
+
+data class KeytaoRimeSchema(
+    val id: String,
+    val name: String,
+) {
+    companion object {
+        fun fromJson(json: String?): KeytaoRimeSchema? {
+            if (json.isNullOrBlank()) return null
+            return runCatching { fromJsonObject(JSONObject(json)) }.getOrNull()
+        }
+
+        fun parseArray(json: String?): List<KeytaoRimeSchema> {
+            if (json.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val array = JSONArray(json)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        array.optJSONObject(index)?.let(::fromJsonObject)?.let(::add)
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        private fun fromJsonObject(root: JSONObject): KeytaoRimeSchema? {
+            val id = root.optString("id").trim()
+            if (id.isEmpty()) return null
+            return KeytaoRimeSchema(
+                id = id,
+                name = root.optString("name").trim().ifEmpty { id },
+            )
+        }
+    }
 }
 
 data class KeytaoRimeDeployStepResult(

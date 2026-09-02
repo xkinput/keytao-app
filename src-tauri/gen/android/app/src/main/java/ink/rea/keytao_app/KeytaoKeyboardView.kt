@@ -80,6 +80,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val global: Boolean = false,
         val command: KeyCommand? = null,
         val clipboardText: String? = null,
+        val style: PanelItemStyle = PanelItemStyle.DEFAULT,
     )
     private data class ToolbarAction(
         val label: String,
@@ -87,6 +88,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val selected: Boolean = false,
         val secondaryLabel: String? = null,
         val icon: ToolbarIcon? = null,
+        val longPressCommand: KeyCommand? = null,
     )
     private data class ToolbarRect(
         val label: String,
@@ -95,12 +97,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val selected: Boolean = false,
         val secondaryLabel: String? = null,
         val icon: ToolbarIcon? = null,
+        val longPressCommand: KeyCommand? = null,
     )
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
+    private data class RimeOptionSpec(
+        val name: String,
+        val label: String,
+        val onLabel: String,
+        val offLabel: String,
+    )
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
-    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, ONE_HANDED, FLOATING, BACK, SETTINGS }
+    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, SETTINGS }
+    private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION }
     private enum class ShiftState { OFF, ONCE, LOCKED }
-    private enum class FunctionPanelMode { HOME, RIME, SELECTION, CLIPBOARD }
+    private enum class FunctionPanelMode { RIME, CLIPBOARD }
 
     var listener: Listener? = null
 
@@ -132,7 +142,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var candidateDragging = false
     private var candidatePanelExpanded = false
     private var functionPanelActive = false
-    private var functionPanelMode = FunctionPanelMode.HOME
+    private var functionPanelMode = FunctionPanelMode.RIME
+    private var rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+    private var rimeOptionsLoading = false
     private var candidateExpandPressed = false
     private var expandedTouchActive = false
     private var expandedDragging = false
@@ -180,6 +192,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var pressedClipboardDelete: ClipboardDeleteRect? = null
     private var pressedToolbar: ToolbarRect? = null
     private var toolbarTouchActive = false
+    private var toolbarLongPressConsumed = false
     private var downX = 0f
     private var downY = 0f
     private var lastShiftTapTimeMs = 0L
@@ -200,6 +213,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             listener?.onKeyCommand(command)
             clearOneShotShiftAfter(command)
         }
+        invalidate()
+    }
+    private val toolbarLongPressRunnable = Runnable {
+        val toolbar = pressedToolbar ?: return@Runnable
+        val command = toolbar.longPressCommand ?: return@Runnable
+        toolbarLongPressConsumed = true
+        performConfiguredHaptic(strong = true)
+        listener?.onKeyCommand(command)
         invalidate()
     }
     private val repeatRunnable = object : Runnable {
@@ -253,6 +274,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (available == inputMethodSwitchingAvailable) return
         inputMethodSwitchingAvailable = available
         invalidateExpandedCandidateItemsCache()
+        invalidate()
+    }
+
+    fun updateRimeOptions(next: KeytaoRimeOptionsState) {
+        rimeOptionsState = next
+        rimeOptionsLoading = false
+        invalidateExpandedCandidateItemsCache()
+        resetExpandedCandidateScroll()
         invalidate()
     }
 
@@ -336,14 +365,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             resetExpandedCandidateScroll()
         }
         state = next
-        if (
-            functionPanelActive &&
-            functionPanelMode == FunctionPanelMode.RIME &&
-            state.candidatePanel.candidates.isNotEmpty() &&
-            expandedCandidates.isEmpty()
-        ) {
-            requestExpandedCandidatesAsync()
-        }
         if (schemaReady) statusMessage = null
         if (wasExpanded != candidatePanelExpanded) {
             startContentTransition()
@@ -396,7 +417,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         keyboardLayer = nextLayer
         candidatePanelExpanded = false
         functionPanelActive = false
-        functionPanelMode = FunctionPanelMode.HOME
+        functionPanelMode = FunctionPanelMode.RIME
+        rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+        rimeOptionsLoading = false
         clipboardClearConfirmationPending = false
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
@@ -668,6 +691,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     event.y >= keyboardScrollViewportTop &&
                     event.y < keyboardScrollViewportBottom
                 stopLongPressAndRepeat()
+                toolbarLongPressConsumed = false
+                if (toolbar?.longPressCommand != null) {
+                    longPressHandler.postDelayed(toolbarLongPressRunnable, longPressDelayMs)
+                }
                 pressedClipboardDelete = if (expandedTouchActive) findClipboardDelete(event.x, event.y) else null
                 pressedExpandedCandidate = if (expandedTouchActive && pressedClipboardDelete == null) {
                     findExpandedCandidate(event.x, event.y)
@@ -715,6 +742,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 if (toolbarTouchActive) {
                     val toolbar = pressedToolbar
                     if (toolbar != null && !toolbar.rect.contains(event.x, event.y)) {
+                        longPressHandler.removeCallbacks(toolbarLongPressRunnable)
                         pressedToolbar = null
                         invalidate()
                     }
@@ -781,9 +809,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 stopLongPressAndRepeat()
                 if (toolbarTouchActive) {
                     val toolbar = pressedToolbar
+                    val longPressConsumed = toolbarLongPressConsumed
                     pressedToolbar = null
                     toolbarTouchActive = false
-                    if (toolbar != null && toolbar.rect.contains(event.x, event.y)) {
+                    toolbarLongPressConsumed = false
+                    if (!longPressConsumed && toolbar != null && toolbar.rect.contains(event.x, event.y)) {
                         handleToolbarCommand(toolbar.command)
                     }
                     invalidate()
@@ -860,6 +890,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 keyboardDragging = false
                 pressedToolbar = null
                 toolbarTouchActive = false
+                toolbarLongPressConsumed = false
                 candidateExpandPressed = false
                 pressedKey = null
                 invalidate()
@@ -1038,7 +1069,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val left = gap * 1.5f
         val right = width - left
         val columns = panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)
-        val rowHeight = dp(
+        val defaultRowHeight = dp(
             when (columns) {
                 4 -> 52f
                 1 -> config.clipboardRowHeightDp
@@ -1050,6 +1081,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         val visibleRect = RectF(0f, top, width.toFloat(), bottom)
         val items = expandedCandidateItems()
+        val structuredRime = functionPanelActive && functionPanelMode == FunctionPanelMode.RIME
         val nextRects = mutableListOf<CandidateRect>()
         val nextClipboardDeleteRects = mutableListOf<ClipboardDeleteRect>()
 
@@ -1073,7 +1105,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 textPaint.color = theme.commentColor.toArgb()
                 val message = when {
                     clipboardItemsLoading -> "正在读取剪贴板"
-                    expandedCandidatesLoading && functionPanelMode == FunctionPanelMode.RIME -> "正在加载 Rime 选项"
+                    rimeOptionsLoading && functionPanelMode == FunctionPanelMode.RIME -> "正在加载 Rime 选项"
                     expandedCandidatesLoading && functionPanelActive -> "正在加载功能"
                     expandedCandidatesLoading -> "正在加载候选"
                     functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD -> "剪贴板为空"
@@ -1084,22 +1116,52 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             for ((index, item) in items.withIndex()) {
                 val chipWidth: Float
-                if (columns != null && cellWidth != null) {
+                val itemRowHeight: Float
+                if (structuredRime) {
+                    when (item.style) {
+                        PanelItemStyle.SECTION -> {
+                            if (x > left) {
+                                x = left
+                                y += dp(44f) + gap
+                            }
+                            chipWidth = right - left
+                            itemRowHeight = dp(28f)
+                        }
+                        PanelItemStyle.SCHEMA -> {
+                            if (x > left) {
+                                x = left
+                                y += dp(44f) + gap
+                            }
+                            chipWidth = right - left
+                            itemRowHeight = dp(44f)
+                        }
+                        PanelItemStyle.OPTION -> {
+                            chipWidth = (right - left - gap) / 2f
+                            itemRowHeight = dp(44f)
+                        }
+                        PanelItemStyle.DEFAULT -> {
+                            chipWidth = right - left
+                            itemRowHeight = defaultRowHeight
+                        }
+                    }
+                } else if (columns != null && cellWidth != null) {
                     val column = index % columns
                     val row = index / columns
                     x = left + column * (cellWidth + gap)
-                    y = top + gap + row * (rowHeight + gap) - expandedCandidateScrollY
+                    y = top + gap + row * (defaultRowHeight + gap) - expandedCandidateScrollY
                     chipWidth = cellWidth
+                    itemRowHeight = defaultRowHeight
                 } else {
                     chipWidth = candidateWidth(item)
                         .coerceAtLeast(dp(56f))
                         .coerceAtMost(right - left)
                     if (x + chipWidth > right && x > left) {
                         x = left
-                        y += rowHeight + gap
+                        y += defaultRowHeight + gap
                     }
+                    itemRowHeight = defaultRowHeight
                 }
-                val rect = RectF(x, y, x + chipWidth, y + rowHeight)
+                val rect = RectF(x, y, x + chipWidth, y + itemRowHeight)
                 if (rect.bottom >= top && rect.top <= bottom) {
                     drawCandidateOption(canvas, item, rect)
                     val hitRect = if (item.clipboardText != null) {
@@ -1107,7 +1169,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     } else {
                         rect
                     }
-                    nextRects.add(CandidateRect(item.index, hitRect, item.global, item.command, item.text))
+                    if (item.style != PanelItemStyle.SECTION) {
+                        nextRects.add(
+                            CandidateRect(
+                                item.index,
+                                hitRect,
+                                item.global,
+                                item.command,
+                                listOf(item.label, item.text).filter(String::isNotBlank).joinToString(" "),
+                            )
+                        )
+                    }
                     item.clipboardText?.let { clipboardText ->
                         nextClipboardDeleteRects.add(
                             ClipboardDeleteRect(
@@ -1118,7 +1190,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     }
                 }
                 contentBottom = max(contentBottom, rect.bottom + expandedCandidateScrollY)
-                if (columns == null) {
+                if (structuredRime) {
+                    when (item.style) {
+                        PanelItemStyle.SECTION, PanelItemStyle.SCHEMA, PanelItemStyle.DEFAULT -> {
+                            x = left
+                            y = rect.bottom + gap
+                        }
+                        PanelItemStyle.OPTION -> {
+                            if (x > left) {
+                                x = left
+                                y = rect.bottom + gap
+                            } else {
+                                x = rect.right + gap
+                            }
+                        }
+                    }
+                } else if (columns == null) {
                     x = rect.right + gap
                 }
             }
@@ -1134,7 +1221,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun panelColumns(mode: FunctionPanelMode): Int? {
         return when (mode) {
-            FunctionPanelMode.HOME, FunctionPanelMode.SELECTION -> 4
             FunctionPanelMode.CLIPBOARD -> 1
             FunctionPanelMode.RIME -> null
         }
@@ -1147,8 +1233,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         val items = if (functionPanelActive) {
             when (functionPanelMode) {
-                FunctionPanelMode.HOME -> functionHomeItems()
-                FunctionPanelMode.SELECTION -> selectionPanelItems()
                 FunctionPanelMode.CLIPBOARD -> clipboardPanelItems()
                 FunctionPanelMode.RIME -> rimePanelItems()
             }
@@ -1161,6 +1245,62 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun rimePanelItems(): List<CandidateDrawItem> {
+        if (functionPanelActive && functionPanelMode == FunctionPanelMode.RIME) {
+            if (rimeOptionsLoading && rimeOptionsState == KeytaoRimeOptionsState.EMPTY) {
+                return emptyList()
+            }
+            val current = rimeOptionsState.currentSchema
+            val schemas = buildList<KeytaoRimeSchema> {
+                addAll(rimeOptionsState.schemas)
+                if (current != null && none { it.id == current.id }) add(current)
+            }
+            val items = mutableListOf(
+                CandidateDrawItem(
+                    index = -2000,
+                    label = "输入方案",
+                    text = "",
+                    style = PanelItemStyle.SECTION,
+                )
+            )
+            schemas.forEachIndexed { index, schema ->
+                items.add(
+                    CandidateDrawItem(
+                        index = -2100 - index,
+                        label = schema.name,
+                        text = schema.id,
+                        selected = schema.id == current?.id,
+                        command = KeyCommand(KeyCommandTypes.RIME_SCHEMA, schema.id),
+                        style = PanelItemStyle.SCHEMA,
+                    )
+                )
+            }
+            items.add(
+                CandidateDrawItem(
+                    index = -3000,
+                    label = "选项",
+                    text = "",
+                    style = PanelItemStyle.SECTION,
+                )
+            )
+            rimeOptionSpecs.forEachIndexed { index, spec ->
+                val enabled = rimeOptionsState.options[spec.name] == true
+                items.add(
+                    CandidateDrawItem(
+                        index = -3100 - index,
+                        label = spec.label,
+                        text = if (enabled) spec.onLabel else spec.offLabel,
+                        selected = enabled,
+                        command = KeyCommand(
+                            KeyCommandTypes.RIME_OPTION,
+                            spec.name,
+                            (!enabled).toString(),
+                        ),
+                        style = PanelItemStyle.OPTION,
+                    )
+                )
+            }
+            return items
+        }
         val all = expandedCandidates
             .takeIf { it.isNotEmpty() }
             ?: state.candidates.map { candidate ->
@@ -1202,6 +1342,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 .takeIf { it.isNotEmpty() }
                 ?: state.candidates
             appendCandidateListSignature(source)
+            if (functionPanelActive && functionPanelMode == FunctionPanelMode.RIME) {
+                append('|')
+                append(rimeOptionsLoading)
+                append('|')
+                append(rimeOptionsState.currentSchema?.id.orEmpty())
+                rimeOptionsState.schemas.forEach { schema ->
+                    append('|')
+                    append(schema.id)
+                    append(':')
+                    append(schema.name)
+                }
+                rimeOptionsState.options.toSortedMap().forEach { (name, enabled) ->
+                    append('|')
+                    append(name)
+                    append(':')
+                    append(enabled)
+                }
+            }
             if (functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD) {
                 append('|')
                 clipboardItems.forEach { item ->
@@ -1229,41 +1387,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidateItemsCacheSignature = ""
         expandedCandidateItemsCache = emptyList()
     }
-
-    private fun functionHomeItems(): List<CandidateDrawItem> {
-        val items = mutableListOf(
-            PanelItem("Rime", "方案/开关", KeyCommand.panel("rime")),
-            PanelItem("编辑", "方向/编辑", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "editor")),
-            PanelItem("符号", "更多符号", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_marks")),
-            PanelItem("Emoji", "分类表情", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_emoji_face")),
-            PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
-            PanelItem("Tab", "输入制表符", KeyCommand.edit("tab")),
-            PanelItem("行首", "移动光标", KeyCommand.edit("lineStart")),
-            PanelItem("行尾", "移动光标", KeyCommand.edit("lineEnd")),
-        )
-        // supportsSwitchingToNextInputMethod is declared in the IME metadata, so
-        // the keyboard has to offer a way out when the framework says one exists.
-        if (inputMethodSwitchingAvailable) {
-            items.add(
-                PanelItem("切换输入法", "下一个输入法", KeyCommand(KeyCommandTypes.NEXT_INPUT_METHOD))
-            )
-        }
-        items.add(PanelItem("输入法列表", "系统选择器", KeyCommand(KeyCommandTypes.KEYBOARD_PICKER)))
-        return panelItems(*items.toTypedArray())
-    }
-
-    private fun selectionPanelItems(): List<CandidateDrawItem> = panelItems(
-        PanelItem("多选", "开始/结束", KeyCommand.edit("toggleSelection")),
-        PanelItem("左选", "扩展一字", KeyCommand.edit("selectLeft")),
-        PanelItem("右选", "扩展一字", KeyCommand.edit("selectRight")),
-        PanelItem("全选", "选择全部", KeyCommand.edit("selectAll")),
-        PanelItem("复制", "复制选区", KeyCommand.edit("copy")),
-        PanelItem("剪切", "剪切选区", KeyCommand.edit("cut")),
-        PanelItem("粘贴", "当前剪贴板", KeyCommand.edit("paste")),
-        PanelItem("行首", "移动光标", KeyCommand.edit("lineStart")),
-        PanelItem("行尾", "移动光标", KeyCommand.edit("lineEnd")),
-        PanelItem("Tab", "输入制表符", KeyCommand.edit("tab")),
-    )
 
     private fun clipboardPanelItems(): List<CandidateDrawItem> {
         return clipboardItems.mapIndexed { index, text ->
@@ -1364,6 +1487,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun keyCornerRadiusDp(): Float = min(theme.keyCornerRadiusDp + 1f, 10f).coerceAtLeast(7f)
 
     private fun drawCandidateOption(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        if (item.style == PanelItemStyle.SECTION) {
+            drawRimeSectionHeader(canvas, item, rect)
+            return
+        }
         val radius = dp(candidateCornerRadiusDp())
         if (item.command != null || item.selected) {
             drawSurfaceShadow(canvas, rect, pressed = false)
@@ -1392,11 +1519,88 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawRoundRect(rect, radius, radius, paint)
         }
 
-        when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
-            4 -> drawCandidateGridCell(canvas, item, rect)
-            1 -> drawClipboardCandidateRow(canvas, item, rect)
-            else -> drawInlineCandidateOption(canvas, item, rect)
+        when (item.style) {
+            PanelItemStyle.SCHEMA -> drawRimeSchemaRow(canvas, item, rect)
+            PanelItemStyle.OPTION -> drawRimeOptionPill(canvas, item, rect)
+            else -> when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
+                4 -> drawCandidateGridCell(canvas, item, rect)
+                1 -> drawClipboardCandidateRow(canvas, item, rect)
+                else -> drawInlineCandidateOption(canvas, item, rect)
+            }
         }
+    }
+
+    private fun drawRimeSectionHeader(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val labelX = rect.left + dp(4f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(candidateLabelSizeSp())
+        textPaint.color = theme.commentColor.toArgb()
+        canvas.drawText(item.label, labelX, rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        val lineLeft = labelX + textPaint.measureText(item.label) + dp(10f)
+        if (lineLeft < rect.right) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = max(1f, dp(theme.candidateBorderWidthDp))
+            paint.color = theme.panelBorder.toArgb()
+            canvas.drawLine(lineLeft, rect.centerY(), rect.right, rect.centerY(), paint)
+        }
+    }
+
+    private fun drawRimeSchemaRow(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val radioCenterX = rect.left + dp(18f)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(if (item.selected) 2f else 1.4f)
+        paint.color = if (item.selected) {
+            theme.candidateSelectedForeground.toArgb()
+        } else {
+            theme.commentColor.toArgb()
+        }
+        canvas.drawCircle(radioCenterX, rect.centerY(), dp(7f), paint)
+        if (item.selected) {
+            paint.style = Paint.Style.FILL
+            canvas.drawCircle(radioCenterX, rect.centerY(), dp(3.5f), paint)
+        }
+
+        val textLeft = rect.left + dp(36f)
+        val maxWidth = (rect.right - dp(10f) - textLeft).coerceAtLeast(0f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(candidateTextSizeSp())
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val name = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(name, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
+        textPaint.textSize = sp(candidateCommentSizeSp())
+        textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
+        val id = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(id, textLeft, rect.centerY() + dp(9f) + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawRimeOptionPill(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val statusWidth = dp(42f)
+        val statusHeight = dp(22f)
+        val statusRect = RectF(
+            rect.right - dp(8f) - statusWidth,
+            rect.centerY() - statusHeight / 2f,
+            rect.right - dp(8f),
+            rect.centerY() + statusHeight / 2f,
+        )
+        val textLeft = rect.left + dp(10f)
+        val maxWidth = (statusRect.left - dp(8f) - textLeft).coerceAtLeast(0f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(candidateLabelSizeSp())
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(label, textLeft, rect.centerY() - dp(7f) + textBaselineOffset(textPaint), textPaint)
+        textPaint.textSize = sp(candidateCommentSizeSp())
+        textPaint.color = if (item.selected) theme.selectedCommentColor.toArgb() else theme.commentColor.toArgb()
+        val stateLabel = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(stateLabel, textLeft, rect.centerY() + dp(9f) + textBaselineOffset(textPaint), textPaint)
+
+        paint.style = Paint.Style.FILL
+        paint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateBorderColor.toArgb()
+        canvas.drawRoundRect(statusRect, statusHeight / 2f, statusHeight / 2f, paint)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(10f)
+        textPaint.color = if (item.selected) theme.candidateSelectedBackground.toArgb() else theme.commentColor.toArgb()
+        canvas.drawText(if (item.selected) "ON" else "OFF", statusRect.centerX(), statusRect.centerY() + textBaselineOffset(textPaint), textPaint)
     }
 
     private fun drawCandidateGridCell(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
@@ -1527,6 +1731,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 action.selected,
                 action.secondaryLabel,
                 action.icon,
+                action.longPressCommand,
             )
             drawToolbarChip(canvas, toolbarRect)
             rects.add(toolbarRect)
@@ -1675,7 +1880,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             canvas.drawText(functionPanelTitle(), width / 2f, barHeight / 2f + textBaselineOffset(textPaint), textPaint)
         }
 
-        if (expandedCandidatesLoading || clipboardItemsLoading) {
+        if (expandedCandidatesLoading || clipboardItemsLoading || rimeOptionsLoading) {
             paint.style = Paint.Style.FILL
             paint.color = theme.selectedLabelColor.toArgb()
             val indicatorWidth = dp(44f)
@@ -1761,6 +1966,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ToolbarIcon.SELECTION -> drawSelectionToolbarIcon(canvas, iconRect)
             ToolbarIcon.CLIPBOARD -> drawClipboardToolbarIcon(canvas, iconRect)
             ToolbarIcon.EMOJI -> drawEmojiToolbarIcon(canvas, iconRect)
+            ToolbarIcon.GLOBE -> drawGlobeToolbarIcon(canvas, iconRect)
             ToolbarIcon.ONE_HANDED -> drawOneHandedToolbarIcon(canvas, iconRect)
             ToolbarIcon.FLOATING -> drawFloatingToolbarIcon(canvas, iconRect)
             ToolbarIcon.BACK -> drawBackToolbarIcon(canvas, iconRect)
@@ -1785,6 +1991,27 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 canvas.drawRoundRect(RectF(left, top, left + cell, top + cell), cell * 0.22f, cell * 0.22f, paint)
             }
         }
+    }
+
+    private fun drawGlobeToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        canvas.drawOval(rect, paint)
+        canvas.drawOval(
+            RectF(
+                rect.left + rect.width() * 0.28f,
+                rect.top,
+                rect.right - rect.width() * 0.28f,
+                rect.bottom,
+            ),
+            paint,
+        )
+        canvas.drawLine(
+            rect.left + rect.width() * 0.08f,
+            rect.centerY(),
+            rect.right - rect.width() * 0.08f,
+            rect.centerY(),
+            paint,
+        )
     }
 
     private fun drawFloatingToolbarIcon(canvas: Canvas, rect: RectF) {
@@ -2406,8 +2633,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun toolbarActions(): List<ToolbarAction> {
-        val function = ToolbarAction("功能", KeyCommand.panel("home"), icon = ToolbarIcon.FUNCTION)
+        val function = ToolbarAction("Rime", KeyCommand.panel("rime"), icon = ToolbarIcon.FUNCTION)
         val languageToggle = languageToggleAction()
+        val inputMethod = ToolbarAction(
+            "切换输入法",
+            KeyCommand(
+                if (inputMethodSwitchingAvailable) KeyCommandTypes.NEXT_INPUT_METHOD
+                else KeyCommandTypes.KEYBOARD_PICKER
+            ),
+            icon = ToolbarIcon.GLOBE,
+            longPressCommand = KeyCommand(KeyCommandTypes.KEYBOARD_PICKER),
+        )
         val oneHanded = ToolbarAction(
             if (keyboardLayoutMode == KeyboardLayoutMode.ONE_HANDED) "退出单手" else "单手",
             KeyCommand(KeyCommandTypes.ONE_HANDED),
@@ -2432,6 +2668,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode),
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers")),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters")),
+                inputMethod,
                 ))
                 addAll(layoutActions)
             }
@@ -2440,7 +2677,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 addAll(listOf(
                 function,
                 languageToggle,
-                ToolbarAction("选择", KeyCommand.panel("selection"), icon = ToolbarIcon.SELECTION),
+                inputMethod,
+                ToolbarAction("选择", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "editor"), icon = ToolbarIcon.SELECTION),
                 ToolbarAction("剪贴板", KeyCommand.panel("clipboard"), icon = ToolbarIcon.CLIPBOARD),
                 ToolbarAction("Emoji", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_emoji_face"), icon = ToolbarIcon.EMOJI),
                 ))
@@ -2504,9 +2742,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun functionPanelTitle(): String {
         return when (functionPanelMode) {
-            FunctionPanelMode.HOME -> "功能"
-            FunctionPanelMode.RIME -> "Rime"
-            FunctionPanelMode.SELECTION -> "选择"
+            FunctionPanelMode.RIME -> "Rime 选项"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
         }
     }
@@ -2593,7 +2829,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (!candidatePanelExpanded && expandedCandidates.isEmpty() && !functionPanelActive) return
         candidatePanelExpanded = false
         functionPanelActive = false
-        functionPanelMode = FunctionPanelMode.HOME
+        functionPanelMode = FunctionPanelMode.RIME
+        keyboardLayer = "letters"
+        rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+        rimeOptionsLoading = false
         clipboardClearConfirmationPending = false
         recentClipboardSuggestion = null
         expandedCandidates = emptyList()
@@ -2601,10 +2840,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         clipboardItemsLoading = false
         resetExpandedCandidateTouch()
         resetExpandedCandidateScroll()
+        resetKeyboardScroll()
+        invalidateKeyboardLayoutCache()
+        invalidateExpandedCandidateItemsCache()
         startContentTransition()
     }
 
-    private fun openFunctionPanel(mode: FunctionPanelMode = FunctionPanelMode.HOME) {
+    private fun openFunctionPanel(mode: FunctionPanelMode) {
         if (mode != FunctionPanelMode.CLIPBOARD || functionPanelMode != mode) {
             clipboardClearConfirmationPending = false
         }
@@ -2614,13 +2856,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = mode == FunctionPanelMode.CLIPBOARD
+        rimeOptionsLoading = mode == FunctionPanelMode.RIME
+        if (rimeOptionsLoading) {
+            rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+        }
         pressedKey = null
         pressedToolbar = null
         toolbarTouchActive = false
         resetExpandedCandidateScroll()
-        if (mode == FunctionPanelMode.RIME) {
-            requestExpandedCandidatesAsync()
-        }
         if (mode == FunctionPanelMode.CLIPBOARD) {
             requestClipboardItemsAsync()
         }
@@ -2643,15 +2886,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             when (command.value) {
                 "close" -> closeCandidatePanel()
                 "dismissClipboard" -> clearRecentClipboardSuggestion()
-                "home", null -> openFunctionPanel(FunctionPanelMode.HOME)
                 "rime" -> {
                     openFunctionPanel(FunctionPanelMode.RIME)
                     listener?.onKeyCommand(KeyCommand(KeyCommandTypes.RIME_MENU))
                 }
-                "selection" -> openFunctionPanel(FunctionPanelMode.SELECTION)
                 "clipboard" -> openFunctionPanel(FunctionPanelMode.CLIPBOARD)
                 "clearClipboardHistory" -> handleClearClipboardHistory()
-                else -> openFunctionPanel(FunctionPanelMode.HOME)
+                else -> setKeyboardLayer("letters")
             }
             performConfiguredHaptic()
             invalidate()
@@ -2699,7 +2940,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun canRequestExpandedCandidates(): Boolean {
         if (!candidatePanelExpanded || state.candidatePanel.candidates.isEmpty()) return false
-        return !functionPanelActive || functionPanelMode == FunctionPanelMode.RIME
+        return !functionPanelActive
     }
 
     private fun cancelExpandedCandidateRequest() {
@@ -2947,6 +3188,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun stopLongPressAndRepeat(pointerId: Int? = null) {
+        if (pointerId == null) {
+            longPressHandler.removeCallbacks(toolbarLongPressRunnable)
+        }
         if (pointerId == null || pointerId == primaryKeyPointerId) {
             longPressHandler.removeCallbacks(longPressRunnable)
         }
@@ -3160,13 +3404,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 KeyCommandTypes.OPEN_PAGE,
                 KeyCommandTypes.KEYBOARD_MODE,
                 KeyCommandTypes.KEYBOARD_PICKER,
+                KeyCommandTypes.NEXT_INPUT_METHOD,
             )
         ) {
             return true
         }
         if (item.command.type == KeyCommandTypes.PANEL && item.command.value in setOf(
-                "home",
-                "selection",
+                "rime",
                 "clipboard",
                 "close",
                 "dismissClipboard",
@@ -3398,6 +3642,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val contentTransitionDurationMs = 140L
         private const val expandedCandidateLoadDelayMs = 180L
         private const val androidSystemBottomInsetDp = 48
+
+        private val rimeOptionSpecs = listOf(
+            RimeOptionSpec("ascii_mode", "英文模式", "英文", "中文"),
+            RimeOptionSpec("ascii_punct", "标点", "英文标点", "中文标点"),
+            RimeOptionSpec("full_shape", "全角模式", "全角", "半角"),
+            RimeOptionSpec("simplification", "简体输出", "简体", "繁体"),
+        )
 
         /** Virtual accessibility node id ranges, one block per hit-test list. */
         private const val accessibilityExpandNodeId = 1

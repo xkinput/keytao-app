@@ -13,6 +13,16 @@ enum class Readiness {
     READY,
 }
 
+data class KeytaoRimeOptionsState(
+    val schemas: List<KeytaoRimeSchema>,
+    val currentSchema: KeytaoRimeSchema?,
+    val options: Map<String, Boolean>,
+) {
+    companion object {
+        val EMPTY = KeytaoRimeOptionsState(emptyList(), null, emptyMap())
+    }
+}
+
 class KeytaoImeEngine(context: Context) {
     private val appContext = context.applicationContext
 
@@ -135,6 +145,41 @@ class KeytaoImeEngine(context: Context) {
     fun allCandidates(limit: Int): List<KeytaoCandidate> {
         if (!nativeReady || session == 0L) return emptyList()
         return KeytaoNativeBridge.allCandidates(session, limit)
+    }
+
+    @Synchronized
+    fun listSchemas(): List<KeytaoRimeSchema> {
+        if (!nativeReady || session == 0L) return emptyList()
+        return KeytaoNativeBridge.listSchemas(session)
+    }
+
+    @Synchronized
+    fun currentSchema(): KeytaoRimeSchema? {
+        if (!nativeReady || session == 0L) return null
+        return KeytaoNativeBridge.currentSchema(session)
+    }
+
+    @Synchronized
+    fun selectSchema(schemaId: String): KeytaoImeState? {
+        val state = KeytaoNativeBridge.selectSchema(session, schemaId)
+            ?.let { stableSchemaState(it) }
+            ?: return null
+        lastState = state.withoutTransientCommit()
+        return state
+    }
+
+    @Synchronized
+    fun getOption(optionName: String): Boolean {
+        return KeytaoNativeBridge.getOption(session, optionName)
+    }
+
+    @Synchronized
+    fun setOption(optionName: String, enabled: Boolean): KeytaoImeState? {
+        val state = KeytaoNativeBridge.setOption(session, optionName, enabled)
+            ?.let { stableSchemaState(it) }
+            ?: return null
+        lastState = state.withoutTransientCommit()
+        return state
     }
 
     @Synchronized

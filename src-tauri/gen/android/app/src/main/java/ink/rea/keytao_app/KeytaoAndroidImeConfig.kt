@@ -25,6 +25,8 @@ object KeyCommandTypes {
     const val PREVIOUS_PAGE = "previousCandidatePage"
     const val RESET = "reset"
     const val RIME_MENU = "rimeMenu"
+    const val RIME_SCHEMA = "rimeSchema"
+    const val RIME_OPTION = "rimeOption"
     const val PANEL = "panel"
     const val EDIT = "edit"
     const val ONE_HANDED = "oneHanded"
