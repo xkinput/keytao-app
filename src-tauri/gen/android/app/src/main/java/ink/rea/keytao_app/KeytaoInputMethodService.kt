@@ -17,6 +17,7 @@ import android.os.SystemClock
 import android.text.InputType
 import android.text.Spanned
 import android.text.style.ReplacementSpan
+import android.util.Log
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
@@ -56,6 +57,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     )
     private var presentationIsLandscape = false
     private var currentState = KeytaoImeState.empty()
+    private var bypassAsciiActive = false
+    private var asciiModeBeforeBypass = false
 
     /**
      * Where the editor put our composing region, in absolute UTF-16 offsets, or
@@ -226,6 +229,17 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             currentState = state.withoutTransientCommit()
             composing = false
         }
+        val bypass = !privacyMode.allowsComposing || directInputEditor
+        if (bypass && !bypassAsciiActive) {
+            bypassAsciiActive = true
+            asciiModeBeforeBypass = currentState.asciiMode
+            currentState = engine.setAsciiMode(true).withoutTransientCommit()
+            keyboardView?.updateState(currentState)
+        } else if (!bypass && bypassAsciiActive) {
+            bypassAsciiActive = false
+            currentState = engine.setAsciiMode(asciiModeBeforeBypass).withoutTransientCommit()
+            keyboardView?.updateState(currentState)
+        }
         val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
         keyboardView?.updateEditorPresentation(
             enterLabel = KeytaoEditorPolicy.resolveEnterLabel(
@@ -235,6 +249,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 forceNewline = behavior == EnterKeyBehaviors.NEWLINE,
             ),
             requestedLayer = KeytaoEditorPolicy.resolveInitialLayer(inputType),
+        )
+        Log.d(
+            "KeytaoIme",
+            "editor pkg=${currentInputEditorInfo?.packageName} " +
+                "inputType=0x${inputType.toString(16)} " +
+                "imeOptions=0x${imeOptions.toString(16)} " +
+                "composing=${privacyMode.allowsComposing} " +
+                "direct=$directInputEditor ready=$inputAvailable",
         )
     }
 
@@ -1348,6 +1370,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.KEYBOARD_MODE,
             KeyCommandTypes.SHIFT,
             KeyCommandTypes.DIRECT_INPUT,
+            KeyCommandTypes.INPUT,
+            KeyCommandTypes.RIME_INPUT,
+            KeyCommandTypes.SPACE,
             KeyCommandTypes.EDIT,
             KeyCommandTypes.ONE_HANDED,
             KeyCommandTypes.FLOATING,
