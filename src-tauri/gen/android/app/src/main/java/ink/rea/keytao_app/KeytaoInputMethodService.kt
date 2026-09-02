@@ -682,10 +682,19 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ?: 1
         when (action) {
             "delete" -> deleteBeforeCursorForRestore(count)
+            "deleteSegment" -> deleteTrailingSegmentBeforeCursorForRestore()
             "restore" -> restoreBackspaceText(count)
             "deleteAll" -> deleteAllBeforeCursorForRestore()
             "restoreAll" -> restoreAllBackspaceText()
         }
+    }
+
+    private fun deleteTrailingSegmentBeforeCursorForRestore() {
+        val beforeCursor = currentInputConnection
+            ?.getTextBeforeCursor(backspaceContextLimit, InputConnection.GET_TEXT_WITH_STYLES)
+            ?.toString()
+            .orEmpty()
+        deleteBeforeCursorForRestore(trailingDeletionSegmentLength(beforeCursor))
     }
 
     private fun deleteOneBeforeCursorForRestore(resetComposition: Boolean = true): Boolean {

@@ -64,6 +64,13 @@ data class KeyStackItem(
     val asciiAction: KeyCommand? = null,
 )
 
+data class KeyAlternate(
+    val label: String,
+    val value: String? = null,
+    val rimeValue: String? = null,
+    val action: KeyCommand = KeyCommand.input(value ?: label),
+)
+
 data class KeySpec(
     val label: String,
     val value: String,
@@ -79,6 +86,8 @@ data class KeySpec(
     val swipeDown: KeyCommand? = null,
     val longPress: KeyCommand? = null,
     val asciiLongPress: KeyCommand? = null,
+    val alternates: List<KeyAlternate> = emptyList(),
+    val asciiAlternates: List<KeyAlternate> = emptyList(),
     val rowSpan: Int = 1,
     val stack: List<KeyStackItem> = emptyList(),
 )
@@ -112,6 +121,9 @@ data class KeytaoAndroidImeConfig(
     val hapticsEnabled: Boolean,
     val hapticIntensity: Int,
     val enterKeyBehavior: String,
+    val keyPreviewEnabled: Boolean,
+    val longPressDelayMs: Long,
+    val deleteSpeed: String,
     val swipeThresholdDp: Float,
     val rows: List<List<KeySpec>>,
     val numberRows: List<List<KeySpec>>,
@@ -305,6 +317,17 @@ data class KeytaoAndroidImeConfig(
                 enterKeyBehavior = normalizeEnterKeyBehavior(
                     mergedString(root, fallbackRoot, "enterKeyBehavior", EnterKeyBehaviors.SYSTEM),
                 ),
+                keyPreviewEnabled = mergedBoolean(root, fallbackRoot, "keyPreviewEnabled", true),
+                longPressDelayMs = mergedInt(
+                    root,
+                    fallbackRoot,
+                    "longPressDelayMs",
+                    KeytaoImeInteractionTuning.LONG_PRESS_DELAY_DEFAULT_MS.toInt(),
+                ).toLong().coerceIn(
+                    KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MIN_MS,
+                    KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MAX_MS,
+                ),
+                deleteSpeed = normalizeDeleteSpeed(mergedString(root, fallbackRoot, "deleteSpeed", "standard")),
                 swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
@@ -393,6 +416,24 @@ data class KeytaoAndroidImeConfig(
                     normalizeEnterKeyBehavior(runtimeRoot.optString("enterKeyBehavior"))
                 } else {
                     config.enterKeyBehavior
+                },
+                keyPreviewEnabled = if (runtimeRoot.has("keyPreviewEnabled")) {
+                    runtimeRoot.optBoolean("keyPreviewEnabled", config.keyPreviewEnabled)
+                } else {
+                    config.keyPreviewEnabled
+                },
+                longPressDelayMs = if (runtimeRoot.has("longPressDelayMs")) {
+                    runtimeRoot.optLong("longPressDelayMs", config.longPressDelayMs).coerceIn(
+                        KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MIN_MS,
+                        KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MAX_MS,
+                    )
+                } else {
+                    config.longPressDelayMs
+                },
+                deleteSpeed = if (runtimeRoot.has("deleteSpeed")) {
+                    normalizeDeleteSpeed(runtimeRoot.optString("deleteSpeed"))
+                } else {
+                    config.deleteSpeed
                 },
                 floating = config.floating.copy(
                     marginDp = floating?.optDouble("margin", config.floating.marginDp.toDouble())
@@ -578,6 +619,27 @@ data class KeytaoAndroidImeConfig(
             }
         }
 
+        private fun normalizeDeleteSpeed(value: String): String {
+            return when (DeleteSpeed.fromSetting(value)) {
+                DeleteSpeed.SLOW -> "slow"
+                DeleteSpeed.STANDARD -> "standard"
+                DeleteSpeed.FAST -> "fast"
+            }
+        }
+
+        private fun mergedBoolean(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            name: String,
+            defaultValue: Boolean,
+        ): Boolean {
+            return when {
+                root.has(name) -> root.optBoolean(name, defaultValue)
+                fallbackRoot?.has(name) == true -> fallbackRoot.optBoolean(name, defaultValue)
+                else -> defaultValue
+            }
+        }
+
         private fun mergedInt(
             root: JSONObject,
             fallbackRoot: JSONObject?,
@@ -679,9 +741,27 @@ data class KeytaoAndroidImeConfig(
                 swipeDown = parseOptionalCommand(json.opt("swipeDown")),
                 longPress = parseOptionalCommand(json.opt("longPress")),
                 asciiLongPress = parseOptionalCommand(json.opt("asciiLongPress")),
+                alternates = parseAlternates(json.optJSONArray("alternates")),
+                asciiAlternates = parseAlternates(json.optJSONArray("asciiAlternates")),
                 rowSpan = json.optInt("rowSpan", 1).coerceIn(1, 8),
                 stack = parseKeyStack(json.optJSONArray("stack")),
             )
+        }
+
+        private fun parseAlternates(alternates: JSONArray?): List<KeyAlternate> {
+            if (alternates == null) return emptyList()
+            return buildList {
+                for (index in 0 until alternates.length()) {
+                    val alternate = alternates.optJSONObject(index) ?: continue
+                    val label = alternate.optString("label").takeIf { it.isNotBlank() } ?: continue
+                    val value = alternate.optString("value").takeIf { it.isNotBlank() }
+                    val rimeValue = alternate.optString("rimeValue").takeIf { it.isNotBlank() }
+                    val action = parseOptionalCommand(alternate.opt("action"))
+                        ?: rimeValue?.let { KeyCommand.rimeInput(it, value ?: label) }
+                        ?: KeyCommand.input(value ?: label)
+                    add(KeyAlternate(label = label, value = value, rimeValue = rimeValue, action = action))
+                }
+            }
         }
 
         private fun parseKeyStack(stack: JSONArray?): List<KeyStackItem> {

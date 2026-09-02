@@ -88,6 +88,42 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `parse config keeps more keys and clamps interaction settings`() {
+        val config = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              "keyPreviewEnabled": false,
+              "longPressDelayMs": 900,
+              "deleteSpeed": "fast",
+              "rows": [[{
+                "label": "，",
+                "value": "，",
+                "alternates": [
+                  { "label": "！", "value": "！" },
+                  { "label": "？", "action": { "type": "directInput", "value": "？" } },
+                  { "label": "、", "rimeValue": ";d" }
+                ],
+                "asciiAlternates": [
+                  { "label": "!", "value": "!" }
+                ]
+              }]]
+            }
+            """.trimIndent()
+        )
+
+        val key = config.rows.single().single()
+        assertEquals(false, config.keyPreviewEnabled)
+        assertEquals(700L, config.longPressDelayMs)
+        assertEquals("fast", config.deleteSpeed)
+        assertEquals(listOf("！", "？", "、"), key.alternates.map { it.label })
+        assertEquals(KeyCommandTypes.DIRECT_INPUT, key.alternates[1].action.type)
+        assertEquals(KeyCommandTypes.RIME_INPUT, key.alternates[2].action.type)
+        assertEquals(";d", key.alternates[2].action.value)
+        assertEquals("、", key.alternates[2].action.fallbackValue)
+        assertEquals(listOf("!"), key.asciiAlternates.map { it.label })
+    }
+
+    @Test
     fun `parse config keeps ascii variants and symbol rows`() {
         val config = KeytaoAndroidImeConfig.parse(
             """
