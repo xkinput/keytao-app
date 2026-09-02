@@ -60,17 +60,20 @@ pub struct ImeState {
 
 /// What a frontend allows the engine to do for the current input context.
 ///
-/// Password fields, PIN entries and "no suggestions" contexts must not produce
-/// a composition and must not teach the user dictionary anything, so the
-/// frontend declares that once per context instead of filtering keys itself.
+/// Password fields and PIN entries must not produce a composition or teach the
+/// user dictionary. Private contexts may keep composition while frontends turn
+/// off their own learning-related stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputContextPolicy {
     /// Whether keys may reach librime at all. With `false` every key is
     /// reported as not accepted and no preedit or candidate is produced.
     pub composing: bool,
-    /// Whether the context may contribute to user learning. Enforced by never
-    /// handing librime a composing key, so it only has an effect together with
-    /// `composing: false`; frontends also use it for their own history stores.
+    /// Whether the context may contribute to user learning. Core cannot enforce
+    /// this while `composing` is true because librime has no per-session
+    /// no-memorize switch. The shipped KeyTao schemas set
+    /// `enable_user_dict: false`; frontends also use this flag for their own
+    /// clipboard and commit-history stores. A third-party schema with a user
+    /// dictionary can still learn while composition remains enabled.
     pub learning: bool,
 }
 
@@ -88,6 +91,15 @@ impl InputContextPolicy {
     pub fn sensitive() -> Self {
         Self {
             composing: false,
+            learning: false,
+        }
+    }
+
+    /// Policy for contexts that forbid personalization but still expect normal
+    /// input, such as incognito and no-suggestion fields.
+    pub fn private() -> Self {
+        Self {
+            composing: true,
             learning: false,
         }
     }
@@ -2411,6 +2423,18 @@ mod ime_runtime_tests {
                 learning: false
             }
         );
+    }
+
+    #[test]
+    fn input_context_policy_private_composes_without_learning() {
+        assert_eq!(
+            InputContextPolicy::private(),
+            InputContextPolicy {
+                composing: true,
+                learning: false
+            }
+        );
+        assert!(!InputContextPolicy::sensitive().composing);
     }
 
     #[test]

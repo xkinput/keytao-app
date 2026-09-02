@@ -23,11 +23,12 @@ internal data class TextUnitRange(
 /**
  * What the editor told us it does not want us to do with the text it receives.
  *
- * `password` comes from the inputType variations, `noLearning` from
- * `IME_FLAG_NO_PERSONALIZED_LEARNING` (incognito) and `noSuggestions` from
- * `TYPE_TEXT_FLAG_NO_SUGGESTIONS`. All three mean "nothing typed here may be
- * remembered", which keytao-core can only guarantee by keeping the keys away
- * from librime.
+ * `password` comes from the inputType variations and requires direct input.
+ * `noLearning` comes from `IME_FLAG_NO_PERSONALIZED_LEARNING` (incognito), and
+ * `noSuggestions` from `TYPE_TEXT_FLAG_NO_SUGGESTIONS`; those two disable the
+ * learning policy without disabling composition. Incognito additionally gates
+ * clipboard history. This is safe for the bundled schemas because all of them
+ * set `enable_user_dict:false`.
  */
 internal data class InputPrivacyMode(
     val password: Boolean = false,
@@ -37,17 +38,16 @@ internal data class InputPrivacyMode(
     /**
      * Whether keys may build a Rime composition at all.
      *
-     * keytao-core only keeps a context out of the user dictionary by never
-     * handing librime a composing key, so every editor that forbids learning
-     * has to lose composition too — `learning = false` on its own is a promise
-     * the engine cannot keep. That costs Chinese input in incognito and
-     * no-suggestion fields, which is the trade the privacy contract asks for
-     * until librime grows a per-session no-memorize switch.
+     * Password variations are the only editors that refuse composition.
+     * Incognito and no-suggestion fields keep normal Chinese input while
+     * disabling learning; incognito also disables clipboard memory. Core cannot
+     * enforce learning off while composing for a third-party schema with a user
+     * dictionary; the bundled schemas disable their user dictionaries.
      */
-    val allowsComposing: Boolean get() = !password && !noLearning && !noSuggestions
+    val allowsComposing: Boolean get() = !password
 
     /** Whether Rime may record what was typed into the user dictionary. */
-    val allowsLearning: Boolean get() = allowsComposing
+    val allowsLearning: Boolean get() = !password && !noLearning && !noSuggestions
 
     /** Whether clipboard contents may be remembered or previewed on the keyboard. */
     val allowsClipboard: Boolean get() = !password && !noLearning

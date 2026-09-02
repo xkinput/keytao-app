@@ -146,26 +146,38 @@ class KeytaoEditorPolicyTest {
     }
 
     @Test
-    fun `incognito editors lose composing because that is the only way to stop learning`() {
+    fun `incognito editors keep composing without learning or clipboard access`() {
         val mode = KeytaoEditorPolicy.resolvePrivacyMode(
             inputType = InputType.TYPE_CLASS_TEXT,
             imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING,
         )
 
-        assertFalse(mode.allowsComposing)
+        assertTrue(mode.allowsComposing)
         assertFalse(mode.allowsLearning)
         assertFalse(mode.allowsClipboard)
     }
 
     @Test
-    fun `no suggestions editors lose composing so nothing reaches the user dictionary`() {
+    fun `no suggestions editors keep composing without learning`() {
         val mode = KeytaoEditorPolicy.resolvePrivacyMode(
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
             imeOptions = EditorInfo.IME_ACTION_NONE,
         )
 
-        assertFalse(mode.allowsComposing)
+        assertTrue(mode.allowsComposing)
         assertFalse(mode.allowsLearning)
+    }
+
+    @Test
+    fun `password with no suggestions still loses composing`() {
+        val mode = KeytaoEditorPolicy.resolvePrivacyMode(
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            imeOptions = EditorInfo.IME_ACTION_DONE,
+        )
+
+        assertFalse(mode.allowsComposing)
     }
 
     @Test

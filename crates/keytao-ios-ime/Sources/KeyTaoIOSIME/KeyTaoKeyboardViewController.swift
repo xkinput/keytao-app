@@ -5,6 +5,7 @@ private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
 private let rimeKeyF4: UInt32 = 0xffc1
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
+private let keyTaoKeyboardTraitsLog = OSLog(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 
 /// `UIInputView` subclass that opts the keyboard into the standard system click
 /// sound; whether it is audible is the user's "Keyboard Clicks" preference.
@@ -40,6 +41,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var currentTheme: KeyTaoImeTheme = .fallback
     private var lastPresentationLandscape: Bool?
     private var currentState = KeyTaoImeState.empty
+    private var bypassAsciiActive = false
+    private var asciiModeBeforeBypass = false
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private var clipboardHistory: [String] = []
@@ -1033,6 +1036,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// through which an iOS host declares what it expects from the keyboard.
     private func applyHostTraits() {
         let traits = KeyTaoHostTraits(proxy: textDocumentProxy)
+        defer {
+            os_log(
+                "host traits kb=%{public}d secure=%{public}d bypass=%{public}d",
+                log: keyTaoKeyboardTraitsLog,
+                type: .info,
+                traits.keyboardType.rawValue,
+                traits.isSecureTextEntry ? 1 : 0,
+                traits.bypassesRime ? 1 : 0
+            )
+        }
         guard traits != hostTraits else {
             return
         }
@@ -1058,12 +1071,21 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard engine.nativeReady else {
             return
         }
-        let composing = !hostTraits.bypassesRime
+        let bypass = hostTraits.bypassesRime
+        let composing = !bypass
         let state = engine.setInputPolicy(composing: composing, learning: composing)
         if !composing {
             clearHostMarkedText()
         }
         currentState = state.withoutTransientCommit()
+        if bypass && !bypassAsciiActive {
+            bypassAsciiActive = true
+            asciiModeBeforeBypass = currentState.asciiMode
+            currentState = engine.setAsciiMode(true).withoutTransientCommit()
+        } else if !bypass && bypassAsciiActive {
+            bypassAsciiActive = false
+            currentState = engine.setAsciiMode(asciiModeBeforeBypass).withoutTransientCommit()
+        }
         keyboardView?.update(state: currentState)
     }
 
@@ -1509,17 +1531,15 @@ struct KeyTaoHostTraits: Equatable {
         isSecureTextEntry
     }
 
-    /// Hosts that asked for digits or an address do not want Rime conversion;
-    /// keys go straight to the document. `.asciiCapable` is deliberately not in
-    /// this list: it only says the keyboard may show ASCII, and plenty of hosts
-    /// set it on fields where users still type Chinese.
+    /// Secure fields and hosts that require digits do not want Rime conversion;
+    /// keys go straight to the document. Text-oriented keyboard types are only
+    /// presentation hints and still allow Chinese composition.
     var bypassesRime: Bool {
         if isSensitive {
             return true
         }
         switch keyboardType {
-        case .numberPad, .decimalPad, .phonePad, .namePhonePad, .asciiCapableNumberPad,
-             .numbersAndPunctuation, .emailAddress, .URL, .webSearch:
+        case .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad:
             return true
         default:
             return false
@@ -1530,7 +1550,7 @@ struct KeyTaoHostTraits: Equatable {
     /// control of the layer.
     var forcedLayer: String? {
         switch keyboardType {
-        case .numberPad, .decimalPad, .phonePad, .namePhonePad, .asciiCapableNumberPad:
+        case .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad:
             return KeyTaoKeyboardLayer.numbers.id
         default:
             return nil
