@@ -19,6 +19,8 @@ public enum KeyTaoCommandType {
     public static let previousCandidatePage = "previousCandidatePage"
     public static let reset = "reset"
     public static let rimeMenu = "rimeMenu"
+    public static let rimeSchema = "rimeSchema"
+    public static let rimeOption = "rimeOption"
     public static let edit = "edit"
     public static let panel = "panel"
     public static let floating = "floating"

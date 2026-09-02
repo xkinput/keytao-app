@@ -3,7 +3,6 @@ import os
 
 private let rimeKeySpace: UInt32 = 0x0020
 private let rimeKeyBackspace: UInt32 = 0xff08
-private let rimeKeyF4: UInt32 = 0xffc1
 private let keyTaoKeyboardLog = Logger(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 private let keyTaoKeyboardTraitsLog = OSLog(subsystem: "ink.rea.keytao-app.keyboard", category: "Keyboard")
 
@@ -18,6 +17,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private static let expandedCandidateLimit = 96
     private static let queuedCommandLimit = 32
     private static let deleteAllBatchLimit = 4096
+    private static let rimeOptionNames = [
+        "ascii_mode",
+        "ascii_punct",
+        "full_shape",
+        "simplification",
+    ]
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -305,7 +310,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.reset:
             apply(engine.reset())
         case KeyTaoCommandType.rimeMenu:
-            apply(engine.processKey(rimeKeyF4))
+            refreshRimeOptions()
+        case KeyTaoCommandType.rimeSchema:
+            selectRimeSchema(command.value)
+        case KeyTaoCommandType.rimeOption:
+            setRimeOption(command.value, enabled: command.fallbackValue.map { $0 == "true" })
         case KeyTaoCommandType.openPage:
             openContainingApp(page: command.value)
         case KeyTaoCommandType.edit:
@@ -642,6 +651,44 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             target = !currentState.asciiMode
         }
         apply(engine.setAsciiMode(target))
+    }
+
+    private func selectRimeSchema(_ schemaID: String?) {
+        guard let schemaID, !schemaID.isEmpty else {
+            return
+        }
+        guard let state = engine.selectSchema(schemaID) else {
+            showMessage("无法切换输入方案")
+            refreshRimeOptions()
+            return
+        }
+        apply(state)
+        refreshRimeOptions()
+    }
+
+    private func setRimeOption(_ optionName: String?, enabled: Bool?) {
+        guard let optionName, !optionName.isEmpty, let enabled else {
+            return
+        }
+        let state: KeyTaoImeState? = optionName == "ascii_mode"
+            ? engine.setAsciiMode(enabled)
+            : engine.setOption(optionName, enabled: enabled)
+        guard let state else {
+            showMessage("无法更新 Rime 选项")
+            return
+        }
+        apply(state)
+        refreshRimeOptions()
+    }
+
+    private func refreshRimeOptions() {
+        keyboardView?.update(rimeOptions: KeyTaoRimeOptionsState(
+            schemas: engine.listSchemas(),
+            currentSchema: engine.currentSchema(),
+            options: Dictionary(uniqueKeysWithValues: Self.rimeOptionNames.map {
+                ($0, engine.getOption($0))
+            })
+        ))
     }
 
     private func handleEditAction(_ action: String, value: String?) {

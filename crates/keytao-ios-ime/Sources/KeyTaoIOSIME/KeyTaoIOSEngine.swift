@@ -2,6 +2,19 @@ import Foundation
 import CryptoKit
 import CKeytaoCore
 
+struct KeyTaoRimeSchema: Codable, Equatable {
+    var id: String
+    var name: String
+}
+
+struct KeyTaoRimeOptionsState: Equatable {
+    var schemas: [KeyTaoRimeSchema]
+    var currentSchema: KeyTaoRimeSchema?
+    var options: [String: Bool]
+
+    static let empty = KeyTaoRimeOptionsState(schemas: [], currentSchema: nil, options: [:])
+}
+
 enum KeyTaoIOSPaths {
     static let appGroupIdentifier = "group.ink.rea.keytao-app"
     private static let keyboardSeedFileName = ".keyboard.seed"
@@ -421,6 +434,61 @@ final class KeyTaoIOSEngine {
             return []
         }
         return (try? JSONDecoder().decode([KeyTaoCandidate].self, from: data)) ?? []
+    }
+
+    func listSchemas() -> [KeyTaoRimeSchema] {
+        guard let session,
+              let json = ownedCString(keytao_session_list_schemas_json(session)),
+              let data = json.data(using: .utf8) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([KeyTaoRimeSchema].self, from: data)) ?? []
+    }
+
+    func currentSchema() -> KeyTaoRimeSchema? {
+        guard let session,
+              let json = ownedCString(keytao_session_current_schema_json(session)),
+              let data = json.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(KeyTaoRimeSchema.self, from: data)
+    }
+
+    func selectSchema(_ schemaID: String) -> KeyTaoImeState? {
+        guard let session else {
+            return nil
+        }
+        let state = schemaID.withCString {
+            decodeState(keytao_session_select_schema_json(session, $0))
+        }
+        guard let state else {
+            return nil
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
+    }
+
+    func getOption(_ optionName: String) -> Bool {
+        guard let session else {
+            return false
+        }
+        return optionName.withCString { keytao_session_get_option(session, $0) }
+    }
+
+    func setOption(_ optionName: String, enabled: Bool) -> KeyTaoImeState? {
+        guard let session else {
+            return nil
+        }
+        let state = optionName.withCString {
+            decodeState(keytao_session_set_option_json(session, $0, enabled))
+        }
+        guard let state else {
+            return nil
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
     }
 
     func changePage(backward: Bool) -> KeyTaoImeState {
