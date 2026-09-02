@@ -76,6 +76,7 @@ const MAX_IME_FONT_SIZE = 36
 const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
 const AUTH_TOKEN_STORAGE_KEY = "keytao.auth.token"
 const AUTH_USER_STORAGE_KEY = "keytao.auth.user"
+const ANDROID_ONBOARDING_DONE_KEY = "keytao.android.onboardingCompleted"
 
 type SchemeKey = "keytao" | "xmjd" | "txjx" | "keydo"
 
@@ -411,6 +412,9 @@ export default function App() {
   const [androidImeStatus, setAndroidImeStatus] = useState<AndroidImeStatus | null>(null)
   const [androidImeError, setAndroidImeError] = useState<string | null>(null)
   const [isCheckingAndroidIme, setIsCheckingAndroidIme] = useState(false)
+  const [androidOnboardingCompleted, setAndroidOnboardingCompleted] = useState<boolean>(
+    () => window.localStorage.getItem(ANDROID_ONBOARDING_DONE_KEY) === "1",
+  )
   const [androidStoragePermission, setAndroidStoragePermission] = useState<AndroidStoragePermissionStatus | null>(null)
   const [androidStoragePermissionError, setAndroidStoragePermissionError] = useState<string | null>(null)
   const [isCheckingAndroidStoragePermission, setIsCheckingAndroidStoragePermission] = useState(false)
@@ -750,12 +754,45 @@ export default function App() {
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
   const androidSchemaDeployed = localSchemaInfo?.deployed ?? false
+  useEffect(() => {
+    if (
+      osType !== "android" ||
+      androidOnboardingCompleted ||
+      !androidImeStatus ||
+      !androidImeStatus.enabled ||
+      !androidImeStatus.selected ||
+      !androidStoragePermission ||
+      !androidStorageGranted ||
+      !localSchemaInfo ||
+      !androidSchemaInstalled ||
+      !androidSchemaDeployed
+    ) {
+      return
+    }
+
+    setAndroidOnboardingCompleted(true)
+    window.localStorage.setItem(ANDROID_ONBOARDING_DONE_KEY, "1")
+  }, [
+    osType,
+    androidOnboardingCompleted,
+    androidImeStatus,
+    androidStoragePermission,
+    androidStorageGranted,
+    localSchemaInfo,
+    androidSchemaInstalled,
+    androidSchemaDeployed,
+  ])
   const androidImePaddingStyle =
     osType === "android"
       ? { paddingBottom: "calc(1.5rem + var(--android-ime-inset-bottom, 0px))" }
       : undefined
   const shouldShowAndroidImeOnboarding =
-    osType === "android" && (
+    osType === "android" &&
+    !androidOnboardingCompleted &&
+    !androidSetupLoading &&
+    androidImeStatus !== null &&
+    androidStoragePermission !== null &&
+    localSchemaInfo !== null && (
       !androidImeStatus ||
       !androidImeStatus.enabled ||
       !androidImeStatus.selected ||
