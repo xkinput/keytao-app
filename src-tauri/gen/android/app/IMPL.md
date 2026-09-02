@@ -339,14 +339,14 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 | 编辑器声明 | KeyTao 行为 |
 | --- | --- |
 | `TYPE_TEXT_VARIATION_PASSWORD` / `VISIBLE_PASSWORD` / `WEB_PASSWORD` / `TYPE_NUMBER_VARIATION_PASSWORD` | `set_input_policy(composing=false, learning=false)`：按键完全不进 librime，没有 preedit / 候选，也不可能写用户词库；同时禁用剪贴板记录与建议、清空退格恢复栈和最近提交缓存 |
-| `IME_FLAG_NO_PERSONALIZED_LEARNING`（无痕） | `set_input_policy(composing=false, learning=false)`：按键直通宿主，禁用剪贴板记录与建议 |
-| `TYPE_TEXT_FLAG_NO_SUGGESTIONS` | `set_input_policy(composing=false, learning=false)`：按键直通宿主 |
+| `IME_FLAG_NO_PERSONALIZED_LEARNING`（无痕） | `set_input_policy(composing=true, learning=false)`：保留组字，关闭学习、剪贴板记忆与建议 |
+| `TYPE_TEXT_FLAG_NO_SUGGESTIONS` | `set_input_policy(composing=true, learning=false)`：保留组字，关闭学习、剪贴板记忆与建议 |
 | `TYPE_CLASS_NUMBER` / `PHONE` / `DATETIME` | 直接切到数字层，并强制走 `commitText()` 直通（这类编辑器的 `DigitsKeyListener` 会静默吞掉汉字）；离开时自动切回字母层 |
 | `imeOptions` 的 `IME_ACTION_*` 与 `actionLabel` | Enter 键帽显示对应文案（优先 `actionLabel`，否则「前往/搜索/发送/下一项/完成/上一项」）；多行编辑器保留布局自带的换行键帽 |
 
 隐私模式还会联动剪贴板：`ClipboardManager.OnPrimaryClipChangedListener` 只在 `onStartInputView` ~ `onFinishInputView` 之间注册（不再是整个 `:ime` 进程存活期间），且读取 primary clip 前会检查 `ClipDescription.EXTRA_IS_SENSITIVE`（API 33+），命中时既不入历史也不做粘贴建议。
 
-**`learning=false` 必须同时关掉 composing**：通用层 `InputContextPolicy.learning` 只是给前端自己的历史存储用的标记，真正阻止用户词库学习的手段只有 `composing=false`（按键根本不进 librime）。所以密码框、无痕（`IME_FLAG_NO_PERSONALIZED_LEARNING`）和 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 一律 `composing=false`，与 D9 的「直通模式」一致。代价是这三类字段里没有中文组字（无痕模式下的浏览器地址栏、设了 `textNoSuggestions` 的用户名框都会退化成直接上屏）；在 librime 提供可验证的 per-session no-memorize 开关之前，隐私契约优先。
+**`learning=false` 在 composing 开启时由随包 schema 的 `enable_user_dict:false` 保证不学习**：通用层 `InputContextPolicy.learning` 还用于约束前端自己的历史存储。密码框仍一律 `composing=false, learning=false`，按键完全不进 librime；无痕（`IME_FLAG_NO_PERSONALIZED_LEARNING`）和 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 则保留组字并关闭学习、剪贴板记忆与建议。第三方 schema 若启用用户词典，librime 没有 per-session no-memorize 开关，仍可能学习。
 
 ## Composition 与提交
 

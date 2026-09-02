@@ -187,8 +187,8 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 | trait | 行为 |
 | --- | --- |
 | `returnKeyType` | Enter 键标签改为 前往 / 搜索 / 加入 / 下一项 / 路线 / 发送 / 完成 / 继续 / 紧急呼叫 |
-| `keyboardType` = numberPad、decimalPad、phonePad、namePhonePad、asciiCapableNumberPad | 强制切到 numbers 层，并按 D9 把 session policy 置为不组字 |
-| `keyboardType` = numbersAndPunctuation、emailAddress、URL、webSearch | 按键直通宿主，不进 Rime |
+| `keyboardType` = numberPad、decimalPad、phonePad、asciiCapableNumberPad | 强制切到 numbers 层，并按 D9 把 session policy 置为不组字 |
+| `keyboardType` = namePhonePad、numbersAndPunctuation、emailAddress、URL、webSearch | 不旁路；这些 presentation hint 仍允许中文组字 |
 | `keyboardType` = asciiCapable | **不**旁路：该值只表示键盘可以显示 ASCII，很多宿主在仍需中文的输入框上也会设它 |
 | `autocapitalizationType` | 仅在英文模式生效：`allCharacters` 锁定 Shift，`sentences` / `words` 在新输入上下文里预置一次性 Shift；中文模式下永不预置（大写字母不在任何 Rime speller 字母表里） |
 | `keyboardAppearance` | 优先级高于设备外观：`.dark` / `.alert` → 深色，`.light` → 浅色，`.default` 才回落到 traitCollection |

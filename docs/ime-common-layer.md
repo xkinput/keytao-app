@@ -432,11 +432,11 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 | Android | `inputType` 的四个 password 变体 | 直通（`composing = false, learning = false`） |
 | Android | `IME_FLAG_NO_PERSONALIZED_LEARNING`、`TYPE_TEXT_FLAG_NO_SUGGESTIONS` | 只置 `learning = false` 并关闭剪贴板记忆/建议与输入历史，**保留组字能力** |
 | iOS | `textDocumentProxy.isSecureTextEntry` | 直通 |
-| iOS | `keyboardType` 为 numberPad / decimalPad / phonePad / namePhonePad / asciiCapableNumberPad / numbersAndPunctuation / emailAddress / URL / webSearch | 直通 |
+| iOS | `keyboardType` 为 numberPad / decimalPad / phonePad / asciiCapableNumberPad | 强制数字层且直通 |
 
 三条容易照抄错的口径：
 
-- **iOS 的 `.asciiCapable` 不属于直通集**。该值只表示键盘可以显示 ASCII，很多宿主在仍需中文的输入框上也会设它。
+- **iOS 的 `.asciiCapable` 不属于直通集**。该值只表示键盘可以显示 ASCII，很多宿主在仍需中文的输入框上也会设它；`.numbersAndPunctuation` / `.emailAddress` / `.URL` / `.webSearch` / `.namePhonePad` 同样只是键盘展示提示，不旁路中文组字。
 - **Android 的 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 不走完全直通**。对中文输入法而言，`textNoSuggestions` 字段（用户名、编号等）大量存在，完全直通等于让用户在这些字段里无法输入中文，危害大于它要解决的隐私问题；AOSP `LatinIME` 的 `InputAttributes` 同样只据此关闭建议与词典学习，不关闭组字。真正的隐私契约（密码框）没有放宽，与 iOS 的 `isSecureTextEntry` 口径一致。
 - Wayland 两套 `content_type` 常量表与 IBus 的 `(purpose, hints)` **三者互不通用**，跨端只共享“命中即 `InputContextPolicy::sensitive()`”这个结论。
 
