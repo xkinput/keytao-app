@@ -357,9 +357,9 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 - UIKit 软键盘、候选栏、字母/数字/符号层。
 - 移动端配置 `ios_ime.json`，字段与 Android 默认配置保持同形。
 - 点击、长按、上滑、下滑动作。
-- 中英模式键、Rime F4、候选选择、reset；翻页与点击选词按 `KEYTAO_CAP_*` 掩码开关，见「能力位驱动的 UI 降级（D4）」。
+- 中英模式键、结构化 Rime 方案/选项页、候选选择、reset；翻页与点击选词按 `KEYTAO_CAP_*` 掩码开关，见「能力位驱动的 UI 降级（D4）」。
 - 强制注入的 🌐 切换键、`advanceToNextInputMode()` 与长按 `handleInputModeList(from:with:)` 键盘选择器。
-- C FFI per-session runtime：init、reload、create/destroy session、process key、select candidate、global select、all candidates、change page、reset、ascii mode。
+- C FFI per-session runtime：init、reload、create/destroy session、process key、select candidate、global select、all candidates、change page、reset、schema list/current/select 和 Rime options。
 - `keytao-theme` resolved theme JSON 接入。
 - `CandidatePanelModel` / `ModeHintModel` 接入。
 - App Group 用户目录和 reload stamp 约定。

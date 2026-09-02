@@ -209,6 +209,10 @@ layers:
         { label: "=", value: "=" },
         { label: "_", value: "_" }
       ]
+    - [
+        { label: "|", value: "|" },
+        { label: "^", value: "^" }
+      ]
     - *symbolFooter
   symbols_math:
     - *symbolHeader
@@ -3057,43 +3061,41 @@ layers:
   # repeatCommit is handled by both platform controllers and replays the last
   # direct commit without inserting this key's label as literal text.
   editor:
-    # Mirrors preset_keyboards/editor from the reference Trime theme
-    # (Q_26键无数字.trime.yaml:526-557): side columns are width 17 vs 10,
-    # i.e. weight 1.7, and the arrow keys form a cross around 选择.
+    # The arrow keys form a cross around 选择 in an even 5×5 grid.
     # The reference labels ☑ ✁ ❐ ▣ ⏍ ⎵ come from its bundled iconfont.ttf,
     # which we do not ship, so they are spelled out instead of rendering tofu.
     - [
-        { label: "全选", weight: 1.7, action: { type: "edit", value: "selectAll" } },
+        { label: "全选", action: { type: "edit", value: "selectAll" } },
         { label: "清除", action: { type: "edit", value: "clearAll" } },
         { label: "英文", action: { type: "keyboardMode", value: "symbols_en" } },
         { label: "中文", action: { type: "keyboardMode", value: "symbols_marks" } },
-        { label: "返回", weight: 1.7, action: { type: "keyboardMode", value: "letters" } }
+        { label: "返回", action: { type: "keyboardMode", value: "letters" } }
       ]
     - [
-        { label: "剪切", weight: 1.7, action: { type: "edit", value: "cut" } },
+        { label: "剪切", action: { type: "edit", value: "cut" } },
         { label: "撤销", action: { type: "edit", value: "undo" } },
         { label: "↑", action: { type: "edit", value: "cursorUp" } },
         { label: "重做", action: { type: "edit", value: "redo" } },
-        { label: "⌫", weight: 1.7, action: { type: "backspace" } }
+        { label: "⌫", action: { type: "backspace" } }
       ]
     - [
-        { label: "复制", weight: 1.7, action: { type: "edit", value: "copy" } },
+        { label: "复制", action: { type: "edit", value: "copy" } },
         { label: "←", action: { type: "edit", value: "cursorLeft" } },
         { label: "选择", action: { type: "edit", value: "toggleSelection" } },
         { label: "→", action: { type: "edit", value: "cursorRight" } },
-        { label: "空格", weight: 1.7, action: { type: "space" } }
+        { label: "空格", action: { type: "space" } }
       ]
     - [
-        { label: "粘贴", weight: 1.7, action: { type: "edit", value: "paste" } },
+        { label: "粘贴", action: { type: "edit", value: "paste" } },
         { label: "行首", action: { type: "edit", value: "lineStart" } },
         { label: "↓", action: { type: "edit", value: "cursorDown" } },
         { label: "行尾", action: { type: "edit", value: "lineEnd" } },
-        { label: "数字", weight: 1.7, action: { type: "keyboardMode", value: "numbers" } }
+        { label: "数字", action: { type: "keyboardMode", value: "numbers" } }
       ]
     - [
-        { label: "符号", weight: 1.7, action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "符号", action: { type: "keyboardMode", value: "symbols_marks" } },
         { label: "Tab", action: { type: "edit", value: "tab" } },
         { label: "剪贴板", action: { type: "panel", value: "clipboard" } },
         { label: "重复", action: { type: "edit", value: "repeatCommit" } },
-        { label: "↵", weight: 1.7, action: { type: "enter" } }
+        { label: "↵", action: { type: "enter" } }
       ]

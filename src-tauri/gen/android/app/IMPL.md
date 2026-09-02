@@ -324,8 +324,9 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 - `keyboardMode`：切换移动端软键盘层，例如 `numbers` / `letters`。
 - `nextCandidatePage` / `previousCandidatePage`：调用 `changePage(false/true)`。
 - `reset`：调用 `reset()` 清当前 composition。
-- `rimeMenu`：发送 `XK_F4` / `0xffc1` 给 librime，打开 Rime schema / options 菜单。
-- `panel`：Android 本地功能面板命令，例如 `home` / `rime` / `selection` / `clipboard` / `emoji` / `close`；不进入 Rime。
+- `rimeMenu`：读取当前方案和固定 Rime 选项，打开结构化设置页，不向 librime 发送 F4。
+- `rimeSchema` / `rimeOption`：直接调用 session 级方案选择或选项开关 API，并刷新结构化设置页。
+- `panel`：Android 本地功能面板命令，例如 `rime` / `clipboard` / `close`；不进入 Rime。
 - `edit`：Android `InputConnection` 编辑命令，例如 `toggleSelection`、`selectLeft`、`selectRight`、`selectAll`、`copy`、`cut`、`paste`、`lineStart`、`lineEnd`、`tab`；不进入 Rime。
 
 内置配置当前把顶排 q-p 的 hint 长按/上滑映射为 1-0，并在 a-l / z-m 上提供常用符号长按/上滑输入。未单独声明 `swipeUp` 时，Android 会复用长按动作，所以 `m` 上滑/长按 `=` 会走 Rime 输入路径，底部 `!` / `?` 上滑/长按则按配置走 `directInput` 立即上屏。`123` 映射为数字键盘，数字页 `#+=` 映射为符号键盘，`ABC` 映射回字母键盘。模式键点击切换中英，空格键只负责空格和输入态重置，不再承担打开主题页动作。
@@ -395,11 +396,11 @@ Android 自绘候选栏当前落成四层：
 
 键盘内容层切换，包括字母/数字/符号切换和候选展开/收起，统一走 140ms 淡入 + 轻微下移动画。动画只在切换期间使用 `saveLayerAlpha()`，平时直接绘制，避免给按键热路径增加额外合成成本。
 
-展开区点击候选走 `selectCandidateGlobal()`，直接调用 librime `select_candidate` 的全局候选 index；默认候选栏点击仍走当前页本地选择键语义。这样 Rime F4 schema/options 菜单可以显示并点击超过 `menu/page_size` 的 switch，例如第 7 个之后的开关，而不需要 Android 自己解释 Rime 菜单内容。
+展开区点击候选走 `selectCandidateGlobal()`，直接调用 librime `select_candidate` 的全局候选 index；默认候选栏点击仍走当前页本地选择键语义。Rime 方案和开关不再借用候选菜单，而是通过独立 session API 读取和修改。
 
 空格键默认显示当前真实方案名。Rime 菜单打开时 status 可能临时报出 `.default` 这类内部 schema，Android engine 会保留最近一次非内部 schema 名作为显示名，避免空格键在菜单态闪成内部配置名。
 
-没有候选和 preedit 时，候选栏变成功能工具栏：左侧依次提供 `功能`、中英切换、`选择`、`剪贴板`、`Emoji`，右侧显示 KeyTao logo，不再用候选栏末尾的 `中` / `英` 文本表达模式，也不在顶部放独立 `符号` 入口。默认中英切换按钮不使用选中高亮，只显示当前语言主字，并在旁边用小号文字提示点击后会切换到的语言。`功能` 按钮会打开和候选展开共用的下方面板，默认显示功能首页；其中 `Rime` 子页才发送 `XK_F4`，让 Rime 自己生成 schema / options 菜单。`选择` 子页提供多选、左右扩展选区、全选、复制、剪切、粘贴、行首、行尾和 Tab；`剪贴板` 子页显示 Android 公开接口可读取的当前系统剪贴板和输入法会话内复制/剪切历史；`Emoji` 子页提供常用表情直接上屏。功能面板顶部左侧是 `返回`，右侧是 `设置`。符号页仍通过数字页 `#+=` 进入，符号页顶部工具栏显示 `中文` / `英文` tab，点击后通过 `setAsciiMode()` 同步 Rime 状态。
+没有候选和 preedit 时，候选栏变成功能工具栏：左侧提供结构化 `Rime` 页、中英切换、输入法地球键、`选择`、`剪贴板`、`Emoji`，右侧显示 KeyTao logo。地球键点击切换到下一个输入法，长按打开系统输入法列表；`选择` 直接打开均匀 5×5 editor 键盘层；`Rime` 页按“输入方案”和“选项”分组，真实读取当前方案与 `ascii_mode`、`ascii_punct`、`full_shape`、`simplification` 状态。`剪贴板` 子页仍显示 Android 公开接口可读取的当前系统剪贴板和输入法会话内复制/剪切历史。符号页仍通过数字页 `#+=` 进入，符号页顶部工具栏显示 `中文` / `英文` tab，点击后通过 `setAsciiMode()` 同步 Rime 状态。
 
 可主题化范围：
 
@@ -506,8 +507,8 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 候选栏默认按屏幕宽度裁剪、右侧固定展开键、展开网格替换键盘区、排除首行候选、上下滑动和全局候选点击命中。
 - 完整候选非阻塞按需加载：普通 `ImeState` 不再携带全量候选，展开时先显示当前页剩余候选，再后台调用 `nativeAllCandidates()`。
 - 键盘层和展开层切换动画。
-- 空闲候选栏工具栏、KeyTao logo、常驻选择/剪贴板/Emoji 入口、功能面板首页和 Rime F4 子页入口。
-- 功能面板 `选择` 子页：多选、左右扩展选区、全选、复制、剪切、粘贴、行首、行尾、Tab。全选/复制/剪切/粘贴走 Android `performContextMenuAction()`，左右扩选和行首/行尾走轻量 `sendKeyEvent()`，不再同步 `getExtractedText()` 拉取全文，避免 WebView/Tauri 编辑器点击选择功能时卡主线程。
+- 空闲候选栏工具栏、KeyTao logo、输入法地球键、常驻 editor/剪贴板/Emoji 入口和结构化 Rime 选项页。
+- 均匀 5×5 editor 键盘层：选择、方向、全选、复制、剪切、粘贴、行首、行尾、Tab 等编辑动作沿用原有门控和派发路径。
 - 功能面板 `剪贴板` 子页：读取当前系统剪贴板，并显示输入法会话内复制/剪切历史。
 - 功能面板 `Emoji` 子页：常用 emoji 直接上屏。
 - 数字页和符号页分离，符号键支持中英状态覆盖。
