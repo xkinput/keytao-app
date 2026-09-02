@@ -37,6 +37,7 @@ panel:
 candidate:
   background: transparent
   hoverBackground: "#F1F6FF"
+  pressedBackground: "#D4E7FF"
   selectedBackground: "#E6F0FF"
   foreground: "#263442"
   selectedForeground: "#243241"
@@ -86,6 +87,7 @@ dark:
 
   candidate:
     hoverBackground: "#222A33"
+    pressedBackground: "#385873"
     selectedBackground: "#2D4B63"
     foreground: "#EEF3F7"
     selectedForeground: "#FFFFFF"

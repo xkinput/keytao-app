@@ -27,19 +27,19 @@ floating:
 
 rows:
   - [
-      { label: "q", hint: "1", value: "q", longPress: { type: input, value: "1" } },
-      { label: "w", hint: "2", value: "w", longPress: { type: input, value: "2" } },
-      { label: "e", hint: "3", value: "e", longPress: { type: input, value: "3" } },
-      { label: "r", hint: "4", value: "r", longPress: { type: input, value: "4" } },
-      { label: "t", hint: "5", value: "t", longPress: { type: input, value: "5" } },
-      { label: "y", hint: "6", value: "y", longPress: { type: input, value: "6" } },
-      { label: "u", hint: "7", value: "u", longPress: { type: input, value: "7" } },
-      { label: "i", hint: "8", value: "i", longPress: { type: input, value: "8" } },
-      { label: "o", hint: "9", value: "o", longPress: { type: input, value: "9" } },
-      { label: "p", hint: "0", value: "p", longPress: { type: input, value: "0" } }
+      { label: "q", hint: "1", value: "q", longPress: { type: input, value: "1" }, alternates: [ { label: "1", value: "1" }, { label: "!", value: "!" } ] },
+      { label: "w", hint: "2", value: "w", longPress: { type: input, value: "2" }, alternates: [ { label: "2", value: "2" }, { label: "@", value: "@" } ] },
+      { label: "e", hint: "3", value: "e", longPress: { type: input, value: "3" }, alternates: [ { label: "3", value: "3" }, { label: "#", value: "#" } ], asciiAlternates: [ { label: "3", value: "3" }, { label: "#", value: "#" }, { label: "é", value: "é" }, { label: "è", value: "è" }, { label: "ê", value: "ê" }, { label: "ë", value: "ë" } ] },
+      { label: "r", hint: "4", value: "r", longPress: { type: input, value: "4" }, alternates: [ { label: "4", value: "4" }, { label: "$", value: "$" } ] },
+      { label: "t", hint: "5", value: "t", longPress: { type: input, value: "5" }, alternates: [ { label: "5", value: "5" }, { label: "%", value: "%" } ] },
+      { label: "y", hint: "6", value: "y", longPress: { type: input, value: "6" }, alternates: [ { label: "6", value: "6" }, { label: "^", value: "^" } ] },
+      { label: "u", hint: "7", value: "u", longPress: { type: input, value: "7" }, alternates: [ { label: "7", value: "7" }, { label: "&", value: "&" } ], asciiAlternates: [ { label: "7", value: "7" }, { label: "&", value: "&" }, { label: "ú", value: "ú" }, { label: "ù", value: "ù" }, { label: "û", value: "û" }, { label: "ü", value: "ü" } ] },
+      { label: "i", hint: "8", value: "i", longPress: { type: input, value: "8" }, alternates: [ { label: "8", value: "8" }, { label: "*", value: "*" } ], asciiAlternates: [ { label: "8", value: "8" }, { label: "*", value: "*" }, { label: "í", value: "í" }, { label: "ì", value: "ì" }, { label: "î", value: "î" }, { label: "ï", value: "ï" } ] },
+      { label: "o", hint: "9", value: "o", longPress: { type: input, value: "9" }, alternates: [ { label: "9", value: "9" }, { label: "(", value: "(" } ], asciiAlternates: [ { label: "9", value: "9" }, { label: "(", value: "(" }, { label: "ó", value: "ó" }, { label: "ò", value: "ò" }, { label: "ô", value: "ô" }, { label: "ö", value: "ö" } ] },
+      { label: "p", hint: "0", value: "p", longPress: { type: input, value: "0" }, alternates: [ { label: "0", value: "0" }, { label: ")", value: ")" } ] }
     ]
   - [
-      { label: "a", hint: "@", value: "a", longPress: { type: input, value: "@" } },
+      { label: "a", hint: "@", value: "a", longPress: { type: input, value: "@" }, asciiAlternates: [ { label: "@", value: "@" }, { label: "á", value: "á" }, { label: "à", value: "à" }, { label: "â", value: "â" }, { label: "ä", value: "ä" }, { label: "ã", value: "ã" }, { label: "å", value: "å" } ] },
       { label: "s", hint: "#", value: "s", longPress: { type: input, value: "#" } },
       { label: "d", hint: "$", value: "d", longPress: { type: input, value: "$" } },
       { label: "f", hint: "%", value: "f", longPress: { type: input, value: "%" } },
@@ -53,18 +53,18 @@ rows:
       { label: "⇧", weight: 1.3, action: { type: shift } },
       { label: "z", hint: "-", value: "z", longPress: { type: input, value: "-" } },
       { label: "x", hint: "/", value: "x", longPress: { type: input, value: "/" } },
-      { label: "c", hint: ":", value: "c", longPress: { type: input, value: ":" } },
+      { label: "c", hint: ":", value: "c", longPress: { type: input, value: ":" }, asciiAlternates: [ { label: ":", value: ":" }, { label: "ç", value: "ç" } ] },
       { label: "v", hint: ";", value: "v", longPress: { type: input, value: ";" } },
       { label: "b", hint: "\"", value: "b", longPress: { type: input, value: "\"" } },
-      { label: "n", hint: "'", value: "n", longPress: { type: input, value: "'" } },
+      { label: "n", hint: "'", value: "n", longPress: { type: input, value: "'" }, asciiAlternates: [ { label: "'", value: "'" }, { label: "ñ", value: "ñ" } ] },
       { label: "m", hint: "=", value: "m", longPress: { type: input, value: "=" } },
       { label: "⌫", weight: 1.3, action: { type: backspace } }
     ]
   - [
       { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers }, longPress: { type: nextInputMethod } },
-      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" } },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" }, alternates: [ { label: "！", action: { type: directInput, value: "！" } }, { label: "？", action: { type: directInput, value: "？" } }, { label: "；", action: { type: directInput, value: "；" } }, { label: "：", action: { type: directInput, value: "：" } } ], asciiAlternates: [ { label: "!", action: { type: directInput, value: "!" } }, { label: "?", action: { type: directInput, value: "?" } }, { label: ";", action: { type: directInput, value: ";" } }, { label: ":", action: { type: directInput, value: ":" } } ] },
       { label: "空格", weight: 4.6, action: { type: space }, swipeDown: { type: reset } },
-      { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" } },
+      { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" }, alternates: [ { label: "…", action: { type: directInput, value: "…" } }, { label: "、", action: { type: directInput, value: "、" } }, { label: "~", action: { type: directInput, value: "~" } } ] },
       { label: "↵", weight: 1.45, action: { type: enter } }
     ]
 
@@ -76,27 +76,27 @@ numberRows:
         { label: "-", value: "-" },
         { label: "/", value: "/" }
       ] },
-      { label: "1", value: "1" },
-      { label: "2", value: "2" },
-      { label: "3", value: "3" },
+      { label: "1", value: "1", alternates: [ { label: "!", value: "!" } ] },
+      { label: "2", value: "2", alternates: [ { label: "@", value: "@" } ] },
+      { label: "3", value: "3", alternates: [ { label: "#", value: "#" } ] },
       { label: "⌫", action: { type: backspace } }
     ]
   - [
-      { label: "4", value: "4" },
-      { label: "5", value: "5" },
-      { label: "6", value: "6" },
+      { label: "4", value: "4", alternates: [ { label: "$", value: "$" } ] },
+      { label: "5", value: "5", alternates: [ { label: "%", value: "%" } ] },
+      { label: "6", value: "6", alternates: [ { label: "^", value: "^" } ] },
       { label: "·", value: "." }
     ]
   - [
-      { label: "7", value: "7" },
-      { label: "8", value: "8" },
-      { label: "9", value: "9" },
+      { label: "7", value: "7", alternates: [ { label: "&", value: "&" } ] },
+      { label: "8", value: "8", alternates: [ { label: "*", value: "*" } ] },
+      { label: "9", value: "9", alternates: [ { label: "(", value: "(" } ] },
       { label: "=", value: "=" }
     ]
   - [
       { label: "返回", action: { type: keyboardMode, value: letters } },
       { label: "#+=", action: { type: keyboardMode, value: symbols } },
-      { label: "0", value: "0" },
+      { label: "0", value: "0", alternates: [ { label: ")", value: ")" } ] },
       { label: "␣", action: { type: space } },
       { label: "发送", action: { type: enter } }
     ]

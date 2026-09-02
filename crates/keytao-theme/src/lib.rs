@@ -136,6 +136,7 @@ pub struct PanelTheme {
 pub struct CandidateTheme {
     pub background: RgbaColor,
     pub hover_background: RgbaColor,
+    pub pressed_background: RgbaColor,
     pub selected_background: RgbaColor,
     pub foreground: RgbaColor,
     pub selected_foreground: RgbaColor,
@@ -571,6 +572,7 @@ impl ResolvedImeTheme {
             candidate: CandidateTheme {
                 background: rgba(0, 0, 0, 0),
                 hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
+                pressed_background: rgba(0xD4, 0xE7, 0xFF, 0xFF),
                 selected_background: rgba(0xE6, 0xF0, 0xFF, 0xFF),
                 foreground: rgba(0x26, 0x34, 0x42, 0xFF),
                 selected_foreground: rgba(0x24, 0x32, 0x41, 0xFF),
@@ -721,12 +723,15 @@ impl ResolvedImeTheme {
         let panel_background = self.panel.background;
         let is_dark = self.ui.effective_color_scheme == EffectiveColorScheme::Dark;
         let selected_weight = if is_dark { 0.42 } else { 0.18 };
+        let pressed_weight = if is_dark { 0.54 } else { 0.28 };
         let hover_weight = if is_dark { 0.22 } else { 0.09 };
 
         self.candidate.selected_label_color = opaque(accent);
         self.candidate.selected_border_color = opaque(accent);
         self.candidate.selected_background =
             with_alpha(mix_color(panel_background, accent, selected_weight), 0xff);
+        self.candidate.pressed_background =
+            with_alpha(mix_color(panel_background, accent, pressed_weight), 0xff);
         self.candidate.hover_background =
             with_alpha(mix_color(panel_background, accent, hover_weight), 0xff);
         self.mode_hint.border_color = opaque(accent);
@@ -868,6 +873,8 @@ struct PartialCandidateTheme {
     #[serde(default, deserialize_with = "optional_color")]
     hover_background: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
+    pressed_background: Option<RgbaColor>,
+    #[serde(default, deserialize_with = "optional_color")]
     selected_background: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
     foreground: Option<RgbaColor>,
@@ -983,6 +990,7 @@ impl CandidateTheme {
     fn apply(&mut self, partial: PartialCandidateTheme) {
         assign(&mut self.background, partial.background);
         assign(&mut self.hover_background, partial.hover_background);
+        assign(&mut self.pressed_background, partial.pressed_background);
         assign(&mut self.selected_background, partial.selected_background);
         assign(&mut self.foreground, partial.foreground);
         assign(&mut self.selected_foreground, partial.selected_foreground);

@@ -85,6 +85,10 @@ pub struct MobileKey {
     pub long_press: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ascii_long_press: Option<MobileCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<MobileKeyAlternate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ascii_alternates: Vec<MobileKeyAlternate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_span: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -107,6 +111,18 @@ pub struct MobileKeyStackItem {
     pub action: Option<MobileCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ascii_action: Option<MobileCommand>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileKeyAlternate {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rime_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<MobileCommand>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -488,6 +504,9 @@ mod tests {
                 collect(item.action.as_ref(), references);
                 collect(item.ascii_action.as_ref(), references);
             }
+            for item in key.alternates.iter().chain(&key.ascii_alternates) {
+                collect(item.action.as_ref(), references);
+            }
         }
 
         let partial = parse_mobile_layout_yaml(DEFAULT_MOBILE_LAYOUT_YAML)
@@ -593,6 +612,31 @@ mod tests {
 
         assert_eq!(layout.height, 300.0);
         assert_eq!(layout.layers["emoji"][0][0].label, "🙂");
+    }
+
+    #[test]
+    fn layout_yaml_preserves_more_key_alternates() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-keyboard-alternates-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(
+            &path,
+            "rows:\n  - [ { label: \"，\", value: \"，\", alternates: [ { label: \"！\", value: \"！\" }, { label: \"？\", action: { type: directInput, value: \"？\" } } ] } ]\n",
+        )
+        .unwrap();
+
+        let layout = resolve_mobile_layout_from_paths(None, Some(&path));
+        fs::remove_file(path).ok();
+
+        let alternates = &layout.rows[0][0].alternates;
+        assert_eq!(alternates.len(), 2);
+        assert_eq!(alternates[0].label, "！");
+        assert_eq!(
+            alternates[1].action.as_ref().unwrap().command_type,
+            "directInput"
+        );
     }
 
     #[test]
