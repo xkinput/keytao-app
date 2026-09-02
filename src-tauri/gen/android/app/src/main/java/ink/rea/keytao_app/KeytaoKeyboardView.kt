@@ -2635,15 +2635,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun toolbarActions(): List<ToolbarAction> {
         val function = ToolbarAction("Rime", KeyCommand.panel("rime"), icon = ToolbarIcon.FUNCTION)
         val languageToggle = languageToggleAction()
-        val inputMethod = ToolbarAction(
-            "切换输入法",
-            KeyCommand(
-                if (inputMethodSwitchingAvailable) KeyCommandTypes.NEXT_INPUT_METHOD
-                else KeyCommandTypes.KEYBOARD_PICKER
-            ),
-            icon = ToolbarIcon.GLOBE,
-            longPressCommand = KeyCommand(KeyCommandTypes.KEYBOARD_PICKER),
-        )
         val oneHanded = ToolbarAction(
             if (keyboardLayoutMode == KeyboardLayoutMode.ONE_HANDED) "退出单手" else "单手",
             KeyCommand(KeyCommandTypes.ONE_HANDED),
@@ -2668,7 +2659,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode),
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers")),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters")),
-                inputMethod,
                 ))
                 addAll(layoutActions)
             }
@@ -2677,7 +2667,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 addAll(listOf(
                 function,
                 languageToggle,
-                inputMethod,
                 ToolbarAction("选择", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "editor"), icon = ToolbarIcon.SELECTION),
                 ToolbarAction("剪贴板", KeyCommand.panel("clipboard"), icon = ToolbarIcon.CLIPBOARD),
                 ToolbarAction("Emoji", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols_emoji_face"), icon = ToolbarIcon.EMOJI),
@@ -2699,12 +2688,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         paint.color = color
         val handleWidth = min(dp(30f), width * 0.12f)
         val handleHeight = max(dp(2f), dp(theme.candidateBorderWidthDp))
+        val handleBottom = height - dp(2f)
         canvas.drawRoundRect(
             RectF(
                 width / 2f - handleWidth / 2f,
-                dp(2f),
+                handleBottom - handleHeight,
                 width / 2f + handleWidth / 2f,
-                dp(2f) + handleHeight,
+                handleBottom,
             ),
             handleHeight / 2f,
             handleHeight / 2f,
@@ -2714,14 +2704,43 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(dp(1.4f), dp(theme.candidateBorderWidthDp))
         paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeJoin = Paint.Join.ROUND
+        paint.color = Color.argb(
+            72,
+            theme.commentColor.red,
+            theme.commentColor.green,
+            theme.commentColor.blue,
+        )
+        val frameInset = paint.strokeWidth / 2f
+        val frameRadius = dp(theme.keyCornerRadiusDp).coerceAtMost(min(width, height) / 2f)
+        canvas.drawRoundRect(
+            RectF(frameInset, frameInset, width - frameInset, height - frameInset),
+            frameRadius,
+            frameRadius,
+            paint,
+        )
+
+        paint.color = color
         val inset = dp(5f)
         val size = dp(9f)
-        val corner = Path().apply {
+        val corners = Path().apply {
+            moveTo(inset + size, inset)
+            lineTo(inset, inset)
+            lineTo(inset, inset + size)
+
+            moveTo(width - inset - size, inset)
+            lineTo(width - inset, inset)
+            lineTo(width - inset, inset + size)
+
+            moveTo(inset, height - inset - size)
+            lineTo(inset, height - inset)
+            lineTo(inset + size, height - inset)
+
             moveTo(width - inset - size, height - inset)
             lineTo(width - inset, height - inset)
             lineTo(width - inset, height - inset - size)
         }
-        canvas.drawPath(corner, paint)
+        canvas.drawPath(corners, paint)
     }
 
     private fun languageToggleAction(): ToolbarAction {

@@ -5,10 +5,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.Rect
 import android.graphics.Region
 import android.graphics.RectF
 import android.os.Build
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -26,19 +26,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         fun onSystemBottomInsetChanged(insetPx: Int)
     }
 
-    private enum class DragMode {
-        NONE,
-        MOVE,
-        RESIZE_LEFT,
-        RESIZE_TOP,
-        RESIZE_RIGHT,
-        RESIZE_BOTTOM,
-        RESIZE_TOP_LEFT,
-        RESIZE_TOP_RIGHT,
-        RESIZE_BOTTOM_LEFT,
-        RESIZE_BOTTOM_RIGHT,
-    }
-
     var listener: Listener? = null
 
     private var layoutState = KeyboardLayoutState(
@@ -50,13 +37,14 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     private var safeBottomInsetPx = 0
     private var reportedBottomInsetPx = -1
     private var isLandscape = false
-    private var dragMode = DragMode.NONE
+    private var dragMode = FloatingDragMode.NONE
     private var dragStartX = 0f
     private var dragStartY = 0f
     private var dragStartScale = 1f
     private var dragStartRect = RectF()
     private var dragHasMoved = false
     private val edgeTouchSizePx = 18f * resources.displayMetrics.density
+    private val dockThresholdPx = DOCK_THRESHOLD_DP * resources.displayMetrics.density
     private val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val sideSwitchView = KeyboardSideSwitchView(context).apply {
         visibility = View.GONE
@@ -67,23 +55,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
             requestLayout()
         }
     }
-    private val floatingControlsView = FloatingControlCapsuleView(context).apply {
-        visibility = View.GONE
-    }
-    private val hideFloatingControls = Runnable {
-        floatingControlsView.visibility = View.GONE
-        requestLayout()
-    }
-
     init {
-        floatingControlsView.setOnClickListener {
-            if (layoutState.mode != KeyboardLayoutMode.FLOATING) return@setOnClickListener
-            removeCallbacks(hideFloatingControls)
-            floatingControlsView.visibility = View.GONE
-            layoutState = layoutState.copy(mode = KeyboardLayoutMode.FULL)
-            listener?.onLayoutStateChanged(layoutState, true)
-            requestLayout()
-        }
         setBackgroundColor(Color.TRANSPARENT)
         clipChildren = false
         clipToPadding = false
@@ -92,13 +64,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
             LayoutParams(
                 (48f * resources.displayMetrics.density).roundToInt(),
                 (48f * resources.displayMetrics.density).roundToInt(),
-            ),
-        )
-        addView(
-            floatingControlsView,
-            LayoutParams(
-                (52f * resources.displayMetrics.density).roundToInt(),
-                (36f * resources.displayMetrics.density).roundToInt(),
             ),
         )
     }
@@ -141,11 +106,9 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         normalHeightPx = (normalHeightDp.coerceAtLeast(1f) * resources.displayMetrics.density).roundToInt()
         safeBottomInsetPx = (safeBottomInsetDp.coerceIn(0f, 80f) * resources.displayMetrics.density).roundToInt()
         sideSwitchView.updateTheme(theme)
-        floatingControlsView.updateTheme(theme)
         sideSwitchView.destination = layoutState.oneHandedSide.opposite
         if (layoutState.mode != KeyboardLayoutMode.FLOATING) {
-            removeCallbacks(hideFloatingControls)
-            floatingControlsView.visibility = View.GONE
+            resetDragState()
         }
         requestLayout()
     }
@@ -160,14 +123,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         val right = (child.right + edgeTouchSizePx).roundToInt().coerceIn(left, width)
         val bottom = (child.bottom + edgeTouchSizePx).roundToInt().coerceIn(top, height)
         outRegion.set(left, top, right, bottom)
-        if (floatingControlsView.visibility == View.VISIBLE) {
-            outRegion.union(Rect(
-                floatingControlsView.left,
-                floatingControlsView.top,
-                floatingControlsView.right,
-                floatingControlsView.bottom,
-            ))
-        }
         return true
     }
 
@@ -210,10 +165,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
             MeasureSpec.makeMeasureSpec(sideSwitchView.layoutParams.width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(sideSwitchView.layoutParams.height, MeasureSpec.EXACTLY),
         )
-        floatingControlsView.measure(
-            MeasureSpec.makeMeasureSpec(floatingControlsView.layoutParams.width, MeasureSpec.EXACTLY),
-            MeasureSpec.makeMeasureSpec(floatingControlsView.layoutParams.height, MeasureSpec.EXACTLY),
-        )
         setMeasuredDimension(
             resolveSize(width, widthMeasureSpec),
             resolveSize(desiredHeight, heightMeasureSpec),
@@ -225,7 +176,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         when (layoutState.mode) {
             KeyboardLayoutMode.FULL -> {
                 sideSwitchView.visibility = View.GONE
-                floatingControlsView.visibility = View.GONE
                 child.layout(
                     paddingLeft,
                     paddingTop,
@@ -234,7 +184,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
                 )
             }
             KeyboardLayoutMode.ONE_HANDED -> {
-                floatingControlsView.visibility = View.GONE
                 val bounds = availableBounds()
                 val childLeft = if (layoutState.oneHandedSide == KeyboardSide.LEFT) {
                     bounds.left
@@ -263,7 +212,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
                     (childLeft + child.measuredWidth).roundToInt(),
                     (childTop + child.measuredHeight).roundToInt(),
                 )
-                layoutFloatingControls(childRect())
             }
         }
     }
@@ -272,35 +220,25 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         if (layoutState.mode != KeyboardLayoutMode.FLOATING) return false
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (isInsideFloatingControls(event.x, event.y)) {
-                    return false
-                }
                 dragMode = dragModeAt(event.x, event.y)
-                if (dragMode != DragMode.NONE) {
+                if (dragMode != FloatingDragMode.NONE) {
                     beginDrag(event)
                     true
                 } else {
                     false
                 }
             }
-            else -> dragMode != DragMode.NONE
+            else -> dragMode != FloatingDragMode.NONE
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (layoutState.mode != KeyboardLayoutMode.FLOATING || dragMode == DragMode.NONE) return false
+        if (layoutState.mode != KeyboardLayoutMode.FLOATING || dragMode == FloatingDragMode.NONE) return false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> beginDrag(event)
-            MotionEvent.ACTION_MOVE -> updateDrag(event, finished = false)
-            MotionEvent.ACTION_UP -> {
-                updateDrag(event, finished = true)
-                dragMode = DragMode.NONE
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                listener?.onLayoutStateChanged(layoutState, true)
-                dragMode = DragMode.NONE
-                dragHasMoved = false
-            }
+            MotionEvent.ACTION_MOVE -> updateDrag(event)
+            MotionEvent.ACTION_UP -> finishDrag(event)
+            MotionEvent.ACTION_CANCEL -> cancelDrag()
         }
         return true
     }
@@ -313,48 +251,85 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         dragHasMoved = false
     }
 
-    private fun updateDrag(event: MotionEvent, finished: Boolean) {
-        val deltaX = event.x - dragStartX
-        val deltaY = event.y - dragStartY
-        if (dragMode == DragMode.MOVE && !dragHasMoved) {
-            if (FloatingHandleInteraction.isTap(deltaX, deltaY, touchSlopPx)) {
-                if (finished) toggleFloatingControls()
-                return
-            }
-            dragHasMoved = true
-            dismissFloatingControls()
-        }
-        val next = if (dragMode == DragMode.MOVE) {
-            movedGeometry(deltaX, deltaY)
-        } else {
-            resizedGeometry(deltaX, deltaY)
-        }
+    private fun updateDrag(event: MotionEvent) {
+        val next = geometryForDrag(event, dragMode) ?: return
         layoutState = next.normalized(
             allowOneHanded = !isLandscape,
             isLandscape = isLandscape,
         )
         requestLayout()
-        listener?.onLayoutStateChanged(layoutState, finished)
+        listener?.onLayoutStateChanged(layoutState, false)
     }
 
-    private fun toggleFloatingControls() {
-        removeCallbacks(hideFloatingControls)
-        floatingControlsView.visibility = if (floatingControlsView.visibility == View.VISIBLE) {
-            View.GONE
-        } else {
-            View.VISIBLE
-        }
-        if (floatingControlsView.visibility == View.VISIBLE) {
-            postDelayed(hideFloatingControls, FLOATING_CONTROLS_TIMEOUT_MS)
-        }
+    private fun finishDrag(event: MotionEvent) {
+        val activeMode = dragMode
+        val next = geometryForDrag(event, activeMode)
+        val shouldDock = FloatingHandleInteraction.shouldDockOnRelease(
+            dragMode = activeMode,
+            dragHasMoved = dragHasMoved,
+            releaseY = event.y,
+            bottomEdge = availableBounds().bottom,
+            threshold = dockThresholdPx,
+        )
+        val finalState = when {
+            shouldDock -> (next ?: layoutState).copy(mode = KeyboardLayoutMode.FULL)
+            next != null -> next
+            else -> null
+        }?.normalized(
+            allowOneHanded = !isLandscape,
+            isLandscape = isLandscape,
+        )
+
+        // The listener can synchronously re-apply presentation, so end the gesture
+        // before delivering its single finished callback.
+        resetDragState()
+        if (finalState == null) return
+
+        layoutState = finalState
         requestLayout()
+        if (shouldDock) {
+            performHapticFeedback(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    HapticFeedbackConstants.CONFIRM
+                } else {
+                    HapticFeedbackConstants.LONG_PRESS
+                },
+            )
+        }
+        listener?.onLayoutStateChanged(layoutState, true)
     }
 
-    private fun dismissFloatingControls() {
-        removeCallbacks(hideFloatingControls)
-        if (floatingControlsView.visibility != View.GONE) {
-            floatingControlsView.visibility = View.GONE
-            requestLayout()
+    private fun cancelDrag() {
+        val finalState = layoutState
+        resetDragState()
+        listener?.onLayoutStateChanged(finalState, true)
+    }
+
+    private fun resetDragState() {
+        dragMode = FloatingDragMode.NONE
+        dragStartX = 0f
+        dragStartY = 0f
+        dragStartScale = 1f
+        dragStartRect = RectF()
+        dragHasMoved = false
+    }
+
+    private fun geometryForDrag(
+        event: MotionEvent,
+        activeMode: FloatingDragMode,
+    ): KeyboardLayoutState? {
+        val deltaX = event.x - dragStartX
+        val deltaY = event.y - dragStartY
+        if (activeMode == FloatingDragMode.MOVE && !dragHasMoved) {
+            if (FloatingHandleInteraction.isTap(deltaX, deltaY, touchSlopPx)) {
+                return null
+            }
+            dragHasMoved = true
+        }
+        return if (activeMode == FloatingDragMode.MOVE) {
+            movedGeometry(deltaX, deltaY)
+        } else {
+            resizedGeometry(deltaX, deltaY, activeMode)
         }
     }
 
@@ -367,7 +342,11 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         return geometryForRect(left, top, width, height, dragStartScale)
     }
 
-    private fun resizedGeometry(deltaX: Float, deltaY: Float): KeyboardLayoutState {
+    private fun resizedGeometry(
+        deltaX: Float,
+        deltaY: Float,
+        activeMode: FloatingDragMode,
+    ): KeyboardLayoutState {
         val baseWidth = dragStartRect.width() / dragStartScale.coerceAtLeast(0.01f)
         val dragStartHeightScale = KeyboardLayoutState.heightScaleForFloatingWidth(
             dragStartScale,
@@ -375,15 +354,15 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         )
         val baseHeight = dragStartRect.height() / dragStartHeightScale.coerceAtLeast(0.01f)
         val scaleCandidates = mutableListOf<Float>()
-        if (dragMode.hasLeftEdge()) scaleCandidates += dragStartScale - deltaX / baseWidth
-        if (dragMode.hasRightEdge()) scaleCandidates += dragStartScale + deltaX / baseWidth
-        if (dragMode.hasTopEdge()) {
+        if (activeMode.hasLeftEdge()) scaleCandidates += dragStartScale - deltaX / baseWidth
+        if (activeMode.hasRightEdge()) scaleCandidates += dragStartScale + deltaX / baseWidth
+        if (activeMode.hasTopEdge()) {
             scaleCandidates += KeyboardLayoutState.widthScaleForFloatingHeight(
                 dragStartHeightScale - deltaY / baseHeight,
                 isLandscape,
             )
         }
-        if (dragMode.hasBottomEdge()) {
+        if (activeMode.hasBottomEdge()) {
             scaleCandidates += KeyboardLayoutState.widthScaleForFloatingHeight(
                 dragStartHeightScale + deltaY / baseHeight,
                 isLandscape,
@@ -399,13 +378,13 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         val width = baseWidth * nextScale
         val height = baseHeight * KeyboardLayoutState.heightScaleForFloatingWidth(nextScale, isLandscape)
         val left = when {
-            dragMode.hasLeftEdge() -> dragStartRect.right - width
-            dragMode.hasRightEdge() -> dragStartRect.left
+            activeMode.hasLeftEdge() -> dragStartRect.right - width
+            activeMode.hasRightEdge() -> dragStartRect.left
             else -> dragStartRect.centerX() - width / 2f
         }
         val top = when {
-            dragMode.hasTopEdge() -> dragStartRect.bottom - height
-            dragMode.hasBottomEdge() -> dragStartRect.top
+            activeMode.hasTopEdge() -> dragStartRect.bottom - height
+            activeMode.hasBottomEdge() -> dragStartRect.top
             else -> dragStartRect.centerY() - height / 2f
         }
         val bounds = availableBounds()
@@ -432,34 +411,17 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         )
     }
 
-    private fun dragModeAt(x: Float, y: Float): DragMode {
+    private fun dragModeAt(x: Float, y: Float): FloatingDragMode {
         val rect = childRect()
-        if (!RectF(
-                rect.left - edgeTouchSizePx,
-                rect.top - edgeTouchSizePx,
-                rect.right + edgeTouchSizePx,
-                rect.bottom + edgeTouchSizePx,
-            ).contains(x, y)
-        ) {
-            return DragMode.NONE
-        }
-        val nearLeft = abs(x - rect.left) <= edgeTouchSizePx
-        val nearTop = abs(y - rect.top) <= edgeTouchSizePx
-        val nearRight = abs(x - rect.right) <= edgeTouchSizePx
-        val nearBottom = abs(y - rect.bottom) <= edgeTouchSizePx
-        val horizontalRatio = if (rect.width() > 0f) (x - rect.left) / rect.width() else 0f
-        if (nearTop && horizontalRatio in 0.32f..0.68f) return DragMode.MOVE
-        return when {
-            nearTop && nearLeft -> DragMode.RESIZE_TOP_LEFT
-            nearTop && nearRight -> DragMode.RESIZE_TOP_RIGHT
-            nearBottom && nearLeft -> DragMode.RESIZE_BOTTOM_LEFT
-            nearBottom && nearRight -> DragMode.RESIZE_BOTTOM_RIGHT
-            nearLeft -> DragMode.RESIZE_LEFT
-            nearTop -> DragMode.RESIZE_TOP
-            nearRight -> DragMode.RESIZE_RIGHT
-            nearBottom -> DragMode.RESIZE_BOTTOM
-            else -> DragMode.NONE
-        }
+        return FloatingHandleInteraction.dragModeAt(
+            x = x,
+            y = y,
+            left = rect.left,
+            top = rect.top,
+            right = rect.right,
+            bottom = rect.bottom,
+            edgeTouchSize = edgeTouchSizePx,
+        )
     }
 
     private fun childRect(): RectF {
@@ -504,37 +466,6 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         )
     }
 
-    private fun layoutFloatingControls(keyboardRect: RectF) {
-        if (floatingControlsView.visibility != View.VISIBLE) return
-        val bounds = availableBounds()
-        val gap = 6f * resources.displayMetrics.density
-        val controlWidth = floatingControlsView.measuredWidth.toFloat()
-        val controlHeight = floatingControlsView.measuredHeight.toFloat()
-        val controlLeft = (keyboardRect.centerX() - controlWidth / 2f).coerceIn(
-            bounds.left,
-            max(bounds.left, bounds.right - controlWidth),
-        )
-        val preferredTop = keyboardRect.top - controlHeight - gap
-        val controlTop = if (preferredTop >= bounds.top) {
-            preferredTop
-        } else {
-            (keyboardRect.top + gap).coerceAtMost(max(bounds.top, bounds.bottom - controlHeight))
-        }
-        floatingControlsView.layout(
-            controlLeft.roundToInt(),
-            controlTop.roundToInt(),
-            (controlLeft + controlWidth).roundToInt(),
-            (controlTop + controlHeight).roundToInt(),
-        )
-        floatingControlsView.bringToFront()
-    }
-
-    private fun isInsideFloatingControls(x: Float, y: Float): Boolean {
-        return floatingControlsView.visibility == View.VISIBLE &&
-            x >= floatingControlsView.left && x <= floatingControlsView.right &&
-            y >= floatingControlsView.top && y <= floatingControlsView.bottom
-    }
-
     private fun availableBounds(): RectF {
         val inset = if (layoutState.mode == KeyboardLayoutMode.FULL) 0f else marginPx.toFloat()
         val safeBottom = if (layoutState.mode == KeyboardLayoutMode.FLOATING) safeBottomInsetPx.toFloat() else 0f
@@ -547,24 +478,32 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
         )
     }
 
-    private fun DragMode.hasLeftEdge(): Boolean {
-        return this == DragMode.RESIZE_LEFT || this == DragMode.RESIZE_TOP_LEFT || this == DragMode.RESIZE_BOTTOM_LEFT
+    private fun FloatingDragMode.hasLeftEdge(): Boolean {
+        return this == FloatingDragMode.RESIZE_LEFT ||
+            this == FloatingDragMode.RESIZE_TOP_LEFT ||
+            this == FloatingDragMode.RESIZE_BOTTOM_LEFT
     }
 
-    private fun DragMode.hasTopEdge(): Boolean {
-        return this == DragMode.RESIZE_TOP || this == DragMode.RESIZE_TOP_LEFT || this == DragMode.RESIZE_TOP_RIGHT
+    private fun FloatingDragMode.hasTopEdge(): Boolean {
+        return this == FloatingDragMode.RESIZE_TOP ||
+            this == FloatingDragMode.RESIZE_TOP_LEFT ||
+            this == FloatingDragMode.RESIZE_TOP_RIGHT
     }
 
-    private fun DragMode.hasRightEdge(): Boolean {
-        return this == DragMode.RESIZE_RIGHT || this == DragMode.RESIZE_TOP_RIGHT || this == DragMode.RESIZE_BOTTOM_RIGHT
+    private fun FloatingDragMode.hasRightEdge(): Boolean {
+        return this == FloatingDragMode.RESIZE_RIGHT ||
+            this == FloatingDragMode.RESIZE_TOP_RIGHT ||
+            this == FloatingDragMode.RESIZE_BOTTOM_RIGHT
     }
 
-    private fun DragMode.hasBottomEdge(): Boolean {
-        return this == DragMode.RESIZE_BOTTOM || this == DragMode.RESIZE_BOTTOM_LEFT || this == DragMode.RESIZE_BOTTOM_RIGHT
+    private fun FloatingDragMode.hasBottomEdge(): Boolean {
+        return this == FloatingDragMode.RESIZE_BOTTOM ||
+            this == FloatingDragMode.RESIZE_BOTTOM_LEFT ||
+            this == FloatingDragMode.RESIZE_BOTTOM_RIGHT
     }
 
     companion object {
-        private const val FLOATING_CONTROLS_TIMEOUT_MS = 3_500L
+        private const val DOCK_THRESHOLD_DP = 24f
     }
 }
 
@@ -636,66 +575,6 @@ private class KeyboardSideSwitchView(context: Context) : View(context) {
     override fun drawableStateChanged() {
         super.drawableStateChanged()
         invalidate()
-    }
-
-    private fun dp(value: Float): Float = value * resources.displayMetrics.density
-}
-
-private class FloatingControlCapsuleView(context: Context) : View(context) {
-    private var theme = KeytaoImeTheme.fallback()
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    init {
-        isClickable = true
-        isFocusable = true
-        contentDescription = "退出悬浮键盘"
-        elevation = dp(8f)
-    }
-
-    fun updateTheme(next: KeytaoImeTheme) {
-        theme = next
-        invalidate()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())
-        val radius = height / 2f
-        paint.style = Paint.Style.FILL
-        paint.color = if (isPressed) {
-            theme.keySelectedBackground.toArgb()
-        } else {
-            theme.panelBackground.toArgb()
-        }
-        canvas.drawRoundRect(rect, radius, radius, paint)
-
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
-        paint.color = theme.panelBorder.toArgb()
-        canvas.drawRoundRect(rect, radius, radius, paint)
-
-        paint.color = if (isPressed) {
-            theme.keySelectedForeground.toArgb()
-        } else {
-            theme.keyForeground.toArgb()
-        }
-        paint.strokeWidth = dp(2.2f)
-        paint.strokeCap = Paint.Cap.ROUND
-        val iconRadius = minOf(width, height) * 0.18f
-        canvas.drawLine(
-            width / 2f - iconRadius,
-            height / 2f - iconRadius,
-            width / 2f + iconRadius,
-            height / 2f + iconRadius,
-            paint,
-        )
-        canvas.drawLine(
-            width / 2f + iconRadius,
-            height / 2f - iconRadius,
-            width / 2f - iconRadius,
-            height / 2f + iconRadius,
-            paint,
-        )
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density

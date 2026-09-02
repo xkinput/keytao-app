@@ -120,7 +120,7 @@ class KeytaoKeyboardLayoutStateTest {
     }
 
     @Test
-    fun `floating drag handle tap toggles controls without treating drags as taps`() {
+    fun `floating drag handle distinguishes taps from drags`() {
         assertTrue(
             FloatingHandleInteraction.isTap(
                 deltaX = 3f,
@@ -140,6 +140,86 @@ class KeytaoKeyboardLayoutStateTest {
                 deltaX = 2f,
                 deltaY = 9f,
                 touchSlop = 8f,
+            ),
+        )
+    }
+
+    @Test
+    fun `floating move handle is bottom center while top center resizes`() {
+        assertEquals(
+            FloatingDragMode.MOVE,
+            FloatingHandleInteraction.dragModeAt(
+                x = 300f,
+                y = 500f,
+                left = 100f,
+                top = 200f,
+                right = 500f,
+                bottom = 500f,
+                edgeTouchSize = 18f,
+            ),
+        )
+        assertEquals(
+            FloatingDragMode.RESIZE_TOP,
+            FloatingHandleInteraction.dragModeAt(
+                x = 300f,
+                y = 200f,
+                left = 100f,
+                top = 200f,
+                right = 500f,
+                bottom = 500f,
+                edgeTouchSize = 18f,
+            ),
+        )
+        assertEquals(
+            FloatingDragMode.RESIZE_BOTTOM_LEFT,
+            FloatingHandleInteraction.dragModeAt(
+                x = 100f,
+                y = 500f,
+                left = 100f,
+                top = 200f,
+                right = 500f,
+                bottom = 500f,
+                edgeTouchSize = 18f,
+            ),
+        )
+    }
+
+    @Test
+    fun `floating move release docks only after dragging near the bottom edge`() {
+        assertTrue(
+            FloatingHandleInteraction.shouldDockOnRelease(
+                dragMode = FloatingDragMode.MOVE,
+                dragHasMoved = true,
+                releaseY = 976f,
+                bottomEdge = 1_000f,
+                threshold = 24f,
+            ),
+        )
+        assertFalse(
+            FloatingHandleInteraction.shouldDockOnRelease(
+                dragMode = FloatingDragMode.MOVE,
+                dragHasMoved = true,
+                releaseY = 975f,
+                bottomEdge = 1_000f,
+                threshold = 24f,
+            ),
+        )
+        assertFalse(
+            FloatingHandleInteraction.shouldDockOnRelease(
+                dragMode = FloatingDragMode.RESIZE_BOTTOM,
+                dragHasMoved = true,
+                releaseY = 1_000f,
+                bottomEdge = 1_000f,
+                threshold = 24f,
+            ),
+        )
+        assertFalse(
+            FloatingHandleInteraction.shouldDockOnRelease(
+                dragMode = FloatingDragMode.MOVE,
+                dragHasMoved = false,
+                releaseY = 1_000f,
+                bottomEdge = 1_000f,
+                threshold = 24f,
             ),
         )
     }

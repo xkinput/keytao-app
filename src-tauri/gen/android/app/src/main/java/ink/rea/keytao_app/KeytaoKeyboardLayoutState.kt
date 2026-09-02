@@ -120,7 +120,67 @@ data class KeyboardLayoutState(
     }
 }
 
-object FloatingHandleInteraction {
+internal enum class FloatingDragMode {
+    NONE,
+    MOVE,
+    RESIZE_LEFT,
+    RESIZE_TOP,
+    RESIZE_RIGHT,
+    RESIZE_BOTTOM,
+    RESIZE_TOP_LEFT,
+    RESIZE_TOP_RIGHT,
+    RESIZE_BOTTOM_LEFT,
+    RESIZE_BOTTOM_RIGHT,
+}
+
+internal object FloatingHandleInteraction {
+    fun dragModeAt(
+        x: Float,
+        y: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        edgeTouchSize: Float,
+    ): FloatingDragMode {
+        val edgeSize = edgeTouchSize.coerceAtLeast(0f)
+        if (x < left - edgeSize || x > right + edgeSize ||
+            y < top - edgeSize || y > bottom + edgeSize
+        ) {
+            return FloatingDragMode.NONE
+        }
+        val nearLeft = kotlin.math.abs(x - left) <= edgeSize
+        val nearTop = kotlin.math.abs(y - top) <= edgeSize
+        val nearRight = kotlin.math.abs(x - right) <= edgeSize
+        val nearBottom = kotlin.math.abs(y - bottom) <= edgeSize
+        val width = right - left
+        val horizontalRatio = if (width > 0f) (x - left) / width else 0f
+        if (nearBottom && horizontalRatio in 0.32f..0.68f) return FloatingDragMode.MOVE
+        return when {
+            nearTop && nearLeft -> FloatingDragMode.RESIZE_TOP_LEFT
+            nearTop && nearRight -> FloatingDragMode.RESIZE_TOP_RIGHT
+            nearBottom && nearLeft -> FloatingDragMode.RESIZE_BOTTOM_LEFT
+            nearBottom && nearRight -> FloatingDragMode.RESIZE_BOTTOM_RIGHT
+            nearLeft -> FloatingDragMode.RESIZE_LEFT
+            nearTop -> FloatingDragMode.RESIZE_TOP
+            nearRight -> FloatingDragMode.RESIZE_RIGHT
+            nearBottom -> FloatingDragMode.RESIZE_BOTTOM
+            else -> FloatingDragMode.NONE
+        }
+    }
+
+    fun shouldDockOnRelease(
+        dragMode: FloatingDragMode,
+        dragHasMoved: Boolean,
+        releaseY: Float,
+        bottomEdge: Float,
+        threshold: Float,
+    ): Boolean {
+        return dragMode == FloatingDragMode.MOVE &&
+            dragHasMoved &&
+            releaseY >= bottomEdge - threshold.coerceAtLeast(0f)
+    }
+
     fun isTap(deltaX: Float, deltaY: Float, touchSlop: Float): Boolean {
         val threshold = touchSlop.coerceAtLeast(0f)
         return deltaX * deltaX + deltaY * deltaY <= threshold * threshold

@@ -61,7 +61,7 @@ rows:
       { label: "⌫", weight: 1.3, action: { type: backspace } }
     ]
   - [
-      { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers } },
+      { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers }, longPress: { type: nextInputMethod } },
       { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" } },
       { label: "空格", weight: 4.6, action: { type: space }, swipeDown: { type: reset } },
       { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" } },
@@ -161,7 +161,7 @@ symbolRows:
       { label: "￥", value: "￥" }
     ]
   - &symbolFooter [
-      { label: "123", weight: 1.15, action: { type: "keyboardMode", value: "numbers" } },
+      { label: "123", weight: 1.15, action: { type: "keyboardMode", value: "numbers" }, longPress: { type: "nextInputMethod" } },
       { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
       { label: "空格", weight: 4.6, action: { type: "space" } },
       { label: "⌫", weight: 1.15, action: { type: "backspace" } },
