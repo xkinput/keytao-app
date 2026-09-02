@@ -363,6 +363,16 @@ char *keytao_session_select_candidate_global_json(void *session, uint32_t index)
 
 char *keytao_session_all_candidates_json(void *session, uint32_t limit);
 
+char *keytao_session_list_schemas_json(void *session);
+
+char *keytao_session_current_schema_json(void *session);
+
+char *keytao_session_select_schema_json(void *session, const char *schema_id);
+
+bool keytao_session_get_option(void *session, const char *option_name);
+
+char *keytao_session_set_option_json(void *session, const char *option_name, bool enabled);
+
 char *keytao_session_change_page_json(void *session, bool backward);
 
 char *keytao_session_reset_json(void *session);

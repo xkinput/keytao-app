@@ -1496,6 +1496,127 @@ pub extern "C" fn keytao_session_all_candidates_json(
 
 #[no_mangle]
 #[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_list_schemas_json(session: *mut c_void) -> *mut c_char {
+    guard(
+        "keytao_session_list_schemas_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            let Some(schemas) = handle.session.list_schemas() else {
+                return std::ptr::null_mut();
+            };
+            match serde_json::to_string(&schemas) {
+                Ok(json) => to_cstring(&json),
+                Err(error) => {
+                    log_error(format_args!(
+                        "keytao_session_list_schemas_json: serialize failed: {error}"
+                    ));
+                    std::ptr::null_mut()
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_current_schema_json(session: *mut c_void) -> *mut c_char {
+    guard(
+        "keytao_session_current_schema_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            let Some(schema) = handle.session.current_schema() else {
+                return std::ptr::null_mut();
+            };
+            match serde_json::to_string(&schema) {
+                Ok(json) => to_cstring(&json),
+                Err(error) => {
+                    log_error(format_args!(
+                        "keytao_session_current_schema_json: serialize failed: {error}"
+                    ));
+                    std::ptr::null_mut()
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_select_schema_json(
+    session: *mut c_void,
+    schema_id: *const c_char,
+) -> *mut c_char {
+    guard(
+        "keytao_session_select_schema_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            let Ok(schema_id) = c_string_arg(schema_id, "schema_id") else {
+                return std::ptr::null_mut();
+            };
+            match handle.session.select_schema(&schema_id) {
+                Ok(state) => to_cstring(&state_json(state, false)),
+                Err(error) => {
+                    log_error(format_args!("keytao_session_select_schema_json: {error}"));
+                    std::ptr::null_mut()
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_get_option(
+    session: *mut c_void,
+    option_name: *const c_char,
+) -> bool {
+    guard("keytao_session_get_option", false, || {
+        let Some(handle) = session_handle(session) else {
+            return false;
+        };
+        let Ok(option_name) = c_string_arg(option_name, "option_name") else {
+            return false;
+        };
+        handle.session.get_option(&option_name)
+    })
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_set_option_json(
+    session: *mut c_void,
+    option_name: *const c_char,
+    enabled: bool,
+) -> *mut c_char {
+    guard(
+        "keytao_session_set_option_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            let Ok(option_name) = c_string_arg(option_name, "option_name") else {
+                return std::ptr::null_mut();
+            };
+            let Some(state) = handle.session.set_option(&option_name, enabled) else {
+                return std::ptr::null_mut();
+            };
+            to_cstring(&state_json(state, false))
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_change_page_json(
     session: *mut c_void,
     backward: bool,

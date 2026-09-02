@@ -179,6 +179,12 @@ pub struct Candidate {
     pub comment: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaInfo {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyProcessResult {
     pub state: ImeState,
@@ -1372,6 +1378,7 @@ mod desktop {
     /// An active rime input session.
     pub struct Engine {
         session: ManuallyDrop<rime_api::Session>,
+        user_data_dir: Option<PathBuf>,
     }
 
     // SAFETY: Session holds only a usize (session_id) and librime itself is not
@@ -1464,15 +1471,19 @@ mod desktop {
             }
             let _rime = rime_api_lock();
             let session = create_session().map_err(|e| format!("{e:?}"))?;
-            if let Some((_, schema_id)) = preferred {
+            if let Some((_, schema_id)) = &preferred {
                 // ascii_mode is left to the schema switches and to ascii_composer;
                 // a session must not silently override the user's mode.
-                select_schema_checked(&session, &schema_id)?;
+                select_schema_checked(&session, schema_id)?;
             } else {
                 validate_active_schema(&session)?;
             }
             Ok(Self {
                 session: ManuallyDrop::new(session),
+                user_data_dir: user_data_dir
+                    .map(Path::to_path_buf)
+                    .or_else(|| preferred.map(|(dir, _)| dir))
+                    .or_else(default_user_data_dir),
             })
         }
 
@@ -1723,11 +1734,36 @@ mod desktop {
         }
 
         pub fn current_schema_name(&self) -> String {
+            self.current_schema()
+                .map(|schema| schema.name)
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+
+        pub fn list_schemas(&self) -> Vec<SchemaInfo> {
+            let Some(user_data_dir) = self.user_data_dir.as_deref() else {
+                return Vec::new();
+            };
+            parse_schema_list_from_dir(user_data_dir)
+                .into_iter()
+                .map(|id| SchemaInfo {
+                    name: schema_name_from_dir(user_data_dir, &id).unwrap_or_else(|| id.clone()),
+                    id,
+                })
+                .collect()
+        }
+
+        pub fn current_schema(&self) -> Option<SchemaInfo> {
             let _rime = rime_api_lock();
-            self.session
-                .status()
-                .map(|s| s.schema_name().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
+            self.session.status().ok().map(|status| SchemaInfo {
+                id: status.schema_id().to_string(),
+                name: status.schema_name().to_string(),
+            })
+        }
+
+        pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
+            let _rime = rime_api_lock();
+            select_schema_checked(&self.session, schema_id)?;
+            Ok(extract_state_readonly(&self.session))
         }
 
         pub fn is_ascii_mode(&self) -> bool {
@@ -1749,6 +1785,17 @@ mod desktop {
             let _rime = rime_api_lock();
             set_session_option(&self.session, "ascii_mode", enabled);
             extract_state_with_commit(&self.session)
+        }
+
+        pub fn get_option(&self, option_name: &str) -> bool {
+            let _rime = rime_api_lock();
+            get_session_option(&self.session, option_name)
+        }
+
+        pub fn set_option(&self, option_name: &str, enabled: bool) -> ImeState {
+            let _rime = rime_api_lock();
+            set_session_option(&self.session, option_name, enabled);
+            extract_state_readonly(&self.session)
         }
     }
 
@@ -1790,6 +1837,18 @@ mod desktop {
             if let Some(set_option) = rime_api_member!(api, set_option) {
                 set_option(session.session_id, option.as_ptr(), i32::from(enabled));
             }
+        }
+    }
+
+    fn get_session_option(session: &rime_api::Session, option_name: &str) -> bool {
+        let Ok(option) = CString::new(option_name) else {
+            return false;
+        };
+        unsafe {
+            let api = rime_get_api();
+            rime_api_member!(api, get_option)
+                .map(|get_option| get_option(session.session_id, option.as_ptr()) != 0)
+                .unwrap_or(false)
         }
     }
 
@@ -3007,6 +3066,19 @@ impl ImeRuntimeSession {
         self.with_engine(|engine| engine.all_candidates_limited(max_count))
     }
 
+    pub fn list_schemas(&self) -> Option<Vec<SchemaInfo>> {
+        self.with_engine(Engine::list_schemas)
+    }
+
+    pub fn current_schema(&self) -> Option<SchemaInfo> {
+        self.with_engine(Engine::current_schema).flatten()
+    }
+
+    pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
+        self.with_engine(|engine| engine.select_schema(schema_id))
+            .ok_or_else(|| "Rime session is unavailable".to_string())?
+    }
+
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
         self.with_engine(|engine| engine.change_page(backward))
     }
@@ -3021,6 +3093,15 @@ impl ImeRuntimeSession {
 
     pub fn set_ascii_mode(&self, enabled: bool) -> Option<ImeState> {
         self.with_engine(|engine| engine.set_ascii_mode(enabled))
+    }
+
+    pub fn get_option(&self, option_name: &str) -> bool {
+        self.with_engine(|engine| engine.get_option(option_name))
+            .unwrap_or(false)
+    }
+
+    pub fn set_option(&self, option_name: &str, enabled: bool) -> Option<ImeState> {
+        self.with_engine(|engine| engine.set_option(option_name, enabled))
     }
 
     /// What the linked librime can do natively, see [`EngineCapabilities`].
@@ -3184,6 +3265,33 @@ pub fn parse_schema_list(content: &str) -> Vec<String> {
         }
     }
     schemas
+}
+
+fn parse_schema_name(content: &str) -> Option<String> {
+    let Value::Mapping(root) = serde_yaml::from_str::<Value>(content).ok()? else {
+        return None;
+    };
+    let Value::Mapping(schema) = root.get(Value::String("schema".into()))? else {
+        return None;
+    };
+    schema
+        .get(Value::String("name".into()))?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn schema_name_from_dir(user_data_dir: &Path, schema_id: &str) -> Option<String> {
+    [
+        user_data_dir.join(format!("{schema_id}.schema.yaml")),
+        user_data_dir
+            .join("build")
+            .join(format!("{schema_id}.schema.yaml")),
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::read_to_string(path).ok())
+    .find_map(|content| parse_schema_name(&content))
 }
 
 fn parse_schema_dependencies(content: &str) -> Vec<String> {
@@ -4432,10 +4540,10 @@ mod tests {
         invalidate_active_windows_rime_build, invalidate_rime_build_artifacts,
         mark_windows_rime_build_repair_complete, merge_default_custom_content,
         merge_rime_lua_content, parse_rime_lua_requires, parse_schema_dependencies,
-        parse_schema_list, patch_android_auxiliary_dictionary, patch_windows_lua_compatibility,
-        preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir, schema_install_state,
-        windows_rime_build_repair_required, ReloadStamp, ReloadStampWatcher,
-        RELOAD_STAMP_FILE_NAME,
+        parse_schema_list, parse_schema_name, patch_android_auxiliary_dictionary,
+        patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
+        rime_log_dir, schema_install_state, windows_rime_build_repair_required, ReloadStamp,
+        ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
@@ -4529,6 +4637,12 @@ mod tests {
     fn parse_schema_list_strips_inline_comments() {
         let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
         assert_eq!(parse_schema_list(content), vec!["keydo"]);
+    }
+
+    #[test]
+    fn parse_schema_name_reads_the_display_name() {
+        let content = "schema:\n  schema_id: keytao\n  name: 键道\n";
+        assert_eq!(parse_schema_name(content).as_deref(), Some("键道"));
     }
 
     #[test]
