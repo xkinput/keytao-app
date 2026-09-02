@@ -301,6 +301,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             // Reached only when the transparent handleInputModeList overlay is
             // not in place (expanded panel, custom layout position).
             advanceToNextInputMode()
+        case KeyTaoCommandType.nextInputMethod:
+            advanceToNextInputMode()
         case KeyTaoCommandType.keyboardMode:
             keyboardView?.setLayer(command.value)
         case KeyTaoCommandType.nextCandidatePage:
@@ -326,6 +328,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         default:
             break
         }
+    }
+
+    func keyboardViewNeedsFullAccessForHaptics(_ view: KeyTaoIOSKeyboardView) {
+        showMessage("请在系统设置中允许 KeyTao 完全访问后使用按键振动")
     }
 
     /// The layout drops paging keys when the runtime cannot turn a page
@@ -517,6 +523,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         switch action {
         case "delete":
             _ = deleteOneBeforeCursorForRestore()
+        case "deleteSegment":
+            deleteTrailingSegmentBeforeCursorForRestore()
         case "restore":
             _ = restoreOneBackspaceText()
         case "deleteAll":
@@ -525,6 +533,16 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             restoreAllBackspaceText()
         default:
             break
+        }
+    }
+
+    private func deleteTrailingSegmentBeforeCursorForRestore() {
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        let count = keyTaoTrailingDeletionSegmentLength(before)
+        for _ in 0..<count {
+            guard deleteOneBeforeCursorForRestore() else {
+                break
+            }
         }
     }
 
@@ -1660,6 +1678,7 @@ private extension KeyTaoKeyCommand {
             KeyTaoCommandType.backspace,
             KeyTaoCommandType.backspaceGesture,
             KeyTaoCommandType.keyboardPicker,
+            KeyTaoCommandType.nextInputMethod,
             KeyTaoCommandType.keyboardMode,
             KeyTaoCommandType.shift,
             KeyTaoCommandType.directInput,

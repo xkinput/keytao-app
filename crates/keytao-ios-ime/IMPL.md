@@ -15,6 +15,8 @@
 - `Sources/KeyTaoIOSIME/KeyTaoIOSConfig.swift`：解析用户目录 `ios_ime.json` 或 bundle 内置 `keytao_ios_ime.json`，字段与 Android `android_ime.json` 保持同形。
 - `Sources/KeyTaoIOSIME/KeyTaoIOSFloatingLayout.swift`：浮动/单手键盘的缩放契约（按方向 clamp）与持久化状态类型；刻意不引 UIKit / CKeytaoCore，`Tests/FloatingLayoutTests` 可以在 host 工具链上直接编译运行它。
 - `test-floating-layout.sh`：编译并运行 `Tests/FloatingLayoutTests`，校验 iOS 侧解码与 `keytao-theme::mobile_layout` 的 clamp 一致。
+- `test-touch-rollover.sh`：编译并运行 `Tests/TouchRolloverTests`，校验每根手指独立完成 `begin/move/finish` 并按抬起顺序产生命令。
+- `test-interaction-policy.sh`：编译并运行 `Tests/InteractionPolicyTests`，校验长按/连删时序、光标手势、退格分段与备选默认选择策略。
 - `Sources/KeyTaoIOSIME/KeyTaoIOSState.swift`：解析 FFI 返回的 Android-compatible state JSON，包括 `CandidatePanelModel` 和 `ModeHintModel`。
 - `Sources/KeyTaoIOSIME/KeyTaoIOSTheme.swift`：解析 `keytao-theme` resolved JSON，并映射到 UIKit 颜色、字号和圆角。
 - `Sources/KeyTaoIOSIME/Resources/keytao_ios_ime.json`：内置 iOS 移动端键盘布局，来源与 Android 默认配置同构。
@@ -480,12 +482,11 @@ xcrun simctl uninstall booted ink.rea.keytao-app.keyboard || true
 source vendor/librime/macos-universal/env.sh
 cargo check -p keytao-core -p keytao-core-ffi
 pnpm check:ios-ime
-crates/keytao-ios-ime/test-floating-layout.sh
 ```
 
-Swift 源码类型检查通过。`pnpm check:ios-ime` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target；没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。keytao-core 加上 ABI 能力探测后，最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.8.5 runtime 上也已通过（原先报 `E0609`）。
+Swift 源码类型检查通过。`pnpm check:ios-ime` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并运行 rollover、interaction policy、floating layout 三个 host 测试脚本；在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target，没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。keytao-core 加上 ABI 能力探测后，最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.8.5 runtime 上也已通过（原先报 `E0609`）。
 
-`test-floating-layout.sh` 目前不在 `pnpm check:ios-ime` 里，需要单独跑；建议后续把它加进 `scripts/verify-ios-ime.sh`。
+`test-touch-rollover.sh`、`test-interaction-policy.sh` 与 `test-floating-layout.sh` 均由 `scripts/verify-ios-ime.sh` 调用。
 
 2026-06-24 本机模拟器 smoke 验证：
 

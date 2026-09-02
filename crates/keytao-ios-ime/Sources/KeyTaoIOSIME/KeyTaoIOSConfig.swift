@@ -14,6 +14,7 @@ public enum KeyTaoCommandType {
     public static let mode = "mode"
     public static let openPage = "openPage"
     public static let keyboardPicker = "keyboardPicker"
+    public static let nextInputMethod = "nextInputMethod"
     public static let keyboardMode = "keyboardMode"
     public static let nextCandidatePage = "nextCandidatePage"
     public static let previousCandidatePage = "previousCandidatePage"
@@ -58,6 +59,25 @@ public struct KeyTaoKeyStackItem: Codable, Equatable {
     public var asciiAction: KeyTaoKeyCommand?
 }
 
+public struct KeyTaoKeyAlternate: Codable, Equatable {
+    public var label: String
+    public var value: String?
+    public var rimeValue: String?
+    public var action: KeyTaoKeyCommand?
+
+    public init(
+        label: String,
+        value: String? = nil,
+        rimeValue: String? = nil,
+        action: KeyTaoKeyCommand? = nil
+    ) {
+        self.label = label
+        self.value = value
+        self.rimeValue = rimeValue
+        self.action = action
+    }
+}
+
 public struct KeyTaoKeySpec: Codable, Equatable {
     public var label: String
     public var value: String?
@@ -73,6 +93,8 @@ public struct KeyTaoKeySpec: Codable, Equatable {
     public var asciiLabel: String?
     public var asciiValue: String?
     public var asciiAction: KeyTaoKeyCommand?
+    public var alternates: [KeyTaoKeyAlternate]?
+    public var asciiAlternates: [KeyTaoKeyAlternate]?
     public var rowSpan: CGFloat?
     public var stack: [KeyTaoKeyStackItem]?
 
@@ -91,6 +113,8 @@ public struct KeyTaoKeySpec: Codable, Equatable {
         asciiLabel: String? = nil,
         asciiValue: String? = nil,
         asciiAction: KeyTaoKeyCommand? = nil,
+        alternates: [KeyTaoKeyAlternate]? = nil,
+        asciiAlternates: [KeyTaoKeyAlternate]? = nil,
         rowSpan: CGFloat? = nil,
         stack: [KeyTaoKeyStackItem]? = nil
     ) {
@@ -108,6 +132,8 @@ public struct KeyTaoKeySpec: Codable, Equatable {
         self.asciiLabel = asciiLabel
         self.asciiValue = asciiValue
         self.asciiAction = asciiAction
+        self.alternates = alternates
+        self.asciiAlternates = asciiAlternates
         self.rowSpan = rowSpan
         self.stack = stack
     }
@@ -211,6 +237,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var hapticsEnabled: Bool
     public var hapticIntensity: Int
     public var enterKeyBehavior: String
+    public var keyPreviewEnabled: Bool
+    public var longPressDelayMs: Int
+    public var deleteSpeed: String
     /// Show the pending composition inside the host field via
     /// `UITextDocumentProxy.setMarkedText`. Off falls back to showing the
     /// preedit only in the candidate bar, for hosts whose proxy mishandles it.
@@ -236,6 +265,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case hapticsEnabled
         case hapticIntensity
         case enterKeyBehavior
+        case keyPreviewEnabled
+        case longPressDelayMs
+        case deleteSpeed
         case hostMarkedText
         case swipeThresholdDp
         case rows
@@ -265,6 +297,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         hapticsEnabled: Bool,
         hapticIntensity: Int,
         enterKeyBehavior: String = KeyTaoEnterKeyBehavior.system,
+        keyPreviewEnabled: Bool = true,
+        longPressDelayMs: Int = KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
+        deleteSpeed: String = KeyTaoDeleteSpeed.standard.rawValue,
         hostMarkedTextEnabled: Bool = true,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
@@ -285,6 +320,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.hapticsEnabled = hapticsEnabled
         self.hapticIntensity = hapticIntensity
         self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(enterKeyBehavior)
+        self.keyPreviewEnabled = keyPreviewEnabled
+        self.longPressDelayMs = Self.clampInt(
+            longPressDelayMs,
+            min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
+            max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
+        )
+        self.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
         self.hostMarkedTextEnabled = hostMarkedTextEnabled
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
@@ -356,6 +398,16 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(
             try? container.decode(String.self, forKey: .enterKeyBehavior)
         )
+        self.keyPreviewEnabled = (try? container.decode(Bool.self, forKey: .keyPreviewEnabled))
+            ?? Self.fallback.keyPreviewEnabled
+        self.longPressDelayMs = Self.clampInt(
+            (try? container.decode(Int.self, forKey: .longPressDelayMs)) ?? Self.fallback.longPressDelayMs,
+            min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
+            max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
+        )
+        self.deleteSpeed = KeyTaoDeleteSpeed(
+            setting: try? container.decode(String.self, forKey: .deleteSpeed)
+        ).rawValue
         self.hostMarkedTextEnabled = (try? container.decode(Bool.self, forKey: .hostMarkedText))
             ?? Self.fallback.hostMarkedTextEnabled
         self.swipeThresholdDp = Self.clamp(
@@ -442,6 +494,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try haptics.encode(hapticsEnabled, forKey: .enabled)
         try haptics.encode(hapticIntensity, forKey: .intensity)
         try container.encode(enterKeyBehavior, forKey: .enterKeyBehavior)
+        try container.encode(keyPreviewEnabled, forKey: .keyPreviewEnabled)
+        try container.encode(longPressDelayMs, forKey: .longPressDelayMs)
+        try container.encode(deleteSpeed, forKey: .deleteSpeed)
         try container.encode(hostMarkedTextEnabled, forKey: .hostMarkedText)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
@@ -479,6 +534,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             hapticsEnabled: Self.fallback.hapticsEnabled,
             hapticIntensity: Self.fallback.hapticIntensity,
             enterKeyBehavior: Self.fallback.enterKeyBehavior,
+            keyPreviewEnabled: Self.fallback.keyPreviewEnabled,
+            longPressDelayMs: Self.fallback.longPressDelayMs,
+            deleteSpeed: Self.fallback.deleteSpeed,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -526,6 +584,19 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         )
         if let enterKeyBehavior = runtime.enterKeyBehavior {
             next.enterKeyBehavior = KeyTaoEnterKeyBehavior.normalize(enterKeyBehavior)
+        }
+        if let keyPreviewEnabled = runtime.keyPreviewEnabled {
+            next.keyPreviewEnabled = keyPreviewEnabled
+        }
+        if let longPressDelayMs = runtime.longPressDelayMs {
+            next.longPressDelayMs = Self.clampInt(
+                longPressDelayMs,
+                min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
+                max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
+            )
+        }
+        if let deleteSpeed = runtime.deleteSpeed {
+            next.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
         }
         if let hostMarkedText = runtime.hostMarkedText {
             next.hostMarkedTextEnabled = hostMarkedText
@@ -628,6 +699,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         hapticsEnabled: true,
         hapticIntensity: 42,
         enterKeyBehavior: KeyTaoEnterKeyBehavior.system,
+        keyPreviewEnabled: true,
+        longPressDelayMs: KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
+        deleteSpeed: KeyTaoDeleteSpeed.standard.rawValue,
         swipeThresholdDp: 34,
         rows: [
             "qwertyuiop".map { KeyTaoKeySpec(label: String($0), value: String($0), rimeValue: nil, hint: nil, weight: nil, style: nil, action: nil, swipeUp: nil, swipeDown: nil, longPress: nil, asciiLongPress: nil, asciiLabel: nil, asciiValue: nil, asciiAction: nil) },
@@ -746,6 +820,9 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var hapticsEnabled: Bool?
     var hapticIntensity: Int?
     var enterKeyBehavior: String?
+    var keyPreviewEnabled: Bool?
+    var longPressDelayMs: Int?
+    var deleteSpeed: String?
     var hostMarkedText: Bool?
     var floating: KeyTaoPartialFloatingConfig?
 }

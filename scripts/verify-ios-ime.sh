@@ -53,6 +53,9 @@ echo "Checking Swift iOS keyboard sources"
         -I Sources/CKeytaoCore \
         Sources/KeyTaoIOSIME/*.swift
 )
+"$IOS_IME_DIR/test-touch-rollover.sh"
+"$IOS_IME_DIR/test-interaction-policy.sh"
+"$IOS_IME_DIR/test-floating-layout.sh"
 
 # Apple requires every custom keyboard to offer a way out to another keyboard.
 # The effective layout comes from user-editable keyboard.yaml, so the guarantee
