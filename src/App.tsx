@@ -64,6 +64,7 @@ type ImeUiColorScheme = "auto" | "light" | "dark"
 type ImeEffectiveColorScheme = "light" | "dark"
 type ImeCandidateOrientation = "horizontal" | "vertical"
 type EnterKeyBehavior = "system" | "newline"
+type MobileImeDeleteSpeed = "slow" | "standard" | "fast"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const RIME_DICT_MANAGER_URL_SCHEME = "rime-dict"
@@ -286,6 +287,9 @@ interface AndroidImeInputSettings {
   hapticsEnabled: boolean
   hapticIntensity: number
   enterKeyBehavior: EnterKeyBehavior
+  keyPreviewEnabled: boolean
+  longPressDelayMs: number
+  deleteSpeed: MobileImeDeleteSpeed
   floatingPortraitEnabled: boolean
   floatingPortraitScale: number
   floatingLandscapeEnabled: boolean
@@ -426,6 +430,7 @@ export default function App() {
   const [androidImeInputError, setAndroidImeInputError] = useState<string | null>(null)
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
   const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
+  const [longPressDelayDraft, setLongPressDelayDraft] = useState<number | null>(null)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -674,6 +679,10 @@ export default function App() {
   }, [androidImeInputSettings?.hapticIntensity])
 
   useEffect(() => {
+    setLongPressDelayDraft(null)
+  }, [androidImeInputSettings?.longPressDelayMs])
+
+  useEffect(() => {
     if (osType !== "android") return
 
     const root = document.documentElement
@@ -750,6 +759,9 @@ export default function App() {
   const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
   const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
   const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
+  const keyPreviewEnabled = androidImeInputSettings?.keyPreviewEnabled ?? true
+  const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
+  const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
@@ -1071,6 +1083,9 @@ export default function App() {
         | "hapticsEnabled"
         | "hapticIntensity"
         | "enterKeyBehavior"
+        | "keyPreviewEnabled"
+        | "longPressDelayMs"
+        | "deleteSpeed"
         | "floatingPortraitEnabled"
         | "floatingPortraitScale"
         | "floatingLandscapeEnabled"
@@ -1083,6 +1098,9 @@ export default function App() {
       hapticsEnabled: androidImeInputSettings?.hapticsEnabled ?? true,
       hapticIntensity: androidImeInputSettings?.hapticIntensity ?? 42,
       enterKeyBehavior: androidImeInputSettings?.enterKeyBehavior ?? ("system" as EnterKeyBehavior),
+      keyPreviewEnabled: androidImeInputSettings?.keyPreviewEnabled ?? true,
+      longPressDelayMs: androidImeInputSettings?.longPressDelayMs ?? 300,
+      deleteSpeed: androidImeInputSettings?.deleteSpeed ?? ("standard" as MobileImeDeleteSpeed),
       floatingPortraitEnabled: androidImeInputSettings?.floatingPortraitEnabled ?? false,
       floatingPortraitScale: androidImeInputSettings?.floatingPortraitScale ?? 88,
       floatingLandscapeEnabled: androidImeInputSettings?.floatingLandscapeEnabled ?? true,
@@ -1092,11 +1110,14 @@ export default function App() {
       ...current,
       ...patch,
       hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
+      longPressDelayMs: Math.round(patch.longPressDelayMs ?? current.longPressDelayMs),
       floatingPortraitScale: Math.round(patch.floatingPortraitScale ?? current.floatingPortraitScale),
       floatingLandscapeScale: Math.round(patch.floatingLandscapeScale ?? current.floatingLandscapeScale),
     }
     next.enterKeyBehavior = next.enterKeyBehavior === "newline" ? "newline" : "system"
     next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
+    next.longPressDelayMs = Math.min(700, Math.max(100, next.longPressDelayMs))
+    next.deleteSpeed = ["slow", "standard", "fast"].includes(next.deleteSpeed) ? next.deleteSpeed : "standard"
     next.floatingPortraitScale = Math.min(100, Math.max(70, next.floatingPortraitScale))
     next.floatingLandscapeScale = Math.min(100, Math.max(70, next.floatingLandscapeScale))
     if (
@@ -1104,6 +1125,9 @@ export default function App() {
       next.hapticsEnabled === androidImeInputSettings.hapticsEnabled &&
       next.hapticIntensity === androidImeInputSettings.hapticIntensity &&
       next.enterKeyBehavior === androidImeInputSettings.enterKeyBehavior &&
+      next.keyPreviewEnabled === androidImeInputSettings.keyPreviewEnabled &&
+      next.longPressDelayMs === androidImeInputSettings.longPressDelayMs &&
+      next.deleteSpeed === androidImeInputSettings.deleteSpeed &&
       next.floatingPortraitEnabled === androidImeInputSettings.floatingPortraitEnabled &&
       next.floatingPortraitScale === androidImeInputSettings.floatingPortraitScale &&
       next.floatingLandscapeEnabled === androidImeInputSettings.floatingLandscapeEnabled &&
@@ -1127,6 +1151,10 @@ export default function App() {
 
   function commitAndroidHapticIntensity(value: number) {
     void handleUpdateAndroidImeInputSettings({ hapticIntensity: value })
+  }
+
+  function commitLongPressDelay(value: number) {
+    void handleUpdateAndroidImeInputSettings({ longPressDelayMs: value })
   }
 
   async function handleInstall() {
@@ -1852,6 +1880,66 @@ export default function App() {
                       disabled={!androidHapticsEnabled || isSavingAndroidImeInputSettings}
                       aria-label="震动强度"
                     />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-muted-foreground">按键预览气泡</span>
+                      <span className="text-xs text-muted-foreground/80">
+                        {keyPreviewEnabled ? "开启" : "关闭"}
+                      </span>
+                    </div>
+                    <Switch
+                      checked={keyPreviewEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ keyPreviewEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换按键预览气泡"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">长按延迟</span>
+                      </div>
+                      <span className="font-mono text-muted-foreground">{longPressDelayMs}ms</span>
+                    </div>
+                    <Slider
+                      min={100}
+                      max={700}
+                      step={10}
+                      value={[longPressDelayMs]}
+                      onValueChange={([value]) => setLongPressDelayDraft(value)}
+                      onValueCommit={([value]) => commitLongPressDelay(value)}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="长按延迟"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">删除速度</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground/80">
+                        {deleteSpeed === "slow" ? "慢" : deleteSpeed === "fast" ? "快" : "标准"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(["slow", "standard", "fast"] as const).map((speed) => (
+                        <Button
+                          key={speed}
+                          type="button"
+                          variant={deleteSpeed === speed ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => handleUpdateAndroidImeInputSettings({ deleteSpeed: speed })}
+                          disabled={isSavingAndroidImeInputSettings}
+                          className="h-8 text-xs"
+                        >
+                          {speed === "slow" ? "慢" : speed === "fast" ? "快" : "标准"}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">

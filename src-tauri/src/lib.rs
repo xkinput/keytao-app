@@ -3866,6 +3866,9 @@ pub struct AndroidImeInputSettings {
     pub haptics_enabled: bool,
     pub haptic_intensity: u8,
     pub enter_key_behavior: String,
+    pub key_preview_enabled: bool,
+    pub long_press_delay_ms: u16,
+    pub delete_speed: String,
     pub floating_portrait_enabled: bool,
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
@@ -4857,6 +4860,20 @@ fn normalize_enter_key_behavior(value: Option<&str>) -> String {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalize_mobile_ime_delete_speed(value: Option<&str>) -> String {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "slow" => "slow".into(),
+        "fast" => "fast".into(),
+        _ => "standard".into(),
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn android_ime_haptics_settings_from_config(
     root: &Path,
     message: String,
@@ -4887,6 +4904,18 @@ fn android_ime_haptics_settings_from_config(
         config
             .get("enterKeyBehavior")
             .and_then(|value| value.as_str()),
+    );
+    let key_preview_enabled = config
+        .get("keyPreviewEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let long_press_delay_ms = config
+        .get("longPressDelayMs")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(300)
+        .clamp(100, 700) as u16;
+    let delete_speed = normalize_mobile_ime_delete_speed(
+        config.get("deleteSpeed").and_then(|value| value.as_str()),
     );
     let keyboard_path = root.join("keyboard.yaml");
     let keyboard = keytao_theme::resolve_keyboard_from_paths(
@@ -4927,6 +4956,9 @@ fn android_ime_haptics_settings_from_config(
         haptics_enabled,
         haptic_intensity,
         enter_key_behavior,
+        key_preview_enabled,
+        long_press_delay_ms,
+        delete_speed,
         floating_portrait_enabled,
         floating_portrait_scale,
         floating_landscape_enabled,
@@ -4986,6 +5018,9 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     haptics_enabled: bool,
     haptic_intensity: u8,
     enter_key_behavior: String,
+    key_preview_enabled: bool,
+    long_press_delay_ms: u16,
+    delete_speed: String,
     floating_portrait_enabled: bool,
     floating_portrait_scale: u8,
     floating_landscape_enabled: bool,
@@ -5017,6 +5052,18 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         config.insert(
             "enterKeyBehavior".into(),
             serde_json::Value::String(normalize_enter_key_behavior(Some(&enter_key_behavior))),
+        );
+        config.insert(
+            "keyPreviewEnabled".into(),
+            serde_json::Value::Bool(key_preview_enabled),
+        );
+        config.insert(
+            "longPressDelayMs".into(),
+            serde_json::Value::from(long_press_delay_ms.clamp(100, 700)),
+        );
+        config.insert(
+            "deleteSpeed".into(),
+            serde_json::Value::String(normalize_mobile_ime_delete_speed(Some(&delete_speed))),
         );
         let mut floating = config
             .get("floating")
@@ -5087,6 +5134,9 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         let _ = haptics_enabled;
         let _ = haptic_intensity;
         let _ = enter_key_behavior;
+        let _ = key_preview_enabled;
+        let _ = long_press_delay_ms;
+        let _ = delete_speed;
         let _ = floating_portrait_enabled;
         let _ = floating_portrait_scale;
         let _ = floating_landscape_enabled;
