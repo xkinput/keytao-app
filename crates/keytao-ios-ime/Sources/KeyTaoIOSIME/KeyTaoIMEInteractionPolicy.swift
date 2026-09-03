@@ -26,11 +26,13 @@ public enum KeyTaoIMEInteractionTuning {
     public static let longPressDelayDefaultMs = 300
     public static let longPressDelayMaxMs = 700
     public static let slideRetargetHysteresis: CGFloat = 8
+    public static let touchNoiseThresholdMs = 40
+    public static let touchNoiseThresholdDistance: CGFloat = 12.6
     public static let backspaceHoldTolerance: CGFloat = 8
     public static let cursorGestureActivation: CGFloat = 12.6
     public static let cursorGestureStep: CGFloat = 10
     public static let candidateDragSlop: CGFloat = 8
-    public static let candidateToolbarToggleWidth: CGFloat = 28
+    public static let doubleSpacePeriodTimeoutMs = 1_100
     static let repeatableEditIntervalMs = 72
     static let repeatTimerToleranceFraction = 0.2
     static let repeatTimerMaximumToleranceSeconds = 0.01
@@ -60,6 +62,56 @@ public enum KeyTaoIMEInteractionTuning {
         case .fast:
             return fastBackspace
         }
+    }
+
+    static func shouldDiscardTouch(durationMs: Double, distance: CGFloat) -> Bool {
+        durationMs < Double(touchNoiseThresholdMs) && distance < touchNoiseThresholdDistance
+    }
+}
+
+final class KeyTaoDoubleSpacePeriodTracker {
+    private let timeoutMs: Int
+    private var lastEligibleSpaceTimeMs: Int?
+
+    init(timeoutMs: Int = KeyTaoIMEInteractionTuning.doubleSpacePeriodTimeoutMs) {
+        self.timeoutMs = timeoutMs
+    }
+
+    func shouldReplaceSpace(
+        nowMs: Int,
+        contextBefore: String,
+        enabled: Bool,
+        hasComposition: Bool
+    ) -> Bool {
+        guard enabled, !hasComposition else {
+            reset()
+            return false
+        }
+        let canReplace = lastEligibleSpaceTimeMs.map { nowMs - $0 >= 0 && nowMs - $0 <= timeoutMs } == true
+            && contextBefore.hasSuffix(" ")
+            && keyTaoHasDoubleSpaceEligibleSuffix(String(contextBefore.dropLast()))
+        if canReplace {
+            reset()
+            return true
+        }
+        lastEligibleSpaceTimeMs = keyTaoHasDoubleSpaceEligibleSuffix(contextBefore) ? nowMs : nil
+        return false
+    }
+
+    func reset() {
+        lastEligibleSpaceTimeMs = nil
+    }
+}
+
+private func keyTaoHasDoubleSpaceEligibleSuffix(_ text: String) -> Bool {
+    guard let last = text.last else {
+        return false
+    }
+    switch keyTaoDeletionSegmentClass(last) {
+    case .whitespace, .punctuation:
+        return false
+    default:
+        return true
     }
 }
 

@@ -347,7 +347,7 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 | 运行库桥接 | JNI 直连 `keytao-core` | C ABI `keytao-core-ffi` |
 | 用户目录 | `/storage/emulated/0/keytao` | App Group `group.ink.rea.keytao-app/keytao` |
 | 提交接口 | `InputConnection` | `UITextDocumentProxy` |
-| preedit | `setComposingText()` 写宿主输入框 | `setMarkedText()` 写宿主输入框，候选栏同时显示 |
+| preedit | `setComposingText()` 写宿主输入框 | `setMarkedText()` 写宿主输入框 |
 | UI | Android `Canvas` 自绘 | UIKit view/button/scroll view |
 | next keyboard | `InputMethodManager.showInputMethodPicker()` | `advanceToNextInputMode()` |
 | open access | Android 存储权限 | `RequestsOpenAccess` + 用户允许完全访问 |
@@ -359,7 +359,7 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 - UIKit 软键盘、候选栏、字母/数字/符号层。
 - 移动端配置 `ios_ime.json`，字段与 Android 默认配置保持同形。
 - 点击、长按、上滑、下滑动作。
-- 中英模式键、结构化 Rime 方案/选项页、候选选择、reset；翻页与点击选词按 `KEYTAO_CAP_*` 掩码开关，见「能力位驱动的 UI 降级（D4）」。
+- 中英模式键、结构化 Rime 方案/选项页、候选选择、reset；Rime 选项从当前 schema 的 `switches` 动态读取，布尔项使用 schema 状态文案，单选组循环切换，无 switches 时显示空态；翻页与点击选词按 `KEYTAO_CAP_*` 掩码开关，见「能力位驱动的 UI 降级（D4）」。
 - 强制注入的 🌐 切换键、`advanceToNextInputMode()` 与长按 `handleInputModeList(from:with:)` 键盘选择器。
 - C FFI per-session runtime：init、reload、create/destroy session、process key、select candidate、global select、all candidates、change page、reset、schema list/current/select 和 Rime options。
 - `keytao-theme` resolved theme JSON 接入。

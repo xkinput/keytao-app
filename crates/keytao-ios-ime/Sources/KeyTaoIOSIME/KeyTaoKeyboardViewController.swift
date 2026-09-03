@@ -17,12 +17,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private static let expandedCandidateLimit = 96
     private static let queuedCommandLimit = 32
     private static let deleteAllBatchLimit = 4096
-    private static let rimeOptionNames = [
-        "ascii_mode",
-        "ascii_punct",
-        "full_shape",
-        "simplification",
-    ]
+    private static let rimeOptionChoicePrefix = "choice:"
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -55,7 +50,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var backspaceRestoreStack: [String] = [] {
         didSet { keyboardView?.setNeedsDisplay() }
     }
+    private var backspaceGestureRestoreStart = 0
     private var lastCommittedText: String?
+    private let doubleSpacePeriodTracker = KeyTaoDoubleSpacePeriodTracker()
     private var hostTraits = KeyTaoHostTraits.default
     private var markedTextActive = false
     private var hostTextMutationDepth = 0
@@ -246,6 +243,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches() {
         backspaceRestoreStack.removeAll()
+        doubleSpacePeriodTracker.reset()
         lastCommittedText = nil
         clipboardHistory.removeAll()
         clipboardSuppression = nil
@@ -316,7 +314,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.rimeSchema:
             selectRimeSchema(command.value)
         case KeyTaoCommandType.rimeOption:
-            setRimeOption(command.value, enabled: command.fallbackValue.map { $0 == "true" })
+            setRimeOption(command.value, action: command.fallbackValue)
         case KeyTaoCommandType.openPage:
             openContainingApp(page: command.value)
         case KeyTaoCommandType.edit:
@@ -377,6 +375,21 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         apply(global ? engine.selectCandidateGlobal(index) : engine.selectCandidate(index))
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, candidateIsUserPhrase index: Int) -> Bool {
+        inputAvailable && engineCapabilities.candidateDeletion && engine.candidateIsUserPhrase(index)
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteCandidate index: Int) -> Bool {
+        guard inputAvailable, engineCapabilities.candidateDeletion else {
+            showMessage("系统词不可删除")
+            return false
+        }
+        let result = engine.deleteCandidate(index)
+        apply(result.state)
+        showMessage(result.deleted ? "已删除用户词" : "系统词不可删除")
+        return result.deleted
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestExpandedCandidates completion: @escaping ([KeyTaoCandidate]) -> Void) {
@@ -521,6 +534,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func handleBackspaceGesture(_ action: String) {
         switch action {
+        case "begin":
+            backspaceGestureRestoreStart = backspaceRestoreStack.count
         case "delete":
             _ = deleteOneBeforeCursorForRestore()
         case "deleteSegment":
@@ -529,11 +544,24 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             _ = restoreOneBackspaceText()
         case "deleteAll":
             deleteAllBeforeCursorForRestore()
+            backspaceGestureRestoreStart = 0
         case "restoreAll":
             restoreAllBackspaceText()
+            backspaceGestureRestoreStart = 0
+        case "restoreGesture":
+            let count = max(0, backspaceRestoreStack.count - backspaceGestureRestoreStart)
+            for _ in 0..<count {
+                _ = restoreOneBackspaceText()
+            }
         default:
             break
         }
+        let preview = hostTraits.isSensitive
+            ? ""
+            : backspaceRestoreStack[
+                min(backspaceGestureRestoreStart, backspaceRestoreStack.count)...
+            ].reversed().joined()
+        keyboardView?.showBackspaceDeletionPreview(preview)
     }
 
     private func deleteTrailingSegmentBeforeCursorForRestore() {
@@ -646,6 +674,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// and `full_shape` turns it into U+3000, so Rime decides even when there is
     /// no composition to select from.
     private func handleSpace() {
+        let config = keyboardView?.currentConfig() ?? .fallback
+        let contextBefore = textDocumentProxy.documentContextBeforeInput ?? ""
+        let replace = doubleSpacePeriodTracker.shouldReplaceSpace(
+            nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
+            contextBefore: contextBefore,
+            enabled: config.doubleSpacePeriodEnabled,
+            hasComposition: currentState.hasComposition
+        )
+        if replace {
+            _ = deleteOneBeforeCursorForRestore()
+            commitDirect(currentState.asciiMode ? ". " : "。")
+            return
+        }
         if hostTraits.bypassesRime {
             commitDirect(" ")
             return
@@ -684,13 +725,27 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         refreshRimeOptions()
     }
 
-    private func setRimeOption(_ optionName: String?, enabled: Bool?) {
-        guard let optionName, !optionName.isEmpty, let enabled else {
+    private func setRimeOption(_ optionName: String?, action: String?) {
+        guard let optionName, !optionName.isEmpty, let action else {
             return
         }
-        let state: KeyTaoImeState? = optionName == "ascii_mode"
-            ? engine.setAsciiMode(enabled)
-            : engine.setOption(optionName, enabled: enabled)
+        let state: KeyTaoImeState?
+        if action == "true" || action == "false" {
+            let enabled = action == "true"
+            state = optionName == "ascii_mode"
+                ? engine.setAsciiMode(enabled)
+                : engine.setOption(optionName, enabled: enabled)
+        } else if action.hasPrefix(Self.rimeOptionChoicePrefix) {
+            let previous = String(action.dropFirst(Self.rimeOptionChoicePrefix.count))
+            if !previous.isEmpty, previous != optionName,
+               engine.setOption(previous, enabled: false) == nil {
+                showMessage("无法更新 Rime 选项")
+                return
+            }
+            state = engine.setOption(optionName, enabled: true)
+        } else {
+            return
+        }
         guard let state else {
             showMessage("无法更新 Rime 选项")
             return
@@ -700,12 +755,24 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func refreshRimeOptions() {
+        var switches = engine.schemaSwitches()
+        if !switches.contains(where: { $0.name == "ascii_punct" }) {
+            switches.append(KeyTaoRimeSchemaSwitch(
+                name: "ascii_punct",
+                options: [],
+                states: ["中文标点", "英文标点"],
+                reset: nil
+            ))
+        }
+        var optionStates: [String: Bool] = [:]
+        for optionName in switches.flatMap(\.optionNames) {
+            optionStates[optionName] = engine.getOption(optionName)
+        }
         keyboardView?.update(rimeOptions: KeyTaoRimeOptionsState(
             schemas: engine.listSchemas(),
             currentSchema: engine.currentSchema(),
-            options: Dictionary(uniqueKeysWithValues: Self.rimeOptionNames.map {
-                ($0, engine.getOption($0))
-            })
+            switches: switches,
+            options: optionStates
         ))
     }
 
@@ -734,6 +801,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case "undo":
             clearCompositionBeforeEdit()
             _ = restoreOneBackspaceText()
+        case "deleteWord":
+            deleteTrailingSegmentBeforeCursorForRestore()
+        case "insertPair":
+            if let pair = value?.takeIfNotEmpty {
+                commitDirect(pair)
+                moveCursor(byCharacterOffset: -1)
+            }
         case "redo", "clearAll":
             break
         case "forwardDelete":
@@ -957,9 +1031,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     /// iOS 13+ lets a keyboard extension show the pending composition inside the
     /// host field via marked text, which is the standard CJK channel: the host
-    /// suppresses autocorrect over it and groups undo around it. The candidate
-    /// bar keeps rendering the preedit as well, so hosts that ignore proxy
-    /// marked text still show it somewhere.
+    /// suppresses autocorrect over it and groups undo around it. When host marked
+    /// text is disabled, the candidate bar renders the preedit instead.
     private func updateHostMarkedText() {
         let preedit = currentState.candidatePanel.preedit ?? currentState.preedit
         guard hostMarkedTextEnabled, !preedit.isEmpty else {
@@ -1235,7 +1308,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             multiplier: presentation.isCompact ? normalized.scale : 1
         )
         keyboardHeightConstraint = container.heightAnchor.constraint(
-            equalToConstant: presentedConfig.keyboardHeightDp + presentedConfig.candidateBarHeightDp
+            equalToConstant: presentedConfig.effectiveKeyboardHeightDp + presentedConfig.candidateBarHeightDp
         )
         keyboardLeadingConstraint = container.leadingAnchor.constraint(
             equalTo: self.view.leadingAnchor
@@ -1245,7 +1318,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         )
         let margin = presentation.isCompact ? config.floating.marginDp : 0
         heightConstraint = self.view.heightAnchor.constraint(
-            equalToConstant: presentedConfig.keyboardHeightDp
+            equalToConstant: presentedConfig.effectiveKeyboardHeightDp
                 + presentedConfig.candidateBarHeightDp
                 + (presentation.isCompact ? margin * 2 : 0)
         )

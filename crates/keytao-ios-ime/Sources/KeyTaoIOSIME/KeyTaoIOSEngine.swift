@@ -7,12 +7,24 @@ struct KeyTaoRimeSchema: Codable, Equatable {
     var name: String
 }
 
+struct KeyTaoRimeSchemaSwitch: Codable, Equatable {
+    var name: String?
+    var options: [String]
+    var states: [String]
+    var reset: Int?
+
+    var optionNames: [String] {
+        options.isEmpty ? name.map { [$0] } ?? [] : options
+    }
+}
+
 struct KeyTaoRimeOptionsState: Equatable {
     var schemas: [KeyTaoRimeSchema]
     var currentSchema: KeyTaoRimeSchema?
+    var switches: [KeyTaoRimeSchemaSwitch]
     var options: [String: Bool]
 
-    static let empty = KeyTaoRimeOptionsState(schemas: [], currentSchema: nil, options: [:])
+    static let empty = KeyTaoRimeOptionsState(schemas: [], currentSchema: nil, switches: [], options: [:])
 }
 
 enum KeyTaoIOSPaths {
@@ -426,6 +438,22 @@ final class KeyTaoIOSEngine {
         return stable
     }
 
+    func deleteCandidate(_ index: Int) -> (state: KeyTaoImeState, deleted: Bool) {
+        guard let session,
+              let state = decodeState(keytao_session_delete_candidate_json(session, UInt32(max(index, 0)))) else {
+            return (lastState.withoutTransientCommit(), false)
+        }
+        let stable = stableSchemaState(state)
+        let deleted = stable.accepted
+        lastState = stable.withoutTransientCommit()
+        return (stable, deleted)
+    }
+
+    func candidateIsUserPhrase(_ index: Int) -> Bool {
+        guard let session else { return false }
+        return keytao_session_candidate_is_user_phrase(session, UInt32(max(index, 0)))
+    }
+
     func allCandidates(limit: Int) -> [KeyTaoCandidate] {
         guard let session, let json = ownedCString(keytao_session_all_candidates_json(session, UInt32(max(limit, 0)))) else {
             return []
@@ -443,6 +471,15 @@ final class KeyTaoIOSEngine {
             return []
         }
         return (try? JSONDecoder().decode([KeyTaoRimeSchema].self, from: data)) ?? []
+    }
+
+    func schemaSwitches() -> [KeyTaoRimeSchemaSwitch] {
+        guard let session,
+              let json = ownedCString(keytao_session_schema_switches_json(session)),
+              let data = json.data(using: .utf8) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([KeyTaoRimeSchemaSwitch].self, from: data)) ?? []
     }
 
     func currentSchema() -> KeyTaoRimeSchema? {

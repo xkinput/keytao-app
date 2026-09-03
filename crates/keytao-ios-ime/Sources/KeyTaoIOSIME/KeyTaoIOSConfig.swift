@@ -240,6 +240,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var keyPreviewEnabled: Bool
     public var longPressDelayMs: Int
     public var deleteSpeed: String
+    public var keySoundEnabled: Bool
+    public var keySoundVolume: Int
+    public var keyHintVisible: Bool
+    public var flickKeysEnabled: Bool
+    public var numberRowEnabled: Bool
+    public var candidateFontScale: CGFloat
+    public var doubleSpacePeriodEnabled: Bool
     /// Show the pending composition inside the host field via
     /// `UITextDocumentProxy.setMarkedText`. Off falls back to showing the
     /// preedit only in the candidate bar, for hosts whose proxy mishandles it.
@@ -249,6 +256,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var numberRows: [[KeyTaoKeySpec]]
     public var symbolRows: [[KeyTaoKeySpec]]
     public var customRows: [String: [[KeyTaoKeySpec]]]
+
+    public var effectiveKeyboardHeightDp: CGFloat {
+        guard numberRowEnabled, !rows.isEmpty else {
+            return keyboardHeightDp
+        }
+        return keyboardHeightDp * CGFloat(rows.count + 1) / CGFloat(rows.count)
+    }
 
     private enum CodingKeys: String, CodingKey {
         case keyboardHeightDp
@@ -268,6 +282,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case keyPreviewEnabled
         case longPressDelayMs
         case deleteSpeed
+        case keySoundEnabled
+        case keySoundVolume
+        case keyHintVisible
+        case flickKeysEnabled
+        case numberRowEnabled
+        case candidateFontScale
+        case doubleSpacePeriodEnabled
         case hostMarkedText
         case swipeThresholdDp
         case rows
@@ -300,6 +321,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         keyPreviewEnabled: Bool = true,
         longPressDelayMs: Int = KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
         deleteSpeed: String = KeyTaoDeleteSpeed.standard.rawValue,
+        keySoundEnabled: Bool = true,
+        keySoundVolume: Int = 100,
+        keyHintVisible: Bool = true,
+        flickKeysEnabled: Bool = true,
+        numberRowEnabled: Bool = false,
+        candidateFontScale: CGFloat = 1,
+        doubleSpacePeriodEnabled: Bool = true,
         hostMarkedTextEnabled: Bool = true,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
@@ -327,6 +355,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
         )
         self.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
+        self.keySoundEnabled = keySoundEnabled
+        self.keySoundVolume = Self.clampInt(keySoundVolume, min: 0, max: 100)
+        self.keyHintVisible = keyHintVisible
+        self.flickKeysEnabled = flickKeysEnabled
+        self.numberRowEnabled = numberRowEnabled
+        self.candidateFontScale = Self.clamp(candidateFontScale, min: 0.8, max: 1.4)
+        self.doubleSpacePeriodEnabled = doubleSpacePeriodEnabled
         self.hostMarkedTextEnabled = hostMarkedTextEnabled
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
@@ -408,6 +443,26 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.deleteSpeed = KeyTaoDeleteSpeed(
             setting: try? container.decode(String.self, forKey: .deleteSpeed)
         ).rawValue
+        self.keySoundEnabled = (try? container.decode(Bool.self, forKey: .keySoundEnabled))
+            ?? Self.fallback.keySoundEnabled
+        self.keySoundVolume = Self.clampInt(
+            (try? container.decode(Int.self, forKey: .keySoundVolume)) ?? Self.fallback.keySoundVolume,
+            min: 0,
+            max: 100
+        )
+        self.keyHintVisible = (try? container.decode(Bool.self, forKey: .keyHintVisible))
+            ?? Self.fallback.keyHintVisible
+        self.flickKeysEnabled = (try? container.decode(Bool.self, forKey: .flickKeysEnabled))
+            ?? Self.fallback.flickKeysEnabled
+        self.numberRowEnabled = (try? container.decode(Bool.self, forKey: .numberRowEnabled))
+            ?? Self.fallback.numberRowEnabled
+        self.candidateFontScale = Self.clamp(
+            (try? container.decode(CGFloat.self, forKey: .candidateFontScale)) ?? Self.fallback.candidateFontScale,
+            min: 0.8,
+            max: 1.4
+        )
+        self.doubleSpacePeriodEnabled = (try? container.decode(Bool.self, forKey: .doubleSpacePeriodEnabled))
+            ?? Self.fallback.doubleSpacePeriodEnabled
         self.hostMarkedTextEnabled = (try? container.decode(Bool.self, forKey: .hostMarkedText))
             ?? Self.fallback.hostMarkedTextEnabled
         self.swipeThresholdDp = Self.clamp(
@@ -497,6 +552,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(keyPreviewEnabled, forKey: .keyPreviewEnabled)
         try container.encode(longPressDelayMs, forKey: .longPressDelayMs)
         try container.encode(deleteSpeed, forKey: .deleteSpeed)
+        try container.encode(keySoundEnabled, forKey: .keySoundEnabled)
+        try container.encode(keySoundVolume, forKey: .keySoundVolume)
+        try container.encode(keyHintVisible, forKey: .keyHintVisible)
+        try container.encode(flickKeysEnabled, forKey: .flickKeysEnabled)
+        try container.encode(numberRowEnabled, forKey: .numberRowEnabled)
+        try container.encode(candidateFontScale, forKey: .candidateFontScale)
+        try container.encode(doubleSpacePeriodEnabled, forKey: .doubleSpacePeriodEnabled)
         try container.encode(hostMarkedTextEnabled, forKey: .hostMarkedText)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
@@ -537,6 +599,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             keyPreviewEnabled: Self.fallback.keyPreviewEnabled,
             longPressDelayMs: Self.fallback.longPressDelayMs,
             deleteSpeed: Self.fallback.deleteSpeed,
+            keySoundEnabled: Self.fallback.keySoundEnabled,
+            keySoundVolume: Self.fallback.keySoundVolume,
+            keyHintVisible: Self.fallback.keyHintVisible,
+            flickKeysEnabled: Self.fallback.flickKeysEnabled,
+            numberRowEnabled: Self.fallback.numberRowEnabled,
+            candidateFontScale: Self.fallback.candidateFontScale,
+            doubleSpacePeriodEnabled: Self.fallback.doubleSpacePeriodEnabled,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -597,6 +666,36 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         }
         if let deleteSpeed = runtime.deleteSpeed {
             next.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
+        }
+        if let keyboardHeightDp = runtime.keyboardHeightDp {
+            next.keyboardHeightDp = Self.clamp(keyboardHeightDp, min: 160, max: 420)
+        }
+        if let candidateBarHeightDp = runtime.candidateBarHeightDp {
+            next.candidateBarHeightDp = Self.clamp(candidateBarHeightDp, min: 36, max: 96)
+        }
+        if let swipeThresholdDp = runtime.swipeThresholdDp {
+            next.swipeThresholdDp = Self.clamp(swipeThresholdDp, min: 12, max: 96)
+        }
+        if let keySoundEnabled = runtime.keySoundEnabled {
+            next.keySoundEnabled = keySoundEnabled
+        }
+        if let keySoundVolume = runtime.keySoundVolume {
+            next.keySoundVolume = Self.clampInt(keySoundVolume, min: 0, max: 100)
+        }
+        if let keyHintVisible = runtime.keyHintVisible {
+            next.keyHintVisible = keyHintVisible
+        }
+        if let flickKeysEnabled = runtime.flickKeysEnabled {
+            next.flickKeysEnabled = flickKeysEnabled
+        }
+        if let numberRowEnabled = runtime.numberRowEnabled {
+            next.numberRowEnabled = numberRowEnabled
+        }
+        if let candidateFontScale = runtime.candidateFontScale {
+            next.candidateFontScale = Self.clamp(candidateFontScale, min: 0.8, max: 1.4)
+        }
+        if let doubleSpacePeriodEnabled = runtime.doubleSpacePeriodEnabled {
+            next.doubleSpacePeriodEnabled = doubleSpacePeriodEnabled
         }
         if let hostMarkedText = runtime.hostMarkedText {
             next.hostMarkedTextEnabled = hostMarkedText
@@ -702,6 +801,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         keyPreviewEnabled: true,
         longPressDelayMs: KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
         deleteSpeed: KeyTaoDeleteSpeed.standard.rawValue,
+        keySoundEnabled: true,
+        keySoundVolume: 100,
+        keyHintVisible: true,
+        flickKeysEnabled: true,
+        numberRowEnabled: false,
+        candidateFontScale: 1,
+        doubleSpacePeriodEnabled: true,
         swipeThresholdDp: 34,
         rows: [
             "qwertyuiop".map { KeyTaoKeySpec(label: String($0), value: String($0), rimeValue: nil, hint: nil, weight: nil, style: nil, action: nil, swipeUp: nil, swipeDown: nil, longPress: nil, asciiLongPress: nil, asciiLabel: nil, asciiValue: nil, asciiAction: nil) },
@@ -823,6 +929,16 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var keyPreviewEnabled: Bool?
     var longPressDelayMs: Int?
     var deleteSpeed: String?
+    var keyboardHeightDp: CGFloat?
+    var candidateBarHeightDp: CGFloat?
+    var swipeThresholdDp: CGFloat?
+    var keySoundEnabled: Bool?
+    var keySoundVolume: Int?
+    var keyHintVisible: Bool?
+    var flickKeysEnabled: Bool?
+    var numberRowEnabled: Bool?
+    var candidateFontScale: CGFloat?
+    var doubleSpacePeriodEnabled: Bool?
     var hostMarkedText: Bool?
     var floating: KeyTaoPartialFloatingConfig?
 }
