@@ -139,6 +139,38 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `keyboard height scale accepts five percent steps and otherwise falls back`() {
+        fun parseScale(value: String?): KeytaoAndroidImeConfig {
+            val field = value?.let { "\"keyboardHeightScale\": $it," }.orEmpty()
+            return KeytaoAndroidImeConfig.parse(
+                """
+                {
+                  $field
+                  "keyboardHeightDp": 200,
+                  "candidateBarHeightDp": 52,
+                  "rows": [[{ "label": "a", "value": "a" }]]
+                }
+                """.trimIndent()
+            )
+        }
+
+        assertEquals(100, parseScale(null).keyboardHeightScale)
+        assertEquals(85, parseScale("85").keyboardHeightScale)
+        assertEquals(130, parseScale("130").keyboardHeightScale)
+        assertEquals(100, parseScale("84").keyboardHeightScale)
+        assertEquals(100, parseScale("135").keyboardHeightScale)
+        assertEquals(100, parseScale("87").keyboardHeightScale)
+        assertEquals(100, parseScale("105.5").keyboardHeightScale)
+        assertEquals(100, parseScale("\"105\"").keyboardHeightScale)
+
+        val scaled = parseScale("130")
+        assertEquals(260f, scaled.effectiveKeyboardHeightDp)
+        assertEquals(1.3f, scaled.keyboardHeightScaleFactor)
+        assertEquals(52, scaled.candidateBarHeightDp)
+        assertEquals(54f, scaled.maxKeyHeightDp)
+    }
+
+    @Test
     fun `parse config keeps ascii variants and symbol rows`() {
         val config = KeytaoAndroidImeConfig.parse(
             """

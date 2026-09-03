@@ -295,6 +295,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun updateConfig(next: KeytaoAndroidImeConfig) {
+        if (config.keyboardHeightScale != next.keyboardHeightScale) {
+            clearActiveKeyTouches()
+            keyRects = emptyList()
+        }
         config = next
         candidateWidthCache.clear()
         invalidateKeyboardLayoutCache()
@@ -584,6 +588,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val signature = buildString {
             append(keyboardLayer).append('|')
             append(shiftState).append('|')
+            append(config.keyboardHeightScale).append('|')
             append(keyRects.size).append('|')
             append(candidateRects.size).append('|')
             append(expandedCandidateRects.size).append('|')
@@ -2971,6 +2976,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append('|')
             append(config.keyboardHeightDp)
             append(':')
+            append(config.keyboardHeightScale)
+            append(':')
             append(config.candidateBarHeightDp)
             append(':')
             append(config.keyboardBottomInsetDp)
@@ -4491,7 +4498,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyboardMaxKeyHeight(): Float {
-        return dp(config.maxKeyHeightDp)
+        return dp(config.maxKeyHeightDp * config.keyboardHeightScaleFactor)
     }
 
     private fun rowWeight(row: List<KeySpec>): Float {

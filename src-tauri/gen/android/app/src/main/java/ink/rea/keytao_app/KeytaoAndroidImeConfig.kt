@@ -123,6 +123,7 @@ data class KeytaoAndroidImeConfig(
     val enterKeyBehavior: String,
     val keyPreviewEnabled: Boolean,
     val longPressDelayMs: Long,
+    val keyboardHeightScale: Int,
     val deleteSpeed: String,
     val keySoundEnabled: Boolean,
     val keySoundVolume: Int,
@@ -139,9 +140,16 @@ data class KeytaoAndroidImeConfig(
 ) {
     val effectiveKeyboardHeightDp: Float
         get() {
-            if (!numberRowEnabled || rows.isEmpty()) return keyboardHeightDp.toFloat()
-            return keyboardHeightDp * (rows.size + 1f) / rows.size
+            val baseHeight = if (!numberRowEnabled || rows.isEmpty()) {
+                keyboardHeightDp.toFloat()
+            } else {
+                keyboardHeightDp * (rows.size + 1f) / rows.size
+            }
+            return baseHeight * keyboardHeightScaleFactor
         }
+
+    val keyboardHeightScaleFactor: Float
+        get() = keyboardHeightScale / 100f
 
     fun rowsForLayer(layer: String): List<List<KeySpec>> {
         return when (layer) {
@@ -206,6 +214,10 @@ data class KeytaoAndroidImeConfig(
 
     companion object {
         private const val minOneHandedScale = 0.78f
+        private const val keyboardHeightScaleMin = 85
+        private const val keyboardHeightScaleMax = 130
+        private const val keyboardHeightScaleStep = 5
+        private const val keyboardHeightScaleDefault = 100
         private const val keyboardSeedFileName = ".keyboard.seed"
         private val legacyDefaultKeyboardHashes = setOf(
             "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
@@ -340,6 +352,7 @@ data class KeytaoAndroidImeConfig(
                     KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MIN_MS,
                     KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MAX_MS,
                 ),
+                keyboardHeightScale = mergedKeyboardHeightScale(root, fallbackRoot),
                 deleteSpeed = normalizeDeleteSpeed(mergedString(root, fallbackRoot, "deleteSpeed", "standard")),
                 keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
                 keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
@@ -416,6 +429,29 @@ data class KeytaoAndroidImeConfig(
             return ratio.toFloat().coerceIn(minimumScale, 1f)
         }
 
+        private fun mergedKeyboardHeightScale(root: JSONObject, fallbackRoot: JSONObject?): Int {
+            val value = when {
+                root.has("keyboardHeightScale") -> root.opt("keyboardHeightScale")
+                fallbackRoot?.has("keyboardHeightScale") == true -> fallbackRoot.opt("keyboardHeightScale")
+                else -> null
+            }
+            return normalizeKeyboardHeightScale(value)
+        }
+
+        private fun normalizeKeyboardHeightScale(value: Any?): Int {
+            val numericValue = (value as? Number)?.toDouble() ?: return keyboardHeightScaleDefault
+            return if (
+                numericValue.isFinite() &&
+                numericValue >= keyboardHeightScaleMin &&
+                numericValue <= keyboardHeightScaleMax &&
+                numericValue % keyboardHeightScaleStep == 0.0
+            ) {
+                numericValue.toInt()
+            } else {
+                keyboardHeightScaleDefault
+            }
+        }
+
         private fun applyRuntimeSettings(
             config: KeytaoAndroidImeConfig,
             runtimeRoot: JSONObject?,
@@ -451,6 +487,11 @@ data class KeytaoAndroidImeConfig(
                     )
                 } else {
                     config.longPressDelayMs
+                },
+                keyboardHeightScale = if (runtimeRoot.has("keyboardHeightScale")) {
+                    normalizeKeyboardHeightScale(runtimeRoot.opt("keyboardHeightScale"))
+                } else {
+                    config.keyboardHeightScale
                 },
                 deleteSpeed = if (runtimeRoot.has("deleteSpeed")) {
                     normalizeDeleteSpeed(runtimeRoot.optString("deleteSpeed"))

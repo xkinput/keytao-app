@@ -269,6 +269,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     func update(config: KeyTaoIOSImeConfig) {
+        if self.config.keyboardHeightScale != config.keyboardHeightScale {
+            clearActiveTouches()
+            keyRects = []
+        }
         self.config = config
         if !config.hapticsEnabled {
             hapticsAccessMessageShown = false
@@ -4492,7 +4496,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func keyboardMaxKeyHeight() -> CGFloat {
-        config.maxKeyHeightDp
+        config.maxKeyHeightDp * config.keyboardHeightScaleFactor
     }
 
     private func candidateTextSize() -> CGFloat {

@@ -239,6 +239,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var enterKeyBehavior: String
     public var keyPreviewEnabled: Bool
     public var longPressDelayMs: Int
+    public var keyboardHeightScale: Int
     public var deleteSpeed: String
     public var keySoundEnabled: Bool
     public var keySoundVolume: Int
@@ -258,10 +259,17 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var customRows: [String: [[KeyTaoKeySpec]]]
 
     public var effectiveKeyboardHeightDp: CGFloat {
-        guard numberRowEnabled, !rows.isEmpty else {
-            return keyboardHeightDp
+        let baseHeight: CGFloat
+        if numberRowEnabled, !rows.isEmpty {
+            baseHeight = keyboardHeightDp * CGFloat(rows.count + 1) / CGFloat(rows.count)
+        } else {
+            baseHeight = keyboardHeightDp
         }
-        return keyboardHeightDp * CGFloat(rows.count + 1) / CGFloat(rows.count)
+        return baseHeight * keyboardHeightScaleFactor
+    }
+
+    public var keyboardHeightScaleFactor: CGFloat {
+        CGFloat(keyboardHeightScale) / 100
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -281,6 +289,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case enterKeyBehavior
         case keyPreviewEnabled
         case longPressDelayMs
+        case keyboardHeightScale
         case deleteSpeed
         case keySoundEnabled
         case keySoundVolume
@@ -320,6 +329,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         enterKeyBehavior: String = KeyTaoEnterKeyBehavior.system,
         keyPreviewEnabled: Bool = true,
         longPressDelayMs: Int = KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
+        keyboardHeightScale: Int = 100,
         deleteSpeed: String = KeyTaoDeleteSpeed.standard.rawValue,
         keySoundEnabled: Bool = true,
         keySoundVolume: Int = 100,
@@ -354,6 +364,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
             max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
         )
+        self.keyboardHeightScale = Self.normalizeKeyboardHeightScale(keyboardHeightScale)
         self.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
         self.keySoundEnabled = keySoundEnabled
         self.keySoundVolume = Self.clampInt(keySoundVolume, min: 0, max: 100)
@@ -439,6 +450,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             (try? container.decode(Int.self, forKey: .longPressDelayMs)) ?? Self.fallback.longPressDelayMs,
             min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
             max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
+        )
+        self.keyboardHeightScale = Self.normalizeKeyboardHeightScale(
+            (try? container.decode(Int.self, forKey: .keyboardHeightScale)) ?? Self.fallback.keyboardHeightScale
         )
         self.deleteSpeed = KeyTaoDeleteSpeed(
             setting: try? container.decode(String.self, forKey: .deleteSpeed)
@@ -551,6 +565,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(enterKeyBehavior, forKey: .enterKeyBehavior)
         try container.encode(keyPreviewEnabled, forKey: .keyPreviewEnabled)
         try container.encode(longPressDelayMs, forKey: .longPressDelayMs)
+        try container.encode(keyboardHeightScale, forKey: .keyboardHeightScale)
         try container.encode(deleteSpeed, forKey: .deleteSpeed)
         try container.encode(keySoundEnabled, forKey: .keySoundEnabled)
         try container.encode(keySoundVolume, forKey: .keySoundVolume)
@@ -598,6 +613,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             enterKeyBehavior: Self.fallback.enterKeyBehavior,
             keyPreviewEnabled: Self.fallback.keyPreviewEnabled,
             longPressDelayMs: Self.fallback.longPressDelayMs,
+            keyboardHeightScale: Self.fallback.keyboardHeightScale,
             deleteSpeed: Self.fallback.deleteSpeed,
             keySoundEnabled: Self.fallback.keySoundEnabled,
             keySoundVolume: Self.fallback.keySoundVolume,
@@ -663,6 +679,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 min: KeyTaoIMEInteractionTuning.longPressDelayMinMs,
                 max: KeyTaoIMEInteractionTuning.longPressDelayMaxMs
             )
+        }
+        if let keyboardHeightScale = runtime.keyboardHeightScale {
+            next.keyboardHeightScale = Self.normalizeKeyboardHeightScale(keyboardHeightScale)
         }
         if let deleteSpeed = runtime.deleteSpeed {
             next.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
@@ -786,6 +805,20 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         Swift.min(Swift.max(value, minimum), maximum)
     }
 
+    private static let keyboardHeightScaleMin = 85
+    private static let keyboardHeightScaleMax = 130
+    private static let keyboardHeightScaleStep = 5
+    private static let keyboardHeightScaleDefault = 100
+
+    private static func normalizeKeyboardHeightScale(_ value: Int) -> Int {
+        guard value >= keyboardHeightScaleMin,
+              value <= keyboardHeightScaleMax,
+              value % keyboardHeightScaleStep == 0 else {
+            return keyboardHeightScaleDefault
+        }
+        return value
+    }
+
     public static let fallback = KeyTaoIOSImeConfig(
         keyboardHeightDp: 266,
         candidateBarHeightDp: 52,
@@ -800,6 +833,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         enterKeyBehavior: KeyTaoEnterKeyBehavior.system,
         keyPreviewEnabled: true,
         longPressDelayMs: KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
+        keyboardHeightScale: 100,
         deleteSpeed: KeyTaoDeleteSpeed.standard.rawValue,
         keySoundEnabled: true,
         keySoundVolume: 100,
@@ -928,6 +962,7 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var enterKeyBehavior: String?
     var keyPreviewEnabled: Bool?
     var longPressDelayMs: Int?
+    var keyboardHeightScale: Int?
     var deleteSpeed: String?
     var keyboardHeightDp: CGFloat?
     var candidateBarHeightDp: CGFloat?

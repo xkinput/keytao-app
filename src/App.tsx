@@ -289,6 +289,7 @@ interface AndroidImeInputSettings {
   enterKeyBehavior: EnterKeyBehavior
   keyPreviewEnabled: boolean
   longPressDelayMs: number
+  keyboardHeightScale: number
   deleteSpeed: MobileImeDeleteSpeed
   keyboardHeightDp: number
   candidateBarHeightDp: number
@@ -441,6 +442,7 @@ export default function App() {
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
   const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
   const [longPressDelayDraft, setLongPressDelayDraft] = useState<number | null>(null)
+  const [keyboardHeightScaleDraft, setKeyboardHeightScaleDraft] = useState<number | null>(null)
   const [keyboardHeightDraft, setKeyboardHeightDraft] = useState<number | null>(null)
   const [candidateBarHeightDraft, setCandidateBarHeightDraft] = useState<number | null>(null)
   const [swipeThresholdDraft, setSwipeThresholdDraft] = useState<number | null>(null)
@@ -698,6 +700,10 @@ export default function App() {
   }, [androidImeInputSettings?.longPressDelayMs])
 
   useEffect(() => {
+    setKeyboardHeightScaleDraft(null)
+  }, [androidImeInputSettings?.keyboardHeightScale])
+
+  useEffect(() => {
     setKeyboardHeightDraft(null)
     setCandidateBarHeightDraft(null)
     setSwipeThresholdDraft(null)
@@ -790,6 +796,7 @@ export default function App() {
   const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
   const keyPreviewEnabled = androidImeInputSettings?.keyPreviewEnabled ?? true
   const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
+  const keyboardHeightScale = keyboardHeightScaleDraft ?? androidImeInputSettings?.keyboardHeightScale ?? 100
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
   const keyboardHeightDp = keyboardHeightDraft ?? androidImeInputSettings?.keyboardHeightDp ?? 266
   const candidateBarHeightDp = candidateBarHeightDraft ?? androidImeInputSettings?.candidateBarHeightDp ?? 52
@@ -1124,6 +1131,7 @@ export default function App() {
         | "enterKeyBehavior"
         | "keyPreviewEnabled"
         | "longPressDelayMs"
+        | "keyboardHeightScale"
         | "deleteSpeed"
         | "keyboardHeightDp"
         | "candidateBarHeightDp"
@@ -1149,6 +1157,7 @@ export default function App() {
       enterKeyBehavior: androidImeInputSettings?.enterKeyBehavior ?? ("system" as EnterKeyBehavior),
       keyPreviewEnabled: androidImeInputSettings?.keyPreviewEnabled ?? true,
       longPressDelayMs: androidImeInputSettings?.longPressDelayMs ?? 300,
+      keyboardHeightScale: androidImeInputSettings?.keyboardHeightScale ?? 100,
       deleteSpeed: androidImeInputSettings?.deleteSpeed ?? ("standard" as MobileImeDeleteSpeed),
       keyboardHeightDp: androidImeInputSettings?.keyboardHeightDp ?? 266,
       candidateBarHeightDp: androidImeInputSettings?.candidateBarHeightDp ?? 52,
@@ -1170,6 +1179,7 @@ export default function App() {
       ...patch,
       hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
       longPressDelayMs: Math.round(patch.longPressDelayMs ?? current.longPressDelayMs),
+      keyboardHeightScale: Math.round(patch.keyboardHeightScale ?? current.keyboardHeightScale),
       keyboardHeightDp: Math.round(patch.keyboardHeightDp ?? current.keyboardHeightDp),
       candidateBarHeightDp: Math.round(patch.candidateBarHeightDp ?? current.candidateBarHeightDp),
       swipeThresholdDp: Math.round(patch.swipeThresholdDp ?? current.swipeThresholdDp),
@@ -1181,6 +1191,11 @@ export default function App() {
     next.enterKeyBehavior = next.enterKeyBehavior === "newline" ? "newline" : "system"
     next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
     next.longPressDelayMs = Math.min(700, Math.max(100, next.longPressDelayMs))
+    next.keyboardHeightScale = next.keyboardHeightScale >= 85 &&
+      next.keyboardHeightScale <= 130 &&
+      next.keyboardHeightScale % 5 === 0
+      ? next.keyboardHeightScale
+      : 100
     next.deleteSpeed = ["slow", "standard", "fast"].includes(next.deleteSpeed) ? next.deleteSpeed : "standard"
     next.keyboardHeightDp = Math.min(420, Math.max(160, next.keyboardHeightDp))
     next.candidateBarHeightDp = Math.min(96, Math.max(36, next.candidateBarHeightDp))
@@ -1196,6 +1211,7 @@ export default function App() {
       next.enterKeyBehavior === androidImeInputSettings.enterKeyBehavior &&
       next.keyPreviewEnabled === androidImeInputSettings.keyPreviewEnabled &&
       next.longPressDelayMs === androidImeInputSettings.longPressDelayMs &&
+      next.keyboardHeightScale === androidImeInputSettings.keyboardHeightScale &&
       next.deleteSpeed === androidImeInputSettings.deleteSpeed &&
       next.keyboardHeightDp === androidImeInputSettings.keyboardHeightDp &&
       next.candidateBarHeightDp === androidImeInputSettings.candidateBarHeightDp &&
@@ -1236,6 +1252,10 @@ export default function App() {
     void handleUpdateAndroidImeInputSettings({ longPressDelayMs: value })
   }
 
+  function commitKeyboardHeightScale(value: number) {
+    void handleUpdateAndroidImeInputSettings({ keyboardHeightScale: value })
+  }
+
   function commitMobileImeSetting(
     patch: Parameters<typeof handleUpdateAndroidImeInputSettings>[0],
     clearDraft?: () => void,
@@ -1250,6 +1270,7 @@ export default function App() {
       enterKeyBehavior: "system",
       keyPreviewEnabled: true,
       longPressDelayMs: 300,
+      keyboardHeightScale: 100,
       deleteSpeed: "standard",
       keyboardHeightDp: 266,
       candidateBarHeightDp: 52,
@@ -2073,6 +2094,25 @@ export default function App() {
                       onValueCommit={([value]) => commitLongPressDelay(value)}
                       disabled={isSavingAndroidImeInputSettings}
                       aria-label="长按延迟"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="text-muted-foreground">键盘高度</span>
+                      </div>
+                      <span className="font-mono text-muted-foreground">{keyboardHeightScale}%</span>
+                    </div>
+                    <Slider
+                      min={85}
+                      max={130}
+                      step={5}
+                      value={[keyboardHeightScale]}
+                      onValueChange={([value]) => setKeyboardHeightScaleDraft(value)}
+                      onValueCommit={([value]) => commitKeyboardHeightScale(value)}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="键盘高度"
                     />
                   </div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">

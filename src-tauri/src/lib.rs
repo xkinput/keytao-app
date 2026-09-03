@@ -3868,6 +3868,7 @@ pub struct AndroidImeInputSettings {
     pub enter_key_behavior: String,
     pub key_preview_enabled: bool,
     pub long_press_delay_ms: u16,
+    pub keyboard_height_scale: u8,
     pub delete_speed: String,
     pub keyboard_height_dp: u16,
     pub candidate_bar_height_dp: u8,
@@ -4926,6 +4927,14 @@ fn normalize_mobile_ime_delete_speed(value: Option<&str>) -> String {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalize_mobile_ime_keyboard_height_scale(value: Option<u64>) -> u8 {
+    match value {
+        Some(value) if (85..=130).contains(&value) && value % 5 == 0 => value as u8,
+        _ => 100,
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn android_ime_haptics_settings_from_config(
     root: &Path,
     message: String,
@@ -4966,6 +4975,18 @@ fn android_ime_haptics_settings_from_config(
         .and_then(|value| value.as_u64())
         .unwrap_or(300)
         .clamp(100, 700) as u16;
+    let keyboard_height_scale = normalize_mobile_ime_keyboard_height_scale(
+        config
+            .get("keyboardHeightScale")
+            .and_then(|value| {
+                value.as_u64().or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|value| value.fract() == 0.0)
+                        .map(|value| value as u64)
+                })
+            }),
+    );
     let delete_speed = normalize_mobile_ime_delete_speed(
         config.get("deleteSpeed").and_then(|value| value.as_str()),
     );
@@ -5055,6 +5076,7 @@ fn android_ime_haptics_settings_from_config(
         enter_key_behavior,
         key_preview_enabled,
         long_press_delay_ms,
+        keyboard_height_scale,
         delete_speed,
         keyboard_height_dp,
         candidate_bar_height_dp,
@@ -5127,6 +5149,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     enter_key_behavior: String,
     key_preview_enabled: bool,
     long_press_delay_ms: u16,
+    keyboard_height_scale: u8,
     delete_speed: String,
     keyboard_height_dp: u16,
     candidate_bar_height_dp: u8,
@@ -5177,6 +5200,12 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         config.insert(
             "longPressDelayMs".into(),
             serde_json::Value::from(long_press_delay_ms.clamp(100, 700)),
+        );
+        config.insert(
+            "keyboardHeightScale".into(),
+            serde_json::Value::from(normalize_mobile_ime_keyboard_height_scale(Some(
+                keyboard_height_scale.into(),
+            ))),
         );
         config.insert(
             "deleteSpeed".into(),
@@ -5293,6 +5322,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         let _ = enter_key_behavior;
         let _ = key_preview_enabled;
         let _ = long_press_delay_ms;
+        let _ = keyboard_height_scale;
         let _ = delete_speed;
         let _ = floating_portrait_enabled;
         let _ = floating_portrait_scale;
