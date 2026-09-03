@@ -124,12 +124,25 @@ data class KeytaoAndroidImeConfig(
     val keyPreviewEnabled: Boolean,
     val longPressDelayMs: Long,
     val deleteSpeed: String,
+    val keySoundEnabled: Boolean,
+    val keySoundVolume: Int,
+    val keyHintVisible: Boolean,
+    val flickKeysEnabled: Boolean,
+    val numberRowEnabled: Boolean,
+    val candidateFontScale: Float,
+    val doubleSpacePeriodEnabled: Boolean,
     val swipeThresholdDp: Float,
     val rows: List<List<KeySpec>>,
     val numberRows: List<List<KeySpec>>,
     val symbolRows: List<List<KeySpec>>,
     val customRows: Map<String, List<List<KeySpec>>> = emptyMap(),
 ) {
+    val effectiveKeyboardHeightDp: Float
+        get() {
+            if (!numberRowEnabled || rows.isEmpty()) return keyboardHeightDp.toFloat()
+            return keyboardHeightDp * (rows.size + 1f) / rows.size
+        }
+
     fun rowsForLayer(layer: String): List<List<KeySpec>> {
         return when (layer) {
             "numbers" -> numberRows
@@ -328,6 +341,15 @@ data class KeytaoAndroidImeConfig(
                     KeytaoImeInteractionTuning.LONG_PRESS_DELAY_MAX_MS,
                 ),
                 deleteSpeed = normalizeDeleteSpeed(mergedString(root, fallbackRoot, "deleteSpeed", "standard")),
+                keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
+                keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
+                keyHintVisible = mergedBoolean(root, fallbackRoot, "keyHintVisible", true),
+                flickKeysEnabled = mergedBoolean(root, fallbackRoot, "flickKeysEnabled", true),
+                numberRowEnabled = mergedBoolean(root, fallbackRoot, "numberRowEnabled", false),
+                candidateFontScale = mergedDouble(root, fallbackRoot, "candidateFontScale", 1.0)
+                    .toFloat()
+                    .coerceIn(0.8f, 1.4f),
+                doubleSpacePeriodEnabled = mergedBoolean(root, fallbackRoot, "doubleSpacePeriodEnabled", true),
                 swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
@@ -434,6 +456,60 @@ data class KeytaoAndroidImeConfig(
                     normalizeDeleteSpeed(runtimeRoot.optString("deleteSpeed"))
                 } else {
                     config.deleteSpeed
+                },
+                keyboardHeightDp = if (runtimeRoot.has("keyboardHeightDp")) {
+                    runtimeRoot.optInt("keyboardHeightDp", config.keyboardHeightDp).coerceIn(160, 420)
+                } else {
+                    config.keyboardHeightDp
+                },
+                candidateBarHeightDp = if (runtimeRoot.has("candidateBarHeightDp")) {
+                    runtimeRoot.optInt("candidateBarHeightDp", config.candidateBarHeightDp).coerceIn(36, 96)
+                } else {
+                    config.candidateBarHeightDp
+                },
+                swipeThresholdDp = if (runtimeRoot.has("swipeThresholdDp")) {
+                    runtimeRoot.optDouble("swipeThresholdDp", config.swipeThresholdDp.toDouble())
+                        .toFloat()
+                        .coerceIn(12f, 96f)
+                } else {
+                    config.swipeThresholdDp
+                },
+                keySoundEnabled = if (runtimeRoot.has("keySoundEnabled")) {
+                    runtimeRoot.optBoolean("keySoundEnabled", config.keySoundEnabled)
+                } else {
+                    config.keySoundEnabled
+                },
+                keySoundVolume = if (runtimeRoot.has("keySoundVolume")) {
+                    runtimeRoot.optInt("keySoundVolume", config.keySoundVolume).coerceIn(0, 100)
+                } else {
+                    config.keySoundVolume
+                },
+                keyHintVisible = if (runtimeRoot.has("keyHintVisible")) {
+                    runtimeRoot.optBoolean("keyHintVisible", config.keyHintVisible)
+                } else {
+                    config.keyHintVisible
+                },
+                flickKeysEnabled = if (runtimeRoot.has("flickKeysEnabled")) {
+                    runtimeRoot.optBoolean("flickKeysEnabled", config.flickKeysEnabled)
+                } else {
+                    config.flickKeysEnabled
+                },
+                numberRowEnabled = if (runtimeRoot.has("numberRowEnabled")) {
+                    runtimeRoot.optBoolean("numberRowEnabled", config.numberRowEnabled)
+                } else {
+                    config.numberRowEnabled
+                },
+                candidateFontScale = if (runtimeRoot.has("candidateFontScale")) {
+                    runtimeRoot.optDouble("candidateFontScale", config.candidateFontScale.toDouble())
+                        .toFloat()
+                        .coerceIn(0.8f, 1.4f)
+                } else {
+                    config.candidateFontScale
+                },
+                doubleSpacePeriodEnabled = if (runtimeRoot.has("doubleSpacePeriodEnabled")) {
+                    runtimeRoot.optBoolean("doubleSpacePeriodEnabled", config.doubleSpacePeriodEnabled)
+                } else {
+                    config.doubleSpacePeriodEnabled
                 },
                 floating = config.floating.copy(
                     marginDp = floating?.optDouble("margin", config.floating.marginDp.toDouble())

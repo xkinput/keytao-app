@@ -110,6 +110,11 @@ object KeytaoNativeBridge {
         )
     }
 
+    fun candidateIsUserPhrase(session: Long, index: Int): Boolean {
+        return loaded && session != 0L &&
+            runCatching { nativeCandidateIsUserPhrase(session, index) }.getOrDefault(false)
+    }
+
     fun selectCandidateGlobal(session: Long, index: Int): KeytaoImeState? {
         if (!loaded || session == 0L) return null
         return KeytaoImeState.fromJson(
@@ -127,6 +132,13 @@ object KeytaoNativeBridge {
     fun listSchemas(session: Long): List<KeytaoRimeSchema> {
         if (!loaded || session == 0L) return emptyList()
         return KeytaoRimeSchema.parseArray(runCatching { nativeListSchemas(session) }.getOrNull())
+    }
+
+    fun schemaSwitches(session: Long): List<KeytaoRimeSchemaSwitch> {
+        if (!loaded || session == 0L) return emptyList()
+        return KeytaoRimeSchemaSwitch.parseArray(
+            runCatching { nativeSchemaSwitches(session) }.getOrNull()
+        )
     }
 
     fun currentSchema(session: Long): KeytaoRimeSchema? {
@@ -289,11 +301,15 @@ object KeytaoNativeBridge {
 
     external fun nativeDeleteCandidate(session: Long, index: Int): String?
 
+    external fun nativeCandidateIsUserPhrase(session: Long, index: Int): Boolean
+
     external fun nativeSelectCandidateGlobal(session: Long, index: Int): String?
 
     external fun nativeAllCandidates(session: Long, limit: Int): String?
 
     external fun nativeListSchemas(session: Long): String?
+
+    external fun nativeSchemaSwitches(session: Long): String?
 
     external fun nativeCurrentSchema(session: Long): String?
 
@@ -363,6 +379,58 @@ data class KeytaoRimeSchema(
                 id = id,
                 name = root.optString("name").trim().ifEmpty { id },
             )
+        }
+    }
+}
+
+data class KeytaoRimeSchemaSwitch(
+    val name: String?,
+    val options: List<String>,
+    val states: List<String>,
+    val reset: Int?,
+) {
+    val optionNames: List<String>
+        get() = options.ifEmpty { listOfNotNull(name) }
+
+    companion object {
+        fun parseArray(json: String?): List<KeytaoRimeSchemaSwitch> {
+            if (json.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val array = JSONArray(json)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val root = array.optJSONObject(index) ?: continue
+                        val name = if (root.has("name") && !root.isNull("name")) {
+                            root.optString("name").trim().takeIf(String::isNotEmpty)
+                        } else {
+                            null
+                        }
+                        val options = root.stringList("options")
+                        if (name == null && options.isEmpty()) continue
+                        add(
+                            KeytaoRimeSchemaSwitch(
+                                name = name,
+                                options = options,
+                                states = root.stringList("states"),
+                                reset = if (root.has("reset") && !root.isNull("reset")) {
+                                    root.optInt("reset")
+                                } else {
+                                    null
+                                },
+                            )
+                        )
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        private fun JSONObject.stringList(name: String): List<String> {
+            val values = optJSONArray(name) ?: return emptyList()
+            return buildList {
+                for (index in 0 until values.length()) {
+                    values.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
+                }
+            }
         }
     }
 }

@@ -30,11 +30,14 @@ internal object KeytaoImeInteractionTuning {
     const val LONG_PRESS_DELAY_DEFAULT_MS = 300L
     const val LONG_PRESS_DELAY_MAX_MS = 700L
     const val SLIDE_RETARGET_HYSTERESIS_DP = 8f
+    const val TOUCH_NOISE_THRESHOLD_MS = 40L
+    const val TOUCH_NOISE_THRESHOLD_DISTANCE_DP = 12.6f
+    const val KEYBOARD_DISMISS_VELOCITY_DP_PER_SECOND = 600f
     const val BACKSPACE_HOLD_TOLERANCE_DP = 8f
     const val CURSOR_GESTURE_ACTIVATION_DP = 12.6f
     const val CURSOR_GESTURE_STEP_DP = 10f
     const val CANDIDATE_DRAG_SLOP_DP = 8f
-    const val CANDIDATE_TOOLBAR_TOGGLE_WIDTH_DP = 28f
+    const val DOUBLE_SPACE_PERIOD_TIMEOUT_MS = 1_100L
     const val REPEATABLE_EDIT_INTERVAL_MS = 72L
 
     private val slowBackspace = BackspaceRepeatProfile(
@@ -58,6 +61,51 @@ internal object KeytaoImeInteractionTuning {
         DeleteSpeed.STANDARD -> standardBackspace
         DeleteSpeed.FAST -> fastBackspace
     }
+
+    fun shouldDiscardTouch(durationMs: Long, distanceDp: Float): Boolean {
+        return durationMs < TOUCH_NOISE_THRESHOLD_MS &&
+            distanceDp < TOUCH_NOISE_THRESHOLD_DISTANCE_DP
+    }
+}
+
+internal class DoubleSpacePeriodTracker(
+    private val timeoutMs: Long = KeytaoImeInteractionTuning.DOUBLE_SPACE_PERIOD_TIMEOUT_MS,
+) {
+    private var lastEligibleSpaceTimeMs: Long? = null
+
+    fun shouldReplaceSpace(
+        nowMs: Long,
+        contextBefore: String,
+        enabled: Boolean,
+        hasComposition: Boolean,
+    ): Boolean {
+        if (!enabled || hasComposition) {
+            reset()
+            return false
+        }
+        val previousTime = lastEligibleSpaceTimeMs
+        val canReplace = previousTime != null &&
+            nowMs - previousTime in 0..timeoutMs &&
+            contextBefore.endsWith(" ") &&
+            hasDoubleSpaceEligibleSuffix(contextBefore.dropLast(1))
+        if (canReplace) {
+            reset()
+            return true
+        }
+        lastEligibleSpaceTimeMs = nowMs.takeIf { hasDoubleSpaceEligibleSuffix(contextBefore) }
+        return false
+    }
+
+    fun reset() {
+        lastEligibleSpaceTimeMs = null
+    }
+}
+
+private fun hasDoubleSpaceEligibleSuffix(text: String): Boolean {
+    if (text.isEmpty()) return false
+    val codePoint = text.codePointBefore(text.length)
+    if (Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)) return false
+    return Character.getType(codePoint) !in punctuationTypes
 }
 
 internal data class CursorGestureUpdate(

@@ -95,6 +95,13 @@ class KeytaoAndroidImeConfigTest {
               "keyPreviewEnabled": false,
               "longPressDelayMs": 900,
               "deleteSpeed": "fast",
+              "keySoundEnabled": false,
+              "keySoundVolume": 120,
+              "keyHintVisible": false,
+              "flickKeysEnabled": false,
+              "numberRowEnabled": true,
+              "candidateFontScale": 1.8,
+              "doubleSpacePeriodEnabled": false,
               "rows": [[{
                 "label": "，",
                 "value": "，",
@@ -115,6 +122,14 @@ class KeytaoAndroidImeConfigTest {
         assertEquals(false, config.keyPreviewEnabled)
         assertEquals(700L, config.longPressDelayMs)
         assertEquals("fast", config.deleteSpeed)
+        assertEquals(false, config.keySoundEnabled)
+        assertEquals(100, config.keySoundVolume)
+        assertEquals(false, config.keyHintVisible)
+        assertEquals(false, config.flickKeysEnabled)
+        assertEquals(true, config.numberRowEnabled)
+        assertEquals(1.4f, config.candidateFontScale)
+        assertEquals(false, config.doubleSpacePeriodEnabled)
+        assertEquals(config.keyboardHeightDp * 2f, config.effectiveKeyboardHeightDp)
         assertEquals(listOf("！", "？", "、"), key.alternates.map { it.label })
         assertEquals(KeyCommandTypes.DIRECT_INPUT, key.alternates[1].action.type)
         assertEquals(KeyCommandTypes.RIME_INPUT, key.alternates[2].action.type)

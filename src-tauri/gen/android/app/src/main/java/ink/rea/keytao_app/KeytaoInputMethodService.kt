@@ -83,7 +83,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     // having installed a schema.
     private var unavailableMessage = preparingMessage
     private val backspaceRestoreStack = mutableListOf<String>()
+    private var backspaceGestureRestoreStart = 0
     private val recentCommittedUnits = mutableListOf<String>()
+    private val doubleSpacePeriodTracker = DoubleSpacePeriodTracker()
     private var lastCommittedText: String? = null
     private var restoreAllOnNextDirectionalRestore = false
     private var privacyMode = InputPrivacyMode()
@@ -174,6 +176,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false
         recentCommittedUnits.clear()
+        doubleSpacePeriodTracker.reset()
         lastCommittedText = null
         keyboardView?.updateState(currentState)
         scheduleAvailabilityRefresh()
@@ -250,6 +253,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ),
             requestedLayer = KeytaoEditorPolicy.resolveInitialLayer(inputType),
         )
+        keyboardView?.updateEmojiHistoryLearningAllowed(privacyMode.allowsLearning)
         Log.d(
             "KeytaoIme",
             "editor pkg=${currentInputEditorInfo?.packageName} " +
@@ -411,7 +415,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun normalKeyboardHeightDp(config: KeytaoAndroidImeConfig): Float {
-        return (config.keyboardHeightDp + config.candidateBarHeightDp + androidBottomInsetDp(config)).toFloat()
+        return config.effectiveKeyboardHeightDp + config.candidateBarHeightDp + androidBottomInsetDp(config)
     }
 
     /**
@@ -521,7 +525,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeyCommandTypes.RIME_SCHEMA -> selectRimeSchema(command.value.orEmpty())
             KeyCommandTypes.RIME_OPTION -> setRimeOption(
                 command.value.orEmpty(),
-                command.fallbackValue?.toBooleanStrictOrNull(),
+                command.fallbackValue,
             )
             KeyCommandTypes.EDIT -> handleEditAction(command.value.orEmpty(), command.fallbackValue)
             KeyCommandTypes.ONE_HANDED -> toggleOneHandedKeyboard()
@@ -542,6 +546,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 engine.selectCandidate(index)
             }
         )
+    }
+
+    override fun onCandidateIsUserPhrase(index: Int): Boolean {
+        return inputAvailable && engine.candidateIsUserPhrase(index)
+    }
+
+    override fun onDeleteCandidate(index: Int): Boolean {
+        if (!inputAvailable) {
+            showUnavailableMessage()
+            return false
+        }
+        val (state, deleted) = engine.deleteCandidate(index)
+        applyState(state)
+        keyboardView?.showMessage(if (deleted) "已删除用户词" else "系统词不可删除")
+        return deleted
+    }
+
+    override fun onDismissKeyboard() {
+        requestHideSelf(0)
     }
 
     override fun onRequestExpandCandidates(callback: (List<KeytaoCandidate>) -> Unit) {
@@ -681,12 +704,30 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ?.coerceIn(1, maxBackspaceGestureBatchCount)
             ?: 1
         when (action) {
+            "begin" -> backspaceGestureRestoreStart = backspaceRestoreStack.size
             "delete" -> deleteBeforeCursorForRestore(count)
             "deleteSegment" -> deleteTrailingSegmentBeforeCursorForRestore()
             "restore" -> restoreBackspaceText(count)
-            "deleteAll" -> deleteAllBeforeCursorForRestore()
-            "restoreAll" -> restoreAllBackspaceText()
+            "deleteAll" -> {
+                deleteAllBeforeCursorForRestore()
+                backspaceGestureRestoreStart = 0
+            }
+            "restoreAll" -> {
+                restoreAllBackspaceText()
+                backspaceGestureRestoreStart = 0
+            }
+            "restoreGesture" -> {
+                val gestureCount = (backspaceRestoreStack.size - backspaceGestureRestoreStart).coerceAtLeast(0)
+                if (gestureCount > 0) restoreBackspaceText(gestureCount)
+            }
         }
+        val preview = if (privacyMode.allowsTextRecall) {
+            val start = backspaceGestureRestoreStart.coerceIn(0, backspaceRestoreStack.size)
+            backspaceRestoreStack.subList(start, backspaceRestoreStack.size).asReversed().joinToString("")
+        } else {
+            ""
+        }
+        keyboardView?.showBackspaceDeletionPreview(preview)
     }
 
     private fun deleteTrailingSegmentBeforeCursorForRestore() {
@@ -863,9 +904,26 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun handleSpace() {
         if (currentState.hasComposition) {
+            doubleSpacePeriodTracker.reset()
             applyState(engine.processKey(AndroidKeyMapper.XK_SPACE, 0))
         } else {
-            commitDirect(" ")
+            val config = keyboardView?.currentConfig()
+            val contextBefore = currentInputConnection
+                ?.getTextBeforeCursor(64, 0)
+                ?.toString()
+                .orEmpty()
+            val replace = doubleSpacePeriodTracker.shouldReplaceSpace(
+                nowMs = SystemClock.uptimeMillis(),
+                contextBefore = contextBefore,
+                enabled = config?.doubleSpacePeriodEnabled ?: true,
+                hasComposition = false,
+            )
+            if (replace) {
+                deleteOneBeforeCursorForRestore(resetComposition = false)
+                commitDirect(if (currentState.asciiMode) ". " else "。")
+            } else {
+                commitDirect(" ")
+            }
         }
     }
 
@@ -941,12 +999,26 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         refreshRimeOptions()
     }
 
-    private fun setRimeOption(optionName: String, enabled: Boolean?) {
-        if (optionName.isBlank() || enabled == null) return
-        val state = if (optionName == "ascii_mode") {
-            engine.setAsciiMode(enabled)
+    private fun setRimeOption(optionName: String, action: String?) {
+        if (optionName.isBlank() || action == null) return
+        val enabled = action.toBooleanStrictOrNull()
+        val state = if (enabled != null) {
+            if (optionName == "ascii_mode") {
+                engine.setAsciiMode(enabled)
+            } else {
+                engine.setOption(optionName, enabled)
+            }
+        } else if (action.startsWith(rimeOptionChoicePrefix)) {
+            val previous = action.removePrefix(rimeOptionChoicePrefix)
+            if (previous.isNotEmpty() && previous != optionName) {
+                engine.setOption(previous, false) ?: run {
+                    keyboardView?.showMessage("无法更新 Rime 选项")
+                    return
+                }
+            }
+            engine.setOption(optionName, true)
         } else {
-            engine.setOption(optionName, enabled)
+            return
         }
         if (state == null) {
             keyboardView?.showMessage("无法更新 Rime 选项")
@@ -957,11 +1029,27 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun refreshRimeOptions() {
+        val switches = engine.schemaSwitches().toMutableList().apply {
+            if (none { it.name == "ascii_punct" }) {
+                add(
+                    KeytaoRimeSchemaSwitch(
+                        name = "ascii_punct",
+                        options = emptyList(),
+                        states = listOf("中文标点", "英文标点"),
+                        reset = null,
+                    )
+                )
+            }
+        }
         keyboardView?.updateRimeOptions(
             KeytaoRimeOptionsState(
                 schemas = engine.listSchemas(),
                 currentSchema = engine.currentSchema(),
-                options = rimeOptionNames.associateWith(engine::getOption),
+                switches = switches,
+                options = switches
+                    .flatMap { it.optionNames }
+                    .distinct()
+                    .associateWith(engine::getOption),
             )
         )
     }
@@ -1409,12 +1497,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val maxBackspaceGestureBatchCount = 96
         private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48
-        private val rimeOptionNames = listOf(
-            "ascii_mode",
-            "ascii_punct",
-            "full_shape",
-            "simplification",
-        )
+        private const val rimeOptionChoicePrefix = "choice:"
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

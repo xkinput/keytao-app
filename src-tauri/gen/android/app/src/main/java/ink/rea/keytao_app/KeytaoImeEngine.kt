@@ -16,10 +16,11 @@ enum class Readiness {
 data class KeytaoRimeOptionsState(
     val schemas: List<KeytaoRimeSchema>,
     val currentSchema: KeytaoRimeSchema?,
+    val switches: List<KeytaoRimeSchemaSwitch>,
     val options: Map<String, Boolean>,
 ) {
     companion object {
-        val EMPTY = KeytaoRimeOptionsState(emptyList(), null, emptyMap())
+        val EMPTY = KeytaoRimeOptionsState(emptyList(), null, emptyList(), emptyMap())
     }
 }
 
@@ -142,6 +143,21 @@ class KeytaoImeEngine(context: Context) {
     }
 
     @Synchronized
+    fun deleteCandidate(index: Int): Pair<KeytaoImeState, Boolean> {
+        val state = KeytaoNativeBridge.deleteCandidate(session, index)
+            ?.let { stableSchemaState(it) }
+            ?: return lastState.withoutTransientCommit() to false
+        val deleted = state.accepted
+        lastState = state.withoutTransientCommit()
+        return state to deleted
+    }
+
+    @Synchronized
+    fun candidateIsUserPhrase(index: Int): Boolean {
+        return KeytaoNativeBridge.candidateIsUserPhrase(session, index)
+    }
+
+    @Synchronized
     fun allCandidates(limit: Int): List<KeytaoCandidate> {
         if (!nativeReady || session == 0L) return emptyList()
         return KeytaoNativeBridge.allCandidates(session, limit)
@@ -151,6 +167,12 @@ class KeytaoImeEngine(context: Context) {
     fun listSchemas(): List<KeytaoRimeSchema> {
         if (!nativeReady || session == 0L) return emptyList()
         return KeytaoNativeBridge.listSchemas(session)
+    }
+
+    @Synchronized
+    fun schemaSwitches(): List<KeytaoRimeSchemaSwitch> {
+        if (!nativeReady || session == 0L) return emptyList()
+        return KeytaoNativeBridge.schemaSwitches(session)
     }
 
     @Synchronized

@@ -324,8 +324,8 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 - `keyboardMode`：切换移动端软键盘层，例如 `numbers` / `letters`。
 - `nextCandidatePage` / `previousCandidatePage`：调用 `changePage(false/true)`。
 - `reset`：调用 `reset()` 清当前 composition。
-- `rimeMenu`：读取当前方案和固定 Rime 选项，打开结构化设置页，不向 librime 发送 F4。
-- `rimeSchema` / `rimeOption`：直接调用 session 级方案选择或选项开关 API，并刷新结构化设置页。
+- `rimeMenu`：读取当前方案及其 schema `switches`，打开结构化设置页，不向 librime 发送 F4。
+- `rimeSchema` / `rimeOption`：直接调用 session 级方案选择或选项 API；布尔项切换实际 `name`，单选组依次关闭旧 option、开启下一项，然后刷新结构化设置页。
 - `panel`：Android 本地功能面板命令，例如 `rime` / `clipboard` / `close`；不进入 Rime。
 - `edit`：Android `InputConnection` 编辑命令，例如 `toggleSelection`、`selectLeft`、`selectRight`、`selectAll`、`copy`、`cut`、`paste`、`lineStart`、`lineEnd`、`tab`；不进入 Rime。
 
@@ -388,9 +388,9 @@ Android 自绘候选栏当前落成四层：
 2. JNI `nativeResolveThemeJson()` 返回 resolved theme JSON，`KeytaoTheme.kt` 映射到 Android 颜色、字号、padding、圆角。
 3. JNI state JSON 附带 `CandidatePanelModel`、`ModeHintModel`、`schemaName` 和 `pageSize`。其中候选 label、选中态、翻页能力和中英文案来自通用 `keytao-theme`；普通按键热路径不携带完整候选列表。
 4. 完整候选只在用户点击展开键时通过后台线程调用 `nativeAllCandidates()` 拉取，Rust 侧走 librime candidate iterator，避免每次输入都扫描全量候选，也避免点击展开阻塞 UI。
-5. `KeytaoKeyboardView` 只用 Android `Canvas` 绘制背景、候选、preedit fallback、键帽、hint 和模式提示。
+5. `KeytaoKeyboardView` 只用 Android `Canvas` 绘制背景、候选、键帽、hint 和模式提示。
 
-候选栏顺序参考 macOS 候选窗：只要 Rime 返回候选，就从左侧直接显示候选项，不把当前 preedit 字母放在第一位；只有没有候选但仍存在 preedit 时，才把 preedit 作为弱提示显示。选中候选使用主题色做 label、左侧强调条和选中边框点缀，避免整块面板只是一种浅色。
+候选栏顺序参考 macOS 候选窗：只要 Rime 返回候选，就从左侧直接显示候选项，不在前面放模式按钮或当前 preedit 字母；无候选时恢复完整功能工具栏。选中候选使用主题色做 label、左侧强调条和选中边框点缀，避免整块面板只是一种浅色。
 
 候选栏不是横向滚动条，而是“左侧最大可见候选 + 右侧固定展开键”。普通候选栏只消费 Rime 当前页候选，即最多是 schema/menu 配置里的 page size；`KeytaoKeyboardView` 按当前屏幕宽度测量候选 chip，能放下几个就显示几个，超出的候选不挤压右侧展开键。点击展开键后，输入法总高度不变：顶部候选栏保持，下面的键盘区域收起并替换为可上下滑动的候选网格。网格会先用当前页里首行放不下的剩余候选立即渲染，再异步补入完整候选；用户正在滚动时不重置滚动位置。
 
@@ -400,7 +400,7 @@ Android 自绘候选栏当前落成四层：
 
 空格键默认显示当前真实方案名。Rime 菜单打开时 status 可能临时报出 `.default` 这类内部 schema，Android engine 会保留最近一次非内部 schema 名作为显示名，避免空格键在菜单态闪成内部配置名。
 
-没有候选和 preedit 时，候选栏变成功能工具栏：左侧提供结构化 `Rime` 页、中英切换、输入法地球键、`选择`、`剪贴板`、`Emoji`，右侧显示 KeyTao logo。地球键点击切换到下一个输入法，长按打开系统输入法列表；`选择` 直接打开均匀 5×5 editor 键盘层；`Rime` 页按“输入方案”和“选项”分组，真实读取当前方案与 `ascii_mode`、`ascii_punct`、`full_shape`、`simplification` 状态。`剪贴板` 子页仍显示 Android 公开接口可读取的当前系统剪贴板和输入法会话内复制/剪切历史。符号页仍通过数字页 `#+=` 进入，符号页顶部工具栏显示 `中文` / `英文` tab，点击后通过 `setAsciiMode()` 同步 Rime 状态。
+没有候选时，候选栏变成功能工具栏：左侧提供结构化 `Rime` 页、中英切换、输入法地球键、`选择`、`剪贴板`、`Emoji`，右侧显示 KeyTao logo。地球键点击切换到下一个输入法，长按打开系统输入法列表；`选择` 直接打开均匀 5×5 editor 键盘层；`Rime` 页按“输入方案”和“选项”分组，选项从当前 schema 的 `switches` 动态读取并使用 schema 自带状态文案，无 switches 时显示空态。布尔项读取实际 option，单选组点击后循环切换，`ascii_mode` 仍通过 `setAsciiMode()` 更新。`剪贴板` 子页仍显示 Android 公开接口可读取的当前系统剪贴板和输入法会话内复制/剪切历史。符号页仍通过数字页 `#+=` 进入，符号页顶部工具栏显示 `中文` / `英文` tab，点击后通过 `setAsciiMode()` 同步 Rime 状态。
 
 可主题化范围：
 

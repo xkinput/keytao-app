@@ -37,6 +37,14 @@ class KeytaoImeInteractionPolicyTest {
     }
 
     @Test
+    fun `touch noise requires both dimensions to remain below the boundary`() {
+        assertEquals(true, KeytaoImeInteractionTuning.shouldDiscardTouch(39, 12.59f))
+        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(40, 12.59f))
+        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(39, 12.6f))
+        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(80, 1f))
+    }
+
+    @Test
     fun `alternate selection keeps the first item until the finger moves`() {
         val tracker = AlternateSelectionTracker(startX = 100f, movementThreshold = 8f)
 
@@ -44,5 +52,19 @@ class KeytaoImeInteractionPolicyTest {
         assertEquals(0, tracker.selectedIndex(106f, true, 20f, 40f, 4))
         assertEquals(1, tracker.selectedIndex(61f, true, 20f, 40f, 4))
         assertEquals(null, tracker.selectedIndex(61f, false, 20f, 40f, 4))
+    }
+
+    @Test
+    fun `double space period requires an eligible character and the exact window`() {
+        val tracker = DoubleSpacePeriodTracker()
+
+        assertEquals(false, tracker.shouldReplaceSpace(1_000, "字", enabled = true, hasComposition = false))
+        assertEquals(true, tracker.shouldReplaceSpace(2_100, "字 ", enabled = true, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(3_000, "字。", enabled = true, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(3_100, "字。 ", enabled = true, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(5_000, "word", enabled = true, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(6_101, "word ", enabled = true, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(7_000, "word", enabled = false, hasComposition = false))
+        assertEquals(false, tracker.shouldReplaceSpace(7_100, "word ", enabled = true, hasComposition = true))
     }
 }
