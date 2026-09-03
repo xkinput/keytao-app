@@ -188,6 +188,8 @@ struct KeytaoState *keytao_session_highlight_candidate(void *session, uint32_t i
  */
 struct KeytaoState *keytao_session_delete_candidate(void *session, uint32_t index);
 
+bool keytao_session_candidate_is_user_phrase(void *session, uint32_t index);
+
 /**
  * Flip to the next/previous candidate page in a per-client session.
  */
@@ -364,6 +366,8 @@ char *keytao_session_select_candidate_global_json(void *session, uint32_t index)
 char *keytao_session_all_candidates_json(void *session, uint32_t limit);
 
 char *keytao_session_list_schemas_json(void *session);
+
+char *keytao_session_schema_switches_json(void *session);
 
 char *keytao_session_current_schema_json(void *session);
 

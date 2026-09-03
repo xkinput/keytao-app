@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
     },
     time::Duration,
@@ -185,6 +185,14 @@ pub struct SchemaInfo {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaSwitch {
+    pub name: Option<String>,
+    pub options: Vec<String>,
+    pub states: Vec<String>,
+    pub reset: Option<i32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyProcessResult {
     pub state: ImeState,
@@ -312,12 +320,15 @@ mod desktop {
     use super::*;
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     use librime_sys::RimeFindModule;
-    use librime_sys::{rime_get_api, RimeApi, RimeCandidateListIterator, RimeTraits};
+    use librime_sys::{
+        rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
+        RimeLeversApi, RimeTraits, RimeUserDictIterator,
+    };
     use rime_api::{create_session, KeyEvent, KeyStatus};
     use std::cell::Cell;
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::mem::ManuallyDrop;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{LazyLock, Mutex, MutexGuard};
 
     /// librime makes no thread-safety promise: `Service` keeps its session map,
     /// `ConfigComponent` its config cache and `DictionaryComponent` its table and
@@ -410,7 +421,7 @@ mod desktop {
     // [`engine_capabilities`].
     #[cfg(all(test, not(target_os = "ios")))]
     mod api_member_tests {
-        use super::api_has_member;
+        use super::{active_user_dictionary_text, api_has_member};
         use librime_sys::RimeApi;
         use std::ffi::c_int;
         use std::mem::{offset_of, size_of};
@@ -430,6 +441,20 @@ mod desktop {
 
             assert!(!api_has_member(std::ptr::null(), 0));
         }
+
+        #[test]
+        fn user_dictionary_snapshot_excludes_deleted_tombstones() {
+            assert_eq!(
+                active_user_dictionary_text("你好\tni hao\t3"),
+                Some("你好".to_owned())
+            );
+            assert_eq!(active_user_dictionary_text("你好\tni hao\t-3"), None);
+            assert_eq!(
+                active_user_dictionary_text("ni hao \t你好\tc=3 d=1.5 t=8"),
+                Some("你好".to_owned())
+            );
+            assert_eq!(active_user_dictionary_text("#@/tick\t8"), None);
+        }
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -437,6 +462,8 @@ mod desktop {
         // Static/mobile librime builds keep plugin modules dormant until required.
         #[link_name = "_Z23rime_require_module_luav"]
         fn rime_require_module_lua();
+        #[link_name = "_Z26rime_require_module_leversv"]
+        fn rime_require_module_levers();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -461,11 +488,19 @@ mod desktop {
     }
 
     pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        let _rime = rime_api_lock();
-        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
-        if !*initialized {
-            initialize_rime(&user_data_dir, &shared_data_dir);
-            *initialized = true;
+        let initialized_now = {
+            let _rime = rime_api_lock();
+            let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+            if *initialized {
+                false
+            } else {
+                initialize_rime(&user_data_dir, &shared_data_dir);
+                *initialized = true;
+                true
+            }
+        };
+        if initialized_now {
+            initialize_user_dictionary_cache(Path::new(&user_data_dir));
         }
         Ok(())
     }
@@ -475,19 +510,23 @@ mod desktop {
     /// Only for callers that already drained every live engine — see
     /// [`crate::reinitialize`], the entry point that does.
     pub(crate) fn finalize_rime() -> Result<(), String> {
-        let _rime = rime_api_lock();
-        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
-        if !*initialized {
-            return Ok(());
+        {
+            let _rime = rime_api_lock();
+            let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+            if !*initialized {
+                clear_user_dictionary_cache();
+                return Ok(());
+            }
+            unsafe {
+                let api = rime_get_api();
+                let finalize = (*api)
+                    .finalize
+                    .ok_or("librime finalize API is unavailable")?;
+                finalize();
+            }
+            *initialized = false;
         }
-        unsafe {
-            let api = rime_get_api();
-            let finalize = (*api)
-                .finalize
-                .ok_or("librime finalize API is unavailable")?;
-            finalize();
-        }
-        *initialized = false;
+        clear_user_dictionary_cache();
         Ok(())
     }
 
@@ -503,11 +542,14 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<(), String> {
-        let _rime = rime_api_lock();
-        finalize_rime()?;
-        let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
-        initialize_rime(&user_data_dir, &shared_data_dir);
-        *initialized = true;
+        {
+            let _rime = rime_api_lock();
+            finalize_rime()?;
+            let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
+            initialize_rime(&user_data_dir, &shared_data_dir);
+            *initialized = true;
+        }
+        initialize_user_dictionary_cache(Path::new(&user_data_dir));
         Ok(())
     }
 
@@ -887,6 +929,7 @@ mod desktop {
         traits.modules = modules.as_mut_ptr();
 
         unsafe {
+            require_levers_module();
             require_lua_module();
 
             let api = rime_get_api();
@@ -906,6 +949,14 @@ mod desktop {
             }
         }
     }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    unsafe fn require_levers_module() {
+        rime_require_module_levers();
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    unsafe fn require_levers_module() {}
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     unsafe fn require_lua_module() {
@@ -1375,10 +1426,25 @@ mod desktop {
         }
     }
 
+    struct UserDictionaryCache {
+        user_data_dir: Option<PathBuf>,
+        entries: HashMap<String, HashSet<String>>,
+        source_available: bool,
+    }
+
+    static USER_DICTIONARY_CACHE: LazyLock<Mutex<UserDictionaryCache>> = LazyLock::new(|| {
+        Mutex::new(UserDictionaryCache {
+            user_data_dir: None,
+            entries: HashMap::new(),
+            source_available: false,
+        })
+    });
+
     /// An active rime input session.
     pub struct Engine {
         session: ManuallyDrop<rime_api::Session>,
         user_data_dir: Option<PathBuf>,
+        user_dictionary_source_available: bool,
     }
 
     // SAFETY: Session holds only a usize (session_id) and librime itself is not
@@ -1447,7 +1513,9 @@ mod desktop {
 
         /// What this librime can do natively, see [`EngineCapabilities`].
         pub fn capabilities(&self) -> EngineCapabilities {
-            engine_capabilities()
+            let mut capabilities = engine_capabilities();
+            capabilities.candidate_deletion &= self.user_dictionary_source_available;
+            capabilities
         }
 
         /// Whether [`Engine::change_page`] pages through librime instead of
@@ -1469,6 +1537,12 @@ mod desktop {
             if let Some((dir, schema_id)) = &preferred {
                 require_compiled_schema(&compiled_schema_path(dir, schema_id), schema_id)?;
             }
+            let effective_user_data_dir = user_data_dir
+                .map(Path::to_path_buf)
+                .or_else(|| preferred.as_ref().map(|(dir, _)| dir.clone()))
+                .or_else(default_user_data_dir);
+            let user_dictionary_source_available =
+                user_dictionary_cache_available_for(effective_user_data_dir.as_deref());
             let _rime = rime_api_lock();
             let session = create_session().map_err(|e| format!("{e:?}"))?;
             if let Some((_, schema_id)) = &preferred {
@@ -1480,10 +1554,8 @@ mod desktop {
             }
             Ok(Self {
                 session: ManuallyDrop::new(session),
-                user_data_dir: user_data_dir
-                    .map(Path::to_path_buf)
-                    .or_else(|| preferred.map(|(dir, _)| dir))
-                    .or_else(default_user_data_dir),
+                user_data_dir: effective_user_data_dir,
+                user_dictionary_source_available,
             })
         }
 
@@ -1494,8 +1566,10 @@ mod desktop {
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
             let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
+            let state = extract_state_with_commit(&self.session);
+            self.remember_committed_user_phrase(&state);
             KeyProcessResult {
-                state: extract_state_with_commit(&self.session),
+                state,
                 accepted: matches!(status, KeyStatus::Accept),
             }
         }
@@ -1529,7 +1603,9 @@ mod desktop {
             if handled.is_none() {
                 self.send_select_key(index);
             }
-            extract_state_with_commit(&self.session)
+            let state = extract_state_with_commit(&self.session);
+            self.remember_committed_user_phrase(&state);
+            state
         }
 
         /// Move the highlight without committing, for hover/arrow interactions.
@@ -1554,18 +1630,101 @@ mod desktop {
             extract_state_with_commit(&self.session)
         }
 
-        /// Forget the `index`-th candidate of the current page (user dictionary
-        /// entries only; librime ignores the request for other candidates).
-        pub fn delete_candidate_on_page(&self, index: usize) -> ImeState {
+        /// Whether the `index`-th candidate on the current page is backed by an
+        /// entry in one of the active schema's user dictionaries.
+        pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> bool {
+            let candidate = {
+                let _rime = rime_api_lock();
+                let state = extract_state_readonly(&self.session);
+                let Some(candidate) = state.candidates.get(index) else {
+                    return false;
+                };
+                let Ok(status) = self.session.status() else {
+                    return false;
+                };
+                (
+                    candidate.text.clone(),
+                    schema_user_dictionary_names_locked(status.schema_id()),
+                )
+            };
+            self.user_dictionary_contains(&candidate.1, &candidate.0)
+        }
+
+        fn user_dictionary_contains(&self, dictionaries: &[String], text: &str) -> bool {
+            if !self.user_dictionary_source_available {
+                return false;
+            }
+            let cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+            if cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
+                || !cache.source_available
+            {
+                return false;
+            }
+            dictionaries.iter().any(|dictionary| {
+                cache
+                    .entries
+                    .get(dictionary)
+                    .is_some_and(|words| words.contains(text))
+            })
+        }
+
+        /// Forget the `index`-th candidate of the current page, but only after
+        /// the active user dictionary confirms that it is a learned phrase.
+        pub fn delete_candidate_on_page_result(&self, index: usize) -> (ImeState, bool) {
+            let (before, candidate_text, dictionaries) = {
+                let _rime = rime_api_lock();
+                let before = extract_state_readonly(&self.session);
+                let Some(candidate_text) = before
+                    .candidates
+                    .get(index)
+                    .map(|candidate| candidate.text.clone())
+                else {
+                    return (before, false);
+                };
+                let Ok(status) = self.session.status() else {
+                    return (extract_state_readonly(&self.session), false);
+                };
+                let dictionaries = schema_user_dictionary_names_locked(status.schema_id());
+                (before, candidate_text, dictionaries)
+            };
+            if !self.user_dictionary_contains(&dictionaries, &candidate_text) {
+                return (before, false);
+            }
+
             let _rime = rime_api_lock();
+            let current = extract_state_readonly(&self.session);
+            if current
+                .candidates
+                .get(index)
+                .map(|candidate| candidate.text.as_str())
+                != Some(candidate_text.as_str())
+            {
+                return (current, false);
+            }
             // SAFETY: the librime lock is held; the pointer is checked.
-            unsafe {
+            let deleted = unsafe {
                 let api = rime_get_api();
                 if let Some(delete) = rime_api_member!(api, delete_candidate_on_current_page) {
-                    delete(self.session.session_id, index);
+                    delete(self.session.session_id, index) != 0
+                } else {
+                    false
+                }
+            };
+            if deleted {
+                let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+                if cache.user_data_dir.as_deref() == self.user_data_dir.as_deref() {
+                    for dictionary in dictionaries {
+                        if let Some(words) = cache.entries.get_mut(&dictionary) {
+                            words.remove(&candidate_text);
+                        }
+                    }
                 }
             }
-            extract_state_with_commit(&self.session)
+            (extract_state_with_commit(&self.session), deleted)
+        }
+
+        pub fn delete_candidate_on_page(&self, index: usize) -> ImeState {
+            self.delete_candidate_on_page_result(index).0
         }
 
         /// Fallback for ABIs without `select_candidate_on_current_page`.
@@ -1574,6 +1733,29 @@ mod desktop {
             let select_keys = select_keys.as_deref().unwrap_or(DEFAULT_SELECT_KEYS);
             if let Some(key) = select_keys.chars().nth(index) {
                 self.session.process_key(key_event(key as u32, 0));
+            }
+        }
+
+        fn remember_committed_user_phrase(&self, state: &ImeState) {
+            let Some(committed) = state.committed.as_ref().filter(|text| !text.is_empty()) else {
+                return;
+            };
+            let Ok(status) = self.session.status() else {
+                return;
+            };
+            let dictionaries = schema_user_dictionary_names_locked(status.schema_id());
+            let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+            if !cache.source_available
+                || cache.user_data_dir.as_deref() != self.user_data_dir.as_deref()
+            {
+                return;
+            }
+            for dictionary in dictionaries {
+                cache
+                    .entries
+                    .entry(dictionary)
+                    .or_default()
+                    .insert(committed.clone());
             }
         }
 
@@ -1586,7 +1768,9 @@ mod desktop {
                     select_candidate(self.session.session_id, index);
                 }
             }
-            extract_state_with_commit(&self.session)
+            let state = extract_state_with_commit(&self.session);
+            self.remember_committed_user_phrase(&state);
+            state
         }
 
         pub fn all_candidates(&self) -> Vec<Candidate> {
@@ -1760,6 +1944,14 @@ mod desktop {
             })
         }
 
+        pub fn schema_switches(&self) -> Vec<SchemaSwitch> {
+            let _rime = rime_api_lock();
+            let Ok(status) = self.session.status() else {
+                return Vec::new();
+            };
+            read_schema_switches_locked(status.schema_id())
+        }
+
         pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
             let _rime = rime_api_lock();
             select_schema_checked(&self.session, schema_id)?;
@@ -1850,6 +2042,350 @@ mod desktop {
                 .map(|get_option| get_option(session.session_id, option.as_ptr()) != 0)
                 .unwrap_or(false)
         }
+    }
+
+    fn read_schema_switches_locked(schema_id: &str) -> Vec<SchemaSwitch> {
+        let Ok(schema_id) = CString::new(schema_id) else {
+            return Vec::new();
+        };
+        unsafe {
+            let api = rime_get_api();
+            let Some(schema_open) = rime_api_member!(api, schema_open) else {
+                return Vec::new();
+            };
+            let Some(config_close) = rime_api_member!(api, config_close) else {
+                return Vec::new();
+            };
+            let Some(config_begin_list) = rime_api_member!(api, config_begin_list) else {
+                return Vec::new();
+            };
+            let Some(config_next) = rime_api_member!(api, config_next) else {
+                return Vec::new();
+            };
+            let Some(config_end) = rime_api_member!(api, config_end) else {
+                return Vec::new();
+            };
+
+            let mut config: RimeConfig = std::mem::zeroed();
+            if schema_open(schema_id.as_ptr(), &mut config) == 0 {
+                return Vec::new();
+            }
+
+            let mut result = Vec::new();
+            let switches_key = CString::new("switches").expect("static string has no NUL");
+            let mut iterator: RimeConfigIterator = std::mem::zeroed();
+            if config_begin_list(&mut iterator, &mut config, switches_key.as_ptr()) != 0 {
+                while config_next(&mut iterator) != 0 {
+                    let Some(path) = cstr_to_str(iterator.path) else {
+                        continue;
+                    };
+                    let name = config_string_locked(&mut config, &format!("{path}/name"));
+                    let options =
+                        config_string_list_locked(&mut config, &format!("{path}/options"));
+                    let states = config_string_list_locked(&mut config, &format!("{path}/states"));
+                    let reset = config_int_locked(&mut config, &format!("{path}/reset"));
+                    if name.is_some() || !options.is_empty() {
+                        result.push(SchemaSwitch {
+                            name,
+                            options,
+                            states,
+                            reset,
+                        });
+                    }
+                }
+                config_end(&mut iterator);
+            }
+            config_close(&mut config);
+            result
+        }
+    }
+
+    fn config_string_locked(config: &mut RimeConfig, key: &str) -> Option<String> {
+        let key = CString::new(key).ok()?;
+        unsafe {
+            let api = rime_get_api();
+            let get = rime_api_member!(api, config_get_cstring)?;
+            cstr_to_str(get(config, key.as_ptr())).filter(|value| !value.is_empty())
+        }
+    }
+
+    fn config_int_locked(config: &mut RimeConfig, key: &str) -> Option<i32> {
+        let key = CString::new(key).ok()?;
+        unsafe {
+            let api = rime_get_api();
+            let get = rime_api_member!(api, config_get_int)?;
+            let mut value = 0;
+            (get(config, key.as_ptr(), &mut value) != 0).then_some(value)
+        }
+    }
+
+    fn config_bool_locked(config: &mut RimeConfig, key: &str) -> Option<bool> {
+        let key = CString::new(key).ok()?;
+        unsafe {
+            let api = rime_get_api();
+            let get = rime_api_member!(api, config_get_bool)?;
+            let mut value = 0;
+            (get(config, key.as_ptr(), &mut value) != 0).then_some(value != 0)
+        }
+    }
+
+    fn config_string_list_locked(config: &mut RimeConfig, key: &str) -> Vec<String> {
+        let Ok(key) = CString::new(key) else {
+            return Vec::new();
+        };
+        unsafe {
+            let api = rime_get_api();
+            let Some(begin) = rime_api_member!(api, config_begin_list) else {
+                return Vec::new();
+            };
+            let Some(next) = rime_api_member!(api, config_next) else {
+                return Vec::new();
+            };
+            let Some(end) = rime_api_member!(api, config_end) else {
+                return Vec::new();
+            };
+            let mut iterator: RimeConfigIterator = std::mem::zeroed();
+            if begin(&mut iterator, config, key.as_ptr()) == 0 {
+                return Vec::new();
+            }
+            let mut values = Vec::new();
+            while next(&mut iterator) != 0 {
+                if let Some(path) = cstr_to_str(iterator.path) {
+                    if let Some(value) = config_string_locked(config, &path) {
+                        values.push(value);
+                    }
+                }
+            }
+            end(&mut iterator);
+            values
+        }
+    }
+
+    fn schema_user_dictionary_names_locked(schema_id: &str) -> Vec<String> {
+        let Ok(schema_id) = CString::new(schema_id) else {
+            return Vec::new();
+        };
+        unsafe {
+            let api = rime_get_api();
+            let Some(schema_open) = rime_api_member!(api, schema_open) else {
+                return Vec::new();
+            };
+            let Some(config_close) = rime_api_member!(api, config_close) else {
+                return Vec::new();
+            };
+            let mut config: RimeConfig = std::mem::zeroed();
+            if schema_open(schema_id.as_ptr(), &mut config) == 0 {
+                return Vec::new();
+            }
+
+            let mut namespaces = vec!["translator".to_owned()];
+            for component in config_string_list_locked(&mut config, "engine/translators") {
+                if let Some((_, namespace)) = component.split_once('@') {
+                    let namespace = namespace.trim();
+                    if !namespace.is_empty() {
+                        namespaces.push(namespace.to_owned());
+                    }
+                }
+            }
+
+            let mut names = Vec::new();
+            for namespace in namespaces {
+                if config_bool_locked(&mut config, &format!("{namespace}/enable_user_dict"))
+                    == Some(false)
+                {
+                    continue;
+                }
+                let explicit_user_dict =
+                    config_string_locked(&mut config, &format!("{namespace}/user_dict"));
+                let name = explicit_user_dict.or_else(|| {
+                    config_string_locked(&mut config, &format!("{namespace}/dictionary"))
+                        .and_then(|name| name.split('.').next().map(str::to_owned))
+                });
+                if let Some(name) = name.filter(|name| name != "disabled") {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            config_close(&mut config);
+            names
+        }
+    }
+
+    fn user_dictionary_cache_available_for(user_data_dir: Option<&Path>) -> bool {
+        let cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+        cache.source_available && cache.user_data_dir.as_deref() == user_data_dir
+    }
+
+    fn initialize_user_dictionary_cache(user_data_dir: &Path) {
+        let result = if engine_capabilities().candidate_deletion {
+            load_user_dictionary_entries()
+        } else {
+            Err("librime has no delete_candidate_on_current_page entry point".into())
+        };
+        let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+        cache.user_data_dir = Some(user_data_dir.to_path_buf());
+        match result {
+            Ok(entries) => {
+                cache.entries = entries;
+                cache.source_available = true;
+            }
+            Err(error) => {
+                cache.entries.clear();
+                cache.source_available = false;
+                log_user_dictionary_degrade(&error);
+            }
+        }
+    }
+
+    fn clear_user_dictionary_cache() {
+        let mut cache = lock_ignore_poison(&USER_DICTIONARY_CACHE);
+        cache.user_data_dir = None;
+        cache.entries.clear();
+        cache.source_available = false;
+    }
+
+    fn load_user_dictionary_entries() -> Result<HashMap<String, HashSet<String>>, String> {
+        static EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+        let dictionary_names = {
+            let _rime = rime_api_lock();
+            // SAFETY: the librime lock is held and the module/API pointers are
+            // checked before any function pointer is called.
+            let levers = unsafe { user_dictionary_api_locked()? };
+            let mut iterator: RimeUserDictIterator = unsafe { std::mem::zeroed() };
+            let iterator_init = unsafe { (*levers).user_dict_iterator_init.unwrap() };
+            let iterator_destroy = unsafe { (*levers).user_dict_iterator_destroy.unwrap() };
+            let next_user_dict = unsafe { (*levers).next_user_dict.unwrap() };
+            if unsafe { iterator_init(&mut iterator) } == 0 {
+                return Ok(HashMap::new());
+            }
+            let mut dictionary_names = Vec::new();
+            loop {
+                let dictionary_name = unsafe { next_user_dict(&mut iterator) };
+                if dictionary_name.is_null() {
+                    break;
+                }
+                if let Some(dictionary_name) = cstr_to_str(dictionary_name) {
+                    dictionary_names.push(dictionary_name);
+                }
+            }
+            unsafe { iterator_destroy(&mut iterator) };
+            dictionary_names
+        };
+
+        let mut result = HashMap::new();
+        for dictionary_name in dictionary_names {
+            let sequence = EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let export_path = std::env::temp_dir().join(format!(
+                ".keytao-candidate-source-{}-{sequence}.txt",
+                std::process::id()
+            ));
+            let export_file = UserDictionaryExportFile(export_path);
+            export_user_dictionary(&dictionary_name, &export_file.0)?;
+            // Export is the only librime operation. Reading and parsing the
+            // potentially large text file must not monopolize RIME_API_LOCK.
+            let contents = std::fs::read_to_string(&export_file.0).map_err(|error| {
+                format!("could not read exported user dictionary {dictionary_name}: {error}")
+            })?;
+            result.insert(
+                dictionary_name,
+                contents
+                    .lines()
+                    .filter_map(active_user_dictionary_text)
+                    .collect(),
+            );
+        }
+        Ok(result)
+    }
+
+    struct UserDictionaryExportFile(PathBuf);
+
+    impl Drop for UserDictionaryExportFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn export_user_dictionary(dictionary_name: &str, export_path: &Path) -> Result<(), String> {
+        let dictionary_name = CString::new(dictionary_name)
+            .map_err(|_| "user-dictionary name contains a NUL byte".to_string())?;
+        let export_path = CString::new(export_path.to_string_lossy().as_bytes())
+            .map_err(|_| "user-dictionary export path contains a NUL byte".to_string())?;
+        let _rime = rime_api_lock();
+        // SAFETY: the librime lock is held and the API was validated before use.
+        let levers = unsafe { user_dictionary_api_locked()? };
+        let export = unsafe { (*levers).export_user_dict.unwrap() };
+        let exported = unsafe { export(dictionary_name.as_ptr(), export_path.as_ptr()) };
+        if exported < 0 {
+            Err(format!(
+                "levers failed to export user dictionary {}",
+                dictionary_name.to_string_lossy()
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    unsafe fn user_dictionary_api_locked() -> Result<*const RimeLeversApi, String> {
+        let api = rime_get_api();
+        let find_module =
+            rime_api_member!(api, find_module).ok_or("librime has no find_module entry point")?;
+        let module_name = CString::new("levers").expect("static string has no NUL");
+        let module = find_module(module_name.as_ptr());
+        if module.is_null() {
+            return Err("librime levers module is not registered".into());
+        }
+        let get_api = (*module)
+            .get_api
+            .ok_or("librime levers module has no get_api entry point")?;
+        let levers = get_api() as *const RimeLeversApi;
+        if levers.is_null() {
+            return Err("librime levers module returned a null API".into());
+        }
+        for (available, name) in [
+            (
+                (*levers).user_dict_iterator_init.is_some(),
+                "user_dict_iterator_init",
+            ),
+            (
+                (*levers).user_dict_iterator_destroy.is_some(),
+                "user_dict_iterator_destroy",
+            ),
+            ((*levers).next_user_dict.is_some(), "next_user_dict"),
+            ((*levers).export_user_dict.is_some(), "export_user_dict"),
+        ] {
+            if !available {
+                return Err(format!("librime levers module has no {name} entry point"));
+            }
+        }
+        Ok(levers)
+    }
+
+    fn log_user_dictionary_degrade(error: &str) {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::AcqRel) {
+            eprintln!("KeyTao: user-dictionary candidate classification unavailable: {error}");
+        }
+    }
+
+    fn active_user_dictionary_text(line: &str) -> Option<String> {
+        if line.starts_with('#') {
+            return None;
+        }
+        let mut fields = line.split('\t');
+        let first = fields.next()?;
+        let second = fields.next()?;
+        let metadata = fields.next()?;
+        let legacy_commits = metadata
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("c="));
+        let (text, commits) = if let Some(commits) = legacy_commits {
+            (second, commits.parse::<i64>().ok()?)
+        } else {
+            (first, metadata.trim().parse::<i64>().ok()?)
+        };
+        (commits >= 0 && !text.is_empty()).then(|| text.to_owned())
     }
 
     /// Snapshot after a state-changing call: takes the pending commit with it.
@@ -3034,6 +3570,14 @@ impl ImeRuntimeSession {
         self.with_engine(|engine| engine.delete_candidate_on_page(index))
     }
 
+    pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> Option<bool> {
+        self.with_engine(|engine| engine.candidate_is_user_phrase_on_page(index))
+    }
+
+    pub fn delete_candidate_on_page_result(&self, index: usize) -> Option<(ImeState, bool)> {
+        self.with_engine(|engine| engine.delete_candidate_on_page_result(index))
+    }
+
     pub fn select_candidate_global(&self, index: usize) -> Option<ImeState> {
         self.with_engine(|engine| engine.select_candidate_global(index))
     }
@@ -3074,6 +3618,10 @@ impl ImeRuntimeSession {
         self.with_engine(Engine::current_schema).flatten()
     }
 
+    pub fn schema_switches(&self) -> Option<Vec<SchemaSwitch>> {
+        self.with_engine(Engine::schema_switches)
+    }
+
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
         self.with_engine(|engine| engine.select_schema(schema_id))
             .ok_or_else(|| "Rime session is unavailable".to_string())?
@@ -3106,7 +3654,8 @@ impl ImeRuntimeSession {
 
     /// What the linked librime can do natively, see [`EngineCapabilities`].
     pub fn capabilities(&self) -> EngineCapabilities {
-        engine_capabilities()
+        self.with_engine(Engine::capabilities)
+            .unwrap_or_else(EngineCapabilities::none)
     }
 
     /// Whether [`ImeRuntimeSession::change_page`] pages through librime instead

@@ -33,10 +33,17 @@ pub const WORDS: [&str; 20] = [
 
 /// Write the fixture into `dir`, which doubles as user and shared data dir.
 pub fn write(dir: &Path) -> std::io::Result<()> {
+    write_with_user_dictionary(dir, false)
+}
+
+pub fn write_with_user_dictionary(dir: &Path, enabled: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("default.yaml"), default_yaml())?;
     std::fs::write(dir.join("default.custom.yaml"), default_custom_yaml())?;
-    std::fs::write(dir.join(format!("{SCHEMA_ID}.schema.yaml")), schema_yaml())?;
+    std::fs::write(
+        dir.join(format!("{SCHEMA_ID}.schema.yaml")),
+        schema_yaml(enabled),
+    )?;
     std::fs::write(dir.join(format!("{SCHEMA_ID}.dict.yaml")), dict_yaml())?;
     Ok(())
 }
@@ -67,7 +74,7 @@ fn default_custom_yaml() -> String {
     )
 }
 
-fn schema_yaml() -> String {
+fn schema_yaml(enable_user_dict: bool) -> String {
     format!(
         "schema:\n  \
            schema_id: {SCHEMA_ID}\n  \
@@ -75,7 +82,11 @@ fn schema_yaml() -> String {
            version: \"1\"\n\
          switches:\n  \
          - name: ascii_mode\n    \
-           reset: 0\n\
+           reset: 0\n    \
+           states: [ 中文, 西文 ]\n  \
+         - options: [ punctuation_ascii, punctuation_cjk ]\n    \
+           reset: 1\n    \
+           states: [ 西文标点, 中文标点 ]\n\
          engine:\n  \
            processors:\n    \
            - ascii_composer\n    \
@@ -106,7 +117,7 @@ fn schema_yaml() -> String {
            enable_completion: false\n  \
            enable_encoder: false\n  \
            enable_sentence: false\n  \
-           enable_user_dict: false\n\
+           enable_user_dict: {enable_user_dict}\n\
          menu:\n  \
            page_size: {PAGE_SIZE}\n"
     )

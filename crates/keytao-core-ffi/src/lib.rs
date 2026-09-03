@@ -798,12 +798,32 @@ pub extern "C" fn keytao_session_delete_candidate(
             let Some(handle) = session_handle(session) else {
                 return std::ptr::null_mut();
             };
-            let Some(state) = handle.session.delete_candidate_on_page(index as usize) else {
+            let Some((state, deleted)) = handle
+                .session
+                .delete_candidate_on_page_result(index as usize)
+            else {
                 return std::ptr::null_mut();
             };
-            Box::into_raw(Box::new(state_to_c(state, true)))
+            Box::into_raw(Box::new(state_to_c(state, deleted)))
         },
     )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_candidate_is_user_phrase(
+    session: *mut c_void,
+    index: u32,
+) -> bool {
+    guard("keytao_session_candidate_is_user_phrase", false, || {
+        let Some(handle) = session_handle(session) else {
+            return false;
+        };
+        handle
+            .session
+            .candidate_is_user_phrase_on_page(index as usize)
+            .unwrap_or(false)
+    })
 }
 
 /// Flip to the next/previous candidate page in a per-client session.
@@ -1443,10 +1463,13 @@ pub extern "C" fn keytao_session_delete_candidate_json(
             let Some(handle) = session_handle(session) else {
                 return std::ptr::null_mut();
             };
-            let Some(state) = handle.session.delete_candidate_on_page(index as usize) else {
+            let Some((state, deleted)) = handle
+                .session
+                .delete_candidate_on_page_result(index as usize)
+            else {
                 return std::ptr::null_mut();
             };
-            to_cstring(&state_json(state, true))
+            to_cstring(&state_json(state, deleted))
         },
     )
 }
@@ -1512,6 +1535,32 @@ pub extern "C" fn keytao_session_list_schemas_json(session: *mut c_void) -> *mut
                 Err(error) => {
                     log_error(format_args!(
                         "keytao_session_list_schemas_json: serialize failed: {error}"
+                    ));
+                    std::ptr::null_mut()
+                }
+            }
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_schema_switches_json(session: *mut c_void) -> *mut c_char {
+    guard(
+        "keytao_session_schema_switches_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            let Some(switches) = handle.session.schema_switches() else {
+                return std::ptr::null_mut();
+            };
+            match serde_json::to_string(&switches) {
+                Ok(json) => to_cstring(&json),
+                Err(error) => {
+                    log_error(format_args!(
+                        "keytao_session_schema_switches_json: serialize failed: {error}"
                     ));
                     std::ptr::null_mut()
                 }

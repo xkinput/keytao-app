@@ -3869,6 +3869,16 @@ pub struct AndroidImeInputSettings {
     pub key_preview_enabled: bool,
     pub long_press_delay_ms: u16,
     pub delete_speed: String,
+    pub keyboard_height_dp: u16,
+    pub candidate_bar_height_dp: u8,
+    pub swipe_threshold_dp: f32,
+    pub key_sound_enabled: bool,
+    pub key_sound_volume: u8,
+    pub key_hint_visible: bool,
+    pub flick_keys_enabled: bool,
+    pub number_row_enabled: bool,
+    pub candidate_font_scale: f32,
+    pub double_space_period_enabled: bool,
     pub floating_portrait_enabled: bool,
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
@@ -4257,11 +4267,32 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeleteC
         let Some(session) = android_session(session) else {
             return std::ptr::null_mut();
         };
-        let Some(state) = session.delete_candidate_on_page(index.max(0) as usize) else {
+        let Some((state, deleted)) = session.delete_candidate_on_page_result(index.max(0) as usize)
+        else {
             return std::ptr::null_mut();
         };
-        jni_string(&mut env, &android_state_json(state, true))
+        jni_string(&mut env, &android_state_json(state, deleted))
     })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCandidateIsUserPhrase(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+    index: jint,
+) -> jboolean {
+    android_jni_guard(
+        "nativeCandidateIsUserPhrase",
+        0,
+        || match android_session(session)
+            .and_then(|session| session.candidate_is_user_phrase_on_page(index.max(0) as usize))
+        {
+            Some(true) => 1,
+            _ => 0,
+        },
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -4317,6 +4348,27 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeListSch
             return std::ptr::null_mut();
         };
         let Ok(json) = serde_json::to_string(&schemas) else {
+            return std::ptr::null_mut();
+        };
+        jni_string(&mut env, &json)
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSchemaSwitches(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    session: jlong,
+) -> jstring {
+    android_jni_guard("nativeSchemaSwitches", std::ptr::null_mut(), || {
+        let Some(session) = android_session(session) else {
+            return std::ptr::null_mut();
+        };
+        let Some(switches) = session.schema_switches() else {
+            return std::ptr::null_mut();
+        };
+        let Ok(json) = serde_json::to_string(&switches) else {
             return std::ptr::null_mut();
         };
         jni_string(&mut env, &json)
@@ -4922,6 +4974,51 @@ fn android_ime_haptics_settings_from_config(
         None,
         keyboard_path.is_file().then_some(keyboard_path.as_path()),
     );
+    let keyboard_height_dp = config
+        .get("keyboardHeightDp")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(keyboard.height.round() as u64)
+        .clamp(160, 420) as u16;
+    let candidate_bar_height_dp = config
+        .get("candidateBarHeightDp")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(keyboard.candidate_bar_height.round() as u64)
+        .clamp(36, 96) as u8;
+    let swipe_threshold_dp = config
+        .get("swipeThresholdDp")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(34.0)
+        .clamp(12.0, 96.0) as f32;
+    let key_sound_enabled = config
+        .get("keySoundEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let key_sound_volume = config
+        .get("keySoundVolume")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(100)
+        .clamp(0, 100) as u8;
+    let key_hint_visible = config
+        .get("keyHintVisible")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let flick_keys_enabled = config
+        .get("flickKeysEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let number_row_enabled = config
+        .get("numberRowEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let candidate_font_scale = config
+        .get("candidateFontScale")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(1.0)
+        .clamp(0.8, 1.4) as f32;
+    let double_space_period_enabled = config
+        .get("doubleSpacePeriodEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
     let floating = config.get("floating").and_then(|value| value.as_object());
     let portrait = floating
         .and_then(|value| value.get("portrait"))
@@ -4959,6 +5056,16 @@ fn android_ime_haptics_settings_from_config(
         key_preview_enabled,
         long_press_delay_ms,
         delete_speed,
+        keyboard_height_dp,
+        candidate_bar_height_dp,
+        swipe_threshold_dp,
+        key_sound_enabled,
+        key_sound_volume,
+        key_hint_visible,
+        flick_keys_enabled,
+        number_row_enabled,
+        candidate_font_scale,
+        double_space_period_enabled,
         floating_portrait_enabled,
         floating_portrait_scale,
         floating_landscape_enabled,
@@ -5021,6 +5128,16 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     key_preview_enabled: bool,
     long_press_delay_ms: u16,
     delete_speed: String,
+    keyboard_height_dp: u16,
+    candidate_bar_height_dp: u8,
+    swipe_threshold_dp: f32,
+    key_sound_enabled: bool,
+    key_sound_volume: u8,
+    key_hint_visible: bool,
+    flick_keys_enabled: bool,
+    number_row_enabled: bool,
+    candidate_font_scale: f32,
+    double_space_period_enabled: bool,
     floating_portrait_enabled: bool,
     floating_portrait_scale: u8,
     floating_landscape_enabled: bool,
@@ -5064,6 +5181,46 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         config.insert(
             "deleteSpeed".into(),
             serde_json::Value::String(normalize_mobile_ime_delete_speed(Some(&delete_speed))),
+        );
+        config.insert(
+            "keyboardHeightDp".into(),
+            serde_json::Value::from(keyboard_height_dp.clamp(160, 420)),
+        );
+        config.insert(
+            "candidateBarHeightDp".into(),
+            serde_json::Value::from(candidate_bar_height_dp.clamp(36, 96)),
+        );
+        config.insert(
+            "swipeThresholdDp".into(),
+            serde_json::Value::from(swipe_threshold_dp.clamp(12.0, 96.0)),
+        );
+        config.insert(
+            "keySoundEnabled".into(),
+            serde_json::Value::Bool(key_sound_enabled),
+        );
+        config.insert(
+            "keySoundVolume".into(),
+            serde_json::Value::from(key_sound_volume.clamp(0, 100)),
+        );
+        config.insert(
+            "keyHintVisible".into(),
+            serde_json::Value::Bool(key_hint_visible),
+        );
+        config.insert(
+            "flickKeysEnabled".into(),
+            serde_json::Value::Bool(flick_keys_enabled),
+        );
+        config.insert(
+            "numberRowEnabled".into(),
+            serde_json::Value::Bool(number_row_enabled),
+        );
+        config.insert(
+            "candidateFontScale".into(),
+            serde_json::Value::from(candidate_font_scale.clamp(0.8, 1.4)),
+        );
+        config.insert(
+            "doubleSpacePeriodEnabled".into(),
+            serde_json::Value::Bool(double_space_period_enabled),
         );
         let mut floating = config
             .get("floating")

@@ -80,12 +80,10 @@ fn main() {
         println!("cargo:rustc-link-lib=c++");
     }
 
+    let include_dir = PathBuf::from(include_dir);
     let mut builder = bindgen::Builder::default()
-        .header(
-            PathBuf::from(include_dir)
-                .join("rime_api.h")
-                .to_string_lossy(),
-        )
+        .header(include_dir.join("rime_api.h").to_string_lossy())
+        .header(include_dir.join("rime_levers_api.h").to_string_lossy())
         .header("./include/keycodes.h")
         .header("./include/modifiers.h")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks));

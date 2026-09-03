@@ -15,7 +15,7 @@
 mod smoke_fixture;
 
 use keytao_core::{
-    ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy, DEFAULT_SELECT_KEYS,
+    ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy, SchemaSwitch, DEFAULT_SELECT_KEYS,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +32,14 @@ fn serialized() -> MutexGuard<'static, ()> {
 fn deployed_runtime(name: &str) -> (ImeRuntime, std::path::PathBuf) {
     let dir = smoke_fixture::scratch_dir(name);
     smoke_fixture::write(&dir).expect("write the fixture");
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime.init().expect("deploy the fixture");
+    (runtime, dir)
+}
+
+fn deployed_runtime_with_user_dictionary(name: &str) -> (ImeRuntime, std::path::PathBuf) {
+    let dir = smoke_fixture::scratch_dir(name);
+    smoke_fixture::write_with_user_dictionary(&dir, true).expect("write the fixture");
     let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
     runtime.init().expect("deploy the fixture");
     (runtime, dir)
@@ -58,6 +66,92 @@ fn page_words(state: &ImeState) -> Vec<&str> {
 }
 
 #[test]
+fn schema_switches_follow_the_active_schema() {
+    let _serialized = serialized();
+    let (runtime, dir) = deployed_runtime("schema-switches");
+    let session = runtime.create_session().expect("create a session");
+
+    assert_eq!(
+        session.schema_switches().expect("session has no engine"),
+        vec![
+            SchemaSwitch {
+                name: Some("ascii_mode".into()),
+                options: vec![],
+                states: vec!["中文".into(), "西文".into()],
+                reset: Some(0),
+            },
+            SchemaSwitch {
+                name: None,
+                options: vec!["punctuation_ascii".into(), "punctuation_cjk".into()],
+                states: vec!["西文标点".into(), "中文标点".into()],
+                reset: Some(1),
+            },
+        ]
+    );
+
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
+fn candidate_deletion_is_limited_to_user_dictionary_entries() {
+    const USER_PHRASE: &str = smoke_fixture::WORDS[0];
+
+    let _serialized = serialized();
+    let (runtime, dir) = deployed_runtime_with_user_dictionary("candidate-user-source");
+    let session = runtime.create_session().expect("create a session");
+
+    let initial = type_code(&session);
+    let initial_index = initial
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == USER_PHRASE)
+        .expect("built-in phrase is not on the first page");
+    assert_eq!(
+        session.candidate_is_user_phrase_on_page(initial_index),
+        Some(false)
+    );
+    let committed = session
+        .select_candidate_on_page(initial_index)
+        .expect("select_candidate_on_page");
+    assert_eq!(committed.committed.as_deref(), Some(USER_PHRASE));
+
+    // A newly created Engine must recover learned-word provenance from the
+    // persisted user dictionary, not only from commits seen by this session.
+    drop(session);
+    runtime
+        .reload_without_deploy()
+        .expect("reinitialize librime for a cold-restart check");
+    let session = runtime.create_session().expect("recreate a session");
+
+    let state = type_code(&session);
+    let index = state
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == USER_PHRASE)
+        .expect("learned phrase is not on the first page");
+    assert_eq!(session.candidate_is_user_phrase_on_page(index), Some(true));
+
+    let (_, deleted) = session
+        .delete_candidate_on_page_result(index)
+        .expect("delete_candidate_on_page_result");
+    assert!(deleted);
+    let after = type_code(&session);
+    let system_index = after
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == USER_PHRASE)
+        .expect("the built-in dictionary entry should remain after forgetting its user record");
+    assert_eq!(
+        session.candidate_is_user_phrase_on_page(system_index),
+        Some(false)
+    );
+
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
 fn selection_and_paging_go_through_librime() {
     let _serialized = serialized();
     let (runtime, dir) = deployed_runtime("candidate-api");
@@ -74,6 +168,10 @@ fn selection_and_paging_go_through_librime() {
     assert!(
         capabilities.supports_candidate_highlight(),
         "the linked librime cannot move the highlight: {capabilities:?}"
+    );
+    assert!(
+        capabilities.supports_candidate_deletion(),
+        "the linked librime cannot classify candidate deletion: {capabilities:?}"
     );
 
     let session = runtime.create_session().expect("create a session");
@@ -144,6 +242,16 @@ fn selection_and_paging_go_through_librime() {
         .expect("select_candidate_on_page");
     assert_eq!(head.committed.as_deref(), Some(smoke_fixture::WORDS[0]));
     assert!(head.preedit.is_empty());
+
+    // Built-in table entries are not learned phrases. The native deletion
+    // result is the source-of-truth distinction used by the mobile menu.
+    type_code(&session);
+    let (unchanged, deleted) = session
+        .delete_candidate_on_page_result(0)
+        .expect("delete_candidate_on_page_result");
+    assert!(!deleted);
+    assert_eq!(page_words(&unchanged), page_words(&first));
+    assert_eq!(unchanged.preedit, first.preedit);
 
     // Discarding and committing are the focus-change paths.
     type_code(&session);
