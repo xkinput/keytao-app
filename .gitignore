@@ -39,6 +39,7 @@ result-*
 # Rust / Cargo build outputs
 dist/
 target/
+/target-linux/
 **/*.rs.bk
 
 # Tauri build artefacts

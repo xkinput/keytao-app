@@ -290,6 +290,16 @@ interface AndroidImeInputSettings {
   keyPreviewEnabled: boolean
   longPressDelayMs: number
   deleteSpeed: MobileImeDeleteSpeed
+  keyboardHeightDp: number
+  candidateBarHeightDp: number
+  swipeThresholdDp: number
+  keySoundEnabled: boolean
+  keySoundVolume: number
+  keyHintVisible: boolean
+  flickKeysEnabled: boolean
+  numberRowEnabled: boolean
+  candidateFontScale: number
+  doubleSpacePeriodEnabled: boolean
   floatingPortraitEnabled: boolean
   floatingPortraitScale: number
   floatingLandscapeEnabled: boolean
@@ -431,6 +441,11 @@ export default function App() {
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
   const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
   const [longPressDelayDraft, setLongPressDelayDraft] = useState<number | null>(null)
+  const [keyboardHeightDraft, setKeyboardHeightDraft] = useState<number | null>(null)
+  const [candidateBarHeightDraft, setCandidateBarHeightDraft] = useState<number | null>(null)
+  const [swipeThresholdDraft, setSwipeThresholdDraft] = useState<number | null>(null)
+  const [keySoundVolumeDraft, setKeySoundVolumeDraft] = useState<number | null>(null)
+  const [candidateFontScaleDraft, setCandidateFontScaleDraft] = useState<number | null>(null)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -683,6 +698,20 @@ export default function App() {
   }, [androidImeInputSettings?.longPressDelayMs])
 
   useEffect(() => {
+    setKeyboardHeightDraft(null)
+    setCandidateBarHeightDraft(null)
+    setSwipeThresholdDraft(null)
+    setKeySoundVolumeDraft(null)
+    setCandidateFontScaleDraft(null)
+  }, [
+    androidImeInputSettings?.keyboardHeightDp,
+    androidImeInputSettings?.candidateBarHeightDp,
+    androidImeInputSettings?.swipeThresholdDp,
+    androidImeInputSettings?.keySoundVolume,
+    androidImeInputSettings?.candidateFontScale,
+  ])
+
+  useEffect(() => {
     if (osType !== "android") return
 
     const root = document.documentElement
@@ -762,6 +791,16 @@ export default function App() {
   const keyPreviewEnabled = androidImeInputSettings?.keyPreviewEnabled ?? true
   const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
+  const keyboardHeightDp = keyboardHeightDraft ?? androidImeInputSettings?.keyboardHeightDp ?? 266
+  const candidateBarHeightDp = candidateBarHeightDraft ?? androidImeInputSettings?.candidateBarHeightDp ?? 52
+  const swipeThresholdDp = swipeThresholdDraft ?? androidImeInputSettings?.swipeThresholdDp ?? 34
+  const keySoundEnabled = androidImeInputSettings?.keySoundEnabled ?? true
+  const keySoundVolume = keySoundVolumeDraft ?? androidImeInputSettings?.keySoundVolume ?? 100
+  const keyHintVisible = androidImeInputSettings?.keyHintVisible ?? true
+  const flickKeysEnabled = androidImeInputSettings?.flickKeysEnabled ?? true
+  const numberRowEnabled = androidImeInputSettings?.numberRowEnabled ?? false
+  const candidateFontScale = candidateFontScaleDraft ?? androidImeInputSettings?.candidateFontScale ?? 1
+  const doubleSpacePeriodEnabled = androidImeInputSettings?.doubleSpacePeriodEnabled ?? true
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
   const androidSchemaInstalled = localSchemaInfo?.installed ?? false
@@ -1086,6 +1125,16 @@ export default function App() {
         | "keyPreviewEnabled"
         | "longPressDelayMs"
         | "deleteSpeed"
+        | "keyboardHeightDp"
+        | "candidateBarHeightDp"
+        | "swipeThresholdDp"
+        | "keySoundEnabled"
+        | "keySoundVolume"
+        | "keyHintVisible"
+        | "flickKeysEnabled"
+        | "numberRowEnabled"
+        | "candidateFontScale"
+        | "doubleSpacePeriodEnabled"
         | "floatingPortraitEnabled"
         | "floatingPortraitScale"
         | "floatingLandscapeEnabled"
@@ -1101,6 +1150,16 @@ export default function App() {
       keyPreviewEnabled: androidImeInputSettings?.keyPreviewEnabled ?? true,
       longPressDelayMs: androidImeInputSettings?.longPressDelayMs ?? 300,
       deleteSpeed: androidImeInputSettings?.deleteSpeed ?? ("standard" as MobileImeDeleteSpeed),
+      keyboardHeightDp: androidImeInputSettings?.keyboardHeightDp ?? 266,
+      candidateBarHeightDp: androidImeInputSettings?.candidateBarHeightDp ?? 52,
+      swipeThresholdDp: androidImeInputSettings?.swipeThresholdDp ?? 34,
+      keySoundEnabled: androidImeInputSettings?.keySoundEnabled ?? true,
+      keySoundVolume: androidImeInputSettings?.keySoundVolume ?? 100,
+      keyHintVisible: androidImeInputSettings?.keyHintVisible ?? true,
+      flickKeysEnabled: androidImeInputSettings?.flickKeysEnabled ?? true,
+      numberRowEnabled: androidImeInputSettings?.numberRowEnabled ?? false,
+      candidateFontScale: androidImeInputSettings?.candidateFontScale ?? 1,
+      doubleSpacePeriodEnabled: androidImeInputSettings?.doubleSpacePeriodEnabled ?? true,
       floatingPortraitEnabled: androidImeInputSettings?.floatingPortraitEnabled ?? false,
       floatingPortraitScale: androidImeInputSettings?.floatingPortraitScale ?? 88,
       floatingLandscapeEnabled: androidImeInputSettings?.floatingLandscapeEnabled ?? true,
@@ -1111,6 +1170,11 @@ export default function App() {
       ...patch,
       hapticIntensity: Math.round(patch.hapticIntensity ?? current.hapticIntensity),
       longPressDelayMs: Math.round(patch.longPressDelayMs ?? current.longPressDelayMs),
+      keyboardHeightDp: Math.round(patch.keyboardHeightDp ?? current.keyboardHeightDp),
+      candidateBarHeightDp: Math.round(patch.candidateBarHeightDp ?? current.candidateBarHeightDp),
+      swipeThresholdDp: Math.round(patch.swipeThresholdDp ?? current.swipeThresholdDp),
+      keySoundVolume: Math.round(patch.keySoundVolume ?? current.keySoundVolume),
+      candidateFontScale: Number((patch.candidateFontScale ?? current.candidateFontScale).toFixed(2)),
       floatingPortraitScale: Math.round(patch.floatingPortraitScale ?? current.floatingPortraitScale),
       floatingLandscapeScale: Math.round(patch.floatingLandscapeScale ?? current.floatingLandscapeScale),
     }
@@ -1118,6 +1182,11 @@ export default function App() {
     next.hapticIntensity = Math.min(100, Math.max(1, next.hapticIntensity))
     next.longPressDelayMs = Math.min(700, Math.max(100, next.longPressDelayMs))
     next.deleteSpeed = ["slow", "standard", "fast"].includes(next.deleteSpeed) ? next.deleteSpeed : "standard"
+    next.keyboardHeightDp = Math.min(420, Math.max(160, next.keyboardHeightDp))
+    next.candidateBarHeightDp = Math.min(96, Math.max(36, next.candidateBarHeightDp))
+    next.swipeThresholdDp = Math.min(96, Math.max(12, next.swipeThresholdDp))
+    next.keySoundVolume = Math.min(100, Math.max(0, next.keySoundVolume))
+    next.candidateFontScale = Math.min(1.4, Math.max(0.8, next.candidateFontScale))
     next.floatingPortraitScale = Math.min(100, Math.max(70, next.floatingPortraitScale))
     next.floatingLandscapeScale = Math.min(100, Math.max(70, next.floatingLandscapeScale))
     if (
@@ -1128,6 +1197,16 @@ export default function App() {
       next.keyPreviewEnabled === androidImeInputSettings.keyPreviewEnabled &&
       next.longPressDelayMs === androidImeInputSettings.longPressDelayMs &&
       next.deleteSpeed === androidImeInputSettings.deleteSpeed &&
+      next.keyboardHeightDp === androidImeInputSettings.keyboardHeightDp &&
+      next.candidateBarHeightDp === androidImeInputSettings.candidateBarHeightDp &&
+      next.swipeThresholdDp === androidImeInputSettings.swipeThresholdDp &&
+      next.keySoundEnabled === androidImeInputSettings.keySoundEnabled &&
+      next.keySoundVolume === androidImeInputSettings.keySoundVolume &&
+      next.keyHintVisible === androidImeInputSettings.keyHintVisible &&
+      next.flickKeysEnabled === androidImeInputSettings.flickKeysEnabled &&
+      next.numberRowEnabled === androidImeInputSettings.numberRowEnabled &&
+      next.candidateFontScale === androidImeInputSettings.candidateFontScale &&
+      next.doubleSpacePeriodEnabled === androidImeInputSettings.doubleSpacePeriodEnabled &&
       next.floatingPortraitEnabled === androidImeInputSettings.floatingPortraitEnabled &&
       next.floatingPortraitScale === androidImeInputSettings.floatingPortraitScale &&
       next.floatingLandscapeEnabled === androidImeInputSettings.floatingLandscapeEnabled &&
@@ -1155,6 +1234,38 @@ export default function App() {
 
   function commitLongPressDelay(value: number) {
     void handleUpdateAndroidImeInputSettings({ longPressDelayMs: value })
+  }
+
+  function commitMobileImeSetting(
+    patch: Parameters<typeof handleUpdateAndroidImeInputSettings>[0],
+    clearDraft?: () => void,
+  ) {
+    void handleUpdateAndroidImeInputSettings(patch).finally(() => clearDraft?.())
+  }
+
+  function resetMobileImeInputSettings() {
+    void handleUpdateAndroidImeInputSettings({
+      hapticsEnabled: true,
+      hapticIntensity: 42,
+      enterKeyBehavior: "system",
+      keyPreviewEnabled: true,
+      longPressDelayMs: 300,
+      deleteSpeed: "standard",
+      keyboardHeightDp: 266,
+      candidateBarHeightDp: 52,
+      swipeThresholdDp: 34,
+      keySoundEnabled: true,
+      keySoundVolume: 100,
+      keyHintVisible: true,
+      flickKeysEnabled: true,
+      numberRowEnabled: false,
+      candidateFontScale: 1,
+      doubleSpacePeriodEnabled: true,
+      floatingPortraitEnabled: false,
+      floatingPortraitScale: 88,
+      floatingLandscapeEnabled: true,
+      floatingLandscapeScale: 72,
+    })
   }
 
   async function handleInstall() {
@@ -1843,6 +1954,7 @@ export default function App() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
+                  <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">反馈</div>
                   <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2 text-xs">
                       {androidHapticsEnabled ? (
@@ -1896,6 +2008,54 @@ export default function App() {
                       aria-label="切换按键预览气泡"
                     />
                   </div>
+                  {osType === "android" ? (
+                    <>
+                      <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2 text-xs">
+                          <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-muted-foreground">按键音</span>
+                          <span className="text-xs text-muted-foreground/80">{keySoundEnabled ? "开启" : "关闭"}</span>
+                        </div>
+                        <Switch
+                          checked={keySoundEnabled}
+                          onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({
+                            keySoundEnabled: checked,
+                            ...(checked && keySoundVolume === 0 ? { keySoundVolume: 20 } : {}),
+                          })}
+                          disabled={isSavingAndroidImeInputSettings}
+                          aria-label="切换按键音"
+                        />
+                      </div>
+                      <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                        <div className="flex items-center justify-between gap-3 text-xs">
+                          <span className="text-muted-foreground">按键音量</span>
+                          <span className="font-mono text-muted-foreground">{keySoundVolume}%</span>
+                        </div>
+                        <Slider
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={[keySoundVolume]}
+                          onValueChange={([value]) => setKeySoundVolumeDraft(value)}
+                          onValueCommit={([value]) => commitMobileImeSetting(
+                            {
+                              keySoundVolume: value,
+                              ...(value === 0 ? { keySoundEnabled: false } : {}),
+                            },
+                            () => setKeySoundVolumeDraft(null),
+                          )}
+                          disabled={!keySoundEnabled || isSavingAndroidImeInputSettings}
+                          aria-label="按键音量"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>按键音跟随系统设置；iOS 键盘扩展无法自定义音色与音量。</span>
+                    </div>
+                  )}
+                  <div className="pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">手势与时序</div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <div className="flex min-w-0 items-center gap-2">
@@ -1941,6 +2101,174 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <div className="text-muted-foreground">显示键角提示</div>
+                      <div className="text-[11px] text-muted-foreground/80">关闭后长按符号仍可使用</div>
+                    </div>
+                    <Switch
+                      checked={keyHintVisible}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ keyHintVisible: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换键角提示"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <div className="text-muted-foreground">下拉输入角标符号</div>
+                      <div className="text-[11px] text-muted-foreground/80">与常驻数字行功能部分重叠</div>
+                    </div>
+                    <Switch
+                      checked={flickKeysEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ flickKeysEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换 Flick keys"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <div className="text-muted-foreground">双击空格输入句号</div>
+                      <div className="text-[11px] text-muted-foreground/80">1100ms 内连按两次</div>
+                    </div>
+                    <Switch
+                      checked={doubleSpacePeriodEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ doubleSpacePeriodEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换双击空格输入句号"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">滑动判定阈值</span>
+                      <span className="font-mono text-muted-foreground">{swipeThresholdDp}dp</span>
+                    </div>
+                    <Slider
+                      min={12}
+                      max={96}
+                      step={1}
+                      value={[swipeThresholdDp]}
+                      onValueChange={([value]) => setSwipeThresholdDraft(value)}
+                      onValueCommit={([value]) => commitMobileImeSetting(
+                        { swipeThresholdDp: value },
+                        () => setSwipeThresholdDraft(null),
+                      )}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="滑动判定阈值"
+                    />
+                  </div>
+                  <div className="pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">布局</div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">键盘高度</span>
+                      <span className="font-mono text-muted-foreground">{keyboardHeightDp}dp</span>
+                    </div>
+                    <Slider
+                      min={160}
+                      max={420}
+                      step={2}
+                      value={[keyboardHeightDp]}
+                      onValueChange={([value]) => setKeyboardHeightDraft(value)}
+                      onValueCommit={([value]) => commitMobileImeSetting(
+                        { keyboardHeightDp: value },
+                        () => setKeyboardHeightDraft(null),
+                      )}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="键盘高度"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">候选栏高度</span>
+                      <span className="font-mono text-muted-foreground">{candidateBarHeightDp}dp</span>
+                    </div>
+                    <Slider
+                      min={36}
+                      max={96}
+                      step={1}
+                      value={[candidateBarHeightDp]}
+                      onValueChange={([value]) => setCandidateBarHeightDraft(value)}
+                      onValueCommit={([value]) => commitMobileImeSetting(
+                        { candidateBarHeightDp: value },
+                        () => setCandidateBarHeightDraft(null),
+                      )}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="候选栏高度"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <div className="text-muted-foreground">常驻数字行</div>
+                      <div className="text-[11px] text-muted-foreground/80">开启后键盘会按行数增高</div>
+                    </div>
+                    <Switch
+                      checked={numberRowEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ numberRowEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换常驻数字行"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">候选字号</span>
+                      <span className="font-mono text-muted-foreground">{candidateFontScale.toFixed(1)}×</span>
+                    </div>
+                    <Slider
+                      min={0.8}
+                      max={1.4}
+                      step={0.1}
+                      value={[candidateFontScale]}
+                      onValueChange={([value]) => setCandidateFontScaleDraft(value)}
+                      onValueCommit={([value]) => commitMobileImeSetting(
+                        { candidateFontScale: value },
+                        () => setCandidateFontScaleDraft(null),
+                      )}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="候选字号"
+                    />
+                  </div>
+                  {([
+                    {
+                      label: "竖屏悬浮键盘",
+                      enabled: androidImeInputSettings?.floatingPortraitEnabled ?? false,
+                      scale: androidImeInputSettings?.floatingPortraitScale ?? 88,
+                      enabledKey: "floatingPortraitEnabled" as const,
+                      scaleKey: "floatingPortraitScale" as const,
+                      min: 70,
+                    },
+                    {
+                      label: "横屏悬浮键盘",
+                      enabled: androidImeInputSettings?.floatingLandscapeEnabled ?? true,
+                      scale: androidImeInputSettings?.floatingLandscapeScale ?? 72,
+                      enabledKey: "floatingLandscapeEnabled" as const,
+                      scaleKey: "floatingLandscapeScale" as const,
+                      min: 70,
+                    },
+                  ]).map((item) => (
+                    <div key={item.label} className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-3 text-xs">
+                        <span className="text-muted-foreground">{item.label}</span>
+                        <Switch
+                          checked={item.enabled}
+                          onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ [item.enabledKey]: checked })}
+                          disabled={isSavingAndroidImeInputSettings}
+                          aria-label={`切换${item.label}`}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground/80">
+                        <span>缩放</span>
+                        <span className="font-mono">{item.scale}%</span>
+                      </div>
+                      <Slider
+                        min={item.min}
+                        max={100}
+                        step={1}
+                        value={[item.scale]}
+                        onValueCommit={([value]) => handleUpdateAndroidImeInputSettings({ [item.scaleKey]: value })}
+                        disabled={!item.enabled || isSavingAndroidImeInputSettings}
+                        aria-label={`${item.label}缩放`}
+                      />
+                    </div>
+                  ))}
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <div className="flex min-w-0 items-center gap-2">
@@ -1981,6 +2309,16 @@ export default function App() {
                       <code className="font-mono truncate flex-1 min-w-0">{androidImeInputSettings.configPath}</code>
                     </div>
                   )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={resetMobileImeInputSettings}
+                    disabled={isSavingAndroidImeInputSettings}
+                    className="w-full"
+                  >
+                    恢复移动端键盘默认设置
+                  </Button>
                   {androidImeInputError && (
                     <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2.5">
                       <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />

@@ -76,27 +76,27 @@ numberRows:
         { label: "-", value: "-" },
         { label: "/", value: "/" }
       ] },
-      { label: "1", value: "1", alternates: [ { label: "!", value: "!" } ] },
-      { label: "2", value: "2", alternates: [ { label: "@", value: "@" } ] },
-      { label: "3", value: "3", alternates: [ { label: "#", value: "#" } ] },
+      { label: "1", hint: "!", value: "1", alternates: [ { label: "!", value: "!" } ] },
+      { label: "2", hint: "@", value: "2", alternates: [ { label: "@", value: "@" } ] },
+      { label: "3", hint: "#", value: "3", alternates: [ { label: "#", value: "#" } ] },
       { label: "⌫", action: { type: backspace } }
     ]
   - [
-      { label: "4", value: "4", alternates: [ { label: "$", value: "$" } ] },
-      { label: "5", value: "5", alternates: [ { label: "%", value: "%" } ] },
-      { label: "6", value: "6", alternates: [ { label: "^", value: "^" } ] },
+      { label: "4", hint: "$", value: "4", alternates: [ { label: "$", value: "$" } ] },
+      { label: "5", hint: "%", value: "5", alternates: [ { label: "%", value: "%" } ] },
+      { label: "6", hint: "^", value: "6", alternates: [ { label: "^", value: "^" } ] },
       { label: "·", value: "." }
     ]
   - [
-      { label: "7", value: "7", alternates: [ { label: "&", value: "&" } ] },
-      { label: "8", value: "8", alternates: [ { label: "*", value: "*" } ] },
-      { label: "9", value: "9", alternates: [ { label: "(", value: "(" } ] },
+      { label: "7", hint: "&", value: "7", alternates: [ { label: "&", value: "&" } ] },
+      { label: "8", hint: "*", value: "8", alternates: [ { label: "*", value: "*" } ] },
+      { label: "9", hint: "(", value: "9", alternates: [ { label: "(", value: "(" } ] },
       { label: "=", value: "=" }
     ]
   - [
       { label: "返回", action: { type: keyboardMode, value: letters } },
       { label: "#+=", action: { type: keyboardMode, value: symbols } },
-      { label: "0", value: "0", alternates: [ { label: ")", value: ")" } ] },
+      { label: "0", hint: ")", value: "0", alternates: [ { label: ")", value: ")" } ] },
       { label: "␣", action: { type: space } },
       { label: "发送", action: { type: enter } }
     ]
