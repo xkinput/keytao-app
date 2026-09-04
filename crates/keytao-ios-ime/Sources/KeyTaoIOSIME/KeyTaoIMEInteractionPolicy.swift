@@ -88,6 +88,12 @@ public enum KeyTaoIMEInteractionTuning {
     static let repeatableEditIntervalMs = 72
     static let repeatTimerToleranceFraction = 0.2
     static let repeatTimerMaximumToleranceSeconds = 0.01
+    static let accentBorderWidth: CGFloat = 1
+    static let softAccentKeyFillAmount: CGFloat = 0.22
+    static let softAccentKeyBorderAlpha: CGFloat = 0.60
+    static let accentToolbarBorderAlpha: CGFloat = 0.60
+    static let candidateBorderAlpha: CGFloat = 0.35
+    static let darkAccentBorderAlphaMultiplier: CGFloat = 0.70
 
     private static let slowBackspace = KeyTaoBackspaceRepeatProfile(
         initialDelayMs: 500,

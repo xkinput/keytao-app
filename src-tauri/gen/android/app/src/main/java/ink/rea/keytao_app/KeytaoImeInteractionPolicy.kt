@@ -91,6 +91,12 @@ internal object KeytaoImeInteractionTuning {
     const val CANDIDATE_DRAG_SLOP_DP = 8f
     const val DOUBLE_SPACE_PERIOD_TIMEOUT_MS = 1_100L
     const val REPEATABLE_EDIT_INTERVAL_MS = 72L
+    const val ACCENT_BORDER_WIDTH_DP = 1f
+    const val SOFT_ACCENT_KEY_FILL_AMOUNT = 0.22f
+    const val SOFT_ACCENT_KEY_BORDER_ALPHA = 0.60f
+    const val ACCENT_TOOLBAR_BORDER_ALPHA = 0.60f
+    const val CANDIDATE_BORDER_ALPHA = 0.35f
+    const val DARK_ACCENT_BORDER_ALPHA_MULTIPLIER = 0.70f
 
     private val slowBackspace = BackspaceRepeatProfile(
         initialDelayMs = 500L,

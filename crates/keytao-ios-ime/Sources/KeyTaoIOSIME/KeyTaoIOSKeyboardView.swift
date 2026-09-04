@@ -2001,11 +2001,16 @@ final class KeyTaoIOSKeyboardView: UIView {
         (selected ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
 
-        let borderWidth = selected ? max(theme.candidate.borderWidth, 1) : theme.candidate.borderWidth
+        let borderWidth = selected
+            ? max(theme.candidate.borderWidth, 1)
+            : KeyTaoIMEInteractionTuning.accentBorderWidth
         if borderWidth > 0 {
             let path = UIBezierPath(roundedRect: rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2), cornerRadius: candidateCornerRadius())
             path.lineWidth = borderWidth
-            (selected ? theme.candidate.selectedBorderColor.uiColor : theme.candidate.borderColor.uiColor).setStroke()
+            (selected
+                ? theme.candidate.selectedBorderColor.uiColor
+                : accentBorderColor(KeyTaoIMEInteractionTuning.candidateBorderAlpha)
+            ).setStroke()
             path.stroke()
         }
 
@@ -2223,15 +2228,20 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func drawToolbarChip(_ item: ToolbarRect) {
         let pressed = pressedToolbar?.action.command == item.action.command && pressedToolbar?.action.label == item.action.label
+        let useAccent = item.action.selected || isSoftAccentToolbar(item.action)
         let rect = item.drawingRect ?? item.rect
         drawSurfaceShadow(rect, pressed: pressed)
         toolbarBackgroundColor(item.action, pressed: pressed).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: keyCornerRadius(for: rect)).fill()
 
-        if item.action.selected {
-            let path = UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: keyCornerRadius(for: rect))
-            path.lineWidth = max(theme.candidate.borderWidth, 1)
-            theme.candidate.selectedBorderColor.uiColor.setStroke()
+        if useAccent {
+            let borderWidth = KeyTaoIMEInteractionTuning.accentBorderWidth
+            let path = UIBezierPath(
+                roundedRect: rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2),
+                cornerRadius: keyCornerRadius(for: rect)
+            )
+            path.lineWidth = borderWidth
+            accentBorderColor(KeyTaoIMEInteractionTuning.accentToolbarBorderAlpha).setStroke()
             path.stroke()
         }
 
@@ -2554,7 +2564,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         } else if isSoftAccentKey(key) {
             pressed = blend(
                 foreground: theme.candidate.pressedBackground.uiColor,
-                background: softenedAccentSurfaceColor(0.16),
+                background: softenedAccentSurfaceColor(KeyTaoIMEInteractionTuning.softAccentKeyFillAmount),
                 amount: 0.72
             )
         } else {
@@ -2701,14 +2711,15 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawKeyOutline(_ key: KeyTaoKeySpec, rect: CGRect, pressed: Bool) {
-        guard !pressed else {
+        let softAccent = isSoftAccentKey(key)
+        guard !pressed || softAccent else {
             return
         }
         let outline = rect.insetBy(dx: 1, dy: 1)
         let path = UIBezierPath(roundedRect: outline, cornerRadius: max(0, keyCornerRadius(for: rect) - 1))
-        path.lineWidth = max(1, 0.7)
-        if isSoftAccentKey(key) {
-            theme.candidate.selectedLabelColor.uiColor.withAlphaComponent(isDarkPanel() ? 0.28 : 0.18).setStroke()
+        path.lineWidth = softAccent ? KeyTaoIMEInteractionTuning.accentBorderWidth : max(1, 0.7)
+        if softAccent {
+            accentBorderColor(pressed ? 1 : KeyTaoIMEInteractionTuning.softAccentKeyBorderAlpha).setStroke()
         } else if isDarkPanel() {
             UIColor.white.withAlphaComponent(0.09).setStroke()
         } else {
@@ -5402,7 +5413,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return theme.candidate.selectedBackground.uiColor.withAlphaComponent(isDarkPanel() ? 0.48 : 0.62)
         }
         if isSoftAccentKey(key) {
-            return softenedAccentSurfaceColor(0.16)
+            return softenedAccentSurfaceColor(KeyTaoIMEInteractionTuning.softAccentKeyFillAmount)
         }
         if key?.style == "accent" {
             return theme.candidate.selectedBackground.uiColor.withAlphaComponent(isDarkPanel() ? 0.42 : 0.54)
@@ -5468,6 +5479,15 @@ final class KeyTaoIOSKeyboardView: UIView {
             background: panelBackgroundColor(),
             amount: max(0, min(amount, 1)),
             alpha: alpha
+        )
+    }
+
+    private func accentBorderColor(_ alpha: CGFloat) -> UIColor {
+        let effectiveAlpha = alpha * (isDarkPanel()
+            ? KeyTaoIMEInteractionTuning.darkAccentBorderAlphaMultiplier
+            : 1)
+        return theme.candidate.selectedLabelColor.uiColor.withAlphaComponent(
+            max(0, min(effectiveAlpha, 1))
         )
     }
 

@@ -1929,20 +1929,28 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         canvas.drawRoundRect(rect, radius, radius, paint)
 
-        val borderWidth = if (item.selected || pressed) {
+        val selected = item.selected || pressed
+        val borderWidth = if (selected) {
             dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
         } else {
-            dp(theme.candidateBorderWidthDp)
+            dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
         }
         if (borderWidth > 0f) {
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = borderWidth
-            paint.color = if (item.selected || pressed) {
+            paint.color = if (selected) {
                 theme.candidateSelectedBorderColor.toArgb()
             } else {
-                theme.candidateBorderColor.toArgb()
+                accentBorderColor(KeytaoImeInteractionTuning.CANDIDATE_BORDER_ALPHA)
             }
-            canvas.drawRoundRect(rect, radius, radius, paint)
+            val borderInset = borderWidth / 2f
+            val borderRect = RectF(
+                rect.left + borderInset,
+                rect.top + borderInset,
+                rect.right - borderInset,
+                rect.bottom - borderInset,
+            )
+            canvas.drawRoundRect(borderRect, radius, radius, paint)
         }
 
         val displayItem = if (pressed && !item.selected) item.copy(selected = true) else item
@@ -2235,6 +2243,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         paint.style = Paint.Style.FILL
         paint.color = toolbarBackgroundColor(item, pressed, forceAccent = true)
         canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
+        drawAccentToolbarBorder(canvas, item.rect)
 
         val padding = dp(13f)
         val inlineGap = dp(8f)
@@ -2357,16 +2366,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun drawToolbarChip(canvas: Canvas, item: ToolbarRect, forceAccent: Boolean = false) {
         val pressed = isToolbarPressed(item)
+        val useAccent = forceAccent || item.selected || isSoftAccentToolbar(item)
         drawSurfaceShadow(canvas, item.rect, pressed)
         paint.style = Paint.Style.FILL
         paint.color = toolbarBackgroundColor(item, pressed, forceAccent)
         canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
 
-        if (item.selected) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(theme.candidateBorderWidthDp.coerceAtLeast(1f))
-            paint.color = theme.candidateSelectedBorderColor.toArgb()
-            canvas.drawRoundRect(item.rect, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
+        if (useAccent) {
+            drawAccentToolbarBorder(canvas, item.rect)
         }
 
         textPaint.textAlign = Paint.Align.CENTER
@@ -2734,7 +2741,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             )
             isSoftAccentKey(key) -> blendColor(
                 theme.keyPressedBackground.toArgb(),
-                softenedAccentSurfaceColor(0.16f),
+                softenedAccentSurfaceColor(KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_FILL_AMOUNT),
                 0.72f,
             )
             else -> theme.keyPressedBackground.toArgb()
@@ -5111,8 +5118,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawRoundRect(shadow, dp(keyCornerRadiusDp()), dp(keyCornerRadiusDp()), paint)
     }
 
+    private fun drawAccentToolbarBorder(canvas: Canvas, rect: RectF) {
+        val borderWidth = dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
+        val borderInset = borderWidth / 2f
+        val borderRect = RectF(
+            rect.left + borderInset,
+            rect.top + borderInset,
+            rect.right - borderInset,
+            rect.bottom - borderInset,
+        )
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = borderWidth
+        paint.color = accentBorderColor(KeytaoImeInteractionTuning.ACCENT_TOOLBAR_BORDER_ALPHA)
+        val radius = dp(keyCornerRadiusDp())
+        canvas.drawRoundRect(borderRect, radius, radius, paint)
+    }
+
     private fun drawKeyOutline(canvas: Canvas, key: KeySpec, rect: RectF, pressed: Boolean) {
-        if (pressed) return
+        val softAccent = isSoftAccentKey(key)
+        if (pressed && !softAccent) return
         val inset = dp(1f)
         val outline = RectF(
             rect.left + inset,
@@ -5121,9 +5145,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             rect.bottom - inset,
         )
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(1f, dp(0.7f))
-        paint.color = if (isSoftAccentKey(key)) {
-            Color.argb(if (isDarkPanel()) 72 else 46, theme.selectedLabelColor.red, theme.selectedLabelColor.green, theme.selectedLabelColor.blue)
+        paint.strokeWidth = if (softAccent) {
+            dp(KeytaoImeInteractionTuning.ACCENT_BORDER_WIDTH_DP)
+        } else {
+            max(1f, dp(0.7f))
+        }
+        paint.color = if (softAccent) {
+            accentBorderColor(if (pressed) 1f else KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_BORDER_ALPHA)
         } else if (isDarkPanel()) {
             Color.argb(22, 255, 255, 255)
         } else {
@@ -5134,7 +5162,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun keyBackgroundColor(key: KeySpec? = null): Int {
-        if (isSoftAccentKey(key)) return softenedAccentSurfaceColor(0.16f)
+        if (isSoftAccentKey(key)) {
+            return softenedAccentSurfaceColor(KeytaoImeInteractionTuning.SOFT_ACCENT_KEY_FILL_AMOUNT)
+        }
         if (key?.style == "accent") return theme.candidateSelectedBackground.toArgb()
         if (theme.keyBackground.alpha > 0) return theme.keyBackground.toArgb()
         return if (isDarkPanel()) {
@@ -5235,6 +5265,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             theme.selectedLabelColor.toArgb(),
             panelBackgroundColor(),
             amount.coerceIn(0f, 1f),
+        )
+    }
+
+    private fun accentBorderColor(alpha: Float): Int {
+        val effectiveAlpha = alpha * if (isDarkPanel()) {
+            KeytaoImeInteractionTuning.DARK_ACCENT_BORDER_ALPHA_MULTIPLIER
+        } else {
+            1f
+        }
+        return blendColor(
+            theme.selectedLabelColor.toArgb(),
+            Color.TRANSPARENT,
+            1f,
+            (255f * effectiveAlpha.coerceIn(0f, 1f)).roundToInt(),
         )
     }
 
