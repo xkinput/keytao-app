@@ -101,26 +101,40 @@ if let config = decodeFloating("{}") {
 let landscapeState = KeyTaoIOSKeyboardLayoutState(
     enabled: true,
     scale: 0.62,
+    heightScale: 0.74,
     side: .right,
     orientation: .landscape
 ).normalized()
 expectScale(landscapeState.scale, 0.62, "landscape layout state keeps 0.62")
+expectScale(landscapeState.heightScale, 0.74, "landscape layout state keeps an independent height")
 
 let landscapeTooSmall = KeyTaoIOSKeyboardLayoutState(
     enabled: true,
     scale: 0.20,
+    heightScale: 0.20,
     side: .right,
     orientation: .landscape
 ).normalized()
 expectScale(landscapeTooSmall.scale, 0.45, "landscape layout state floor is 0.45")
+expectScale(
+    landscapeTooSmall.heightScale,
+    KeyTaoIOSKeyboardLayoutState.minimumHeightScale,
+    "height uses its own floor"
+)
 
 let portraitState = KeyTaoIOSKeyboardLayoutState(
     enabled: true,
     scale: 0.62,
+    heightScale: 1.25,
     side: .right,
     orientation: .portrait
 ).normalized()
 expectScale(portraitState.scale, 0.70, "portrait layout state floor is 0.70")
+expectScale(
+    portraitState.heightScale,
+    KeyTaoIOSKeyboardLayoutState.maximumHeightScale,
+    "height uses its own ceiling"
+)
 
 let widestState = KeyTaoIOSKeyboardLayoutState(
     enabled: true,

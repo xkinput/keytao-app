@@ -62,10 +62,10 @@ rows:
     ]
   - [
       { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers }, longPress: { type: nextInputMethod } },
-      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" }, alternates: [ { label: "！", action: { type: directInput, value: "！" } }, { label: "？", action: { type: directInput, value: "？" } }, { label: "；", action: { type: directInput, value: "；" } }, { label: "：", action: { type: directInput, value: "：" } } ], asciiAlternates: [ { label: "!", action: { type: directInput, value: "!" } }, { label: "?", action: { type: directInput, value: "?" } }, { label: ";", action: { type: directInput, value: ";" } }, { label: ":", action: { type: directInput, value: ":" } } ] },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" }, alternates: [ { label: "！", action: { type: directInput, value: "！" } }, { label: "？", action: { type: directInput, value: "？" } }, { label: "；", action: { type: directInput, value: "；" } }, { label: "：", action: { type: directInput, value: "：" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: symbols } } ], asciiAlternates: [ { label: "!", action: { type: directInput, value: "!" } }, { label: "?", action: { type: directInput, value: "?" } }, { label: ";", action: { type: directInput, value: ";" } }, { label: ":", action: { type: directInput, value: ":" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: symbols } } ] },
       { label: "空格", weight: 4.6, action: { type: space }, swipeDown: { type: reset } },
       { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" }, alternates: [ { label: "…", action: { type: directInput, value: "…" } }, { label: "、", action: { type: directInput, value: "、" } }, { label: "~", action: { type: directInput, value: "~" } } ] },
-      { label: "↵", weight: 1.45, action: { type: enter } }
+      { label: "↵", weight: 1.45, action: { type: enter }, alternates: [ { label: "↵", action: { type: enter } }, { label: "悬浮", action: { type: floating } } ] }
     ]
 
 numberRows:
@@ -98,7 +98,7 @@ numberRows:
       { label: "#+=", action: { type: keyboardMode, value: symbols } },
       { label: "0", hint: ")", value: "0", alternates: [ { label: ")", value: ")" } ] },
       { label: "␣", action: { type: space } },
-      { label: "发送", action: { type: enter } }
+      { label: "发送", action: { type: enter }, alternates: [ { label: "发送", action: { type: enter } }, { label: "悬浮", action: { type: floating } } ] }
     ]
 
 symbolRows:
@@ -165,7 +165,7 @@ symbolRows:
       { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
       { label: "空格", weight: 4.6, action: { type: "space" } },
       { label: "⌫", weight: 1.15, action: { type: "backspace" } },
-      { label: "↵", weight: 1.15, action: { type: "enter" } }
+      { label: "↵", weight: 1.15, action: { type: "enter" }, alternates: [ { label: "↵", action: { type: "enter" } }, { label: "悬浮", action: { type: "floating" } } ] }
     ]
 
 # Extra custom keyboard pages. A key can jump here with
@@ -1259,7 +1259,7 @@ layers:
         { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
         { label: "空格", weight: 4.6, action: { type: "space" } },
         { label: "⌫", weight: 1.15, action: { type: "backspace" } },
-        { label: "↵", weight: 1.15, action: { type: "enter" } }
+        { label: "↵", weight: 1.15, action: { type: "enter" }, alternates: [ { label: "↵", action: { type: "enter" } }, { label: "悬浮", action: { type: "floating" } } ] }
       ]
   symbols_emoji_hand:
     - *emojiHeader
@@ -3097,5 +3097,5 @@ layers:
         { label: "Tab", action: { type: "edit", value: "tab" } },
         { label: "剪贴板", action: { type: "panel", value: "clipboard" } },
         { label: "重复", action: { type: "edit", value: "repeatCommit" } },
-        { label: "↵", action: { type: "enter" } }
+        { label: "↵", action: { type: "enter" }, alternates: [ { label: "↵", action: { type: "enter" } }, { label: "悬浮", action: { type: "floating" } } ] }
       ]

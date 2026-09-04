@@ -18,6 +18,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private static let queuedCommandLimit = 32
     private static let deleteAllBatchLimit = 4096
     private static let rimeOptionChoicePrefix = "choice:"
+    private static let englishCompletionLexicon = [
+        "about", "after", "again", "because", "before", "between", "could", "different",
+        "example", "first", "from", "good", "great", "have", "hello", "help", "important",
+        "keyboard", "know", "language", "little", "make", "more", "people", "please", "right",
+        "should", "something", "thanks", "their", "there", "these", "thing", "think", "through",
+        "today", "under", "want", "where", "which", "with", "work", "would", "your",
+    ]
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -51,8 +58,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         didSet { keyboardView?.setNeedsDisplay() }
     }
     private var backspaceGestureRestoreStart = 0
+    private struct BackspaceSelectionSession {
+        var originalBefore: String
+        var selectedText: String
+    }
+    private var backspaceSelectionSession: BackspaceSelectionSession?
     private var lastCommittedText: String?
     private let doubleSpacePeriodTracker = KeyTaoDoubleSpacePeriodTracker()
+    private let englishTextChecker = UITextChecker()
     private var hostTraits = KeyTaoHostTraits.default
     private var markedTextActive = false
     private var hostTextMutationDepth = 0
@@ -154,6 +167,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         applyHostTraits()
         startRuntimeIfNeeded()
         keyboardView?.update(state: currentState)
+        refreshPredictionSuggestions()
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
@@ -242,6 +256,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches() {
+        cancelBackspaceSelection()
         backspaceRestoreStack.removeAll()
         doubleSpacePeriodTracker.reset()
         lastCommittedText = nil
@@ -286,7 +301,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.backspace:
             handleBackspace()
         case KeyTaoCommandType.backspaceGesture:
-            handleBackspaceGesture(command.value.orEmpty)
+            handleBackspaceGesture(
+                command.value.orEmpty,
+                count: Int(command.fallbackValue ?? "") ?? 1
+            )
         case KeyTaoCommandType.enter:
             handleEnter()
         case KeyTaoCommandType.space:
@@ -433,6 +451,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
     }
 
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistToolbarOrder order: [String], pinnedCount: Int) {
+        if !engine.persistToolbarCustomization(order: order, pinnedCount: pinnedCount) {
+            showMessage("工具栏顺序保存失败")
+        }
+    }
+
     func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool {
         !backspaceRestoreStack.isEmpty
     }
@@ -517,6 +541,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             apply(engine.commitComposition())
         }
         insertHostText(text)
+        refreshPredictionSuggestions()
     }
 
     private func handleBackspace() {
@@ -530,9 +555,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         _ = deleteOneBeforeCursorForRestore()
+        refreshPredictionSuggestions()
     }
 
-    private func handleBackspaceGesture(_ action: String) {
+    private func handleBackspaceGesture(_ action: String, count: Int) {
         switch action {
         case "begin":
             backspaceGestureRestoreStart = backspaceRestoreStack.count
@@ -553,6 +579,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             for _ in 0..<count {
                 _ = restoreOneBackspaceText()
             }
+        case "select":
+            updateBackspaceSelection(count: count)
+        case "cancelSelection":
+            cancelBackspaceSelection()
+        case "commitSelection":
+            commitBackspaceSelection()
         default:
             break
         }
@@ -561,7 +593,70 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             : backspaceRestoreStack[
                 min(backspaceGestureRestoreStart, backspaceRestoreStack.count)...
             ].reversed().joined()
-        keyboardView?.showBackspaceDeletionPreview(preview)
+        if !["select", "cancelSelection", "commitSelection"].contains(action) {
+            keyboardView?.showBackspaceDeletionPreview(preview)
+        }
+        refreshPredictionSuggestions()
+    }
+
+    private func updateBackspaceSelection(count: Int) {
+        guard !hostTraits.isSensitive else { return }
+        resetCompositionBeforeBackspaceGesture()
+        let originalBefore = backspaceSelectionSession?.originalBefore
+            ?? textDocumentProxy.documentContextBeforeInput
+            ?? ""
+        restoreBackspaceSelectionMarkup()
+        let selectionLength = keyTaoTrailingDeletionSegmentsLength(
+            originalBefore,
+            count: max(1, min(count, 96))
+        )
+        let selectedText = String(originalBefore.suffix(selectionLength))
+        guard !selectedText.isEmpty else {
+            backspaceSelectionSession = nil
+            keyboardView?.showBackspaceDeletionPreview("")
+            return
+        }
+        withHostTextMutation {
+            for _ in selectedText {
+                textDocumentProxy.deleteBackward()
+            }
+            textDocumentProxy.setMarkedText(
+                selectedText,
+                selectedRange: NSRange(location: 0, length: selectedText.utf16.count)
+            )
+        }
+        markedTextActive = true
+        backspaceSelectionSession = BackspaceSelectionSession(
+            originalBefore: originalBefore,
+            selectedText: selectedText
+        )
+        keyboardView?.showBackspaceDeletionPreview(selectedText, pendingSelection: true)
+    }
+
+    private func restoreBackspaceSelectionMarkup() {
+        guard let session = backspaceSelectionSession else { return }
+        withHostTextMutation {
+            textDocumentProxy.insertText(session.selectedText)
+            textDocumentProxy.unmarkText()
+        }
+        markedTextActive = false
+        backspaceSelectionSession = nil
+    }
+
+    private func cancelBackspaceSelection() {
+        restoreBackspaceSelectionMarkup()
+        keyboardView?.showBackspaceDeletionPreview("")
+    }
+
+    private func commitBackspaceSelection() {
+        guard let session = backspaceSelectionSession else { return }
+        let selectedText = session.selectedText
+        backspaceSelectionSession = nil
+        backspaceRestoreStack.removeAll()
+        backspaceGestureRestoreStart = 0
+        clearHostMarkedText()
+        backspaceRestoreStack.append(contentsOf: selectedText.reversed().map(String.init))
+        keyboardView?.showBackspaceDeletionPreview(selectedText)
     }
 
     private func deleteTrailingSegmentBeforeCursorForRestore() {
@@ -644,6 +739,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
+        refreshPredictionSuggestions()
     }
 
     private func handleEnter() {
@@ -939,6 +1035,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
+        refreshPredictionSuggestions()
     }
 
     /// Reading `UIPasteboard.general.string` needs Full Access, and since iOS 16
@@ -984,6 +1081,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         lastCommittedText = hostTraits.isSensitive ? nil : text
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
+        refreshPredictionSuggestions()
     }
 
     private func apply(_ state: KeyTaoImeState) {
@@ -993,6 +1091,37 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentState = state.withoutTransientCommit()
         updateHostMarkedText()
         keyboardView?.update(state: currentState)
+        refreshPredictionSuggestions()
+    }
+
+    private func refreshPredictionSuggestions() {
+        let config = keyboardView?.currentConfig() ?? baseKeyboardConfig ?? .fallback
+        guard config.predictionEnabled,
+              !hostTraits.isSensitive,
+              currentState.asciiMode,
+              !currentState.hasComposition,
+              backspaceSelectionSession == nil,
+              let before = textDocumentProxy.documentContextBeforeInput,
+              let prefix = keyTaoEnglishCompletionPrefix(before) else {
+            keyboardView?.updatePredictionSuggestions(prefix: nil, suggestions: [])
+            return
+        }
+        let range = NSRange(location: 0, length: prefix.utf16.count)
+        let systemCompletions = englishTextChecker.completions(
+            forPartialWordRange: range,
+            in: prefix,
+            language: "en_US"
+        ) ?? []
+        let systemGuesses = englishTextChecker.guesses(
+            forWordRange: range,
+            in: prefix,
+            language: "en_US"
+        ) ?? []
+        let suggestions = keyTaoCompleteEnglishPrefix(
+            prefix,
+            lexicon: systemCompletions + systemGuesses + Self.englishCompletionLexicon
+        )
+        keyboardView?.updatePredictionSuggestions(prefix: prefix, suggestions: suggestions)
     }
 
     // MARK: - Host text
@@ -1172,7 +1301,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     /// `textDocumentProxy` inherits `UITextInputTraits`; it is the only channel
     /// through which an iOS host declares what it expects from the keyboard.
-    private func applyHostTraits() {
+        private func applyHostTraits() {
         let traits = KeyTaoHostTraits(proxy: textDocumentProxy)
         defer {
             os_log(
@@ -1266,7 +1395,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         if !force, lastPresentationLandscape == isLandscape,
            layoutState == state,
            layoutPresentation == presentation,
-           keyboardView.currentConfig() == config.scaledForFloating(profile) {
+           keyboardView.currentConfig() == config.scaledForFloating(profile, heightScale: state.heightScale) {
             return
         }
         lastPresentationLandscape = isLandscape
@@ -1289,7 +1418,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let profile = keyboardLayoutProfile(state: normalized, presentation: presentation)
         layoutState = normalized
         layoutPresentation = presentation
-        let presentedConfig = config.scaledForFloating(profile)
+        let presentedConfig = config.scaledForFloating(profile, heightScale: normalized.heightScale)
         keyboardView.update(config: presentedConfig)
         keyboardView.updateLayoutPresentation(presentation)
 
@@ -1351,8 +1480,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         let normalized = state.normalized()
         let scaleChanged = abs(normalized.scale - layoutState.scale) >= 0.001
+        let heightChanged = abs(normalized.heightScale - layoutState.heightScale) >= 0.001
         layoutState = normalized
-        if scaleChanged {
+        if scaleChanged || heightChanged {
             applyKeyboardPresentation(config: config, state: normalized)
         } else {
             keyboardContainer?.configure(
@@ -1378,6 +1508,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let next = KeyTaoIOSKeyboardLayoutState(
             enabled: !layoutState.enabled,
             scale: layoutState.scale,
+            heightScale: layoutState.heightScale,
             side: layoutState.side,
             orientation: layoutState.orientation
         ).normalized()
@@ -1396,6 +1527,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let next = KeyTaoIOSKeyboardLayoutState(
             enabled: true,
             scale: layoutState.scale,
+            heightScale: layoutState.heightScale,
             side: layoutState.side.opposite,
             orientation: layoutState.orientation
         ).normalized()

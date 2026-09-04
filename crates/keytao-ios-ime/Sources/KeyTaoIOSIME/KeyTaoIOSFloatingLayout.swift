@@ -52,6 +52,7 @@ public struct KeyTaoFloatingKeyboardConfig: Codable, Equatable {
     public static let defaultMargin: CGFloat = 8
     public static let defaultPortraitScale: CGFloat = 0.88
     public static let defaultLandscapeScale: CGFloat = 0.62
+    public static let defaultHeightScale: CGFloat = 1.0
 
     public var marginDp: CGFloat
     public var portrait: KeyTaoFloatingKeyboardProfile
@@ -154,9 +155,12 @@ struct KeyTaoIOSKeyboardLayoutState: Equatable {
     /// again. The lower bound follows the shared layout contract instead, which
     /// is orientation dependent.
     static let maximumScale: CGFloat = 0.94
+    static let minimumHeightScale: CGFloat = 0.55
+    static let maximumHeightScale: CGFloat = 1.15
 
     var enabled: Bool
     var scale: CGFloat
+    var heightScale: CGFloat = KeyTaoFloatingKeyboardConfig.defaultHeightScale
     var side: KeyTaoIOSKeyboardSide = .right
     var orientation: KeyTaoFloatingOrientation = .portrait
 
@@ -164,6 +168,7 @@ struct KeyTaoIOSKeyboardLayoutState: Equatable {
         KeyTaoIOSKeyboardLayoutState(
             enabled: enabled,
             scale: min(max(scale, orientation.minimumScale), Self.maximumScale),
+            heightScale: min(max(heightScale, Self.minimumHeightScale), Self.maximumHeightScale),
             side: side,
             orientation: orientation
         )

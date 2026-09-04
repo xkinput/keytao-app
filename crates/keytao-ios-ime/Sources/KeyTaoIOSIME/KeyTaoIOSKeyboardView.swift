@@ -9,6 +9,7 @@ protocol KeyTaoIOSKeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestClipboardHistory completion: @escaping ([String]) -> Void)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteClipboardEntry text: String)
     func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView)
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistToolbarOrder order: [String], pinnedCount: Int)
     func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool
     func keyboardViewNeedsFullAccessForHaptics(_ view: KeyTaoIOSKeyboardView)
 }
@@ -99,6 +100,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         var pageIndex: Int = 0
         var label: String = ""
         var comment: String?
+        var clipboardText: String? = nil
     }
 
     private struct CandidateMenuState {
@@ -132,18 +134,38 @@ final class KeyTaoIOSKeyboardView: UIView {
         var statusLabel: String? = nil
     }
 
+    private struct CompletionSuggestion: Equatable {
+        var word: String
+        var insertion: String
+    }
+
     private struct ToolbarAction {
         var label: String
         var command: KeyTaoKeyCommand
         var selected: Bool = false
         var secondaryLabel: String?
         var icon: KeyTaoToolbarIcon?
+        var longPressCommand: KeyTaoKeyCommand?
+        var id: String?
+        var customizable: Bool { id != nil && id != Self.pinnedBoundaryID }
+
+        private static let pinnedBoundaryID = "__toolbar_pinned_boundary__"
     }
 
     private struct ToolbarRect {
         var action: ToolbarAction
         var rect: CGRect
         var drawingRect: CGRect? = nil
+    }
+
+    private struct KeyPressAnimationState {
+        var progress: CGFloat
+        var target: CGFloat
+    }
+
+    private enum VerticalScrollSurface {
+        case expandedPanel
+        case symbolKeyboard
     }
 
     private var config: KeyTaoIOSImeConfig
@@ -172,11 +194,14 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var clipboardItemsLoading = false
     private var clipboardItems: [String] = []
     private var clipboardClearConfirmationPending = false
+    private var completionSuggestions: [CompletionSuggestion] = []
     private var expandedCandidateItemsCacheSignature = ""
     private var expandedCandidateItemsCache: [CandidateDrawItem] = []
     private var expandedCandidateScrollY: CGFloat = 0
+    private var expandedCandidateOverscrollY: CGFloat = 0
     private var expandedCandidateContentHeight: CGFloat = 0
     private var keyboardScrollY: CGFloat = 0
+    private var keyboardOverscrollY: CGFloat = 0
     private var keyboardTouchStartY: CGFloat = 0
     private var keyboardTouchStartScrollY: CGFloat = 0
     private var keyboardDragging = false
@@ -187,7 +212,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var keyboardScrollViewportBottom: CGFloat = 0
     private var expandRequestToken = 0
 
-    private var keyRects: [KeyRect] = []
+    private let keyHitLayout = KeyTaoImmediateHitLayout<KeyRect>()
+    private var keyRects: [KeyRect] {
+        get { keyHitLayout.items }
+        set { keyHitLayout.rebuild(newValue) }
+    }
     private var inlineCandidateRects: [CandidateRect] = []
     private var expandedCandidateRects: [CandidateRect] = []
     private var expandedSectionRects: [Int: CGRect] = [:]
@@ -207,6 +236,14 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var toolbarTouchStartScrollX: CGFloat = 0
     private var toolbarTouchActive = false
     private var toolbarDragging = false
+    private var toolbarLongPressWorkItem: DispatchWorkItem?
+    private var toolbarLongPressConsumed = false
+    private var toolbarMoreExpanded = false
+    private var toolbarEditMode = false
+    private var toolbarActionOrderOverride: [String]?
+    private var toolbarPinnedCountOverride: Int?
+    private var toolbarDragActionID: String?
+    private var toolbarInactiveActionIDs: [String] = []
     private var inlineCandidateTouchActive = false
     private var candidateDragging = false
     private var candidatePagingConsumed = false
@@ -215,11 +252,27 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var pressedCandidateMenuAction: CandidateMenuActionRect?
     private var candidateLongPressWorkItem: DispatchWorkItem?
     private var candidateLongPressConsumed = false
-    private var gestureTouchStartUptime: TimeInterval = 0
     private var candidatePanelExpanded = false
+    private var keyPressAnimations: [Int: KeyPressAnimationState] = [:]
+    private var keyPressDisplayLink: CADisplayLink?
+    private var keyPressLastTimestamp: CFTimeInterval = 0
+    private var verticalScrollSurface: VerticalScrollSurface?
+    private var verticalScrollVelocityY: CGFloat = 0
+    private var verticalScrollDisplayLink: CADisplayLink?
+    private var verticalScrollLastTimestamp: CFTimeInterval = 0
+    private var scrollGestureLastY: CGFloat = 0
+    private var scrollGestureLastTimestamp: CFTimeInterval = 0
+    private var scrollGestureVelocityY: CGFloat = 0
+    private var scrollIndicatorSurface: VerticalScrollSurface?
+    private var scrollIndicatorAlpha: CGFloat = 0
+    private var scrollIndicatorHoldRemaining: TimeInterval = 0
     private var activeTouches = KeyTaoTouchRolloverStateMachine<ActiveTouch>()
+    private let touchBounceTracker = KeyTaoPerPointerBounceTracker<Int>()
+    private var pointerSlotsByTouchIdentifier: [ObjectIdentifier: Int] = [:]
     private var candidateGestureTouchIdentifier: ObjectIdentifier?
     private var keyboardScrollTouchIdentifier: ObjectIdentifier?
+    private var expandedScrollWasAnimatingAtDown = false
+    private var keyboardScrollWasAnimatingAtDown = false
     private var pressedToolbar: ToolbarRect?
     private var pressedCandidate: CandidateRect?
     private var pressedClipboardDelete: ClipboardDeleteRect?
@@ -230,6 +283,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var backspacePreviewText: String?
     private var backspacePreviewRect: CGRect?
     private var backspacePreviewPressed = false
+    private var backspacePreviewPendingSelection = false
     private var backspacePreviewHideWorkItem: DispatchWorkItem?
     private let emojiPreferences = UserDefaults(suiteName: KeyTaoIOSPaths.appGroupIdentifier) ?? .standard
     private lazy var recentEmojis: [String] = loadRecentEmojis()
@@ -274,6 +328,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             keyRects = []
         }
         self.config = config
+        if !config.predictionEnabled {
+            completionSuggestions = []
+        }
+        if !toolbarEditMode {
+            toolbarActionOrderOverride = config.toolbarActionOrder.isEmpty ? nil : config.toolbarActionOrder
+            toolbarPinnedCountOverride = config.toolbarPinnedCount
+        }
         if !config.hapticsEnabled {
             hapticsAccessMessageShown = false
         } else {
@@ -288,6 +349,32 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     func currentConfig() -> KeyTaoIOSImeConfig {
         config
+    }
+
+    func updatePredictionSuggestions(prefix: String?, suggestions: [String]) {
+        let normalizedPrefix = prefix ?? ""
+        let next: [CompletionSuggestion]
+        if config.predictionEnabled, !normalizedPrefix.isEmpty {
+            next = suggestions.reduce(into: []) { result, word in
+                guard word.count > normalizedPrefix.count,
+                      word.lowercased().hasPrefix(normalizedPrefix.lowercased()),
+                      !result.contains(where: { $0.word == word }) else {
+                    return
+                }
+                result.append(
+                    CompletionSuggestion(
+                        word: word,
+                        insertion: String(word.dropFirst(normalizedPrefix.count))
+                    )
+                )
+            }
+        } else {
+            next = []
+        }
+        guard next != completionSuggestions else { return }
+        completionSuggestions = next
+        resetCandidateScroll()
+        invalidateLayoutAndDisplay()
     }
 
     func update(theme: KeyTaoImeTheme) {
@@ -328,10 +415,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
-    func showBackspaceDeletionPreview(_ text: String) {
+    func showBackspaceDeletionPreview(_ text: String, pendingSelection: Bool = false) {
         backspacePreviewHideWorkItem?.cancel()
         backspacePreviewHideWorkItem = nil
         backspacePreviewText = text.isEmpty ? nil : text
+        backspacePreviewPendingSelection = pendingSelection && !text.isEmpty
         invalidateLayoutAndDisplay()
     }
 
@@ -486,8 +574,21 @@ final class KeyTaoIOSKeyboardView: UIView {
         rebuildAccessibilityElements()
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            clearActiveTouches()
+            verticalScrollDisplayLink?.invalidate()
+            verticalScrollDisplayLink = nil
+            verticalScrollSurface = nil
+            keyPressDisplayLink?.invalidate()
+            keyPressDisplayLink = nil
+            keyPressAnimations.removeAll()
+            keyPressLastTimestamp = 0
+        }
+    }
+
     override func draw(_ rect: CGRect) {
-        rebuildInteractiveRects()
         drawBackground()
         drawCandidateBar()
         drawBackspaceDeletionPreview()
@@ -529,14 +630,31 @@ final class KeyTaoIOSKeyboardView: UIView {
         for touch in touches {
             let identifier = ObjectIdentifier(touch)
             let point = touch.location(in: self)
+            let pointerSlot = pointerSlotsByTouchIdentifier.removeValue(forKey: identifier)
+            if pointerSlot.map({ touchBounceTracker.recordUp(
+                pointerID: $0,
+                eventTimeMs: touch.timestamp * 1_000,
+                x: point.x,
+                y: point.y
+            ) }) == true {
+                continue
+            }
             if identifier == candidateGestureTouchIdentifier {
                 finishCandidateOrPanelTouch(at: point)
                 continue
             }
             if identifier == keyboardScrollTouchIdentifier {
                 let wasDragging = keyboardDragging
+                let wasBrakingScroll = keyboardScrollWasAnimatingAtDown
+                if wasDragging {
+                    startVerticalScrollAnimation(surface: .symbolKeyboard)
+                }
                 clearKeyboardScrollTouchState()
                 if wasDragging {
+                    cancelActiveTouch(identifier)
+                    continue
+                }
+                if wasBrakingScroll {
                     cancelActiveTouch(identifier)
                     continue
                 }
@@ -551,12 +669,17 @@ final class KeyTaoIOSKeyboardView: UIView {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             let identifier = ObjectIdentifier(touch)
+            if let pointerSlot = pointerSlotsByTouchIdentifier.removeValue(forKey: identifier) {
+                touchBounceTracker.cancel(pointerID: pointerSlot)
+            }
             if identifier == candidateGestureTouchIdentifier {
+                settleVerticalScrollAfterCancellation()
                 clearCandidateOrPanelTouchState()
                 continue
             }
             cancelActiveTouch(identifier)
             if identifier == keyboardScrollTouchIdentifier {
+                settleVerticalScrollAfterCancellation()
                 clearKeyboardScrollTouchState()
             }
         }
@@ -586,6 +709,8 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func clearCandidateOrPanelTouchState() {
         candidateLongPressWorkItem?.cancel()
         candidateLongPressWorkItem = nil
+        toolbarLongPressWorkItem?.cancel()
+        toolbarLongPressWorkItem = nil
         pressedToolbar = nil
         pressedCandidate = nil
         pressedClipboardDelete = nil
@@ -600,6 +725,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         backspacePreviewPressed = false
         toolbarTouchActive = false
         toolbarDragging = false
+        toolbarLongPressConsumed = false
+        toolbarDragActionID = nil
+        expandedScrollWasAnimatingAtDown = false
         candidateGestureTouchIdentifier = nil
         setNeedsDisplay()
     }
@@ -607,6 +735,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func clearKeyboardScrollTouchState() {
         keyboardScrollTouchActive = false
         keyboardDragging = false
+        keyboardScrollWasAnimatingAtDown = false
         keyboardScrollTouchIdentifier = nil
         setNeedsDisplay()
     }
@@ -614,6 +743,15 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func beginTouch(_ touch: UITouch) {
         let identifier = ObjectIdentifier(touch)
         let point = touch.location(in: self)
+        let pointerSlot = allocatePointerSlot(for: identifier)
+        if touchBounceTracker.isBounceDown(
+            pointerID: pointerSlot,
+            eventTimeMs: touch.timestamp * 1_000,
+            x: point.x,
+            y: point.y
+        ) {
+            return
+        }
         let beginsCandidateOrPanelTouch = (!usesFullHeightSymbolKeyboard() && point.y < config.candidateBarHeightDp) ||
             (candidatePanelExpanded && point.y >= config.candidateBarHeightDp && point.y < keyboardBottom())
         let beginsKeyboardScrollTouch = usesCategorizedSymbolKeyboard() &&
@@ -635,7 +773,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             beginKeyboardScrollTouch(identifier: identifier, at: point)
             return
         }
-        guard let keyIndex = keyRects.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }) else {
+        guard let keyIndex = keyHitLayout.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }) else {
             return
         }
         let key = keyRects[keyIndex]
@@ -648,8 +786,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func beginAuxiliaryTouch(at point: CGPoint) -> Bool {
         gestureTouchStart = point
-        gestureTouchStartUptime = ProcessInfo.processInfo.systemUptime
-        if backspacePreviewRect?.contains(point) == true {
+        if !backspacePreviewPendingSelection, backspacePreviewRect?.contains(point) == true {
             backspacePreviewPressed = true
             return true
         }
@@ -657,7 +794,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             pressedCandidateMenuAction = candidateMenuActionRects.first { $0.rect.contains(point) }
             return true
         }
-        touchStartScrollY = expandedCandidateScrollY
         candidateTouchStartScrollX = candidateScrollX
         toolbarTouchStartScrollX = toolbarScrollX
         expandedDragging = false
@@ -665,21 +801,26 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarDragging = false
         candidatePagingConsumed = false
         inlineCandidateTouchActive = false
+        let hasInlineCandidates = !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty
         candidateExpandPressed = !functionPanelActive
             && !state.candidatePanel.candidates.isEmpty
             && point.y < config.candidateBarHeightDp
             && candidateExpandRect?.contains(point) == true
         pressedToolbar = point.y < config.candidateBarHeightDp ? toolbarRects.first { $0.rect.contains(point) } : nil
         toolbarTouchActive = !functionPanelActive
-            && state.candidatePanel.candidates.isEmpty
+            && !hasInlineCandidates
             && !usesFullHeightSymbolKeyboard()
             && point.y < config.candidateBarHeightDp
         pressedCandidate = nil
+        toolbarLongPressConsumed = false
+        if pressedToolbar?.action.longPressCommand != nil {
+            scheduleToolbarLongPress()
+        }
         pressedClipboardDelete = nil
         expandedTouchActive = false
         if pressedToolbar == nil,
            !candidateExpandPressed,
-           !state.candidatePanel.candidates.isEmpty,
+           hasInlineCandidates,
            point.y < config.candidateBarHeightDp {
             inlineCandidateTouchActive = true
             pressedCandidate = inlineCandidateRects.first { $0.rect.contains(point) }
@@ -688,6 +829,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
         } else if pressedToolbar == nil && !candidateExpandPressed && candidatePanelExpanded && point.y >= config.candidateBarHeightDp {
             expandedTouchActive = true
+            expandedScrollWasAnimatingAtDown = beginVerticalScrollGesture(at: point.y) == .expandedPanel
+            touchStartScrollY = expandedCandidateScrollY
             pressedClipboardDelete = clipboardDeleteRects.first { $0.rect.contains(point) }
             if pressedClipboardDelete == nil {
                 pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
@@ -703,11 +846,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func beginKeyboardScrollTouch(identifier: ObjectIdentifier, at point: CGPoint) {
+        keyboardScrollWasAnimatingAtDown = beginVerticalScrollGesture(at: point.y) == .symbolKeyboard
         keyboardTouchStartY = point.y
         keyboardTouchStartScrollY = keyboardScrollY
         keyboardDragging = false
         keyboardScrollTouchActive = true
-        if let keyIndex = keyRects.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }) {
+        if let keyIndex = keyHitLayout.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }) {
             let key = keyRects[keyIndex]
             if !isUnsupportedEditKey(key.spec) {
                 beginKeyTouch(identifier: identifier, key: key, keyIndex: keyIndex, point: point)
@@ -729,16 +873,29 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         if toolbarTouchActive {
+            let toolbar = pressedToolbar
+            let dragActionID = toolbarDragActionID ?? toolbar?.action.id
             let deltaX = point.x - gestureTouchStart.x
             let deltaY = point.y - gestureTouchStart.y
             let dragSlop = KeyTaoIMEInteractionTuning.candidateDragSlop
             if !toolbarDragging, abs(deltaX) > dragSlop, abs(deltaX) > abs(deltaY) {
                 toolbarDragging = true
-                pressedToolbar = nil
+                toolbarLongPressWorkItem?.cancel()
+                toolbarLongPressWorkItem = nil
+                if !toolbarEditMode || toolbar?.action.customizable != true {
+                    pressedToolbar = nil
+                }
             }
             if toolbarDragging {
-                toolbarScrollX = max(0, min(maxToolbarScroll(), toolbarTouchStartScrollX - deltaX))
+                if toolbarEditMode, let dragActionID, toolbar?.action.customizable == true {
+                    toolbarDragActionID = dragActionID
+                    reorderToolbarAction(dragActionID, at: point.x)
+                } else {
+                    toolbarScrollX = max(0, min(maxToolbarScroll(), toolbarTouchStartScrollX - deltaX))
+                }
             } else if let toolbar = pressedToolbar, !toolbar.rect.contains(point) {
+                toolbarLongPressWorkItem?.cancel()
+                toolbarLongPressWorkItem = nil
                 pressedToolbar = nil
             }
             invalidateLayoutAndDisplay()
@@ -789,8 +946,10 @@ final class KeyTaoIOSKeyboardView: UIView {
                 pressedClipboardDelete = nil
             }
             if expandedDragging {
-                expandedCandidateScrollY = max(0, min(maxExpandedCandidateScroll(), touchStartScrollY - deltaY))
-                invalidateLayoutAndDisplay()
+                updateVerticalScrollGesture(at: point.y)
+                setExpandedCandidateScroll(touchStartScrollY - deltaY, rubberBand: true)
+                showScrollIndicator(.expandedPanel)
+                refreshScrollLayoutAndDisplay()
             }
         }
     }
@@ -802,8 +961,10 @@ final class KeyTaoIOSKeyboardView: UIView {
             cancelActiveTouch(identifier)
         }
         if keyboardDragging {
-            keyboardScrollY = max(0, min(maxKeyboardScroll(), keyboardTouchStartScrollY - deltaY))
-            invalidateLayoutAndDisplay()
+            updateVerticalScrollGesture(at: point.y)
+            setKeyboardScroll(keyboardTouchStartScrollY - deltaY, rubberBand: true)
+            showScrollIndicator(.symbolKeyboard)
+            refreshScrollLayoutAndDisplay()
         }
     }
 
@@ -827,7 +988,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if var menu = candidateMenu {
             let action = pressedCandidateMenuAction
             pressedCandidateMenuAction = nil
-            if let action, action.rect.contains(point), !isAuxiliaryTouchNoise(at: point) {
+            if let action, action.rect.contains(point) {
                 switch action.action {
                 case "delete":
                     if delegate?.keyboardView(self, deleteCandidate: menu.pageIndex) == true {
@@ -845,14 +1006,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                 }
             }
             candidateGestureTouchIdentifier = nil
-            setNeedsDisplay()
+            invalidateLayoutAndDisplay()
             return
         }
         if toolbarTouchActive {
             let toolbar = pressedToolbar
             let wasDragging = toolbarDragging
+            let longPressConsumed = toolbarLongPressConsumed
             clearCandidateOrPanelTouchState()
-            if !wasDragging, let toolbar, toolbar.rect.contains(point) {
+            if wasDragging, toolbarEditMode {
+                persistToolbarCustomization()
+            } else if !longPressConsumed, let toolbar, toolbar.rect.contains(point) {
                 handleToolbarCommand(toolbar.action.command)
             }
             return
@@ -872,18 +1036,24 @@ final class KeyTaoIOSKeyboardView: UIView {
             handleToolbarCommand(toolbar.action.command)
             return
         }
+        let wasBrakingScroll = expandedScrollWasAnimatingAtDown
         if let clipboardDelete = pressedClipboardDelete,
            !expandedDragging,
+           !wasBrakingScroll,
            clipboardDelete.rect.contains(point) {
             clearCandidateOrPanelTouchState()
             deleteClipboardEntry(clipboardDelete.text)
             return
         }
         if let candidate = pressedCandidate, !candidateLongPressConsumed, !expandedDragging,
-           !candidateDragging, !isAuxiliaryTouchNoise(at: point), candidate.rect.contains(point) {
+           !candidateDragging, !wasBrakingScroll, candidate.rect.contains(point) {
             clearCandidateOrPanelTouchState()
             if let command = candidate.command {
                 handlePanelCommand(command)
+                if candidate.clipboardText != nil {
+                    closeCandidatePanel()
+                    invalidateLayoutAndDisplay()
+                }
             } else if !isSelectable(candidate) {
                 performWarningFeedback()
                 delegate?.keyboardView(self, didSelectCandidate: candidate.selectIndex, global: candidate.global)
@@ -894,6 +1064,9 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
             return
         }
+        if expandedDragging {
+            startVerticalScrollAnimation(surface: .expandedPanel)
+        }
         clearCandidateOrPanelTouchState()
     }
 
@@ -903,7 +1076,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             guard let self,
                   self.inlineCandidateTouchActive,
                   !self.candidateDragging,
-                  let candidate = self.pressedCandidate else {
+                  let candidate = self.pressedCandidate,
+                  candidate.command == nil else {
                 return
             }
             self.candidateLongPressConsumed = true
@@ -921,7 +1095,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 ) != true
             )
             self.performMediumFeedback(playSound: false)
-            self.setNeedsDisplay()
+            self.invalidateLayoutAndDisplay()
         }
         candidateLongPressWorkItem = workItem
         DispatchQueue.main.asyncAfter(
@@ -930,10 +1104,25 @@ final class KeyTaoIOSKeyboardView: UIView {
         )
     }
 
-    private func isAuxiliaryTouchNoise(at point: CGPoint) -> Bool {
-        let elapsedMs = (ProcessInfo.processInfo.systemUptime - gestureTouchStartUptime) * 1_000
-        let distance = hypot(point.x - gestureTouchStart.x, point.y - gestureTouchStart.y)
-        return KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: elapsedMs, distance: distance)
+    private func scheduleToolbarLongPress() {
+        toolbarLongPressWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.toolbarTouchActive,
+                  !self.toolbarDragging,
+                  let command = self.pressedToolbar?.action.longPressCommand else {
+                return
+            }
+            self.toolbarLongPressConsumed = true
+            self.performMediumFeedback(playSound: false)
+            self.handleToolbarCommand(command)
+            self.setNeedsDisplay()
+        }
+        toolbarLongPressWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Double(config.longPressDelayMs) / 1_000,
+            execute: workItem
+        )
     }
 
     private func beginKeyTouch(
@@ -946,6 +1135,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             ? stackIndex(in: key.rect, count: key.spec.stack?.count ?? 0, y: point.y)
             : nil
         let isBackspace = isBackspaceKey(key.spec)
+        let selectionBackspace = isBackspace && usesSelectionBackspaceGesture()
         activeTouches.begin(
             ActiveTouch(
                 key: key,
@@ -955,8 +1145,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 touchStart: point,
                 currentTouchPoint: point,
                 touchStartUptime: ProcessInfo.processInfo.systemUptime,
-                longPressConsumed: isBackspace,
-                backspaceGestureUnits: isBackspace ? 1 : 0,
+                longPressConsumed: isBackspace && !selectionBackspace,
+                backspaceGestureUnits: isBackspace && !selectionBackspace ? 1 : 0,
                 pressedStackIndex: pressedStackIndex,
                 cursorGesture: isSpaceKey(key.spec) && !hasActiveComposition
                     ? KeyTaoCursorGestureTracker(startX: point.x)
@@ -964,10 +1154,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             ),
             for: identifier
         )
+        animateKeyPress(keyIndex: keyIndex, pressed: true)
         performPressFeedback()
         if isBackspace {
-            delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("begin"))
-            delegate?.keyboardView(self, didTrigger: actionForMode(key.spec))
+            if !selectionBackspace {
+                delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("begin"))
+                delegate?.keyboardView(self, didTrigger: actionForMode(key.spec))
+            }
             scheduleBackspaceRepeat(for: identifier)
         } else {
             scheduleLongPressIfNeeded(for: identifier)
@@ -1029,25 +1222,18 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func finishKeyTouch(identifier: ObjectIdentifier, point: CGPoint) {
+        // Do not reintroduce release-time duration filtering; bounce suppression happens only on DOWN.
         guard activeTouches[identifier] != nil else { return }
         activeTouches.move(identifier) { $0.currentTouchPoint = point }
+        if activeTouches[identifier]?.backspaceGestureConsumed == true {
+            _ = handleBackspaceDrag(identifier: identifier, at: point)
+        }
         stopLongPressAndRepeat(for: identifier)
         guard let finishedTouch = activeTouches.finish(identifier, resolving: { $0 }).first else {
             return
         }
-        if isTouchNoise(finishedTouch, at: point) {
-            if isBackspaceKey(finishedTouch.key.spec) {
-                delegate?.keyboardView(
-                    self,
-                    didTrigger: KeyTaoKeyCommand(
-                        type: KeyTaoCommandType.backspaceGesture,
-                        value: "restoreGesture",
-                        fallbackValue: nil
-                    )
-                )
-            }
-            setNeedsDisplay()
-            return
+        if !activeTouches.values.contains(where: { $0.keyIndex == finishedTouch.keyIndex }) {
+            animateKeyPress(keyIndex: finishedTouch.keyIndex, pressed: false)
         }
         if var panel = finishedTouch.alternatePanel {
             panel.selectedIndex = alternateIndex(in: &panel, at: point)
@@ -1062,7 +1248,18 @@ final class KeyTaoIOSKeyboardView: UIView {
             setNeedsDisplay()
             return
         }
-        if handleBackspaceRelease(for: finishedTouch, at: point) || finishedTouch.backspaceGestureConsumed {
+        if finishedTouch.backspaceGestureConsumed {
+            if let command = KeyTaoBackspaceGesturePolicy.releaseCommand(
+                mode: backspaceGestureMode(),
+                selectedUnits: finishedTouch.backspaceGestureUnits
+            ) {
+                delegate?.keyboardView(self, didTrigger: backspaceGestureCommand(command.action, count: command.count))
+            }
+            settleBackspaceDeletionPreview()
+            setNeedsDisplay()
+            return
+        }
+        if handleBackspaceRelease(for: finishedTouch, at: point) {
             settleBackspaceDeletionPreview()
             setNeedsDisplay()
             return
@@ -1090,12 +1287,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         clearOneShotShift(after: command)
     }
 
-    private func isTouchNoise(_ touch: ActiveTouch, at point: CGPoint) -> Bool {
-        let elapsedMs = (ProcessInfo.processInfo.systemUptime - touch.touchStartUptime) * 1_000
-        let distance = hypot(point.x - touch.touchStart.x, point.y - touch.touchStart.y)
-        return KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: elapsedMs, distance: distance)
-    }
-
     private func settleBackspaceDeletionPreview() {
         guard backspacePreviewText?.isEmpty == false else {
             return
@@ -1114,6 +1305,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         backspacePreviewText = nil
         backspacePreviewRect = nil
         backspacePreviewPressed = false
+        backspacePreviewPendingSelection = false
         setNeedsDisplay()
     }
 
@@ -1128,11 +1320,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             dy: -KeyTaoIMEInteractionTuning.slideRetargetHysteresis
         )
         guard !retainedRect.contains(point),
-              let targetIndex = keyRects.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }),
+              let targetIndex = keyHitLayout.firstIndex(where: { isVisibleKey($0, at: point) && $0.rect.contains(point) }),
               targetIndex != touch.keyIndex,
               isCharacterKey(keyRects[targetIndex].spec) else {
             return false
         }
+        let previousIndex = touch.keyIndex
         stopLongPressAndRepeat(for: identifier)
         activeTouches.move(identifier) { activeTouch in
             activeTouch.key = keyRects[targetIndex]
@@ -1140,6 +1333,10 @@ final class KeyTaoIOSKeyboardView: UIView {
             activeTouch.pressedStackIndex = nil
             activeTouch.alternatePanel = nil
         }
+        if !activeTouches.values.contains(where: { $0.keyIndex == previousIndex && $0.keyIndex != targetIndex }) {
+            animateKeyPress(keyIndex: previousIndex, pressed: false)
+        }
+        animateKeyPress(keyIndex: targetIndex, pressed: true)
         scheduleLongPressIfNeeded(for: identifier)
         return true
     }
@@ -1295,18 +1492,48 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func cancelActiveTouch(_ identifier: ObjectIdentifier) {
         stopLongPressAndRepeat(for: identifier)
-        _ = activeTouches.cancel(identifier)
+        guard let touch = activeTouches.cancel(identifier) else { return }
+        if touch.backspaceGestureConsumed, usesSelectionBackspaceGesture() {
+            delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("cancelSelection"))
+        }
+        if !activeTouches.values.contains(where: { $0.keyIndex == touch.keyIndex }) {
+            animateKeyPress(keyIndex: touch.keyIndex, pressed: false)
+        }
     }
 
     private func clearActiveTouches() {
-        for touch in activeTouches.removeAll() {
+        let removedTouches = activeTouches.removeAll()
+        if usesSelectionBackspaceGesture(), removedTouches.contains(where: { $0.backspaceGestureConsumed }) {
+            delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("cancelSelection"))
+        }
+        for touch in removedTouches {
             touch.longPressWorkItem?.cancel()
             touch.repeatTimer?.invalidate()
         }
+        for keyIndex in Set(removedTouches.map(\.keyIndex)) {
+            animateKeyPress(keyIndex: keyIndex, pressed: false)
+        }
+        touchBounceTracker.reset()
+        pointerSlotsByTouchIdentifier.removeAll()
         candidateGestureTouchIdentifier = nil
         keyboardScrollTouchIdentifier = nil
+        expandedScrollWasAnimatingAtDown = false
+        keyboardScrollWasAnimatingAtDown = false
         keyboardScrollTouchActive = false
         keyboardDragging = false
+    }
+
+    private func allocatePointerSlot(for identifier: ObjectIdentifier) -> Int {
+        if let existing = pointerSlotsByTouchIdentifier[identifier] {
+            return existing
+        }
+        let usedSlots = Set(pointerSlotsByTouchIdentifier.values)
+        var pointerSlot = 0
+        while usedSlots.contains(pointerSlot) {
+            pointerSlot += 1
+        }
+        pointerSlotsByTouchIdentifier[identifier] = pointerSlot
+        return pointerSlot
     }
 
     private func rebuildInteractiveRects() {
@@ -1321,6 +1548,49 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         toolbarRects = toolbarLayout()
         candidateExpandRect = expandButtonRect()
+        candidateMenuActionRects = candidateMenuLayout()
+        backspacePreviewRect = backspacePreviewLayout()
+    }
+
+    private func candidateMenuLayout() -> [CandidateMenuActionRect] {
+        guard let menu = candidateMenu else { return [] }
+        let gap = max(4, theme.panel.gap)
+        let leftPadding = theme.panel.gap * 1.5
+        let top: CGFloat = 7
+        let bottom = config.candidateBarHeightDp - 7
+        let codeRight = menu.deletionUnavailable ? bounds.width - leftPadding : bounds.width * 0.62
+        let codeRect = CGRect(
+            x: leftPadding,
+            y: top,
+            width: max(0, codeRight - gap / 2 - leftPadding),
+            height: max(0, bottom - top)
+        )
+        var actions = [CandidateMenuActionRect(action: "close", rect: codeRect)]
+        if !menu.deletionUnavailable {
+            actions.append(
+                CandidateMenuActionRect(
+                    action: "delete",
+                    rect: CGRect(
+                        x: codeRight + gap / 2,
+                        y: top,
+                        width: max(0, bounds.width - leftPadding - codeRight - gap / 2),
+                        height: max(0, bottom - top)
+                    )
+                )
+            )
+        }
+        return actions
+    }
+
+    private func backspacePreviewLayout() -> CGRect? {
+        guard backspacePreviewText?.isEmpty == false else { return nil }
+        let gap = max(4, theme.panel.gap)
+        return CGRect(
+            x: gap,
+            y: 6,
+            width: max(0, bounds.width - gap * 2),
+            height: max(0, config.candidateBarHeightDp - 12)
+        )
     }
 
     private func rebuildAccessibilityElements() {
@@ -1358,13 +1628,21 @@ final class KeyTaoIOSKeyboardView: UIView {
                 guard let self, self.isSelectable(candidate) else {
                     return false
                 }
-                self.closeCandidatePanelIfNeeded(afterCandidateSelection: candidate.global)
-                self.performSelectionFeedback()
-                self.delegate?.keyboardView(
-                    self,
-                    didSelectCandidate: candidate.selectIndex,
-                    global: candidate.global
-                )
+                if let command = candidate.command {
+                    self.handlePanelCommand(command)
+                    if candidate.clipboardText != nil {
+                        self.closeCandidatePanel()
+                        self.invalidateLayoutAndDisplay()
+                    }
+                } else {
+                    self.closeCandidatePanelIfNeeded(afterCandidateSelection: candidate.global)
+                    self.performSelectionFeedback()
+                    self.delegate?.keyboardView(
+                        self,
+                        didSelectCandidate: candidate.selectIndex,
+                        global: candidate.global
+                    )
+                }
                 return true
             }
             elements.append(element)
@@ -1433,7 +1711,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         let leftPadding = theme.panel.gap * 1.5
         let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
         if let candidateMenu {
-            drawCandidateMenu(candidateMenu, barHeight: barHeight, leftPadding: leftPadding)
+            drawCandidateMenu(candidateMenu)
             return
         }
         if message != nil && state.candidatePanel.candidates.isEmpty && state.candidatePanel.preedit?.isEmpty != false {
@@ -1457,7 +1735,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
 
-        if !state.candidatePanel.candidates.isEmpty {
+        if !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty {
             if let context = UIGraphicsGetCurrentContext() {
                 context.saveGState()
                 UIBezierPath(rect: inlineCandidateViewportRect()).addClip()
@@ -1515,22 +1793,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawLogo(in: logoRect())
     }
 
-    private func drawCandidateMenu(
-        _ menu: CandidateMenuState,
-        barHeight: CGFloat,
-        leftPadding: CGFloat
-    ) {
-        let gap = max(4, theme.panel.gap)
-        let top: CGFloat = 7
-        let bottom = barHeight - 7
+    private func drawCandidateMenu(_ menu: CandidateMenuState) {
         let codeText = "\(menu.text) · 编码 \(menu.code)"
-        let codeRight = menu.deletionUnavailable ? bounds.width - leftPadding : bounds.width * 0.62
-        let codeRect = CGRect(
-            x: leftPadding,
-            y: top,
-            width: max(0, codeRight - gap / 2 - leftPadding),
-            height: max(0, bottom - top)
-        )
+        guard let codeRect = candidateMenuActionRects.first(where: { $0.action == "close" })?.rect else {
+            return
+        }
         keyBackgroundColor().setFill()
         UIBezierPath(roundedRect: codeRect, cornerRadius: candidateCornerRadius()).fill()
         drawText(
@@ -1541,14 +1808,10 @@ final class KeyTaoIOSKeyboardView: UIView {
             weight: theme.font.weight,
             alignment: .center
         )
-        var actions = [CandidateMenuActionRect(action: "close", rect: codeRect)]
         if !menu.deletionUnavailable {
-            let deleteRect = CGRect(
-                x: codeRight + gap / 2,
-                y: top,
-                width: max(0, bounds.width - leftPadding - codeRight - gap / 2),
-                height: max(0, bottom - top)
-            )
+            guard let deleteRect = candidateMenuActionRects.first(where: { $0.action == "delete" })?.rect else {
+                return
+            }
             let pressed = pressedCandidateMenuAction?.action == "delete"
             drawSurfaceShadow(deleteRect, pressed: pressed)
             (pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
@@ -1561,29 +1824,20 @@ final class KeyTaoIOSKeyboardView: UIView {
                 weight: theme.font.weight,
                 alignment: .center
             )
-            actions.append(CandidateMenuActionRect(action: "delete", rect: deleteRect))
         }
-        candidateMenuActionRects = actions
     }
 
     private func drawBackspaceDeletionPreview() {
-        guard let deleted = backspacePreviewText, !deleted.isEmpty else {
-            backspacePreviewRect = nil
+        guard let deleted = backspacePreviewText, !deleted.isEmpty, let rect = backspacePreviewRect else {
             return
         }
-        let gap = max(4, theme.panel.gap)
-        let rect = CGRect(
-            x: gap,
-            y: 6,
-            width: max(0, bounds.width - gap * 2),
-            height: max(0, config.candidateBarHeightDp - 12)
-        )
-        backspacePreviewRect = rect
         drawSurfaceShadow(rect, pressed: backspacePreviewPressed)
         (backspacePreviewPressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
         drawText(
-            "已删除 \(deleted.count) 字：\(String(deleted.suffix(18))) · 点按恢复",
+            backspacePreviewPendingSelection
+                ? "将删除 \(deleted.count) 字：\(String(deleted.suffix(18))) · 抬手删除"
+                : "已删除 \(deleted.count) 字：\(String(deleted.suffix(18))) · 点按恢复",
             in: rect,
             color: backspacePreviewPressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
             size: candidateLabelSize(),
@@ -1608,6 +1862,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     key.spec,
                     rect: key.rect,
                     pressed: touchState.pressed,
+                    pressProgress: keyPressProgress(for: index, pressed: touchState.pressed),
                     pressedStackIndices: touchState.pressedStackIndices
                 )
             }
@@ -1618,9 +1873,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                     key.spec,
                     rect: key.rect,
                     pressed: touchState.pressed,
+                    pressProgress: keyPressProgress(for: index, pressed: touchState.pressed),
                     pressedStackIndices: touchState.pressedStackIndices
                 )
             }
+            drawVerticalScrollIndicator(
+                viewportTop: keyboardScrollViewportTop,
+                viewportBottom: keyboardScrollViewportBottom,
+                contentHeight: keyboardScrollContentHeight,
+                scrollY: keyboardScrollY,
+                surface: .symbolKeyboard
+            )
             return
         }
         for (index, key) in keyRects.enumerated() {
@@ -1629,6 +1892,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 key.spec,
                 rect: key.rect,
                 pressed: touchState.pressed,
+                pressProgress: keyPressProgress(for: index, pressed: touchState.pressed),
                 pressedStackIndices: touchState.pressedStackIndices
             )
         }
@@ -1669,6 +1933,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
             drawCandidateOption(item, rect: drawingRect)
         }
+        drawVerticalScrollIndicator(
+            viewportTop: top,
+            viewportBottom: keyboardBottom(),
+            contentHeight: expandedCandidateContentHeight,
+            scrollY: expandedCandidateScrollY,
+            surface: .expandedPanel
+        )
     }
 
     private func drawFunctionPanelBar() {
@@ -2183,6 +2454,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         _ key: KeyTaoKeySpec,
         rect: CGRect,
         pressed: Bool,
+        pressProgress: CGFloat,
         pressedStackIndices: Set<Int> = []
     ) {
         let unsupported = isUnsupportedEditKey(key)
@@ -2196,25 +2468,31 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
         }
         if let stack = key.stack, !stack.isEmpty {
-            drawStackKey(stack, key: key, rect: rect, pressedStackIndices: pressedStackIndices)
+            drawStackKey(
+                stack,
+                key: key,
+                rect: rect,
+                pressProgress: pressProgress,
+                pressedStackIndices: pressedStackIndices
+            )
             return
         }
 
         var keyRect = rect
-        if pressed {
-            keyRect.origin.y += 1
+        if pressProgress > 0 {
+            keyRect.origin.y += pressProgress
         }
         let selected = isActiveKey(key)
-        drawSurfaceShadow(keyRect, pressed: pressed)
-        keySurfaceColor(key, pressed: pressed).setFill()
+        drawSurfaceShadow(keyRect, pressed: pressProgress > 0.5)
+        keySurfaceColor(key, pressProgress: pressProgress).setFill()
         UIBezierPath(roundedRect: keyRect, cornerRadius: keyCornerRadius(for: keyRect)).fill()
-        drawKeyOutline(key, rect: keyRect, pressed: pressed)
+        drawKeyOutline(key, rect: keyRect, pressed: pressProgress > 0.01)
         drawShiftStateDecoration(key, rect: keyRect)
 
         let label = displayLabel(key)
         let baseSize = keyLabelSize(for: label)
         let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10)
-        let color = keyForegroundColor(key, selected: selected || pressed)
+        let color = keyForegroundColor(key, selected: selected, pressProgress: pressProgress)
         drawText(label, in: keyRect, color: color, font: font, alignment: .center)
 
         if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
@@ -2235,52 +2513,54 @@ final class KeyTaoIOSKeyboardView: UIView {
         _ stack: [KeyTaoKeyStackItem],
         key: KeyTaoKeySpec,
         rect: CGRect,
+        pressProgress: CGFloat,
         pressedStackIndices: Set<Int>
     ) {
         let itemRects = stackItemRects(in: rect, count: stack.count)
         for (index, item) in stack.enumerated() {
             let pressed = pressedStackIndices.contains(index)
+            let itemPressProgress = pressed || pressedStackIndices.isEmpty ? pressProgress : 0
             var itemRect = itemRects[index]
-            if pressed {
-                itemRect.origin.y += 1
+            if itemPressProgress > 0 {
+                itemRect.origin.y += itemPressProgress
             }
             let selected = isActiveKey(key)
-            drawSurfaceShadow(itemRect, pressed: pressed)
-            keySurfaceColor(key, pressed: pressed).setFill()
+            drawSurfaceShadow(itemRect, pressed: itemPressProgress > 0.5)
+            keySurfaceColor(key, pressProgress: itemPressProgress).setFill()
             UIBezierPath(roundedRect: itemRect, cornerRadius: keyCornerRadius(for: itemRect)).fill()
-            drawKeyOutline(key, rect: itemRect, pressed: pressed)
+            drawKeyOutline(key, rect: itemRect, pressed: itemPressProgress > 0.01)
 
             let label = stackLabelForMode(item)
             let baseSize = keyLabelSize(for: label)
             let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10)
-            let color = keyForegroundColor(key, selected: selected || pressed)
+            let color = keyForegroundColor(key, selected: selected, pressProgress: itemPressProgress)
             drawText(label, in: itemRect, color: color, font: font, alignment: .center)
         }
     }
 
-    private func keySurfaceColor(_ key: KeyTaoKeySpec, pressed: Bool) -> UIColor {
+    private func keySurfaceColor(_ key: KeyTaoKeySpec, pressProgress: CGFloat) -> UIColor {
         let active = isActiveKey(key)
-        if pressed && active {
-            return blend(
+        let normal = active && shiftState == .locked
+            ? theme.candidate.selectedBackground.uiColor
+            : keyBackgroundColor(key)
+        guard pressProgress > 0 else { return normal }
+        let pressed: UIColor
+        if active {
+            pressed = blend(
                 foreground: theme.candidate.pressedBackground.uiColor,
                 background: theme.candidate.selectedBackground.uiColor,
                 amount: 0.52
             )
-        }
-        if pressed && isSoftAccentKey(key) {
-            return blend(
+        } else if isSoftAccentKey(key) {
+            pressed = blend(
                 foreground: theme.candidate.pressedBackground.uiColor,
                 background: softenedAccentSurfaceColor(0.16),
                 amount: 0.72
             )
+        } else {
+            pressed = theme.candidate.pressedBackground.uiColor
         }
-        if pressed {
-            return theme.candidate.pressedBackground.uiColor
-        }
-        if active, shiftState == .locked {
-            return theme.candidate.selectedBackground.uiColor
-        }
-        return keyBackgroundColor(key)
+        return blend(foreground: pressed, background: normal, amount: pressProgress)
     }
 
     private func drawShiftStateDecoration(_ key: KeyTaoKeySpec, rect: CGRect) {
@@ -2672,7 +2952,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             appendRows(
                 bodyRows,
                 rowIndexOffset: 1,
-                startY: keyboardScrollViewportTop - keyboardScrollY,
+                startY: keyboardScrollViewportTop - keyboardVisualScrollY(),
                 rowHeight: rowHeight,
                 verticalGap: verticalGap,
                 sticky: false
@@ -2707,7 +2987,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func inlineCandidateLayout() -> [CandidateRect] {
-        guard !state.candidatePanel.candidates.isEmpty else {
+        guard !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty else {
             candidateContentWidth = 0
             candidateViewportWidth = 0
             return []
@@ -2738,7 +3018,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                         drawingRect: drawingRect,
                         pageIndex: item.identifierIndex,
                         label: item.text,
-                        comment: item.comment
+                        comment: item.comment,
+                        clipboardText: item.clipboardText
                     )
                 )
             }
@@ -2774,7 +3055,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             (right - left - gap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
         }
         var x = left
-        var y = top + gap - expandedCandidateScrollY
+        let visualScrollY = expandedCandidateVisualScrollY()
+        var y = top + gap - visualScrollY
         var contentBottom = top + gap
         var rects: [CandidateRect] = []
         var sectionRects: [Int: CGRect] = [:]
@@ -2810,7 +3092,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 let column = index % columns
                 let row = index / columns
                 x = left + CGFloat(column) * (cellWidth + gap)
-                y = top + gap + CGFloat(row) * (defaultRowHeight + gap) - expandedCandidateScrollY
+                y = top + gap + CGFloat(row) * (defaultRowHeight + gap) - visualScrollY
                 width = cellWidth
                 itemRowHeight = defaultRowHeight
             } else {
@@ -2858,12 +3140,13 @@ final class KeyTaoIOSKeyboardView: UIView {
                             drawingRect: drawingRect,
                             pageIndex: item.identifierIndex,
                             label: item.text,
-                            comment: item.comment
+                            comment: item.comment,
+                            clipboardText: item.clipboardText
                         )
                     )
                 }
             }
-            contentBottom = max(contentBottom, drawingRect.maxY + expandedCandidateScrollY)
+            contentBottom = max(contentBottom, drawingRect.maxY + visualScrollY)
             if structuredRime {
                 switch item.style {
                 case .section, .schema, .standard, .empty:
@@ -2884,7 +3167,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidateContentHeight = max(contentBottom - top + gap, expandedCandidatePanelHeight())
         expandedSectionRects = sectionRects
         clipboardDeleteRects = deleteRects
+        let previousScrollY = expandedCandidateScrollY
         coerceExpandedCandidateScroll()
+        if expandedCandidateScrollY != previousScrollY {
+            return expandedCandidateLayout()
+        }
         return rects
     }
 
@@ -2962,7 +3249,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let barHeight = config.candidateBarHeightDp
         let leftPadding = theme.panel.gap * 1.5
-        if !state.candidatePanel.candidates.isEmpty {
+        if !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty {
             return []
         }
         let preedit = state.candidatePanel.preedit ?? state.preedit
@@ -3016,7 +3303,21 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func candidateDrawItems(inlineOnly: Bool) -> [CandidateDrawItem] {
-        state.candidatePanel.candidates.map { candidate in
+        if state.candidatePanel.candidates.isEmpty {
+            return completionSuggestions.enumerated().map { index, suggestion in
+                CandidateDrawItem(
+                    identifierIndex: index,
+                    selectIndex: index,
+                    label: "补全",
+                    text: suggestion.word,
+                    comment: nil,
+                    selected: false,
+                    global: false,
+                    command: .directInput(suggestion.insertion)
+                )
+            }
+        }
+        return state.candidatePanel.candidates.map { candidate in
             let global = panelCandidateGlobalIndex(candidate.index)
             return CandidateDrawItem(
                 identifierIndex: candidate.index,
@@ -3535,10 +3836,46 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func toolbarActions() -> [ToolbarAction] {
+        let base = baseToolbarActions()
+        let byID = Dictionary(uniqueKeysWithValues: base.compactMap { action in
+            action.id.map { ($0, action) }
+        })
+        let configuredOrder = toolbarActionOrderOverride ?? config.toolbarActionOrder
+        let orderedIDs = (configuredOrder + base.compactMap(\.id)).reduce(into: [String]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
+        let ordered = orderedIDs.compactMap { byID[$0] }
+        let pinnedCount = max(1, min(toolbarPinnedCountOverride ?? config.toolbarPinnedCount, max(1, ordered.count)))
+        let more = ToolbarAction(
+            label: toolbarMoreExpanded ? "收起" : "更多",
+            command: .panel("toolbarMore"),
+            longPressCommand: .panel("toolbarEdit")
+        )
+        if toolbarEditMode {
+            var actions = Array(ordered.prefix(pinnedCount))
+            actions.append(
+                ToolbarAction(
+                    label: "置顶｜更多",
+                    command: .panel("toolbarPinnedBoundary"),
+                    id: Self.toolbarPinnedBoundaryID
+                )
+            )
+            actions.append(contentsOf: ordered.dropFirst(pinnedCount))
+            actions.append(ToolbarAction(label: "完成", command: .panel("toolbarDone")))
+            return actions
+        }
+        if toolbarMoreExpanded {
+            return ordered + [ToolbarAction(label: "编辑", command: .panel("toolbarEdit"))]
+        }
+        return Array(ordered.prefix(pinnedCount)) + [more]
+    }
+
+    private func baseToolbarActions() -> [ToolbarAction] {
         let function = ToolbarAction(
             label: "Rime",
             command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "rime", fallbackValue: nil),
-            icon: .function
+            icon: .function,
+            id: "rime"
         )
         let languageToggle = languageToggleAction()
         let layoutModeName = layoutPresentation.displayedMode == .split ? "分栏" : "单手"
@@ -3546,20 +3883,22 @@ final class KeyTaoIOSKeyboardView: UIView {
             label: layoutPresentation.isEnabled ? "退出\(layoutModeName)" : layoutModeName,
             command: KeyTaoKeyCommand(type: KeyTaoCommandType.floating, value: nil, fallbackValue: nil),
             selected: layoutPresentation.isEnabled,
-            icon: .layout
+            icon: .layout,
+            id: "layout"
         )
         let settings = ToolbarAction(
             label: "设置",
             command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
-            icon: .settings
+            icon: .settings,
+            id: "settings"
         )
         if layerMode == .symbols {
             return [
                 function,
-                ToolbarAction(label: "中", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "chinese", fallbackValue: nil), selected: !state.asciiMode),
-                ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: state.asciiMode),
-                ToolbarAction(label: "123", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "numbers", fallbackValue: nil)),
-                ToolbarAction(label: "ABC", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil)),
+                ToolbarAction(label: "中", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "chinese", fallbackValue: nil), selected: !state.asciiMode, id: "chinese"),
+                ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: state.asciiMode, id: "english"),
+                ToolbarAction(label: "123", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "numbers", fallbackValue: nil), id: "numbers"),
+                ToolbarAction(label: "ABC", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil), id: "letters"),
                 layout,
                 settings,
             ]
@@ -3567,13 +3906,79 @@ final class KeyTaoIOSKeyboardView: UIView {
             return [
                 function,
                 languageToggle,
-                ToolbarAction(label: "选择", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "editor", fallbackValue: nil), icon: .selection),
-                ToolbarAction(label: "剪贴板", command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "clipboard", fallbackValue: nil), icon: .clipboard),
-                ToolbarAction(label: "Emoji", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols_emoji_face", fallbackValue: nil), icon: .emoji),
+                ToolbarAction(label: "选择", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "editor", fallbackValue: nil), icon: .selection, id: "editor"),
+                ToolbarAction(
+                    label: "剪贴板",
+                    command: KeyTaoKeyCommand(type: KeyTaoCommandType.panel, value: "clipboard", fallbackValue: nil),
+                    icon: .clipboard,
+                    longPressCommand: .panel("clearClipboardHistoryNow"),
+                    id: "clipboard"
+                ),
+                ToolbarAction(
+                    label: "Emoji",
+                    command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: Self.emojiRecentLayer, fallbackValue: nil),
+                    icon: .emoji,
+                    id: "emoji"
+                ),
                 layout,
                 settings,
             ]
         }
+    }
+
+    private func currentToolbarOrder() -> [String] {
+        let available = baseToolbarActions().compactMap(\.id)
+        return ((toolbarActionOrderOverride ?? config.toolbarActionOrder) + available).reduce(into: []) { result, id in
+            if available.contains(id), !result.contains(id) {
+                result.append(id)
+            }
+        }
+    }
+
+    private func currentToolbarPinnedCount() -> Int {
+        max(1, min(toolbarPinnedCountOverride ?? config.toolbarPinnedCount, max(1, currentToolbarOrder().count)))
+    }
+
+    private func reorderToolbarAction(_ actionID: String, at x: CGFloat) {
+        var order = currentToolbarOrder()
+        guard let sourceIndex = order.firstIndex(of: actionID),
+              let targetID = toolbarRects
+                .filter({ $0.action.customizable })
+                .min(by: {
+                    abs(($0.drawingRect ?? $0.rect).midX - x) < abs(($1.drawingRect ?? $1.rect).midX - x)
+                })?
+                .action.id,
+              var targetIndex = order.firstIndex(of: targetID) else {
+            return
+        }
+        let oldOrder = order
+        let oldPinnedCount = currentToolbarPinnedCount()
+        var pinnedIDs = Set(order.prefix(oldPinnedCount))
+        let boundaryMidX = toolbarRects
+            .first(where: { $0.action.id == Self.toolbarPinnedBoundaryID })
+            .map { ($0.drawingRect ?? $0.rect).midX }
+        let movingToPinned = boundaryMidX.map { x < $0 } ?? (targetIndex < oldPinnedCount)
+        order.remove(at: sourceIndex)
+        if sourceIndex < targetIndex { targetIndex -= 1 }
+        order.insert(actionID, at: max(0, min(targetIndex, order.count)))
+        if movingToPinned { pinnedIDs.insert(actionID) } else { pinnedIDs.remove(actionID) }
+        let pinnedCount = max(1, min(pinnedIDs.count, max(1, order.count)))
+        guard order != oldOrder || pinnedCount != oldPinnedCount else { return }
+        toolbarActionOrderOverride = order
+        toolbarPinnedCountOverride = pinnedCount
+        performSelectionFeedback(playSound: false)
+    }
+
+    private func persistToolbarCustomization() {
+        let persistedOrder = (currentToolbarOrder() + toolbarInactiveActionIDs).reduce(into: [String]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
+        toolbarActionOrderOverride = persistedOrder
+        delegate?.keyboardView(
+            self,
+            persistToolbarOrder: persistedOrder,
+            pinnedCount: currentToolbarPinnedCount()
+        )
     }
 
     private func drawLayoutInteractionHints() {
@@ -3603,13 +4008,17 @@ final class KeyTaoIOSKeyboardView: UIView {
             return ToolbarAction(
                 label: "En",
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: nil, fallbackValue: nil),
-                secondaryLabel: "中"
+                secondaryLabel: "中",
+                longPressCommand: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols", fallbackValue: nil),
+                id: "language"
             )
         }
         return ToolbarAction(
             label: "中",
             command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: nil, fallbackValue: nil),
-            secondaryLabel: "En"
+            secondaryLabel: "En",
+            longPressCommand: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols", fallbackValue: nil),
+            id: "language"
         )
     }
 
@@ -3634,6 +4043,32 @@ final class KeyTaoIOSKeyboardView: UIView {
                 openFunctionPanel(.clipboard)
             case "clearClipboardHistory":
                 handleClearClipboardHistory()
+            case "clearClipboardHistoryNow":
+                clipboardClearConfirmationPending = false
+                clipboardItems = []
+                delegate?.keyboardViewClearClipboardHistory(self)
+            case "toolbarMore":
+                toolbarMoreExpanded.toggle()
+                toolbarScrollX = 0
+                rebuildInteractiveRects()
+            case "toolbarEdit":
+                let visibleOrder = currentToolbarOrder()
+                let configuredOrder = toolbarActionOrderOverride ?? config.toolbarActionOrder
+                toolbarInactiveActionIDs = configuredOrder.filter { !visibleOrder.contains($0) }
+                toolbarEditMode = true
+                toolbarMoreExpanded = true
+                toolbarScrollX = 0
+                toolbarActionOrderOverride = visibleOrder
+                toolbarPinnedCountOverride = currentToolbarPinnedCount()
+                rebuildInteractiveRects()
+            case "toolbarDone":
+                toolbarEditMode = false
+                toolbarMoreExpanded = false
+                toolbarScrollX = 0
+                persistToolbarCustomization()
+                rebuildInteractiveRects()
+            case "toolbarPinnedBoundary":
+                break
             default:
                 setLayer("letters")
             }
@@ -3665,6 +4100,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidates = []
         resetExpandedCandidateScroll()
         requestExpandedCandidatesAsync()
+        invalidateLayoutAndDisplay()
     }
 
     private func closeCandidatePanel() {
@@ -3686,6 +4122,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         resetKeyboardScroll()
         expandedCandidateItemsCacheSignature = ""
         expandedCandidateItemsCache = []
+        invalidateLayoutAndDisplay()
     }
 
     private func closeCandidatePanelIfNeeded(afterCandidateSelection global: Bool) {
@@ -3713,6 +4150,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if mode == .clipboard {
             requestClipboardItemsAsync()
         }
+        invalidateLayoutAndDisplay()
     }
 
     private func requestExpandedCandidatesAsync() {
@@ -3815,7 +4253,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func resetExpandedCandidateScroll() {
+        if verticalScrollSurface == .expandedPanel {
+            stopVerticalScrollAnimation()
+        }
         expandedCandidateScrollY = 0
+        expandedCandidateOverscrollY = 0
         expandedCandidateContentHeight = expandedCandidatePanelHeight()
     }
 
@@ -3826,8 +4268,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func resetKeyboardScroll() {
+        if verticalScrollSurface == .symbolKeyboard {
+            stopVerticalScrollAnimation()
+        }
         keyboardScrollTouchIdentifier = nil
         keyboardScrollY = 0
+        keyboardOverscrollY = 0
         keyboardTouchStartY = 0
         keyboardTouchStartScrollY = 0
         keyboardDragging = false
@@ -3864,6 +4310,205 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func coerceExpandedCandidateScroll() {
         expandedCandidateScrollY = max(0, min(maxExpandedCandidateScroll(), expandedCandidateScrollY))
+    }
+
+    private func expandedCandidateVisualScrollY() -> CGFloat {
+        expandedCandidateScrollY + expandedCandidateOverscrollY
+    }
+
+    private func keyboardVisualScrollY() -> CGFloat {
+        keyboardScrollY + keyboardOverscrollY
+    }
+
+    private func setExpandedCandidateScroll(_ rawScrollY: CGFloat, rubberBand: Bool) {
+        let maximum = maxExpandedCandidateScroll()
+        let clamped = max(0, min(maximum, rawScrollY))
+        expandedCandidateScrollY = clamped
+        let overscroll = rawScrollY - clamped
+        expandedCandidateOverscrollY = max(
+            -Self.scrollOverscrollDistance,
+            min(
+                Self.scrollOverscrollDistance,
+                overscroll * (rubberBand ? Self.scrollRubberBandFactor : 1)
+            )
+        )
+    }
+
+    private func setKeyboardScroll(_ rawScrollY: CGFloat, rubberBand: Bool) {
+        let maximum = maxKeyboardScroll()
+        let clamped = max(0, min(maximum, rawScrollY))
+        keyboardScrollY = clamped
+        let overscroll = rawScrollY - clamped
+        keyboardOverscrollY = max(
+            -Self.scrollOverscrollDistance,
+            min(
+                Self.scrollOverscrollDistance,
+                overscroll * (rubberBand ? Self.scrollRubberBandFactor : 1)
+            )
+        )
+    }
+
+    private func beginVerticalScrollGesture(at y: CGFloat) -> VerticalScrollSurface? {
+        let interruptedSurface = verticalScrollSurface
+        stopVerticalScrollAnimation(settleAtBoundary: true)
+        scrollGestureLastY = y
+        scrollGestureLastTimestamp = CACurrentMediaTime()
+        scrollGestureVelocityY = 0
+        return interruptedSurface
+    }
+
+    private func updateVerticalScrollGesture(at y: CGFloat) {
+        let now = CACurrentMediaTime()
+        let elapsed = now - scrollGestureLastTimestamp
+        if elapsed > 0 {
+            let instantVelocity = -(y - scrollGestureLastY) / CGFloat(elapsed)
+            scrollGestureVelocityY = scrollGestureVelocityY * 0.72 + instantVelocity * 0.28
+        }
+        scrollGestureLastY = y
+        scrollGestureLastTimestamp = now
+    }
+
+    private func startVerticalScrollAnimation(surface: VerticalScrollSurface) {
+        verticalScrollSurface = surface
+        verticalScrollVelocityY = abs(scrollGestureVelocityY) >= Self.minimumScrollVelocity
+            ? max(-Self.maximumScrollVelocity, min(Self.maximumScrollVelocity, scrollGestureVelocityY))
+            : 0
+        showScrollIndicator(surface)
+        ensureVerticalScrollDisplayLink()
+    }
+
+    private func settleVerticalScrollAfterCancellation() {
+        let surface: VerticalScrollSurface?
+        if expandedCandidateOverscrollY != 0 {
+            surface = .expandedPanel
+        } else if keyboardOverscrollY != 0 {
+            surface = .symbolKeyboard
+        } else {
+            surface = nil
+        }
+        guard let surface else { return }
+        verticalScrollSurface = surface
+        verticalScrollVelocityY = 0
+        showScrollIndicator(surface)
+        ensureVerticalScrollDisplayLink()
+    }
+
+    private func showScrollIndicator(_ surface: VerticalScrollSurface) {
+        scrollIndicatorSurface = surface
+        scrollIndicatorAlpha = 1
+        scrollIndicatorHoldRemaining = Self.scrollIndicatorHoldDuration
+    }
+
+    private func ensureVerticalScrollDisplayLink() {
+        guard verticalScrollDisplayLink == nil else { return }
+        verticalScrollLastTimestamp = 0
+        let displayLink = CADisplayLink(target: self, selector: #selector(stepVerticalScroll(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        verticalScrollDisplayLink = displayLink
+    }
+
+    private func stopVerticalScrollAnimation(settleAtBoundary: Bool = false) {
+        verticalScrollDisplayLink?.invalidate()
+        verticalScrollDisplayLink = nil
+        verticalScrollLastTimestamp = 0
+        verticalScrollSurface = nil
+        verticalScrollVelocityY = 0
+        if settleAtBoundary {
+            scrollIndicatorAlpha = 0
+            scrollIndicatorSurface = nil
+            scrollIndicatorHoldRemaining = 0
+            expandedCandidateOverscrollY = 0
+            keyboardOverscrollY = 0
+            coerceExpandedCandidateScroll()
+            keyboardScrollY = max(0, min(maxKeyboardScroll(), keyboardScrollY))
+            refreshScrollLayoutAndDisplay()
+        }
+    }
+
+    @objc private func stepVerticalScroll(_ displayLink: CADisplayLink) {
+        let previousTimestamp = verticalScrollLastTimestamp
+        verticalScrollLastTimestamp = displayLink.timestamp
+        guard previousTimestamp > 0 else { return }
+        let elapsed = min(1.0 / 30.0, displayLink.timestamp - previousTimestamp)
+        if let surface = verticalScrollSurface {
+            let current = surface == .expandedPanel
+                ? expandedCandidateVisualScrollY()
+                : keyboardVisualScrollY()
+            let maximum = surface == .expandedPanel
+                ? maxExpandedCandidateScroll()
+                : maxKeyboardScroll()
+            var velocity = verticalScrollVelocityY
+            var next = current + velocity * CGFloat(elapsed)
+            if next < 0 || next > maximum {
+                let boundary = max(0, min(maximum, next))
+                velocity += (boundary - next) * Self.scrollSpringStrength * CGFloat(elapsed)
+                velocity *= CGFloat(pow(Self.scrollBoundaryDamping, elapsed * 60))
+            } else {
+                velocity *= CGFloat(pow(Self.scrollFrictionPerFrame, elapsed * 60))
+            }
+            verticalScrollVelocityY = velocity
+            if surface == .expandedPanel {
+                setExpandedCandidateScroll(next, rubberBand: false)
+                next = expandedCandidateVisualScrollY()
+            } else {
+                setKeyboardScroll(next, rubberBand: false)
+                next = keyboardVisualScrollY()
+            }
+            let overscroll = next - max(0, min(maximum, next))
+            if abs(velocity) < Self.scrollStopVelocity && abs(overscroll) < 0.5 {
+                if surface == .expandedPanel {
+                    setExpandedCandidateScroll(next, rubberBand: false)
+                    expandedCandidateOverscrollY = 0
+                } else {
+                    setKeyboardScroll(next, rubberBand: false)
+                    keyboardOverscrollY = 0
+                }
+                verticalScrollSurface = nil
+                verticalScrollVelocityY = 0
+            }
+            refreshScrollLayoutAndDisplay()
+        } else if scrollIndicatorHoldRemaining > 0 {
+            scrollIndicatorHoldRemaining = max(0, scrollIndicatorHoldRemaining - elapsed)
+        } else if scrollIndicatorAlpha > 0 {
+            scrollIndicatorAlpha = max(0, scrollIndicatorAlpha - CGFloat(elapsed / Self.scrollIndicatorFadeDuration))
+            setNeedsDisplay()
+        }
+        if verticalScrollSurface == nil && scrollIndicatorAlpha <= 0 {
+            stopVerticalScrollAnimation()
+        }
+    }
+
+    private func refreshScrollLayoutAndDisplay() {
+        rebuildInteractiveRects()
+        setNeedsDisplay()
+    }
+
+    private func drawVerticalScrollIndicator(
+        viewportTop: CGFloat,
+        viewportBottom: CGFloat,
+        contentHeight: CGFloat,
+        scrollY: CGFloat,
+        surface: VerticalScrollSurface
+    ) {
+        guard scrollIndicatorSurface == surface, scrollIndicatorAlpha > 0 else { return }
+        let viewportHeight = viewportBottom - viewportTop
+        guard viewportHeight > 0, contentHeight > viewportHeight else { return }
+        let maximum = contentHeight - viewportHeight
+        let thumbHeight = max(Self.scrollIndicatorMinimumThumb, viewportHeight * viewportHeight / contentHeight)
+        let travel = max(0, viewportHeight - thumbHeight - 4)
+        let thumbTop = viewportTop + 2 + travel * (max(0, min(maximum, scrollY)) / maximum)
+        theme.candidate.commentColor.uiColor
+            .withAlphaComponent(scrollIndicatorAlpha * Self.scrollIndicatorMaximumAlpha)
+            .setFill()
+        UIBezierPath(
+            roundedRect: CGRect(
+                x: bounds.width - Self.scrollIndicatorWidth - 2,
+                y: thumbTop,
+                width: Self.scrollIndicatorWidth,
+                height: thumbHeight
+            ),
+            cornerRadius: Self.scrollIndicatorWidth / 2
+        ).fill()
     }
 
     private func expandedCandidatePanelHeight() -> CGFloat {
@@ -3917,6 +4562,19 @@ final class KeyTaoIOSKeyboardView: UIView {
         let deltaX = point.x - touch.touchStart.x
         let deltaY = point.y - touch.touchStart.y
         let threshold = max(CGFloat(8), config.swipeThresholdDp * 0.65)
+        if usesSelectionBackspaceGesture(), touch.backspaceGestureConsumed, abs(deltaX) <= threshold {
+            if let command = KeyTaoBackspaceGesturePolicy.dragCommand(
+                mode: .selectThenDelete,
+                currentUnits: touch.backspaceGestureUnits,
+                requestedUnits: 0,
+                maximumUnits: Self.maxBackspaceGestureUnitsPerGesture
+            ) {
+                delegate?.keyboardView(self, didTrigger: backspaceGestureCommand(command.action, count: command.count))
+            }
+            touch.backspaceGestureUnits = 0
+            activeTouches[identifier] = touch
+            return true
+        }
         guard abs(deltaX) > threshold, abs(deltaX) > abs(deltaY) * 0.75 else {
             return false
         }
@@ -3929,21 +4587,25 @@ final class KeyTaoIOSKeyboardView: UIView {
         let stepWidth = max(CGFloat(8), touch.key.rect.width * 0.22)
         let moved = max(CGFloat(0), abs(deltaX) - threshold)
         let stepCount = max(1, Int(floor(moved / stepWidth)) + 1)
-        let targetUnits = deltaX < 0 ? stepCount : -stepCount
-        let deltaUnits = targetUnits - touch.backspaceGestureUnits
+        let requestedUnits = deltaX < 0 ? stepCount : -stepCount
+        let targetUnits = usesSelectionBackspaceGesture()
+            ? max(0, min(Self.maxBackspaceGestureUnitsPerGesture, requestedUnits))
+            : max(-Self.maxBackspaceGestureUnitsPerGesture, min(Self.maxBackspaceGestureUnitsPerGesture, requestedUnits))
+        let command = KeyTaoBackspaceGesturePolicy.dragCommand(
+            mode: backspaceGestureMode(),
+            currentUnits: touch.backspaceGestureUnits,
+            requestedUnits: targetUnits,
+            maximumUnits: Self.maxBackspaceGestureUnitsPerGesture
+        )
         touch.backspaceGestureUnits = targetUnits
         activeTouches[identifier] = touch
-        guard deltaUnits != 0 else {
+        guard let command else {
             if firstDragUpdate {
                 delegate?.keyboardView(self, didTrigger: backspaceGestureCommand("preview"))
             }
             return true
         }
-
-        let action = deltaUnits > 0 ? "delete" : "restore"
-        for _ in 0..<abs(deltaUnits) {
-            delegate?.keyboardView(self, didTrigger: backspaceGestureCommand(action))
-        }
+        delegate?.keyboardView(self, didTrigger: backspaceGestureCommand(command.action, count: command.count))
         performConfiguredHaptic()
         return true
     }
@@ -3967,8 +4629,22 @@ final class KeyTaoIOSKeyboardView: UIView {
         return true
     }
 
-    private func backspaceGestureCommand(_ action: String) -> KeyTaoKeyCommand {
-        KeyTaoKeyCommand(type: KeyTaoCommandType.backspaceGesture, value: action, fallbackValue: nil)
+    private func backspaceGestureCommand(_ action: String, count: Int = 1) -> KeyTaoKeyCommand {
+        KeyTaoKeyCommand(
+            type: KeyTaoCommandType.backspaceGesture,
+            value: action,
+            fallbackValue: String(max(1, count))
+        )
+    }
+
+    private func backspaceGestureMode() -> KeyTaoBackspaceGestureMode {
+        hostTraits.isSensitive
+            ? .immediate
+            : KeyTaoBackspaceGestureMode(setting: config.backspaceGestureMode)
+    }
+
+    private func usesSelectionBackspaceGesture() -> Bool {
+        backspaceGestureMode() == .selectThenDelete
     }
 
     private func isBackspaceKey(_ key: KeyTaoKeySpec) -> Bool {
@@ -4114,6 +4790,62 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
         }
         return (pressed, pressedStackIndices)
+    }
+
+    private func keyPressProgress(for keyIndex: Int, pressed: Bool) -> CGFloat {
+        keyPressAnimations[keyIndex]?.progress ?? (pressed ? 1 : 0)
+    }
+
+    private func animateKeyPress(keyIndex: Int, pressed: Bool) {
+        guard keyRects.indices.contains(keyIndex) else { return }
+        let rect = keyRects[keyIndex].rect
+        let target: CGFloat = pressed ? 1 : 0
+        let current = keyPressAnimations[keyIndex]?.progress ?? (1 - target)
+        if UIAccessibility.isReduceMotionEnabled || abs(current - target) < 0.001 {
+            if target == 0 {
+                keyPressAnimations.removeValue(forKey: keyIndex)
+            } else {
+                keyPressAnimations[keyIndex] = KeyPressAnimationState(progress: target, target: target)
+            }
+            setNeedsDisplay(rect.insetBy(dx: -4, dy: -4))
+            return
+        }
+        keyPressAnimations[keyIndex] = KeyPressAnimationState(progress: current, target: target)
+        if keyPressDisplayLink == nil {
+            keyPressLastTimestamp = 0
+            let displayLink = CADisplayLink(target: self, selector: #selector(stepKeyPressAnimations(_:)))
+            displayLink.add(to: .main, forMode: .common)
+            keyPressDisplayLink = displayLink
+        }
+    }
+
+    @objc private func stepKeyPressAnimations(_ displayLink: CADisplayLink) {
+        let previousTimestamp = keyPressLastTimestamp
+        keyPressLastTimestamp = displayLink.timestamp
+        guard previousTimestamp > 0 else { return }
+        let step = CGFloat(min(1, (displayLink.timestamp - previousTimestamp) / Self.keyPressAnimationDuration))
+        var completed: [Int] = []
+        for (keyIndex, var animation) in keyPressAnimations {
+            let delta = animation.target - animation.progress
+            if abs(delta) <= step {
+                animation.progress = animation.target
+                completed.append(keyIndex)
+            } else {
+                animation.progress += delta.sign == .minus ? -step : step
+            }
+            keyPressAnimations[keyIndex] = animation
+            if keyRects.indices.contains(keyIndex) {
+                setNeedsDisplay(keyRects[keyIndex].rect.insetBy(dx: -4, dy: -4))
+            }
+        }
+        for keyIndex in completed where keyPressAnimations[keyIndex]?.target == 0 {
+            keyPressAnimations.removeValue(forKey: keyIndex)
+        }
+        if keyPressAnimations.values.allSatisfy({ abs($0.progress - $0.target) < 0.001 }) {
+            displayLink.invalidate()
+            keyPressDisplayLink = nil
+            keyPressLastTimestamp = 0
+        }
     }
 
     private func stackIndex(in rect: CGRect, count: Int, y: CGFloat) -> Int {
@@ -4380,7 +5112,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func isSoftAccentPunctuationKey(_ key: KeyTaoKeySpec) -> Bool {
         let label = state.asciiMode ? (key.asciiLabel ?? key.asciiValue ?? key.label) : key.label
         let value = state.asciiMode ? (key.asciiValue ?? key.value ?? key.label) : (key.value ?? key.label)
-        return ["，", "。", ",", "."].contains(label) || ["，", "。", ",", "."].contains(value)
+        return Self.softAccentPunctuation.contains(label) || Self.softAccentPunctuation.contains(value)
     }
 
     /// Whether tapping this cell can do anything. Panel rows carry their own
@@ -4683,14 +5415,20 @@ final class KeyTaoIOSKeyboardView: UIView {
             : UIColor.white.withAlphaComponent(0.58)
     }
 
-    private func keyForegroundColor(_ key: KeyTaoKeySpec, selected: Bool) -> UIColor {
-        if selected {
-            return theme.candidate.selectedForeground.uiColor
-        }
-        if key.style == "accent" {
-            return theme.candidate.selectedForeground.uiColor
-        }
-        return theme.candidate.foreground.uiColor
+    private func keyForegroundColor(
+        _ key: KeyTaoKeySpec,
+        selected: Bool,
+        pressProgress: CGFloat = 0
+    ) -> UIColor {
+        let normal = selected || key.style == "accent"
+            ? theme.candidate.selectedForeground.uiColor
+            : theme.candidate.foreground.uiColor
+        guard pressProgress > 0 else { return normal }
+        return blend(
+            foreground: theme.candidate.pressedForeground.uiColor,
+            background: normal,
+            amount: pressProgress
+        )
     }
 
     private func toolbarBackgroundColor(_ action: ToolbarAction, pressed: Bool) -> UIColor {
@@ -4921,9 +5659,26 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let alternatePanelTextSize: CGFloat = 20
     private static let expandedCandidateLoadDelayMs = 180
     private static let backspacePreviewDuration: TimeInterval = 2
+    private static let maxBackspaceGestureUnitsPerGesture = 96
     private static let emojiRecentLayer = "symbols_emoji_face"
+    private static let toolbarPinnedBoundaryID = "__toolbar_pinned_boundary__"
     private static let recentEmojiPreferenceKey = "recent_emoji"
     private static let maxRecentEmojiCount = 32
+    private static let softAccentPunctuation: Set<String> = ["，", "。", ",", "."]
+    private static let keyPressAnimationDuration: TimeInterval = 0.08
+    private static let scrollRubberBandFactor: CGFloat = 0.28
+    private static let scrollOverscrollDistance: CGFloat = 18
+    private static let minimumScrollVelocity: CGFloat = 120
+    private static let maximumScrollVelocity: CGFloat = 8_000
+    private static let scrollStopVelocity: CGFloat = 8
+    private static let scrollFrictionPerFrame = 0.92
+    private static let scrollBoundaryDamping = 0.78
+    private static let scrollSpringStrength: CGFloat = 180
+    private static let scrollIndicatorHoldDuration: TimeInterval = 0.32
+    private static let scrollIndicatorFadeDuration: TimeInterval = 0.22
+    private static let scrollIndicatorMinimumThumb: CGFloat = 18
+    private static let scrollIndicatorWidth: CGFloat = 2.5
+    private static let scrollIndicatorMaximumAlpha: CGFloat = 0.7
     private static let repeatableEditVerbs: Set<String> = [
         "cursorLeft",
         "cursorRight",

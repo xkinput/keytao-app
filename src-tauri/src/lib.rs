@@ -3870,6 +3870,8 @@ pub struct AndroidImeInputSettings {
     pub long_press_delay_ms: u16,
     pub keyboard_height_scale: u8,
     pub delete_speed: String,
+    pub prediction_enabled: bool,
+    pub backspace_gesture_mode: String,
     pub keyboard_height_dp: u16,
     pub candidate_bar_height_dp: u8,
     pub swipe_threshold_dp: f32,
@@ -4927,6 +4929,15 @@ fn normalize_mobile_ime_delete_speed(value: Option<&str>) -> String {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalize_mobile_ime_backspace_gesture_mode(value: Option<&str>) -> String {
+    if value.is_some_and(|value| value.eq_ignore_ascii_case("selectThenDelete")) {
+        "selectThenDelete".into()
+    } else {
+        "immediate".into()
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn normalize_mobile_ime_keyboard_height_scale(value: Option<u64>) -> u8 {
     match value {
         Some(value) if (85..=130).contains(&value) && value % 5 == 0 => value as u8,
@@ -4989,6 +5000,15 @@ fn android_ime_haptics_settings_from_config(
     );
     let delete_speed = normalize_mobile_ime_delete_speed(
         config.get("deleteSpeed").and_then(|value| value.as_str()),
+    );
+    let prediction_enabled = config
+        .get("predictionEnabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let backspace_gesture_mode = normalize_mobile_ime_backspace_gesture_mode(
+        config
+            .get("backspaceGestureMode")
+            .and_then(|value| value.as_str()),
     );
     let keyboard_path = root.join("keyboard.yaml");
     let keyboard = keytao_theme::resolve_keyboard_from_paths(
@@ -5078,6 +5098,8 @@ fn android_ime_haptics_settings_from_config(
         long_press_delay_ms,
         keyboard_height_scale,
         delete_speed,
+        prediction_enabled,
+        backspace_gesture_mode,
         keyboard_height_dp,
         candidate_bar_height_dp,
         swipe_threshold_dp,
@@ -5151,6 +5173,8 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     long_press_delay_ms: u16,
     keyboard_height_scale: u8,
     delete_speed: String,
+    prediction_enabled: bool,
+    backspace_gesture_mode: String,
     keyboard_height_dp: u16,
     candidate_bar_height_dp: u8,
     swipe_threshold_dp: f32,
@@ -5210,6 +5234,16 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         config.insert(
             "deleteSpeed".into(),
             serde_json::Value::String(normalize_mobile_ime_delete_speed(Some(&delete_speed))),
+        );
+        config.insert(
+            "predictionEnabled".into(),
+            serde_json::Value::Bool(prediction_enabled),
+        );
+        config.insert(
+            "backspaceGestureMode".into(),
+            serde_json::Value::String(normalize_mobile_ime_backspace_gesture_mode(Some(
+                &backspace_gesture_mode,
+            ))),
         );
         config.insert(
             "keyboardHeightDp".into(),

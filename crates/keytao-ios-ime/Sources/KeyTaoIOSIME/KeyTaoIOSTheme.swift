@@ -89,6 +89,7 @@ public struct KeyTaoImeTheme: Codable {
         public var background: KeyTaoThemeColor
         public var hoverBackground: KeyTaoThemeColor
         public var pressedBackground: KeyTaoThemeColor
+        public var pressedForeground: KeyTaoThemeColor
         public var selectedBackground: KeyTaoThemeColor
         public var foreground: KeyTaoThemeColor
         public var selectedForeground: KeyTaoThemeColor
@@ -162,6 +163,7 @@ public struct KeyTaoImeTheme: Codable {
             background: KeyTaoThemeColor(red: 0, green: 0, blue: 0, alpha: 0),
             hoverBackground: KeyTaoThemeColor(red: 0xF1, green: 0xF6, blue: 0xFF, alpha: 0xFF),
             pressedBackground: KeyTaoThemeColor(red: 0xD4, green: 0xE7, blue: 0xFF, alpha: 0xFF),
+            pressedForeground: KeyTaoThemeColor(red: 0x14, green: 0x23, blue: 0x3B, alpha: 0xFF),
             selectedBackground: KeyTaoThemeColor(red: 0xE6, green: 0xF0, blue: 0xFF, alpha: 0xFF),
             foreground: KeyTaoThemeColor(red: 0x1F, green: 0x29, blue: 0x33, alpha: 0xFF),
             selectedForeground: KeyTaoThemeColor(red: 0x14, green: 0x23, blue: 0x3B, alpha: 0xFF),

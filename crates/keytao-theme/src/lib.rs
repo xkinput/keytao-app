@@ -137,6 +137,7 @@ pub struct CandidateTheme {
     pub background: RgbaColor,
     pub hover_background: RgbaColor,
     pub pressed_background: RgbaColor,
+    pub pressed_foreground: RgbaColor,
     pub selected_background: RgbaColor,
     pub foreground: RgbaColor,
     pub selected_foreground: RgbaColor,
@@ -573,6 +574,7 @@ impl ResolvedImeTheme {
                 background: rgba(0, 0, 0, 0),
                 hover_background: rgba(0xF1, 0xF6, 0xFF, 0xFF),
                 pressed_background: rgba(0xD4, 0xE7, 0xFF, 0xFF),
+                pressed_foreground: rgba(0x14, 0x23, 0x3B, 0xFF),
                 selected_background: rgba(0xE6, 0xF0, 0xFF, 0xFF),
                 foreground: rgba(0x26, 0x34, 0x42, 0xFF),
                 selected_foreground: rgba(0x24, 0x32, 0x41, 0xFF),
@@ -875,6 +877,8 @@ struct PartialCandidateTheme {
     #[serde(default, deserialize_with = "optional_color")]
     pressed_background: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
+    pressed_foreground: Option<RgbaColor>,
+    #[serde(default, deserialize_with = "optional_color")]
     selected_background: Option<RgbaColor>,
     #[serde(default, deserialize_with = "optional_color")]
     foreground: Option<RgbaColor>,
@@ -991,6 +995,7 @@ impl CandidateTheme {
         assign(&mut self.background, partial.background);
         assign(&mut self.hover_background, partial.hover_background);
         assign(&mut self.pressed_background, partial.pressed_background);
+        assign(&mut self.pressed_foreground, partial.pressed_foreground);
         assign(&mut self.selected_background, partial.selected_background);
         assign(&mut self.foreground, partial.foreground);
         assign(&mut self.selected_foreground, partial.selected_foreground);
@@ -1369,13 +1374,21 @@ mod tests {
     fn user_overlay_merges_and_clamps() {
         let mut theme = ResolvedImeTheme::default();
         let partial = serde_yaml::from_str::<PartialTheme>(
-            "font:\n  size: 99\npanel:\n  orientation: vertical\ncandidate:\n  selectedBackground: '#11223344'\n",
+            "font:\n  size: 99\npanel:\n  orientation: vertical\ncandidate:\n  pressedBackground: '#10203040'\n  pressedForeground: '#50607080'\n  selectedBackground: '#11223344'\n",
         )
         .unwrap();
         theme.apply(partial);
         let theme = theme.sanitized();
         assert_eq!(theme.font.size, 36.0);
         assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
+        assert_eq!(
+            theme.candidate.pressed_background,
+            rgba(0x10, 0x20, 0x30, 0x40)
+        );
+        assert_eq!(
+            theme.candidate.pressed_foreground,
+            rgba(0x50, 0x60, 0x70, 0x80)
+        );
         assert_eq!(
             theme.candidate.selected_background,
             rgba(0x11, 0x22, 0x33, 0x44)

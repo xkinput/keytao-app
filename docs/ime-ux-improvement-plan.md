@@ -270,8 +270,8 @@
 - **平台**：both
 - **现状**：Android `swipeThresholdDp` 默认 34dp（yaml 可配，夹 12–96），但无触摸噪声过滤；`shouldAcceptKeyRelease` 用 `max(2×touchSlop, 0.65×键宽)` 判定横向取消（:3330-3337）。iOS `swipeThresholdDp` 只随一手模式缩放，用户不可调（KeyTaoIOSConfig.swift:498-509）。
 - **GBoard 行为**：AOSP `config_touch_noise_threshold_time = 40ms`、`config_touch_noise_threshold_distance = 12.6dp`、`config_key_hysteresis_distance_for_sliding_modifier = 8.0dp`。来源：HeliBoard `config-common.xml`。
-- **改法**：引入 40ms/12.6dp 噪声过滤（时长 <40ms 且位移 <12.6dp 的触摸视为误触丢弃），迟滞距离 8dp 供 P1-10 使用；`swipeThresholdDp` 接入设置页（P2-4）。
-- **验收标准**：手掌边缘轻扫键盘不产生字符；正常快速点击（>40ms）不被误过滤；滑动阈值设置项两端均生效。
+- **改法**：在 DOWN 时做逐指针回弹抑制：记录同一 pointer 上一次 UP 的时间与位置；新的 DOWN 若距该 pointer 上一次 UP `<40ms` **且** 距离 `<12.6dp`，则作为回弹噪声丢弃。任何干净点击都不按本次触摸的持续时长过滤。迟滞距离 8dp 供 P1-10 使用；`swipeThresholdDp` 接入设置页（P2-4）。
+- **验收标准**：同键 60ms 间隔双击两次都生效；换键 30ms 连点两次都生效；同位置 20ms 回弹被忽略；滑动阈值设置项两端均生效。
 
 ### P2-14 下滑收起键盘
 
@@ -295,6 +295,11 @@
 - **改法**：iOS 编辑网格隐藏这四个键，用可实现的功能补位：整词删除、括号/引号包裹（配合光标移动）、常用短语。若保留则点击时 `showMessage` 一次性说明原因。
 - **验收标准**：iOS 编辑网格中不存在长期灰死、点击无任何反馈的按键；Android 编辑网格功能不变。
 
+### 子批次 A 补充：剪贴板条目上屏后自动返回键盘
+
+- **平台**：both
+- **验收标准**：点选任一剪贴板文本条目时，上屏动作派发后关闭面板并返回字母键盘（当前链路无成功/失败回执）；删除单条（✕）与清空操作不关闭面板。两端一致。
+
 ---
 
 # P3 锦上添花 / 大工程
@@ -303,8 +308,9 @@
 
 - **平台**：both
 - **现状**：`keyRects` 在 `onDraw` 开头清空、在 `drawKeyboard` 末尾才回填（`candidateRects/toolbarRects/expandedCandidateRects` 同理；KeytaoKeyboardView.kt:471-488、:2143-2170、:3305-3312），`findKey` 命中的是**上一帧**的布局。切层、展开面板、悬浮缩放的那一帧可能命中已不存在的键位。
+- **子批次 A 审计结论**：布局与绘制耦合会造成状态切换帧的错键风险，但与本次快速点击丢击无关；丢击根因是抬手阶段按本次触摸时长过滤，改为 DOWN 时基于同一 pointer 上一次 UP 的回弹抑制后，P3-1 无需提前到子批次 A。
 - **改法**：把布局计算从 `onDraw` 抽到 `onMeasure/onSizeChanged` + 状态变更时触发的 `rebuildLayout()`，`onDraw` 只消费布局结果。iOS 同理（`draw(_:)` 内的布局计算抽到 `layoutSubviews`）。
-- **验收标准**：切层动画进行中连续点击不产生错键输入；自动化用例在布局变更帧后立即命中，返回的键与新布局一致。
+- **验收标准**：真机手工确认切层动画进行中连续点击不产生错键输入；结构检查确认所有层/尺寸/滚动状态变更都会同步重建命中矩形，且 DOWN 在命中前兜底重建。当前 Android JVM 单元测试没有 View/Robolectric seam，iOS policy harness 也不链接 UIKit，因此不以 host 单元测试宣称实际 View 命中链路覆盖；待加入平台 View harness 后再补自动化。
 
 ### P3-2 面板惯性滚动 / 回弹 / 滚动条
 
@@ -317,8 +323,10 @@
 
 - **平台**：both（引擎级）
 - **现状**：无 composition 时候选栏直接画工具栏；英文模式绕过 Rime 直接上屏，无任何建议（KeyTaoIOSKeyboardView.swift:719-749）。
-- **改法**：中文侧接 Rime 的 `predict/associate`（需确认 librime 版本支持）；英文侧用 `UITextChecker.completions/guesses`（iOS）/ 本地词表（Android）填候选栏。属独立特性，不与 P1/P2 耦合。
-- **验收标准**：中文上屏一个词后候选栏出现联想词，点击可直接上屏；英文模式输入前缀出现补全候选；关闭该设置后候选栏行为回到现状。
+- **子批次 C 交付边界**：本批次只交付英文补全。当前 bundled librime 未包含 `librime-predict` / `predict.db`，目标 schema 也尚未配置对应的 predictor processor/translator；在这些依赖补齐前无法提供真实的中文联想链路。
+- **本批次改法**：英文侧用 `UITextChecker.completions/guesses`（iOS）/ 本地词表（Android）填候选栏。属独立特性，不与 P1/P2 耦合。
+- **本批次验收标准**：英文模式输入前缀出现补全候选；点击候选补全当前英文单词；关闭该设置后候选栏行为回到现状。
+- **后续项**：补齐 `librime-predict` / `predict.db` 并在目标 schema 接入 predictor processor/translator 后，再实现和验收中文上屏后的联想词展示与点击上屏。
 
 ### P3-4 退格「按词选中 → 抬手删除 → 可撤回」模型
 

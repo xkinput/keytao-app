@@ -125,6 +125,10 @@ data class KeytaoAndroidImeConfig(
     val longPressDelayMs: Long,
     val keyboardHeightScale: Int,
     val deleteSpeed: String,
+    val predictionEnabled: Boolean,
+    val backspaceGestureMode: String,
+    val toolbarActionOrder: List<String>,
+    val toolbarPinnedCount: Int,
     val keySoundEnabled: Boolean,
     val keySoundVolume: Int,
     val keyHintVisible: Boolean,
@@ -282,6 +286,30 @@ data class KeytaoAndroidImeConfig(
             return parseRoot(root, null)
         }
 
+        @Synchronized
+        fun persistToolbarCustomization(context: Context, order: List<String>, pinnedCount: Int): Boolean {
+            val file = KeytaoAndroidPaths.imeConfigFile(context)
+            return runCatching {
+                val root = file.takeIf { it.isFile }
+                    ?.readText()
+                    ?.let(::JSONObject)
+                    ?: JSONObject()
+                val normalizedOrder = order.map(String::trim).filter(String::isNotEmpty).distinct()
+                root.put("toolbarActionOrder", JSONArray(normalizedOrder))
+                root.put("toolbarPinnedCount", pinnedCount.coerceIn(1, 12))
+                file.parentFile?.mkdirs()
+                val temporary = File(file.parentFile, ".${file.name}.toolbar.tmp")
+                temporary.writeText(root.toString(2))
+                if (!temporary.renameTo(file)) {
+                    file.writeText(root.toString(2))
+                    temporary.delete()
+                }
+                cachedSignature = null
+                cachedConfig = null
+                true
+            }.getOrDefault(false)
+        }
+
         private fun parse(json: String, defaultJson: String): KeytaoAndroidImeConfig {
             return parseRoot(JSONObject(json), JSONObject(defaultJson))
         }
@@ -354,6 +382,12 @@ data class KeytaoAndroidImeConfig(
                 ),
                 keyboardHeightScale = mergedKeyboardHeightScale(root, fallbackRoot),
                 deleteSpeed = normalizeDeleteSpeed(mergedString(root, fallbackRoot, "deleteSpeed", "standard")),
+                predictionEnabled = mergedBoolean(root, fallbackRoot, "predictionEnabled", true),
+                backspaceGestureMode = normalizeBackspaceGestureMode(
+                    mergedString(root, fallbackRoot, "backspaceGestureMode", "immediate"),
+                ),
+                toolbarActionOrder = mergedStringList(root, fallbackRoot, "toolbarActionOrder"),
+                toolbarPinnedCount = mergedInt(root, fallbackRoot, "toolbarPinnedCount", 5).coerceIn(1, 12),
                 keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
                 keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
                 keyHintVisible = mergedBoolean(root, fallbackRoot, "keyHintVisible", true),
@@ -498,6 +532,26 @@ data class KeytaoAndroidImeConfig(
                 } else {
                     config.deleteSpeed
                 },
+                predictionEnabled = if (runtimeRoot.has("predictionEnabled")) {
+                    runtimeRoot.optBoolean("predictionEnabled", config.predictionEnabled)
+                } else {
+                    config.predictionEnabled
+                },
+                backspaceGestureMode = if (runtimeRoot.has("backspaceGestureMode")) {
+                    normalizeBackspaceGestureMode(runtimeRoot.optString("backspaceGestureMode"))
+                } else {
+                    config.backspaceGestureMode
+                },
+                toolbarActionOrder = if (runtimeRoot.has("toolbarActionOrder")) {
+                    stringList(runtimeRoot.optJSONArray("toolbarActionOrder"))
+                } else {
+                    config.toolbarActionOrder
+                },
+                toolbarPinnedCount = if (runtimeRoot.has("toolbarPinnedCount")) {
+                    runtimeRoot.optInt("toolbarPinnedCount", config.toolbarPinnedCount).coerceIn(1, 12)
+                } else {
+                    config.toolbarPinnedCount
+                },
                 keyboardHeightDp = if (runtimeRoot.has("keyboardHeightDp")) {
                     runtimeRoot.optInt("keyboardHeightDp", config.keyboardHeightDp).coerceIn(160, 420)
                 } else {
@@ -593,6 +647,19 @@ data class KeytaoAndroidImeConfig(
 
         private fun rowArray(root: JSONObject, fallbackRoot: JSONObject?, name: String): JSONArray? {
             return root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name)
+        }
+
+        private fun mergedStringList(root: JSONObject, fallbackRoot: JSONObject?, name: String): List<String> {
+            return stringList(root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name))
+        }
+
+        private fun stringList(array: JSONArray?): List<String> {
+            if (array == null) return emptyList()
+            return buildList {
+                for (index in 0 until array.length()) {
+                    array.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
+                }
+            }.distinct()
         }
 
         private fun layerRows(root: JSONObject, fallbackRoot: JSONObject?): Map<String, List<List<KeySpec>>> {
@@ -741,6 +808,14 @@ data class KeytaoAndroidImeConfig(
                 DeleteSpeed.SLOW -> "slow"
                 DeleteSpeed.STANDARD -> "standard"
                 DeleteSpeed.FAST -> "fast"
+            }
+        }
+
+        private fun normalizeBackspaceGestureMode(value: String): String {
+            return if (value.trim().equals("selectThenDelete", ignoreCase = true)) {
+                "selectThenDelete"
+            } else {
+                "immediate"
             }
         }
 

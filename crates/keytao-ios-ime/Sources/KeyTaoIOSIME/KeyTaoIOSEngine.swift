@@ -395,6 +395,32 @@ final class KeyTaoIOSEngine {
         return config
     }
 
+    func persistToolbarCustomization(order: [String], pinnedCount: Int) -> Bool {
+        let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
+        return (try? {
+            var root: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: url.path) {
+                let data = try Data(contentsOf: url)
+                root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            }
+            let normalizedOrder = order.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .reduce(into: [String]()) { result, id in
+                    if !result.contains(id) { result.append(id) }
+                }
+            root["toolbarActionOrder"] = normalizedOrder
+            root["toolbarPinnedCount"] = max(1, min(pinnedCount, 12))
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            lastConfig = nil
+            return true
+        }()) ?? false
+    }
+
     /// Drops everything that can be rebuilt on demand; the session and the
     /// deployed schemas stay put so that typing keeps working.
     func releaseCaches() {

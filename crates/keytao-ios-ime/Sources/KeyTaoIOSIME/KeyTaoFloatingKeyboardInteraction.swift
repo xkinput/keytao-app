@@ -38,16 +38,21 @@ final class KeyTaoIOSKeyboardLayoutStateStore {
         let prefix = orientationPrefix(isLandscape)
         let enabledKey = "\(prefix)_enabled"
         let scaleKey = "\(prefix)_scale"
+        let heightScaleKey = "\(prefix)_height_scale"
         let side = defaults.string(forKey: "\(prefix)_side")
             .flatMap(KeyTaoIOSKeyboardSide.init(rawValue:))
             ?? .right
+        let scale = defaults.object(forKey: scaleKey) == nil
+            ? fallback.scale
+            : defaults.double(forKey: scaleKey)
         return KeyTaoIOSKeyboardLayoutState(
             enabled: defaults.object(forKey: enabledKey) == nil
                 ? fallback.enabled
                 : defaults.bool(forKey: enabledKey),
-            scale: defaults.object(forKey: scaleKey) == nil
-                ? fallback.scale
-                : defaults.double(forKey: scaleKey),
+            scale: scale,
+            heightScale: defaults.object(forKey: heightScaleKey) == nil
+                ? scale
+                : defaults.double(forKey: heightScaleKey),
             side: side,
             orientation: KeyTaoFloatingOrientation(isLandscape: isLandscape)
         ).normalized()
@@ -63,6 +68,7 @@ final class KeyTaoIOSKeyboardLayoutStateStore {
         let normalized = stored.normalized()
         defaults.set(normalized.enabled, forKey: "\(prefix)_enabled")
         defaults.set(normalized.scale, forKey: "\(prefix)_scale")
+        defaults.set(normalized.heightScale, forKey: "\(prefix)_height_scale")
         defaults.set(normalized.side.rawValue, forKey: "\(prefix)_side")
     }
 
@@ -83,6 +89,9 @@ final class KeyTaoResizableKeyboardContainerView: UIView, UIGestureRecognizerDel
     private var acceptsCurrentTouch = false
     private var dragStartWidth: CGFloat = 0
     private var dragStartScale: CGFloat = 1
+    private var dragStartHeight: CGFloat = 0
+    private var dragStartHeightScale: CGFloat = 1
+    private var resizeAxis: NSLayoutConstraint.Axis?
     private let edgeTouchSize: CGFloat = 16
     private lazy var panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
 
@@ -122,14 +131,19 @@ final class KeyTaoResizableKeyboardContainerView: UIView, UIGestureRecognizerDel
         case .began:
             dragStartWidth = bounds.width
             dragStartScale = state.scale
+            dragStartHeight = bounds.height
+            dragStartHeightScale = state.heightScale
+            resizeAxis = nil
         case .changed:
-            updateScale(translationX: gesture.translation(in: self).x, finished: false)
+            updateSize(translation: gesture.translation(in: self), finished: false)
         case .ended:
-            updateScale(translationX: gesture.translation(in: self).x, finished: true)
+            updateSize(translation: gesture.translation(in: self), finished: true)
             acceptsCurrentTouch = false
+            resizeAxis = nil
         case .cancelled, .failed:
             onStateChanged?(state, true)
             acceptsCurrentTouch = false
+            resizeAxis = nil
         default:
             break
         }
@@ -154,6 +168,17 @@ final class KeyTaoResizableKeyboardContainerView: UIView, UIGestureRecognizerDel
         }
     }
 
+    private func updateSize(translation: CGPoint, finished: Bool) {
+        if resizeAxis == nil, max(abs(translation.x), abs(translation.y)) >= 2 {
+            resizeAxis = abs(translation.y) > abs(translation.x) ? .vertical : .horizontal
+        }
+        if resizeAxis == .vertical {
+            updateHeight(translationY: translation.y, finished: finished)
+        } else {
+            updateScale(translationX: translation.x, finished: finished)
+        }
+    }
+
     private func updateScale(translationX: CGFloat, finished: Bool) {
         let baseWidth = dragStartWidth / max(dragStartScale, 0.01)
         let outwardTranslation = presentation.side == .left ? translationX : -translationX
@@ -161,6 +186,20 @@ final class KeyTaoResizableKeyboardContainerView: UIView, UIGestureRecognizerDel
         state = KeyTaoIOSKeyboardLayoutState(
             enabled: true,
             scale: nextScale,
+            heightScale: state.heightScale,
+            side: presentation.side,
+            orientation: state.orientation
+        ).normalized()
+        onStateChanged?(state, finished)
+    }
+
+    private func updateHeight(translationY: CGFloat, finished: Bool) {
+        let baseHeight = dragStartHeight / max(dragStartHeightScale, 0.01)
+        let nextHeightScale = dragStartHeightScale + translationY / max(baseHeight, 1)
+        state = KeyTaoIOSKeyboardLayoutState(
+            enabled: true,
+            scale: state.scale,
+            heightScale: nextHeightScale,
             side: presentation.side,
             orientation: state.orientation
         ).normalized()

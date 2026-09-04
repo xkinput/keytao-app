@@ -22,6 +22,7 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.view.ViewGroup
@@ -84,6 +85,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var unavailableMessage = preparingMessage
     private val backspaceRestoreStack = mutableListOf<String>()
     private var backspaceGestureRestoreStart = 0
+    private data class BackspaceSelectionSession(
+        val anchor: Int,
+        val beforeUnits: List<String>,
+        var selectedText: String = "",
+        var selectionApplied: Boolean = false,
+    )
+    private var backspaceSelectionSession: BackspaceSelectionSession? = null
     private val recentCommittedUnits = mutableListOf<String>()
     private val doubleSpacePeriodTracker = DoubleSpacePeriodTracker()
     private var lastCommittedText: String? = null
@@ -163,6 +171,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        backspaceSelectionSession = null
         // doStartInput() skips doFinishInput() when restarting, so the editor can
         // still hold a composing region from the previous round.
         if (restarting) {
@@ -219,6 +228,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 keyboardView?.clearRecentClipboardSuggestion()
             }
             if (!nextPrivacy.allowsTextRecall) {
+                cancelBackspaceSelection()
                 backspaceRestoreStack.clear()
                 recentCommittedUnits.clear()
                 lastCommittedText = null
@@ -254,6 +264,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             requestedLayer = KeytaoEditorPolicy.resolveInitialLayer(inputType),
         )
         keyboardView?.updateEmojiHistoryLearningAllowed(privacyMode.allowsLearning)
+        keyboardView?.updateTextRecallAllowed(privacyMode.allowsTextRecall)
+        refreshPredictionSuggestions()
         Log.d(
             "KeytaoIme",
             "editor pkg=${currentInputEditorInfo?.packageName} " +
@@ -286,6 +298,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             candidatesEnd,
         )
         selectionModeActive = newSelStart != newSelEnd
+        if (backspaceSelectionSession == null) {
+            mainHandler.post(::refreshPredictionSuggestions)
+        }
         composingRegionStart = if (candidatesStart >= 0 && candidatesEnd >= candidatesStart) {
             candidatesStart
         } else {
@@ -312,6 +327,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeytaoImeState.empty(asciiMode = currentState.asciiMode)
         }
         keyboardView?.updateState(currentState)
+        refreshPredictionSuggestions()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -360,6 +376,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             oneHandedAvailable = !presentationIsLandscape,
         )
         keyboardView?.updateConfig(presentedConfig)
+        refreshPredictionSuggestions()
     }
 
     private fun handleKeyboardLayoutStateChanged(next: KeyboardLayoutState, finished: Boolean) {
@@ -432,6 +449,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         // finishComposingText() already puts the composing text into the editor,
         // so Rime only needs its own composition discarded — committing here too
         // would duplicate the text.
+        cancelBackspaceSelection()
         currentInputConnection?.finishComposingText()
         composing = false
         currentState = if (inputAvailable) {
@@ -606,6 +624,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.clearRecentClipboardSuggestion()
     }
 
+    override fun onToolbarCustomization(order: List<String>, pinnedCount: Int) {
+        if (!KeytaoAndroidImeConfig.persistToolbarCustomization(this, order, pinnedCount)) {
+            keyboardView?.showMessage("工具栏顺序保存失败")
+        }
+    }
+
     /** Sensitive or digits-only editors never build a composition. */
     private fun bypassesComposition(): Boolean {
         return !inputAvailable || !privacyMode.allowsComposing || directInputEditor
@@ -681,6 +705,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (!currentState.hasComposition && !composing) {
             deleteOneBeforeCursorForRestore()
             selectionModeActive = false
+            refreshPredictionSuggestions()
             return
         }
         val result = engine.processKey(AndroidKeyMapper.XK_BACK_SPACE, 0)
@@ -720,6 +745,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 val gestureCount = (backspaceRestoreStack.size - backspaceGestureRestoreStart).coerceAtLeast(0)
                 if (gestureCount > 0) restoreBackspaceText(gestureCount)
             }
+            "select" -> updateBackspaceSelection(count)
+            "cancelSelection" -> cancelBackspaceSelection()
+            "commitSelection" -> commitBackspaceSelection()
         }
         val preview = if (privacyMode.allowsTextRecall) {
             val start = backspaceGestureRestoreStart.coerceIn(0, backspaceRestoreStack.size)
@@ -727,7 +755,80 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         } else {
             ""
         }
-        keyboardView?.showBackspaceDeletionPreview(preview)
+        if (action !in setOf("select", "cancelSelection", "commitSelection")) {
+            keyboardView?.showBackspaceDeletionPreview(preview)
+        }
+        refreshPredictionSuggestions()
+    }
+
+    private fun updateBackspaceSelection(count: Int) {
+        if (!privacyMode.allowsTextRecall) return
+        resetCompositionBeforeBackspaceSelection()
+        val connection = currentInputConnection ?: return
+        val session = backspaceSelectionSession ?: run {
+            val extracted = connection.getExtractedText(ExtractedTextRequest(), 0) ?: return
+            val anchor = max(extracted.selectionStart, extracted.selectionEnd)
+            val before = connection.getTextBeforeCursor(
+                backspaceContextLimit,
+                InputConnection.GET_TEXT_WITH_STYLES,
+            )?.toString().orEmpty()
+            BackspaceSelectionSession(anchor = anchor, beforeUnits = textUnits(before)).also {
+                backspaceSelectionSession = it
+            }
+        }
+        val selectionLength = trailingDeletionSegmentsLength(
+            session.beforeUnits.joinToString(""),
+            count.coerceIn(1, maxBackspaceGestureBatchCount),
+        )
+        val selectedUnits = session.beforeUnits.takeLast(selectionLength)
+        val selectedText = selectedUnits.joinToString("")
+        val selectionStart = session.anchor - selectedText.length
+        session.selectionApplied = selectedText.isNotEmpty() &&
+            selectionStart >= 0 && connection.setSelection(selectionStart, session.anchor)
+        session.selectedText = selectedText
+        selectionModeActive = session.selectionApplied
+        keyboardView?.showBackspaceDeletionPreview(selectedText, pendingSelection = true)
+    }
+
+    private fun cancelBackspaceSelection() {
+        val session = backspaceSelectionSession ?: run {
+            keyboardView?.showBackspaceDeletionPreview("")
+            return
+        }
+        if (session.selectionApplied) {
+            currentInputConnection?.setSelection(session.anchor, session.anchor)
+        }
+        backspaceSelectionSession = null
+        selectionModeActive = false
+        keyboardView?.showBackspaceDeletionPreview("")
+    }
+
+    private fun commitBackspaceSelection() {
+        val session = backspaceSelectionSession ?: return
+        val selectedText = session.selectedText
+        backspaceSelectionSession = null
+        if (selectedText.isEmpty()) {
+            selectionModeActive = false
+            keyboardView?.showBackspaceDeletionPreview("")
+            return
+        }
+        val connection = currentInputConnection ?: return
+        backspaceRestoreStack.clear()
+        backspaceGestureRestoreStart = 0
+        if (session.selectionApplied) {
+            if (!deleteSelectionForRestore(connection)) {
+                connection.setSelection(session.anchor, session.anchor)
+                deleteBeforeCursorForRestore(textUnits(selectedText).size)
+            }
+        } else {
+            deleteBeforeCursorForRestore(textUnits(selectedText).size)
+        }
+        keyboardView?.showBackspaceDeletionPreview(selectedText)
+    }
+
+    private fun resetCompositionBeforeBackspaceSelection() {
+        if (!currentState.hasComposition && !composing) return
+        clearCompositionBeforeEdit()
     }
 
     private fun deleteTrailingSegmentBeforeCursorForRestore() {
@@ -968,6 +1069,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             engine.reset().withoutTransientCommit()
         }
         keyboardView?.updateState(currentState)
+        refreshPredictionSuggestions()
     }
 
     private fun sendEnterKey() {
@@ -1378,6 +1480,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             engine.state().withoutTransientCommit()
         }
         keyboardView?.updateState(currentState)
+        refreshPredictionSuggestions()
     }
 
     private fun applyState(state: KeytaoImeState) {
@@ -1411,6 +1514,26 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
         currentState = state.withoutTransientCommit()
         keyboardView?.updateState(currentState)
+        refreshPredictionSuggestions()
+    }
+
+    private fun refreshPredictionSuggestions() {
+        val config = keyboardView?.currentConfig() ?: return
+        if (
+            !config.predictionEnabled ||
+            !privacyMode.allowsTextRecall ||
+            !currentState.asciiMode ||
+            currentState.hasComposition ||
+            composing ||
+            backspaceSelectionSession != null
+        ) {
+            keyboardView?.updatePredictionSuggestions(null, emptyList())
+            return
+        }
+        val before = currentInputConnection?.getTextBeforeCursor(128, 0)?.toString().orEmpty()
+        val prefix = englishCompletionPrefix(before)
+        val suggestions = prefix?.let { completeEnglishPrefix(it, englishCompletionLexicon) }.orEmpty()
+        keyboardView?.updatePredictionSuggestions(prefix, suggestions)
     }
 
     /**
@@ -1498,6 +1621,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48
         private const val rimeOptionChoicePrefix = "choice:"
+        private val englishCompletionLexicon = listOf(
+            "about", "after", "again", "because", "before", "between", "could", "first",
+            "hello", "help", "important", "keyboard", "language", "people", "please", "really",
+            "should", "something", "thanks", "their", "there", "these", "thing", "think",
+            "through", "today", "together", "under", "would", "world", "write", "your",
+        )
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

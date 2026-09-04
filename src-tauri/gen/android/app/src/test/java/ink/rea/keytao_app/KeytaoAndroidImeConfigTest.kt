@@ -139,6 +139,26 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `parse config keeps prediction backspace mode and toolbar customization`() {
+        val config = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              "predictionEnabled": false,
+              "backspaceGestureMode": "selectThenDelete",
+              "toolbarActionOrder": ["emoji", "clipboard", "emoji", " settings "],
+              "toolbarPinnedCount": 3,
+              "rows": [[{ "label": "a", "value": "a" }]]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(false, config.predictionEnabled)
+        assertEquals("selectThenDelete", config.backspaceGestureMode)
+        assertEquals(listOf("emoji", "clipboard", "settings"), config.toolbarActionOrder)
+        assertEquals(3, config.toolbarPinnedCount)
+    }
+
+    @Test
     fun `keyboard height scale accepts five percent steps and otherwise falls back`() {
         fun parseScale(value: String?): KeytaoAndroidImeConfig {
             val field = value?.let { "\"keyboardHeightScale\": $it," }.orEmpty()

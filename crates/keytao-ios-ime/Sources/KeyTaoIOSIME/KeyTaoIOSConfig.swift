@@ -241,6 +241,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var longPressDelayMs: Int
     public var keyboardHeightScale: Int
     public var deleteSpeed: String
+    public var predictionEnabled: Bool
+    public var backspaceGestureMode: String
+    public var toolbarActionOrder: [String]
+    public var toolbarPinnedCount: Int
     public var keySoundEnabled: Bool
     public var keySoundVolume: Int
     public var keyHintVisible: Bool
@@ -291,6 +295,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case longPressDelayMs
         case keyboardHeightScale
         case deleteSpeed
+        case predictionEnabled
+        case backspaceGestureMode
+        case toolbarActionOrder
+        case toolbarPinnedCount
         case keySoundEnabled
         case keySoundVolume
         case keyHintVisible
@@ -331,6 +339,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         longPressDelayMs: Int = KeyTaoIMEInteractionTuning.longPressDelayDefaultMs,
         keyboardHeightScale: Int = 100,
         deleteSpeed: String = KeyTaoDeleteSpeed.standard.rawValue,
+        predictionEnabled: Bool = true,
+        backspaceGestureMode: String = "immediate",
+        toolbarActionOrder: [String] = [],
+        toolbarPinnedCount: Int = 5,
         keySoundEnabled: Bool = true,
         keySoundVolume: Int = 100,
         keyHintVisible: Bool = true,
@@ -366,6 +378,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         )
         self.keyboardHeightScale = Self.normalizeKeyboardHeightScale(keyboardHeightScale)
         self.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
+        self.predictionEnabled = predictionEnabled
+        self.backspaceGestureMode = KeyTaoBackspaceGestureMode(setting: backspaceGestureMode).rawValue
+        self.toolbarActionOrder = Self.normalizeToolbarActionOrder(toolbarActionOrder)
+        self.toolbarPinnedCount = Self.clampInt(toolbarPinnedCount, min: 1, max: 12)
         self.keySoundEnabled = keySoundEnabled
         self.keySoundVolume = Self.clampInt(keySoundVolume, min: 0, max: 100)
         self.keyHintVisible = keyHintVisible
@@ -457,6 +473,19 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.deleteSpeed = KeyTaoDeleteSpeed(
             setting: try? container.decode(String.self, forKey: .deleteSpeed)
         ).rawValue
+        self.predictionEnabled = (try? container.decode(Bool.self, forKey: .predictionEnabled))
+            ?? Self.fallback.predictionEnabled
+        self.backspaceGestureMode = KeyTaoBackspaceGestureMode(
+            setting: try? container.decode(String.self, forKey: .backspaceGestureMode)
+        ).rawValue
+        self.toolbarActionOrder = Self.normalizeToolbarActionOrder(
+            (try? container.decode([String].self, forKey: .toolbarActionOrder)) ?? []
+        )
+        self.toolbarPinnedCount = Self.clampInt(
+            (try? container.decode(Int.self, forKey: .toolbarPinnedCount)) ?? Self.fallback.toolbarPinnedCount,
+            min: 1,
+            max: 12
+        )
         self.keySoundEnabled = (try? container.decode(Bool.self, forKey: .keySoundEnabled))
             ?? Self.fallback.keySoundEnabled
         self.keySoundVolume = Self.clampInt(
@@ -567,6 +596,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(longPressDelayMs, forKey: .longPressDelayMs)
         try container.encode(keyboardHeightScale, forKey: .keyboardHeightScale)
         try container.encode(deleteSpeed, forKey: .deleteSpeed)
+        try container.encode(predictionEnabled, forKey: .predictionEnabled)
+        try container.encode(backspaceGestureMode, forKey: .backspaceGestureMode)
+        try container.encode(toolbarActionOrder, forKey: .toolbarActionOrder)
+        try container.encode(toolbarPinnedCount, forKey: .toolbarPinnedCount)
         try container.encode(keySoundEnabled, forKey: .keySoundEnabled)
         try container.encode(keySoundVolume, forKey: .keySoundVolume)
         try container.encode(keyHintVisible, forKey: .keyHintVisible)
@@ -634,20 +667,24 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         KeyTaoIOSBundle.url(forResource: "keytao_ios_ime", withExtension: "json")
     }
 
-    public func scaledForFloating(_ profile: KeyTaoFloatingKeyboardProfile) -> KeyTaoIOSImeConfig {
+    public func scaledForFloating(
+        _ profile: KeyTaoFloatingKeyboardProfile,
+        heightScale: CGFloat? = nil
+    ) -> KeyTaoIOSImeConfig {
         guard profile.enabled, profile.scale < 0.999 else {
             return self
         }
         let scale = profile.scale
+        let verticalScale = heightScale ?? scale
         var next = self
-        next.keyboardHeightDp = Swift.max(120, keyboardHeightDp * scale)
-        next.candidateBarHeightDp = Swift.max(32, candidateBarHeightDp * scale)
-        next.keyboardBottomInsetDp *= scale
+        next.keyboardHeightDp = Swift.max(120, keyboardHeightDp * verticalScale)
+        next.candidateBarHeightDp = Swift.max(32, candidateBarHeightDp * verticalScale)
+        next.keyboardBottomInsetDp *= verticalScale
         next.horizontalGapDp *= scale
-        next.verticalGapDp *= scale
+        next.verticalGapDp *= verticalScale
         next.outerInsetDp *= scale
-        next.maxKeyHeightDp = Swift.max(30, maxKeyHeightDp * scale)
-        next.swipeThresholdDp = Swift.max(12, swipeThresholdDp * scale)
+        next.maxKeyHeightDp = Swift.max(30, maxKeyHeightDp * verticalScale)
+        next.swipeThresholdDp = Swift.max(12, swipeThresholdDp * verticalScale)
         return next
     }
 
@@ -685,6 +722,18 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         }
         if let deleteSpeed = runtime.deleteSpeed {
             next.deleteSpeed = KeyTaoDeleteSpeed(setting: deleteSpeed).rawValue
+        }
+        if let predictionEnabled = runtime.predictionEnabled {
+            next.predictionEnabled = predictionEnabled
+        }
+        if let backspaceGestureMode = runtime.backspaceGestureMode {
+            next.backspaceGestureMode = KeyTaoBackspaceGestureMode(setting: backspaceGestureMode).rawValue
+        }
+        if let toolbarActionOrder = runtime.toolbarActionOrder {
+            next.toolbarActionOrder = Self.normalizeToolbarActionOrder(toolbarActionOrder)
+        }
+        if let toolbarPinnedCount = runtime.toolbarPinnedCount {
+            next.toolbarPinnedCount = Self.clampInt(toolbarPinnedCount, min: 1, max: 12)
         }
         if let keyboardHeightDp = runtime.keyboardHeightDp {
             next.keyboardHeightDp = Self.clamp(keyboardHeightDp, min: 160, max: 420)
@@ -817,6 +866,14 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             return keyboardHeightScaleDefault
         }
         return value
+    }
+
+    private static func normalizeToolbarActionOrder(_ value: [String]) -> [String] {
+        var seen: Set<String> = []
+        return value.compactMap { raw in
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !id.isEmpty && seen.insert(id).inserted ? id : nil
+        }
     }
 
     public static let fallback = KeyTaoIOSImeConfig(
@@ -964,6 +1021,10 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var longPressDelayMs: Int?
     var keyboardHeightScale: Int?
     var deleteSpeed: String?
+    var predictionEnabled: Bool?
+    var backspaceGestureMode: String?
+    var toolbarActionOrder: [String]?
+    var toolbarPinnedCount: Int?
     var keyboardHeightDp: CGFloat?
     var candidateBarHeightDp: CGFloat?
     var swipeThresholdDp: CGFloat?

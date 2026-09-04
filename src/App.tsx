@@ -65,6 +65,7 @@ type ImeEffectiveColorScheme = "light" | "dark"
 type ImeCandidateOrientation = "horizontal" | "vertical"
 type EnterKeyBehavior = "system" | "newline"
 type MobileImeDeleteSpeed = "slow" | "standard" | "fast"
+type MobileImeBackspaceGestureMode = "immediate" | "selectThenDelete"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
 const RIME_DICT_MANAGER_URL_SCHEME = "rime-dict"
@@ -291,6 +292,8 @@ interface AndroidImeInputSettings {
   longPressDelayMs: number
   keyboardHeightScale: number
   deleteSpeed: MobileImeDeleteSpeed
+  predictionEnabled: boolean
+  backspaceGestureMode: MobileImeBackspaceGestureMode
   keyboardHeightDp: number
   candidateBarHeightDp: number
   swipeThresholdDp: number
@@ -798,6 +801,8 @@ export default function App() {
   const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
   const keyboardHeightScale = keyboardHeightScaleDraft ?? androidImeInputSettings?.keyboardHeightScale ?? 100
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
+  const predictionEnabled = androidImeInputSettings?.predictionEnabled ?? true
+  const backspaceGestureMode = androidImeInputSettings?.backspaceGestureMode ?? "immediate"
   const keyboardHeightDp = keyboardHeightDraft ?? androidImeInputSettings?.keyboardHeightDp ?? 266
   const candidateBarHeightDp = candidateBarHeightDraft ?? androidImeInputSettings?.candidateBarHeightDp ?? 52
   const swipeThresholdDp = swipeThresholdDraft ?? androidImeInputSettings?.swipeThresholdDp ?? 34
@@ -1133,6 +1138,8 @@ export default function App() {
         | "longPressDelayMs"
         | "keyboardHeightScale"
         | "deleteSpeed"
+        | "predictionEnabled"
+        | "backspaceGestureMode"
         | "keyboardHeightDp"
         | "candidateBarHeightDp"
         | "swipeThresholdDp"
@@ -1159,6 +1166,8 @@ export default function App() {
       longPressDelayMs: androidImeInputSettings?.longPressDelayMs ?? 300,
       keyboardHeightScale: androidImeInputSettings?.keyboardHeightScale ?? 100,
       deleteSpeed: androidImeInputSettings?.deleteSpeed ?? ("standard" as MobileImeDeleteSpeed),
+      predictionEnabled: androidImeInputSettings?.predictionEnabled ?? true,
+      backspaceGestureMode: androidImeInputSettings?.backspaceGestureMode ?? ("immediate" as MobileImeBackspaceGestureMode),
       keyboardHeightDp: androidImeInputSettings?.keyboardHeightDp ?? 266,
       candidateBarHeightDp: androidImeInputSettings?.candidateBarHeightDp ?? 52,
       swipeThresholdDp: androidImeInputSettings?.swipeThresholdDp ?? 34,
@@ -1197,6 +1206,7 @@ export default function App() {
       ? next.keyboardHeightScale
       : 100
     next.deleteSpeed = ["slow", "standard", "fast"].includes(next.deleteSpeed) ? next.deleteSpeed : "standard"
+    next.backspaceGestureMode = next.backspaceGestureMode === "selectThenDelete" ? "selectThenDelete" : "immediate"
     next.keyboardHeightDp = Math.min(420, Math.max(160, next.keyboardHeightDp))
     next.candidateBarHeightDp = Math.min(96, Math.max(36, next.candidateBarHeightDp))
     next.swipeThresholdDp = Math.min(96, Math.max(12, next.swipeThresholdDp))
@@ -1213,6 +1223,8 @@ export default function App() {
       next.longPressDelayMs === androidImeInputSettings.longPressDelayMs &&
       next.keyboardHeightScale === androidImeInputSettings.keyboardHeightScale &&
       next.deleteSpeed === androidImeInputSettings.deleteSpeed &&
+      next.predictionEnabled === androidImeInputSettings.predictionEnabled &&
+      next.backspaceGestureMode === androidImeInputSettings.backspaceGestureMode &&
       next.keyboardHeightDp === androidImeInputSettings.keyboardHeightDp &&
       next.candidateBarHeightDp === androidImeInputSettings.candidateBarHeightDp &&
       next.swipeThresholdDp === androidImeInputSettings.swipeThresholdDp &&
@@ -1272,6 +1284,8 @@ export default function App() {
       longPressDelayMs: 300,
       keyboardHeightScale: 100,
       deleteSpeed: "standard",
+      predictionEnabled: true,
+      backspaceGestureMode: "immediate",
       keyboardHeightDp: 266,
       candidateBarHeightDp: 52,
       swipeThresholdDp: 34,
@@ -2137,6 +2151,41 @@ export default function App() {
                           className="h-8 text-xs"
                         >
                           {speed === "slow" ? "慢" : speed === "fast" ? "快" : "标准"}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <div className="min-w-0 text-xs">
+                      <div className="text-muted-foreground">英文补全建议</div>
+                      <div className="text-[11px] text-muted-foreground/80">英文模式输入前缀时显示本地补全</div>
+                    </div>
+                    <Switch
+                      checked={predictionEnabled}
+                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ predictionEnabled: checked })}
+                      disabled={isSavingAndroidImeInputSettings}
+                      aria-label="切换英文补全建议"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">退格滑动模式</span>
+                      <span className="text-xs text-muted-foreground/80">
+                        {backspaceGestureMode === "selectThenDelete" ? "选中后删除" : "即时删除"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["immediate", "selectThenDelete"] as const).map((mode) => (
+                        <Button
+                          key={mode}
+                          type="button"
+                          variant={backspaceGestureMode === mode ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => handleUpdateAndroidImeInputSettings({ backspaceGestureMode: mode })}
+                          disabled={isSavingAndroidImeInputSettings}
+                          className="h-8 text-xs"
+                        >
+                          {mode === "immediate" ? "即时删除" : "选中后删除"}
                         </Button>
                       ))}
                     </div>
