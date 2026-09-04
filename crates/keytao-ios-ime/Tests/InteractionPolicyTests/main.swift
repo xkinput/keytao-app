@@ -23,6 +23,46 @@ expect(keyTaoTrailingDeletionSegmentLength("前文，测试"), 2, "Chinese segme
 expect(keyTaoTrailingDeletionSegmentLength("测试hello"), 5, "Latin word after Chinese")
 expect(keyTaoTrailingDeletionSegmentLength("hello中文"), 2, "Chinese run after Latin")
 expect(keyTaoTrailingDeletionSegmentLength("hello！"), 1, "punctuation is its own segment")
+expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 1), 5, "one selection step covers one trailing segment")
+expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 2), 6, "two selection steps include the preceding segment")
+expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 3), 8, "selection steps stop at segment boundaries")
+
+expect(KeyTaoBackspaceGestureMode(setting: nil), .immediate, "backspace gesture defaults to immediate deletion")
+expect(KeyTaoBackspaceGestureMode(setting: "selectThenDelete"), .selectThenDelete, "selection mode parses from runtime settings")
+expect(
+    KeyTaoBackspaceGesturePolicy.dragCommand(mode: .immediate, currentUnits: 1, requestedUnits: 3, maximumUnits: 96),
+    KeyTaoBackspaceGestureCommand(action: "delete", count: 2),
+    "immediate mode deletes the forward delta"
+)
+expect(
+    KeyTaoBackspaceGesturePolicy.dragCommand(mode: .immediate, currentUnits: 3, requestedUnits: 1, maximumUnits: 96),
+    KeyTaoBackspaceGestureCommand(action: "restore", count: 2),
+    "immediate mode restores the reverse delta"
+)
+expect(
+    KeyTaoBackspaceGesturePolicy.dragCommand(mode: .selectThenDelete, currentUnits: 1, requestedUnits: 3, maximumUnits: 96),
+    KeyTaoBackspaceGestureCommand(action: "select", count: 3),
+    "selection mode updates the pending selection without deleting"
+)
+expect(
+    KeyTaoBackspaceGesturePolicy.dragCommand(mode: .selectThenDelete, currentUnits: 3, requestedUnits: -2, maximumUnits: 96),
+    KeyTaoBackspaceGestureCommand(action: "cancelSelection", count: 0),
+    "selection mode cancels after dragging back to zero"
+)
+expect(
+    KeyTaoBackspaceGesturePolicy.releaseCommand(mode: .selectThenDelete, selectedUnits: 3),
+    KeyTaoBackspaceGestureCommand(action: "commitSelection", count: 3),
+    "selection mode deletes only on release"
+)
+
+expect(keyTaoEnglishCompletionPrefix("say he"), "he", "English completion reads the active ASCII prefix")
+expect(keyTaoEnglishCompletionPrefix("say h"), nil, "single-letter prefixes stay quiet")
+expect(keyTaoEnglishCompletionPrefix("say he!"), nil, "punctuation ends the active prefix")
+expect(
+    keyTaoCompleteEnglishPrefix("he", lexicon: ["hello", "help", "he", "world", "hero"]),
+    ["hello", "help", "hero"],
+    "English completion returns longer local matches"
+)
 
 let cursorTracker = KeyTaoCursorGestureTracker(startX: 100)
 expect(cursorTracker.update(x: 112.5), KeyTaoCursorGestureUpdate(active: false, stepDelta: 0), "cursor gesture ignores touch noise")
@@ -30,10 +70,32 @@ expect(cursorTracker.update(x: 112.6), KeyTaoCursorGestureUpdate(active: true, s
 expect(cursorTracker.update(x: 120), KeyTaoCursorGestureUpdate(active: true, stepDelta: 1), "cursor gesture emits fixed forward steps")
 expect(cursorTracker.update(x: 90), KeyTaoCursorGestureUpdate(active: true, stepDelta: -3), "cursor gesture emits reverse steps")
 
-expect(KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: 39, distance: 12.59), true, "touch noise stays below both boundaries")
-expect(KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: 40, distance: 12.59), false, "40ms touch is accepted")
-expect(KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: 39, distance: 12.6), false, "12.6pt movement is accepted")
-expect(KeyTaoIMEInteractionTuning.shouldDiscardTouch(durationMs: 80, distance: 1), false, "normal quick tap is accepted")
+let sameKeyTracker = KeyTaoPerPointerBounceTracker<Int>()
+var sameKeyCommitCount = 0
+if !sameKeyTracker.isBounceDown(pointerID: 0, eventTimeMs: 0, x: 10, y: 10) { sameKeyCommitCount += 1 }
+sameKeyTracker.recordUp(pointerID: 0, eventTimeMs: 25, x: 10, y: 10)
+if !sameKeyTracker.isBounceDown(pointerID: 0, eventTimeMs: 85, x: 10, y: 10) { sameKeyCommitCount += 1 }
+sameKeyTracker.recordUp(pointerID: 0, eventTimeMs: 110, x: 10, y: 10)
+expect(sameKeyCommitCount, 2, "same-key 60ms-gap double tap commits both clean 25ms taps")
+
+let differentKeyTracker = KeyTaoPerPointerBounceTracker<Int>()
+var differentKeyCommitCount = 0
+if !differentKeyTracker.isBounceDown(pointerID: 0, eventTimeMs: 0, x: 10, y: 10) { differentKeyCommitCount += 1 }
+differentKeyTracker.recordUp(pointerID: 0, eventTimeMs: 25, x: 10, y: 10)
+if !differentKeyTracker.isBounceDown(pointerID: 0, eventTimeMs: 55, x: 30, y: 10) { differentKeyCommitCount += 1 }
+differentKeyTracker.recordUp(pointerID: 0, eventTimeMs: 80, x: 30, y: 10)
+expect(differentKeyCommitCount, 2, "different-key 30ms-gap typing commits both clean 25ms taps")
+
+let bounceTracker = KeyTaoPerPointerBounceTracker<Int>()
+expect(bounceTracker.isBounceDown(pointerID: 0, eventTimeMs: 0, x: 10, y: 10), false, "first down is accepted")
+bounceTracker.recordUp(pointerID: 0, eventTimeMs: 25, x: 10, y: 10)
+expect(bounceTracker.isBounceDown(pointerID: 0, eventTimeMs: 45, x: 10, y: 10), true, "same-position down 20ms after up is rejected")
+expect(bounceTracker.isBounceDown(pointerID: 1, eventTimeMs: 45, x: 10, y: 10), false, "a separate pointer remains independent")
+
+expect(KeyTaoIMEInteractionTuning.isBounceDown(sinceLastUpMs: 39, distanceFromLastUp: 12.59), true, "bounce stays below both boundaries")
+expect(KeyTaoIMEInteractionTuning.isBounceDown(sinceLastUpMs: 40, distanceFromLastUp: 12.59), false, "40ms down is accepted")
+expect(KeyTaoIMEInteractionTuning.isBounceDown(sinceLastUpMs: 39, distanceFromLastUp: 12.6), false, "12.6pt movement is accepted")
+expect(KeyTaoIMEInteractionTuning.isBounceDown(sinceLastUpMs: -1, distanceFromLastUp: 1), false, "out-of-order down is accepted")
 
 var alternateTracker = KeyTaoAlternateSelectionTracker(startX: 100, movementThreshold: 8)
 expect(alternateTracker.selectedIndex(x: 100, insideSelection: true, panelLeft: 20, itemWidth: 40, itemCount: 4), 0, "alternate defaults to first item")

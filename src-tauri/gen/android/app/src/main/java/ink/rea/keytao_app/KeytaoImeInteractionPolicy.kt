@@ -25,13 +25,65 @@ internal data class BackspaceRepeatProfile(
 
 internal enum class BackspaceDeletionGranularity { CHARACTER, SEGMENT }
 
+internal enum class BackspaceGestureMode {
+    IMMEDIATE,
+    SELECT_THEN_DELETE;
+
+    companion object {
+        fun fromSetting(value: String?): BackspaceGestureMode = when (value?.trim()?.lowercase()) {
+            "selectthendelete" -> SELECT_THEN_DELETE
+            else -> IMMEDIATE
+        }
+    }
+}
+
+internal data class BackspaceGestureCommand(
+    val action: String,
+    val count: Int,
+)
+
+internal object BackspaceGesturePolicy {
+    fun dragCommand(
+        mode: BackspaceGestureMode,
+        currentUnits: Int,
+        requestedUnits: Int,
+        maximumUnits: Int,
+    ): BackspaceGestureCommand? {
+        return when (mode) {
+            BackspaceGestureMode.IMMEDIATE -> {
+                val target = requestedUnits.coerceIn(-maximumUnits, maximumUnits)
+                val delta = target - currentUnits
+                if (delta == 0) null else BackspaceGestureCommand(
+                    action = if (delta > 0) "delete" else "restore",
+                    count = kotlin.math.abs(delta),
+                )
+            }
+            BackspaceGestureMode.SELECT_THEN_DELETE -> {
+                val target = requestedUnits.coerceIn(0, maximumUnits)
+                if (target == currentUnits) null else BackspaceGestureCommand(
+                    action = if (target == 0) "cancelSelection" else "select",
+                    count = target,
+                )
+            }
+        }
+    }
+
+    fun releaseCommand(mode: BackspaceGestureMode, selectedUnits: Int): BackspaceGestureCommand? {
+        if (mode != BackspaceGestureMode.SELECT_THEN_DELETE) return null
+        return BackspaceGestureCommand(
+            action = if (selectedUnits > 0) "commitSelection" else "cancelSelection",
+            count = selectedUnits.coerceAtLeast(0),
+        )
+    }
+}
+
 internal object KeytaoImeInteractionTuning {
     const val LONG_PRESS_DELAY_MIN_MS = 100L
     const val LONG_PRESS_DELAY_DEFAULT_MS = 300L
     const val LONG_PRESS_DELAY_MAX_MS = 700L
     const val SLIDE_RETARGET_HYSTERESIS_DP = 8f
-    const val TOUCH_NOISE_THRESHOLD_MS = 40L
-    const val TOUCH_NOISE_THRESHOLD_DISTANCE_DP = 12.6f
+    const val BOUNCE_INTERVAL_MS = 40L
+    const val BOUNCE_DISTANCE_DP = 12.6f
     const val KEYBOARD_DISMISS_VELOCITY_DP_PER_SECOND = 600f
     const val BACKSPACE_HOLD_TOLERANCE_DP = 8f
     const val CURSOR_GESTURE_ACTIVATION_DP = 12.6f
@@ -62,9 +114,71 @@ internal object KeytaoImeInteractionTuning {
         DeleteSpeed.FAST -> fastBackspace
     }
 
-    fun shouldDiscardTouch(durationMs: Long, distanceDp: Float): Boolean {
-        return durationMs < TOUCH_NOISE_THRESHOLD_MS &&
-            distanceDp < TOUCH_NOISE_THRESHOLD_DISTANCE_DP
+    fun isBounceDown(sinceLastUpMs: Long, distanceFromLastUpDp: Float): Boolean {
+        return sinceLastUpMs >= 0L &&
+            sinceLastUpMs < BOUNCE_INTERVAL_MS &&
+            distanceFromLastUpDp < BOUNCE_DISTANCE_DP
+    }
+}
+
+/**
+ * Atomically replaces the geometry consumed by touch hit-testing. Views rebuild
+ * this store during layout/state changes, so a touch never observes a partially
+ * rebuilt or previous-frame list.
+ */
+internal class ImmediateHitLayout<Element> {
+    private var snapshot: List<Element> = emptyList()
+
+    val items: List<Element>
+        get() = snapshot
+
+    fun rebuild(next: List<Element>) {
+        snapshot = next
+    }
+
+    fun firstOrNull(predicate: (Element) -> Boolean): Element? = snapshot.firstOrNull(predicate)
+
+    fun firstIndexOrNull(predicate: (Element) -> Boolean): Int? {
+        return snapshot.indexOfFirst(predicate).takeIf { it >= 0 }
+    }
+}
+
+internal class PerPointerBounceTracker<PointerId> {
+    private data class PreviousUp(
+        val eventTimeMs: Long,
+        val xDp: Float,
+        val yDp: Float,
+    )
+
+    private val previousUps = mutableMapOf<PointerId, PreviousUp>()
+    private val bouncedPointers = mutableSetOf<PointerId>()
+
+    fun isBounceDown(pointerId: PointerId, eventTimeMs: Long, xDp: Float, yDp: Float): Boolean {
+        val previousUp = previousUps[pointerId]
+        val isBounce = previousUp != null && KeytaoImeInteractionTuning.isBounceDown(
+            sinceLastUpMs = eventTimeMs - previousUp.eventTimeMs,
+            distanceFromLastUpDp = kotlin.math.hypot(xDp - previousUp.xDp, yDp - previousUp.yDp),
+        )
+        if (isBounce) {
+            bouncedPointers.add(pointerId)
+        } else {
+            bouncedPointers.remove(pointerId)
+        }
+        return isBounce
+    }
+
+    fun recordUp(pointerId: PointerId, eventTimeMs: Long, xDp: Float, yDp: Float): Boolean {
+        previousUps[pointerId] = PreviousUp(eventTimeMs, xDp, yDp)
+        return bouncedPointers.remove(pointerId)
+    }
+
+    fun cancel(pointerId: PointerId) {
+        bouncedPointers.remove(pointerId)
+    }
+
+    fun reset() {
+        previousUps.clear()
+        bouncedPointers.clear()
     }
 }
 
@@ -180,9 +294,46 @@ internal class BackspaceRepeatPolicy(
 private enum class DeletionSegmentClass { WHITESPACE, CJK, LATIN, PUNCTUATION, OTHER }
 
 internal fun trailingDeletionSegmentLength(text: String): Int {
+    return trailingDeletionSegmentsLength(text, 1).coerceAtLeast(1)
+}
+
+internal fun trailingDeletionSegmentsLength(text: String, segmentCount: Int): Int {
     val units = graphemeUnits(text)
-    val trailingClass = units.lastOrNull()?.let(::deletionSegmentClass) ?: return 1
-    return units.asReversed().takeWhile { deletionSegmentClass(it) == trailingClass }.size.coerceAtLeast(1)
+    if (units.isEmpty()) return 0
+    val limit = segmentCount.coerceAtLeast(1)
+    var selectedUnits = 0
+    var selectedSegments = 0
+    var previousClass: DeletionSegmentClass? = null
+    for (unit in units.asReversed()) {
+        val currentClass = deletionSegmentClass(unit)
+        if (currentClass != previousClass) {
+            if (selectedSegments == limit) break
+            selectedSegments += 1
+            previousClass = currentClass
+        }
+        selectedUnits += 1
+    }
+    return selectedUnits
+}
+
+internal fun englishCompletionPrefix(text: String): String? {
+    val prefix = text.takeLastWhile { it in 'a'..'z' || it in 'A'..'Z' }
+    return prefix.takeIf { it.length >= 2 }
+}
+
+internal fun completeEnglishPrefix(
+    prefix: String,
+    lexicon: List<String>,
+    limit: Int = 5,
+): List<String> {
+    if (prefix.length < 2 || limit <= 0) return emptyList()
+    val normalized = prefix.lowercase(Locale.ROOT)
+    return lexicon.asSequence()
+        .map(String::trim)
+        .filter { it.length > prefix.length && it.lowercase(Locale.ROOT).startsWith(normalized) }
+        .distinctBy { it.lowercase(Locale.ROOT) }
+        .take(limit)
+        .toList()
 }
 
 private fun graphemeUnits(text: String): List<String> {

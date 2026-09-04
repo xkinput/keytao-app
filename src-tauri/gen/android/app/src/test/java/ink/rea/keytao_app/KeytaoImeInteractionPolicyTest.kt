@@ -24,6 +24,46 @@ class KeytaoImeInteractionPolicyTest {
         assertEquals(5, trailingDeletionSegmentLength("测试hello"))
         assertEquals(2, trailingDeletionSegmentLength("hello中文"))
         assertEquals(1, trailingDeletionSegmentLength("hello！"))
+        assertEquals(5, trailingDeletionSegmentsLength("中文 hello", 1))
+        assertEquals(6, trailingDeletionSegmentsLength("中文 hello", 2))
+        assertEquals(8, trailingDeletionSegmentsLength("中文 hello", 3))
+    }
+
+    @Test
+    fun `backspace gesture modes share one transition policy`() {
+        assertEquals(BackspaceGestureMode.IMMEDIATE, BackspaceGestureMode.fromSetting(null))
+        assertEquals(BackspaceGestureMode.SELECT_THEN_DELETE, BackspaceGestureMode.fromSetting("selectThenDelete"))
+        assertEquals(
+            BackspaceGestureCommand("delete", 2),
+            BackspaceGesturePolicy.dragCommand(BackspaceGestureMode.IMMEDIATE, 1, 3, 96),
+        )
+        assertEquals(
+            BackspaceGestureCommand("restore", 2),
+            BackspaceGesturePolicy.dragCommand(BackspaceGestureMode.IMMEDIATE, 3, 1, 96),
+        )
+        assertEquals(
+            BackspaceGestureCommand("select", 3),
+            BackspaceGesturePolicy.dragCommand(BackspaceGestureMode.SELECT_THEN_DELETE, 1, 3, 96),
+        )
+        assertEquals(
+            BackspaceGestureCommand("cancelSelection", 0),
+            BackspaceGesturePolicy.dragCommand(BackspaceGestureMode.SELECT_THEN_DELETE, 3, -2, 96),
+        )
+        assertEquals(
+            BackspaceGestureCommand("commitSelection", 3),
+            BackspaceGesturePolicy.releaseCommand(BackspaceGestureMode.SELECT_THEN_DELETE, 3),
+        )
+    }
+
+    @Test
+    fun `English completion uses the active ASCII word prefix`() {
+        assertEquals("he", englishCompletionPrefix("say he"))
+        assertEquals(null, englishCompletionPrefix("say h"))
+        assertEquals(null, englishCompletionPrefix("say he!"))
+        assertEquals(
+            listOf("hello", "help", "hero"),
+            completeEnglishPrefix("he", listOf("hello", "help", "he", "world", "hero")),
+        )
     }
 
     @Test
@@ -37,11 +77,47 @@ class KeytaoImeInteractionPolicyTest {
     }
 
     @Test
-    fun `touch noise requires both dimensions to remain below the boundary`() {
-        assertEquals(true, KeytaoImeInteractionTuning.shouldDiscardTouch(39, 12.59f))
-        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(40, 12.59f))
-        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(39, 12.6f))
-        assertEquals(false, KeytaoImeInteractionTuning.shouldDiscardTouch(80, 1f))
+    fun `same-key fast double tap commits both clean 25ms taps`() {
+        val tracker = PerPointerBounceTracker<Int>()
+        var commitCount = 0
+
+        if (!tracker.isBounceDown(0, eventTimeMs = 0, xDp = 10f, yDp = 10f)) commitCount++
+        tracker.recordUp(0, eventTimeMs = 25, xDp = 10f, yDp = 10f)
+        if (!tracker.isBounceDown(0, eventTimeMs = 85, xDp = 10f, yDp = 10f)) commitCount++
+        tracker.recordUp(0, eventTimeMs = 110, xDp = 10f, yDp = 10f)
+
+        assertEquals(2, commitCount)
+    }
+
+    @Test
+    fun `different-key fast typing commits both clean 25ms taps`() {
+        val tracker = PerPointerBounceTracker<Int>()
+        var commitCount = 0
+
+        if (!tracker.isBounceDown(0, eventTimeMs = 0, xDp = 10f, yDp = 10f)) commitCount++
+        tracker.recordUp(0, eventTimeMs = 25, xDp = 10f, yDp = 10f)
+        if (!tracker.isBounceDown(0, eventTimeMs = 55, xDp = 30f, yDp = 10f)) commitCount++
+        tracker.recordUp(0, eventTimeMs = 80, xDp = 30f, yDp = 10f)
+
+        assertEquals(2, commitCount)
+    }
+
+    @Test
+    fun `same-position down 20ms after up is rejected as bounce`() {
+        val tracker = PerPointerBounceTracker<Int>()
+
+        assertEquals(false, tracker.isBounceDown(0, eventTimeMs = 0, xDp = 10f, yDp = 10f))
+        tracker.recordUp(0, eventTimeMs = 25, xDp = 10f, yDp = 10f)
+        assertEquals(true, tracker.isBounceDown(0, eventTimeMs = 45, xDp = 10f, yDp = 10f))
+        assertEquals(false, tracker.isBounceDown(1, eventTimeMs = 45, xDp = 10f, yDp = 10f))
+    }
+
+    @Test
+    fun `bounce down requires both dimensions to remain below the boundary`() {
+        assertEquals(true, KeytaoImeInteractionTuning.isBounceDown(39, 12.59f))
+        assertEquals(false, KeytaoImeInteractionTuning.isBounceDown(40, 12.59f))
+        assertEquals(false, KeytaoImeInteractionTuning.isBounceDown(39, 12.6f))
+        assertEquals(false, KeytaoImeInteractionTuning.isBounceDown(-1, 1f))
     }
 
     @Test

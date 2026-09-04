@@ -21,13 +21,65 @@ enum KeyTaoBackspaceDeletionGranularity: Equatable {
     case segment
 }
 
+enum KeyTaoBackspaceGestureMode: String {
+    case immediate
+    case selectThenDelete
+
+    init(setting: String?) {
+        self = KeyTaoBackspaceGestureMode(rawValue: setting ?? "") ?? .immediate
+    }
+}
+
+struct KeyTaoBackspaceGestureCommand: Equatable {
+    let action: String
+    let count: Int
+}
+
+enum KeyTaoBackspaceGesturePolicy {
+    static func dragCommand(
+        mode: KeyTaoBackspaceGestureMode,
+        currentUnits: Int,
+        requestedUnits: Int,
+        maximumUnits: Int
+    ) -> KeyTaoBackspaceGestureCommand? {
+        switch mode {
+        case .immediate:
+            let target = max(-maximumUnits, min(maximumUnits, requestedUnits))
+            let delta = target - currentUnits
+            guard delta != 0 else { return nil }
+            return KeyTaoBackspaceGestureCommand(
+                action: delta > 0 ? "delete" : "restore",
+                count: abs(delta)
+            )
+        case .selectThenDelete:
+            let target = max(0, min(maximumUnits, requestedUnits))
+            guard target != currentUnits else { return nil }
+            return KeyTaoBackspaceGestureCommand(
+                action: target == 0 ? "cancelSelection" : "select",
+                count: target
+            )
+        }
+    }
+
+    static func releaseCommand(
+        mode: KeyTaoBackspaceGestureMode,
+        selectedUnits: Int
+    ) -> KeyTaoBackspaceGestureCommand? {
+        guard mode == .selectThenDelete else { return nil }
+        return KeyTaoBackspaceGestureCommand(
+            action: selectedUnits > 0 ? "commitSelection" : "cancelSelection",
+            count: max(0, selectedUnits)
+        )
+    }
+}
+
 public enum KeyTaoIMEInteractionTuning {
     public static let longPressDelayMinMs = 100
     public static let longPressDelayDefaultMs = 300
     public static let longPressDelayMaxMs = 700
     public static let slideRetargetHysteresis: CGFloat = 8
-    public static let touchNoiseThresholdMs = 40
-    public static let touchNoiseThresholdDistance: CGFloat = 12.6
+    public static let bounceIntervalMs = 40
+    public static let bounceDistance: CGFloat = 12.6
     public static let backspaceHoldTolerance: CGFloat = 8
     public static let cursorGestureActivation: CGFloat = 12.6
     public static let cursorGestureStep: CGFloat = 10
@@ -64,8 +116,79 @@ public enum KeyTaoIMEInteractionTuning {
         }
     }
 
-    static func shouldDiscardTouch(durationMs: Double, distance: CGFloat) -> Bool {
-        durationMs < Double(touchNoiseThresholdMs) && distance < touchNoiseThresholdDistance
+    static func isBounceDown(sinceLastUpMs: Double, distanceFromLastUp: CGFloat) -> Bool {
+        sinceLastUpMs >= 0
+            && sinceLastUpMs < Double(bounceIntervalMs)
+            && distanceFromLastUp < bounceDistance
+    }
+}
+
+/// Atomically replaces the geometry consumed by touch hit-testing. Layout and
+/// state changes publish a complete snapshot before the next touch is handled.
+final class KeyTaoImmediateHitLayout<Element> {
+    private(set) var items: [Element] = []
+
+    func rebuild(_ next: [Element]) {
+        items = next
+    }
+
+    func first(where predicate: (Element) -> Bool) -> Element? {
+        items.first(where: predicate)
+    }
+
+    func firstIndex(where predicate: (Element) -> Bool) -> Int? {
+        items.firstIndex(where: predicate)
+    }
+}
+
+final class KeyTaoPerPointerBounceTracker<PointerID: Hashable> {
+    private struct PreviousUp {
+        let eventTimeMs: Double
+        let x: CGFloat
+        let y: CGFloat
+    }
+
+    private var previousUps: [PointerID: PreviousUp] = [:]
+    private var bouncedPointers: Set<PointerID> = []
+
+    func isBounceDown(
+        pointerID: PointerID,
+        eventTimeMs: Double,
+        x: CGFloat,
+        y: CGFloat
+    ) -> Bool {
+        let isBounce = previousUps[pointerID].map { previousUp in
+            KeyTaoIMEInteractionTuning.isBounceDown(
+                sinceLastUpMs: eventTimeMs - previousUp.eventTimeMs,
+                distanceFromLastUp: hypot(x - previousUp.x, y - previousUp.y)
+            )
+        } ?? false
+        if isBounce {
+            bouncedPointers.insert(pointerID)
+        } else {
+            bouncedPointers.remove(pointerID)
+        }
+        return isBounce
+    }
+
+    @discardableResult
+    func recordUp(
+        pointerID: PointerID,
+        eventTimeMs: Double,
+        x: CGFloat,
+        y: CGFloat
+    ) -> Bool {
+        previousUps[pointerID] = PreviousUp(eventTimeMs: eventTimeMs, x: x, y: y)
+        return bouncedPointers.remove(pointerID) != nil
+    }
+
+    func cancel(pointerID: PointerID) {
+        bouncedPointers.remove(pointerID)
+    }
+
+    func reset() {
+        previousUps.removeAll()
+        bouncedPointers.removeAll()
     }
 }
 
@@ -205,12 +328,49 @@ private enum KeyTaoDeletionSegmentClass {
 }
 
 func keyTaoTrailingDeletionSegmentLength(_ text: String) -> Int {
+    max(1, keyTaoTrailingDeletionSegmentsLength(text, count: 1))
+}
+
+func keyTaoTrailingDeletionSegmentsLength(_ text: String, count: Int) -> Int {
     let units = Array(text)
-    guard let last = units.last else {
-        return 1
+    guard !units.isEmpty else { return 0 }
+    let limit = max(1, count)
+    var selectedUnits = 0
+    var selectedSegments = 0
+    var previousClass: KeyTaoDeletionSegmentClass?
+    for unit in units.reversed() {
+        let currentClass = keyTaoDeletionSegmentClass(unit)
+        if currentClass != previousClass {
+            guard selectedSegments < limit else { break }
+            selectedSegments += 1
+            previousClass = currentClass
+        }
+        selectedUnits += 1
     }
-    let trailingClass = keyTaoDeletionSegmentClass(last)
-    return max(1, units.reversed().prefix { keyTaoDeletionSegmentClass($0) == trailingClass }.count)
+    return selectedUnits
+}
+
+func keyTaoEnglishCompletionPrefix(_ text: String) -> String? {
+    let prefix = String(text.reversed().prefix { $0.isASCII && $0.isLetter }.reversed())
+    return prefix.count >= 2 ? prefix : nil
+}
+
+func keyTaoCompleteEnglishPrefix(
+    _ prefix: String,
+    lexicon: [String],
+    limit: Int = 5
+) -> [String] {
+    guard prefix.count >= 2, limit > 0 else { return [] }
+    let normalized = prefix.lowercased()
+    var seen: Set<String> = []
+    return lexicon.compactMap { raw -> String? in
+        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folded = word.lowercased()
+        guard word.count > prefix.count, folded.hasPrefix(normalized), seen.insert(folded).inserted else {
+            return nil
+        }
+        return word
+    }.prefix(limit).map { $0 }
 }
 
 private func keyTaoDeletionSegmentClass(_ character: Character) -> KeyTaoDeletionSegmentClass {
