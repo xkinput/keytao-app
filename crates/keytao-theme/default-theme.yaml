@@ -44,8 +44,8 @@ candidate:
   selectedForeground: "#243241"
   labelColor: "#7F8D9C"
   selectedLabelColor: "#4A8DF6"
-  commentColor: "#84929E"
-  selectedCommentColor: "#617286"
+  commentColor: "#3F4E5E"
+  selectedCommentColor: "#2E3E50"
   borderColor: transparent
   selectedBorderColor: "#5DA7D7"
   borderWidth: 1
@@ -95,8 +95,8 @@ dark:
     selectedForeground: "#FFFFFF"
     labelColor: "#9AA8B5"
     selectedLabelColor: "#B6E3FF"
-    commentColor: "#94A0AA"
-    selectedCommentColor: "#D3E4EE"
+    commentColor: "#C9D3DC"
+    selectedCommentColor: "#E9F2FA"
     borderColor: transparent
     selectedBorderColor: "#5DA7D7"
     separatorColor: "#343C47"
