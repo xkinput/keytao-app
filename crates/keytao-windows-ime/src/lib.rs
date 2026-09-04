@@ -28,9 +28,9 @@ mod state;
 mod text_service;
 
 use windows::{
-    core::{Interface, GUID, HRESULT},
+    core::{Interface, Result, GUID, HRESULT},
     Win32::{
-        Foundation::{BOOL, E_POINTER, HMODULE, S_FALSE, S_OK},
+        Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HMODULE, S_FALSE, S_OK},
         System::Com::IClassFactory,
         System::LibraryLoader::DisableThreadLibraryCalls,
     },
@@ -38,6 +38,11 @@ use windows::{
 
 use globals::{can_unload, DLL_INSTANCE};
 use text_service::ClassFactory;
+
+pub(crate) fn guard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err(E_UNEXPECTED.into()))
+}
 
 // ── Well-known GUIDs ──────────────────────────────────────────────────────────
 
@@ -87,14 +92,17 @@ pub const MODE_ICON_ENGLISH_RESOURCE_ID: u32 = 3;
 
 #[no_mangle]
 pub extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> BOOL {
-    const DLL_PROCESS_ATTACH: u32 = 1;
-    if reason == DLL_PROCESS_ATTACH {
-        let _ = DLL_INSTANCE.set(hinstance.0 as isize);
-        unsafe {
-            let _ = DisableThreadLibraryCalls(hinstance);
+    guard(|| {
+        const DLL_PROCESS_ATTACH: u32 = 1;
+        if reason == DLL_PROCESS_ATTACH {
+            let _ = DLL_INSTANCE.set(hinstance.0 as _);
+            unsafe {
+                let _ = DisableThreadLibraryCalls(hinstance);
+            }
         }
-    }
-    BOOL::from(true)
+        Ok(())
+    })
+    .map_or(BOOL::from(false), |_| BOOL::from(true))
 }
 
 // ── COM DLL exports ───────────────────────────────────────────────────────────
@@ -108,52 +116,53 @@ pub unsafe extern "system" fn DllGetClassObject(
     riid: *const GUID,
     ppv: *mut *mut std::ffi::c_void,
 ) -> HRESULT {
-    unsafe {
+    guard(|| unsafe {
         if rclsid.is_null() || riid.is_null() || ppv.is_null() {
-            return E_POINTER;
+            return Err(E_POINTER.into());
         }
         *ppv = std::ptr::null_mut();
         let clsid = &*rclsid;
         if *clsid != CLSID_TEXT_SERVICE {
-            return windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE;
+            return Err(windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE.into());
         }
         let factory: IClassFactory = ClassFactory::new().into();
-        factory.query(riid, ppv as *mut _)
-    }
+        factory.query(riid, ppv as *mut _).ok()
+    })
+    .map(|_| S_OK)
+    .unwrap_or_else(|error| error.code())
 }
 
 #[no_mangle]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if can_unload() {
-        S_OK
-    } else {
-        S_FALSE
-    }
+    guard(|| Ok(if can_unload() { S_OK } else { S_FALSE })).unwrap_or(E_UNEXPECTED)
 }
 
 #[no_mangle]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
-    state::append_diagnostic("DllRegisterServer started");
-    match registration::register() {
-        Ok(()) => {
-            state::append_diagnostic("DllRegisterServer succeeded");
-            S_OK
+    guard(|| {
+        state::append_diagnostic("DllRegisterServer started");
+        match registration::register() {
+            Ok(()) => {
+                state::append_diagnostic("DllRegisterServer succeeded");
+                Ok(S_OK)
+            }
+            Err(error) => {
+                state::append_diagnostic(format!(
+                    "DllRegisterServer failed: {} (0x{:08x})",
+                    error,
+                    error.code().0 as u32
+                ));
+                let _ = registration::unregister();
+                Ok(error.code())
+            }
         }
-        Err(error) => {
-            state::append_diagnostic(format!(
-                "DllRegisterServer failed: {} (0x{:08x})",
-                error,
-                error.code().0 as u32
-            ));
-            let _ = registration::unregister();
-            error.into()
-        }
-    }
+    })
+    .unwrap_or(E_UNEXPECTED)
 }
 
 #[no_mangle]
 pub extern "system" fn DllUnregisterServer() -> HRESULT {
-    registration::unregister()
+    guard(registration::unregister)
         .map(|_| S_OK)
-        .unwrap_or_else(|e| e.into())
+        .unwrap_or_else(|error| error.code())
 }

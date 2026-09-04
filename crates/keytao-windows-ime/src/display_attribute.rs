@@ -15,7 +15,7 @@ use windows::{
     },
 };
 
-use crate::{globals::DllActivityGuard, GUID_DISPLAY_ATTRIBUTE_INPUT};
+use crate::{globals::DllActivityGuard, guard, GUID_DISPLAY_ATTRIBUTE_INPUT};
 
 fn default_attribute() -> TF_DISPLAYATTRIBUTE {
     TF_DISPLAYATTRIBUTE {
@@ -56,34 +56,40 @@ impl DisplayAttributeInfo {
 
 impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
     fn GetGUID(&self) -> Result<GUID> {
-        Ok(GUID_DISPLAY_ATTRIBUTE_INPUT)
+        guard(|| Ok(GUID_DISPLAY_ATTRIBUTE_INPUT))
     }
 
     fn GetDescription(&self) -> Result<BSTR> {
-        Ok(BSTR::from("KeyTao composition input"))
+        guard(|| Ok(BSTR::from("KeyTao composition input")))
     }
 
     fn GetAttributeInfo(&self, attribute: *mut TF_DISPLAYATTRIBUTE) -> Result<()> {
-        if attribute.is_null() {
-            return Err(E_INVALIDARG.into());
-        }
-        unsafe {
-            *attribute = *self.attribute.borrow();
-        }
-        Ok(())
+        guard(|| {
+            if attribute.is_null() {
+                return Err(E_INVALIDARG.into());
+            }
+            unsafe {
+                *attribute = *self.attribute.borrow();
+            }
+            Ok(())
+        })
     }
 
     fn SetAttributeInfo(&self, attribute: *const TF_DISPLAYATTRIBUTE) -> Result<()> {
-        if attribute.is_null() {
-            return Err(E_INVALIDARG.into());
-        }
-        *self.attribute.borrow_mut() = unsafe { *attribute };
-        Ok(())
+        guard(|| {
+            if attribute.is_null() {
+                return Err(E_INVALIDARG.into());
+            }
+            *self.attribute.borrow_mut() = unsafe { *attribute };
+            Ok(())
+        })
     }
 
     fn Reset(&self) -> Result<()> {
-        *self.attribute.borrow_mut() = default_attribute();
-        Ok(())
+        guard(|| {
+            *self.attribute.borrow_mut() = default_attribute();
+            Ok(())
+        })
     }
 }
 
@@ -104,7 +110,7 @@ impl DisplayAttributeEnumerator {
 
 impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
     fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        Ok(DisplayAttributeEnumerator::new(self.yielded.get()).into())
+        guard(|| Ok(DisplayAttributeEnumerator::new(self.yielded.get()).into()))
     }
 
     fn Next(
@@ -113,47 +119,53 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
         info: *mut Option<ITfDisplayAttributeInfo>,
         fetched: *mut u32,
     ) -> Result<()> {
-        if count == 0 || info.is_null() || (count != 1 && fetched.is_null()) {
-            return Err(E_INVALIDARG.into());
-        }
-
-        let actual = u32::from(!self.yielded.get());
-        unsafe {
-            if !fetched.is_null() {
-                *fetched = actual;
+        guard(|| {
+            if count == 0 || info.is_null() || (count != 1 && fetched.is_null()) {
+                return Err(E_INVALIDARG.into());
             }
-            if actual == 1 {
-                info.write(Some(DisplayAttributeInfo::new().into()));
+
+            let actual = u32::from(!self.yielded.get());
+            unsafe {
+                if !fetched.is_null() {
+                    *fetched = actual;
+                }
+                if actual == 1 {
+                    info.write(Some(DisplayAttributeInfo::new().into()));
+                }
             }
-        }
-        self.yielded.set(true);
-
-        if actual == count {
-            Ok(())
-        } else {
-            Err(Error::from(S_FALSE))
-        }
-    }
-
-    fn Reset(&self) -> Result<()> {
-        self.yielded.set(false);
-        Ok(())
-    }
-
-    fn Skip(&self, count: u32) -> Result<()> {
-        if count == 0 {
-            return Ok(());
-        }
-        if self.yielded.get() {
-            Err(Error::from(S_FALSE))
-        } else {
             self.yielded.set(true);
-            if count == 1 {
+
+            if actual == count {
                 Ok(())
             } else {
                 Err(Error::from(S_FALSE))
             }
-        }
+        })
+    }
+
+    fn Reset(&self) -> Result<()> {
+        guard(|| {
+            self.yielded.set(false);
+            Ok(())
+        })
+    }
+
+    fn Skip(&self, count: u32) -> Result<()> {
+        guard(|| {
+            if count == 0 {
+                return Ok(());
+            }
+            if self.yielded.get() {
+                Err(Error::from(S_FALSE))
+            } else {
+                self.yielded.set(true);
+                if count == 1 {
+                    Ok(())
+                } else {
+                    Err(Error::from(S_FALSE))
+                }
+            }
+        })
     }
 }
 

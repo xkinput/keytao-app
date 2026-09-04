@@ -20,7 +20,7 @@ use windows::{
     },
 };
 
-use crate::globals::DllActivityGuard;
+use crate::{globals::DllActivityGuard, guard};
 
 const CANDIDATE_UI_GUID: GUID = GUID {
     data1: 0x8d7f2864,
@@ -51,60 +51,68 @@ struct CandidateUiElement {
 
 impl ITfUIElement_Impl for CandidateUiElement_Impl {
     fn GetDescription(&self) -> Result<BSTR> {
-        Ok(BSTR::from("KeyTao candidates"))
+        guard(|| Ok(BSTR::from("KeyTao candidates")))
     }
 
     fn GetGUID(&self) -> Result<GUID> {
-        Ok(CANDIDATE_UI_GUID)
+        guard(|| Ok(CANDIDATE_UI_GUID))
     }
 
     fn Show(&self, show: BOOL) -> Result<()> {
-        self.data.borrow_mut().shown = show.as_bool();
-        Ok(())
+        guard(|| {
+            self.data.borrow_mut().shown = show.as_bool();
+            Ok(())
+        })
     }
 
     fn IsShown(&self) -> Result<BOOL> {
-        Ok(BOOL::from(self.data.borrow().shown))
+        guard(|| Ok(BOOL::from(self.data.borrow().shown)))
     }
 }
 
 impl ITfCandidateListUIElement_Impl for CandidateUiElement_Impl {
     fn GetUpdatedFlags(&self) -> Result<u32> {
-        Ok(std::mem::take(&mut self.data.borrow_mut().updated_flags))
+        guard(|| Ok(std::mem::take(&mut self.data.borrow_mut().updated_flags)))
     }
 
     fn GetDocumentMgr(&self) -> Result<ITfDocumentMgr> {
-        self.data
-            .borrow()
-            .document_mgr
-            .clone()
-            .ok_or_else(|| E_FAIL.into())
+        guard(|| {
+            self.data
+                .borrow()
+                .document_mgr
+                .clone()
+                .ok_or_else(|| E_FAIL.into())
+        })
     }
 
     fn GetCount(&self) -> Result<u32> {
-        Ok(self.data.borrow().state.candidates.len() as u32)
+        guard(|| Ok(self.data.borrow().state.candidates.len() as u32))
     }
 
     fn GetSelection(&self) -> Result<u32> {
-        let data = self.data.borrow();
-        let count = data.state.candidates.len();
-        if count == 0 {
-            return Err(windows::core::Error::from(S_FALSE));
-        }
-        Ok(data
-            .state
-            .highlighted_candidate_index
-            .min(count.saturating_sub(1)) as u32)
+        guard(|| {
+            let data = self.data.borrow();
+            let count = data.state.candidates.len();
+            if count == 0 {
+                return Err(windows::core::Error::from(S_FALSE));
+            }
+            Ok(data
+                .state
+                .highlighted_candidate_index
+                .min(count.saturating_sub(1)) as u32)
+        })
     }
 
     fn GetString(&self, index: u32) -> Result<BSTR> {
-        let data = self.data.borrow();
-        let candidate = data
-            .state
-            .candidates
-            .get(index as usize)
-            .ok_or_else(|| windows::core::Error::from(E_INVALIDARG))?;
-        Ok(BSTR::from(candidate.text.as_str()))
+        guard(|| {
+            let data = self.data.borrow();
+            let candidate = data
+                .state
+                .candidates
+                .get(index as usize)
+                .ok_or_else(|| windows::core::Error::from(E_INVALIDARG))?;
+            Ok(BSTR::from(candidate.text.as_str()))
+        })
     }
 
     fn GetPageIndex(
@@ -113,35 +121,39 @@ impl ITfCandidateListUIElement_Impl for CandidateUiElement_Impl {
         capacity: u32,
         page_count: *mut u32,
     ) -> Result<()> {
-        if page_count.is_null() {
-            return Err(E_INVALIDARG.into());
-        }
-
-        let has_candidates = !self.data.borrow().state.candidates.is_empty();
-        unsafe {
-            *page_count = u32::from(has_candidates);
-            if has_candidates && capacity > 0 {
-                if page_indices.is_null() {
-                    return Err(E_INVALIDARG.into());
-                }
-                *page_indices = 0;
+        guard(|| {
+            if page_count.is_null() {
+                return Err(E_INVALIDARG.into());
             }
-        }
-        Ok(())
+
+            let has_candidates = !self.data.borrow().state.candidates.is_empty();
+            unsafe {
+                *page_count = u32::from(has_candidates);
+                if has_candidates && capacity > 0 {
+                    if page_indices.is_null() {
+                        return Err(E_INVALIDARG.into());
+                    }
+                    *page_indices = 0;
+                }
+            }
+            Ok(())
+        })
     }
 
     fn SetPageIndex(&self, page_indices: *const u32, page_count: u32) -> Result<()> {
-        if page_count == 0 {
-            return Ok(());
-        }
-        if page_indices.is_null() || unsafe { *page_indices } != 0 {
-            return Err(E_INVALIDARG.into());
-        }
-        Ok(())
+        guard(|| {
+            if page_count == 0 {
+                return Ok(());
+            }
+            if page_indices.is_null() || unsafe { *page_indices } != 0 {
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        })
     }
 
     fn GetCurrentPage(&self) -> Result<u32> {
-        Ok(0)
+        guard(|| Ok(0))
     }
 }
 

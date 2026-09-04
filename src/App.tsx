@@ -275,6 +275,7 @@ interface ImeUiSettings {
   colorScheme: ImeUiColorScheme
   effectiveColorScheme: ImeEffectiveColorScheme
   orientation: ImeCandidateOrientation
+  embeddedComposition: boolean
   accentColor: string
   fontSize: number
   themePath: string | null
@@ -1106,6 +1107,21 @@ export default function App() {
     }
   }
 
+  async function handleSetImeEmbeddedComposition(embedded: boolean) {
+    if (isSavingImeUiSettings || imeUiSettings?.embeddedComposition === embedded) return
+    setIsSavingImeUiSettings(true)
+    setImeUiError(null)
+    try {
+      const settings = await invoke<ImeUiSettings>("set_ime_embedded_composition", { embedded })
+      setImeUiSettings(settings)
+      addLogs([`[IME UI] ${settings.message}`])
+    } catch (e) {
+      setImeUiError(String(e))
+    } finally {
+      setIsSavingImeUiSettings(false)
+    }
+  }
+
   async function commitImeFontSize(fontSize: number) {
     setImeFontSizeDraft(fontSize)
     try {
@@ -1904,6 +1920,27 @@ export default function App() {
                           </Button>
                         )
                       })}
+                    </div>
+                  )}
+                  {osType === "windows" && (
+                    <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
+                      <div className="min-w-0 space-y-1 text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">嵌入模式</span>
+                          <span className="text-muted-foreground/80">
+                            {imeUiSettings?.embeddedComposition ? "开启" : "关闭"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+                          开启后在输入框内直接显示拼写字母；关闭时仅在候选窗口显示，完成后整体上屏（默认关闭）
+                        </p>
+                      </div>
+                      <Switch
+                        checked={imeUiSettings?.embeddedComposition ?? false}
+                        onCheckedChange={(checked) => void handleSetImeEmbeddedComposition(checked)}
+                        disabled={isSavingImeUiSettings}
+                        aria-label="切换嵌入模式"
+                      />
                     </div>
                   )}
                   {!isMobilePlatform && (

@@ -48,17 +48,18 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 - 现代 Windows 可能查询 `ITfTextInputProcessorEx`；KeyTao 同时实现 `ITfTextInputProcessor` 和 `ITfTextInputProcessorEx`。两条激活路径共用轻量接线逻辑，并通过 `ITfThreadMgrEx::GetActiveFlags` 保存 thread mode。
 - `ITfKeyEventSink` 由 text service 实现，并通过 `ITfKeystrokeMgr::AdviseKeyEventSink` 安装到当前 `ITfThreadMgr`。
 - `ITfLangBarItemButton` 通过 `ITfLangBarItemMgr::AddItem` 暴露持久的“中/英”状态、图标和左键切换，并同步 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION`。
-- `ITfThreadMgrEventSink` 和 `ITfThreadFocusSink` 在 `Activate` 时通过 `ITfSource::AdviseSink` 安装，并在 `Deactivate` 时按 cookie 反注册；document/context 焦点变化会异步申请 TSF write edit session，清空未提交 range/display attribute 并真正结束旧 composition，然后复位 Rime session 和候选 UI。终止回调按 COM identity 只清理自己对应的 active composition，迟到的旧回调不能清掉新 Context 已开始的 composition。
+- `ITfThreadMgrEventSink` 和 `ITfThreadFocusSink` 在 `Activate` 时通过 `ITfSource::AdviseSink` 安装，并在 `Deactivate` 时按 cookie 反注册；document/context 焦点变化会异步申请 TSF write edit session，清空未提交 range/display attribute 并真正结束旧 composition，然后复位 Rime session 和候选 UI。终止回调按 COM identity 只清理自己对应的 active composition，迟到的旧回调不能清掉新 Context 已开始的 composition；非嵌入模式下宿主终止空锚点时只丢弃 composition handle，不清 Rime 状态和面板。
 - `Deactivate` 与 `OnKillThreadFocus` 不能用异步 edit session 收尾：前者返回后 TSF 立刻释放 text service 与 client id，后者之后本线程不再泵我们的 session，排队的 `EndComposition` 永远不会执行。这两条路径改用同步 write session，宿主拒绝同步锁时退回 `ITfContextOwnerCompositionServices::TerminateComposition`（该接口允许在 edit session 之外调用）。普通 focus 切换仍走异步路径。
 - `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 与 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` 在 `Activate` 时写入初值（开 + native），并各自 `AdviseSink(ITfCompartmentEventSink)`；系统 Ctrl+Space、输入指示器改写这两个 compartment 时会反向驱动 Rime（关闭即停止组字并透传按键，conversion mode 变化即 `set_ascii_mode`）。语言栏写回同一数值，因此 sink 只在数值真正不同时才动 Rime，不会产生回环。
 - `OnTestKeyDown` / `OnTestKeyUp` 只声明当前按键是否会被处理；真正的状态更新、commit 和 composition 操作在 `OnKeyDown` / `OnKeyUp` 中完成。solo Shift 的 pending 标志必须在测试回调里维护：TSF 不会为测试回调拒绝的按键调用 `OnKeyDown`，只在 `OnKeyDown` 里置位/清零会让该标志永远为 false，中英切换链路整条断开。
-- 候选面板定位失败要区分原因：`ITfContextView::GetTextExt` 返回 `TF_E_NOLAYOUT` 表示宿主尚未排版，此时保留上一次有效 caret，并在该 context 上 `AdviseSink(ITfTextLayoutSink)`，`OnLayoutChange` 后用只读 edit session 重新定位。从未拿到过 caret 时退回系统 caret（`GetGUIThreadInfo`）或宿主窗口左上角，不使用固定屏幕坐标。
-- composition 必须在 TSF edit session 里用 `ITfContextComposition::StartComposition` 创建，用 `ITfRange::SetText` 更新 range，用 `ITfComposition::EndComposition` 结束；没有 active composition 的直接提交使用 `ITfInsertAtSelection::InsertTextAtSelection`。
+- 候选面板定位结果带 `CaretSource::Probe / Cache / System` 来源；只有未裁剪且位于 owner monitor 内的 fresh Probe 会写入 `last_caret`、清零重试预算并停止重探，Cache/System 仅作临时显示，不能冒充新探测。`TF_E_NOLAYOUT` 或其他无可用 Probe 的结果会在原 context 上 `AdviseSink(ITfTextLayoutSink)`，并按 `16/32/64/128/256 ms` 有界退避；`OnLayoutChange` 同样用只读 edit session 重探。系统 caret 只通过 `GetGUIThreadInfo(GetCurrentThreadId())` 获取，并拒绝非同一 root window、退化矩形和 client origin；所有来源都必须通过 owner-monitor sanity check，失败时不伪造窗口原点坐标。
+- `reposition_ime_windows` 在任何 TSF 探测前校验 composition context 的 COM identity，并用进程内 guard 阻止自身重入；timer 在 guard 忙时不会消耗一次重试预算，待外层定位完成后继续退避链。
+- composition 必须在 TSF edit session 里用 `ITfContextComposition::StartComposition` 创建，用 `ITfRange::SetText` 更新 range，用 `ITfComposition::EndComposition` 结束。所有 commit 都通过 composition range：没有 active composition 时先用 QUERYONLY insertion range 创建空 composition，再写入提交文本并结束；不存在 `TF_IAS_NOQUERY` 裸写路径。
 - composition range 会写入 `GUID_PROP_ATTRIBUTE`，对应的 `ITfDisplayAttributeProvider` 提供 input display attribute；更新 preedit 后同步 TSF selection 到 Rime cursor。任何 edit session 失败都会终止残留 composition 并复位输入状态。
 - 候选 UI 显示前先调用 `ITfUIElementMgr::BeginUIElement`。宿主允许 TIP 自绘时才显示 layered window；宿主返回 `pbShow=FALSE` 时通过 `ITfCandidateListUIElement` 提供目标 `ITfDocumentMgr`、更新 flags、候选数量、选中项、字符串与分页数据，并调用 `UpdateUIElement` / `EndUIElement`。`pbShow=TRUE` 只表示"TIP 可以自绘"，不代表已 advise 的 `ITfUIElementSink`（accessibility / 自动化消费方）不需要变更通知，因此只要元素数据变化就调用 `UpdateUIElement`，不按是否自绘门控。
 - `ITfCandidateListUIElement` 暴露的是**当前页**候选：`GetCount` / `GetString` / `GetSelection` 的索引空间就是一页，`GetPageIndex` 相应返回单页描述。这与 `ImeState.candidates` 的语义一致；把 `ImeState.page` 直接映射成 page index 会让页索引与字符串索引空间脱节，属已评估后放弃的方案。
 - 候选窗必须使用当前 `ITfContextView::GetWnd()` 返回的窗口作为 owned window；如果 TSF context 没有窗口，则退回 `GetFocus()`。候选窗显示、隐藏、位置/大小变化分别通过 `NotifyWinEvent(EVENT_OBJECT_IME_SHOW/HIDE/CHANGE, ...)` 通知 Windows light-dismiss/accessibility 管线。
-- 自绘候选窗使用宿主窗口 DPI 缩放，并按 caret 所在显示器的 work area 定位；触摸键盘位于更高 z-order band 且不改变 work area，因此显示前用 `IFrameworkInputPane::Location()` 把它从可用区域里扣掉，取不到接口时保持原行为。候选窗销毁后尝试注销 Win32 window class，避免 DLL 重载后保留指向旧 `wnd_proc` 的类注册。
+- 自绘候选窗使用宿主窗口 DPI 缩放，并按 caret 所在显示器的 work area 定位；触摸键盘位于更高 z-order band 且不改变 work area，因此显示前用 `IFrameworkInputPane::Location()` 把它从可用区域里扣掉，取不到接口时保持原行为。TIP 模块在激活时已固定到宿主进程生命周期，Win32 window class 因此保持注册到进程退出，不能在临时 `CandidateWindow` drop 时注销。
 - 候选面板接受鼠标点选：`panel.rs` 渲染时同时产出候选项和翻页按钮的命中矩形，`wnd_proc` 在 `WM_LBUTTONUP` 上做命中测试并回到 STA 状态执行 `select_candidate_on_page(index)` / `change_page(backward)`；`WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE`，配合 `WS_EX_NOACTIVATE` 保证点击不会把焦点从宿主抢走。中英模式提示窗额外带 `WS_EX_TRANSPARENT`，保持点击穿透。
 - 触摸键盘或 `SendInput` 产生的 Unicode 输入会以 `VK_PACKET` 进入 `ITfKeyEventSink`；KeyTao 使用 `GetKeyboardState` + `ToUnicode(VK_PACKET, ...)` 提取字符，并把触摸键盘候选翻页的 `0xF003` / `0xF004` 映射到 Rime 的 PageDown / PageUp keysym。
 
@@ -124,7 +125,7 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 
 切换输入法时必须避免在 TSF 回调线程里做重活或持锁调用可重入 API：
 
-- `DllMain` 只保存 DLL instance 并调用 `DisableThreadLibraryCalls`。TIP 不在宿主进程安装全局 tracing subscriber；发行构建默认也不做同步文件诊断，只有 debug 构建或 `KEYTAO_WINDOWS_IME_DIAGNOSTICS=1` 时写 `windows-ime.log`。
+- `DllMain` 只保存 DLL instance 并调用 `DisableThreadLibraryCalls`。TIP 不在宿主进程安装全局 tracing subscriber；发行构建默认也不做同步文件诊断，只有 debug 构建或宿主进程启动前设置 `KEYTAO_WINDOWS_IME_DIAGNOSTICS=1` 时写 `windows-ime.log`。按键热路径的 lengths-only 诊断同样使用运行时开关，并保留每进程最多 96 行的上限，不再由 `debug_assertions` 编译掉。
 - `keytao_windows_ime.dll` 在 MSVC 构建中把 `rime.dll` 配置为 delay-load，并在第一次真正初始化引擎前用 DLL 同级绝对路径预加载 `rime.dll`；这样 Windows 切换输入法载入 TSF DLL 时不会同步加载整条 librime 依赖链，也不会从宿主进程目录错误解析同名 DLL。
 - x86/x64 使用 librime 官方 Windows SDK 中合并的 `librime-lua`；原生 ARM64 构建读取官方包记录的同一插件 revision，并通过 `RIME_PLUGINS` 合并进 `rime-arm64.dll`。构建和 bundle 校验必须同时验证 feature manifest 与 `lua_translator` / `lua_filter` / `lua_processor` 标记，不能再把缺少 Lua 当作警告放行。
 - 若自定义 runtime 使用外置 Lua plugin，加载器只从版本化 runtime、应用资源目录和显式 `KEYTAO_RIME_PLUGIN_DIR` / `RIME_LIB_DIR` 中解析，不遍历宿主进程 `PATH`；加载后以 Rime module registry 判断是否成功，不依赖 Windows DLL 导出 C++ linker helper symbol。
@@ -133,7 +134,8 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 - `TsfState` 使用 STA 内的 `Rc<RefCell<_>>`，类型系统不允许它跨线程；`TextService::Activate` / `Deactivate` 不在持有 mutable borrow 时调用 `AdviseKeyEventSink`、`AdviseSink`、`UnadviseKeyEventSink` 或 `UnadviseSink`，避免 TSF 同步回调 `OnSetFocus` 时重入冲突。
 - `ITfKeyEventSink`、thread manager/focus sink 和 composition sink 只保存 STA 内 `TsfState` 的 `Weak` 引用；状态仍可持有对应 COM interface 以管理生命周期，但不再形成 `state -> COM sink -> state` 强引用环。宿主异常跳过 `Deactivate` 时，状态与 thread manager 仍可释放，迟到回调会直接放行或忽略。
 - `CandidateWindow::new()` 不创建 HWND、不读取字体；候选窗和字体在首次显示候选或模式提示时懒加载，避免 TSF 创建 text service 时卡住输入线程。
-- `apply_ime_state()` 不在持有 `TsfState` borrow 时调用 `StartComposition` / `SetText` / `EndComposition`，并在同步 edit session 返回后才刷新候选窗，避免 `OnCompositionTerminated` 或宿主窗口消息重入时借用冲突。
+- `apply_ime_state()` 不在持有 `TsfState` borrow 时调用 `RequestEditSession` / `StartComposition` / `SetText` / `SetSelection` / `EndComposition`；文档写入完成、写会话标志和同步终止标志收尾后才刷新候选窗。键盘路径使用同步 write session，候选窗鼠标点选使用 `TF_ES_ASYNCDONTCARE | TF_ES_READWRITE`，两者的状态写回都发生在真正的 `DoEditSession` 执行期。候选窗点击会先同步推进 Rime，再把所得 `ImeState` 排入宿主可能延迟执行的文档写会话；快速点击后紧接按键时，两份文档快照仍存在乱序落地窗口，这是 `ASYNCDONTCARE` 的已知取舍，真机验收需覆盖该交互。
+- 所有 `#[implement]` COM 方法、class factory、`DllMain` 与 DLL COM exports 都经过统一的 `catch_unwind` guard；panic 映射为 `E_UNEXPECTED`，按键 guard 或 librime 运行前的内部失败返回 `S_OK` + `FALSE`，但 librime 已消费按键后的文档写失败保持 `pfEaten=TRUE`，避免宿主再插入原始字符。候选窗 `wnd_proc` panic 时退回 `DefWindowProcW`。`EditSession` 用 `RefCell<Option<EditFn>>` 和 `try_borrow_mut` 拒绝重入，closure 若产生 code 为 success 的空 `windows-rs` error 会归一化成 `E_FAIL`。
 - librime setup 和 reload session rebuild 都通过命名后台线程执行；每个任务和每个 COM 对象都持有 `DllActivityGuard`，所以 `DllCanUnloadNow` 不会在线程或 sink 仍可回调时返回 `S_OK`。后台任务只把纯 engine bundle 写入 mailbox，不持有或升级 `TsfState`；下一次 TSF STA 回调领取并安装结果，禁止在 worker 上析构 STA COM/window 对象。
 - `OnTestKeyDown` 只读取缓存 `ImeState`，不调用 `ImeRuntimeSession::state()`，避免 TSF 按键探测阶段进入 librime 或触发 generation refresh。
 - focus/context 回调清理 TSF composition 与窗口、标记 session 待重置，并通过 `refresh_engine_for_focus()` 领取后台结果或调度 warmup/reload；真正的 `ImeRuntimeSession::reset()` 延迟到下一次真实按键，回调本身不会在宿主 UI 线程同步进入 librime。
@@ -166,13 +168,9 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 6. 有 composition 时 Enter 走 `ImeRuntimeSession::process_enter()`：先把 `XK_Return` 交给 Rime，Rime 未接受时由通用层 fallback 到 `commit_raw_input()`。**平台不再自行提交 preedit 字面量**，也**不再本地拦截数字键或空格做选词**——选择键语义完全由 schema 的 `select_keys` / `key_binder` 决定，鼠标点选走 `select_candidate_on_page(index)`。
 7. 普通按键调用 `ImeRuntimeSession::process_key_result(keysym, mods)`。
 8. `should_eat_key()` 是刻意放宽的：为了让 Rime 的 punctuator 收到标点、让 `key_binder` 收到 Ctrl/Alt 组合，所有可打印键（字母、数字行、OEM 标点、小键盘）在无 composition 时也会被声明拦截；真正的放行发生在 `OnKeyDown`——`should_consume_processed_state()` 只在 `accepted`、产生 commit、或 preedit/候选/高亮/页码确实发生变化时才吃掉按键，否则返回 false 由 TSF 把按键交回宿主。因此中文模式下无 preedit 直接按 `,` 会上屏 `，`，而 `Ctrl+C`、无候选时的数字键仍然照常到达应用。
-9. 有 `committed` 时：
-   - 若存在 TSF composition，替换 composition range、结束 composition，并把 TSF selection 折叠到提交文本末尾。
-   - 否则用 `ITfInsertAtSelection` 直接插入。
-10. 有 `preedit` 时：
-   - 若存在 composition，更新 composition range。
-   - 否则从当前 caret 开始 `StartComposition`。
-11. preedit 清空且无 commit 时，结束 composition。`ImeState.cursor` 是 Unicode 标量偏移（通用层 D8 契约），写进 TSF selection 前用 `keytao_core::utf16_offset_from_chars` 换算成 UTF-16 code unit 偏移。
+9. 有 `committed` 时一律通过 composition：复用已有 composition，或从 QUERYONLY insertion range 创建临时空 composition；写入提交文本后先把 TSF selection 折叠到 range 末尾，再 `EndComposition`。这条顺序与 Weasel 一致，也保证顶功的新 composition 从已提交文字之后开始。
+10. `plan_composition(state, embedded)` 是唯一模式决策：嵌入模式把非空 preedit 写进 composition range；非嵌入模式只要 preedit 或候选可见就保留零长度 composition anchor；目标为 none 时结束已有 composition。
+11. `ImeState.cursor` 是 Unicode 标量偏移（通用层 D8 契约）；嵌入模式写 TSF selection 前用 `keytao_core::utf16_offset_from_chars` 换算成 UTF-16 code unit 偏移，非嵌入模式则由候选面板在对应标量位置插入 `|`。
 12. 候选窗口用 `CandidateWindow` 绘制并按 caret screen position 定位。
 
 `OnKeyUp` 只处理 solo Shift release：发送 `Shift_L` 或 `Shift_R` keysym，mask 为 `RIME_RELEASE_MASK`。Shift key down 本身不送 Rime；如果 Shift 按下后又出现其它 keyDown，pending flag 会被清除。该 flag 由 `OnTestKeyDown` 维护——TSF 只对测试回调声明拦截的按键调用 `OnKeyDown`，而 Shift 本身从不被拦截，只在 `OnKeyDown` 里置位会让整条中英切换链路失效。
@@ -194,7 +192,16 @@ Windows 侧按 `docs/ime-common-layer.md`《敏感输入上下文》落地通用
 - `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 为 0（系统 Ctrl+Space 关闭输入法）时同样一律透传。
 - 引擎是后台构建的，可能在决定策略的焦点变化之后才就绪，因此 `poll_engine_builds()`（按键与焦点路径都会走）在装上新 session 后立刻用缓存的上下文状态补推一次策略，数值未变时是空操作。补推不能只放在按键路径上：敏感上下文在 `input_is_blocked()` 处就返回了，永远走不到那里，session 会一直留着不该有的组字权限。
 
-Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 同时出现时，必须先结束旧 composition，再把 selection 折叠到 commit range 末尾，最后创建新 composition。缺少 selection collapse 时，新 preedit 会插到已提交文字前面，顶功结果会从“`缤` + `c`”错误地显示成“`c缤`”。
+Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 同时出现时，必须先写提交文本并把 selection 折叠到 commit range 末尾，再结束旧 composition，最后创建新 composition。缺少 selection collapse 时，新 preedit 会插到已提交文字前面，顶功结果会从“`缤` + `c`”错误地显示成“`c缤`”。
+
+## 嵌入 / 非嵌入模式
+
+Windows 默认使用非嵌入模式。设置保存在 `%APPDATA%/keytao/theme.yaml` 的 `ui.embeddedComposition`，兼容别名 `embedded_composition`；文件缺失、key 缺失和新安装都解析为 `false`。TIP 通过进程级 `OnceLock<ThemeResolver>` 读取并跟随 theme 文件签名变化，不把 resolver 放入 `TsfState`。主 App 的「输入法外观」卡片只在 Windows 显示开关，并由桌面命令 `set_ime_embedded_composition` 原子更新 YAML、写 reload stamp。
+
+- 非嵌入模式不把 preedit 写入宿主文档；只要 `has_visible_state` 为真，就维护零长度 composition anchor，并在自绘候选面板第一行显示 preedit 与 `|` 光标。write session 暂时取走共享 handle 时用 `composition_in_flight` 保存其 COM identity；只有终止通知与该 identity 匹配才置 `composition_terminated_in_session`，我们主动 `EndComposition` 产生的非匹配通知会被忽略。匹配标志在 write session 后消费并丢弃失效 handle；会话外终止同样只丢 handle，Rime 状态和面板继续保留，下一键重建锚点。
+- 嵌入模式保持原有行为：非空 preedit 写进 composition range 并设置 display attribute，preedit 为空时结束 composition。UIless host 没有 panel preedit 通道，因此无条件强制嵌入模式。
+- 两种模式共享同一 commit path，均不允许 composition 外直接插入文本。模式切换写 reload stamp，TIP 在下一次处理前先用空 `ImeState` 收掉旧 composition。
+- release 诊断会记录模式、uiless、长度/候选数、planner target、composition start/update/end、commit 路径和终止分支；不记录 preedit、候选或提交正文。
 
 ## 候选窗与主题
 
@@ -214,7 +221,7 @@ Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 
 5. Windows 桌面候选窗在 DPI 比例上应用 `0.82` 的紧凑密度；150% 系统缩放时渲染比例为 `1.23`，保留每显示器 DPI 语义，同时把默认 34 DIP 候选行收紧到约 42 个物理像素。
 6. 字体按 glyph 回退：中文优先使用 Microsoft YaHei / SimSun，缺字时依次使用系统自带的 Segoe UI Emoji、Segoe UI Symbol 和 Segoe UI；`FE0E`、`FE0F` 与 ZWJ 作为零宽格式控制符处理，不能显示成方框或额外占位。
 
-`theme.yaml` v2 支持 `ui.colorScheme: auto | light | dark`、`ui.accentColor` 和 `light:` / `dark:` 模式变体；`auto` 跟随系统主题，Windows 自绘候选窗会消费解析后的最终主题。
+`theme.yaml` v2 支持 `ui.colorScheme: auto | light | dark`、`ui.accentColor`、`ui.embeddedComposition` 和 `light:` / `dark:` 模式变体；`auto` 跟随系统主题，Windows 自绘候选窗会消费解析后的最终主题。
 
 用户主题路径跟随 `keytao_core::default_user_data_dir()`，即 `%APPDATA%/keytao/theme.yaml`；开发覆盖可用 `KEYTAO_IME_THEME_PATH`。
 

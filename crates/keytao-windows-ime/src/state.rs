@@ -37,6 +37,7 @@ use crate::{
     edit_session::with_write_session,
     globals::DllActivityGuard,
     input_context::{inspect_context, ContextInputState},
+    key_event_sink::{has_visible_state, should_arm_caret_reprobe, CaretSource},
     language_bar::LanguageBarItem,
 };
 
@@ -53,6 +54,7 @@ const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// that never grants one must not get one request per keystroke.
 const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
+static THEME_RESOLVER: OnceLock<keytao_theme::ThemeResolver> = OnceLock::new();
 
 // ── Shared TsfState ───────────────────────────────────────────────────────────
 
@@ -112,6 +114,11 @@ pub struct TsfState {
     pub caret_retry_attempts: u8,
     pub caret_retry_mode_hint: bool,
     pub ime_write_session_active: bool,
+    pub caret_probe_session_in_progress: bool,
+    /// COM identity of the composition temporarily owned by the active write
+    /// session while `st.composition` is taken out of shared state.
+    pub composition_in_flight: Option<usize>,
+    pub composition_terminated_in_session: bool,
     layout_sink: Option<LayoutSinkRegistration>,
     compartment_sinks: Vec<CompartmentSinkRegistration>,
     /// Sinks on the focused context's `KEYBOARD_DISABLED` / `EMPTYCONTEXT`
@@ -271,6 +278,9 @@ impl TsfState {
             caret_retry_attempts: 0,
             caret_retry_mode_hint: false,
             ime_write_session_active: false,
+            caret_probe_session_in_progress: false,
+            composition_in_flight: None,
+            composition_terminated_in_session: false,
             layout_sink: None,
             compartment_sinks: Vec::new(),
             context_compartment_sinks: Vec::new(),
@@ -458,6 +468,34 @@ pub(crate) fn diagnostics_enabled() -> bool {
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
     })
+}
+
+/// Missing theme file or key means panel-only preedit by default.
+pub(crate) fn embedded_composition() -> bool {
+    THEME_RESOLVER
+        .get_or_init(|| {
+            let theme_path = keytao_theme::default_user_theme_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "missing".to_string());
+            let resolver = crate::panel::windows_theme_resolver();
+            let embedded = resolver.current().ui.embedded_composition;
+            append_diagnostic(format!(
+                "embedded_composition setting={} theme={theme_path}",
+                u8::from(embedded)
+            ));
+            resolver
+        })
+        .current()
+        .ui
+        .embedded_composition
+}
+
+/// Resolve the theme once before a TSF document write can synchronously call
+/// `OnCompositionTerminated`. Later calls still observe theme-file changes.
+pub(crate) fn prime_theme_resolver() {
+    if THEME_RESOLVER.get().is_none() {
+        let _ = embedded_composition();
+    }
 }
 
 pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
@@ -947,14 +985,14 @@ pub(crate) fn update_ime_windows(
     shared_state: &SharedState,
     ime_state: &ImeState,
     document_mgr: Option<&ITfDocumentMgr>,
-    caret: Option<CaretPosition>,
+    caret: Option<(CaretPosition, CaretSource)>,
     owner_hwnd: HWND,
     show_mode_hint: bool,
+    embedded: bool,
 ) {
     let (thread_mgr, allow_fallback_window) = {
         let st = shared_state.borrow();
-        let uiless = st.activation_flags & TF_TMAE_UIELEMENTENABLEDONLY != 0
-            || st.thread_mgr_flags & TF_TMF_UIELEMENTENABLEDONLY != 0;
+        let uiless = host_is_uiless(&st);
         (st.thread_mgr.clone(), !uiless)
     };
     let allow_candidate_window = with_detached_candidate_ui(shared_state, |candidate_ui| {
@@ -969,16 +1007,28 @@ pub(crate) fn update_ime_windows(
     with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
-            if let Some(caret) = caret {
-                candidate_win.show(ime_state, caret.x, caret.y, caret.owner_hwnd, &weak_state);
+            if let Some((caret, _)) = caret {
+                candidate_win.show(
+                    ime_state,
+                    caret.x,
+                    caret.y,
+                    caret.owner_hwnd,
+                    &weak_state,
+                    embedded,
+                );
             }
         } else {
             candidate_win.hide();
         }
-        if caret.is_none() && ((show && allow_candidate_window) || show_mode_hint) {
+        let caret_source = caret.map(|(_, source)| source);
+        if caret_source == Some(CaretSource::Probe) {
+            candidate_win.disarm_caret_reprobe();
+        } else if should_arm_caret_reprobe(caret_source)
+            && ((show && allow_candidate_window) || show_mode_hint)
+        {
             candidate_win.arm_caret_reprobe(owner_hwnd, &weak_state);
         }
-        if let Some(caret) = caret.filter(|_| show_mode_hint) {
+        if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
             mode_hint_win.show_mode_hint(
                 ime_state.ascii_mode,
                 caret.x,
@@ -988,6 +1038,11 @@ pub(crate) fn update_ime_windows(
             );
         }
     });
+}
+
+pub(crate) fn host_is_uiless(state: &TsfState) -> bool {
+    state.activation_flags & TF_TMAE_UIELEMENTENABLEDONLY != 0
+        || state.thread_mgr_flags & TF_TMF_UIELEMENTENABLEDONLY != 0
 }
 
 pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
@@ -1034,6 +1089,8 @@ fn take_active_composition(
     st.last_caret = None;
     st.caret_retry_attempts = 0;
     st.caret_retry_mode_hint = false;
+    st.composition_in_flight = None;
+    st.composition_terminated_in_session = false;
     // The panel is about to be hidden, so no click can still be pending; the
     // stale context must not keep the host object alive.
     st.key_context = None;
@@ -1047,12 +1104,43 @@ pub(crate) fn clear_input_after_composition_terminated(
     let Some(terminated) = terminated else {
         return;
     };
-    let is_active_composition = shared_state
-        .borrow()
-        .composition
-        .as_ref()
-        .is_some_and(|active| active.as_raw() == terminated.as_raw());
+    let terminated_identity = terminated.as_raw() as usize;
+    let (is_active_composition, terminated_in_session) = {
+        let st = shared_state.borrow();
+        (
+            st.composition
+                .as_ref()
+                .is_some_and(|active| active.as_raw() == terminated.as_raw()),
+            should_record_termination_in_session(
+                st.ime_write_session_active,
+                st.composition_in_flight,
+                terminated_identity,
+            ),
+        )
+    };
     if !is_active_composition {
+        if terminated_in_session {
+            shared_state.borrow_mut().composition_terminated_in_session = true;
+        }
+        return;
+    }
+
+    // A composition can only become active after `apply_ime_state` has already
+    // primed the resolver outside the document write session. Keep this lookup
+    // below the identity check so stale callbacks do no filesystem work.
+    let configured_embedded = embedded_composition();
+    let panel_mode_with_visible_state = {
+        let st = shared_state.borrow();
+        !configured_embedded
+            && !host_is_uiless(&st)
+            && st.ime_state.as_ref().is_some_and(has_visible_state)
+    };
+    if panel_mode_with_visible_state {
+        let mut st = shared_state.borrow_mut();
+        st.composition = None;
+        st.composition_context = None;
+        drop(st);
+        append_diagnostic("composition terminated mode=panel kept_state=1");
         return;
     }
 
@@ -1063,8 +1151,19 @@ pub(crate) fn clear_input_after_composition_terminated(
         st.composition = None;
         st.composition_context = None;
         st.ime_state = None;
+        st.last_caret = None;
+        st.caret_retry_attempts = 0;
+        st.caret_retry_mode_hint = false;
     }
     hide_ime_windows(shared_state);
+}
+
+fn should_record_termination_in_session(
+    in_write_session: bool,
+    composition_in_flight: Option<usize>,
+    terminated_identity: usize,
+) -> bool {
+    in_write_session && composition_in_flight == Some(terminated_identity)
 }
 
 fn request_composition_end(context: ITfContext, composition: ITfComposition, client_id: u32) {
@@ -1256,7 +1355,9 @@ pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {
 
 #[cfg(test)]
 mod tests {
-    use super::{input_context_retry_due, INPUT_CONTEXT_RETRY_INTERVAL};
+    use super::{
+        input_context_retry_due, should_record_termination_in_session, INPUT_CONTEXT_RETRY_INTERVAL,
+    };
     use std::time::Instant;
 
     #[test]
@@ -1300,5 +1401,24 @@ mod tests {
         // the throttle and keep the context stuck in pass-through.
         let now = Instant::now();
         assert!(!input_context_retry_due(true, 0, None, now));
+    }
+
+    #[test]
+    fn only_matching_in_flight_composition_arms_session_termination() {
+        assert!(should_record_termination_in_session(
+            true,
+            Some(0x1234),
+            0x1234
+        ));
+        assert!(!should_record_termination_in_session(
+            true,
+            Some(0x1234),
+            0x5678
+        ));
+        assert!(!should_record_termination_in_session(
+            false,
+            Some(0x1234),
+            0x1234
+        ));
     }
 }

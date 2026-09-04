@@ -18,6 +18,7 @@ use windows::{
 use crate::{
     display_attribute,
     globals::{lock_server, pin_module, DllActivityGuard},
+    guard,
     input_context::CONTEXT_SENSITIVITY_COMPARTMENTS,
     key_event_sink::KeyEventSink,
     language_bar::LanguageBarItem,
@@ -54,30 +55,34 @@ impl IClassFactory_Impl for ClassFactory_Impl {
         riid: *const GUID,
         ppvobject: *mut *mut std::ffi::c_void,
     ) -> Result<()> {
-        if riid.is_null() || ppvobject.is_null() {
-            return Err(E_POINTER.into());
-        }
-        unsafe {
-            *ppvobject = std::ptr::null_mut();
-        }
-        if punkouter.is_some() {
-            return Err(CLASS_E_NOAGGREGATION.into());
-        }
-        let state = new_shared_state();
-        let ts: ITfTextInputProcessorEx = TextService {
-            state,
-            _dll_guard: DllActivityGuard::new(),
-        }
-        .into();
-        unsafe {
-            ts.query(riid, ppvobject).ok()?;
+        guard(|| {
+            if riid.is_null() || ppvobject.is_null() {
+                return Err(E_POINTER.into());
+            }
+            unsafe {
+                *ppvobject = std::ptr::null_mut();
+            }
+            if punkouter.is_some() {
+                return Err(CLASS_E_NOAGGREGATION.into());
+            }
+            let state = new_shared_state();
+            let ts: ITfTextInputProcessorEx = TextService {
+                state,
+                _dll_guard: DllActivityGuard::new(),
+            }
+            .into();
+            unsafe {
+                ts.query(riid, ppvobject).ok()?;
+            }
             Ok(())
-        }
+        })
     }
 
     fn LockServer(&self, flock: BOOL) -> Result<()> {
-        lock_server(flock.as_bool());
-        Ok(())
+        guard(|| {
+            lock_server(flock.as_bool());
+            Ok(())
+        })
     }
 }
 
@@ -311,92 +316,94 @@ fn advise_compartment_sink(
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
-        activate_service(&self.state, ptim, tid, 0)
+        guard(|| activate_service(&self.state, ptim, tid, 0))
     }
 
     fn Deactivate(&self) -> Result<()> {
-        // TSF releases its last reference right after this returns, so a queued
-        // edit session would never run — end the composition synchronously.
-        terminate_input_now(&self.state);
-        clear_compartment_sinks(&self.state);
-        clear_context_compartment_sinks(&self.state);
-        let (thread_mgr, client_id, thread_sink_cookie, thread_focus_sink_cookie, language_bar) = {
+        guard(|| {
+            // TSF releases its last reference right after this returns, so a queued
+            // edit session would never run — end the composition synchronously.
+            terminate_input_now(&self.state);
+            clear_compartment_sinks(&self.state);
+            clear_context_compartment_sinks(&self.state);
+            let (thread_mgr, client_id, thread_sink_cookie, thread_focus_sink_cookie, language_bar) = {
+                let mut st = self.state.borrow_mut();
+                (
+                    st.thread_mgr.clone(),
+                    st.client_id,
+                    st.thread_mgr_sink_cookie,
+                    st.thread_focus_sink_cookie,
+                    st.language_bar.take(),
+                )
+            };
+
+            if let Some(language_bar) = language_bar {
+                language_bar.remove();
+            }
+
+            if let Some(thread_mgr) = thread_mgr {
+                if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
+                    unsafe {
+                        let _ = km.UnadviseKeyEventSink(client_id);
+                    }
+                }
+                if let Some(cookie) = thread_sink_cookie {
+                    if let Ok(source) = thread_mgr.cast::<ITfSource>() {
+                        unsafe {
+                            let _ = source.UnadviseSink(cookie);
+                        }
+                    }
+                }
+                if let Some(cookie) = thread_focus_sink_cookie {
+                    if let Ok(source) = thread_mgr.cast::<ITfSource>() {
+                        unsafe {
+                            let _ = source.UnadviseSink(cookie);
+                        }
+                    }
+                }
+            }
+
             let mut st = self.state.borrow_mut();
-            (
-                st.thread_mgr.clone(),
-                st.client_id,
-                st.thread_mgr_sink_cookie,
-                st.thread_focus_sink_cookie,
-                st.language_bar.take(),
-            )
-        };
 
-        if let Some(language_bar) = language_bar {
-            language_bar.remove();
-        }
+            // The composition is already gone; clear any disconnected handles too.
+            st.composition = None;
+            st.composition_context = None;
+            st.key_context = None;
+            st.key_sink = None;
+            st.thread_mgr_sink = None;
+            st.thread_mgr_sink_cookie = None;
+            st.thread_focus_sink = None;
+            st.thread_focus_sink_cookie = None;
+            st.language_bar = None;
+            st.thread_mgr = None;
+            st.ime_state = None;
+            st.client_id = 0;
+            st.activation_flags = 0;
+            st.thread_mgr_flags = 0;
+            st.display_attribute_atom = None;
+            drop(st);
+            hide_ime_windows(&self.state);
 
-        if let Some(thread_mgr) = thread_mgr {
-            if let Ok(km) = thread_mgr.cast::<ITfKeystrokeMgr>() {
-                unsafe {
-                    let _ = km.UnadviseKeyEventSink(client_id);
-                }
-            }
-            if let Some(cookie) = thread_sink_cookie {
-                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
-                    unsafe {
-                        let _ = source.UnadviseSink(cookie);
-                    }
-                }
-            }
-            if let Some(cookie) = thread_focus_sink_cookie {
-                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
-                    unsafe {
-                        let _ = source.UnadviseSink(cookie);
-                    }
-                }
-            }
-        }
-
-        let mut st = self.state.borrow_mut();
-
-        // The composition is already gone; clear any disconnected handles too.
-        st.composition = None;
-        st.composition_context = None;
-        st.key_context = None;
-        st.key_sink = None;
-        st.thread_mgr_sink = None;
-        st.thread_mgr_sink_cookie = None;
-        st.thread_focus_sink = None;
-        st.thread_focus_sink_cookie = None;
-        st.language_bar = None;
-        st.thread_mgr = None;
-        st.ime_state = None;
-        st.client_id = 0;
-        st.activation_flags = 0;
-        st.thread_mgr_flags = 0;
-        st.display_attribute_atom = None;
-        drop(st);
-        hide_ime_windows(&self.state);
-
-        tracing::info!("KeyTao TSF deactivated");
-        append_diagnostic("TSF deactivated");
-        Ok(())
+            tracing::info!("KeyTao TSF deactivated");
+            append_diagnostic("TSF deactivated");
+            Ok(())
+        })
     }
 }
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
     fn ActivateEx(&self, ptim: Option<&ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
-        activate_service(&self.state, ptim, tid, flags)
+        guard(|| activate_service(&self.state, ptim, tid, flags))
     }
 }
 
 impl ITfDisplayAttributeProvider_Impl for TextService_Impl {
     fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        Ok(display_attribute::new_enumerator())
+        guard(|| Ok(display_attribute::new_enumerator()))
     }
 
     fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
-        display_attribute::get_info(guid)
+        guard(|| display_attribute::get_info(guid))
     }
 }
 
@@ -408,16 +415,20 @@ struct ThreadMgrEventSink {
 
 impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     fn OnInitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
-        append_diagnostic("ThreadMgrEventSink OnInitDocumentMgr");
-        Ok(())
+        guard(|| {
+            append_diagnostic("ThreadMgrEventSink OnInitDocumentMgr");
+            Ok(())
+        })
     }
 
     fn OnUninitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
-        append_diagnostic("ThreadMgrEventSink OnUninitDocumentMgr");
-        if let Some(state) = self.state.upgrade() {
-            reset_input_for_focus_change(&state);
-        }
-        Ok(())
+        guard(|| {
+            append_diagnostic("ThreadMgrEventSink OnUninitDocumentMgr");
+            if let Some(state) = self.state.upgrade() {
+                reset_input_for_focus_change(&state);
+            }
+            Ok(())
+        })
     }
 
     fn OnSetFocus(
@@ -425,36 +436,42 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         pdimfocus: Option<&ITfDocumentMgr>,
         _pdimprevfocus: Option<&ITfDocumentMgr>,
     ) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            reset_input_for_focus_change(&state);
-            refresh_engine_for_focus(&state);
-            let context = pdimfocus.and_then(|manager| unsafe { manager.GetTop() }.ok());
-            refresh_input_context(&state, context.as_ref());
-        }
-        append_diagnostic(format!(
-            "ThreadMgrEventSink OnSetFocus focus={}",
-            pdimfocus.is_some()
-        ));
-        Ok(())
+        guard(|| {
+            if let Some(state) = self.state.upgrade() {
+                reset_input_for_focus_change(&state);
+                refresh_engine_for_focus(&state);
+                let context = pdimfocus.and_then(|manager| unsafe { manager.GetTop() }.ok());
+                refresh_input_context(&state, context.as_ref());
+            }
+            append_diagnostic(format!(
+                "ThreadMgrEventSink OnSetFocus focus={}",
+                pdimfocus.is_some()
+            ));
+            Ok(())
+        })
     }
 
     fn OnPushContext(&self, pic: Option<&ITfContext>) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            reset_input_for_focus_change(&state);
-            refresh_engine_for_focus(&state);
-            refresh_input_context(&state, pic);
-        }
-        append_diagnostic("ThreadMgrEventSink OnPushContext");
-        Ok(())
+        guard(|| {
+            if let Some(state) = self.state.upgrade() {
+                reset_input_for_focus_change(&state);
+                refresh_engine_for_focus(&state);
+                refresh_input_context(&state, pic);
+            }
+            append_diagnostic("ThreadMgrEventSink OnPushContext");
+            Ok(())
+        })
     }
 
     fn OnPopContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            reset_input_for_focus_change(&state);
-            refresh_input_context(&state, None);
-        }
-        append_diagnostic("ThreadMgrEventSink OnPopContext");
-        Ok(())
+        guard(|| {
+            if let Some(state) = self.state.upgrade() {
+                reset_input_for_focus_change(&state);
+                refresh_input_context(&state, None);
+            }
+            append_diagnostic("ThreadMgrEventSink OnPopContext");
+            Ok(())
+        })
     }
 }
 
@@ -473,23 +490,25 @@ struct CompartmentSink {
 
 impl ITfCompartmentEventSink_Impl for CompartmentSink_Impl {
     fn OnChange(&self, rguid: *const GUID) -> Result<()> {
-        if rguid.is_null() {
-            return Ok(());
-        }
-        let Some(state) = self.state.upgrade() else {
-            return Ok(());
-        };
-        let guid = unsafe { *rguid };
-        if guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
-            apply_open_close_change(&state);
-        } else if guid == GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION {
-            apply_conversion_mode_change(&state);
-        } else if CONTEXT_SENSITIVITY_COMPARTMENTS.contains(&guid) {
-            // Re-inspects the context but leaves the registrations alone: this
-            // sink must not be unadvised from inside its own callback.
-            apply_context_compartment_change(&state);
-        }
-        Ok(())
+        guard(|| {
+            if rguid.is_null() {
+                return Ok(());
+            }
+            let Some(state) = self.state.upgrade() else {
+                return Ok(());
+            };
+            let guid = unsafe { *rguid };
+            if guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+                apply_open_close_change(&state);
+            } else if guid == GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION {
+                apply_conversion_mode_change(&state);
+            } else if CONTEXT_SENSITIVITY_COMPARTMENTS.contains(&guid) {
+                // Re-inspects the context but leaves the registrations alone: this
+                // sink must not be unadvised from inside its own callback.
+                apply_context_compartment_change(&state);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -501,21 +520,25 @@ struct ThreadFocusSink {
 
 impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            refresh_engine_for_focus(&state);
-            refresh_input_context(&state, None);
-        }
-        append_diagnostic("ThreadFocusSink OnSetThreadFocus");
-        Ok(())
+        guard(|| {
+            if let Some(state) = self.state.upgrade() {
+                refresh_engine_for_focus(&state);
+                refresh_input_context(&state, None);
+            }
+            append_diagnostic("ThreadFocusSink OnSetThreadFocus");
+            Ok(())
+        })
     }
 
     fn OnKillThreadFocus(&self) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            // The thread stops pumping our edit sessions once focus is gone, so
-            // a queued composition end would hang around in the document.
-            terminate_input_now(&state);
-        }
-        append_diagnostic("ThreadFocusSink OnKillThreadFocus");
-        Ok(())
+        guard(|| {
+            if let Some(state) = self.state.upgrade() {
+                // The thread stops pumping our edit sessions once focus is gone, so
+                // a queued composition end would hang around in the document.
+                terminate_input_now(&state);
+            }
+            append_diagnostic("ThreadFocusSink OnKillThreadFocus");
+            Ok(())
+        })
     }
 }

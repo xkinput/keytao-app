@@ -152,21 +152,19 @@ impl PanelRenderer {
     pub fn new(fonts: FontSet) -> Self {
         Self {
             fonts: fonts.fonts,
-            theme_resolver: ThemeResolver::new(
-                windows_bundled_default_theme_path()
-                    .or_else(keytao_theme::default_bundled_theme_path),
-                keytao_theme::default_user_theme_path(),
-            ),
+            theme_resolver: windows_theme_resolver(),
         }
     }
 
     /// Render panel to a premultiplied BGRA byte buffer plus the hit areas the
     /// window needs for mouse selection.
-    pub fn render(&self, state: &ImeState, scale: f32) -> RenderedPanel {
+    pub fn render(&self, state: &ImeState, scale: f32, embedded: bool) -> RenderedPanel {
         let mut theme = self.theme_resolver.current();
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
-        let model = theme
-            .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
+        let model = theme.candidate_panel_model(
+            state_to_panel_input(state, embedded),
+            &UiCapabilities::full_custom(),
+        );
         let font_size = theme.font.size;
         let label_size = theme.font.label_size;
         let comment_size = theme.font.comment_size;
@@ -720,6 +718,13 @@ fn windows_bundled_default_theme_path() -> Option<PathBuf> {
     None
 }
 
+pub(crate) fn windows_theme_resolver() -> ThemeResolver {
+    ThemeResolver::new(
+        windows_bundled_default_theme_path().or_else(keytao_theme::default_bundled_theme_path),
+        keytao_theme::default_user_theme_path(),
+    )
+}
+
 fn dll_related_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -753,10 +758,13 @@ fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
 }
 
-fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
+fn state_to_panel_input(state: &ImeState, embedded: bool) -> CandidatePanelInput {
     CandidatePanelInput {
-        // TSF already renders the composition in the client edit control.
-        preedit: String::new(),
+        preedit: if embedded {
+            String::new()
+        } else {
+            preedit_with_caret(state)
+        },
         candidates: state
             .candidates
             .iter()
@@ -770,6 +778,18 @@ fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
         is_last_page: state.is_last_page,
         select_keys: state.select_keys.clone(),
     }
+}
+
+/// `ImeState::cursor` counts Unicode scalar values.
+fn preedit_with_caret(state: &ImeState) -> String {
+    let mut text = state.preedit.clone();
+    let byte = state
+        .preedit
+        .char_indices()
+        .nth(state.cursor)
+        .map_or(text.len(), |(index, _)| index);
+    text.insert(byte, '|');
+    text
 }
 
 fn bgra(color: RgbaColor) -> [u8; 4] {
@@ -852,7 +872,25 @@ mod tests {
         let mut state = ImeState::empty();
         state.preedit = "f".to_owned();
 
-        assert!(state_to_panel_input(&state).preedit.is_empty());
+        assert!(state_to_panel_input(&state, true).preedit.is_empty());
+    }
+
+    #[test]
+    fn panel_shows_preedit_when_not_embedded() {
+        let mut state = ImeState::empty();
+        state.preedit = "ni".to_owned();
+        state.cursor = 1;
+
+        assert_eq!(state_to_panel_input(&state, false).preedit, "n|i");
+    }
+
+    #[test]
+    fn preedit_caret_lands_at_end_when_cursor_past_len() {
+        let mut state = ImeState::empty();
+        state.preedit = "ni".to_owned();
+        state.cursor = 10;
+
+        assert_eq!(state_to_panel_input(&state, false).preedit, "ni|");
     }
 
     #[test]

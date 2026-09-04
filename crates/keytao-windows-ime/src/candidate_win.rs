@@ -28,11 +28,11 @@ use windows::{
         System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
         System::LibraryLoader::GetModuleHandleW,
         UI::Accessibility::NotifyWinEvent,
-        UI::HiDpi::GetDpiForWindow,
+        UI::HiDpi::{GetDpiForSystem, GetDpiForWindow},
         UI::Shell::{FrameworkInputPane, IFrameworkInputPane},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-            KillTimer, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow, UnregisterClassW,
+            KillTimer, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow,
             UpdateLayeredWindow, CW_USEDEFAULT, EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE,
             EVENT_OBJECT_IME_SHOW, GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT, SM_CXVIRTUALSCREEN,
             SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
@@ -45,6 +45,7 @@ use windows::{
 
 use crate::{
     globals::DLL_INSTANCE,
+    guard,
     key_event_sink::{handle_panel_click, PanelClick},
     panel::{PanelHitAreas, PanelRenderer},
     state::{append_diagnostic, diagnostics_enabled, WeakState},
@@ -55,6 +56,13 @@ const MODE_HINT_TIMER_ID: usize = 1;
 const CARET_RETRY_TIMER_ID: usize = 2;
 const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CARET_RETRY_DELAYS_MS: [u32; 5] = [16, 32, 64, 128, 256];
+
+pub(crate) fn caret_retry_delay_ms(completed_attempts: u8) -> Option<u32> {
+    CARET_RETRY_DELAYS_MS
+        .get(completed_attempts as usize)
+        .copied()
+}
 
 fn class_name_wide() -> Vec<u16> {
     CLASS_NAME.encode_utf16().collect()
@@ -68,10 +76,14 @@ fn module_handle() -> HMODULE {
 }
 
 fn dpi_scale(owner_hwnd: HWND) -> f32 {
-    if owner_hwnd.0.is_null() {
-        return WINDOWS_CANDIDATE_DENSITY;
-    }
-    render_scale_for_dpi(unsafe { GetDpiForWindow(owner_hwnd) })
+    let dpi = unsafe {
+        if owner_hwnd.0.is_null() {
+            GetDpiForSystem()
+        } else {
+            GetDpiForWindow(owner_hwnd)
+        }
+    };
+    render_scale_for_dpi(dpi)
 }
 
 fn render_scale_for_dpi(dpi: u32) -> f32 {
@@ -182,6 +194,11 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    guard(|| Ok(wnd_proc_inner(hwnd, msg, wparam, lparam)))
+        .unwrap_or_else(|_| DefWindowProcW(hwnd, msg, wparam, lparam))
+}
+
+unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER if wparam.0 == CARET_RETRY_TIMER_ID => {
             let _ = KillTimer(hwnd, CARET_RETRY_TIMER_ID);
@@ -199,7 +216,7 @@ unsafe extern "system" fn wnd_proc(
             return LRESULT(0);
         }
         // Selecting a candidate must never move the caret out of the host.
-        WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as _),
         WM_LBUTTONUP => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -262,6 +279,11 @@ impl CandidateWindow {
     }
 
     fn ensure_window(&mut self, owner_hwnd: HWND, state: &WeakState) -> bool {
+        let owner_hwnd = if owner_hwnd.0.is_null() && !self.owner_hwnd.0.is_null() {
+            self.owner_hwnd
+        } else {
+            owner_hwnd
+        };
         if !self.hwnd.0.is_null() && self.owner_hwnd != owner_hwnd {
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
@@ -393,19 +415,31 @@ impl CandidateWindow {
             return;
         };
         let completed_attempts = shared_state.borrow().caret_retry_attempts;
-        if completed_attempts >= 6 {
+        let Some(delay_ms) = caret_retry_delay_ms(completed_attempts) else {
             if diagnostics_enabled() {
                 append_diagnostic(format!("caret retry attempt={completed_attempts} gave_up"));
             }
             return;
-        }
+        };
         let attempt = completed_attempts + 1;
-        let timer_id = unsafe { SetTimer(self.hwnd, CARET_RETRY_TIMER_ID, 16, None) };
+        let timer_id = unsafe { SetTimer(self.hwnd, CARET_RETRY_TIMER_ID, delay_ms, None) };
         if timer_id != 0 {
             target.caret_reprobe_pending.set(true);
             if diagnostics_enabled() {
                 append_diagnostic(format!("caret retry attempt={attempt} armed"));
             }
+        }
+    }
+
+    pub fn disarm_caret_reprobe(&mut self) {
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = KillTimer(self.hwnd, CARET_RETRY_TIMER_ID);
+        }
+        if let Some(target) = click_target(self.hwnd) {
+            target.caret_reprobe_pending.set(false);
         }
     }
 
@@ -417,6 +451,7 @@ impl CandidateWindow {
         caret_y: i32,
         owner_hwnd: HWND,
         state: &WeakState,
+        embedded: bool,
     ) {
         let has_content = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if !has_content {
@@ -430,8 +465,8 @@ impl CandidateWindow {
             return;
         };
 
-        let scale = dpi_scale(owner_hwnd);
-        let rendered = renderer.render(ime_state, scale);
+        let scale = dpi_scale(self.owner_hwnd);
+        let rendered = renderer.render(ime_state, scale, embedded);
         let (w, h) = (rendered.width, rendered.height);
         if w == 0 || h == 0 {
             return;
@@ -469,12 +504,9 @@ impl CandidateWindow {
 
     pub fn hide(&mut self) {
         if !self.hwnd.0.is_null() {
-            if let Some(target) = click_target(self.hwnd) {
-                target.caret_reprobe_pending.set(false);
-            }
+            self.disarm_caret_reprobe();
             unsafe {
                 let _ = KillTimer(self.hwnd, MODE_HINT_TIMER_ID);
-                let _ = KillTimer(self.hwnd, CARET_RETRY_TIMER_ID);
                 if self.visible {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
                 }
@@ -501,7 +533,7 @@ impl CandidateWindow {
             return;
         };
 
-        let scale = dpi_scale(owner_hwnd);
+        let scale = dpi_scale(self.owner_hwnd);
         let (pixels, w, h) = renderer.render_mode_hint(ascii_mode, scale);
         let hint_duration_ms = renderer.mode_hint_duration_ms();
         if w == 0 || h == 0 {
@@ -607,8 +639,6 @@ impl Drop for CandidateWindow {
             if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
             }
-            let class_name = class_name_wide();
-            let _ = UnregisterClassW(windows::core::PCWSTR(class_name.as_ptr()), module_handle());
         }
     }
 }
@@ -617,7 +647,10 @@ impl Drop for CandidateWindow {
 mod tests {
     use windows::Win32::Foundation::RECT;
 
-    use super::{click_at, popup_position_in, render_scale_for_dpi, subtract_touch_keyboard};
+    use super::{
+        caret_retry_delay_ms, click_at, popup_position_in, render_scale_for_dpi,
+        subtract_touch_keyboard,
+    };
     use crate::{
         key_event_sink::PanelClick,
         panel::{PanelHitAreas, PanelRect},
@@ -637,6 +670,16 @@ mod tests {
         assert!((render_scale_for_dpi(96) - 0.82).abs() < 0.001);
         assert!((render_scale_for_dpi(144) - 1.23).abs() < 0.001);
         assert!((render_scale_for_dpi(192) - 1.64).abs() < 0.001);
+    }
+
+    #[test]
+    fn caret_retry_uses_bounded_exponential_backoff() {
+        assert_eq!(caret_retry_delay_ms(0), Some(16));
+        assert_eq!(caret_retry_delay_ms(1), Some(32));
+        assert_eq!(caret_retry_delay_ms(2), Some(64));
+        assert_eq!(caret_retry_delay_ms(3), Some(128));
+        assert_eq!(caret_retry_delay_ms(4), Some(256));
+        assert_eq!(caret_retry_delay_ms(5), None);
     }
 
     #[test]

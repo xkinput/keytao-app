@@ -272,6 +272,7 @@ pub struct ImeUiSettings {
     pub color_scheme: keytao_theme::UiColorScheme,
     pub effective_color_scheme: keytao_theme::EffectiveColorScheme,
     pub orientation: keytao_theme::PanelOrientation,
+    pub embedded_composition: bool,
     pub accent_color: String,
     pub font_size: f32,
     pub theme_path: Option<String>,
@@ -306,6 +307,7 @@ fn ime_ui_settings_from_paths(
         color_scheme: theme.ui.color_scheme,
         effective_color_scheme: theme.ui.effective_color_scheme,
         orientation: theme.panel.orientation,
+        embedded_composition: theme.ui.embedded_composition,
         accent_color: color_to_hex(accent_color),
         font_size: theme.font.size,
         theme_exists: theme_path.is_file(),
@@ -456,6 +458,42 @@ fn write_ime_ui_color_scheme(color_scheme: keytao_theme::UiColorScheme) -> Resul
         current.accent_color,
         current.font_size,
     )
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_embedded_composition(embedded: bool) -> Result<(), String> {
+    let theme_path = ime_theme_path()?;
+    if let Some(parent) = theme_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
+    }
+    let mut root = if theme_path.is_file() {
+        let content = std::fs::read_to_string(&theme_path)
+            .map_err(|e| format!("读取主题配置失败 {}: {e}", theme_path.display()))?;
+        serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map_err(|e| format!("主题配置无法解析 {}: {e}", theme_path.display()))?
+    } else {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    };
+    if !matches!(root, serde_yaml::Value::Mapping(_)) {
+        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let mapping = root
+        .as_mapping_mut()
+        .ok_or("主题配置根节点必须是 YAML mapping")?;
+    mapping
+        .entry(serde_yaml::Value::String("version".into()))
+        .or_insert_with(|| {
+            serde_yaml::Value::Number(serde_yaml::Number::from(keytao_theme::THEME_SCHEMA_VERSION))
+    });
+    let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
+    ui_mapping.remove(&serde_yaml::Value::String("embedded_composition".into()));
+    ui_mapping.insert(
+        serde_yaml::Value::String("embeddedComposition".into()),
+        serde_yaml::Value::Bool(embedded),
+    );
+    let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
+    write_file_atomic(&theme_path, content.as_bytes())
+        .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
 }
 
 fn yaml_child_mapping<'a>(
@@ -6397,6 +6435,17 @@ fn set_ime_ui_color_scheme(
 
 #[tauri::command]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn set_ime_embedded_composition(embedded: bool) -> Result<ImeUiSettings, String> {
+    write_ime_embedded_composition(embedded)?;
+    let reload_message = match write_keytao_ime_reload_stamp() {
+        Ok(()) => "已保存嵌入模式设置并通知系统输入法重载".to_string(),
+        Err(e) => format!("已保存嵌入模式设置，但系统输入法重载通知失败：{e}"),
+    };
+    ime_ui_settings_with_message(reload_message)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
@@ -6991,6 +7040,8 @@ pub fn run() {
             rime_deploy_default,
             get_ime_ui_settings,
             set_ime_ui_color_scheme,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            set_ime_embedded_composition,
             set_ime_ui_settings,
             read_debug_logs,
             #[cfg(not(any(target_os = "android", target_os = "linux")))]

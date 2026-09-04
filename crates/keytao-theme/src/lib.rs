@@ -100,6 +100,7 @@ pub struct UiTheme {
     pub color_scheme: UiColorScheme,
     pub effective_color_scheme: EffectiveColorScheme,
     pub accent_color: Option<RgbaColor>,
+    pub embedded_composition: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -790,6 +791,7 @@ impl Default for UiTheme {
             color_scheme: UiColorScheme::Auto,
             effective_color_scheme: EffectiveColorScheme::Light,
             accent_color: None,
+            embedded_composition: false,
         }
     }
 }
@@ -830,6 +832,8 @@ struct PartialThemeVariant {
 struct PartialUiTheme {
     #[serde(alias = "color_scheme")]
     color_scheme: Option<UiColorScheme>,
+    #[serde(alias = "embedded_composition")]
+    embedded_composition: Option<bool>,
     #[serde(alias = "night_mode")]
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "optional_color")]
@@ -955,6 +959,9 @@ impl UiTheme {
         }
         if let Some(accent_color) = partial.accent_color {
             self.accent_color = Some(accent_color);
+        }
+        if let Some(embedded_composition) = partial.embedded_composition {
+            self.embedded_composition = embedded_composition;
         }
     }
 }
@@ -1317,6 +1324,7 @@ mod tests {
         let theme = resolve_theme_from_paths(None, None);
         assert_eq!(theme.version, THEME_SCHEMA_VERSION);
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
+        assert!(!theme.ui.embedded_composition);
         assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
         assert_eq!(theme.panel.min_width, 128.0);
         assert_eq!(theme.font.size, 20.0);
