@@ -222,6 +222,8 @@ Rust 返回 JSON，Kotlin 只反序列化：
 7. `accepted=false && !hasComposition` 时放行给系统。
 8. `accepted=true` 或有 composition 时按 `ImeState` 应用到 `InputConnection`。
 
+移动端 `englishMode` 默认 `ascii`，中/En、独按硬件 Shift 与 Rime 选项页因此默认沿用 `ascii_mode`。仅当 `englishMode == "schema"` 且已安装 English 方案时，这些入口才会先清掉未上屏 composition，再选择 English schema；返回中文会恢复进入 English 前快照的中文 schema 选项（包括临时 `ascii_punct`）。敏感/直通输入框的性能旁路始终只使用 `ascii_mode`，不切换 schema；桌面契约不受此移动端设置影响。
+
 Android keysym 基线：
 
 | Android key | X11 keysym |
@@ -645,3 +647,9 @@ cd src-tauri/gen/android
 - Android ABI `librime` / OpenCC / plugin 是否可加载。
 - 当前 reload stamp 签名。
 - 当前 schema、ascii mode、候选数量和最近一次 process key 结果。
+
+## 键盘内设置面板
+
+工具栏的「设置」会打开键盘内设置面板。布局、候选字号、键角提示和反馈选项仍写入 `android_ime.json`，配色与主题色仍写入 `theme.yaml`；没有新增配置存储。滑杆和色板在手势移动时只更新内存中的键盘配置、尺寸或主题预览，抬手时才通过 `persistSettings` 或主题写入器持久化一次。
+
+App 的移动端页面继续保留长按延迟、删除速度、退格滑动模式、滑动判定阈值、双击空格句号、Flick、回车键、悬浮布局、配置路径及恢复默认等低频设置。完整主题路径、桌面主题配置和桌面页面行为不受键盘内面板影响。

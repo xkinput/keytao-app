@@ -61,6 +61,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var currentState = KeytaoImeState.empty()
     private var bypassAsciiActive = false
     private var asciiModeBeforeBypass = false
+    private var englishSchemaId: String? = null
+    private var currentRimeSchemaId: String? = null
+    private var lastChineseSchemaId: String? = null
+    private var chineseSwitchSnapshot: Map<String, Boolean> = emptyMap()
 
     /**
      * Where the editor put our composing region, in absolute UTF-16 offsets, or
@@ -267,7 +271,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
         keyboardView?.updateEmojiHistoryLearningAllowed(privacyMode.allowsLearning)
         keyboardView?.updateTextRecallAllowed(privacyMode.allowsTextRecall)
-        refreshPredictionSuggestions()
         Log.d(
             "KeytaoIme",
             "editor pkg=${currentInputEditorInfo?.packageName} " +
@@ -300,9 +303,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             candidatesEnd,
         )
         selectionModeActive = newSelStart != newSelEnd
-        if (backspaceSelectionSession == null) {
-            mainHandler.post(::refreshPredictionSuggestions)
-        }
         composingRegionStart = if (candidatesStart >= 0 && candidatesEnd >= candidatesStart) {
             candidatesStart
         } else {
@@ -329,7 +329,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             KeytaoImeState.empty(asciiMode = currentState.asciiMode)
         }
         keyboardView?.updateState(currentState)
-        refreshPredictionSuggestions()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -377,8 +376,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             oneHandedSide = normalized.oneHandedSide,
             oneHandedAvailable = !presentationIsLandscape,
         )
+        keyboardView?.updateSettingsConfig(config)
         keyboardView?.updateConfig(presentedConfig)
-        refreshPredictionSuggestions()
     }
 
     private fun handleKeyboardLayoutStateChanged(next: KeyboardLayoutState, finished: Boolean) {
@@ -514,7 +513,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             applyState(result)
         } else {
             KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
-            applyState(engine.setAsciiMode(!currentState.asciiMode))
+            if (usesEnglishSchema()) {
+                handleMode(null)
+            } else {
+                applyState(engine.setAsciiMode(!currentState.asciiMode))
+            }
         }
         return true
     }
@@ -632,6 +635,101 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
+    override fun onSettingPreview(key: String, value: String) {
+        val next = applySettingToConfig(baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this), key, value)
+            ?: return
+        baseKeyboardConfig = next
+        applyKeyboardPresentation(next, keyboardLayoutState)
+    }
+
+    override fun onSettingChanged(key: String, value: String) {
+        if (key == "accentColor" || key == "colorScheme") {
+            persistThemeSetting(key, value)
+            return
+        }
+        if (key == "reset") {
+            val patch = defaultPanelSettingsPatch()
+            var next = baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this)
+            patch.forEach { (settingKey, settingValue) ->
+                next = applySettingToConfig(next, settingKey, settingValue.toString()) ?: next
+            }
+            baseKeyboardConfig = next
+            applyKeyboardPresentation(next, keyboardLayoutState)
+            val configWritten = KeytaoAndroidImeConfig.persistSettings(this, patch)
+            val themeWritten = KeytaoNativeBridge.writeThemeUi(
+                KeytaoAndroidPaths.themeFile(this).absolutePath,
+                "auto",
+                "",
+            )
+            KeytaoThemeResolver.invalidate()
+            keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
+            if (!configWritten || !themeWritten) keyboardView?.showMessage("键盘内设置恢复失败")
+            return
+        }
+        val patch = settingPatch(key, value) ?: return
+        if (!KeytaoAndroidImeConfig.persistSettings(this, mapOf(key to patch))) {
+            keyboardView?.showMessage("设置保存失败")
+        }
+    }
+
+    private fun persistThemeSetting(key: String, value: String) {
+        val currentScheme = keyboardView?.currentThemeColorScheme() ?: "auto"
+        val colorScheme = if (key == "colorScheme") value else currentScheme
+        val accent = if (key == "accentColor") value else null
+        if (!KeytaoNativeBridge.writeThemeUi(
+                KeytaoAndroidPaths.themeFile(this).absolutePath,
+                colorScheme,
+                accent,
+            )) {
+            keyboardView?.showMessage("主题设置保存失败")
+            return
+        }
+        KeytaoThemeResolver.invalidate()
+        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
+    }
+
+    private fun settingPatch(key: String, value: String): Any? = when (key) {
+        "keyboardHeightDp", "candidateBarHeightDp", "haptics.intensity", "keySoundVolume" ->
+            value.toFloatOrNull()?.roundToInt()
+        "candidateFontScale" -> value.toFloatOrNull()
+        "keyHintVisible", "numberRowEnabled", "haptics.enabled", "keySoundEnabled", "keyPreviewEnabled" ->
+            value.toBooleanStrictOrNull()
+        else -> null
+    }
+
+    private fun applySettingToConfig(
+        current: KeytaoAndroidImeConfig,
+        key: String,
+        value: String,
+    ): KeytaoAndroidImeConfig? {
+        return when (key) {
+            "keyboardHeightDp" -> current.copy(keyboardHeightDp = value.toFloatOrNull()?.roundToInt()?.coerceIn(160, 420) ?: return null)
+            "candidateBarHeightDp" -> current.copy(candidateBarHeightDp = value.toFloatOrNull()?.roundToInt()?.coerceIn(36, 96) ?: return null)
+            "candidateFontScale" -> current.copy(candidateFontScale = value.toFloatOrNull()?.coerceIn(0.8f, 1.4f) ?: return null)
+            "keyHintVisible" -> current.copy(keyHintVisible = value.toBooleanStrictOrNull() ?: return null)
+            "numberRowEnabled" -> current.copy(numberRowEnabled = value.toBooleanStrictOrNull() ?: return null)
+            "haptics.enabled" -> current.copy(hapticsEnabled = value.toBooleanStrictOrNull() ?: return null)
+            "haptics.intensity" -> current.copy(hapticIntensity = value.toFloatOrNull()?.roundToInt()?.coerceIn(1, 100) ?: return null)
+            "keySoundEnabled" -> current.copy(keySoundEnabled = value.toBooleanStrictOrNull() ?: return null)
+            "keySoundVolume" -> current.copy(keySoundVolume = value.toFloatOrNull()?.roundToInt()?.coerceIn(0, 100) ?: return null)
+            "keyPreviewEnabled" -> current.copy(keyPreviewEnabled = value.toBooleanStrictOrNull() ?: return null)
+            else -> null
+        }
+    }
+
+    private fun defaultPanelSettingsPatch(): Map<String, Any> = linkedMapOf(
+        "candidateFontScale" to 1.0f,
+        "keyHintVisible" to true,
+        "keyboardHeightDp" to 266,
+        "candidateBarHeightDp" to 52,
+        "numberRowEnabled" to false,
+        "haptics.enabled" to true,
+        "haptics.intensity" to 42,
+        "keySoundEnabled" to true,
+        "keySoundVolume" to 100,
+        "keyPreviewEnabled" to true,
+    )
+
     /** Sensitive or digits-only editors never build a composition. */
     private fun bypassesComposition(): Boolean {
         return !inputAvailable || !privacyMode.allowsComposing || directInputEditor
@@ -707,7 +805,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (!currentState.hasComposition && !composing) {
             deleteOneBeforeCursorForRestore()
             selectionModeActive = false
-            refreshPredictionSuggestions()
             return
         }
         val result = engine.processKey(AndroidKeyMapper.XK_BACK_SPACE, 0)
@@ -760,7 +857,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (action !in setOf("select", "cancelSelection", "commitSelection")) {
             keyboardView?.showBackspaceDeletionPreview(preview)
         }
-        refreshPredictionSuggestions()
     }
 
     private fun updateBackspaceSelection(count: Int) {
@@ -1023,7 +1119,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             )
             if (replace) {
                 deleteOneBeforeCursorForRestore(resetComposition = false)
-                commitDirect(if (currentState.asciiMode) ". " else "。")
+                commitDirect(if (isEnglishMode()) ". " else "。")
             } else {
                 commitDirect(" ")
             }
@@ -1071,7 +1167,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             engine.reset().withoutTransientCommit()
         }
         keyboardView?.updateState(currentState)
-        refreshPredictionSuggestions()
     }
 
     private fun sendEnterKey() {
@@ -1079,12 +1174,70 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleMode(value: String?) {
-        val target = when (value) {
-            "ascii", "english", "en" -> true
-            "chinese", "zh", "cn" -> false
-            else -> !currentState.asciiMode
+        val decision = decideLanguageMode(
+            englishMode = configuredEnglishMode(),
+            englishSchemaId = englishSchemaId,
+            value = value,
+            currentSchemaId = currentRimeSchemaId,
+            asciiMode = currentState.asciiMode,
+        )
+        if (!decision.usesEnglishSchema) {
+            applyState(engine.setAsciiMode(decision.targetEnglish))
+            return
         }
-        applyState(engine.setAsciiMode(target))
+
+        val englishId = englishSchemaId ?: return
+        if ((currentRimeSchemaId == englishId) == decision.targetEnglish) return
+        val schemas = engine.listSchemas()
+        val targetSchemaId = if (decision.targetEnglish) {
+            englishId
+        } else {
+            lastChineseSchemaId?.takeIf { remembered ->
+                schemas.any { it.id == remembered && it.id != englishId }
+            } ?: schemas.firstOrNull { it.id != englishId }?.id
+        }
+        if (targetSchemaId == null) {
+            keyboardView?.showMessage("没有可用的中文输入方案")
+            refreshRimeOptions()
+            return
+        }
+
+        if (currentState.hasComposition || composing) {
+            applyState(engine.clearComposition())
+        }
+        if (decision.targetEnglish) {
+            engine.currentSchema()?.takeIf { it.id != englishId }?.let { current ->
+                lastChineseSchemaId = current.id
+                chineseSwitchSnapshot = snapshotChineseSwitchOptions(
+                    engine.schemaSwitches().flatMap { it.optionNames } + "ascii_punct",
+                    engine::getOption,
+                )
+            }
+        }
+
+        val selectedState = engine.selectSchema(targetSchemaId)
+        if (selectedState == null) {
+            keyboardView?.showMessage("无法切换输入方案")
+            refreshRimeOptions()
+            return
+        }
+        var resultingState: KeytaoImeState = selectedState
+        val failedOptions = mutableListOf<String>()
+        if (!decision.targetEnglish) {
+            for ((optionName, enabled) in chineseSwitchSnapshot) {
+                val restoredState = engine.setOption(optionName, enabled)
+                if (restoredState == null) {
+                    failedOptions += optionName
+                    continue
+                }
+                resultingState = restoredState
+            }
+        }
+        applyState(resultingState)
+        if (failedOptions.isNotEmpty()) {
+            keyboardView?.showMessage("无法恢复 Rime 选项：${failedOptions.joinToString("、")}")
+        }
+        refreshRimeOptions()
     }
 
     private fun openRimeMenu() {
@@ -1093,6 +1246,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun selectRimeSchema(schemaId: String) {
         if (schemaId.isBlank()) return
+        val schemaSwitchingEnabled = usesEnglishSchema()
+        if (schemaSwitchingEnabled && schemaId == englishSchemaId) {
+            handleMode("ascii")
+            return
+        }
+        if (schemaSwitchingEnabled && currentRimeSchemaId == englishSchemaId) {
+            lastChineseSchemaId = schemaId
+            handleMode("chinese")
+            return
+        }
         val state = engine.selectSchema(schemaId)
         if (state == null) {
             keyboardView?.showMessage("无法切换输入方案")
@@ -1107,7 +1270,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (optionName.isBlank() || action == null) return
         val enabled = action.toBooleanStrictOrNull()
         val state = if (enabled != null) {
-            if (optionName == "ascii_mode") {
+            if (optionName == "ascii_mode" && !usesEnglishSchema()) {
                 engine.setAsciiMode(enabled)
             } else {
                 engine.setOption(optionName, enabled)
@@ -1133,6 +1296,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun refreshRimeOptions() {
+        val schemas = engine.listSchemas()
+        val currentSchema = engine.currentSchema()
+        englishSchemaId = resolveEnglishSchemaId(schemas.map { it.id to it.name })
+        currentRimeSchemaId = currentSchema?.id
+        if (currentSchema != null && currentSchema.id != englishSchemaId) {
+            lastChineseSchemaId = currentSchema.id
+        }
         val switches = engine.schemaSwitches().toMutableList().apply {
             if (none { it.name == "ascii_punct" }) {
                 add(
@@ -1147,8 +1317,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         keyboardView?.updateRimeOptions(
             KeytaoRimeOptionsState(
-                schemas = engine.listSchemas(),
-                currentSchema = engine.currentSchema(),
+                schemas = schemas,
+                currentSchema = currentSchema,
+                englishSchemaId = if (usesEnglishSchema()) englishSchemaId else null,
                 switches = switches,
                 options = switches
                     .flatMap { it.optionNames }
@@ -1459,6 +1630,19 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         inputAvailable = message.isEmpty()
         unavailableMessage = message.ifEmpty { defaultUnavailableMessage }
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
+        if (inputAvailable) refreshRimeOptions()
+    }
+
+    private fun configuredEnglishMode(): String {
+        return baseKeyboardConfig?.englishMode ?: keyboardView?.currentConfig()?.englishMode ?: "ascii"
+    }
+
+    private fun usesEnglishSchema(): Boolean {
+        return configuredEnglishMode() == "schema" && englishSchemaId != null
+    }
+
+    private fun isEnglishMode(): Boolean {
+        return if (usesEnglishSchema()) currentRimeSchemaId == englishSchemaId else currentState.asciiMode
     }
 
     private fun showUnavailableMessage() {
@@ -1504,7 +1688,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             engine.state().withoutTransientCommit()
         }
         keyboardView?.updateState(currentState)
-        refreshPredictionSuggestions()
     }
 
     private fun applyState(state: KeytaoImeState) {
@@ -1538,26 +1721,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
         currentState = state.withoutTransientCommit()
         keyboardView?.updateState(currentState)
-        refreshPredictionSuggestions()
-    }
-
-    private fun refreshPredictionSuggestions() {
-        val config = keyboardView?.currentConfig() ?: return
-        if (
-            !config.predictionEnabled ||
-            !privacyMode.allowsTextRecall ||
-            !currentState.asciiMode ||
-            currentState.hasComposition ||
-            composing ||
-            backspaceSelectionSession != null
-        ) {
-            keyboardView?.updatePredictionSuggestions(null, emptyList())
-            return
-        }
-        val before = currentInputConnection?.getTextBeforeCursor(128, 0)?.toString().orEmpty()
-        val prefix = englishCompletionPrefix(before)
-        val suggestions = prefix?.let { completeEnglishPrefix(it, englishCompletionLexicon) }.orEmpty()
-        keyboardView?.updatePredictionSuggestions(prefix, suggestions)
     }
 
     /**
@@ -1645,12 +1808,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48
         private const val rimeOptionChoicePrefix = "choice:"
-        private val englishCompletionLexicon = listOf(
-            "about", "after", "again", "because", "before", "between", "could", "first",
-            "hello", "help", "important", "keyboard", "language", "people", "please", "really",
-            "should", "something", "thanks", "their", "there", "these", "thing", "think",
-            "through", "today", "together", "under", "would", "world", "write", "your",
-        )
     }
 
     private fun KeyCommand.requiresInstalledSchema(): Boolean {

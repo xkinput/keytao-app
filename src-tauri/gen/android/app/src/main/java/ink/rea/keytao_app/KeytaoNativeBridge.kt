@@ -22,6 +22,11 @@ object KeytaoNativeBridge {
             ?.takeIf { it.isNotBlank() }
     }
 
+    fun writeThemeUi(path: String, colorScheme: String, accentHex: String?): Boolean {
+        if (!loaded) return false
+        return runCatching { nativeWriteThemeUi(path, colorScheme, accentHex) }.getOrDefault(false)
+    }
+
     fun defaultKeyboardYaml(): String? {
         if (!loaded) return null
         return runCatching { nativeDefaultKeyboardYaml() }
@@ -269,6 +274,8 @@ object KeytaoNativeBridge {
         userThemePath: String?,
         systemColorScheme: String?,
     ): String
+
+    external fun nativeWriteThemeUi(path: String, colorScheme: String, accentHex: String?): Boolean
 
     external fun nativeDefaultKeyboardYaml(): String
 

@@ -70,6 +70,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onDeleteClipboardEntry(text: String)
         fun onClearClipboardHistory()
         fun onToolbarCustomization(order: List<String>, pinnedCount: Int)
+        fun onSettingPreview(key: String, value: String)
+        fun onSettingChanged(key: String, value: String)
     }
 
     private data class KeyRect(val spec: KeySpec, val rect: RectF, val sticky: Boolean = false)
@@ -128,8 +130,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val clipboardText: String? = null,
         val style: PanelItemStyle = PanelItemStyle.DEFAULT,
         val statusLabel: String? = null,
+        val minimumValue: Float? = null,
+        val maximumValue: Float? = null,
+        val value: Float? = null,
+        val step: Float? = null,
+        val swatches: List<String> = emptyList(),
     )
-    private data class CompletionSuggestion(val word: String, val insertion: String)
     private data class ToolbarAction(
         val label: String,
         val command: KeyCommand,
@@ -155,9 +161,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, SETTINGS }
-    private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION, EMPTY }
+    private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY }
     private enum class ShiftState { OFF, ONCE, LOCKED }
-    private enum class FunctionPanelMode { RIME, CLIPBOARD }
+    private enum class FunctionPanelMode { RIME, CLIPBOARD, SETTINGS }
     private enum class CandidateBarContent {
         CANDIDATE_MENU,
         STATUS_MESSAGE,
@@ -166,7 +172,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         CANDIDATES,
         BACKSPACE_HINT,
         CLIPBOARD_SUGGESTION,
-        COMPLETION_SUGGESTIONS,
         TOOLBAR,
     }
     private enum class VerticalScrollSurface { EXPANDED_PANEL, SYMBOL_KEYBOARD }
@@ -174,6 +179,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     var listener: Listener? = null
 
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
+    private var settingsConfig: KeytaoAndroidImeConfig = config
     private var theme: KeytaoImeTheme = KeytaoThemeResolver.resolve(context)
     private var keyboardLayoutMode = KeyboardLayoutMode.FULL
     private var oneHandedSide = KeyboardSide.RIGHT
@@ -214,6 +220,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var functionPanelActive = false
     private var functionPanelMode = FunctionPanelMode.RIME
     private var rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+    private val isEnglishMode: Boolean
+        get() = rimeOptionsState.englishSchemaId
+            ?.let { rimeOptionsState.currentSchema?.id == it }
+            ?: state.asciiMode
     private var rimeOptionsLoading = false
     private var candidateExpandPressed = false
     private var expandedTouchActive = false
@@ -223,7 +233,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var clipboardItems: List<String> = emptyList()
     private var clipboardClearConfirmationPending = false
     private var recentClipboardSuggestion: String? = null
-    private var completionSuggestions: List<CompletionSuggestion> = emptyList()
     private var expandedCandidateScrollY = 0f
     private var expandedCandidateOverscrollY = 0f
     private var expandedCandidateContentHeight = 0f
@@ -277,6 +286,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var panelGesturePointerId: Int? = null
     private val repeatRunnablesByPointerId = mutableMapOf<Int, Runnable>()
     private var pressedExpandedCandidate: CandidateRect? = null
+    private var activeSettingItem: CandidateDrawItem? = null
+    private var activeSettingOriginalValue: String? = null
+    private var activeSettingValue: String? = null
+    private var activeSettingRect: RectF? = null
     private var pressedClipboardDelete: ClipboardDeleteRect? = null
     private var pressedToolbar: ToolbarRect? = null
     private var toolbarTouchActive = false
@@ -360,7 +373,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             keyRects = emptyList()
         }
         config = next
-        if (!next.predictionEnabled) completionSuggestions = emptyList()
         if (!toolbarEditMode) {
             toolbarActionOrderOverride = next.toolbarActionOrder.takeIf { it.isNotEmpty() }
             toolbarPinnedCountOverride = next.toolbarPinnedCount
@@ -378,24 +390,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun currentConfig(): KeytaoAndroidImeConfig = config
 
-    fun updatePredictionSuggestions(prefix: String?, suggestions: List<String>) {
-        val normalizedPrefix = prefix.orEmpty()
-        val next = if (config.predictionEnabled && normalizedPrefix.isNotEmpty()) {
-            suggestions.distinct().mapNotNull { word ->
-                word.takeIf {
-                    it.length > normalizedPrefix.length && it.startsWith(normalizedPrefix, ignoreCase = true)
-                }?.let {
-                    CompletionSuggestion(word = word, insertion = word.drop(normalizedPrefix.length))
-                }
-            }
-        } else {
-            emptyList()
-        }
-        if (next == completionSuggestions) return
-        completionSuggestions = next
-        resetCandidateScroll()
+    fun updateSettingsConfig(next: KeytaoAndroidImeConfig) {
+        settingsConfig = next
+        invalidateExpandedCandidateItemsCache()
         rebuildInteractiveRects()
         invalidate()
+    }
+
+    fun currentThemeColorScheme(): String = theme.uiColorScheme
+
+    fun previewAccent(value: String) {
+        updateTheme(theme.withAccentHex(value))
     }
 
     fun updateTextRecallAllowed(allowed: Boolean) {
@@ -471,6 +476,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         theme = next
         candidateWidthCache.clear()
         invalidateKeyboardLayoutCache()
+        invalidateExpandedCandidateItemsCache()
         invalidateOutline()
         invalidate()
     }
@@ -707,9 +713,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 resetCandidateScroll()
                 toolbarRects = clipboardSuggestionToolbarLayout(barHeight, leftPadding)
             }
-            CandidateBarContent.COMPLETION_SUGGESTIONS -> {
-                candidateRects = inlineCandidateLayout(barHeight, leftPadding, null)
-            }
             CandidateBarContent.TOOLBAR -> {
                 resetCandidateScroll()
                 toolbarRects = toolbarLayout(barHeight, leftPadding, toolbarActions(), showLogo = true)
@@ -731,7 +734,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             panelModel.candidates.isNotEmpty() -> CandidateBarContent.CANDIDATES
             !backspacePreviewText.isNullOrEmpty() -> CandidateBarContent.BACKSPACE_HINT
             recentClipboardSuggestion != null -> CandidateBarContent.CLIPBOARD_SUGGESTION
-            completionSuggestions.isNotEmpty() -> CandidateBarContent.COMPLETION_SUGGESTIONS
             else -> CandidateBarContent.TOOLBAR
         }
     }
@@ -999,7 +1001,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 expandedDownY = event.y
                 expandedDownScrollY = expandedCandidateScrollY
                 val hasRimeCandidates = state.candidatePanel.candidates.isNotEmpty()
-                val hasCandidates = hasRimeCandidates || completionSuggestions.isNotEmpty()
+                val hasCandidates = hasRimeCandidates
                 candidateExpandPressed = !functionPanelActive && hasRimeCandidates && isInCandidateBar(event.y) &&
                     candidateExpandRect?.contains(event.x, event.y) == true
                 val toolbar = if (isInCandidateBar(event.y)) {
@@ -1063,6 +1065,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 } else {
                     null
                 }
+                beginSettingControl(event.x)
                 if (!candidateTouchActive && !toolbarTouchActive && !candidateExpandPressed && !expandedTouchActive) {
                     findKey(event.x, event.y)?.let { key ->
                         beginKeyTouch(
@@ -1160,6 +1163,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
+                finishSettingControl(event.x, cancelled = true)
                 for (pointerIndex in 0 until event.pointerCount) {
                     touchBounceTracker.cancel(event.getPointerId(pointerIndex))
                 }
@@ -1266,8 +1270,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 drawToolbar(canvas, barHeight, leftPadding)
                 return
             }
-            CandidateBarContent.CANDIDATES,
-            CandidateBarContent.COMPLETION_SUGGESTIONS -> Unit
+            CandidateBarContent.CANDIDATES -> Unit
         }
 
         val expandRect = candidateExpandRect
@@ -1496,7 +1499,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             (right - left - gap * (columnCount - 1)) / columnCount
         }
         val items = expandedCandidateItems()
-        val structuredRime = functionPanelActive && functionPanelMode == FunctionPanelMode.RIME
+        val structuredRime = functionPanelActive &&
+            (functionPanelMode == FunctionPanelMode.RIME || functionPanelMode == FunctionPanelMode.SETTINGS)
         val visualScrollY = expandedCandidateVisualScrollY()
         var x = left
         var y = top + gap - visualScrollY
@@ -1527,6 +1531,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     }
                     PanelItemStyle.OPTION -> {
                         chipWidth = (right - left - gap) / 2f
+                        itemRowHeight = dp(44f)
+                    }
+                    PanelItemStyle.SLIDER -> {
+                        if (x > left) {
+                            x = left
+                            y += dp(44f) + gap
+                        }
+                        chipWidth = right - left
+                        itemRowHeight = dp(56f)
+                    }
+                    PanelItemStyle.SWATCHES -> {
+                        if (x > left) {
+                            x = left
+                            y += dp(44f) + gap
+                        }
+                        chipWidth = right - left
                         itemRowHeight = dp(44f)
                     }
                     PanelItemStyle.DEFAULT, PanelItemStyle.EMPTY -> {
@@ -1578,7 +1598,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             contentBottom = max(contentBottom, rect.bottom + visualScrollY)
             if (structuredRime) {
                 when (item.style) {
-                    PanelItemStyle.SECTION, PanelItemStyle.SCHEMA, PanelItemStyle.DEFAULT, PanelItemStyle.EMPTY -> {
+                    PanelItemStyle.SECTION, PanelItemStyle.SCHEMA, PanelItemStyle.SLIDER,
+                    PanelItemStyle.SWATCHES, PanelItemStyle.DEFAULT, PanelItemStyle.EMPTY -> {
                         x = left
                         y = rect.bottom + gap
                     }
@@ -1609,6 +1630,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun panelColumns(mode: FunctionPanelMode): Int? {
         return when (mode) {
             FunctionPanelMode.CLIPBOARD -> 1
+            FunctionPanelMode.SETTINGS -> 1
             FunctionPanelMode.RIME -> null
         }
     }
@@ -1621,6 +1643,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val items = if (functionPanelActive) {
             when (functionPanelMode) {
                 FunctionPanelMode.CLIPBOARD -> clipboardPanelItems()
+                FunctionPanelMode.SETTINGS -> settingsPanelItems()
                 FunctionPanelMode.RIME -> rimePanelItems()
             }
         } else {
@@ -1669,7 +1692,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     style = PanelItemStyle.SECTION,
                 )
             )
-            if (rimeOptionsState.switches.isEmpty()) {
+            val visibleSwitches = rimeOptionsState.switches.filterNot { schemaSwitch ->
+                rimeOptionsState.englishSchemaId != null && schemaSwitch.optionNames.contains("ascii_mode")
+            }
+            if (visibleSwitches.isEmpty()) {
                 items.add(
                     CandidateDrawItem(
                         index = -3100,
@@ -1679,7 +1705,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     )
                 )
             } else {
-                rimeOptionsState.switches.forEachIndexed { index, schemaSwitch ->
+                visibleSwitches.forEachIndexed { index, schemaSwitch ->
                     items.add(rimeSwitchItem(index, schemaSwitch))
                 }
             }
@@ -1846,6 +1872,105 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun settingsPanelItems(): List<CandidateDrawItem> {
+        val scheme = theme.uiColorScheme.takeIf { it in setOf("auto", "light", "dark") } ?: "auto"
+        val nextScheme = when (scheme) {
+            "auto" -> "light"
+            "light" -> "dark"
+            else -> "auto"
+        }
+        val currentAccent = theme.accentColor.toHex()
+        val swatches = (accentPresets + currentAccent).distinct()
+        var index = -4000
+        fun nextIndex(): Int = index--
+        fun section(label: String) = CandidateDrawItem(
+            index = nextIndex(), label = label, text = "", style = PanelItemStyle.SECTION,
+        )
+        fun toggle(label: String, key: String, enabled: Boolean) = CandidateDrawItem(
+            index = nextIndex(),
+            label = label,
+            text = if (enabled) "开" else "关",
+            selected = enabled,
+            command = KeyCommand(KeyCommandTypes.SETTING, key, (!enabled).toString()),
+            style = PanelItemStyle.OPTION,
+        )
+        fun slider(label: String, key: String, value: Float, min: Float, max: Float, step: Float, text: String) =
+            CandidateDrawItem(
+                index = nextIndex(),
+                label = label,
+                text = text,
+                command = KeyCommand(KeyCommandTypes.SETTING, key, value.toString()),
+                style = PanelItemStyle.SLIDER,
+                minimumValue = min,
+                maximumValue = max,
+                value = value,
+                step = step,
+            )
+        return buildList {
+            add(section("外观"))
+            add(
+                CandidateDrawItem(
+                    index = nextIndex(),
+                    label = "主题色",
+                    text = currentAccent,
+                    selected = true,
+                    command = KeyCommand(KeyCommandTypes.SETTING, "accentColor", currentAccent),
+                    style = PanelItemStyle.SWATCHES,
+                    swatches = swatches,
+                )
+            )
+            add(
+                CandidateDrawItem(
+                    index = nextIndex(),
+                    label = "配色",
+                    text = schemeLabel(scheme),
+                    selected = scheme != "auto",
+                    command = KeyCommand(KeyCommandTypes.SETTING, "colorScheme", nextScheme),
+                    style = PanelItemStyle.OPTION,
+                    statusLabel = "切换",
+                )
+            )
+            add(slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8f, 1.4f, 0.1f, "%.1f×".format(settingsConfig.candidateFontScale)))
+            add(toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible))
+            add(section("布局"))
+            add(slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp.toFloat(), 160f, 420f, 2f, "${settingsConfig.keyboardHeightDp}dp"))
+            add(slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp.toFloat(), 36f, 96f, 1f, "${settingsConfig.candidateBarHeightDp}dp"))
+            add(toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled))
+            add(section("反馈"))
+            add(toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled))
+            add(slider("强度", "haptics.intensity", settingsConfig.hapticIntensity.toFloat(), 1f, 100f, 1f, "${settingsConfig.hapticIntensity}%"))
+            add(toggle("按键音", "keySoundEnabled", settingsConfig.keySoundEnabled))
+            add(slider("按键音量", "keySoundVolume", settingsConfig.keySoundVolume.toFloat(), 0f, 100f, 1f, "${settingsConfig.keySoundVolume}%"))
+            add(toggle("按键预览气泡", "keyPreviewEnabled", settingsConfig.keyPreviewEnabled))
+            add(
+                CandidateDrawItem(
+                    index = nextIndex(),
+                    label = "更多设置",
+                    text = "→ App",
+                    command = KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"),
+                    style = PanelItemStyle.OPTION,
+                    statusLabel = "打开",
+                )
+            )
+            add(
+                CandidateDrawItem(
+                    index = nextIndex(),
+                    label = "恢复默认",
+                    text = "面板项目",
+                    command = KeyCommand(KeyCommandTypes.SETTING, "reset", "true"),
+                    style = PanelItemStyle.OPTION,
+                    statusLabel = "重置",
+                )
+            )
+        }
+    }
+
+    private fun schemeLabel(value: String): String = when (value) {
+        "light" -> "白天"
+        "dark" -> "夜间"
+        else -> "自动"
+    }
+
     private fun panelItems(vararg items: PanelItem): List<CandidateDrawItem> {
         return items.mapIndexed { index, item ->
             CandidateDrawItem(
@@ -2002,10 +2127,62 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         when (item.style) {
             PanelItemStyle.SCHEMA -> drawRimeSchemaRow(canvas, displayItem, rect)
             PanelItemStyle.OPTION -> drawRimeOptionPill(canvas, displayItem, rect)
+            PanelItemStyle.SLIDER -> drawSettingsSlider(canvas, displayItem, rect)
+            PanelItemStyle.SWATCHES -> drawSettingsSwatches(canvas, displayItem, rect)
             else -> when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
                 4 -> drawCandidateGridCell(canvas, displayItem, rect)
                 1 -> drawClipboardCandidateRow(canvas, displayItem, rect)
                 else -> drawInlineCandidateOption(canvas, displayItem, rect)
+            }
+        }
+    }
+
+    private fun drawSettingsSlider(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val minimum = item.minimumValue ?: return
+        val maximum = item.maximumValue ?: return
+        val value = item.value ?: return
+        val trackLeft = rect.left + dp(10f)
+        val trackRight = rect.right - dp(10f)
+        val trackY = rect.bottom - dp(13f)
+        val ratio = ((value - minimum) / (maximum - minimum)).coerceIn(0f, 1f)
+        textPaint.textSize = sp(candidateLabelSizeSp())
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.color = theme.keyForeground.toArgb()
+        canvas.drawText(item.label, trackLeft, rect.top + dp(15f) + textBaselineOffset(textPaint), textPaint)
+        textPaint.textAlign = Paint.Align.RIGHT
+        textPaint.color = theme.commentColor.toArgb()
+        canvas.drawText(item.text, trackRight, rect.top + dp(15f) + textBaselineOffset(textPaint), textPaint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = dp(3f)
+        paint.color = theme.panelBorder.toArgb()
+        canvas.drawLine(trackLeft, trackY, trackRight, trackY, paint)
+        paint.color = theme.selectedLabelColor.toArgb()
+        canvas.drawLine(trackLeft, trackY, trackLeft + (trackRight - trackLeft) * ratio, trackY, paint)
+        paint.style = Paint.Style.FILL
+        canvas.drawCircle(trackLeft + (trackRight - trackLeft) * ratio, trackY, dp(6f), paint)
+        paint.strokeCap = Paint.Cap.BUTT
+    }
+
+    private fun drawSettingsSwatches(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val cellWidth = dp(30f)
+        val swatchRadius = dp(8f)
+        val startX = rect.right - dp(8f) - cellWidth * item.swatches.size
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(candidateLabelSizeSp())
+        textPaint.color = theme.keyForeground.toArgb()
+        canvas.drawText(item.label, rect.left + dp(10f), rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        item.swatches.forEachIndexed { index, value ->
+            val color = KeytaoColor.fromHex(value) ?: return@forEachIndexed
+            val centerX = startX + cellWidth * index + cellWidth / 2f
+            paint.style = Paint.Style.FILL
+            paint.color = color.toArgb()
+            canvas.drawCircle(centerX, rect.centerY(), swatchRadius, paint)
+            if (value.equals(theme.accentColor.toHex(), ignoreCase = true)) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(2f)
+                paint.color = theme.keyForeground.toArgb()
+                canvas.drawCircle(centerX, rect.centerY(), swatchRadius + dp(3f), paint)
             }
         }
     }
@@ -2374,7 +2551,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (clipboardClearConfirmationPending) "确认清空" else "清空",
             KeyCommand.panel("clearClipboardHistory"),
         )
-        val settingsAction = ToolbarAction("设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
+        val settingsAction = ToolbarAction("更多设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
         val backWidth = toolbarChipWidth(backAction)
         val pasteWidth = toolbarChipWidth(pasteAction)
         val clearWidth = toolbarChipWidth(clearAction)
@@ -2975,7 +3152,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun resolveSwipeUpCommand(key: KeySpec): KeyCommand {
         key.swipeUp?.let { return it }
-        if (state.asciiMode) {
+        if (isEnglishMode) {
             key.asciiLongPress?.let { return it }
         }
         key.longPress?.let { return it }
@@ -2986,7 +3163,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun resolveSwipeDownCommand(key: KeySpec): KeyCommand {
         key.swipeDown?.let { return it }
         if (!config.flickKeysEnabled) return key.action
-        if (state.asciiMode) {
+        if (isEnglishMode) {
             key.asciiLongPress?.let { return it }
         }
         key.longPress?.let { return it }
@@ -2995,7 +3172,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun resolveLongPressCommand(key: KeySpec): KeyCommand {
-        val command = if (state.asciiMode) {
+        val command = if (isEnglishMode) {
             key.asciiLongPress ?: key.longPress
         } else {
             key.longPress
@@ -3006,14 +3183,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun explicitAlternates(key: KeySpec): List<AlternateOption> {
-        val source = if (state.asciiMode && key.asciiAlternates.isNotEmpty()) {
+        val source = if (isEnglishMode && key.asciiAlternates.isNotEmpty()) {
             key.asciiAlternates
         } else {
             key.alternates
         }
         if (source.isEmpty()) {
             val hasLegacyLongPress = key.longPress != null ||
-                (state.asciiMode && key.asciiLongPress != null) ||
+                (isEnglishMode && key.asciiLongPress != null) ||
                 !key.hint.isNullOrBlank()
             if (!hasLegacyLongPress) return emptyList()
             val command = resolveLongPressCommand(key)
@@ -3087,11 +3264,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             enterLabelOverride?.let { return it }
         }
         if (key.action.type == KeyCommandTypes.SPACE) {
-            val mode = if (state.asciiMode) "En" else "中"
+            val mode = if (isEnglishMode) "En" else "中"
             return "${state.schemaName.ifBlank { key.label }} · $mode"
         }
         if (key.action.type == KeyCommandTypes.MODE) {
-            return if (state.asciiMode) theme.modeHintEnglishText else theme.modeHintChineseText
+            return if (isEnglishMode) theme.modeHintEnglishText else theme.modeHintChineseText
         }
         val label = labelForMode(key)
         val value = valueForMode(key)
@@ -3147,7 +3324,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun shouldUseInlineNumberRow(): Boolean {
-        return !state.asciiMode && state.hasComposition && state.preedit.contains("=")
+        return !isEnglishMode && state.hasComposition && state.preedit.contains("=")
     }
 
     private fun inlineNumberRow(sourceRow: List<KeySpec>): List<KeySpec> {
@@ -3366,7 +3543,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (keyboardLayer.isSymbolLayer() && key.action.isTextInputCommand()) {
             return KeyCommand.directInput(valueForMode(key))
         }
-        if (state.asciiMode) {
+        if (isEnglishMode) {
             key.asciiAction?.let { return it }
             key.asciiValue?.let { return KeyCommand.input(it) }
         } else {
@@ -3419,7 +3596,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (keyboardLayer.isSymbolLayer() && item.isTextInputItem()) {
             return KeyCommand.directInput(valueForMode(item))
         }
-        if (state.asciiMode) {
+        if (isEnglishMode) {
             item.asciiAction?.let { return it }
             item.asciiValue?.let { return KeyCommand.input(it) }
         } else {
@@ -3433,7 +3610,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun labelForMode(key: KeySpec): String {
-        return if (state.asciiMode) {
+        return if (isEnglishMode) {
             key.asciiLabel ?: key.asciiValue ?: key.label
         } else {
             key.label
@@ -3441,7 +3618,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun stackLabelForMode(item: KeyStackItem): String {
-        return if (state.asciiMode) {
+        return if (isEnglishMode) {
             item.asciiLabel ?: item.asciiValue ?: item.label
         } else {
             item.label
@@ -3449,7 +3626,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun valueForMode(key: KeySpec): String {
-        return if (state.asciiMode) {
+        return if (isEnglishMode) {
             key.asciiValue ?: key.value
         } else {
             key.value
@@ -3458,7 +3635,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun valueForMode(item: KeyStackItem): String {
         val value = item.value ?: item.label
-        return if (state.asciiMode) {
+        return if (isEnglishMode) {
             item.asciiValue ?: value
         } else {
             value
@@ -3534,7 +3711,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         val settings = ToolbarAction(
             "设置",
-            KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"),
+            KeyCommand.panel("settings"),
             icon = ToolbarIcon.SETTINGS,
             id = "settings",
         )
@@ -3542,13 +3719,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             buildList {
                 addAll(listOf(
                 function,
-                ToolbarAction("中", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !state.asciiMode, id = "chinese"),
-                ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = state.asciiMode, id = "english"),
+                ToolbarAction("中", KeyCommand(KeyCommandTypes.MODE, "chinese"), selected = !isEnglishMode, id = "chinese"),
+                ToolbarAction("En", KeyCommand(KeyCommandTypes.MODE, "ascii"), selected = isEnglishMode, id = "english"),
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers"), id = "numbers"),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters"), id = "letters"),
                 ))
-                addAll(layoutActions)
                 add(settings)
+                addAll(layoutActions)
             }
         } else {
             buildList {
@@ -3570,8 +3747,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     id = "emoji",
                 ),
                 ))
-                addAll(layoutActions)
                 add(settings)
+                addAll(layoutActions)
             }
         }
     }
@@ -3692,7 +3869,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun languageToggleAction(): ToolbarAction {
-        return if (state.asciiMode) {
+        return if (isEnglishMode) {
             ToolbarAction(
                 "En",
                 KeyCommand(KeyCommandTypes.MODE),
@@ -3715,6 +3892,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return when (functionPanelMode) {
             FunctionPanelMode.RIME -> "Rime 选项"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
+            FunctionPanelMode.SETTINGS -> "设置"
         }
     }
 
@@ -3878,6 +4056,21 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun handlePanelCommand(command: KeyCommand): Boolean {
+        if (command.type == KeyCommandTypes.SETTING) {
+            val key = command.value ?: return true
+            val value = command.fallbackValue.orEmpty()
+            when (key) {
+                "accentColor" -> previewAccent(value)
+                "colorScheme", "reset" -> Unit
+                else -> listener?.onSettingPreview(key, value)
+            }
+            listener?.onSettingChanged(key, value)
+            performConfiguredSelectionFeedback()
+            invalidateExpandedCandidateItemsCache()
+            rebuildInteractiveRects()
+            invalidate()
+            return true
+        }
         if (command.type == KeyCommandTypes.PANEL) {
             when (command.value) {
                 "close" -> closeCandidatePanel()
@@ -3887,6 +4080,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     listener?.onKeyCommand(KeyCommand(KeyCommandTypes.RIME_MENU))
                 }
                 "clipboard" -> openFunctionPanel(FunctionPanelMode.CLIPBOARD)
+                "settings" -> openFunctionPanel(FunctionPanelMode.SETTINGS)
                 "clearClipboardHistory" -> handleClearClipboardHistory()
                 "clearClipboardHistoryNow" -> {
                     clipboardClearConfirmationPending = false
@@ -4036,6 +4230,87 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedDragging = false
         pressedExpandedCandidate = null
         pressedClipboardDelete = null
+        activeSettingItem = null
+        activeSettingOriginalValue = null
+        activeSettingValue = null
+        activeSettingRect = null
+    }
+
+    private fun beginSettingControl(x: Float) {
+        if (!functionPanelActive || functionPanelMode != FunctionPanelMode.SETTINGS) return
+        val candidate = pressedExpandedCandidate ?: return
+        val item = expandedCandidateItems().firstOrNull { it.index == candidate.index } ?: return
+        if (item.style != PanelItemStyle.SLIDER && item.style != PanelItemStyle.SWATCHES) return
+        activeSettingItem = item
+        activeSettingRect = candidate.drawingRect
+        activeSettingOriginalValue = when (item.style) {
+            PanelItemStyle.SLIDER -> item.value?.let(::serializeSettingNumber)
+            PanelItemStyle.SWATCHES -> theme.accentColor.toHex()
+            else -> null
+        }
+        updateSettingControl(x)
+        pressedExpandedCandidate = null
+    }
+
+    private fun updateSettingControl(x: Float): Boolean {
+        val item = activeSettingItem ?: return false
+        val rect = activeSettingRect ?: return false
+        val key = item.command?.value ?: return false
+        val value = when (item.style) {
+            PanelItemStyle.SLIDER -> {
+                val minimum = item.minimumValue ?: return false
+                val maximum = item.maximumValue ?: return false
+                val step = item.step ?: 1f
+                val trackLeft = rect.left + dp(10f)
+                val trackRight = rect.right - dp(10f)
+                val ratio = ((x - trackLeft) / (trackRight - trackLeft)).coerceIn(0f, 1f)
+                val raw = minimum + (maximum - minimum) * ratio
+                serializeSettingNumber((minimum + ((raw - minimum) / step).roundToInt() * step).coerceIn(minimum, maximum))
+            }
+            PanelItemStyle.SWATCHES -> {
+                if (item.swatches.isEmpty()) return false
+                val cellWidth = dp(30f)
+                val startX = rect.right - dp(8f) - cellWidth * item.swatches.size
+                val index = ((x - startX) / cellWidth).toInt().coerceIn(0, item.swatches.lastIndex)
+                item.swatches[index]
+            }
+            else -> return false
+        }
+        if (value == activeSettingValue) return true
+        activeSettingValue = value
+        if (key == "accentColor") {
+            previewAccent(value)
+        } else {
+            listener?.onSettingPreview(key, value)
+        }
+        return true
+    }
+
+    private fun finishSettingControl(x: Float, cancelled: Boolean): Boolean {
+        val item = activeSettingItem ?: return false
+        val key = item.command?.value ?: return false
+        if (!cancelled) updateSettingControl(x)
+        val value = if (cancelled) activeSettingOriginalValue else activeSettingValue
+        activeSettingItem = null
+        activeSettingOriginalValue = null
+        activeSettingValue = null
+        activeSettingRect = null
+        if (value != null) {
+            if (cancelled) {
+                if (key == "accentColor") previewAccent(value) else listener?.onSettingPreview(key, value)
+            } else {
+                listener?.onSettingChanged(key, value)
+                performConfiguredSelectionFeedback()
+            }
+        }
+        invalidateExpandedCandidateItemsCache()
+        rebuildInteractiveRects()
+        invalidate()
+        return true
+    }
+
+    private fun serializeSettingNumber(value: Float): String {
+        return if (abs(value - value.roundToInt()) < 0.0001f) value.roundToInt().toString() else "%.1f".format(Locale.ROOT, value)
     }
 
     private fun deleteClipboardEntry(text: String) {
@@ -4432,6 +4707,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             candidateExpandPressed -> invalidate()
             expandedTouchActive -> {
+                if (activeSettingItem != null) {
+                    updateSettingControl(x)
+                    invalidate()
+                    return
+                }
                 val deltaY = y - expandedDownY
                 if (!expandedDragging && abs(deltaY) > touchSlop) {
                     expandedDragging = true
@@ -4582,6 +4862,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             return true
         }
         if (expandedTouchActive) {
+            if (activeSettingItem != null) {
+                expandedTouchActive = false
+                return finishSettingControl(x, cancelled = false)
+            }
             val candidate = pressedExpandedCandidate
             val clipboardDelete = pressedClipboardDelete
             val wasBrakingScroll = verticalScrollBrakeSurfaceAtDown == VerticalScrollSurface.EXPANDED_PANEL
@@ -5031,14 +5315,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 )
             }
         }
-        return completionSuggestions.mapIndexed { index, suggestion ->
-            CandidateDrawItem(
-                index = index,
-                label = "补全",
-                text = suggestion.word,
-                command = KeyCommand.directInput(suggestion.insertion),
-            )
-        }
+        return emptyList()
     }
 
     private fun activateInlineCandidate(candidate: CandidateRect) {
@@ -5520,6 +5797,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             KeyCommandTypes.RIME_MENU,
             KeyCommandTypes.RIME_SCHEMA,
             KeyCommandTypes.RIME_OPTION,
+            KeyCommandTypes.SETTING,
             KeyCommandTypes.PANEL,
             KeyCommandTypes.ONE_HANDED,
             KeyCommandTypes.FLOATING,
@@ -5581,6 +5859,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val toolbarPinnedBoundaryId = "__toolbar_pinned_boundary__"
         private const val maxRecentEmojiCount = 32
         private val softAccentPunctuation = setOf("，", "。", ",", ".")
+        private val accentPresets = listOf("#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6")
 
         /** Virtual accessibility node id ranges, one block per hit-test list. */
         private const val accessibilityExpandNodeId = 1

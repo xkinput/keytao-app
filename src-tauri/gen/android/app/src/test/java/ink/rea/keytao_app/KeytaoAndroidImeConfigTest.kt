@@ -139,11 +139,11 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
-    fun `parse config keeps prediction backspace mode and toolbar customization`() {
+    fun `parse config keeps backspace mode and toolbar customization`() {
         val config = KeytaoAndroidImeConfig.parse(
             """
             {
-              "predictionEnabled": false,
+              "englishMode": "schema",
               "backspaceGestureMode": "selectThenDelete",
               "toolbarActionOrder": ["emoji", "clipboard", "emoji", " settings "],
               "toolbarPinnedCount": 3,
@@ -152,10 +152,26 @@ class KeytaoAndroidImeConfigTest {
             """.trimIndent()
         )
 
-        assertEquals(false, config.predictionEnabled)
+        assertEquals("schema", config.englishMode)
         assertEquals("selectThenDelete", config.backspaceGestureMode)
         assertEquals(listOf("emoji", "clipboard", "settings"), config.toolbarActionOrder)
         assertEquals(3, config.toolbarPinnedCount)
+    }
+
+    @Test
+    fun `English mode defaults invalid values to ASCII`() {
+        fun parseMode(field: String): KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.parse(
+            """
+            {
+              $field
+              "rows": [[{ "label": "a", "value": "a" }]]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals("ascii", parseMode("").englishMode)
+        assertEquals("ascii", parseMode("\"englishMode\": \"auto\",").englishMode)
+        assertEquals("schema", parseMode("\"englishMode\": \"SCHEMA\",").englishMode)
     }
 
     @Test

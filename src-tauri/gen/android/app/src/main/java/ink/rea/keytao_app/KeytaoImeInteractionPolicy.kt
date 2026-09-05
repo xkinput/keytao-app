@@ -347,25 +347,44 @@ internal fun trailingDeletionSegmentsLength(text: String, segmentCount: Int): In
     return selectedUnits
 }
 
-internal fun englishCompletionPrefix(text: String): String? {
-    val prefix = text.takeLastWhile { it in 'a'..'z' || it in 'A'..'Z' }
-    return prefix.takeIf { it.length >= 2 }
+internal data class LanguageModeDecision(
+    val usesEnglishSchema: Boolean,
+    val targetEnglish: Boolean,
+)
+
+internal fun resolveEnglishSchemaId(schemas: List<Pair<String, String>>): String? {
+    return schemas.firstOrNull { it.first == "easy_en" }?.first
+        ?: schemas.firstOrNull { it.first == "english" }?.first
+        ?: schemas.firstOrNull {
+            it.second.equals("Easy English", ignoreCase = true) ||
+                it.second.equals("English", ignoreCase = true)
+        }?.first
 }
 
-internal fun completeEnglishPrefix(
-    prefix: String,
-    lexicon: List<String>,
-    limit: Int = 5,
-): List<String> {
-    if (prefix.length < 2 || limit <= 0) return emptyList()
-    val normalized = prefix.lowercase(Locale.ROOT)
-    return lexicon.asSequence()
-        .map(String::trim)
-        .filter { it.length > prefix.length && it.lowercase(Locale.ROOT).startsWith(normalized) }
-        .distinctBy { it.lowercase(Locale.ROOT) }
-        .take(limit)
-        .toList()
+internal fun decideLanguageMode(
+    englishMode: String,
+    englishSchemaId: String?,
+    value: String?,
+    currentSchemaId: String?,
+    asciiMode: Boolean,
+): LanguageModeDecision {
+    val usesEnglishSchema = englishMode.trim().equals("schema", ignoreCase = true) && englishSchemaId != null
+    val targetEnglish = when (value?.trim()?.lowercase(Locale.ROOT)) {
+        "ascii", "english", "en" -> true
+        "chinese", "zh", "cn" -> false
+        else -> if (usesEnglishSchema) currentSchemaId != englishSchemaId else !asciiMode
+    }
+    return LanguageModeDecision(usesEnglishSchema, targetEnglish)
 }
+
+internal fun snapshotChineseSwitchOptions(
+    switchNames: List<String>,
+    optionValue: (String) -> Boolean,
+): Map<String, Boolean> = switchNames
+    .asSequence()
+    .filter { it != "ascii_mode" }
+    .distinct()
+    .associateWith(optionValue)
 
 private fun graphemeUnits(text: String): List<String> {
     if (text.isEmpty()) return emptyList()

@@ -10,6 +10,8 @@ protocol KeyTaoIOSKeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteClipboardEntry text: String)
     func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView)
     func keyboardView(_ view: KeyTaoIOSKeyboardView, persistToolbarOrder order: [String], pinnedCount: Int)
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, previewSetting key: String, value: String)
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistSetting key: String, value: String)
     func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool
     func keyboardViewNeedsFullAccessForHaptics(_ view: KeyTaoIOSKeyboardView)
 }
@@ -25,6 +27,7 @@ private final class KeyTaoActivatingAccessibilityElement: UIAccessibilityElement
 private enum KeyTaoFunctionPanelMode {
     case rime
     case clipboard
+    case settings
 }
 
 private enum KeyTaoCandidateBarContent {
@@ -34,7 +37,6 @@ private enum KeyTaoCandidateBarContent {
     case fullHeightSymbolKeyboard
     case candidates
     case backspaceHint
-    case completionSuggestions
     case toolbar
 }
 
@@ -43,6 +45,8 @@ private enum KeyTaoPanelItemStyle {
     case section
     case schema
     case option
+    case slider
+    case swatches
     case empty
 }
 
@@ -143,11 +147,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         var clipboardText: String? = nil
         var style: KeyTaoPanelItemStyle = .standard
         var statusLabel: String? = nil
-    }
-
-    private struct CompletionSuggestion: Equatable {
-        var word: String
-        var insertion: String
+        var minimumValue: CGFloat? = nil
+        var maximumValue: CGFloat? = nil
+        var value: CGFloat? = nil
+        var step: CGFloat? = nil
+        var swatches: [String] = []
     }
 
     private struct ToolbarAction {
@@ -180,6 +184,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private var config: KeyTaoIOSImeConfig
+    private var settingsConfig: KeyTaoIOSImeConfig
     private var theme: KeyTaoImeTheme
     private var state: KeyTaoImeState
     private var layoutPresentation = KeyTaoIOSKeyboardLayoutPresentation(
@@ -199,13 +204,16 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var functionPanelActive = false
     private var functionPanelMode: KeyTaoFunctionPanelMode = .rime
     private var rimeOptionsState = KeyTaoRimeOptionsState.empty
+    private var isEnglishMode: Bool {
+        rimeOptionsState.englishSchemaID.map { rimeOptionsState.currentSchema?.id == $0 }
+            ?? state.asciiMode
+    }
     private var rimeOptionsLoading = false
     private var expandedCandidates: [KeyTaoCandidate] = []
     private var expandedCandidatesLoading = false
     private var clipboardItemsLoading = false
     private var clipboardItems: [String] = []
     private var clipboardClearConfirmationPending = false
-    private var completionSuggestions: [CompletionSuggestion] = []
     private var expandedCandidateItemsCacheSignature = ""
     private var expandedCandidateItemsCache: [CandidateDrawItem] = []
     private var expandedCandidateScrollY: CGFloat = 0
@@ -289,6 +297,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var pressedClipboardDelete: ClipboardDeleteRect?
     private var expandedTouchActive = false
     private var expandedDragging = false
+    private var activeSettingItem: CandidateDrawItem?
+    private var activeSettingRect: CGRect?
+    private var activeSettingOriginalValue: String?
+    private var activeSettingValue: String?
     private var candidateExpandPressed = false
     private var gestureTouchStart: CGPoint = .zero
     private var backspacePreviewText: String?
@@ -315,6 +327,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     init(config: KeyTaoIOSImeConfig, theme: KeyTaoImeTheme, state: KeyTaoImeState) {
         self.config = config
+        self.settingsConfig = config
         self.theme = theme
         self.state = state
         super.init(frame: .zero)
@@ -323,6 +336,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     required init?(coder: NSCoder) {
         self.config = .fallback
+        self.settingsConfig = .fallback
         self.theme = .fallback
         self.state = .empty
         super.init(coder: coder)
@@ -339,9 +353,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             keyRects = []
         }
         self.config = config
-        if !config.predictionEnabled {
-            completionSuggestions = []
-        }
         if !toolbarEditMode {
             toolbarActionOrderOverride = config.toolbarActionOrder.isEmpty ? nil : config.toolbarActionOrder
             toolbarPinnedCountOverride = config.toolbarPinnedCount
@@ -362,34 +373,23 @@ final class KeyTaoIOSKeyboardView: UIView {
         config
     }
 
-    func updatePredictionSuggestions(prefix: String?, suggestions: [String]) {
-        let normalizedPrefix = prefix ?? ""
-        let next: [CompletionSuggestion]
-        if config.predictionEnabled, !normalizedPrefix.isEmpty {
-            next = suggestions.reduce(into: []) { result, word in
-                guard word.count > normalizedPrefix.count,
-                      word.lowercased().hasPrefix(normalizedPrefix.lowercased()),
-                      !result.contains(where: { $0.word == word }) else {
-                    return
-                }
-                result.append(
-                    CompletionSuggestion(
-                        word: word,
-                        insertion: String(word.dropFirst(normalizedPrefix.count))
-                    )
-                )
-            }
-        } else {
-            next = []
-        }
-        guard next != completionSuggestions else { return }
-        completionSuggestions = next
-        resetCandidateScroll()
+    func update(settingsConfig: KeyTaoIOSImeConfig) {
+        self.settingsConfig = settingsConfig
+        expandedCandidateItemsCacheSignature = ""
+        expandedCandidateItemsCache = []
         invalidateLayoutAndDisplay()
+    }
+
+    func currentThemeColorScheme() -> String { theme.ui.colorScheme }
+
+    func previewAccent(_ value: String) {
+        update(theme: theme.withAccent(hex: value))
     }
 
     func update(theme: KeyTaoImeTheme) {
         self.theme = theme
+        expandedCandidateItemsCacheSignature = ""
+        expandedCandidateItemsCache = []
         invalidateLayoutAndDisplay()
     }
 
@@ -467,7 +467,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         self.hostTraits = hostTraits
-        if state.asciiMode, hostTraits.autocapitalizationType == .allCharacters {
+        if isEnglishMode, hostTraits.autocapitalizationType == .allCharacters {
             shiftState = .locked
         }
         invalidateLayoutAndDisplay()
@@ -478,7 +478,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     /// meaningful in English mode: shifted letters are not part of any Rime
     /// speller alphabet, so Chinese input must never start capitalised.
     func resetShiftForNewContext() {
-        guard state.asciiMode else {
+        guard isEnglishMode else {
             if shiftState == .once {
                 shiftState = .off
                 invalidateLayoutAndDisplay()
@@ -683,6 +683,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 touchBounceTracker.cancel(pointerID: pointerSlot)
             }
             if identifier == candidateGestureTouchIdentifier {
+                _ = finishSettingControl(at: 0, cancelled: true)
                 settleVerticalScrollAfterCancellation()
                 clearCandidateOrPanelTouchState()
                 continue
@@ -738,6 +739,10 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarLongPressConsumed = false
         toolbarDragActionID = nil
         expandedScrollWasAnimatingAtDown = false
+        activeSettingItem = nil
+        activeSettingRect = nil
+        activeSettingOriginalValue = nil
+        activeSettingValue = nil
         candidateGestureTouchIdentifier = nil
         setNeedsDisplay()
     }
@@ -811,7 +816,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarDragging = false
         candidatePagingConsumed = false
         inlineCandidateTouchActive = false
-        let hasInlineCandidates = !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty
+        let hasInlineCandidates = !state.candidatePanel.candidates.isEmpty
         candidateExpandPressed = !functionPanelActive
             && !state.candidatePanel.candidates.isEmpty
             && point.y < config.candidateBarHeightDp
@@ -845,6 +850,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             if pressedClipboardDelete == nil {
                 pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
             }
+            beginSettingControl(at: point.x)
         }
         return candidateExpandPressed ||
             pressedToolbar != nil ||
@@ -949,6 +955,11 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         if expandedTouchActive {
+            if activeSettingItem != nil {
+                _ = updateSettingControl(at: point.x)
+                setNeedsDisplay()
+                return
+            }
             let deltaY = point.y - gestureTouchStart.y
             if !expandedDragging && abs(deltaY) > 6 {
                 expandedDragging = true
@@ -1046,6 +1057,11 @@ final class KeyTaoIOSKeyboardView: UIView {
             handleToolbarCommand(toolbar.action.command)
             return
         }
+        if activeSettingItem != nil {
+            _ = finishSettingControl(at: point.x, cancelled: false)
+            clearCandidateOrPanelTouchState()
+            return
+        }
         let wasBrakingScroll = expandedScrollWasAnimatingAtDown
         if let clipboardDelete = pressedClipboardDelete,
            !expandedDragging,
@@ -1078,6 +1094,89 @@ final class KeyTaoIOSKeyboardView: UIView {
             startVerticalScrollAnimation(surface: .expandedPanel)
         }
         clearCandidateOrPanelTouchState()
+    }
+
+    private func beginSettingControl(at x: CGFloat) {
+        guard functionPanelActive,
+              functionPanelMode == .settings,
+              let candidate = pressedCandidate,
+              let item = expandedCandidateItems().first(where: { $0.identifierIndex == candidate.identifierIndex }),
+              item.style == .slider || item.style == .swatches else { return }
+        activeSettingItem = item
+        activeSettingRect = candidate.drawingRect ?? candidate.rect
+        activeSettingOriginalValue = item.style == .slider
+            ? item.value.map(serializeSettingNumber)
+            : (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        _ = updateSettingControl(at: x)
+        pressedCandidate = nil
+    }
+
+    @discardableResult
+    private func updateSettingControl(at x: CGFloat) -> Bool {
+        guard let item = activeSettingItem,
+              let rect = activeSettingRect,
+              let key = item.command?.value else { return false }
+        let value: String
+        switch item.style {
+        case .slider:
+            guard let minimum = item.minimumValue,
+                  let maximum = item.maximumValue else { return false }
+            let step = item.step ?? 1
+            let trackLeft = rect.minX + 10
+            let trackRight = rect.maxX - 10
+            let ratio = max(0, min(1, (x - trackLeft) / (trackRight - trackLeft)))
+            let raw = minimum + (maximum - minimum) * ratio
+            let snapped = max(minimum, min(maximum, minimum + ((raw - minimum) / step).rounded() * step))
+            value = serializeSettingNumber(snapped)
+        case .swatches:
+            guard !item.swatches.isEmpty else { return false }
+            let cellWidth: CGFloat = 30
+            let startX = rect.maxX - 8 - cellWidth * CGFloat(item.swatches.count)
+            let index = max(0, min(item.swatches.count - 1, Int((x - startX) / cellWidth)))
+            value = item.swatches[index]
+        default:
+            return false
+        }
+        guard value != activeSettingValue else { return true }
+        activeSettingValue = value
+        if key == "accentColor" {
+            previewAccent(value)
+        } else {
+            delegate?.keyboardView(self, previewSetting: key, value: value)
+        }
+        return true
+    }
+
+    @discardableResult
+    private func finishSettingControl(at x: CGFloat, cancelled: Bool) -> Bool {
+        guard let item = activeSettingItem,
+              let key = item.command?.value else { return false }
+        if !cancelled { _ = updateSettingControl(at: x) }
+        let value = cancelled ? activeSettingOriginalValue : activeSettingValue
+        activeSettingItem = nil
+        activeSettingRect = nil
+        activeSettingOriginalValue = nil
+        activeSettingValue = nil
+        if let value {
+            if cancelled {
+                if key == "accentColor" {
+                    previewAccent(value)
+                } else {
+                    delegate?.keyboardView(self, previewSetting: key, value: value)
+                }
+            } else {
+                delegate?.keyboardView(self, persistSetting: key, value: value)
+                performSelectionFeedback()
+            }
+        }
+        invalidateLayoutAndDisplay()
+        return true
+    }
+
+    private func serializeSettingNumber(_ value: CGFloat) -> String {
+        abs(value - value.rounded()) < 0.0001
+            ? String(Int(value.rounded()))
+            : String(format: "%.1f", Double(value))
     }
 
     private func scheduleCandidateLongPress() {
@@ -1405,14 +1504,14 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func explicitAlternates(_ key: KeyTaoKeySpec) -> [AlternateOption] {
         let source: [KeyTaoKeyAlternate]
-        if state.asciiMode, let asciiAlternates = key.asciiAlternates, !asciiAlternates.isEmpty {
+        if isEnglishMode, let asciiAlternates = key.asciiAlternates, !asciiAlternates.isEmpty {
             source = asciiAlternates
         } else {
             source = key.alternates ?? []
         }
         if source.isEmpty {
             let hasLegacyLongPress = key.longPress != nil ||
-                (state.asciiMode && key.asciiLongPress != nil) ||
+                (isEnglishMode && key.asciiLongPress != nil) ||
                 key.hint?.isEmpty == false
             guard hasLegacyLongPress else {
                 return []
@@ -1431,7 +1530,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             let command: KeyTaoKeyCommand
             if let action = alternate.action {
                 command = action
-            } else if !state.asciiMode, let rimeValue = alternate.rimeValue {
+            } else if !isEnglishMode, let rimeValue = alternate.rimeValue {
                 command = KeyTaoKeyCommand(
                     type: KeyTaoCommandType.rimeInput,
                     value: rimeValue,
@@ -1552,7 +1651,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         keyRects = keyboardLayout()
         let barContent = candidateBarContent()
         switch barContent {
-        case .candidates, .completionSuggestions:
+        case .candidates:
             inlineCandidateRects = inlineCandidateLayout()
         default:
             inlineCandidateRects = []
@@ -1581,7 +1680,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         if !state.candidatePanel.candidates.isEmpty { return .candidates }
         if backspacePreviewText?.isEmpty == false { return .backspaceHint }
         // iOS intentionally has no automatic clipboard-suggestion state; see IMPL.md.
-        if !completionSuggestions.isEmpty { return .completionSuggestions }
         return .toolbar
     }
 
@@ -1765,7 +1863,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         case .fullHeightSymbolKeyboard:
             return
-        case .candidates, .completionSuggestions:
+        case .candidates:
             if let context = UIGraphicsGetCurrentContext() {
                 context.saveGState()
                 UIBezierPath(rect: inlineCandidateViewportRect()).addClip()
@@ -2079,6 +2177,10 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawRimeSchemaRow(displayItem, rect: rect)
         case .option:
             drawRimeOptionPill(displayItem, rect: rect)
+        case .slider:
+            drawSettingsSlider(displayItem, rect: rect)
+        case .swatches:
+            drawSettingsSwatches(displayItem, rect: rect)
         default:
             switch panelColumns(for: functionPanelActive ? functionPanelMode : .rime) {
             case 4:
@@ -2087,6 +2189,73 @@ final class KeyTaoIOSKeyboardView: UIView {
                 drawClipboardCandidateRow(displayItem, rect: rect)
             default:
                 drawInlineCandidateOption(displayItem, rect: rect)
+            }
+        }
+    }
+
+    private func drawSettingsSlider(_ item: CandidateDrawItem, rect: CGRect) {
+        guard let minimum = item.minimumValue,
+              let maximum = item.maximumValue,
+              let value = item.value else { return }
+        let trackLeft = rect.minX + 10
+        let trackRight = rect.maxX - 10
+        let trackY = rect.maxY - 13
+        let ratio = max(0, min(1, (value - minimum) / (maximum - minimum)))
+        drawTruncatedText(
+            item.label,
+            in: CGRect(x: trackLeft, y: rect.minY + 2, width: rect.width * 0.65, height: 25),
+            color: theme.candidate.foreground.uiColor,
+            size: candidateLabelSize(),
+            alignment: .left
+        )
+        drawTruncatedText(
+            item.text,
+            in: CGRect(x: rect.midX, y: rect.minY + 2, width: trackRight - rect.midX, height: 25),
+            color: theme.candidate.commentColor.uiColor,
+            size: candidateCommentSize(),
+            alignment: .right
+        )
+        let background = UIBezierPath()
+        background.move(to: CGPoint(x: trackLeft, y: trackY))
+        background.addLine(to: CGPoint(x: trackRight, y: trackY))
+        background.lineWidth = 3
+        background.lineCapStyle = .round
+        theme.panel.borderColor.uiColor.setStroke()
+        background.stroke()
+        let filledRight = trackLeft + (trackRight - trackLeft) * ratio
+        let filled = UIBezierPath()
+        filled.move(to: CGPoint(x: trackLeft, y: trackY))
+        filled.addLine(to: CGPoint(x: filledRight, y: trackY))
+        filled.lineWidth = 3
+        filled.lineCapStyle = .round
+        theme.candidate.selectedLabelColor.uiColor.setStroke()
+        filled.stroke()
+        theme.candidate.selectedLabelColor.uiColor.setFill()
+        UIBezierPath(ovalIn: CGRect(x: filledRight - 6, y: trackY - 6, width: 12, height: 12)).fill()
+    }
+
+    private func drawSettingsSwatches(_ item: CandidateDrawItem, rect: CGRect) {
+        let cellWidth: CGFloat = 30
+        let radius: CGFloat = 8
+        let startX = rect.maxX - 8 - cellWidth * CGFloat(item.swatches.count)
+        drawTruncatedText(
+            item.label,
+            in: CGRect(x: rect.minX + 10, y: rect.minY, width: max(0, startX - rect.minX - 12), height: rect.height),
+            color: theme.candidate.foreground.uiColor,
+            size: candidateLabelSize(),
+            alignment: .left
+        )
+        let selected = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        for (index, value) in item.swatches.enumerated() {
+            guard let color = KeyTaoThemeColor.from(hex: value) else { continue }
+            let center = CGPoint(x: startX + cellWidth * (CGFloat(index) + 0.5), y: rect.midY)
+            color.uiColor.setFill()
+            UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true).fill()
+            if value.caseInsensitiveCompare(selected) == .orderedSame {
+                let ring = UIBezierPath(arcCenter: center, radius: radius + 3, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+                ring.lineWidth = 2
+                theme.candidate.foreground.uiColor.setStroke()
+                ring.stroke()
             }
         }
     }
@@ -3056,7 +3225,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func inlineCandidateLayout() -> [CandidateRect] {
-        guard !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty else {
+        guard !state.candidatePanel.candidates.isEmpty else {
             candidateContentWidth = 0
             candidateViewportWidth = 0
             return []
@@ -3130,7 +3299,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         var rects: [CandidateRect] = []
         var sectionRects: [Int: CGRect] = [:]
         var deleteRects: [ClipboardDeleteRect] = []
-        let structuredRime = functionPanelActive && functionPanelMode == .rime
+        let structuredRime = functionPanelActive && (functionPanelMode == .rime || functionPanelMode == .settings)
         for (index, item) in expandedCandidateItems().enumerated() {
             let width: CGFloat
             let itemRowHeight: CGFloat
@@ -3152,6 +3321,20 @@ final class KeyTaoIOSKeyboardView: UIView {
                     itemRowHeight = 44
                 case .option:
                     width = (right - left - gap) / 2
+                    itemRowHeight = 44
+                case .slider:
+                    if x > left {
+                        x = left
+                        y += 44 + gap
+                    }
+                    width = right - left
+                    itemRowHeight = 56
+                case .swatches:
+                    if x > left {
+                        x = left
+                        y += 44 + gap
+                    }
+                    width = right - left
                     itemRowHeight = 44
                 case .standard, .empty:
                     width = right - left
@@ -3218,7 +3401,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             contentBottom = max(contentBottom, drawingRect.maxY + visualScrollY)
             if structuredRime {
                 switch item.style {
-                case .section, .schema, .standard, .empty:
+                case .section, .schema, .slider, .swatches, .standard, .empty:
                     x = left
                     y = drawingRect.maxY + gap
                 case .option:
@@ -3248,6 +3431,8 @@ final class KeyTaoIOSKeyboardView: UIView {
         switch mode {
         case .clipboard:
             return 1
+        case .settings:
+            return 1
         case .rime:
             return nil
         }
@@ -3270,7 +3455,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 command: .panel("clearClipboardHistory")
             )
             let settingsAction = ToolbarAction(
-                label: "设置",
+                label: "更多设置",
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
                 icon: .settings
             )
@@ -3318,7 +3503,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         let barHeight = config.candidateBarHeightDp
         let leftPadding = theme.panel.gap * 1.5
-        if !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty {
+        if !state.candidatePanel.candidates.isEmpty {
             return []
         }
         let preedit = state.candidatePanel.preedit ?? state.preedit
@@ -3373,18 +3558,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func candidateDrawItems(inlineOnly: Bool) -> [CandidateDrawItem] {
         if state.candidatePanel.candidates.isEmpty {
-            return completionSuggestions.enumerated().map { index, suggestion in
-                CandidateDrawItem(
-                    identifierIndex: index,
-                    selectIndex: index,
-                    label: "补全",
-                    text: suggestion.word,
-                    comment: nil,
-                    selected: false,
-                    global: false,
-                    command: .directInput(suggestion.insertion)
-                )
-            }
+            return []
         }
         return state.candidatePanel.candidates.map { candidate in
             let global = panelCandidateGlobalIndex(candidate.index)
@@ -3409,6 +3583,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 items = rimePanelItems()
             case .clipboard:
                 items = clipboardPanelItems()
+            case .settings:
+                items = settingsPanelItems()
             }
         } else {
             items = rimePanelItems()
@@ -3501,7 +3677,10 @@ final class KeyTaoIOSKeyboardView: UIView {
                     style: .section
                 )
             )
-            if rimeOptionsState.switches.isEmpty {
+            let visibleSwitches = rimeOptionsState.switches.filter { schemaSwitch in
+                rimeOptionsState.englishSchemaID == nil || !schemaSwitch.optionNames.contains("ascii_mode")
+            }
+            if visibleSwitches.isEmpty {
                 items.append(
                     CandidateDrawItem(
                         identifierIndex: -3100,
@@ -3516,7 +3695,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     )
                 )
             } else {
-                items.append(contentsOf: rimeOptionsState.switches.enumerated().map { index, schemaSwitch in
+                items.append(contentsOf: visibleSwitches.enumerated().map { index, schemaSwitch in
                     rimeSwitchItem(index: index, schemaSwitch: schemaSwitch)
                 })
             }
@@ -3621,6 +3800,95 @@ final class KeyTaoIOSKeyboardView: UIView {
                 clipboardText: text
             )
         }
+    }
+
+    private func settingsPanelItems() -> [CandidateDrawItem] {
+        let scheme = ["auto", "light", "dark"].contains(theme.ui.colorScheme) ? theme.ui.colorScheme : "auto"
+        let nextScheme = scheme == "auto" ? "light" : (scheme == "light" ? "dark" : "auto")
+        let currentAccent = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        let swatches = (Self.accentPresets + [currentAccent]).reduce(into: [String]()) { result, value in
+            if !result.contains(value) { result.append(value) }
+        }
+        var index = -4000
+        func nextIndex() -> Int { defer { index -= 1 }; return index }
+        func section(_ label: String) -> CandidateDrawItem {
+            let id = nextIndex()
+            return CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: label, text: "", comment: nil,
+                selected: false, global: false, command: nil, style: .section
+            )
+        }
+        func toggle(_ label: String, _ key: String, _ enabled: Bool) -> CandidateDrawItem {
+            let id = nextIndex()
+            return CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: label, text: enabled ? "开" : "关",
+                comment: nil, selected: enabled, global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: key, fallbackValue: String(!enabled)),
+                style: .option
+            )
+        }
+        func slider(
+            _ label: String,
+            _ key: String,
+            _ value: CGFloat,
+            _ minimum: CGFloat,
+            _ maximum: CGFloat,
+            _ step: CGFloat,
+            _ text: String
+        ) -> CandidateDrawItem {
+            let id = nextIndex()
+            return CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: label, text: text,
+                comment: nil, selected: false, global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: key, fallbackValue: String(Double(value))),
+                style: .slider, minimumValue: minimum, maximumValue: maximum, value: value, step: step
+            )
+        }
+        func indexed(_ makeItem: (Int) -> CandidateDrawItem) -> CandidateDrawItem {
+            let id = nextIndex()
+            return makeItem(id)
+        }
+        return [
+            section("外观"),
+            indexed { id in CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: "主题色", text: currentAccent,
+                comment: nil, selected: true, global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "accentColor", fallbackValue: currentAccent),
+                style: .swatches, swatches: swatches
+            ) },
+            indexed { id in CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: "配色", text: schemeLabel(scheme),
+                comment: nil, selected: scheme != "auto", global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "colorScheme", fallbackValue: nextScheme),
+                style: .option, statusLabel: "切换"
+            ) },
+            slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8, 1.4, 0.1, String(format: "%.1f×", Double(settingsConfig.candidateFontScale))),
+            toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible),
+            section("布局"),
+            slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp, 160, 420, 2, "\(Int(settingsConfig.keyboardHeightDp.rounded()))dp"),
+            slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp, 36, 96, 1, "\(Int(settingsConfig.candidateBarHeightDp.rounded()))dp"),
+            toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled),
+            section("反馈"),
+            toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled),
+            slider("强度", "haptics.intensity", CGFloat(settingsConfig.hapticIntensity), 1, 100, 1, "\(settingsConfig.hapticIntensity)%"),
+            toggle("按键预览气泡", "keyPreviewEnabled", settingsConfig.keyPreviewEnabled),
+            indexed { id in CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: "更多设置", text: "→ App",
+                comment: nil, selected: false, global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
+                style: .option, statusLabel: "打开"
+            ) },
+            indexed { id in CandidateDrawItem(
+                identifierIndex: id, selectIndex: id, label: "恢复默认", text: "面板项目",
+                comment: nil, selected: false, global: false,
+                command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "reset", fallbackValue: "true"),
+                style: .option, statusLabel: "重置"
+            ) },
+        ]
+    }
+
+    private func schemeLabel(_ value: String) -> String {
+        value == "light" ? "白天" : (value == "dark" ? "夜间" : "自动")
     }
 
     private struct PanelItem {
@@ -3858,7 +4126,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func shouldUseInlineNumberRow() -> Bool {
-        !state.asciiMode && state.hasComposition && state.preedit.contains("=")
+        !isEnglishMode && state.hasComposition && state.preedit.contains("=")
     }
 
     private func inlineNumberRow(_ row: [KeyTaoKeySpec]) -> [KeyTaoKeySpec] {
@@ -3957,19 +4225,19 @@ final class KeyTaoIOSKeyboardView: UIView {
         )
         let settings = ToolbarAction(
             label: "设置",
-            command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
+            command: .panel("settings"),
             icon: .settings,
             id: "settings"
         )
         if layerMode == .symbols {
             return [
                 function,
-                ToolbarAction(label: "中", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "chinese", fallbackValue: nil), selected: !state.asciiMode, id: "chinese"),
-                ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: state.asciiMode, id: "english"),
+                ToolbarAction(label: "中", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "chinese", fallbackValue: nil), selected: !isEnglishMode, id: "chinese"),
+                ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: isEnglishMode, id: "english"),
                 ToolbarAction(label: "123", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "numbers", fallbackValue: nil), id: "numbers"),
                 ToolbarAction(label: "ABC", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil), id: "letters"),
-                layout,
                 settings,
+                layout,
             ]
         } else {
             return [
@@ -3989,8 +4257,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                     icon: .emoji,
                     id: "emoji"
                 ),
-                layout,
                 settings,
+                layout,
             ]
         }
     }
@@ -4073,7 +4341,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func languageToggleAction() -> ToolbarAction {
-        if state.asciiMode {
+        if isEnglishMode {
             return ToolbarAction(
                 label: "En",
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: nil, fallbackValue: nil),
@@ -4101,6 +4369,19 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     @discardableResult
     private func handlePanelCommand(_ command: KeyTaoKeyCommand) -> Bool {
+        if command.type == KeyTaoCommandType.setting {
+            guard let key = command.value else { return true }
+            let value = command.fallbackValue ?? ""
+            if key == "accentColor" {
+                previewAccent(value)
+            } else if key != "colorScheme" && key != "reset" {
+                delegate?.keyboardView(self, previewSetting: key, value: value)
+            }
+            delegate?.keyboardView(self, persistSetting: key, value: value)
+            performSelectionFeedback()
+            invalidateLayoutAndDisplay()
+            return true
+        }
         if command.type == KeyTaoCommandType.panel {
             switch command.value {
             case "close":
@@ -4110,6 +4391,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 delegate?.keyboardView(self, didTrigger: KeyTaoKeyCommand(type: KeyTaoCommandType.rimeMenu, value: nil, fallbackValue: nil))
             case "clipboard":
                 openFunctionPanel(.clipboard)
+            case "settings":
+                openFunctionPanel(.settings)
             case "clearClipboardHistory":
                 handleClearClipboardHistory()
             case "clearClipboardHistoryNow":
@@ -4593,6 +4876,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             return "Rime 选项"
         case .clipboard:
             return "剪贴板"
+        case .settings:
+            return "设置"
         }
     }
 
@@ -4602,6 +4887,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             return "rime"
         case .clipboard:
             return "clipboard"
+        case .settings:
+            return "settings"
         }
     }
 
@@ -4750,7 +5037,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if let swipeUp = key.swipeUp {
             return swipeUp
         }
-        if state.asciiMode, let asciiLongPress = key.asciiLongPress {
+        if isEnglishMode, let asciiLongPress = key.asciiLongPress {
             return asciiLongPress
         }
         if let longPress = key.longPress {
@@ -4769,7 +5056,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         guard config.flickKeysEnabled else {
             return actionForMode(key)
         }
-        if state.asciiMode, let asciiLongPress = key.asciiLongPress {
+        if isEnglishMode, let asciiLongPress = key.asciiLongPress {
             return asciiLongPress
         }
         if let longPress = key.longPress {
@@ -4782,7 +5069,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func resolveLongPressCommand(_ key: KeyTaoKeySpec) -> KeyTaoKeyCommand {
-        if state.asciiMode, let asciiLongPress = key.asciiLongPress {
+        if isEnglishMode, let asciiLongPress = key.asciiLongPress {
             return applyShift(asciiLongPress)
         }
         if let longPress = key.longPress {
@@ -4798,7 +5085,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if layerMode.id.isSymbolLayer && key.isTextInputKey {
             return .directInput(valueForMode(key))
         }
-        if state.asciiMode {
+        if isEnglishMode {
             if let asciiAction = key.asciiAction {
                 return asciiAction
             }
@@ -4945,7 +5232,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         if layerMode.id.isSymbolLayer && item.isTextInputItem {
             return .directInput(valueForMode(item))
         }
-        if state.asciiMode {
+        if isEnglishMode {
             if let asciiAction = item.asciiAction {
                 return asciiAction
             }
@@ -5124,14 +5411,14 @@ final class KeyTaoIOSKeyboardView: UIView {
             return label
         }
         if key.action?.type == KeyTaoCommandType.space {
-            let mode = state.asciiMode ? "En" : "中"
+            let mode = isEnglishMode ? "En" : "中"
             return "\(state.schemaName.isEmpty ? key.label : state.schemaName) · \(mode)"
         }
         if key.action?.type == KeyTaoCommandType.mode {
-            return state.asciiMode ? theme.modeHint.englishText : theme.modeHint.chineseText
+            return isEnglishMode ? theme.modeHint.englishText : theme.modeHint.chineseText
         }
-        let label = state.asciiMode ? (key.asciiLabel ?? key.asciiValue ?? key.label) : key.label
-        let value = state.asciiMode ? (key.asciiValue ?? key.value ?? key.label) : (key.value ?? key.label)
+        let label = isEnglishMode ? (key.asciiLabel ?? key.asciiValue ?? key.label) : key.label
+        let value = isEnglishMode ? (key.asciiValue ?? key.value ?? key.label) : (key.value ?? key.label)
         if shiftState != .off, value.count == 1, value.range(of: "[A-Za-z]", options: .regularExpression) != nil {
             return label.uppercased()
         }
@@ -5139,14 +5426,14 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func stackLabelForMode(_ item: KeyTaoKeyStackItem) -> String {
-        if state.asciiMode {
+        if isEnglishMode {
             return item.asciiLabel ?? item.asciiValue ?? item.label
         }
         return item.label
     }
 
     private func valueForMode(_ key: KeyTaoKeySpec) -> String {
-        if state.asciiMode {
+        if isEnglishMode {
             return key.asciiValue ?? key.value ?? key.label
         }
         return key.value ?? key.label
@@ -5154,7 +5441,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func valueForMode(_ item: KeyTaoKeyStackItem) -> String {
         let value = item.value ?? item.label
-        if state.asciiMode {
+        if isEnglishMode {
             return item.asciiValue ?? value
         }
         return value
@@ -5179,8 +5466,8 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func isSoftAccentPunctuationKey(_ key: KeyTaoKeySpec) -> Bool {
-        let label = state.asciiMode ? (key.asciiLabel ?? key.asciiValue ?? key.label) : key.label
-        let value = state.asciiMode ? (key.asciiValue ?? key.value ?? key.label) : (key.value ?? key.label)
+        let label = isEnglishMode ? (key.asciiLabel ?? key.asciiValue ?? key.label) : key.label
+        let value = isEnglishMode ? (key.asciiValue ?? key.value ?? key.label) : (key.value ?? key.label)
         return Self.softAccentPunctuation.contains(label) || Self.softAccentPunctuation.contains(value)
     }
 
@@ -5522,7 +5809,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return true
         }
         if action.command.type == KeyTaoCommandType.panel,
-           ["rime", "clipboard", "close", "dismissClipboard"].contains(action.command.value ?? "") {
+           ["rime", "clipboard", "settings", "close", "dismissClipboard"].contains(action.command.value ?? "") {
             return true
         }
         return false
@@ -5651,6 +5938,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             KeyTaoCommandType.rimeMenu,
             KeyTaoCommandType.rimeSchema,
             KeyTaoCommandType.rimeOption,
+            KeyTaoCommandType.setting,
             KeyTaoCommandType.panel,
             KeyTaoCommandType.floating,
         ].contains(command.type)
@@ -5743,6 +6031,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let recentEmojiPreferenceKey = "recent_emoji"
     private static let maxRecentEmojiCount = 32
     private static let softAccentPunctuation: Set<String> = ["，", "。", ",", "."]
+    private static let accentPresets = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
     private static let keyPressAnimationDuration: TimeInterval = 0.08
     private static let scrollRubberBandFactor: CGFloat = 0.28
     private static let scrollOverscrollDistance: CGFloat = 18

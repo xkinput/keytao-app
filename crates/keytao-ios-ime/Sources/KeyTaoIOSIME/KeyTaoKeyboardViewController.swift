@@ -18,13 +18,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private static let queuedCommandLimit = 32
     private static let deleteAllBatchLimit = 4096
     private static let rimeOptionChoicePrefix = "choice:"
-    private static let englishCompletionLexicon = [
-        "about", "after", "again", "because", "before", "between", "could", "different",
-        "example", "first", "from", "good", "great", "have", "hello", "help", "important",
-        "keyboard", "know", "language", "little", "make", "more", "people", "please", "right",
-        "should", "something", "thanks", "their", "there", "these", "thing", "think", "through",
-        "today", "under", "want", "where", "which", "with", "work", "would", "your",
-    ]
 
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -50,6 +43,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var currentState = KeyTaoImeState.empty
     private var bypassAsciiActive = false
     private var asciiModeBeforeBypass = false
+    private var englishSchemaID: String?
+    private var currentRimeSchemaID: String?
+    private var lastChineseSchemaID: String?
+    private var chineseSwitchSnapshot: [String: Bool] = [:]
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
     private var clipboardHistory: [String] = []
@@ -65,7 +62,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var backspaceSelectionSession: BackspaceSelectionSession?
     private var lastCommittedText: String?
     private let doubleSpacePeriodTracker = KeyTaoDoubleSpacePeriodTracker()
-    private let englishTextChecker = UITextChecker()
     private var hostTraits = KeyTaoHostTraits.default
     private var markedTextActive = false
     private var hostTextMutationDepth = 0
@@ -167,7 +163,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         applyHostTraits()
         startRuntimeIfNeeded()
         keyboardView?.update(state: currentState)
-        refreshPredictionSuggestions()
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
@@ -457,6 +452,133 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
     }
 
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, previewSetting key: String, value: String) {
+        guard let current = baseKeyboardConfig,
+              let next = applySetting(to: current, key: key, value: value) else { return }
+        previewKeyboardPresentation(config: next)
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, persistSetting key: String, value: String) {
+        if key == "accentColor" || key == "colorScheme" {
+            persistThemeSetting(key: key, value: value)
+            return
+        }
+        if key == "reset" {
+            let patch = defaultPanelSettingsPatch()
+            var next = baseKeyboardConfig ?? engine.loadConfig()
+            for (settingKey, settingValue) in patch {
+                next = applySetting(to: next, key: settingKey, value: String(describing: settingValue)) ?? next
+            }
+            baseKeyboardConfig = next
+            applyKeyboardPresentation(config: next, force: true)
+            let configWritten = engine.persistSettings(patch: patch)
+            let themeWritten = engine.persistThemeUi(colorScheme: "auto", accentHex: "")
+            engine.releaseCaches()
+            updateThemeForCurrentAppearance()
+            if !configWritten || !themeWritten { showMessage("键盘内设置恢复失败") }
+            return
+        }
+        guard let patchValue = settingPatch(key: key, value: value) else { return }
+        if let current = baseKeyboardConfig {
+            applyKeyboardPresentation(config: current, force: true)
+        }
+        if !engine.persistSettings(patch: [key: patchValue]) {
+            showMessage("设置保存失败")
+        }
+    }
+
+    private func persistThemeSetting(key: String, value: String) {
+        let currentScheme = keyboardView?.currentThemeColorScheme() ?? "auto"
+        let scheme = key == "colorScheme" ? value : currentScheme
+        let accent: String? = key == "accentColor" ? value : nil
+        guard engine.persistThemeUi(colorScheme: scheme, accentHex: accent) else {
+            showMessage("主题设置保存失败")
+            return
+        }
+        engine.releaseCaches()
+        updateThemeForCurrentAppearance()
+    }
+
+    private func settingPatch(key: String, value: String) -> Any? {
+        switch key {
+        case "keyboardHeightDp", "candidateBarHeightDp", "haptics.intensity":
+            return Double(value).map { Int($0.rounded()) }
+        case "candidateFontScale":
+            return Double(value)
+        case "keyHintVisible", "numberRowEnabled", "haptics.enabled", "keyPreviewEnabled":
+            return Bool(value)
+        default:
+            return nil
+        }
+    }
+
+    private func applySetting(
+        to current: KeyTaoIOSImeConfig,
+        key: String,
+        value: String
+    ) -> KeyTaoIOSImeConfig? {
+        var next = current
+        switch key {
+        case "keyboardHeightDp":
+            guard let number = Double(value) else { return nil }
+            next.keyboardHeightDp = max(160, min(420, CGFloat(number.rounded())))
+        case "candidateBarHeightDp":
+            guard let number = Double(value) else { return nil }
+            next.candidateBarHeightDp = max(36, min(96, CGFloat(number.rounded())))
+        case "candidateFontScale":
+            guard let number = Double(value) else { return nil }
+            next.candidateFontScale = max(0.8, min(1.4, CGFloat(number)))
+        case "keyHintVisible":
+            guard let enabled = Bool(value) else { return nil }
+            next.keyHintVisible = enabled
+        case "numberRowEnabled":
+            guard let enabled = Bool(value) else { return nil }
+            next.numberRowEnabled = enabled
+        case "haptics.enabled":
+            guard let enabled = Bool(value) else { return nil }
+            next.hapticsEnabled = enabled
+        case "haptics.intensity":
+            guard let number = Double(value) else { return nil }
+            next.hapticIntensity = max(1, min(100, Int(number.rounded())))
+        case "keyPreviewEnabled":
+            guard let enabled = Bool(value) else { return nil }
+            next.keyPreviewEnabled = enabled
+        default:
+            return nil
+        }
+        return next
+    }
+
+    private func previewKeyboardPresentation(config: KeyTaoIOSImeConfig) {
+        guard let keyboardView else { return }
+        baseKeyboardConfig = config
+        let normalized = layoutState.normalized()
+        let isLandscape = currentInterfaceIsLandscape()
+        let presentation = keyboardLayoutPresentation(state: normalized, isLandscape: isLandscape)
+        let profile = keyboardLayoutProfile(state: normalized, presentation: presentation)
+        let presented = config.scaledForFloating(profile, heightScale: normalized.heightScale)
+        keyboardView.update(settingsConfig: config)
+        keyboardView.update(config: presented)
+        let keyboardHeight = presented.effectiveKeyboardHeightDp + presented.candidateBarHeightDp
+        keyboardHeightConstraint?.constant = keyboardHeight
+        let margin = presentation.isCompact ? config.floating.marginDp : 0
+        heightConstraint?.constant = keyboardHeight + (presentation.isCompact ? margin * 2 : 0)
+        self.view.layoutIfNeeded()
+    }
+
+    private func defaultPanelSettingsPatch() -> [String: Any] {
+        [
+            "candidateFontScale": 1.0,
+            "keyHintVisible": true,
+            "keyboardHeightDp": 266,
+            "candidateBarHeightDp": 52,
+            "numberRowEnabled": false,
+            "haptics.enabled": true,
+            "haptics.intensity": 42,
+            "keyPreviewEnabled": true,
+        ]
+    }
+
     func keyboardViewCanUndo(_ view: KeyTaoIOSKeyboardView) -> Bool {
         !backspaceRestoreStack.isEmpty
     }
@@ -541,7 +663,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             apply(engine.commitComposition())
         }
         insertHostText(text)
-        refreshPredictionSuggestions()
     }
 
     private func handleBackspace() {
@@ -555,7 +676,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         _ = deleteOneBeforeCursorForRestore()
-        refreshPredictionSuggestions()
     }
 
     private func handleBackspaceGesture(_ action: String, count: Int) {
@@ -596,7 +716,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         if !["select", "cancelSelection", "commitSelection"].contains(action) {
             keyboardView?.showBackspaceDeletionPreview(preview)
         }
-        refreshPredictionSuggestions()
     }
 
     private func updateBackspaceSelection(count: Int) {
@@ -739,7 +858,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
-        refreshPredictionSuggestions()
     }
 
     private func handleEnter() {
@@ -780,7 +898,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         )
         if replace {
             _ = deleteOneBeforeCursorForRestore()
-            commitDirect(currentState.asciiMode ? ". " : "。")
+            commitDirect(isEnglishMode ? ". " : "。")
             return
         }
         if hostTraits.bypassesRime {
@@ -796,20 +914,87 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func handleMode(_ value: String?) {
-        let target: Bool
-        switch value {
-        case "ascii", "english", "en":
-            target = true
-        case "chinese", "zh", "cn":
-            target = false
-        default:
-            target = !currentState.asciiMode
+        let decision = keyTaoLanguageModeDecision(
+            englishMode: configuredEnglishMode,
+            englishSchemaID: englishSchemaID,
+            value: value,
+            currentSchemaID: currentRimeSchemaID,
+            asciiMode: currentState.asciiMode
+        )
+        guard decision.usesEnglishSchema else {
+            apply(engine.setAsciiMode(decision.targetEnglish))
+            return
         }
-        apply(engine.setAsciiMode(target))
+        guard let englishSchemaID else {
+            return
+        }
+        if (currentRimeSchemaID == englishSchemaID) == decision.targetEnglish {
+            return
+        }
+
+        let schemas = engine.listSchemas()
+        let targetSchemaID: String?
+        if decision.targetEnglish {
+            targetSchemaID = englishSchemaID
+        } else if let lastChineseSchemaID,
+                  schemas.contains(where: { $0.id == lastChineseSchemaID && $0.id != englishSchemaID }) {
+            targetSchemaID = lastChineseSchemaID
+        } else {
+            targetSchemaID = schemas.first(where: { $0.id != englishSchemaID })?.id
+        }
+        guard let targetSchemaID else {
+            showMessage("没有可用的中文输入方案")
+            refreshRimeOptions()
+            return
+        }
+
+        if currentState.hasComposition || markedTextActive {
+            clearHostMarkedText()
+            apply(engine.clearComposition())
+        }
+        if decision.targetEnglish,
+           let current = engine.currentSchema(),
+           current.id != englishSchemaID {
+            lastChineseSchemaID = current.id
+            chineseSwitchSnapshot = keyTaoChineseSwitchSnapshot(
+                names: engine.schemaSwitches().flatMap(\.optionNames) + ["ascii_punct"],
+                optionValue: engine.getOption
+            )
+        }
+
+        guard var state = engine.selectSchema(targetSchemaID) else {
+            showMessage("无法切换输入方案")
+            refreshRimeOptions()
+            return
+        }
+        var failedOptions: [String] = []
+        if !decision.targetEnglish {
+            for (optionName, enabled) in chineseSwitchSnapshot {
+                guard let restoredState = engine.setOption(optionName, enabled: enabled) else {
+                    failedOptions.append(optionName)
+                    continue
+                }
+                state = restoredState
+            }
+        }
+        apply(state)
+        if !failedOptions.isEmpty {
+            showMessage("无法恢复 Rime 选项：\(failedOptions.joined(separator: "、"))")
+        }
+        refreshRimeOptions()
     }
 
     private func selectRimeSchema(_ schemaID: String?) {
         guard let schemaID, !schemaID.isEmpty else {
+            return
+        }
+        if usesEnglishSchema, schemaID == englishSchemaID {
+            handleMode("ascii")
+            return
+        }
+        if usesEnglishSchema, currentRimeSchemaID == englishSchemaID {
+            lastChineseSchemaID = schemaID
+            handleMode("chinese")
             return
         }
         guard let state = engine.selectSchema(schemaID) else {
@@ -828,7 +1013,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let state: KeyTaoImeState?
         if action == "true" || action == "false" {
             let enabled = action == "true"
-            state = optionName == "ascii_mode"
+            state = optionName == "ascii_mode" && !usesEnglishSchema
                 ? engine.setAsciiMode(enabled)
                 : engine.setOption(optionName, enabled: enabled)
         } else if action.hasPrefix(Self.rimeOptionChoicePrefix) {
@@ -851,6 +1036,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func refreshRimeOptions() {
+        let schemas = engine.listSchemas()
+        let currentSchema = engine.currentSchema()
+        englishSchemaID = keyTaoEnglishSchemaID(schemas: schemas.map { ($0.id, $0.name) })
+        currentRimeSchemaID = currentSchema?.id
+        if let currentSchema, currentSchema.id != englishSchemaID {
+            lastChineseSchemaID = currentSchema.id
+        }
         var switches = engine.schemaSwitches()
         if !switches.contains(where: { $0.name == "ascii_punct" }) {
             switches.append(KeyTaoRimeSchemaSwitch(
@@ -865,8 +1057,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             optionStates[optionName] = engine.getOption(optionName)
         }
         keyboardView?.update(rimeOptions: KeyTaoRimeOptionsState(
-            schemas: engine.listSchemas(),
-            currentSchema: engine.currentSchema(),
+            schemas: schemas,
+            currentSchema: currentSchema,
+            englishSchemaID: usesEnglishSchema ? englishSchemaID : nil,
             switches: switches,
             options: optionStates
         ))
@@ -1035,7 +1228,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         clearHostMarkedText()
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
-        refreshPredictionSuggestions()
     }
 
     /// Reading `UIPasteboard.general.string` needs Full Access, and since iOS 16
@@ -1081,7 +1273,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         lastCommittedText = hostTraits.isSensitive ? nil : text
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
-        refreshPredictionSuggestions()
     }
 
     private func apply(_ state: KeyTaoImeState) {
@@ -1091,37 +1282,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         currentState = state.withoutTransientCommit()
         updateHostMarkedText()
         keyboardView?.update(state: currentState)
-        refreshPredictionSuggestions()
-    }
-
-    private func refreshPredictionSuggestions() {
-        let config = keyboardView?.currentConfig() ?? baseKeyboardConfig ?? .fallback
-        guard config.predictionEnabled,
-              !hostTraits.isSensitive,
-              currentState.asciiMode,
-              !currentState.hasComposition,
-              backspaceSelectionSession == nil,
-              let before = textDocumentProxy.documentContextBeforeInput,
-              let prefix = keyTaoEnglishCompletionPrefix(before) else {
-            keyboardView?.updatePredictionSuggestions(prefix: nil, suggestions: [])
-            return
-        }
-        let range = NSRange(location: 0, length: prefix.utf16.count)
-        let systemCompletions = englishTextChecker.completions(
-            forPartialWordRange: range,
-            in: prefix,
-            language: "en_US"
-        ) ?? []
-        let systemGuesses = englishTextChecker.guesses(
-            forWordRange: range,
-            in: prefix,
-            language: "en_US"
-        ) ?? []
-        let suggestions = keyTaoCompleteEnglishPrefix(
-            prefix,
-            lexicon: systemCompletions + systemGuesses + Self.englishCompletionLexicon
-        )
-        keyboardView?.updatePredictionSuggestions(prefix: prefix, suggestions: suggestions)
     }
 
     // MARK: - Host text
@@ -1276,11 +1436,24 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         if inputAvailable {
             currentState = engine.state().withoutTransientCommit()
             keyboardView?.updateAvailability(message: nil)
+            refreshRimeOptions()
         } else {
             currentState = .empty
             keyboardView?.updateAvailability(message: unavailableMessage)
         }
         keyboardView?.update(state: currentState)
+    }
+
+    private var configuredEnglishMode: String {
+        baseKeyboardConfig?.englishMode ?? keyboardView?.currentConfig().englishMode ?? "ascii"
+    }
+
+    private var usesEnglishSchema: Bool {
+        configuredEnglishMode == "schema" && englishSchemaID != nil
+    }
+
+    private var isEnglishMode: Bool {
+        usesEnglishSchema ? currentRimeSchemaID == englishSchemaID : currentState.asciiMode
     }
 
     private func reloadIfNeeded() {
@@ -1419,6 +1592,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         layoutState = normalized
         layoutPresentation = presentation
         let presentedConfig = config.scaledForFloating(profile, heightScale: normalized.heightScale)
+        keyboardView.update(settingsConfig: config)
         keyboardView.update(config: presentedConfig)
         keyboardView.updateLayoutPresentation(presentation)
 

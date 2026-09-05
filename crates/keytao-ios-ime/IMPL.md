@@ -174,6 +174,8 @@ Enter 走通用层唯一实现 `keytao_session_process_enter_json`（把 `XK_Ret
 
 按 D6，**任何模式下按键都先进 Rime**：英文模式是 librime 的 `ascii_mode` 选项而不是键盘侧的捷径，iOS 不再按 `currentState.asciiMode` 直接提交字符，schema 的标点、`ascii_composer`、`key_binder` 规则在英文模式下同样生效；librime 拒绝该键时才走上面的宿主直插路径。唯一的旁路仍是 D9 的敏感/直通宿主（`hostTraits.bypassesRime`），那里 session policy 本来就不组字。这条契约的前提是 schema 的 processors 里有 `ascii_composer`（Rime 默认预设都有）：没有它时 `ascii_mode` 不会让 librime 拒绝字母键，英文模式会继续组字——这一点五个前端一致，不是 iOS 独有。
 
+移动端 `englishMode` 默认 `ascii`，因此上述 `ascii_mode` 契约仍是默认及无 English 方案时的降级路径。仅当 `englishMode == "schema"` 且已安装 English 方案时，中/En 才会先清掉未上屏 composition，再选择 English schema；返回中文会恢复进入 English 前快照的中文 schema 选项（包括临时 `ascii_punct`）。敏感/直通宿主的性能旁路始终只使用 `ascii_mode`，不切换 schema；桌面契约不受此移动端设置影响。
+
 多字符 `rimeInput`（键位的 `rimeValue`）按序**逐次**送 Rime 并逐次应用结果：中途触发的自动上屏必须先落到宿主，否则会被后一次 state 覆盖而丢字。回退分两种，避免把已经进过 Rime 的前缀重复打进宿主：
 
 - 送出任何一键**之前**：先把整串逐字符映射成 keysym，只要有一个映射不出来，整个键回退成它声明的字面量（`fallbackValue`），Rime 完全不参与。
@@ -522,3 +524,9 @@ proc ... load code signature error 4 for file "KeyTaoKeyboard"
 ```
 
 修复后 simulator 构建不再带 App Group 或 `application-identifier`，AMFI 不再拒载，键盘可以实际打开并输入。
+
+## 键盘内设置面板
+
+工具栏的「设置」会打开键盘内设置面板。布局、候选字号、键角提示和反馈选项仍写入 `ios_ime.json`，配色与主题色仍写入 `theme.yaml`；没有新增配置存储。滑杆和色板在手势移动时只更新内存中的键盘配置、约束常量或主题预览，抬手时才完整应用布局，并通过 `persistSettings` 或主题写入器持久化一次。高度预览不使用动画。
+
+App 的移动端页面继续保留长按延迟、删除速度、退格滑动模式、滑动判定阈值、双击空格句号、Flick、回车键、悬浮布局、配置路径及恢复默认等低频设置。完整主题路径、桌面主题配置和桌面页面行为不受键盘内面板影响。

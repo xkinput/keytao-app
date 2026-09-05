@@ -55,14 +55,101 @@ expect(
     "selection mode deletes only on release"
 )
 
-expect(keyTaoEnglishCompletionPrefix("say he"), "he", "English completion reads the active ASCII prefix")
-expect(keyTaoEnglishCompletionPrefix("say h"), nil, "single-letter prefixes stay quiet")
-expect(keyTaoEnglishCompletionPrefix("say he!"), nil, "punctuation ends the active prefix")
 expect(
-    keyTaoCompleteEnglishPrefix("he", lexicon: ["hello", "help", "he", "world", "hero"]),
-    ["hello", "help", "hero"],
-    "English completion returns longer local matches"
+    keyTaoEnglishSchemaID(schemas: [("english", "English"), ("easy_en", "Easy English")]),
+    "easy_en",
+    "English schema resolution prefers easy_en"
 )
+expect(keyTaoEnglishSchemaID(schemas: [("english", "English")]), "english", "English schema ID fallback")
+expect(keyTaoEnglishSchemaID(schemas: [("custom_easy", "Easy English")]), "custom_easy", "Easy English name fallback")
+expect(keyTaoEnglishSchemaID(schemas: [("custom_english", "eNgLiSh")]), "custom_english", "English name fallback")
+expect(keyTaoEnglishSchemaID(schemas: [("keytao", "键道")]), nil, "missing English schema")
+
+let legacyAscii = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: nil,
+    value: "ascii",
+    currentSchemaID: "keytao",
+    asciiMode: false
+)
+let legacyChinese = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: nil,
+    value: "chinese",
+    currentSchemaID: "keytao",
+    asciiMode: true
+)
+let legacyToggle = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: nil,
+    value: nil,
+    currentSchemaID: "keytao",
+    asciiMode: false
+)
+let configuredAscii = keyTaoLanguageModeDecision(
+    englishMode: "ascii",
+    englishSchemaID: "easy_en",
+    value: nil,
+    currentSchemaID: "keytao",
+    asciiMode: false
+)
+let schemaEnglish = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: "easy_en",
+    value: "ascii",
+    currentSchemaID: "keytao",
+    asciiMode: false
+)
+let schemaChinese = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: "easy_en",
+    value: "chinese",
+    currentSchemaID: "easy_en",
+    asciiMode: true
+)
+let schemaToggleToEnglish = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: "easy_en",
+    value: nil,
+    currentSchemaID: "keytao",
+    asciiMode: true
+)
+let schemaToggleToChinese = keyTaoLanguageModeDecision(
+    englishMode: "schema",
+    englishSchemaID: "easy_en",
+    value: nil,
+    currentSchemaID: "easy_en",
+    asciiMode: false
+)
+
+expect(legacyAscii.usesEnglishSchema, false, "legacy ASCII request keeps the ascii_mode path")
+expect(legacyAscii.targetEnglish, true, "legacy ASCII request enables ascii_mode")
+expect(legacyChinese.targetEnglish, false, "legacy Chinese request disables ascii_mode")
+expect(legacyToggle.targetEnglish, true, "legacy toggle flips ascii_mode")
+expect(configuredAscii.usesEnglishSchema, false, "ASCII setting ignores an installed English schema")
+expect(configuredAscii.targetEnglish, true, "ASCII setting toggles ascii_mode")
+expect(schemaEnglish.usesEnglishSchema, true, "English schema selects the schema path")
+expect(schemaEnglish.targetEnglish, true, "ASCII request selects the English schema")
+expect(schemaChinese.targetEnglish, false, "Chinese request selects the Chinese schema")
+expect(schemaToggleToEnglish.targetEnglish, true, "Chinese schema toggles to English")
+expect(schemaToggleToChinese.targetEnglish, false, "English schema toggles to Chinese")
+
+let switchValues = [
+    "ascii_mode": true,
+    "simplification": false,
+    "emoji_cn": true,
+    "danzi_mode": false,
+    "ascii_punct": true,
+]
+let switchSnapshot = keyTaoChineseSwitchSnapshot(names: Array(switchValues.keys)) {
+    switchValues[$0] ?? false
+}
+expect(
+    switchSnapshot,
+    ["simplification": false, "emoji_cn": true, "danzi_mode": false, "ascii_punct": true],
+    "Chinese switch snapshot and restore exclude ascii_mode"
+)
+expect(switchSnapshot["ascii_mode"], nil, "ascii_mode is never restored across schema changes")
 
 let cursorTracker = KeyTaoCursorGestureTracker(startX: 100)
 expect(cursorTracker.update(x: 112.5), KeyTaoCursorGestureUpdate(active: false, stepDelta: 0), "cursor gesture ignores touch noise")

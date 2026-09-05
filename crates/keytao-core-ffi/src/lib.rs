@@ -1309,6 +1309,40 @@ pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
     )
 }
 
+/// Persist the mobile theme color scheme and optionally its accent. A null
+/// accent preserves the key; an empty accent removes it.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_write_theme_ui(
+    path: *const c_char,
+    color_scheme: *const c_char,
+    accent_hex: *const c_char,
+) -> bool {
+    guard("keytao_write_theme_ui", false, || {
+        let Some(path) = optional_path_arg(path) else {
+            return false;
+        };
+        let Ok(color_scheme) = c_string_arg(color_scheme, "color_scheme") else {
+            return false;
+        };
+        let color_scheme = match color_scheme.trim().to_ascii_lowercase().as_str() {
+            "auto" => keytao_theme::UiColorScheme::Auto,
+            "light" => keytao_theme::UiColorScheme::Light,
+            "dark" => keytao_theme::UiColorScheme::Dark,
+            _ => return false,
+        };
+        let accent_hex = if accent_hex.is_null() {
+            None
+        } else {
+            let Ok(accent_hex) = c_string_arg(accent_hex, "accent_hex") else {
+                return false;
+            };
+            Some(accent_hex)
+        };
+        keytao_theme::write_theme_ui_to_path(&path, color_scheme, accent_hex).is_ok()
+    })
+}
+
 #[no_mangle]
 #[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {

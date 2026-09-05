@@ -2,6 +2,7 @@ package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -71,14 +72,111 @@ class KeytaoImeInteractionPolicyTest {
     }
 
     @Test
-    fun `English completion uses the active ASCII word prefix`() {
-        assertEquals("he", englishCompletionPrefix("say he"))
-        assertEquals(null, englishCompletionPrefix("say h"))
-        assertEquals(null, englishCompletionPrefix("say he!"))
+    fun `English schema resolution prefers easy en and accepts documented fallbacks`() {
         assertEquals(
-            listOf("hello", "help", "hero"),
-            completeEnglishPrefix("he", listOf("hello", "help", "he", "world", "hero")),
+            "easy_en",
+            resolveEnglishSchemaId(listOf("english" to "English", "easy_en" to "Easy English")),
         )
+        assertEquals("english", resolveEnglishSchemaId(listOf("english" to "English")))
+        assertEquals("custom_easy", resolveEnglishSchemaId(listOf("custom_easy" to "Easy English")))
+        assertEquals("custom_english", resolveEnglishSchemaId(listOf("custom_english" to "eNgLiSh")))
+        assertNull(resolveEnglishSchemaId(listOf("keytao" to "键道")))
+    }
+
+    @Test
+    fun `language mode decision uses English schema when available and ASCII mode otherwise`() {
+        val legacyAscii = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = null,
+            value = "ascii",
+            currentSchemaId = "keytao",
+            asciiMode = false,
+        )
+        val legacyChinese = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = null,
+            value = "chinese",
+            currentSchemaId = "keytao",
+            asciiMode = true,
+        )
+        val legacyToggle = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = null,
+            value = null,
+            currentSchemaId = "keytao",
+            asciiMode = false,
+        )
+        val configuredAscii = decideLanguageMode(
+            englishMode = "ascii",
+            englishSchemaId = "easy_en",
+            value = null,
+            currentSchemaId = "keytao",
+            asciiMode = false,
+        )
+        val schemaEnglish = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = "easy_en",
+            value = "ascii",
+            currentSchemaId = "keytao",
+            asciiMode = false,
+        )
+        val schemaChinese = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = "easy_en",
+            value = "chinese",
+            currentSchemaId = "easy_en",
+            asciiMode = true,
+        )
+        val schemaToggleToEnglish = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = "easy_en",
+            value = null,
+            currentSchemaId = "keytao",
+            asciiMode = true,
+        )
+        val schemaToggleToChinese = decideLanguageMode(
+            englishMode = "schema",
+            englishSchemaId = "easy_en",
+            value = null,
+            currentSchemaId = "easy_en",
+            asciiMode = false,
+        )
+
+        assertEquals(false, legacyAscii.usesEnglishSchema)
+        assertEquals(true, legacyAscii.targetEnglish)
+        assertEquals(false, legacyChinese.targetEnglish)
+        assertEquals(true, legacyToggle.targetEnglish)
+        assertEquals(false, configuredAscii.usesEnglishSchema)
+        assertEquals(true, configuredAscii.targetEnglish)
+        assertEquals(true, schemaEnglish.usesEnglishSchema)
+        assertEquals(true, schemaEnglish.targetEnglish)
+        assertEquals(false, schemaChinese.targetEnglish)
+        assertEquals(true, schemaToggleToEnglish.targetEnglish)
+        assertEquals(false, schemaToggleToChinese.targetEnglish)
+    }
+
+    @Test
+    fun `Chinese switch snapshot and restore exclude ascii mode`() {
+        val values = mapOf(
+            "ascii_mode" to true,
+            "simplification" to false,
+            "emoji_cn" to true,
+            "danzi_mode" to false,
+            "ascii_punct" to true,
+        )
+
+        val snapshot = snapshotChineseSwitchOptions(values.keys.toList()) { values.getValue(it) }
+
+        assertEquals(
+            mapOf(
+                "simplification" to false,
+                "emoji_cn" to true,
+                "danzi_mode" to false,
+                "ascii_punct" to true,
+            ),
+            snapshot,
+        )
+        assertFalse(snapshot.containsKey("ascii_mode"))
     }
 
     @Test

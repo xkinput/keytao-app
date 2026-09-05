@@ -319,15 +319,6 @@
 - **改法**：Android 接 `VelocityTracker` + `OverScroller`；iOS 用简单的速度衰减动画（`CADisplayLink`）。同时加细滚动条指示。
 - **验收标准**：快速甩动候选面板后列表继续滑行并平滑停止；到达边界有轻微回弹；滚动时右侧出现滚动条并在停止后淡出。
 
-### P3-3 联想 / 预测
-
-- **平台**：both（引擎级）
-- **现状**：无 composition 时候选栏直接画工具栏；英文模式绕过 Rime 直接上屏，无任何建议（KeyTaoIOSKeyboardView.swift:719-749）。
-- **子批次 C 交付边界**：本批次只交付英文补全。当前 bundled librime 未包含 `librime-predict` / `predict.db`，目标 schema 也尚未配置对应的 predictor processor/translator；在这些依赖补齐前无法提供真实的中文联想链路。
-- **本批次改法**：英文侧用 `UITextChecker.completions/guesses`（iOS）/ 本地词表（Android）填候选栏。属独立特性，不与 P1/P2 耦合。
-- **本批次验收标准**：英文模式输入前缀出现补全候选；点击候选补全当前英文单词；关闭该设置后候选栏行为回到现状。
-- **后续项**：补齐 `librime-predict` / `predict.db` 并在目标 schema 接入 predictor processor/translator 后，再实现和验收中文上屏后的联想词展示与点击上屏。
-
 ### P3-4 退格「按词选中 → 抬手删除 → 可撤回」模型
 
 - **平台**：both
@@ -373,7 +364,7 @@
 | 项 | 原因 |
 | --- | --- |
 | 滑行输入（glide typing / 轨迹输入） | 与形码方案根本冲突：键道按键序列不是词的字母序列，轨迹匹配无意义。英文层的落差可接受。 |
-| 英文自动纠错 / autocorrect | 需要英文词频模型与纠错词典，工程量大且不服务主场景（中文形码）。英文层只做 P3-3 的补全建议。 |
+| 英文自动纠错 / autocorrect | 需要英文词频模型与纠错词典，工程量大且不服务主场景（中文形码）；英文输入由已安装的 Rime schema 负责。 |
 | 中文自动首字母大写 / `TYPE_TEXT_FLAG_CAP_SENTENCES` | 中文无大小写；英文层作为次要场景，收益低于实现与误触成本。 |
 | 语音输入、翻译、GIF、贴纸、表情搜索 | GBoard 的云服务能力，KeyTao 无对应后端，且与「本地输入法」定位冲突。 |
 | iOS 自由浮动键盘（任意位置移动 + dock/undock） | **平台硬限制**：键盘扩展只能在系统给的 `inputView` 矩形内绘制，无 move handle 可言。iOS 只做「一手模式（缩窄靠边）+ 分栏 + 高度拖拽」（P3-8）。 |

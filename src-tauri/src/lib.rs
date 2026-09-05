@@ -362,76 +362,6 @@ fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     outcome
 }
 
-fn write_ime_ui_settings_to_path(
-    theme_path: &Path,
-    color_scheme: keytao_theme::UiColorScheme,
-    orientation: keytao_theme::PanelOrientation,
-    accent_color: String,
-    font_size: f32,
-) -> Result<(), String> {
-    if let Some(parent) = theme_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
-    }
-    let accent_color = normalize_hex_color(&accent_color)?;
-    let font_size = normalize_ime_font_size(font_size)?;
-
-    let mut root = if theme_path.is_file() {
-        let content = std::fs::read_to_string(&theme_path)
-            .map_err(|e| format!("读取主题配置失败 {}: {e}", theme_path.display()))?;
-        serde_yaml::from_str::<serde_yaml::Value>(&content)
-            .map_err(|e| format!("主题配置无法解析 {}: {e}", theme_path.display()))?
-    } else {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    };
-
-    if !matches!(root, serde_yaml::Value::Mapping(_)) {
-        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let mapping = root
-        .as_mapping_mut()
-        .ok_or("主题配置根节点必须是 YAML mapping")?;
-    mapping
-        .entry(serde_yaml::Value::String("version".into()))
-        .or_insert_with(|| {
-            serde_yaml::Value::Number(serde_yaml::Number::from(keytao_theme::THEME_SCHEMA_VERSION))
-        });
-
-    let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
-    let color_scheme = match color_scheme {
-        keytao_theme::UiColorScheme::Auto => "auto",
-        keytao_theme::UiColorScheme::Light => "light",
-        keytao_theme::UiColorScheme::Dark => "dark",
-    };
-    ui_mapping.insert(
-        serde_yaml::Value::String("colorScheme".into()),
-        serde_yaml::Value::String(color_scheme.into()),
-    );
-    ui_mapping.insert(
-        serde_yaml::Value::String("accentColor".into()),
-        serde_yaml::Value::String(accent_color),
-    );
-
-    let panel_mapping = yaml_child_mapping(mapping, "panel", "主题面板配置必须是 YAML mapping")?;
-    let orientation = match orientation {
-        keytao_theme::PanelOrientation::Horizontal => "horizontal",
-        keytao_theme::PanelOrientation::Vertical => "vertical",
-    };
-    panel_mapping.insert(
-        serde_yaml::Value::String("orientation".into()),
-        serde_yaml::Value::String(orientation.into()),
-    );
-
-    let font_mapping = yaml_child_mapping(mapping, "font", "主题字体配置必须是 YAML mapping")?;
-    font_mapping.insert(
-        serde_yaml::Value::String("size".into()),
-        serde_yaml::to_value(font_size).map_err(|e| format!("序列化候选字号失败: {e}"))?,
-    );
-
-    let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
-    write_file_atomic(theme_path, content.as_bytes())
-        .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
-}
-
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn write_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
@@ -440,7 +370,7 @@ fn write_ime_ui_settings(
     font_size: f32,
 ) -> Result<(), String> {
     let theme_path = ime_theme_path()?;
-    write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path(
         &theme_path,
         color_scheme,
         orientation,
@@ -512,24 +442,6 @@ fn yaml_child_mapping<'a>(
 
 fn color_to_hex(color: keytao_theme::RgbaColor) -> String {
     format!("#{:02X}{:02X}{:02X}", color.red, color.green, color.blue)
-}
-
-fn normalize_hex_color(value: &str) -> Result<String, String> {
-    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
-    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err("主题色必须是 #RRGGBB 格式".into());
-    }
-    Ok(format!("#{}", hex.to_ascii_uppercase()))
-}
-
-fn normalize_ime_font_size(value: f32) -> Result<f32, String> {
-    if !value.is_finite() {
-        return Err("候选字号必须是有效数字".into());
-    }
-    Ok(value.clamp(
-        keytao_theme::MIN_CANDIDATE_FONT_SIZE,
-        keytao_theme::MAX_CANDIDATE_FONT_SIZE,
-    ))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -3908,7 +3820,7 @@ pub struct AndroidImeInputSettings {
     pub long_press_delay_ms: u16,
     pub keyboard_height_scale: u8,
     pub delete_speed: String,
-    pub prediction_enabled: bool,
+    pub english_mode: String,
     pub backspace_gesture_mode: String,
     pub keyboard_height_dp: u16,
     pub candidate_bar_height_dp: u8,
@@ -3997,6 +3909,47 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeResolve
         match keytao_theme::resolved_theme_json(&theme) {
             Ok(json) => jni_string(&mut env, &json),
             Err(error) => jni_string(&mut env, &format!(r#"{{"error":"{error}"}}"#)),
+        }
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeWriteThemeUi(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    path: JString<'_>,
+    color_scheme: JString<'_>,
+    accent_hex: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeWriteThemeUi", 0, || {
+        let Some(path) = optional_jni_path(&mut env, path) else {
+            return 0;
+        };
+        let Some(color_scheme) = optional_jni_text(&mut env, color_scheme) else {
+            return 0;
+        };
+        let color_scheme = match color_scheme.to_ascii_lowercase().as_str() {
+            "auto" => keytao_theme::UiColorScheme::Auto,
+            "light" => keytao_theme::UiColorScheme::Light,
+            "dark" => keytao_theme::UiColorScheme::Dark,
+            _ => return 0,
+        };
+        let accent_hex = if accent_hex.is_null() {
+            None
+        } else {
+            let Ok(accent_hex) = env.get_string(&accent_hex) else {
+                return 0;
+            };
+            Some(accent_hex.to_string_lossy().trim().to_owned())
+        };
+        if keytao_theme::write_theme_ui_to_path(&path, color_scheme, accent_hex).is_ok() {
+            if let Ok(mut resolver) = ANDROID_IME_THEME_RESOLVER.lock() {
+                *resolver = None;
+            }
+            1
+        } else {
+            0
         }
     })
 }
@@ -4967,6 +4920,15 @@ fn normalize_mobile_ime_delete_speed(value: Option<&str>) -> String {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+fn normalize_mobile_ime_english_mode(value: Option<&str>) -> String {
+    if value.is_some_and(|value| value.trim().eq_ignore_ascii_case("schema")) {
+        "schema".into()
+    } else {
+        "ascii".into()
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn normalize_mobile_ime_backspace_gesture_mode(value: Option<&str>) -> String {
     if value.is_some_and(|value| value.eq_ignore_ascii_case("selectThenDelete")) {
         "selectThenDelete".into()
@@ -5039,10 +5001,9 @@ fn android_ime_haptics_settings_from_config(
     let delete_speed = normalize_mobile_ime_delete_speed(
         config.get("deleteSpeed").and_then(|value| value.as_str()),
     );
-    let prediction_enabled = config
-        .get("predictionEnabled")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true);
+    let english_mode = normalize_mobile_ime_english_mode(
+        config.get("englishMode").and_then(|value| value.as_str()),
+    );
     let backspace_gesture_mode = normalize_mobile_ime_backspace_gesture_mode(
         config
             .get("backspaceGestureMode")
@@ -5136,7 +5097,7 @@ fn android_ime_haptics_settings_from_config(
         long_press_delay_ms,
         keyboard_height_scale,
         delete_speed,
-        prediction_enabled,
+        english_mode,
         backspace_gesture_mode,
         keyboard_height_dp,
         candidate_bar_height_dp,
@@ -5211,7 +5172,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
     long_press_delay_ms: u16,
     keyboard_height_scale: u8,
     delete_speed: String,
-    prediction_enabled: bool,
+    english_mode: String,
     backspace_gesture_mode: String,
     keyboard_height_dp: u16,
     candidate_bar_height_dp: u8,
@@ -5274,8 +5235,8 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
             serde_json::Value::String(normalize_mobile_ime_delete_speed(Some(&delete_speed))),
         );
         config.insert(
-            "predictionEnabled".into(),
-            serde_json::Value::Bool(prediction_enabled),
+            "englishMode".into(),
+            serde_json::Value::String(normalize_mobile_ime_english_mode(Some(&english_mode))),
         );
         config.insert(
             "backspaceGestureMode".into(),
@@ -5396,6 +5357,7 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
         let _ = long_press_delay_ms;
         let _ = keyboard_height_scale;
         let _ = delete_speed;
+        let _ = english_mode;
         let _ = floating_portrait_enabled;
         let _ = floating_portrait_scale;
         let _ = floating_landscape_enabled;
@@ -6473,7 +6435,7 @@ fn set_ime_ui_color_scheme<R: tauri::Runtime>(
         Some(android_reload_stamp_path(&root)),
         String::new(),
     )?;
-    write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path(
         &theme_path,
         color_scheme,
         current.orientation,
@@ -6507,7 +6469,7 @@ fn set_ime_ui_color_scheme(
         Some(ios_reload_stamp_path(&root)),
         String::new(),
     )?;
-    write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path(
         &theme_path,
         color_scheme,
         current.orientation,
@@ -6539,7 +6501,7 @@ fn set_ime_ui_settings<R: tauri::Runtime>(
 ) -> Result<ImeUiSettings, String> {
     let root = android_keytao_root(&app)?;
     let theme_path = root.join("theme.yaml");
-    write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path(
         &theme_path,
         color_scheme,
         orientation,
@@ -6571,7 +6533,7 @@ fn set_ime_ui_settings(
 ) -> Result<ImeUiSettings, String> {
     let root = ios_keytao_root(&app)?;
     let theme_path = root.join("theme.yaml");
-    write_ime_ui_settings_to_path(
+    keytao_theme::write_ime_ui_settings_to_path(
         &theme_path,
         color_scheme,
         orientation,
@@ -7106,7 +7068,7 @@ mod tests {
         std::fs::write(&theme_path, "candidate:\n  labelSuffix: ')'\n")
             .expect("write existing theme");
 
-        write_ime_ui_settings_to_path(
+        keytao_theme::write_ime_ui_settings_to_path(
             &theme_path,
             keytao_theme::UiColorScheme::Dark,
             keytao_theme::PanelOrientation::Horizontal,
@@ -7129,19 +7091,6 @@ mod tests {
         assert_eq!(settings.accent_color, "#123456");
 
         std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn test_normalize_ime_font_size_clamps_and_rejects_non_finite_values() {
-        assert_eq!(
-            normalize_ime_font_size(4.0).expect("clamp minimum"),
-            keytao_theme::MIN_CANDIDATE_FONT_SIZE
-        );
-        assert_eq!(
-            normalize_ime_font_size(99.0).expect("clamp maximum"),
-            keytao_theme::MAX_CANDIDATE_FONT_SIZE
-        );
-        assert!(normalize_ime_font_size(f32::NAN).is_err());
     }
 
     // ── parse_rime_lua_requires ───────────────────────────────────────────────

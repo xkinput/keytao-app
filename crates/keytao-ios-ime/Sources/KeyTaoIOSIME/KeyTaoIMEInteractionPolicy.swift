@@ -360,27 +360,53 @@ func keyTaoTrailingDeletionSegmentsLength(_ text: String, count: Int) -> Int {
     return selectedUnits
 }
 
-func keyTaoEnglishCompletionPrefix(_ text: String) -> String? {
-    let prefix = String(text.reversed().prefix { $0.isASCII && $0.isLetter }.reversed())
-    return prefix.count >= 2 ? prefix : nil
+struct KeyTaoLanguageModeDecision: Equatable {
+    let usesEnglishSchema: Bool
+    let targetEnglish: Bool
 }
 
-func keyTaoCompleteEnglishPrefix(
-    _ prefix: String,
-    lexicon: [String],
-    limit: Int = 5
-) -> [String] {
-    guard prefix.count >= 2, limit > 0 else { return [] }
-    let normalized = prefix.lowercased()
-    var seen: Set<String> = []
-    return lexicon.compactMap { raw -> String? in
-        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let folded = word.lowercased()
-        guard word.count > prefix.count, folded.hasPrefix(normalized), seen.insert(folded).inserted else {
-            return nil
-        }
-        return word
-    }.prefix(limit).map { $0 }
+func keyTaoEnglishSchemaID(schemas: [(id: String, name: String)]) -> String? {
+    schemas.first(where: { $0.id == "easy_en" })?.id
+        ?? schemas.first(where: { $0.id == "english" })?.id
+        ?? schemas.first(where: {
+            $0.name.caseInsensitiveCompare("Easy English") == .orderedSame
+                || $0.name.caseInsensitiveCompare("English") == .orderedSame
+        })?.id
+}
+
+func keyTaoLanguageModeDecision(
+    englishMode: String,
+    englishSchemaID: String?,
+    value: String?,
+    currentSchemaID: String?,
+    asciiMode: Bool
+) -> KeyTaoLanguageModeDecision {
+    let usesEnglishSchema = englishMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        .caseInsensitiveCompare("schema") == .orderedSame && englishSchemaID != nil
+    let targetEnglish: Bool
+    switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "ascii", "english", "en":
+        targetEnglish = true
+    case "chinese", "zh", "cn":
+        targetEnglish = false
+    default:
+        targetEnglish = usesEnglishSchema ? currentSchemaID != englishSchemaID : !asciiMode
+    }
+    return KeyTaoLanguageModeDecision(
+        usesEnglishSchema: usesEnglishSchema,
+        targetEnglish: targetEnglish
+    )
+}
+
+func keyTaoChineseSwitchSnapshot(
+    names: [String],
+    optionValue: (String) -> Bool
+) -> [String: Bool] {
+    var snapshot: [String: Bool] = [:]
+    for name in names where name != "ascii_mode" && snapshot[name] == nil {
+        snapshot[name] = optionValue(name)
+    }
+    return snapshot
 }
 
 private func keyTaoDeletionSegmentClass(_ character: Character) -> KeyTaoDeletionSegmentClass {

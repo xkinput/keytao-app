@@ -51,6 +51,21 @@ public struct KeyTaoThemeColor: Codable, Equatable {
             alpha: CGFloat(alpha.clampedColor) / 255
         )
     }
+
+    var hex: String {
+        String(format: "#%02X%02X%02X", red.clampedColor, green.clampedColor, blue.clampedColor)
+    }
+
+    static func from(hex value: String) -> KeyTaoThemeColor? {
+        let hex = value.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
+        guard hex.count == 6, let number = Int(hex, radix: 16) else { return nil }
+        return KeyTaoThemeColor(
+            red: (number >> 16) & 0xFF,
+            green: (number >> 8) & 0xFF,
+            blue: number & 0xFF,
+            alpha: 0xFF
+        )
+    }
 }
 
 public struct KeyTaoImeTheme: Codable {
@@ -204,6 +219,44 @@ public struct KeyTaoImeTheme: Codable {
             englishText: "英"
         )
     )
+
+    func withAccent(hex: String) -> KeyTaoImeTheme {
+        guard let accent = KeyTaoThemeColor.from(hex: hex) else { return self }
+        var next = self
+        let dark = ui.effectiveColorScheme == "dark"
+        next.ui.accentColor = accent
+        next.candidate.selectedLabelColor = accent
+        next.candidate.selectedBorderColor = accent
+        next.candidate.selectedBackground = Self.mix(
+            base: panel.background,
+            accent: accent,
+            weight: dark ? 0.42 : 0.18
+        )
+        next.candidate.pressedBackground = Self.mix(
+            base: panel.background,
+            accent: accent,
+            weight: dark ? 0.54 : 0.28
+        )
+        next.candidate.hoverBackground = Self.mix(
+            base: panel.background,
+            accent: accent,
+            weight: dark ? 0.22 : 0.09
+        )
+        return next
+    }
+
+    private static func mix(base: KeyTaoThemeColor, accent: KeyTaoThemeColor, weight: CGFloat) -> KeyTaoThemeColor {
+        let ratio = max(0, min(weight, 1))
+        func channel(_ baseValue: Int, _ accentValue: Int) -> Int {
+            Int((CGFloat(baseValue) * (1 - ratio) + CGFloat(accentValue) * ratio).rounded())
+        }
+        return KeyTaoThemeColor(
+            red: channel(base.red, accent.red),
+            green: channel(base.green, accent.green),
+            blue: channel(base.blue, accent.blue),
+            alpha: 0xFF
+        )
+    }
 }
 
 public enum KeyTaoEffectiveColorScheme: String {

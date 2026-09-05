@@ -31,6 +31,7 @@ object KeyCommandTypes {
     const val EDIT = "edit"
     const val ONE_HANDED = "oneHanded"
     const val FLOATING = "floating"
+    const val SETTING = "setting"
 }
 
 object EnterKeyBehaviors {
@@ -125,7 +126,7 @@ data class KeytaoAndroidImeConfig(
     val longPressDelayMs: Long,
     val keyboardHeightScale: Int,
     val deleteSpeed: String,
-    val predictionEnabled: Boolean,
+    val englishMode: String,
     val backspaceGestureMode: String,
     val toolbarActionOrder: List<String>,
     val toolbarPinnedCount: Int,
@@ -310,6 +311,37 @@ data class KeytaoAndroidImeConfig(
             }.getOrDefault(false)
         }
 
+        @Synchronized
+        fun persistSettings(context: Context, patch: Map<String, Any>): Boolean {
+            val file = KeytaoAndroidPaths.imeConfigFile(context)
+            return runCatching {
+                val root = file.takeIf { it.isFile }
+                    ?.readText()
+                    ?.let(::JSONObject)
+                    ?: JSONObject()
+                patch.forEach { (key, value) ->
+                    when (key) {
+                        "haptics.enabled", "haptics.intensity" -> {
+                            val haptics = root.optJSONObject("haptics") ?: JSONObject()
+                            haptics.put(key.substringAfter('.'), value)
+                            root.put("haptics", haptics)
+                        }
+                        else -> root.put(key, value)
+                    }
+                }
+                file.parentFile?.mkdirs()
+                val temporary = File(file.parentFile, ".${file.name}.settings.tmp")
+                temporary.writeText(root.toString(2))
+                if (!temporary.renameTo(file)) {
+                    file.writeText(root.toString(2))
+                    temporary.delete()
+                }
+                cachedSignature = null
+                cachedConfig = null
+                true
+            }.getOrDefault(false)
+        }
+
         private fun parse(json: String, defaultJson: String): KeytaoAndroidImeConfig {
             return parseRoot(JSONObject(json), JSONObject(defaultJson))
         }
@@ -382,12 +414,12 @@ data class KeytaoAndroidImeConfig(
                 ),
                 keyboardHeightScale = mergedKeyboardHeightScale(root, fallbackRoot),
                 deleteSpeed = normalizeDeleteSpeed(mergedString(root, fallbackRoot, "deleteSpeed", "standard")),
-                predictionEnabled = mergedBoolean(root, fallbackRoot, "predictionEnabled", true),
+                englishMode = normalizeEnglishMode(mergedString(root, fallbackRoot, "englishMode", "ascii")),
                 backspaceGestureMode = normalizeBackspaceGestureMode(
                     mergedString(root, fallbackRoot, "backspaceGestureMode", "immediate"),
                 ),
                 toolbarActionOrder = mergedStringList(root, fallbackRoot, "toolbarActionOrder"),
-                toolbarPinnedCount = mergedInt(root, fallbackRoot, "toolbarPinnedCount", 5).coerceIn(1, 12),
+                toolbarPinnedCount = mergedInt(root, fallbackRoot, "toolbarPinnedCount", 6).coerceIn(1, 12),
                 keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
                 keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
                 keyHintVisible = mergedBoolean(root, fallbackRoot, "keyHintVisible", true),
@@ -532,10 +564,10 @@ data class KeytaoAndroidImeConfig(
                 } else {
                     config.deleteSpeed
                 },
-                predictionEnabled = if (runtimeRoot.has("predictionEnabled")) {
-                    runtimeRoot.optBoolean("predictionEnabled", config.predictionEnabled)
+                englishMode = if (runtimeRoot.has("englishMode")) {
+                    normalizeEnglishMode(runtimeRoot.optString("englishMode"))
                 } else {
-                    config.predictionEnabled
+                    config.englishMode
                 },
                 backspaceGestureMode = if (runtimeRoot.has("backspaceGestureMode")) {
                     normalizeBackspaceGestureMode(runtimeRoot.optString("backspaceGestureMode"))
@@ -809,6 +841,10 @@ data class KeytaoAndroidImeConfig(
                 DeleteSpeed.STANDARD -> "standard"
                 DeleteSpeed.FAST -> "fast"
             }
+        }
+
+        private fun normalizeEnglishMode(value: String): String {
+            return if (value.trim().equals("schema", ignoreCase = true)) "schema" else "ascii"
         }
 
         private fun normalizeBackspaceGestureMode(value: String): String {

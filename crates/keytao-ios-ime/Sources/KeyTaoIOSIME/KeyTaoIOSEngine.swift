@@ -21,10 +21,17 @@ struct KeyTaoRimeSchemaSwitch: Codable, Equatable {
 struct KeyTaoRimeOptionsState: Equatable {
     var schemas: [KeyTaoRimeSchema]
     var currentSchema: KeyTaoRimeSchema?
+    var englishSchemaID: String?
     var switches: [KeyTaoRimeSchemaSwitch]
     var options: [String: Bool]
 
-    static let empty = KeyTaoRimeOptionsState(schemas: [], currentSchema: nil, switches: [], options: [:])
+    static let empty = KeyTaoRimeOptionsState(
+        schemas: [],
+        currentSchema: nil,
+        englishSchemaID: nil,
+        switches: [],
+        options: [:]
+    )
 }
 
 enum KeyTaoIOSPaths {
@@ -421,6 +428,53 @@ final class KeyTaoIOSEngine {
         }()) ?? false
     }
 
+    func persistSettings(patch: [String: Any]) -> Bool {
+        let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
+        return (try? {
+            var root: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: url.path) {
+                let data = try Data(contentsOf: url)
+                root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            }
+            for (key, value) in patch {
+                if key == "haptics.enabled" || key == "haptics.intensity" {
+                    var haptics = root["haptics"] as? [String: Any] ?? [:]
+                    haptics[String(key.dropFirst("haptics.".count))] = value
+                    root["haptics"] = haptics
+                } else {
+                    root[key] = value
+                }
+            }
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            lastConfig = nil
+            return true
+        }()) ?? false
+    }
+
+    func persistThemeUi(colorScheme: String, accentHex: String?) -> Bool {
+        let path = KeyTaoIOSPaths.themeFile(userRoot: userRoot).path
+        let written = path.withCString { pathPointer in
+            colorScheme.withCString { schemePointer in
+                if let accentHex {
+                    return accentHex.withCString { accentPointer in
+                        keytao_write_theme_ui(pathPointer, schemePointer, accentPointer)
+                    }
+                }
+                return keytao_write_theme_ui(pathPointer, schemePointer, nil)
+            }
+        }
+        if written {
+            lastTheme = nil
+            lastThemeColorScheme = nil
+        }
+        return written
+    }
+
     /// Drops everything that can be rebuilt on demand; the session and the
     /// deployed schemas stay put so that typing keeps working.
     func releaseCaches() {
@@ -566,6 +620,17 @@ final class KeyTaoIOSEngine {
     func reset() -> KeyTaoImeState {
         guard let session, let state = decodeState(keytao_session_reset_json(session)) else {
             return KeyTaoImeState.empty
+        }
+        let stable = stableSchemaState(state)
+        lastState = stable.withoutTransientCommit()
+        return stable
+    }
+
+    /// Drop the composition without committing it before changing schemas.
+    func clearComposition() -> KeyTaoImeState {
+        guard let session,
+              let state = decodeState(keytao_session_clear_composition_json(session)) else {
+            return lastState.withoutTransientCommit()
         }
         let stable = stableSchemaState(state)
         lastState = stable.withoutTransientCommit()

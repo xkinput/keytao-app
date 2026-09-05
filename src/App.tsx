@@ -47,8 +47,6 @@ import {
   Type,
   Columns3,
   Rows3,
-  Vibrate,
-  VibrateOff,
   SlidersHorizontal,
   User,
   LogIn,
@@ -65,6 +63,7 @@ type ImeEffectiveColorScheme = "light" | "dark"
 type ImeCandidateOrientation = "horizontal" | "vertical"
 type EnterKeyBehavior = "system" | "newline"
 type MobileImeDeleteSpeed = "slow" | "standard" | "fast"
+type MobileImeEnglishMode = "ascii" | "schema"
 type MobileImeBackspaceGestureMode = "immediate" | "selectThenDelete"
 
 const GITHUB_REPOSITORY_URL = "https://github.com/xkinput/keytao-app"
@@ -293,7 +292,7 @@ interface AndroidImeInputSettings {
   longPressDelayMs: number
   keyboardHeightScale: number
   deleteSpeed: MobileImeDeleteSpeed
-  predictionEnabled: boolean
+  englishMode: MobileImeEnglishMode
   backspaceGestureMode: MobileImeBackspaceGestureMode
   keyboardHeightDp: number
   candidateBarHeightDp: number
@@ -444,14 +443,9 @@ export default function App() {
   const [androidImeInputSettings, setAndroidImeInputSettings] = useState<AndroidImeInputSettings | null>(null)
   const [androidImeInputError, setAndroidImeInputError] = useState<string | null>(null)
   const [isSavingAndroidImeInputSettings, setIsSavingAndroidImeInputSettings] = useState(false)
-  const [androidHapticIntensityDraft, setAndroidHapticIntensityDraft] = useState<number | null>(null)
   const [longPressDelayDraft, setLongPressDelayDraft] = useState<number | null>(null)
   const [keyboardHeightScaleDraft, setKeyboardHeightScaleDraft] = useState<number | null>(null)
-  const [keyboardHeightDraft, setKeyboardHeightDraft] = useState<number | null>(null)
-  const [candidateBarHeightDraft, setCandidateBarHeightDraft] = useState<number | null>(null)
   const [swipeThresholdDraft, setSwipeThresholdDraft] = useState<number | null>(null)
-  const [keySoundVolumeDraft, setKeySoundVolumeDraft] = useState<number | null>(null)
-  const [candidateFontScaleDraft, setCandidateFontScaleDraft] = useState<number | null>(null)
 
   // Default data dir
   const [defaultDir, setDefaultDir] = useState<string | null>(null)
@@ -696,10 +690,6 @@ export default function App() {
   }, [osType])
 
   useEffect(() => {
-    setAndroidHapticIntensityDraft(null)
-  }, [androidImeInputSettings?.hapticIntensity])
-
-  useEffect(() => {
     setLongPressDelayDraft(null)
   }, [androidImeInputSettings?.longPressDelayMs])
 
@@ -708,18 +698,8 @@ export default function App() {
   }, [androidImeInputSettings?.keyboardHeightScale])
 
   useEffect(() => {
-    setKeyboardHeightDraft(null)
-    setCandidateBarHeightDraft(null)
     setSwipeThresholdDraft(null)
-    setKeySoundVolumeDraft(null)
-    setCandidateFontScaleDraft(null)
-  }, [
-    androidImeInputSettings?.keyboardHeightDp,
-    androidImeInputSettings?.candidateBarHeightDp,
-    androidImeInputSettings?.swipeThresholdDp,
-    androidImeInputSettings?.keySoundVolume,
-    androidImeInputSettings?.candidateFontScale,
-  ])
+  }, [androidImeInputSettings?.swipeThresholdDp])
 
   useEffect(() => {
     if (osType !== "android") return
@@ -795,24 +775,14 @@ export default function App() {
   const canOpenRimeDictManager = DESKTOP_RIME_DICT_MANAGER_PLATFORMS.includes(osType)
   const imeAccentColor = imeUiSettings?.accentColor ?? DEFAULT_IME_ACCENT_COLOR
   const imeFontSize = imeFontSizeDraft ?? imeUiSettings?.fontSize ?? DEFAULT_IME_FONT_SIZE
-  const androidHapticsEnabled = androidImeInputSettings?.hapticsEnabled ?? true
-  const androidHapticIntensity = androidHapticIntensityDraft ?? androidImeInputSettings?.hapticIntensity ?? 42
   const enterKeyBehavior = androidImeInputSettings?.enterKeyBehavior ?? "system"
-  const keyPreviewEnabled = androidImeInputSettings?.keyPreviewEnabled ?? true
   const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
   const keyboardHeightScale = keyboardHeightScaleDraft ?? androidImeInputSettings?.keyboardHeightScale ?? 100
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
-  const predictionEnabled = androidImeInputSettings?.predictionEnabled ?? true
+  const englishMode = androidImeInputSettings?.englishMode ?? "ascii"
   const backspaceGestureMode = androidImeInputSettings?.backspaceGestureMode ?? "immediate"
-  const keyboardHeightDp = keyboardHeightDraft ?? androidImeInputSettings?.keyboardHeightDp ?? 266
-  const candidateBarHeightDp = candidateBarHeightDraft ?? androidImeInputSettings?.candidateBarHeightDp ?? 52
   const swipeThresholdDp = swipeThresholdDraft ?? androidImeInputSettings?.swipeThresholdDp ?? 34
-  const keySoundEnabled = androidImeInputSettings?.keySoundEnabled ?? true
-  const keySoundVolume = keySoundVolumeDraft ?? androidImeInputSettings?.keySoundVolume ?? 100
-  const keyHintVisible = androidImeInputSettings?.keyHintVisible ?? true
   const flickKeysEnabled = androidImeInputSettings?.flickKeysEnabled ?? true
-  const numberRowEnabled = androidImeInputSettings?.numberRowEnabled ?? false
-  const candidateFontScale = candidateFontScaleDraft ?? androidImeInputSettings?.candidateFontScale ?? 1
   const doubleSpacePeriodEnabled = androidImeInputSettings?.doubleSpacePeriodEnabled ?? true
   const androidSetupLoading = isCheckingAndroidIme || isCheckingAndroidStoragePermission || isCheckingLocal
   const androidStorageGranted = androidStoragePermission?.granted ?? false
@@ -1154,7 +1124,7 @@ export default function App() {
         | "longPressDelayMs"
         | "keyboardHeightScale"
         | "deleteSpeed"
-        | "predictionEnabled"
+        | "englishMode"
         | "backspaceGestureMode"
         | "keyboardHeightDp"
         | "candidateBarHeightDp"
@@ -1182,7 +1152,7 @@ export default function App() {
       longPressDelayMs: androidImeInputSettings?.longPressDelayMs ?? 300,
       keyboardHeightScale: androidImeInputSettings?.keyboardHeightScale ?? 100,
       deleteSpeed: androidImeInputSettings?.deleteSpeed ?? ("standard" as MobileImeDeleteSpeed),
-      predictionEnabled: androidImeInputSettings?.predictionEnabled ?? true,
+      englishMode: androidImeInputSettings?.englishMode ?? ("ascii" as MobileImeEnglishMode),
       backspaceGestureMode: androidImeInputSettings?.backspaceGestureMode ?? ("immediate" as MobileImeBackspaceGestureMode),
       keyboardHeightDp: androidImeInputSettings?.keyboardHeightDp ?? 266,
       candidateBarHeightDp: androidImeInputSettings?.candidateBarHeightDp ?? 52,
@@ -1222,6 +1192,7 @@ export default function App() {
       ? next.keyboardHeightScale
       : 100
     next.deleteSpeed = ["slow", "standard", "fast"].includes(next.deleteSpeed) ? next.deleteSpeed : "standard"
+    next.englishMode = next.englishMode === "schema" ? "schema" : "ascii"
     next.backspaceGestureMode = next.backspaceGestureMode === "selectThenDelete" ? "selectThenDelete" : "immediate"
     next.keyboardHeightDp = Math.min(420, Math.max(160, next.keyboardHeightDp))
     next.candidateBarHeightDp = Math.min(96, Math.max(36, next.candidateBarHeightDp))
@@ -1229,7 +1200,7 @@ export default function App() {
     next.keySoundVolume = Math.min(100, Math.max(0, next.keySoundVolume))
     next.candidateFontScale = Math.min(1.4, Math.max(0.8, next.candidateFontScale))
     next.floatingPortraitScale = Math.min(100, Math.max(70, next.floatingPortraitScale))
-    next.floatingLandscapeScale = Math.min(100, Math.max(70, next.floatingLandscapeScale))
+    next.floatingLandscapeScale = Math.min(100, Math.max(45, next.floatingLandscapeScale))
     if (
       androidImeInputSettings &&
       next.hapticsEnabled === androidImeInputSettings.hapticsEnabled &&
@@ -1239,7 +1210,7 @@ export default function App() {
       next.longPressDelayMs === androidImeInputSettings.longPressDelayMs &&
       next.keyboardHeightScale === androidImeInputSettings.keyboardHeightScale &&
       next.deleteSpeed === androidImeInputSettings.deleteSpeed &&
-      next.predictionEnabled === androidImeInputSettings.predictionEnabled &&
+      next.englishMode === androidImeInputSettings.englishMode &&
       next.backspaceGestureMode === androidImeInputSettings.backspaceGestureMode &&
       next.keyboardHeightDp === androidImeInputSettings.keyboardHeightDp &&
       next.candidateBarHeightDp === androidImeInputSettings.candidateBarHeightDp &&
@@ -1272,10 +1243,6 @@ export default function App() {
     }
   }
 
-  function commitAndroidHapticIntensity(value: number) {
-    void handleUpdateAndroidImeInputSettings({ hapticIntensity: value })
-  }
-
   function commitLongPressDelay(value: number) {
     void handleUpdateAndroidImeInputSettings({ longPressDelayMs: value })
   }
@@ -1300,7 +1267,7 @@ export default function App() {
       longPressDelayMs: 300,
       keyboardHeightScale: 100,
       deleteSpeed: "standard",
-      predictionEnabled: true,
+      englishMode: "ascii",
       backspaceGestureMode: "immediate",
       keyboardHeightDp: 266,
       candidateBarHeightDp: 52,
@@ -1857,7 +1824,7 @@ export default function App() {
               </Card>
             )}
 
-            {systemImeAvailable && (
+            {systemImeAvailable && !isMobilePlatform && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -1869,7 +1836,8 @@ export default function App() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/30 p-1">
+                  {!isMobilePlatform && (
+                    <div className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/30 p-1">
                     {([
                       { id: "auto" as const, label: "自动", icon: Monitor },
                       { id: "light" as const, label: "白天", icon: Sun },
@@ -1894,7 +1862,8 @@ export default function App() {
                         </Button>
                       )
                     })}
-                  </div>
+                    </div>
+                  )}
                   {!isMobilePlatform && (
                     <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1">
                       {([
@@ -1964,7 +1933,8 @@ export default function App() {
                       />
                     </div>
                   )}
-                  <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs sm:grid-cols-[minmax(8.5rem,1fr)_auto] sm:items-center">
+                  {!isMobilePlatform && (
+                    <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs sm:grid-cols-[minmax(8.5rem,1fr)_auto] sm:items-center">
                     <div className="flex min-w-0 items-center gap-2 whitespace-nowrap">
                       <Paintbrush className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="shrink-0 text-muted-foreground">主题色</span>
@@ -1986,8 +1956,9 @@ export default function App() {
                       className="justify-start sm:justify-end"
                       title="选择主题色"
                     />
-                  </div>
-                  {imeUiSettings?.themePath && (
+                    </div>
+                  )}
+                  {!isMobilePlatform && imeUiSettings?.themePath && (
                     <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
                       <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="text-muted-foreground">主题：</span>
@@ -2026,107 +1997,6 @@ export default function App() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">反馈</div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                    <div className="flex min-w-0 items-center gap-2 text-xs">
-                      {androidHapticsEnabled ? (
-                        <Vibrate className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      ) : (
-                        <VibrateOff className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      )}
-                      <span className="text-muted-foreground">键盘震动</span>
-                      <span className="text-xs text-muted-foreground/80">
-                        {androidHapticsEnabled ? "开启" : "关闭"}
-                      </span>
-                    </div>
-                    <Switch
-                      checked={androidHapticsEnabled}
-                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ hapticsEnabled: checked })}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="切换键盘震动"
-                    />
-                  </div>
-                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span className="text-muted-foreground">震动强度</span>
-                      </div>
-                      <span className="font-mono text-muted-foreground">{androidHapticIntensity}%</span>
-                    </div>
-                    <Slider
-                      min={1}
-                      max={100}
-                      step={1}
-                      value={[androidHapticIntensity]}
-                      onValueChange={([value]) => setAndroidHapticIntensityDraft(value)}
-                      onValueCommit={([value]) => commitAndroidHapticIntensity(value)}
-                      disabled={!androidHapticsEnabled || isSavingAndroidImeInputSettings}
-                      aria-label="震动强度"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                    <div className="flex min-w-0 items-center gap-2 text-xs">
-                      <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="text-muted-foreground">按键预览气泡</span>
-                      <span className="text-xs text-muted-foreground/80">
-                        {keyPreviewEnabled ? "开启" : "关闭"}
-                      </span>
-                    </div>
-                    <Switch
-                      checked={keyPreviewEnabled}
-                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ keyPreviewEnabled: checked })}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="切换按键预览气泡"
-                    />
-                  </div>
-                  {osType === "android" ? (
-                    <>
-                      <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                        <div className="flex min-w-0 items-center gap-2 text-xs">
-                          <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="text-muted-foreground">按键音</span>
-                          <span className="text-xs text-muted-foreground/80">{keySoundEnabled ? "开启" : "关闭"}</span>
-                        </div>
-                        <Switch
-                          checked={keySoundEnabled}
-                          onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({
-                            keySoundEnabled: checked,
-                            ...(checked && keySoundVolume === 0 ? { keySoundVolume: 20 } : {}),
-                          })}
-                          disabled={isSavingAndroidImeInputSettings}
-                          aria-label="切换按键音"
-                        />
-                      </div>
-                      <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                        <div className="flex items-center justify-between gap-3 text-xs">
-                          <span className="text-muted-foreground">按键音量</span>
-                          <span className="font-mono text-muted-foreground">{keySoundVolume}%</span>
-                        </div>
-                        <Slider
-                          min={0}
-                          max={100}
-                          step={1}
-                          value={[keySoundVolume]}
-                          onValueChange={([value]) => setKeySoundVolumeDraft(value)}
-                          onValueCommit={([value]) => commitMobileImeSetting(
-                            {
-                              keySoundVolume: value,
-                              ...(value === 0 ? { keySoundEnabled: false } : {}),
-                            },
-                            () => setKeySoundVolumeDraft(null),
-                          )}
-                          disabled={!keySoundEnabled || isSavingAndroidImeInputSettings}
-                          aria-label="按键音量"
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
-                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>按键音跟随系统设置；iOS 键盘扩展无法自定义音色与音量。</span>
-                    </div>
-                  )}
                   <div className="pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">手势与时序</div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
@@ -2146,6 +2016,32 @@ export default function App() {
                       disabled={isSavingAndroidImeInputSettings}
                       aria-label="长按延迟"
                     />
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-muted-foreground">英文模式</span>
+                      <span className="text-xs text-muted-foreground/80">
+                        {englishMode === "schema" ? "English 方案" : "ASCII 模式"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["ascii", "schema"] as const).map((mode) => (
+                        <Button
+                          key={mode}
+                          type="button"
+                          variant={englishMode === mode ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => handleUpdateAndroidImeInputSettings({ englishMode: mode })}
+                          disabled={isSavingAndroidImeInputSettings}
+                          className="h-8 text-xs"
+                        >
+                          {mode === "schema" ? "English 方案" : "ASCII 模式"}
+                        </Button>
+                      ))}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground/80">
+                      English 方案需先在方案页安装附加方案 English
+                    </div>
                   </div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
@@ -2192,18 +2088,6 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                    <div className="min-w-0 text-xs">
-                      <div className="text-muted-foreground">英文补全建议</div>
-                      <div className="text-[11px] text-muted-foreground/80">英文模式输入前缀时显示本地补全</div>
-                    </div>
-                    <Switch
-                      checked={predictionEnabled}
-                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ predictionEnabled: checked })}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="切换英文补全建议"
-                    />
-                  </div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <span className="text-muted-foreground">退格滑动模式</span>
@@ -2226,18 +2110,6 @@ export default function App() {
                         </Button>
                       ))}
                     </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                    <div className="min-w-0 text-xs">
-                      <div className="text-muted-foreground">显示键角提示</div>
-                      <div className="text-[11px] text-muted-foreground/80">关闭后长按符号仍可使用</div>
-                    </div>
-                    <Switch
-                      checked={keyHintVisible}
-                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ keyHintVisible: checked })}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="切换键角提示"
-                    />
                   </div>
                   <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
                     <div className="min-w-0 text-xs">
@@ -2283,75 +2155,6 @@ export default function App() {
                     />
                   </div>
                   <div className="pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">布局</div>
-                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <span className="text-muted-foreground">键盘高度</span>
-                      <span className="font-mono text-muted-foreground">{keyboardHeightDp}dp</span>
-                    </div>
-                    <Slider
-                      min={160}
-                      max={420}
-                      step={2}
-                      value={[keyboardHeightDp]}
-                      onValueChange={([value]) => setKeyboardHeightDraft(value)}
-                      onValueCommit={([value]) => commitMobileImeSetting(
-                        { keyboardHeightDp: value },
-                        () => setKeyboardHeightDraft(null),
-                      )}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="键盘高度"
-                    />
-                  </div>
-                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <span className="text-muted-foreground">候选栏高度</span>
-                      <span className="font-mono text-muted-foreground">{candidateBarHeightDp}dp</span>
-                    </div>
-                    <Slider
-                      min={36}
-                      max={96}
-                      step={1}
-                      value={[candidateBarHeightDp]}
-                      onValueChange={([value]) => setCandidateBarHeightDraft(value)}
-                      onValueCommit={([value]) => commitMobileImeSetting(
-                        { candidateBarHeightDp: value },
-                        () => setCandidateBarHeightDraft(null),
-                      )}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="候选栏高度"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                    <div className="min-w-0 text-xs">
-                      <div className="text-muted-foreground">常驻数字行</div>
-                      <div className="text-[11px] text-muted-foreground/80">开启后键盘会按行数增高</div>
-                    </div>
-                    <Switch
-                      checked={numberRowEnabled}
-                      onCheckedChange={(checked) => handleUpdateAndroidImeInputSettings({ numberRowEnabled: checked })}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="切换常驻数字行"
-                    />
-                  </div>
-                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <span className="text-muted-foreground">候选字号</span>
-                      <span className="font-mono text-muted-foreground">{candidateFontScale.toFixed(1)}×</span>
-                    </div>
-                    <Slider
-                      min={0.8}
-                      max={1.4}
-                      step={0.1}
-                      value={[candidateFontScale]}
-                      onValueChange={([value]) => setCandidateFontScaleDraft(value)}
-                      onValueCommit={([value]) => commitMobileImeSetting(
-                        { candidateFontScale: value },
-                        () => setCandidateFontScaleDraft(null),
-                      )}
-                      disabled={isSavingAndroidImeInputSettings}
-                      aria-label="候选字号"
-                    />
-                  </div>
                   {([
                     {
                       label: "竖屏悬浮键盘",
@@ -2367,7 +2170,7 @@ export default function App() {
                       scale: androidImeInputSettings?.floatingLandscapeScale ?? 72,
                       enabledKey: "floatingLandscapeEnabled" as const,
                       scaleKey: "floatingLandscapeScale" as const,
-                      min: 70,
+                      min: 45,
                     },
                   ]).map((item) => (
                     <div key={item.label} className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">

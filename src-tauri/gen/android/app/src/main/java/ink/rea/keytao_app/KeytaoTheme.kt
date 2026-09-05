@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 data class KeytaoColor(
     val red: Int,
@@ -12,9 +13,22 @@ data class KeytaoColor(
     val alpha: Int = 255,
 ) {
     fun toArgb(): Int = Color.argb(alpha, red, green, blue)
+    fun toHex(): String = "#%02X%02X%02X".format(red, green, blue)
 
     companion object {
         fun rgb(red: Int, green: Int, blue: Int) = KeytaoColor(red, green, blue)
+
+        fun fromHex(value: String): KeytaoColor? {
+            val hex = value.trim().removePrefix("#")
+            if (hex.length != 6 || hex.any { !it.isDigit() && it.lowercaseChar() !in 'a'..'f' }) return null
+            return runCatching {
+                KeytaoColor(
+                    red = hex.substring(0, 2).toInt(16),
+                    green = hex.substring(2, 4).toInt(16),
+                    blue = hex.substring(4, 6).toInt(16),
+                )
+            }.getOrNull()
+        }
 
         fun fromJson(json: JSONObject?, fallback: KeytaoColor): KeytaoColor {
             if (json == null) return fallback
@@ -29,6 +43,9 @@ data class KeytaoColor(
 }
 
 data class KeytaoImeTheme(
+    val uiColorScheme: String,
+    val effectiveColorScheme: String,
+    val accentColor: KeytaoColor,
     val panelBackground: KeytaoColor,
     val panelBorder: KeytaoColor,
     val keyBackground: KeytaoColor,
@@ -59,8 +76,26 @@ data class KeytaoImeTheme(
     val modeHintChineseText: String,
     val modeHintEnglishText: String,
 ) {
+    fun withAccentHex(value: String): KeytaoImeTheme {
+        val accent = KeytaoColor.fromHex(value) ?: return this
+        val dark = effectiveColorScheme == "dark"
+        val selected = mixThemeColor(panelBackground, accent, if (dark) 0.42f else 0.18f)
+        val pressed = mixThemeColor(panelBackground, accent, if (dark) 0.54f else 0.28f)
+        return copy(
+            accentColor = accent,
+            selectedLabelColor = accent,
+            candidateSelectedBorderColor = accent,
+            keySelectedBackground = selected,
+            candidateSelectedBackground = selected,
+            keyPressedBackground = pressed,
+        )
+    }
+
     companion object {
         fun fallback(): KeytaoImeTheme = KeytaoImeTheme(
+            uiColorScheme = "auto",
+            effectiveColorScheme = "light",
+            accentColor = KeytaoColor.rgb(0x3B, 0x73, 0xD9),
             panelBackground = KeytaoColor(0xF8, 0xFA, 0xFF, 0xF2),
             panelBorder = KeytaoColor.rgb(0xD8, 0xE2, 0xF1),
             keyBackground = KeytaoColor(0, 0, 0, 0),
@@ -96,12 +131,21 @@ data class KeytaoImeTheme(
             if (json.isNullOrBlank()) return fallback()
             return runCatching {
                 val root = JSONObject(json)
+                val ui = root.optJSONObject("ui")
                 val panel = root.optJSONObject("panel")
                 val candidate = root.optJSONObject("candidate")
                 val font = root.optJSONObject("font")
                 val modeHint = root.optJSONObject("modeHint")
                 val fallback = fallback()
+                val selectedLabelColor = KeytaoColor.fromJson(
+                    candidate?.optJSONObject("selectedLabelColor"),
+                    fallback.selectedLabelColor,
+                )
                 KeytaoImeTheme(
+                    uiColorScheme = ui?.optString("colorScheme", fallback.uiColorScheme) ?: fallback.uiColorScheme,
+                    effectiveColorScheme = ui?.optString("effectiveColorScheme", fallback.effectiveColorScheme)
+                        ?: fallback.effectiveColorScheme,
+                    accentColor = KeytaoColor.fromJson(ui?.optJSONObject("accentColor"), selectedLabelColor),
                     panelBackground = KeytaoColor.fromJson(panel?.optJSONObject("background"), fallback.panelBackground),
                     panelBorder = KeytaoColor.fromJson(panel?.optJSONObject("borderColor"), fallback.panelBorder),
                     keyBackground = KeytaoColor.fromJson(candidate?.optJSONObject("background"), fallback.keyBackground),
@@ -111,7 +155,7 @@ data class KeytaoImeTheme(
                     keyForeground = KeytaoColor.fromJson(candidate?.optJSONObject("foreground"), fallback.keyForeground),
                     keySelectedForeground = KeytaoColor.fromJson(candidate?.optJSONObject("selectedForeground"), fallback.keySelectedForeground),
                     labelColor = KeytaoColor.fromJson(candidate?.optJSONObject("labelColor"), fallback.labelColor),
-                    selectedLabelColor = KeytaoColor.fromJson(candidate?.optJSONObject("selectedLabelColor"), fallback.selectedLabelColor),
+                    selectedLabelColor = selectedLabelColor,
                     commentColor = KeytaoColor.fromJson(candidate?.optJSONObject("commentColor"), fallback.commentColor),
                     selectedCommentColor = KeytaoColor.fromJson(candidate?.optJSONObject("selectedCommentColor"), fallback.selectedCommentColor),
                     candidateBorderColor = KeytaoColor.fromJson(candidate?.optJSONObject("borderColor"), fallback.candidateBorderColor),
@@ -150,6 +194,18 @@ data class KeytaoImeTheme(
     }
 }
 
+private fun mixThemeColor(base: KeytaoColor, accent: KeytaoColor, accentWeight: Float): KeytaoColor {
+    val weight = accentWeight.coerceIn(0f, 1f)
+    fun channel(baseValue: Int, accentValue: Int): Int =
+        (baseValue * (1f - weight) + accentValue * weight).roundToInt().coerceIn(0, 255)
+    return KeytaoColor(
+        red = channel(base.red, accent.red),
+        green = channel(base.green, accent.green),
+        blue = channel(base.blue, accent.blue),
+        alpha = 255,
+    )
+}
+
 object KeytaoThemeResolver {
     private var cachedSignature: String? = null
     private var cachedTheme: KeytaoImeTheme? = null
@@ -177,6 +233,12 @@ object KeytaoThemeResolver {
         cachedSignature = signature
         cachedTheme = theme
         return theme
+    }
+
+    @Synchronized
+    fun invalidate() {
+        cachedSignature = null
+        cachedTheme = null
     }
 
     private fun systemColorScheme(context: Context): String {
