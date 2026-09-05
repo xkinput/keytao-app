@@ -35,6 +35,7 @@
 
 - 自动获取最新键道方案并下载安装
 - 智能合并 `default.custom.yaml` 和 `rime.lua`
+- 可选安装 Easy English 附加方案；移动端安装并部署后可把“英文模式”切换为完整英文词库
 - 自动检测 Rime 配置目录，也可手动选择
 - 安装进度、部署状态、调试日志实时展示
 - Linux 版本内置完整 `keytao-ime` 系统输入法 daemon
@@ -64,6 +65,8 @@
 - iOS / iPadOS 用户目录：App Group `group.ink.rea.keytao-app` 容器下的 `keytao`
 
 App 的“安装方案”只负责写文件；“部署”才会让 librime 编译并加载新配置。`rime.lua` 是否生效，取决于它是否安装到了系统输入法实际使用的用户目录，并且是否完成部署。
+
+“附加方案”中的 Easy English 随 App 离线提供，安装时复制 `easy_en` schema、词典和 Lua 到同一用户目录，并与当前键道方案一起部署。重新安装或升级键道方案会保留 `easy_en`，将它放在所有包内方案之后，且不会把它选作启动方案；卸载附加方案会删除其源码、编译产物和用户词典，移动端若正在使用“English 方案”则自动退回“ASCII 模式”。14,566,541 B 的原始词典 gzip 后为 4,153,342 B；当前 debug APK 中六个 add-on asset 的 deflate 体积合计 4,694,956 B，即 APK 增量约 4.7 MB。安装源码与 28,216,820 B 编译产物合计约占 43 MB。上游来源、固定提交和许可证见 [`resources/addon-schemas/easy_en/NOTICE.md`](resources/addon-schemas/easy_en/NOTICE.md)。
 
 ## 下载
 

@@ -66,6 +66,12 @@ App installs schema/dict/lua/opencc files
   -> ImeRuntimeSession refreshes internal Engine lazily
 ```
 
+附加方案走同一条部署链路。当前唯一受支持的 add-on id 是 `easy_en`：Tauri 将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
+
+`easy_en` 的 14,566,541 B 词典在 macOS Apple Silicon 上增量部署实测为 4,328 ms，生成 28,216,820 B（table 15,784,108 B、prism 6,320,444 B、reverse 6,112,268 B）编译产物。中低端 Android 可能慢一个数量级以上；含 `easy_en` 的 staged deploy 总预算因此由 180 s 提高到 300 s，未含 add-on 的部署仍保持 180 s。以上不是 Android 真机耗时证据，合并前仍需在目标中低端真机记录完整 staged deploy 用时。
+
+键道包重装时，`keytao-core` 和 Android ZIP 合并器都按 `用户自定义方案 -> 当前包方案 -> add-on` 排序并去重。启动方案选择会跳过 add-on，因此即使列表只剩 `easy_en` 也不会把它当作默认中文方案。移动端仅在 `easy_en` 已安装且已有 `build/easy_en.schema.yaml` 时允许选择 `englishMode: "schema"`；卸载会将该设置原子地恢复为 `ascii`。
+
 按键通信里只有两种输入从平台进入通用层：
 
 - `keycode`：统一使用 X11 keysym，例如 Return 是 `0xff0d`，Escape 是 `0xff1b`。

@@ -593,11 +593,69 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun copyAddonSchemaAssets(invoke: Invoke) {
+        class AddonArgs {
+            var id: String? = null
+        }
+        val id = invoke.parseArgs(AddonArgs::class.java).id
+            ?: return invoke.reject("Missing add-on schema id")
+        if (id != easyEnglishAddonId) {
+            return invoke.reject("Unsupported add-on schema: $id")
+        }
+
+        Thread {
+            try {
+                val root = KeytaoAndroidPaths.userRoot(activity)
+                if (!KeytaoAndroidPaths.isWritable(root)) {
+                    return@Thread invoke.reject("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
+                }
+                val files = listOf(
+                    "easy_en.schema.yaml" to "easy_en.schema.yaml",
+                    "easy_en.dict.yaml" to "easy_en.dict.yaml",
+                    "easy_en.custom.yaml" to "easy_en.custom.yaml",
+                    "lua/easy_en.lua" to "lua/easy_en.lua",
+                )
+                files.forEach { (assetRelative, destinationRelative) ->
+                    val destination = File(root, destinationRelative)
+                    destination.parentFile?.mkdirs()
+                    val temporary = File(destination.parentFile, ".${destination.name}.${System.nanoTime()}.tmp")
+                    try {
+                        activity.assets.open("addon-schemas/$id/$assetRelative").use { input ->
+                            temporary.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        if (destination.exists() && !destination.delete()) {
+                            throw IllegalStateException("Cannot replace ${destination.absolutePath}")
+                        }
+                        if (!temporary.renameTo(destination)) {
+                            temporary.copyTo(destination, overwrite = true)
+                            temporary.delete()
+                        }
+                    } finally {
+                        temporary.delete()
+                    }
+                }
+                invoke.resolve(JSObject().apply { put("copied", files.size) })
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Failed to copy add-on schema assets")
+            }
+        }.start()
+    }
+
+    @Command
     fun deployImeData(invoke: Invoke) {
-        if (!KeytaoAndroidPaths.hasInstalledSchema(KeytaoAndroidPaths.userRoot(activity))) {
+        val root = KeytaoAndroidPaths.userRoot(activity)
+        if (!KeytaoAndroidPaths.hasInstalledSchema(root)) {
             return invoke.reject("请先安装键道方案")
         }
-        KeytaoRimeDeployClient.deploy(activity) { result ->
+        val configuredSchemas = runCatching {
+            val content = readPrivateText(root, "default.custom.yaml")
+                ?: readPrivateText(root, "default-custom.yaml")
+            content?.let(::parseSchemas).orEmpty()
+        }.getOrDefault(emptyList())
+        KeytaoRimeDeployClient.deploy(
+            activity,
+            timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas),
+        ) { result ->
             if (result.success) {
                 invoke.resolve(JSObject().apply {
                     put("path", result.path)
@@ -632,6 +690,10 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    companion object {
+        private const val easyEnglishAddonId = "easy_en"
     }
 
     private fun readPrivateText(root: File, relativePath: String): String? {

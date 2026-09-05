@@ -1,0 +1,3 @@
+# KeyTao add-on defaults: no external word-splitter on mobile/desktop.
+patch:
+  easy_en/split_sentence: false

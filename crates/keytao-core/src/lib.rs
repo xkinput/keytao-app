@@ -3750,6 +3750,9 @@ fn preferred_schema_from_list(schemas: Vec<String>) -> Option<String> {
         if schema.trim().is_empty() {
             continue;
         }
+        if is_addon_schema(&schema) {
+            continue;
+        }
         if first_schema.is_none() {
             first_schema = Some(schema.clone());
         }
@@ -4208,6 +4211,10 @@ fn is_keytao_managed_schema(schema: &str) -> bool {
         .any(|prefix| schema.starts_with(prefix))
 }
 
+pub fn is_addon_schema(schema: &str) -> bool {
+    schema == "easy_en"
+}
+
 fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
     schemas
@@ -4215,6 +4222,27 @@ fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
         .filter(|schema| !schema.trim().is_empty())
         .filter(|schema| seen.insert(schema.clone()))
         .collect()
+}
+
+fn merge_schema_lists(existing_schemas: Vec<String>, package_schemas: Vec<String>) -> Vec<String> {
+    let user_schemas = existing_schemas
+        .iter()
+        .filter(|schema| !is_keytao_managed_schema(schema) && !is_addon_schema(schema))
+        .cloned();
+    let package_schemas_without_addons = package_schemas
+        .iter()
+        .filter(|schema| !is_addon_schema(schema))
+        .cloned();
+    let addon_schemas = existing_schemas
+        .iter()
+        .chain(package_schemas.iter())
+        .filter(|schema| is_addon_schema(schema))
+        .cloned();
+    dedupe_schemas(
+        user_schemas
+            .chain(package_schemas_without_addons)
+            .chain(addon_schemas),
+    )
 }
 
 fn is_managed_default_patch_key(key: &str) -> bool {
@@ -4244,12 +4272,8 @@ fn merge_yaml_mapping(existing: &Mapping, package: &Mapping, inside_patch: bool)
         match (key_name, package.get(key)) {
             (Some("schema_list"), Some(package_value)) => {
                 let package_schemas = schema_list_from_yaml(Some(package_value));
-                let user_schemas: Vec<String> = schema_list_from_yaml(Some(existing_value))
-                    .into_iter()
-                    .filter(|schema| !is_keytao_managed_schema(schema))
-                    .collect();
-                let merged_schemas =
-                    dedupe_schemas(user_schemas.iter().chain(package_schemas.iter()).cloned());
+                let existing_schemas = schema_list_from_yaml(Some(existing_value));
+                let merged_schemas = merge_schema_lists(existing_schemas, package_schemas);
                 merged.insert(key.clone(), make_schema_list_value(&merged_schemas));
             }
             (Some(key_name), Some(_)) if inside_patch && is_managed_default_patch_key(key_name) => {
@@ -4282,15 +4306,13 @@ fn string_merge_default_custom(
     package_content: &str,
 ) -> (String, Vec<String>) {
     let package_schemas = parse_schema_list(package_content);
-    let user_schemas: Vec<String> = existing
-        .map(|content| {
-            parse_schema_list(content)
-                .into_iter()
-                .filter(|schema| !is_keytao_managed_schema(schema))
-                .collect()
-        })
-        .unwrap_or_default();
-    let merged_schemas = dedupe_schemas(user_schemas.iter().chain(package_schemas.iter()).cloned());
+    let existing_schemas = existing.map(parse_schema_list).unwrap_or_default();
+    let user_schemas: Vec<String> = existing_schemas
+        .iter()
+        .filter(|schema| !is_keytao_managed_schema(schema) && !is_addon_schema(schema))
+        .cloned()
+        .collect();
+    let merged_schemas = merge_schema_lists(existing_schemas, package_schemas);
 
     let mut out = String::new();
     let mut in_list = false;
@@ -4329,7 +4351,7 @@ pub fn merge_default_custom_content(
         .map(parse_schema_list)
         .unwrap_or_default()
         .into_iter()
-        .filter(|schema| !is_keytao_managed_schema(schema))
+        .filter(|schema| !is_keytao_managed_schema(schema) && !is_addon_schema(schema))
         .collect();
 
     let merged_yaml = if let Some(existing) = existing {
@@ -5090,9 +5112,9 @@ mod tests {
         mark_windows_rime_build_repair_complete, merge_default_custom_content,
         merge_rime_lua_content, parse_rime_lua_requires, parse_schema_dependencies,
         parse_schema_list, parse_schema_name, patch_android_auxiliary_dictionary,
-        patch_windows_lua_compatibility, preferred_schema_id_from_dir, rime_build_dirs,
-        rime_log_dir, schema_install_state, windows_rime_build_repair_required, ReloadStamp,
-        ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
+        patch_windows_lua_compatibility, preferred_schema_from_list, preferred_schema_id_from_dir,
+        rime_build_dirs, rime_log_dir, schema_install_state, windows_rime_build_repair_required,
+        ReloadStamp, ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
@@ -5435,6 +5457,29 @@ mod tests {
         assert!(merged.contains("- schema: keytao"));
         assert!(merged.contains("- schema: keytao-dz"));
         assert!(!merged.contains("keytao_old"));
+    }
+
+    #[test]
+    fn merge_default_custom_preserves_addon_after_package_schemas() {
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: keydo\n";
+        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n";
+        let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
+        let schemas = parse_schema_list(&merged);
+
+        assert_eq!(user, vec!["user_schema"]);
+        assert_eq!(
+            schemas,
+            vec!["user_schema", "keytao", "keytao-dz", "easy_en"]
+        );
+    }
+
+    #[test]
+    fn preferred_schema_never_uses_addon_as_startup_schema() {
+        assert_eq!(
+            preferred_schema_from_list(vec!["easy_en".into(), "user_schema".into()]),
+            Some("user_schema".into())
+        );
+        assert_eq!(preferred_schema_from_list(vec!["easy_en".into()]), None);
     }
 
     #[test]

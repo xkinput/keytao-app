@@ -92,6 +92,7 @@ group.ink.rea.keytao-app/keytao
 常见文件：
 
 - `keytao.schema.yaml`、`default.custom.yaml`、`*.dict.yaml`、`lua/`、`opencc/`：用户方案和运行时数据。
+- `easy_en.schema.yaml`、`easy_en.dict.yaml`、`easy_en.custom.yaml`、`lua/easy_en.lua`：可选 Easy English 附加方案。资源由 Tauri 放进 containing app 的 `assets/addon-schemas/easy_en`，主 App 的 `addon_schema_install` 再复制到 App Group；键盘扩展只读取已部署的 App Group 数据，不直接修改 bundle。
 - `rime-data/default.yaml`：基础 shared data fallback。
 - `theme.yaml`：用户主题，交给 `keytao-theme` 解析。
 - `ios_ime.json`：iOS 移动端键盘布局和动作配置。

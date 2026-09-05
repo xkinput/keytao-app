@@ -21,6 +21,9 @@ object KeytaoRimeDeployClient {
 
     private val deploymentRunning = AtomicBoolean(false)
 
+    internal fun timeoutMsForSchemas(schemas: List<String>) =
+        if (schemas.any(::isAddonSchema)) addonTimeoutMs else defaultTimeoutMs
+
     fun deploy(
         context: Context,
         timeoutMs: Long = defaultTimeoutMs,
@@ -185,6 +188,7 @@ object KeytaoRimeDeployClient {
     private data class PendingSchema(val id: String, val required: Boolean)
 
     private const val defaultTimeoutMs = 180_000L
+    private const val addonTimeoutMs = 300_000L
     private const val minimumTimeoutMs = 1_000L
     private const val processExitGraceMs = 350L
 }

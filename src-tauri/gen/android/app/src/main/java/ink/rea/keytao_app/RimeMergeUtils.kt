@@ -4,12 +4,15 @@ data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
 data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)
 
 private val managedSchemaPrefixes = listOf("keytao", "txjx", "xmjd6", "keydo")
+private const val easyEnglishAddonSchema = "easy_en"
 
 fun isDefaultCustom(filename: String) =
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
 
 fun isManagedSchema(schema: String) =
     managedSchemaPrefixes.any { schema.startsWith(it) }
+
+fun isAddonSchema(schema: String) = schema == easyEnglishAddonSchema
 
 private fun dedupeSchemas(schemas: List<String>): List<String> {
     val seen = linkedSetOf<String>()
@@ -111,10 +114,12 @@ fun mergeRimeLua(
 
 fun mergeDefaultCustom(existing: String?, zipContent: String): MergeResult {
     val packageSchemas = parseSchemas(zipContent)
-    val userSchemas = existing?.let { c ->
-        parseSchemas(c).filter { !isManagedSchema(it) }
-    } ?: emptyList()
-    val allSchemas = dedupeSchemas(userSchemas + packageSchemas)
+    val existingSchemas = existing?.let(::parseSchemas).orEmpty()
+    val userSchemas = existingSchemas.filter { !isManagedSchema(it) && !isAddonSchema(it) }
+    val addonSchemas = (existingSchemas + packageSchemas).filter(::isAddonSchema)
+    val allSchemas = dedupeSchemas(
+        userSchemas + packageSchemas.filterNot(::isAddonSchema) + addonSchemas,
+    )
 
     val out = StringBuilder()
     var inList = false

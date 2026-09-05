@@ -134,7 +134,16 @@ pub struct InstallResult {
     pub verify: Vec<VerifyEntry>,
 }
 
+#[derive(Serialize, Clone)]
+pub struct AddonSchemaStatus {
+    pub installed: bool,
+    pub deployed: bool,
+    pub version: String,
+}
+
 const API_BASE: &str = "https://keytao.rea.ink";
+const EASY_EN_ADDON_ID: &str = "easy_en";
+const EASY_EN_ADDON_VERSION: &str = "0.10.1";
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
 #[cfg(target_os = "ios")]
@@ -6123,6 +6132,322 @@ fn get_component_versions(app: AppHandle) -> ComponentVersions {
     }
 }
 
+fn validate_addon_schema_id(id: &str) -> Result<&str, String> {
+    match id.trim() {
+        EASY_EN_ADDON_ID => Ok(EASY_EN_ADDON_ID),
+        _ => Err(format!("不支持的附加方案：{id}")),
+    }
+}
+
+fn addon_schema_source_files(id: &str) -> [(&'static str, String); 4] {
+    [
+        ("easy_en.schema.yaml", format!("{id}.schema.yaml")),
+        ("easy_en.dict.yaml", format!("{id}.dict.yaml")),
+        ("easy_en.custom.yaml", format!("{id}.custom.yaml")),
+        ("lua/easy_en.lua", format!("lua/{id}.lua")),
+    ]
+}
+
+fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
+    let configured = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+        .is_some_and(|content| {
+            parse_schema_list(&content)
+                .iter()
+                .any(|schema| schema == id)
+        });
+    let installed = configured
+        && addon_schema_source_files(id)
+            .iter()
+            .all(|(_, relative)| root.join(relative).is_file());
+    let deployed = installed
+        && root
+            .join("build")
+            .join(format!("{id}.schema.yaml"))
+            .is_file();
+    AddonSchemaStatus {
+        installed,
+        deployed,
+        version: EASY_EN_ADDON_VERSION.into(),
+    }
+}
+
+#[tauri::command]
+fn addon_schema_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+) -> Result<AddonSchemaStatus, String> {
+    let id = validate_addon_schema_id(&id)?;
+    let root = default_keytao_user_root(&app)?;
+    Ok(addon_schema_status_at(&root, id))
+}
+
+fn update_addon_schema_list_content(
+    existing: &str,
+    id: &str,
+    installed: bool,
+) -> Result<String, String> {
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(&existing)
+        .map_err(|error| format!("解析 default custom 配置失败: {error}"))?;
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or("default custom 配置根节点必须是 YAML mapping")?;
+    let patch = yaml_child_mapping(mapping, "patch", "patch 必须是 YAML mapping")?;
+
+    let mut schemas = parse_schema_list(&existing);
+    schemas.retain(|schema| schema != id);
+    if installed {
+        schemas.push(id.to_string());
+    }
+    let schema_list = serde_yaml::Value::Sequence(
+        schemas
+            .into_iter()
+            .map(|schema| {
+                let mut entry = serde_yaml::Mapping::new();
+                entry.insert(
+                    serde_yaml::Value::String("schema".into()),
+                    serde_yaml::Value::String(schema),
+                );
+                serde_yaml::Value::Mapping(entry)
+            })
+            .collect(),
+    );
+    patch.insert(serde_yaml::Value::String("schema_list".into()), schema_list);
+
+    let mut content = serde_yaml::to_string(&value)
+        .map_err(|error| format!("序列化 default custom 配置失败: {error}"))?;
+    if let Some(stripped) = content.strip_prefix("---\n") {
+        content = stripped.to_string();
+    }
+    Ok(content)
+}
+
+fn write_addon_schema_list(root: &Path, id: &str, installed: bool) -> Result<(), String> {
+    let path = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+        .ok_or("请先安装键道方案")?;
+    let existing = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+    let content = update_addon_schema_list_content(&existing, id, installed)?;
+    write_file_atomic(&path, content.as_bytes())
+        .map_err(|error| format!("写入附加方案列表失败: {error}"))
+}
+
+#[cfg(not(target_os = "android"))]
+fn bundled_addon_schema_dir<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.extend([
+            resource_dir.join("addon-schemas").join(id),
+            resource_dir
+                .join("resources")
+                .join("addon-schemas")
+                .join(id),
+        ]);
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/addon-schemas")
+            .join(id),
+    );
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("easy_en.schema.yaml").is_file())
+        .ok_or_else(|| format!("应用包中缺少附加方案资源：{id}"))
+}
+
+#[cfg(not(target_os = "android"))]
+fn install_addon_schema_files<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    root: &Path,
+    id: &str,
+) -> Result<(), String> {
+    let source = bundled_addon_schema_dir(app, id)?;
+    for (source_relative, destination_relative) in addon_schema_source_files(id) {
+        let bytes = std::fs::read(source.join(source_relative))
+            .map_err(|error| format!("读取附加方案资源 {source_relative} 失败: {error}"))?;
+        let destination = root.join(destination_relative);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
+        }
+        write_file_atomic(&destination, &bytes)
+            .map_err(|error| format!("写入 {} 失败: {error}", destination.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn install_addon_schema_files<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    _root: &Path,
+    id: &str,
+) -> Result<(), String> {
+    app.state::<ScopedStorageHandle<R>>()
+        .0
+        .run_mobile_plugin::<serde_json::Value>(
+            "copyAddonSchemaAssets",
+            serde_json::json!({ "id": id }),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn remove_path_if_present(path: &Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("读取 {} 失败: {error}", path.display())),
+    };
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .map_err(|error| format!("删除 {} 失败: {error}", path.display()))
+}
+
+fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
+    for (_, relative) in addon_schema_source_files(id) {
+        remove_path_if_present(&root.join(relative))?;
+    }
+    for dir in [root.to_path_buf(), root.join("build")] {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("读取 {} 失败: {error}", dir.display())),
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let remove = if dir == root {
+                name.starts_with(&format!("{id}.userdb"))
+            } else {
+                name.starts_with(&format!("{id}."))
+            };
+            if remove {
+                remove_path_if_present(&entry.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn reset_mobile_english_mode(root: &Path) -> Result<bool, String> {
+    let path = android_ime_config_path(root);
+    let mut config = read_android_ime_config(&path);
+    if config
+        .get("englishMode")
+        .and_then(serde_json::Value::as_str)
+        != Some("schema")
+    {
+        return Ok(false);
+    }
+    config.insert(
+        "englishMode".into(),
+        serde_json::Value::String("ascii".into()),
+    );
+    let content = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("序列化移动端输入设置失败: {error}"))?;
+    write_file_atomic(&path, &content)
+        .map_err(|error| format!("写入 {} 失败: {error}", path.display()))?;
+    Ok(true)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[tauri::command]
+async fn addon_schema_install(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
+    let id = validate_addon_schema_id(&id)?;
+    let root = default_keytao_user_root(&app)?;
+    let base = keytao_core::schema_install_state(&root);
+    if !base.installed {
+        return Err("请先安装键道方案".into());
+    }
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "addon-copy".into(),
+            percent: 20,
+            message: "正在复制附加方案 English...".into(),
+        },
+    );
+    install_addon_schema_files(&app, &root, id)?;
+    write_addon_schema_list(&root, id, true)?;
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "addon-deploy".into(),
+            percent: 55,
+            message: "正在部署键道方案与 English...".into(),
+        },
+    );
+    rime_deploy_default(app.clone()).await?;
+    let status = addon_schema_status_at(&root, id);
+    if !status.deployed {
+        return Err("附加方案文件已安装，但部署产物缺失".into());
+    }
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "done".into(),
+            percent: 100,
+            message: "附加方案 English 已安装并部署".into(),
+        },
+    );
+    Ok(status)
+}
+
+#[tauri::command]
+async fn addon_schema_uninstall(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
+    let id = validate_addon_schema_id(&id)?;
+    let root = default_keytao_user_root(&app)?;
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "addon-uninstall".into(),
+            percent: 20,
+            message: "正在卸载附加方案 English...".into(),
+        },
+    );
+    write_addon_schema_list(&root, id, false)?;
+    remove_addon_schema_files(&root, id)?;
+    let reset_english_mode = reset_mobile_english_mode(&root)?;
+    if keytao_core::schema_install_state(&root).installed {
+        rime_deploy_default(app.clone()).await?;
+    } else {
+        let _ = write_default_reload_stamp(&app, &root)?;
+    }
+    if reset_english_mode {
+        let _ = app.emit(
+            "install-progress",
+            InstallProgress {
+                stage: "addon-reset-mode".into(),
+                percent: 90,
+                message: "英文模式已切回 ASCII 模式".into(),
+            },
+        );
+    }
+    let _ = app.emit(
+        "install-progress",
+        InstallProgress {
+            stage: "done".into(),
+            percent: 100,
+            message: "附加方案 English 已卸载".into(),
+        },
+    );
+    Ok(addon_schema_status_at(&root, id))
+}
+
 #[tauri::command]
 fn check_local_schema<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -6999,6 +7324,9 @@ pub fn run() {
             android_read_local_schemas,
             android_smart_extract,
             check_local_schema,
+            addon_schema_status,
+            addon_schema_install,
+            addon_schema_uninstall,
             rime_deploy_default,
             get_ime_ui_settings,
             set_ime_ui_color_scheme,
@@ -7278,6 +7606,80 @@ mod tests {
     }
 
     // ── parse_schema_list ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_addon_schema_list_appends_after_package_schemas_and_preserves_patch() {
+        let existing = concat!(
+            "patch:\n",
+            "  schema_list:\n",
+            "    - schema: keytao\n",
+            "    - schema: keytao-dz\n",
+            "  switcher:\n",
+            "    hotkeys:\n",
+            "      - F4\n",
+            "  menu:\n",
+            "    page_size: 7\n",
+            "  ascii_composer:\n",
+            "    good_old_caps_lock: true\n",
+        );
+
+        let updated = update_addon_schema_list_content(existing, "easy_en", true)
+            .expect("append add-on schema");
+        assert_eq!(
+            parse_schema_list(&updated),
+            vec!["keytao", "keytao-dz", "easy_en"]
+        );
+
+        let value: serde_yaml::Value = serde_yaml::from_str(&updated).expect("parse updated yaml");
+        let patch = value
+            .get("patch")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("patch mapping");
+        assert_eq!(
+            patch.get("switcher").and_then(|value| value.get("hotkeys")),
+            serde_yaml::from_str::<serde_yaml::Value>("[F4]")
+                .ok()
+                .as_ref()
+        );
+        assert_eq!(
+            patch
+                .get("menu")
+                .and_then(|value| value.get("page_size"))
+                .and_then(serde_yaml::Value::as_i64),
+            Some(7)
+        );
+        assert_eq!(
+            patch
+                .get("ascii_composer")
+                .and_then(|value| value.get("good_old_caps_lock"))
+                .and_then(serde_yaml::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_write_addon_schema_list_updates_the_existing_hyphenated_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-addon-schema-list-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create add-on schema test dir");
+        let path = dir.join("default-custom.yaml");
+        std::fs::write(
+            &path,
+            "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n",
+        )
+        .expect("write hyphenated default custom");
+
+        write_addon_schema_list(&dir, "easy_en", true).expect("write add-on schema list");
+
+        assert_eq!(
+            parse_schema_list(&std::fs::read_to_string(&path).expect("read updated config")),
+            vec!["keytao", "keytao-dz", "easy_en"]
+        );
+        assert!(!dir.join("default.custom.yaml").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn test_parse_schema_list_basic() {

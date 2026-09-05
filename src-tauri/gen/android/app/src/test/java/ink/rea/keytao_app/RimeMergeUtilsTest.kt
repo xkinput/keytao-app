@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RimeMergeUtilsTest {
+    @Test
+    fun `add-on schema extends the staged deployment budget`() {
+        assertEquals(
+            180_000L,
+            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "keytao-dz")),
+        )
+        assertEquals(
+            300_000L,
+            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "easy_en")),
+        )
+    }
 
     // ── extractLuaRequire ─────────────────────────────────────────────────────
 
@@ -158,6 +169,19 @@ class RimeMergeUtilsTest {
         val userPos   = result.mergedContent.indexOf("user_schema")
         val keytaoPos = result.mergedContent.indexOf("keytao_b")
         assertTrue("user schema must precede keytao schema", userPos < keytaoPos)
+    }
+
+    @Test
+    fun `mergeDefaultCustom preserves addon after package schemas`() {
+        val existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: keydo\n"
+        val zip = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n"
+        val result = mergeDefaultCustom(existing, zip)
+
+        assertEquals(listOf("user_schema"), result.userSchemas)
+        assertEquals(
+            listOf("user_schema", "keytao", "keytao-dz", "easy_en"),
+            parseSchemas(result.mergedContent),
+        )
     }
 
     // ── real keytao rime.lua ──────────────────────────────────────────────────

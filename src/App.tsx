@@ -199,6 +199,12 @@ interface LocalSchemaInfo {
   schemas: string[]
 }
 
+interface AddonSchemaStatus {
+  installed: boolean
+  deployed: boolean
+  version: string
+}
+
 interface DeployResult {
   success: boolean
   message: string
@@ -452,6 +458,9 @@ export default function App() {
 
   // Local schema info
   const [localSchemaInfo, setLocalSchemaInfo] = useState<LocalSchemaInfo | null>(null)
+  const [addonSchemaStatus, setAddonSchemaStatus] = useState<AddonSchemaStatus | null>(null)
+  const [addonSchemaError, setAddonSchemaError] = useState<string | null>(null)
+  const [isManagingAddonSchema, setIsManagingAddonSchema] = useState(false)
   const [isCheckingLocal, setIsCheckingLocal] = useState(false)
   const [isOpeningDir, setIsOpeningDir] = useState(false)
   const [isOpeningDictManager, setIsOpeningDictManager] = useState(false)
@@ -602,6 +611,10 @@ export default function App() {
     invoke<LocalSchemaInfo>("check_local_schema")
       .then(setLocalSchemaInfo)
       .catch(() => { })
+
+    invoke<AddonSchemaStatus>("addon_schema_status", { id: "easy_en" })
+      .then(setAddonSchemaStatus)
+      .catch((e) => setAddonSchemaError(String(e)))
 
     invoke<ComponentVersions>("get_component_versions")
       .then(setComponentVersions)
@@ -768,7 +781,7 @@ export default function App() {
   const windowsRegistrationBusy = osType === "windows" && (
     isManagingWindowsIme || windowsImeStatus?.registration_busy === true
   )
-  const isBusy = isInstalling || isDeploying || isCheckingAndroidStoragePermission || windowsRegistrationBusy
+  const isBusy = isInstalling || isDeploying || isManagingAddonSchema || isCheckingAndroidStoragePermission || windowsRegistrationBusy
   const systemImeAvailable = hasSystemIme(osType)
   const isMobilePlatform = osType === "android" || osType === "ios"
   const canOpenDefaultDir = osType !== "android"
@@ -780,6 +793,11 @@ export default function App() {
   const keyboardHeightScale = keyboardHeightScaleDraft ?? androidImeInputSettings?.keyboardHeightScale ?? 100
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
   const englishMode = androidImeInputSettings?.englishMode ?? "ascii"
+  // An English schema shipped inside the installed scheme package (e.g. xmjd6's
+  // `english`) counts as available, same as the bundled easy_en add-on.
+  const packageShipsEnglishSchema = (localSchemaInfo?.schemas ?? []).includes("english")
+  const englishAddonReady =
+    (addonSchemaStatus?.installed === true && addonSchemaStatus.deployed === true) || packageShipsEnglishSchema
   const backspaceGestureMode = androidImeInputSettings?.backspaceGestureMode ?? "immediate"
   const swipeThresholdDp = swipeThresholdDraft ?? androidImeInputSettings?.swipeThresholdDp ?? 34
   const flickKeysEnabled = androidImeInputSettings?.flickKeysEnabled ?? true
@@ -923,10 +941,25 @@ export default function App() {
     }
   }
 
+  async function refreshAddonSchemaStatus() {
+    try {
+      const status = await invoke<AddonSchemaStatus>("addon_schema_status", { id: "easy_en" })
+      setAddonSchemaStatus(status)
+      setAddonSchemaError(null)
+      return status
+    } catch (e) {
+      setAddonSchemaError(String(e))
+      return null
+    }
+  }
+
   async function handleCheckLocalSchema() {
     setIsCheckingLocal(true)
     try {
-      const info = await invoke<LocalSchemaInfo>("check_local_schema")
+      const [info] = await Promise.all([
+        invoke<LocalSchemaInfo>("check_local_schema"),
+        refreshAddonSchemaStatus(),
+      ])
       setLocalSchemaInfo(info)
     } catch { }
     finally { setIsCheckingLocal(false) }
@@ -1023,6 +1056,49 @@ export default function App() {
       addLogs([`[DEPLOY ERROR] ${msg}`])
     } finally {
       setIsDeploying(false)
+    }
+  }
+
+  async function handleInstallAddonSchema() {
+    if (isManagingAddonSchema) return
+    setIsManagingAddonSchema(true)
+    setAddonSchemaError(null)
+    setInstallProgress(null)
+    try {
+      const status = await invoke<AddonSchemaStatus>("addon_schema_install", { id: "easy_en" })
+      setAddonSchemaStatus(status)
+      addLogs([`[ADDON] Easy English 已安装并部署 v${status.version}`])
+      await handleCheckLocalSchema()
+    } catch (e) {
+      const message = String(e)
+      addLogs([`[ADDON ERROR] ${message}`])
+      await refreshAddonSchemaStatus()
+      setAddonSchemaError(message)
+    } finally {
+      setIsManagingAddonSchema(false)
+    }
+  }
+
+  async function handleUninstallAddonSchema() {
+    if (isManagingAddonSchema) return
+    setIsManagingAddonSchema(true)
+    setAddonSchemaError(null)
+    setInstallProgress(null)
+    try {
+      const status = await invoke<AddonSchemaStatus>("addon_schema_uninstall", { id: "easy_en" })
+      setAddonSchemaStatus(status)
+      addLogs(["[ADDON] Easy English 已卸载"])
+      await handleCheckLocalSchema()
+      if (isMobilePlatform) {
+        await refreshAndroidImeInputSettings()
+      }
+    } catch (e) {
+      const message = String(e)
+      addLogs([`[ADDON ERROR] ${message}`])
+      await refreshAddonSchemaStatus()
+      setAddonSchemaError(message)
+    } finally {
+      setIsManagingAddonSchema(false)
     }
   }
 
@@ -2032,16 +2108,18 @@ export default function App() {
                           variant={englishMode === mode ? "default" : "outline"}
                           size="sm"
                           onClick={() => handleUpdateAndroidImeInputSettings({ englishMode: mode })}
-                          disabled={isSavingAndroidImeInputSettings}
+                          disabled={isSavingAndroidImeInputSettings || (mode === "schema" && !englishAddonReady)}
                           className="h-8 text-xs"
                         >
                           {mode === "schema" ? "English 方案" : "ASCII 模式"}
                         </Button>
                       ))}
                     </div>
-                    <div className="text-[11px] text-muted-foreground/80">
-                      English 方案需先在方案页安装附加方案 English
-                    </div>
+                    {!englishAddonReady && (
+                      <div className="text-[11px] text-muted-foreground/80">
+                        请先在方案页安装附加方案 English
+                      </div>
+                    )}
                   </div>
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
@@ -2542,6 +2620,71 @@ export default function App() {
                       rows={3}
                       placeholder="在此测试输入法…"
                     />
+                </CardContent>
+              </Card>
+            )}
+
+            {systemImeAvailable && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <BookOpen className="h-4 w-4 text-muted-foreground" />
+                    附加方案
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/30 px-3 py-3 sm:flex-row sm:items-center">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium">Easy English · 英文单词输入</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {!addonSchemaStatus
+                          ? "检测中"
+                          : !addonSchemaStatus.installed
+                            ? "未安装"
+                            : !addonSchemaStatus.deployed
+                              ? "已安装 · 未部署"
+                              : `已部署 v${addonSchemaStatus.version}`}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      {!addonSchemaStatus?.deployed && (
+                        <Button
+                          size="sm"
+                          onClick={handleInstallAddonSchema}
+                          disabled={isBusy || !localSchemaInfo?.installed}
+                          title={localSchemaInfo?.installed ? "安装并部署 Easy English" : "请先安装键道方案"}
+                          className="gap-1.5"
+                        >
+                          {isManagingAddonSchema
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Download className="h-3.5 w-3.5" />}
+                          {addonSchemaStatus?.installed ? "重新部署" : "安装"}
+                        </Button>
+                      )}
+                      {addonSchemaStatus?.installed && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleUninstallAddonSchema}
+                          disabled={isBusy}
+                        >
+                          卸载
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  {isManagingAddonSchema && installProgress && (
+                    <div className="space-y-1.5">
+                      <Progress value={installProgress.percent} className="h-1.5" />
+                      <p className="text-xs text-muted-foreground">{installProgress.message}</p>
+                    </div>
+                  )}
+                  {addonSchemaError && (
+                    <div className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{addonSchemaError}</span>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )}
