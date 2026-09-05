@@ -21,7 +21,10 @@ use windows::{
             LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         },
-        System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        System::Threading::{
+            CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, ReleaseMutex,
+            WaitForSingleObject,
+        },
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
             ITfComposition, ITfContext, ITfContextOwnerCompositionServices, ITfDocumentMgr,
@@ -36,8 +39,12 @@ use crate::{
     candidate_ui::CandidateUiManager,
     edit_session::with_write_session,
     globals::DllActivityGuard,
-    input_context::{inspect_context, ContextInputState},
-    key_event_sink::{has_visible_state, should_arm_caret_reprobe, CaretSource},
+    input_context::{
+        inspect_context, merge_probe_failed_state, ContextInputState, InputBlockReason,
+    },
+    key_event_sink::{
+        should_arm_caret_reprobe, CaretSource, PendingCommitRetry, PendingWindowUpdate,
+    },
     language_bar::LanguageBarItem,
 };
 
@@ -47,11 +54,10 @@ const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
 /// force a fresh read, so a schema update is still picked up before the first
 /// key of the next focus; this only keeps typing off the file system.
 const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// How soon a context whose probes came back `Unknown` may be inspected again
-/// from the key path. An unanswered probe fails closed, so without a retry a
-/// single refused read session would keep the field in pass-through until the
-/// next focus change; inspecting costs a synchronous read session, so a host
-/// that never grants one must not get one request per keystroke.
+/// How soon a context with an unanswered probe may be inspected again from the
+/// key path. `Unknown` fails closed; a refused password edit session keeps a
+/// known answer or stays open on its first attempt. Both need bounded retries,
+/// but a host that never grants the session must not get one request per key.
 const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
 static THEME_RESOLVER: OnceLock<keytao_theme::ThemeResolver> = OnceLock::new();
@@ -78,9 +84,14 @@ pub struct TsfState {
     pub(crate) language_bar: Option<LanguageBarItem>,
     pub composition: Option<ITfComposition>,
     pub composition_context: Option<ITfContext>,
+    pub panel_context: Option<ITfContext>,
     pub ime_state: Option<ImeState>,
-    pub candidate_win: crate::candidate_win::CandidateWindow,
-    pub mode_hint_win: crate::candidate_win::CandidateWindow,
+    pub candidate_win: Option<crate::candidate_win::CandidateWindow>,
+    pub mode_hint_win: Option<crate::candidate_win::CandidateWindow>,
+    pub windows_dirty: bool,
+    pub windows_hide_pending: bool,
+    pub(crate) pending_window_update: Option<PendingWindowUpdate>,
+    pub(crate) pending_commit_retry: Option<PendingCommitRetry>,
     pub candidate_ui: Option<CandidateUiManager>,
     pub ascii_mode: bool,
     pub reload_stamp_path: Option<PathBuf>,
@@ -95,6 +106,8 @@ pub struct TsfState {
     /// What TSF says about the focused context (password field, disabled
     /// keyboard, empty context). Refreshed on focus changes.
     pub input_context: ContextInputState,
+    /// Strong reference used to scope cached probe answers to one live context.
+    input_context_source: Option<ITfContext>,
     /// Cached `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`. A closed keyboard passes
     /// every keystroke through unaltered.
     pub keyboard_open: bool,
@@ -113,12 +126,13 @@ pub struct TsfState {
     pub last_caret: Option<CaretPosition>,
     pub caret_retry_attempts: u8,
     pub caret_retry_mode_hint: bool,
+    caret_rearm_pending: bool,
     pub ime_write_session_active: bool,
     pub caret_probe_session_in_progress: bool,
     /// COM identity of the composition temporarily owned by the active write
     /// session while `st.composition` is taken out of shared state.
     pub composition_in_flight: Option<usize>,
-    pub composition_terminated_in_session: bool,
+    pub composition_clear_pending: bool,
     layout_sink: Option<LayoutSinkRegistration>,
     compartment_sinks: Vec<CompartmentSinkRegistration>,
     /// Sinks on the focused context's `KEYBOARD_DISABLED` / `EMPTYCONTEXT`
@@ -255,9 +269,14 @@ impl TsfState {
             language_bar: None,
             composition: None,
             composition_context: None,
+            panel_context: None,
             ime_state: None,
-            candidate_win: crate::candidate_win::CandidateWindow::new(),
-            mode_hint_win: crate::candidate_win::CandidateWindow::new_mode_hint(),
+            candidate_win: Some(crate::candidate_win::CandidateWindow::new()),
+            mode_hint_win: Some(crate::candidate_win::CandidateWindow::new_mode_hint()),
+            windows_dirty: false,
+            windows_hide_pending: false,
+            pending_window_update: None,
+            pending_commit_retry: None,
             candidate_ui: Some(CandidateUiManager::new()),
             ascii_mode: false,
             reload_stamp_path: None,
@@ -270,6 +289,7 @@ impl TsfState {
             shift_pressed_without_key: false,
             session_reset_pending: false,
             input_context: ContextInputState::default(),
+            input_context_source: None,
             keyboard_open: true,
             input_policy_applied: None,
             input_context_retry_after: None,
@@ -277,10 +297,11 @@ impl TsfState {
             last_caret: None,
             caret_retry_attempts: 0,
             caret_retry_mode_hint: false,
+            caret_rearm_pending: false,
             ime_write_session_active: false,
             caret_probe_session_in_progress: false,
             composition_in_flight: None,
-            composition_terminated_in_session: false,
+            composition_clear_pending: false,
             layout_sink: None,
             compartment_sinks: Vec::new(),
             context_compartment_sinks: Vec::new(),
@@ -374,8 +395,6 @@ impl TsfState {
         self.runtime = None;
         self.rime_dll = None;
         self.ime_state = None;
-        self.candidate_win.hide();
-        self.mode_hint_win.hide();
         self.reload_clear_pending = true;
         self.reload_retry_after = None;
         true
@@ -518,7 +537,13 @@ pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
         .unwrap_or(0);
     let log_path = log_dir.join("windows-ime.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let _ = writeln!(file, "[{timestamp}] {}", message.as_ref());
+        let pid = unsafe { GetCurrentProcessId() };
+        let tid = unsafe { GetCurrentThreadId() };
+        let _ = writeln!(
+            file,
+            "[{timestamp}][pid:{pid}][tid:{tid}] {}",
+            message.as_ref()
+        );
     }
 }
 
@@ -567,6 +592,8 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
     if !should_reload {
         return false;
     }
+
+    hide_ime_windows(shared_state);
 
     let mailbox = {
         let st = shared_state.borrow();
@@ -632,6 +659,7 @@ pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) {
     if let Some(session) = session {
         let ime_state = session.reset();
         shared_state.borrow_mut().ime_state = ime_state;
+        append_diagnostic("session reset applied");
     }
 }
 
@@ -683,7 +711,7 @@ pub(crate) fn refresh_input_context(shared_state: &SharedState, context: Option<
     let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
     crate::text_service::advise_context_compartment_sinks(shared_state, context.as_ref());
     let inspected = inspect_context(thread_mgr.as_ref(), context.as_ref(), client_id);
-    if apply_input_context_state(shared_state, inspected) {
+    if apply_input_context_state(shared_state, context.as_ref(), inspected) {
         // Ends a composition that may still be on screen as well as hiding the
         // UI. Every caller happens to reset first today, but a context that
         // turned out sensitive must not depend on that to stop showing preedit.
@@ -697,26 +725,60 @@ pub(crate) fn refresh_input_context(shared_state: &SharedState, context: Option<
 /// Takes the state rather than inspecting itself: the compartment sink refreshes
 /// only the two compartments, while a focus change re-runs the input-scope probe
 /// as well.
-fn apply_input_context_state(shared_state: &SharedState, input_context: ContextInputState) -> bool {
+fn apply_input_context_state(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+    inspected: ContextInputState,
+) -> bool {
+    let (input_context, thread_mgr) = {
+        let st = shared_state.borrow();
+        let previous_same_context = context
+            .filter(|context| {
+                st.input_context_source
+                    .as_ref()
+                    .is_some_and(|previous| previous.as_raw() == context.as_raw())
+            })
+            .map(|_| st.input_context);
+        (
+            merge_probe_failed_state(previous_same_context, inspected),
+            st.thread_mgr.clone(),
+        )
+    };
     let sensitive = input_context.is_sensitive();
+    let retry_due = input_context.needs_retry();
+    let keyboard_open = crate::input_context::keyboard_is_open(thread_mgr.as_ref());
     {
         let mut st = shared_state.borrow_mut();
         st.input_context = input_context;
+        st.input_context_source = context.cloned();
         // A fresh answer re-arms the throttle: the next failure gets an
         // immediate retry rather than inheriting an old deadline.
         st.input_context_retry_after = None;
-        st.keyboard_open = crate::input_context::keyboard_is_open(st.thread_mgr.as_ref());
+        st.keyboard_open = keyboard_open;
     }
+    let password_diagnostic = if input_context.password_probe_failed {
+        "probe_failed"
+    } else {
+        input_context.password.diagnostic_name()
+    };
+    append_diagnostic(format!(
+        "input context inspected kd={} ec={} pw={} sensitive={} retry_due={}",
+        input_context.keyboard_disabled.diagnostic_name(),
+        input_context.empty_context.diagnostic_name(),
+        password_diagnostic,
+        sensitive,
+        retry_due,
+    ));
     sync_input_policy(shared_state);
     sensitive
 }
 
 /// Inspect the context again when the last attempt could not answer.
 ///
-/// Runs from the key callbacks. `ContextProbe::Unknown` fails closed, which is
-/// right for the keystroke at hand but would strand an ordinary text field in
-/// pass-through forever if the refusal was momentary — hosts routinely refuse a
-/// synchronous read session while the document is locked.
+/// Runs from the key callbacks. `ContextProbe::Unknown` fails closed, while a
+/// password `ProbeFailed` keeps a known answer or allows input until the retry;
+/// hosts routinely refuse a synchronous read session while the document is
+/// locked, so neither result may become permanent.
 pub(crate) fn retry_input_context_if_unknown(
     shared_state: &SharedState,
     context: Option<&ITfContext>,
@@ -774,7 +836,7 @@ pub(crate) fn apply_context_compartment_change(shared_state: &SharedState) {
         context.as_ref(),
         previous,
     );
-    let sensitive = apply_input_context_state(shared_state, refreshed);
+    let sensitive = apply_input_context_state(shared_state, context.as_ref(), refreshed);
     if sensitive && !previous.is_sensitive() {
         // Ends the composition through a queued write session; the document is
         // very likely still locked underneath this callback.
@@ -850,18 +912,39 @@ pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
 
 /// True when neither the context nor the system state allows composing.
 pub(crate) fn input_is_blocked(shared_state: &SharedState, context: Option<&ITfContext>) -> bool {
-    let (thread_mgr, keyboard_open, sensitive) = {
+    let reason = input_block_reason(shared_state, context);
+    if let Some(reason) = reason {
+        append_input_blocked_diagnostic(reason, context);
+        return true;
+    }
+    false
+}
+
+fn input_block_reason(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+) -> Option<InputBlockReason> {
+    let (thread_mgr, keyboard_open, cached_reason) = {
         let st = shared_state.borrow();
         (
             st.thread_mgr.clone(),
             st.keyboard_open,
-            st.input_context.is_sensitive(),
+            st.input_context.block_reason(),
         )
     };
-    if !keyboard_open || sensitive {
-        return true;
+    if !keyboard_open {
+        return Some(InputBlockReason::KeyboardClosed);
     }
-    crate::input_context::keyboard_is_disabled(thread_mgr.as_ref(), context)
+    cached_reason
+        .or_else(|| crate::input_context::context_block_reason(thread_mgr.as_ref(), context))
+}
+
+fn append_input_blocked_diagnostic(reason: InputBlockReason, context: Option<&ITfContext>) {
+    append_diagnostic(format!(
+        "input blocked reason={} ctx=0x{:x}",
+        reason.diagnostic_name(),
+        context.map_or(0, |context| context.as_raw() as usize),
+    ));
 }
 
 pub(crate) fn store_layout_sink(shared_state: &SharedState, registration: LayoutSinkRegistration) {
@@ -986,25 +1069,33 @@ pub(crate) fn update_ime_windows(
     ime_state: &ImeState,
     document_mgr: Option<&ITfDocumentMgr>,
     caret: Option<(CaretPosition, CaretSource)>,
-    owner_hwnd: HWND,
     show_mode_hint: bool,
     embedded: bool,
-) {
+) -> bool {
     let (thread_mgr, allow_fallback_window) = {
         let st = shared_state.borrow();
         let uiless = host_is_uiless(&st);
         (st.thread_mgr.clone(), !uiless)
     };
     let allow_candidate_window = with_detached_candidate_ui(shared_state, |candidate_ui| {
-        candidate_ui.update(
+        let allow = candidate_ui.update(
             thread_mgr.as_ref(),
             document_mgr,
             ime_state,
             allow_fallback_window,
-        )
+        );
+        if shared_state.borrow().ime_state.is_none() {
+            candidate_ui.end();
+            false
+        } else {
+            allow
+        }
     });
+    if shared_state.borrow().ime_state.is_none() {
+        return true;
+    }
     let weak_state = Rc::downgrade(shared_state);
-    with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
+    with_detached_windows(shared_state, false, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
             if let Some((caret, _)) = caret {
@@ -1026,7 +1117,7 @@ pub(crate) fn update_ime_windows(
         } else if should_arm_caret_reprobe(caret_source)
             && ((show && allow_candidate_window) || show_mode_hint)
         {
-            candidate_win.arm_caret_reprobe(owner_hwnd, &weak_state);
+            candidate_win.arm_caret_reprobe(&weak_state);
         }
         if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
             mode_hint_win.show_mode_hint(
@@ -1037,7 +1128,8 @@ pub(crate) fn update_ime_windows(
                 &weak_state,
             );
         }
-    });
+    })
+    .is_some()
 }
 
 pub(crate) fn host_is_uiless(state: &TsfState) -> bool {
@@ -1046,18 +1138,75 @@ pub(crate) fn host_is_uiless(state: &TsfState) -> bool {
 }
 
 pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
+    {
+        let mut st = shared_state.borrow_mut();
+        st.panel_context = None;
+        st.pending_window_update = None;
+        st.caret_rearm_pending = false;
+    }
     clear_layout_sink(shared_state);
     with_detached_candidate_ui(shared_state, CandidateUiManager::end);
-    with_detached_windows(shared_state, |candidate_win, mode_hint_win| {
+    let _ = with_detached_windows(shared_state, true, |candidate_win, mode_hint_win| {
         candidate_win.hide();
         mode_hint_win.hide();
+    });
+}
+
+pub(crate) fn defer_ime_ui_hide(shared_state: &SharedState) {
+    let mut st = shared_state.borrow_mut();
+    st.session_reset_pending = true;
+    st.panel_context = None;
+    st.pending_window_update = None;
+    st.windows_dirty = true;
+    st.windows_hide_pending = true;
+}
+
+pub(crate) fn post_pending_ime_ui(shared_state: &SharedState) {
+    let posted = shared_state
+        .borrow()
+        .candidate_win
+        .as_ref()
+        .is_some_and(crate::candidate_win::CandidateWindow::post_pending_ime_ui);
+    if !posted {
+        flush_pending_ime_ui(shared_state);
+    }
+}
+
+pub(crate) fn flush_pending_ime_ui(shared_state: &SharedState) {
+    let (hide_pending, rearm_pending) = {
+        let mut st = shared_state.borrow_mut();
+        st.windows_dirty = false;
+        (
+            std::mem::take(&mut st.windows_hide_pending),
+            std::mem::take(&mut st.caret_rearm_pending),
+        )
+    };
+    if hide_pending {
+        hide_ime_windows(shared_state);
+    }
+    crate::key_event_sink::flush_pending_commit_retry(shared_state);
+    crate::key_event_sink::flush_pending_window_update(shared_state);
+    if rearm_pending && !hide_pending {
+        rearm_caret_reprobe(shared_state);
+    }
+}
+
+pub(crate) fn request_caret_reprobe_rearm(shared_state: &SharedState) {
+    shared_state.borrow_mut().caret_rearm_pending = true;
+    post_pending_ime_ui(shared_state);
+}
+
+pub(crate) fn rearm_caret_reprobe(shared_state: &SharedState) {
+    let weak_state = Rc::downgrade(shared_state);
+    let _ = with_detached_windows(shared_state, false, |candidate_win, _mode_hint_win| {
+        candidate_win.arm_caret_reprobe(&weak_state);
     });
 }
 
 pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
     let active_composition = take_active_composition(shared_state);
     if let Some((context, composition, client_id)) = active_composition {
-        request_composition_end(context, composition, client_id);
+        request_composition_end(shared_state, context, composition, client_id);
     }
     hide_ime_windows(shared_state);
 }
@@ -1069,7 +1218,7 @@ pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
 pub(crate) fn terminate_input_now(shared_state: &SharedState) {
     let active_composition = take_active_composition(shared_state);
     if let Some((context, composition, client_id)) = active_composition {
-        end_composition_now(&context, composition, client_id);
+        end_composition_now(shared_state, &context, composition, client_id);
     }
     hide_ime_windows(shared_state);
 }
@@ -1086,11 +1235,14 @@ fn take_active_composition(
         .zip(st.composition_context.take())
         .map(|(composition, context)| (context, composition, st.client_id));
     st.ime_state = None;
+    st.panel_context = None;
     st.last_caret = None;
     st.caret_retry_attempts = 0;
     st.caret_retry_mode_hint = false;
+    st.caret_rearm_pending = false;
     st.composition_in_flight = None;
-    st.composition_terminated_in_session = false;
+    st.composition_clear_pending = false;
+    st.pending_window_update = None;
     // The panel is about to be hidden, so no click can still be pending; the
     // stale context must not keep the host object alive.
     st.key_context = None;
@@ -1105,73 +1257,71 @@ pub(crate) fn clear_input_after_composition_terminated(
         return;
     };
     let terminated_identity = terminated.as_raw() as usize;
-    let (is_active_composition, terminated_in_session) = {
+    let policy = {
         let st = shared_state.borrow();
-        (
-            st.composition
-                .as_ref()
-                .is_some_and(|active| active.as_raw() == terminated.as_raw()),
-            should_record_termination_in_session(
-                st.ime_write_session_active,
-                st.composition_in_flight,
-                terminated_identity,
-            ),
-        )
+        termination_policy(st.composition_in_flight, terminated_identity)
     };
-    if !is_active_composition {
-        if terminated_in_session {
-            shared_state.borrow_mut().composition_terminated_in_session = true;
-        }
+    if policy == TerminationPolicy::Ignore {
         return;
     }
 
-    // A composition can only become active after `apply_ime_state` has already
-    // primed the resolver outside the document write session. Keep this lookup
-    // below the identity check so stale callbacks do no filesystem work.
-    let configured_embedded = embedded_composition();
-    let panel_mode_with_visible_state = {
-        let st = shared_state.borrow();
-        !configured_embedded
-            && !host_is_uiless(&st)
-            && st.ime_state.as_ref().is_some_and(has_visible_state)
-    };
-    if panel_mode_with_visible_state {
+    let in_write_session = {
         let mut st = shared_state.borrow_mut();
-        st.composition = None;
-        st.composition_context = None;
-        drop(st);
-        append_diagnostic("composition terminated mode=panel kept_state=1");
-        return;
-    }
-
-    {
-        let mut st = shared_state.borrow_mut();
+        let in_write_session = st.ime_write_session_active;
         st.shift_pressed_without_key = false;
         st.session_reset_pending = true;
         st.composition = None;
         st.composition_context = None;
+        st.panel_context = None;
         st.ime_state = None;
         st.last_caret = None;
         st.caret_retry_attempts = 0;
         st.caret_retry_mode_hint = false;
+        st.pending_window_update = None;
+        st.composition_clear_pending = in_write_session;
+        if in_write_session {
+            st.windows_dirty = true;
+            st.windows_hide_pending = true;
+        }
+        in_write_session
+    };
+    if in_write_session {
+        post_pending_ime_ui(shared_state);
+    } else {
+        hide_ime_windows(shared_state);
     }
-    hide_ime_windows(shared_state);
 }
 
-fn should_record_termination_in_session(
-    in_write_session: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminationPolicy {
+    Ignore,
+    Clear,
+}
+
+fn termination_policy(
     composition_in_flight: Option<usize>,
     terminated_identity: usize,
-) -> bool {
-    in_write_session && composition_in_flight == Some(terminated_identity)
+) -> TerminationPolicy {
+    if composition_in_flight == Some(terminated_identity) {
+        TerminationPolicy::Ignore
+    } else {
+        TerminationPolicy::Clear
+    }
 }
 
-fn request_composition_end(context: ITfContext, composition: ITfComposition, client_id: u32) {
+fn request_composition_end(
+    shared_state: &SharedState,
+    context: ITfContext,
+    composition: ITfComposition,
+    client_id: u32,
+) {
     if client_id == 0 {
         return;
     }
+    let state = Rc::clone(shared_state);
     let result =
         crate::edit_session::with_async_write_session(&context, client_id, move |ec, ctx| {
+            let _in_flight = CompositionInFlightGuard::enter(&state, &composition);
             clear_composition_range(ec, ctx, &composition)
         });
     if let Err(error) = result {
@@ -1181,10 +1331,17 @@ fn request_composition_end(context: ITfContext, composition: ITfComposition, cli
     }
 }
 
-fn end_composition_now(context: &ITfContext, composition: ITfComposition, client_id: u32) {
+fn end_composition_now(
+    shared_state: &SharedState,
+    context: &ITfContext,
+    composition: ITfComposition,
+    client_id: u32,
+) {
     if client_id != 0 {
+        let state = Rc::clone(shared_state);
         let composition_for_session = composition.clone();
         let cleared = with_write_session(context, client_id, move |ec, ctx| {
+            let _in_flight = CompositionInFlightGuard::enter(&state, &composition_for_session);
             clear_composition_range(ec, ctx, &composition_for_session)
         });
         if cleared.is_ok() {
@@ -1196,9 +1353,35 @@ fn end_composition_now(context: &ITfContext, composition: ITfComposition, client
     // context; the text stays in the document but no dangling composition range
     // survives the text service.
     if let Ok(services) = context.cast::<ITfContextOwnerCompositionServices>() {
+        let _in_flight = CompositionInFlightGuard::enter(shared_state, &composition);
         let terminated = unsafe { services.TerminateComposition(None) };
         if let Err(error) = terminated {
             append_diagnostic(format!("failed to terminate composition: {error}"));
+        }
+    }
+}
+
+struct CompositionInFlightGuard {
+    state: SharedState,
+    identity: usize,
+}
+
+impl CompositionInFlightGuard {
+    fn enter(shared_state: &SharedState, composition: &ITfComposition) -> Self {
+        let identity = composition.as_raw() as usize;
+        shared_state.borrow_mut().composition_in_flight = Some(identity);
+        Self {
+            state: Rc::clone(shared_state),
+            identity,
+        }
+    }
+}
+
+impl Drop for CompositionInFlightGuard {
+    fn drop(&mut self) {
+        let mut st = self.state.borrow_mut();
+        if st.composition_in_flight == Some(self.identity) {
+            st.composition_in_flight = None;
         }
     }
 }
@@ -1219,44 +1402,79 @@ fn clear_composition_range(
 }
 
 pub(crate) fn hide_candidate_window(shared_state: &SharedState) {
+    {
+        let mut st = shared_state.borrow_mut();
+        st.panel_context = None;
+        st.pending_window_update = None;
+        st.caret_rearm_pending = false;
+    }
     with_detached_candidate_ui(shared_state, CandidateUiManager::end);
-    with_detached_windows(shared_state, |candidate_win, _mode_hint_win| {
+    let _ = with_detached_windows(shared_state, true, |candidate_win, _mode_hint_win| {
         candidate_win.hide();
     });
 }
 
 fn with_detached_windows<R>(
     shared_state: &SharedState,
-    f: impl FnOnce(
+    hide_request: bool,
+    mut f: impl FnMut(
         &mut crate::candidate_win::CandidateWindow,
         &mut crate::candidate_win::CandidateWindow,
     ) -> R,
-) -> R {
-    let (mut candidate_win, mut mode_hint_win) = {
-        let mut st = shared_state.borrow_mut();
-        (
-            std::mem::replace(
-                &mut st.candidate_win,
-                crate::candidate_win::CandidateWindow::new(),
-            ),
-            std::mem::replace(
-                &mut st.mode_hint_win,
-                crate::candidate_win::CandidateWindow::new_mode_hint(),
-            ),
-        )
-    };
+) -> Option<R> {
+    fn run<R, F>(
+        shared_state: &SharedState,
+        hide_request: bool,
+        f: &mut F,
+        allow_followup: bool,
+    ) -> Option<R>
+    where
+        F: FnMut(
+            &mut crate::candidate_win::CandidateWindow,
+            &mut crate::candidate_win::CandidateWindow,
+        ) -> R,
+    {
+        let (mut candidate_win, mut mode_hint_win) = {
+            let mut st = shared_state.borrow_mut();
+            let Some(candidate_win) = st.candidate_win.take() else {
+                st.windows_dirty = true;
+                st.windows_hide_pending |= hide_request;
+                return None;
+            };
+            let Some(mode_hint_win) = st.mode_hint_win.take() else {
+                st.candidate_win = Some(candidate_win);
+                st.windows_dirty = true;
+                st.windows_hide_pending |= hide_request;
+                return None;
+            };
+            (candidate_win, mode_hint_win)
+        };
 
-    let result = f(&mut candidate_win, &mut mode_hint_win);
+        let result = f(&mut candidate_win, &mut mode_hint_win);
 
-    let (replaced_candidate, replaced_mode_hint) = {
-        let mut st = shared_state.borrow_mut();
-        (
-            std::mem::replace(&mut st.candidate_win, candidate_win),
-            std::mem::replace(&mut st.mode_hint_win, mode_hint_win),
-        )
-    };
-    drop((replaced_candidate, replaced_mode_hint));
-    result
+        let (rerun, hide_pending, has_pending_update) = {
+            let mut st = shared_state.borrow_mut();
+            debug_assert!(st.candidate_win.is_none());
+            debug_assert!(st.mode_hint_win.is_none());
+            st.candidate_win = Some(candidate_win);
+            st.mode_hint_win = Some(mode_hint_win);
+            (
+                st.windows_dirty,
+                st.windows_hide_pending,
+                st.pending_window_update.is_some(),
+            )
+        };
+
+        if hide_pending || has_pending_update {
+            flush_pending_ime_ui(shared_state);
+        } else if rerun && allow_followup {
+            shared_state.borrow_mut().windows_dirty = false;
+            let _ = run(shared_state, false, f, false);
+        }
+        Some(result)
+    }
+
+    run(shared_state, hide_request, &mut f, true)
 }
 
 fn with_detached_candidate_ui<R>(
@@ -1356,8 +1574,10 @@ pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {
 #[cfg(test)]
 mod tests {
     use super::{
-        input_context_retry_due, should_record_termination_in_session, INPUT_CONTEXT_RETRY_INTERVAL,
+        input_context_retry_due, termination_policy, with_detached_windows, TerminationPolicy,
+        INPUT_CONTEXT_RETRY_INTERVAL,
     };
+    use std::cell::Cell;
     use std::time::Instant;
 
     #[test]
@@ -1404,21 +1624,47 @@ mod tests {
     }
 
     #[test]
-    fn only_matching_in_flight_composition_arms_session_termination() {
-        assert!(should_record_termination_in_session(
-            true,
-            Some(0x1234),
-            0x1234
-        ));
-        assert!(!should_record_termination_in_session(
-            true,
-            Some(0x1234),
-            0x5678
-        ));
-        assert!(!should_record_termination_in_session(
-            false,
-            Some(0x1234),
-            0x1234
-        ));
+    fn only_matching_in_flight_composition_is_ignored() {
+        assert_eq!(
+            termination_policy(Some(0x1234), 0x1234),
+            TerminationPolicy::Ignore
+        );
+        assert_eq!(
+            termination_policy(Some(0x1234), 0x5678),
+            TerminationPolicy::Clear
+        );
+        assert_eq!(termination_policy(None, 0x1234), TerminationPolicy::Clear);
+    }
+
+    #[test]
+    fn detached_window_reentrancy_only_sets_pending_flags() {
+        let state = super::new_shared_state();
+        let (candidate_win, mode_hint_win) = {
+            let mut st = state.borrow_mut();
+            (st.candidate_win.take(), st.mode_hint_win.take())
+        };
+        let called = Cell::new(false);
+
+        assert!(with_detached_windows(&state, false, |_, _| called.set(true)).is_none());
+        {
+            let st = state.borrow();
+            assert!(st.windows_dirty);
+            assert!(!st.windows_hide_pending);
+            assert!(st.candidate_win.is_none());
+            assert!(st.mode_hint_win.is_none());
+        }
+        assert!(!called.get());
+
+        assert!(with_detached_windows(&state, true, |_, _| called.set(true)).is_none());
+        {
+            let mut st = state.borrow_mut();
+            assert!(st.windows_dirty);
+            assert!(st.windows_hide_pending);
+            assert!(st.candidate_win.is_none());
+            assert!(st.mode_hint_win.is_none());
+            st.candidate_win = candidate_win;
+            st.mode_hint_win = mode_hint_win;
+        }
+        assert!(!called.get());
     }
 }

@@ -6,7 +6,10 @@
 //!   preedit text    → manage ITfComposition
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -39,22 +42,23 @@ use crate::{
     },
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
-        clear_input_for_blocked_context, clear_layout_sink, diagnostics_enabled,
-        embedded_composition, fallback_focus_window, hide_candidate_window, host_is_uiless,
-        input_is_blocked, layout_sink_context, poll_engine_builds, prime_theme_resolver,
-        refresh_engine_for_focus, refresh_input_context, reset_input_for_focus_change,
-        retry_input_context_if_unknown, start_engine_warmup, start_reload_if_needed,
-        store_layout_sink, sync_input_policy, update_ime_windows, update_language_bar_mode,
-        CaretPosition, LayoutSinkRegistration, SharedState, WeakState,
+        clear_input_for_blocked_context, clear_layout_sink, defer_ime_ui_hide, diagnostics_enabled,
+        embedded_composition, fallback_focus_window, flush_pending_ime_ui, hide_candidate_window,
+        host_is_uiless, input_is_blocked, layout_sink_context, poll_engine_builds,
+        post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus, refresh_input_context,
+        reset_input_for_focus_change, retry_input_context_if_unknown, start_engine_warmup,
+        start_reload_if_needed, store_layout_sink, sync_input_policy, update_ime_windows,
+        update_language_bar_mode, CaretPosition, LayoutSinkRegistration, SharedState, WeakState,
     },
 };
 
 static KEY_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+const KEY_DIAGNOSTIC_LIMIT: usize = 65_536;
 
 macro_rules! append_key_diagnostic {
     ($($arg:tt)*) => {
         if diagnostics_enabled()
-            && KEY_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < 96
+            && KEY_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < KEY_DIAGNOSTIC_LIMIT
         {
             append_diagnostic(format!($($arg)*));
         }
@@ -223,9 +227,26 @@ fn clear_composition_display_attribute(ec: u32, context: &ITfContext, range: &IT
 /// `position` stays `None` when the host has not laid the text out yet
 /// (`TF_E_NOLAYOUT`) or refuses the query; the owner window is still usable in
 /// that case, so the two answers are kept apart.
+#[derive(Clone)]
 struct CaretProbe {
     owner_hwnd: HWND,
     position: Option<(i32, i32)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingWindowUpdate {
+    context: ITfContext,
+    ime_state: ImeState,
+    caret: CaretProbe,
+    document_mgr: Option<ITfDocumentMgr>,
+    show_mode_hint: bool,
+    embedded: bool,
+}
+
+pub(crate) struct PendingCommitRetry {
+    context: ITfContext,
+    client_id: u32,
+    committed: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,6 +535,7 @@ fn probe_caret(
 fn resolve_caret(
     shared_state: &SharedState,
     probe: CaretProbe,
+    embedded: bool,
 ) -> Option<(CaretPosition, CaretSource)> {
     if let Some((x, y)) = probe.position {
         let caret = CaretPosition {
@@ -526,6 +548,11 @@ fn resolve_caret(
             append_diagnostic(format!("caret resolved via=probe x={x} y={y}"));
         }
         return Some((caret, CaretSource::Probe));
+    }
+    if !embedded {
+        if let Some(caret) = resolved_system_caret(probe.owner_hwnd) {
+            return Some(caret);
+        }
     }
     let cached = shared_state.borrow().last_caret;
     if let Some(mut caret) = cached {
@@ -542,19 +569,26 @@ fn resolve_caret(
             return Some((caret, CaretSource::Cache));
         }
     }
-    if let Some(caret) = system_caret(probe.owner_hwnd) {
-        if diagnostics_enabled() {
-            append_diagnostic(format!(
-                "caret resolved via=system x={} y={}",
-                caret.x, caret.y
-            ));
+    if embedded {
+        if let Some(caret) = resolved_system_caret(probe.owner_hwnd) {
+            return Some(caret);
         }
-        return Some((caret, CaretSource::System));
     }
     if diagnostics_enabled() {
         append_diagnostic("caret resolved via=none x=0 y=0");
     }
     None
+}
+
+fn resolved_system_caret(owner_hwnd: HWND) -> Option<(CaretPosition, CaretSource)> {
+    let caret = system_caret(owner_hwnd)?;
+    if diagnostics_enabled() {
+        append_diagnostic(format!(
+            "caret resolved via=system x={} y={}",
+            caret.x, caret.y
+        ));
+    }
+    Some((caret, CaretSource::System))
 }
 
 /// Use a validated system caret when the host cannot report a text extent.
@@ -604,7 +638,7 @@ impl ImeWriteSessionGuard {
             let mut st = state.borrow_mut();
             st.ime_write_session_active = true;
             st.composition_in_flight = None;
-            st.composition_terminated_in_session = false;
+            st.composition_clear_pending = false;
         }
         Self {
             state: Rc::clone(state),
@@ -619,7 +653,7 @@ impl ImeWriteSessionGuard {
         let mut st = self.state.borrow_mut();
         st.ime_write_session_active = false;
         st.composition_in_flight = None;
-        st.composition_terminated_in_session = false;
+        st.composition_clear_pending = false;
         self.active = false;
     }
 }
@@ -638,7 +672,7 @@ impl CaretProbeSessionGuard {
     fn enter(state: &SharedState, context: &ITfContext) -> Option<Self> {
         let mut st = state.borrow_mut();
         let context_mismatch = st
-            .composition_context
+            .panel_context
             .as_ref()
             .is_some_and(|active| active.as_raw() != context.as_raw());
         if context_mismatch || st.ime_write_session_active || st.caret_probe_session_in_progress {
@@ -663,6 +697,106 @@ fn track_composition_in_flight(shared_state: &SharedState, composition: Option<&
         composition.map(|composition| composition.as_raw() as usize);
 }
 
+fn queue_lost_commit_once(
+    context: &ITfContext,
+    client_id: u32,
+    shared_state: &SharedState,
+    committed: &str,
+    scheduled: &Cell<bool>,
+) {
+    if scheduled.replace(true) {
+        return;
+    }
+    let committed_len = committed.chars().count();
+    append_diagnostic(format!("commit lost len={committed_len}"));
+    shared_state.borrow_mut().pending_commit_retry = Some(PendingCommitRetry {
+        context: context.clone(),
+        client_id,
+        committed: committed.to_owned(),
+    });
+}
+
+pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
+    let Some(retry) = shared_state.borrow_mut().pending_commit_retry.take() else {
+        return;
+    };
+    let state = Rc::clone(shared_state);
+    let comp_sink: ITfCompositionSink = CompositionSink {
+        state: Rc::downgrade(shared_state),
+        _dll_guard: DllActivityGuard::new(),
+    }
+    .into();
+    if let Err(error) =
+        with_async_dontcare_write_session(&retry.context, retry.client_id, move |ec, ctx| {
+            let _write_session_guard = ImeWriteSessionGuard::enter(&state);
+            let result = (|| {
+                let composition = start_composition(ec, ctx, "", 0, &comp_sink, None)?;
+                track_composition_in_flight(&state, Some(&composition));
+                end_composition(ec, ctx, &composition, Some(&retry.committed))
+            })();
+            track_composition_in_flight(&state, None);
+            if let Err(error) = &result {
+                append_diagnostic(format!(
+                    "TSF edit session failed stage=commit-retry-apply: {error}"
+                ));
+            }
+            result
+        })
+    {
+        append_diagnostic(format!(
+            "TSF edit session failed stage=commit-retry-request: {error}"
+        ));
+    }
+}
+
+pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
+    let Some(update) = shared_state.borrow_mut().pending_window_update.take() else {
+        return;
+    };
+    if shared_state.borrow().ime_state.is_none() {
+        return;
+    }
+
+    if has_visible_state(&update.ime_state) {
+        ensure_layout_sink(shared_state, &update.context);
+    } else {
+        clear_layout_sink(shared_state);
+    }
+    if shared_state.borrow().ime_state.is_none() {
+        return;
+    }
+    let caret = resolve_caret(shared_state, update.caret.clone(), update.embedded);
+    let caret_source = caret.map(|(_, source)| source);
+    {
+        let mut st = shared_state.borrow_mut();
+        if st.ime_state.is_none() {
+            return;
+        }
+        if caret_source == Some(CaretSource::Probe) {
+            st.caret_retry_attempts = 0;
+        }
+        st.caret_retry_mode_hint = update.show_mode_hint && should_arm_caret_reprobe(caret_source);
+        st.panel_context = has_visible_state(&update.ime_state).then(|| update.context.clone());
+    }
+    update_language_bar_mode(shared_state, update.ime_state.ascii_mode);
+    if shared_state.borrow().ime_state.is_none() {
+        return;
+    }
+    if !update_ime_windows(
+        shared_state,
+        &update.ime_state,
+        update.document_mgr.as_ref(),
+        caret,
+        update.show_mode_hint,
+        update.embedded,
+    ) {
+        let mut st = shared_state.borrow_mut();
+        if st.pending_window_update.is_none() {
+            st.pending_window_update = Some(update);
+        }
+    }
+}
+
 fn apply_ime_state(
     context: &ITfContext,
     client_id: u32,
@@ -674,6 +808,13 @@ fn apply_ime_state(
     let state_arc = Rc::clone(shared_state);
     let state_arc_for_session = Rc::clone(&state_arc);
     let ime_state_clone = ime_state.clone();
+    let failed_commit_retry_scheduled = Rc::new(Cell::new(false));
+    let failed_commit_retry_for_session = Rc::clone(&failed_commit_retry_scheduled);
+    let committed_for_retry = ime_state
+        .committed
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
     let comp_sink_obj = CompositionSink {
         state: Rc::downgrade(shared_state),
         _dll_guard: DllActivityGuard::new(),
@@ -697,7 +838,6 @@ fn apply_ime_state(
         let mode = if embedded { "embedded" } else { "panel" };
         let target = match plan.target {
             CompositionTarget::None => "none",
-            CompositionTarget::Empty => "empty",
             CompositionTarget::Preedit => "preedit",
         };
         append_diagnostic(format!(
@@ -708,12 +848,8 @@ fn apply_ime_state(
             u8::from(plan.commit),
         ));
     }
-    if has_visible_state(&ime_state) {
-        ensure_layout_sink(&state_arc, context);
-    }
-
     let apply_session = move |ec: u32, ctx: &ITfContext| {
-        let mut write_session_guard = ImeWriteSessionGuard::enter(&state_arc_for_session);
+        let _write_session_guard = ImeWriteSessionGuard::enter(&state_arc_for_session);
         let committed = ime_state_clone
             .committed
             .as_deref()
@@ -737,26 +873,18 @@ fn apply_ime_state(
                     append_key_diagnostic!("commit path=fresh-composition len={committed_len}");
                     start_composition(ec, ctx, "", 0, &comp_sink_iface, None)?
                 };
-                // Drop local ownership before our own EndComposition. A host may
-                // notify the sink synchronously from that call; it is benign.
-                track_composition_in_flight(&state_arc_for_session, composition.as_ref());
+                track_composition_in_flight(&state_arc_for_session, Some(&comp));
                 end_composition(ec, ctx, &comp, Some(committed))?;
+                track_composition_in_flight(&state_arc_for_session, None);
             }
 
             match plan.target {
                 CompositionTarget::None => {
                     if let Some(comp) = composition.take() {
                         append_key_diagnostic!("composition end reason=clear");
-                        track_composition_in_flight(&state_arc_for_session, composition.as_ref());
+                        track_composition_in_flight(&state_arc_for_session, Some(&comp));
                         end_composition(ec, ctx, &comp, None)?;
-                    }
-                }
-                CompositionTarget::Empty => {
-                    if composition.is_none() {
-                        append_key_diagnostic!("composition start mode=panel text_len=0");
-                        composition =
-                            Some(start_composition(ec, ctx, "", 0, &comp_sink_iface, None)?);
-                        track_composition_in_flight(&state_arc_for_session, composition.as_ref());
+                        track_composition_in_flight(&state_arc_for_session, None);
                     }
                 }
                 CompositionTarget::Preedit => {
@@ -794,25 +922,46 @@ fn apply_ime_state(
         })();
 
         if let Err(error) = apply_result {
-            track_composition_in_flight(&state_arc_for_session, None);
             if let Some(comp) = composition.as_ref().or(original_composition.as_ref()) {
+                track_composition_in_flight(&state_arc_for_session, Some(comp));
                 let _ = end_composition(ec, ctx, comp, None);
             }
+            track_composition_in_flight(&state_arc_for_session, None);
             let mut st = state_arc_for_session.borrow_mut();
             st.composition = None;
             st.composition_context = None;
+            st.panel_context = None;
             st.ime_state = None;
+            st.pending_window_update = None;
             drop(st);
-            write_session_guard.finish();
+            append_diagnostic(format!("TSF edit session failed stage=apply: {error}"));
+            if let Some(committed) = committed {
+                queue_lost_commit_once(
+                    ctx,
+                    client_id,
+                    &state_arc_for_session,
+                    committed,
+                    &failed_commit_retry_for_session,
+                );
+            }
             if async_dontcare {
-                reset_input_for_focus_change(&state_arc_for_session);
-                if diagnostics_enabled() {
-                    append_diagnostic(format!("TSF edit session failed: {error}"));
-                }
+                defer_ime_ui_hide(&state_arc_for_session);
+                post_pending_ime_ui(&state_arc_for_session);
             }
             return Err(error);
         }
 
+        if std::mem::take(&mut state_arc_for_session.borrow_mut().composition_clear_pending) {
+            if let Some(comp) = composition.as_ref() {
+                track_composition_in_flight(&state_arc_for_session, Some(comp));
+                let _ = end_composition(ec, ctx, comp, None);
+                track_composition_in_flight(&state_arc_for_session, None);
+            }
+            if async_dontcare {
+                post_pending_ime_ui(&state_arc_for_session);
+            }
+            return Ok(());
+        }
         let caret = probe_caret(ec, ctx, composition.as_ref(), &ime_state_clone, embedded);
         let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
         let mode_changed = {
@@ -829,44 +978,20 @@ fn apply_ime_state(
             mode_changed
         };
         let show_mode_hint = show_mode_hint_on_change && mode_changed;
-
-        let terminated_in_session = {
-            let mut st = state_arc_for_session.borrow_mut();
-            std::mem::take(&mut st.composition_terminated_in_session)
-        };
-        write_session_guard.finish();
-        if terminated_in_session {
-            let mut st = state_arc_for_session.borrow_mut();
-            st.composition = None;
-            st.composition_context = None;
-            drop(st);
-            append_diagnostic("composition dropped reason=terminated-in-session");
-        }
-
-        let owner_hwnd = caret.owner_hwnd;
-        let caret = resolve_caret(&state_arc_for_session, caret);
-        let caret_source = caret.map(|(_, source)| source);
         {
             let mut st = state_arc_for_session.borrow_mut();
-            if caret_source == Some(CaretSource::Probe) {
-                st.caret_retry_attempts = 0;
-            }
-            st.caret_retry_mode_hint = show_mode_hint && should_arm_caret_reprobe(caret_source);
+            st.pending_window_update = Some(PendingWindowUpdate {
+                context: ctx.clone(),
+                ime_state: ime_state_clone.clone(),
+                caret,
+                document_mgr,
+                show_mode_hint,
+                embedded,
+            });
         }
-        if !has_visible_state(&ime_state_clone) {
-            clear_layout_sink(&state_arc_for_session);
+        if async_dontcare {
+            post_pending_ime_ui(&state_arc_for_session);
         }
-        update_language_bar_mode(&state_arc_for_session, ime_state_clone.ascii_mode);
-        update_ime_windows(
-            &state_arc_for_session,
-            &ime_state_clone,
-            document_mgr.as_ref(),
-            caret,
-            owner_hwnd,
-            show_mode_hint,
-            embedded,
-        );
-
         Ok(())
     };
     let session_result = if async_dontcare {
@@ -875,16 +1000,20 @@ fn apply_ime_state(
         with_write_session(context, client_id, apply_session)
     };
     if let Err(error) = &session_result {
-        {
-            let mut st = state_arc.borrow_mut();
-            st.ime_write_session_active = false;
-            st.composition_in_flight = None;
-            st.composition_terminated_in_session = false;
+        append_diagnostic(format!("TSF edit session failed stage=request: {error}"));
+        if let Some(committed) = committed_for_retry.as_deref() {
+            queue_lost_commit_once(
+                context,
+                client_id,
+                &state_arc,
+                committed,
+                &failed_commit_retry_scheduled,
+            );
         }
         reset_input_for_focus_change(&state_arc);
-        if diagnostics_enabled() {
-            append_diagnostic(format!("TSF edit session failed: {error}"));
-        }
+        flush_pending_ime_ui(&state_arc);
+    } else {
+        flush_pending_ime_ui(&state_arc);
     }
     session_result
 }
@@ -960,25 +1089,15 @@ fn reposition_ime_windows(
         }
     };
 
-    let owner_hwnd = probe.owner_hwnd;
-    let caret = resolve_caret(shared_state, probe);
-    let caret_source = caret.map(|(_, source)| source);
-    if caret_source == Some(CaretSource::Probe) {
-        let mut st = shared_state.borrow_mut();
-        st.caret_retry_attempts = 0;
-        if show_mode_hint {
-            st.caret_retry_mode_hint = false;
-        }
-    }
-    update_ime_windows(
-        shared_state,
-        &ime_state,
-        document_mgr.as_ref(),
-        caret,
-        owner_hwnd,
+    shared_state.borrow_mut().pending_window_update = Some(PendingWindowUpdate {
+        context: context.clone(),
+        ime_state,
+        caret: probe,
+        document_mgr,
         show_mode_hint,
         embedded,
-    );
+    });
+    flush_pending_ime_ui(shared_state);
     true
 }
 
@@ -988,9 +1107,7 @@ pub(crate) fn retry_caret_probe(shared_state: &SharedState) {
         st.caret_retry_attempts = st.caret_retry_attempts.saturating_add(1);
         (
             st.caret_retry_attempts,
-            st.composition_context
-                .clone()
-                .or_else(|| st.key_context.clone()),
+            st.panel_context.clone().or_else(|| st.key_context.clone()),
             st.caret_retry_mode_hint,
         )
     };
@@ -1005,8 +1122,7 @@ pub(crate) fn retry_caret_probe(shared_state: &SharedState) {
     }
     if let Some(context) = context {
         if !reposition_ime_windows(shared_state, &context, show_mode_hint) {
-            let mut st = shared_state.borrow_mut();
-            st.caret_retry_attempts = st.caret_retry_attempts.saturating_sub(1);
+            crate::state::request_caret_reprobe_rearm(shared_state);
         }
     }
 }
@@ -1062,7 +1178,6 @@ fn has_commit(state: &ImeState) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CompositionTarget {
     None,
-    Empty,
     Preedit,
 }
 
@@ -1079,8 +1194,6 @@ fn plan_composition(state: &ImeState, embedded: bool) -> CompositionPlan {
         } else {
             CompositionTarget::Preedit
         }
-    } else if has_visible_state(state) {
-        CompositionTarget::Empty
     } else {
         CompositionTarget::None
     };
@@ -1135,9 +1248,7 @@ pub(crate) fn handle_panel_click(shared_state: &SharedState, click: PanelClick) 
     let (context, client_id) = {
         let st = shared_state.borrow();
         (
-            st.composition_context
-                .clone()
-                .or_else(|| st.key_context.clone()),
+            st.panel_context.clone().or_else(|| st.key_context.clone()),
             st.client_id,
         )
     };
@@ -1585,7 +1696,7 @@ mod tests {
             let _guard = ImeWriteSessionGuard::enter(&state);
             let mut st = state.borrow_mut();
             st.composition_in_flight = Some(0x1234);
-            st.composition_terminated_in_session = true;
+            st.composition_clear_pending = true;
             drop(st);
             panic!("deferred edit session panic");
         }));
@@ -1594,7 +1705,7 @@ mod tests {
         let st = state.borrow();
         assert!(!st.ime_write_session_active);
         assert_eq!(st.composition_in_flight, None);
-        assert!(!st.composition_terminated_in_session);
+        assert!(!st.composition_clear_pending);
     }
 
     #[test]
@@ -1691,23 +1802,23 @@ mod tests {
     }
 
     #[test]
-    fn panel_mode_keeps_empty_anchor() {
+    fn panel_mode_never_creates_a_composition_for_preedit() {
         assert_eq!(
             plan_composition(&state_with_preedit("ni"), false),
             CompositionPlan {
                 commit: false,
-                target: CompositionTarget::Empty,
+                target: CompositionTarget::None,
             }
         );
     }
 
     #[test]
-    fn panel_mode_anchors_on_candidates_only() {
+    fn panel_mode_never_creates_a_composition_for_candidates_only() {
         assert_eq!(
             plan_composition(&state_with_candidate("你"), false),
             CompositionPlan {
                 commit: false,
-                target: CompositionTarget::Empty,
+                target: CompositionTarget::None,
             }
         );
     }
@@ -1739,7 +1850,7 @@ mod tests {
             plan_composition(&state, false),
             CompositionPlan {
                 commit: true,
-                target: CompositionTarget::Empty,
+                target: CompositionTarget::None,
             }
         );
     }

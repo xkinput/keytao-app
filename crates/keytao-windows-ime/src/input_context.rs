@@ -11,12 +11,15 @@
 //! runs with `InputContextPolicy::sensitive()` so nothing reaches the user
 //! dictionary.
 //!
-//! Every probe is tri-state. TSF reports "no restriction" and "cannot answer
+//! Probe outcomes distinguish a declared restriction, a clear answer, an
+//! invalid/unknown answer, and a refused password edit session. TSF reports "no restriction" and "cannot answer
 //! right now" through the same shapes — a refused synchronous read session, a
 //! failed `GetSelection`, a property in an unexpected form — and reading any of
 //! them as "no restriction" would hand a password field straight to Rime. A
-//! failed probe therefore counts as restricted and is retried from the key
-//! path.
+//! Most failed probes therefore count as restricted and are retried from the
+//! key path. A refused password-probe edit session is distinct: the caller can
+//! retain a known answer for the same context, or allow one key-path retry when
+//! there is no prior answer.
 
 use std::{cell::Cell, rc::Rc};
 
@@ -35,7 +38,10 @@ use windows::{
     },
 };
 
-use crate::edit_session::{take_selection_range, with_read_session};
+use crate::{
+    edit_session::{take_selection_range, with_read_session},
+    state::append_diagnostic,
+};
 
 /// The compartments that live on the *context* rather than on the thread
 /// manager, and that a host flips to take the keyboard away mid-session.
@@ -81,6 +87,28 @@ pub(crate) enum ContextProbe {
     /// The read failed. Counts as restricted until a later probe answers.
     #[default]
     Unknown,
+    /// TSF refused the synchronous password-probe edit session. Unlike an
+    /// invalid property answer, this does not prove the field is sensitive.
+    ProbeFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputBlockReason {
+    KeyboardClosed,
+    Sensitive,
+    ContextDisabled,
+    ProbeFailed,
+}
+
+impl InputBlockReason {
+    pub(crate) fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::KeyboardClosed => "keyboard_closed",
+            Self::Sensitive => "sensitive",
+            Self::ContextDisabled => "context_disabled",
+            Self::ProbeFailed => "probe_failed",
+        }
+    }
 }
 
 impl ContextProbe {
@@ -93,7 +121,20 @@ impl ContextProbe {
     }
 
     fn blocks_input(self) -> bool {
-        !matches!(self, Self::Clear)
+        matches!(self, Self::Restricted | Self::Unknown)
+    }
+
+    pub(crate) fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Restricted => "restricted",
+            Self::Clear => "clear",
+            Self::Unknown => "unknown",
+            Self::ProbeFailed => "probe_failed",
+        }
+    }
+
+    fn is_known(self) -> bool {
+        matches!(self, Self::Restricted | Self::Clear)
     }
 }
 
@@ -106,6 +147,9 @@ pub(crate) struct ContextInputState {
     pub(crate) empty_context: ContextProbe,
     /// The context declares an `IS_PASSWORD` input scope.
     pub(crate) password: ContextProbe,
+    /// The most recent password-scope edit session was refused. The effective
+    /// `password` value may still be the last known answer for this context.
+    pub(crate) password_probe_failed: bool,
 }
 
 impl ContextInputState {
@@ -116,6 +160,7 @@ impl ContextInputState {
             keyboard_disabled: ContextProbe::Clear,
             empty_context: ContextProbe::Clear,
             password: ContextProbe::Clear,
+            password_probe_failed: false,
         }
     }
 
@@ -124,6 +169,25 @@ impl ContextInputState {
         self.keyboard_disabled.blocks_input()
             || self.empty_context.blocks_input()
             || self.password.blocks_input()
+    }
+
+    pub(crate) fn block_reason(&self) -> Option<InputBlockReason> {
+        if matches!(
+            (self.keyboard_disabled, self.empty_context),
+            (ContextProbe::Restricted, _) | (_, ContextProbe::Restricted)
+        ) {
+            return Some(InputBlockReason::ContextDisabled);
+        }
+        if self.password == ContextProbe::Restricted {
+            return Some(InputBlockReason::Sensitive);
+        }
+        if [self.keyboard_disabled, self.empty_context, self.password]
+            .into_iter()
+            .any(|probe| probe == ContextProbe::Unknown)
+        {
+            return Some(InputBlockReason::ProbeFailed);
+        }
+        None
     }
 
     /// Take fresh compartment answers, keep the input-scope one.
@@ -140,16 +204,31 @@ impl ContextInputState {
             keyboard_disabled,
             empty_context,
             password: self.password,
+            password_probe_failed: self.password_probe_failed,
         }
     }
 
     /// A probe could not answer, so the state has to be inspected again before
     /// the context can go back to composing.
     pub(crate) fn needs_retry(&self) -> bool {
-        [self.keyboard_disabled, self.empty_context, self.password]
-            .into_iter()
-            .any(|probe| probe == ContextProbe::Unknown)
+        self.password_probe_failed
+            || [self.keyboard_disabled, self.empty_context, self.password]
+                .into_iter()
+                .any(|probe| matches!(probe, ContextProbe::Unknown | ContextProbe::ProbeFailed))
     }
+}
+
+pub(crate) fn merge_probe_failed_state(
+    previous_same_context: Option<ContextInputState>,
+    mut inspected: ContextInputState,
+) -> ContextInputState {
+    if inspected.password == ContextProbe::ProbeFailed {
+        if let Some(previous) = previous_same_context.filter(|state| state.password.is_known()) {
+            inspected.password = previous.password;
+        }
+        inspected.password_probe_failed = true;
+    }
+    inspected
 }
 
 fn compartment_probe(manager: &ITfCompartmentMgr, guid: &GUID) -> ContextProbe {
@@ -193,10 +272,10 @@ pub(crate) fn resolve_context(
 /// Cheap enough for the key callbacks: two compartment reads, and only when the
 /// caller could not supply a context does it ask the thread manager for the
 /// focus document.
-pub(crate) fn keyboard_is_disabled(
+pub(crate) fn context_block_reason(
     thread_mgr: Option<&ITfThreadMgr>,
     context: Option<&ITfContext>,
-) -> bool {
+) -> Option<InputBlockReason> {
     let owned;
     let context = match context {
         Some(context) => context,
@@ -206,15 +285,27 @@ pub(crate) fn keyboard_is_disabled(
                 &owned
             }
             // No focus document at all: nothing may be composed into it.
-            None => return true,
+            None => return Some(InputBlockReason::ProbeFailed),
         },
     };
     let Ok(manager) = context.cast::<ITfCompartmentMgr>() else {
-        // A context that will not answer is not one we may compose into.
-        return true;
+        return Some(InputBlockReason::ProbeFailed);
     };
-    compartment_probe(&manager, &GUID_COMPARTMENT_KEYBOARD_DISABLED).blocks_input()
-        || compartment_probe(&manager, &GUID_COMPARTMENT_EMPTYCONTEXT).blocks_input()
+    let keyboard_disabled = compartment_probe(&manager, &GUID_COMPARTMENT_KEYBOARD_DISABLED);
+    let empty_context = compartment_probe(&manager, &GUID_COMPARTMENT_EMPTYCONTEXT);
+    if matches!(
+        (keyboard_disabled, empty_context),
+        (ContextProbe::Restricted, _) | (_, ContextProbe::Restricted)
+    ) {
+        Some(InputBlockReason::ContextDisabled)
+    } else if matches!(
+        (keyboard_disabled, empty_context),
+        (ContextProbe::Unknown, _) | (_, ContextProbe::Unknown)
+    ) {
+        Some(InputBlockReason::ProbeFailed)
+    } else {
+        None
+    }
 }
 
 /// The system on/off state. A closed keyboard passes every key through.
@@ -295,7 +386,7 @@ fn thread_compartment_value(thread_mgr: Option<&ITfThreadMgr>, guid: &GUID) -> O
 
 /// Ask the context for its input scopes. Requires an edit cookie, so it runs in
 /// a synchronous read session; hosts refuse one while the document is locked and
-/// that answer is `Unknown`, never `Clear`.
+/// that answer is `ProbeFailed`, distinct from an invalid property answer.
 fn context_password_probe(context: &ITfContext, client_id: u32) -> ContextProbe {
     if client_id == 0 {
         return ContextProbe::Unknown;
@@ -306,8 +397,12 @@ fn context_password_probe(context: &ITfContext, client_id: u32) -> ContextProbe 
         probe_for_session.set(read_password_scope(ec, ctx));
         Ok(())
     });
-    if result.is_err() {
-        return ContextProbe::Unknown;
+    if let Err(error) = result {
+        append_diagnostic(format!(
+            "password probe session hr=0x{:08X}",
+            error.code().0 as u32
+        ));
+        return ContextProbe::ProbeFailed;
     }
     probe.get()
 }
@@ -399,6 +494,7 @@ pub(crate) fn inspect_context(
         keyboard_disabled,
         empty_context,
         password: context_password_probe(&context, client_id),
+        password_probe_failed: false,
     }
 }
 
@@ -423,7 +519,9 @@ pub(crate) fn refresh_context_compartments(
 
 #[cfg(test)]
 mod tests {
-    use super::{scopes_declare_sensitive, ContextInputState, ContextProbe};
+    use super::{
+        merge_probe_failed_state, scopes_declare_sensitive, ContextInputState, ContextProbe,
+    };
     use windows::Win32::UI::TextServices::{
         IS_ALPHANUMERIC_PIN, IS_ALPHANUMERIC_PIN_SET, IS_DEFAULT, IS_EMAIL_USERNAME,
         IS_NUMERIC_PASSWORD, IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE, IS_URL,
@@ -543,5 +641,25 @@ mod tests {
             ..ContextInputState::unrestricted()
         };
         assert!(!state.needs_retry());
+    }
+
+    #[test]
+    fn password_probe_failure_keeps_a_known_clear_answer_or_retries_open() {
+        let failed = ContextInputState {
+            password: ContextProbe::ProbeFailed,
+            ..ContextInputState::unrestricted()
+        };
+
+        let kept = merge_probe_failed_state(Some(ContextInputState::unrestricted()), failed);
+        assert_eq!(kept.password, ContextProbe::Clear);
+        assert!(!kept.is_sensitive());
+        assert!(kept.needs_retry());
+        assert!(kept.password_probe_failed);
+
+        let first_failure = merge_probe_failed_state(None, failed);
+        assert_eq!(first_failure.password, ContextProbe::ProbeFailed);
+        assert!(!first_failure.is_sensitive());
+        assert!(first_failure.needs_retry());
+        assert!(first_failure.password_probe_failed);
     }
 }

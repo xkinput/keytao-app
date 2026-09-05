@@ -32,13 +32,13 @@ use windows::{
         UI::Shell::{FrameworkInputPane, IFrameworkInputPane},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-            KillTimer, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow,
+            KillTimer, PostMessageW, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow,
             UpdateLayeredWindow, CW_USEDEFAULT, EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE,
-            EVENT_OBJECT_IME_SHOW, GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT, SM_CXVIRTUALSCREEN,
-            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
-            ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_TIMER, WNDCLASSEXW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_POPUP,
+            EVENT_OBJECT_IME_SHOW, GWLP_HWNDPARENT, GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT,
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
+            SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCDESTROY,
+            WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
@@ -54,6 +54,7 @@ use crate::{
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
 const MODE_HINT_TIMER_ID: usize = 1;
 const CARET_RETRY_TIMER_ID: usize = 2;
+const PENDING_IME_UI_MESSAGE: u32 = WM_APP + 0x4B;
 const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CARET_RETRY_DELAYS_MS: [u32; 5] = [16, 32, 64, 128, 256];
@@ -200,6 +201,14 @@ unsafe extern "system" fn wnd_proc(
 
 unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        PENDING_IME_UI_MESSAGE => {
+            if let Some(target) = click_target(hwnd) {
+                if let Some(state) = target.state.upgrade() {
+                    crate::state::flush_pending_ime_ui(&state);
+                }
+            }
+            return LRESULT(0);
+        }
         WM_TIMER if wparam.0 == CARET_RETRY_TIMER_ID => {
             let _ = KillTimer(hwnd, CARET_RETRY_TIMER_ID);
             if let Some(target) = click_target(hwnd) {
@@ -285,8 +294,16 @@ impl CandidateWindow {
             owner_hwnd
         };
         if !self.hwnd.0.is_null() && self.owner_hwnd != owner_hwnd {
+            self.hide();
             unsafe {
-                let _ = DestroyWindow(self.hwnd);
+                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner_hwnd.0 as _);
+                if GetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT) as usize == owner_hwnd.0 as usize {
+                    self.owner_hwnd = owner_hwnd;
+                    return true;
+                }
+                if DestroyWindow(self.hwnd).is_err() {
+                    return true;
+                }
             }
             self.hwnd = HWND(std::ptr::null_mut());
             self.visible = false;
@@ -401,8 +418,8 @@ impl CandidateWindow {
         Ok(hwnd)
     }
 
-    pub fn arm_caret_reprobe(&mut self, owner_hwnd: HWND, state: &WeakState) {
-        if self.hwnd.0.is_null() && !self.ensure_window(owner_hwnd, state) {
+    pub fn arm_caret_reprobe(&mut self, state: &WeakState) {
+        if self.hwnd.0.is_null() {
             return;
         }
         let Some(target) = click_target(self.hwnd) else {
@@ -429,6 +446,13 @@ impl CandidateWindow {
                 append_diagnostic(format!("caret retry attempt={attempt} armed"));
             }
         }
+    }
+
+    pub fn post_pending_ime_ui(&self) -> bool {
+        if self.hwnd.0.is_null() {
+            return false;
+        }
+        unsafe { PostMessageW(self.hwnd, PENDING_IME_UI_MESSAGE, WPARAM(0), LPARAM(0)).is_ok() }
     }
 
     pub fn disarm_caret_reprobe(&mut self) {
