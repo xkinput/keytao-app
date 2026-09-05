@@ -224,6 +224,7 @@ data class KeytaoAndroidImeConfig(
         private const val keyboardHeightScaleStep = 5
         private const val keyboardHeightScaleDefault = 100
         private const val keyboardSeedFileName = ".keyboard.seed"
+        private const val excludedToolbarActionId = "settings"
         private val legacyDefaultKeyboardHashes = setOf(
             "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
             "3ebe95295376bfeffb79c0106f86bc7e3d8631311dae0c595d330ed4c1b2805c",
@@ -295,7 +296,7 @@ data class KeytaoAndroidImeConfig(
                     ?.readText()
                     ?.let(::JSONObject)
                     ?: JSONObject()
-                val normalizedOrder = order.map(String::trim).filter(String::isNotEmpty).distinct()
+                val normalizedOrder = normalizeToolbarActionOrder(order)
                 root.put("toolbarActionOrder", JSONArray(normalizedOrder))
                 root.put("toolbarPinnedCount", pinnedCount.coerceIn(1, 12))
                 file.parentFile?.mkdirs()
@@ -418,8 +419,10 @@ data class KeytaoAndroidImeConfig(
                 backspaceGestureMode = normalizeBackspaceGestureMode(
                     mergedString(root, fallbackRoot, "backspaceGestureMode", "immediate"),
                 ),
-                toolbarActionOrder = mergedStringList(root, fallbackRoot, "toolbarActionOrder"),
-                toolbarPinnedCount = mergedInt(root, fallbackRoot, "toolbarPinnedCount", 6).coerceIn(1, 12),
+                toolbarActionOrder = normalizeToolbarActionOrder(
+                    mergedStringList(root, fallbackRoot, "toolbarActionOrder"),
+                ),
+                toolbarPinnedCount = mergedInt(root, fallbackRoot, "toolbarPinnedCount", 5).coerceIn(1, 12),
                 keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
                 keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
                 keyHintVisible = mergedBoolean(root, fallbackRoot, "keyHintVisible", true),
@@ -575,7 +578,7 @@ data class KeytaoAndroidImeConfig(
                     config.backspaceGestureMode
                 },
                 toolbarActionOrder = if (runtimeRoot.has("toolbarActionOrder")) {
-                    stringList(runtimeRoot.optJSONArray("toolbarActionOrder"))
+                    normalizeToolbarActionOrder(stringList(runtimeRoot.optJSONArray("toolbarActionOrder")))
                 } else {
                     config.toolbarActionOrder
                 },
@@ -692,6 +695,12 @@ data class KeytaoAndroidImeConfig(
                     array.optString(index).trim().takeIf(String::isNotEmpty)?.let(::add)
                 }
             }.distinct()
+        }
+
+        private fun normalizeToolbarActionOrder(order: List<String>): List<String> {
+            return order.map(String::trim)
+                .filter { it.isNotEmpty() && it != excludedToolbarActionId }
+                .distinct()
         }
 
         private fun layerRows(root: JSONObject, fallbackRoot: JSONObject?): Map<String, List<List<KeySpec>>> {

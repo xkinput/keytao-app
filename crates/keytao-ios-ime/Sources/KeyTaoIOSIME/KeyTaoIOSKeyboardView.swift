@@ -57,7 +57,38 @@ private enum KeyTaoToolbarIcon {
     case emoji
     case layout
     case back
+    case edit
     case settings
+}
+
+private enum SettingsPanelLayout {
+    static let horizontalPadding: CGFloat = 16
+    static let sectionHeight: CGFloat = 28
+    static let sectionTopSpacing: CGFloat = 8
+    static let rowHeight: CGFloat = 44
+    static let sliderRowHeight: CGFloat = 56
+    static let labelTextSize: CGFloat = 14
+    static let secondaryTextSize: CGFloat = 12
+    static let sectionTextSize: CGFloat = 12
+    static let labelMaxWidthFraction: CGFloat = 0.60
+    static let controlGap: CGFloat = 8
+    static let controlHeight: CGFloat = 28
+    static let toggleWidth: CGFloat = 52
+    static let segmentWidth: CGFloat = 56
+    static let sliderTextBaseline: CGFloat = 20
+    static let sliderTrackCenterY: CGFloat = 40
+    static let sliderTrackHeight: CGFloat = 4
+    static let sliderThumbDiameter: CGFloat = 16
+    static let sliderThumbBorderWidth: CGFloat = 1
+    static let swatchDiameter: CGFloat = 24
+    static let swatchGap: CGFloat = 12
+    static let swatchRingWidth: CGFloat = 2
+    static let footerChipHeight: CGFloat = 36
+    static let footerTextSize: CGFloat = 13
+    static let footerGap: CGFloat = 8
+    static let footerHorizontalPadding: CGFloat = 12
+    static let dividerHeight: CGFloat = 1
+    static let dividerAlpha: CGFloat = 0.40
 }
 
 final class KeyTaoIOSKeyboardView: UIView {
@@ -1101,12 +1132,24 @@ final class KeyTaoIOSKeyboardView: UIView {
               functionPanelMode == .settings,
               let candidate = pressedCandidate,
               let item = expandedCandidateItems().first(where: { $0.identifierIndex == candidate.identifierIndex }),
-              item.style == .slider || item.style == .swatches else { return }
+              item.style == .slider || item.style == .swatches || isSettingsSegmentedItem(item) else { return }
+        if isSettingsSegmentedItem(item) {
+            let segmentLeft = (candidate.drawingRect ?? candidate.rect).maxX
+                - SettingsPanelLayout.segmentWidth * CGFloat(item.swatches.count)
+            guard x >= segmentLeft else { return }
+        }
         activeSettingItem = item
         activeSettingRect = candidate.drawingRect ?? candidate.rect
-        activeSettingOriginalValue = item.style == .slider
-            ? item.value.map(serializeSettingNumber)
-            : (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        switch item.style {
+        case .slider:
+            activeSettingOriginalValue = item.value.map(serializeSettingNumber)
+        case .swatches:
+            activeSettingOriginalValue = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        case .option:
+            activeSettingOriginalValue = item.swatches.contains(theme.ui.colorScheme) ? theme.ui.colorScheme : "auto"
+        default:
+            activeSettingOriginalValue = nil
+        }
         _ = updateSettingControl(at: x)
         pressedCandidate = nil
     }
@@ -1122,17 +1165,29 @@ final class KeyTaoIOSKeyboardView: UIView {
             guard let minimum = item.minimumValue,
                   let maximum = item.maximumValue else { return false }
             let step = item.step ?? 1
-            let trackLeft = rect.minX + 10
-            let trackRight = rect.maxX - 10
+            let trackLeft = rect.minX
+            let trackRight = rect.maxX
             let ratio = max(0, min(1, (x - trackLeft) / (trackRight - trackLeft)))
             let raw = minimum + (maximum - minimum) * ratio
             let snapped = max(minimum, min(maximum, minimum + ((raw - minimum) / step).rounded() * step))
             value = serializeSettingNumber(snapped)
         case .swatches:
             guard !item.swatches.isEmpty else { return false }
-            let cellWidth: CGFloat = 30
-            let startX = rect.maxX - 8 - cellWidth * CGFloat(item.swatches.count)
-            let index = max(0, min(item.swatches.count - 1, Int((x - startX) / cellWidth)))
+            let startX = settingsSwatchStartX(rect: rect, count: item.swatches.count)
+            let step = SettingsPanelLayout.swatchDiameter + SettingsPanelLayout.swatchGap
+            let firstCenter = startX + SettingsPanelLayout.swatchDiameter / 2
+            let index = max(
+                0,
+                min(item.swatches.count - 1, Int(((x - firstCenter) / step).rounded()))
+            )
+            value = item.swatches[index]
+        case .option:
+            guard isSettingsSegmentedItem(item), !item.swatches.isEmpty else { return false }
+            let startX = rect.maxX - SettingsPanelLayout.segmentWidth * CGFloat(item.swatches.count)
+            let index = max(
+                0,
+                min(item.swatches.count - 1, Int((x - startX) / SettingsPanelLayout.segmentWidth))
+            )
             value = item.swatches[index]
         default:
             return false
@@ -2142,6 +2197,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func drawCandidateOption(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool = false) {
+        if functionPanelActive, functionPanelMode == .settings {
+            drawSettingsPanelItem(item, rect: rect, pressed: pressed)
+            return
+        }
         if item.style == .section {
             drawRimeSectionHeader(item, rect: rect)
             return
@@ -2193,71 +2252,323 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
     }
 
+    private func drawSettingsPanelItem(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool) {
+        switch item.style {
+        case .section:
+            drawSettingsSectionHeader(item, rect: rect)
+        case .slider:
+            drawSettingsSlider(item, rect: rect)
+        case .swatches:
+            drawSettingsSwatches(item, rect: rect)
+        case .option:
+            if isSettingsFooterItem(item) {
+                drawSettingsFooterChip(item, rect: rect, pressed: pressed)
+            } else if isSettingsSegmentedItem(item) {
+                drawSettingsSegmentedControl(item, rect: rect)
+            } else {
+                drawSettingsToggle(item, rect: rect)
+            }
+        case .empty:
+            drawRimeEmptyState(item, rect: rect)
+        default:
+            drawInlineCandidateOption(item, rect: rect)
+        }
+        if shouldDrawSettingsDivider(after: item) {
+            drawSettingsDivider(rect)
+        }
+    }
+
+    private func drawSettingsSectionHeader(_ item: CandidateDrawItem, rect: CGRect) {
+        drawTruncatedText(
+            item.label,
+            in: rect,
+            color: theme.candidate.commentColor.uiColor,
+            size: SettingsPanelLayout.sectionTextSize,
+            alignment: .left
+        )
+    }
+
+    private func drawSettingsToggle(_ item: CandidateDrawItem, rect: CGRect) {
+        let controlRect = CGRect(
+            x: rect.maxX - SettingsPanelLayout.toggleWidth,
+            y: rect.midY - SettingsPanelLayout.controlHeight / 2,
+            width: SettingsPanelLayout.toggleWidth,
+            height: SettingsPanelLayout.controlHeight
+        )
+        drawSettingsLabel(item.label, rect: rect, controlLeft: controlRect.minX)
+        (item.selected ? theme.candidate.selectedForeground.uiColor : theme.candidate.borderColor.uiColor).setFill()
+        UIBezierPath(roundedRect: controlRect, cornerRadius: controlRect.height / 2).fill()
+        drawTruncatedText(
+            item.text,
+            in: controlRect,
+            color: item.selected ? theme.candidate.selectedBackground.uiColor : theme.candidate.commentColor.uiColor,
+            size: SettingsPanelLayout.secondaryTextSize,
+            alignment: .center
+        )
+    }
+
+    private func drawSettingsSegmentedControl(_ item: CandidateDrawItem, rect: CGRect) {
+        let controlWidth = SettingsPanelLayout.segmentWidth * CGFloat(item.swatches.count)
+        let controlRect = CGRect(
+            x: rect.maxX - controlWidth,
+            y: rect.midY - SettingsPanelLayout.controlHeight / 2,
+            width: controlWidth,
+            height: SettingsPanelLayout.controlHeight
+        )
+        drawSettingsLabel(item.label, rect: rect, controlLeft: controlRect.minX)
+        keyBackgroundColor().setFill()
+        UIBezierPath(roundedRect: controlRect, cornerRadius: controlRect.height / 4).fill()
+        for (index, value) in item.swatches.enumerated() {
+            let segmentRect = CGRect(
+                x: controlRect.minX + SettingsPanelLayout.segmentWidth * CGFloat(index),
+                y: controlRect.minY,
+                width: SettingsPanelLayout.segmentWidth,
+                height: controlRect.height
+            )
+            let selected = schemeLabel(value) == item.text
+            if selected {
+                theme.candidate.selectedForeground.uiColor.setFill()
+                UIBezierPath(roundedRect: segmentRect, cornerRadius: controlRect.height / 4).fill()
+            }
+            drawTruncatedText(
+                schemeLabel(value),
+                in: segmentRect,
+                color: selected ? theme.candidate.selectedBackground.uiColor : theme.candidate.commentColor.uiColor,
+                size: SettingsPanelLayout.secondaryTextSize,
+                alignment: .center
+            )
+        }
+        let border = UIBezierPath(
+            roundedRect: controlRect.insetBy(
+                dx: SettingsPanelLayout.sliderThumbBorderWidth / 2,
+                dy: SettingsPanelLayout.sliderThumbBorderWidth / 2
+            ),
+            cornerRadius: controlRect.height / 4
+        )
+        border.lineWidth = SettingsPanelLayout.sliderThumbBorderWidth
+        accentBorderColor(SettingsPanelLayout.dividerAlpha).setStroke()
+        border.stroke()
+    }
+
     private func drawSettingsSlider(_ item: CandidateDrawItem, rect: CGRect) {
         guard let minimum = item.minimumValue,
               let maximum = item.maximumValue,
               let value = item.value else { return }
-        let trackLeft = rect.minX + 10
-        let trackRight = rect.maxX - 10
-        let trackY = rect.maxY - 13
+        let trackLeft = rect.minX
+        let trackRight = rect.maxX
+        let trackY = rect.minY + SettingsPanelLayout.sliderTrackCenterY
         let ratio = max(0, min(1, (value - minimum) / (maximum - minimum)))
-        drawTruncatedText(
+        let valueFont = themedFont(size: SettingsPanelLayout.secondaryTextSize, weight: theme.font.weight)
+        let valueMaxWidth = max(
+            0,
+            rect.width * (1 - SettingsPanelLayout.labelMaxWidthFraction) - SettingsPanelLayout.controlGap
+        )
+        let valueText = truncatedText(item.text, font: valueFont, maxWidth: valueMaxWidth)
+        let valueWidth = valueText.size(withAttributes: [.font: valueFont]).width
+        let labelMaxWidth = max(
+            0,
+            min(
+                rect.width * SettingsPanelLayout.labelMaxWidthFraction,
+                rect.width - valueWidth - SettingsPanelLayout.controlGap
+            )
+        )
+        drawSettingsBaselineText(
             item.label,
-            in: CGRect(x: trackLeft, y: rect.minY + 2, width: rect.width * 0.65, height: 25),
+            x: rect.minX,
+            baselineY: rect.minY + SettingsPanelLayout.sliderTextBaseline,
+            maxWidth: labelMaxWidth,
             color: theme.candidate.foreground.uiColor,
-            size: candidateLabelSize(),
+            size: SettingsPanelLayout.labelTextSize,
             alignment: .left
         )
-        drawTruncatedText(
-            item.text,
-            in: CGRect(x: rect.midX, y: rect.minY + 2, width: trackRight - rect.midX, height: 25),
+        drawSettingsBaselineText(
+            valueText,
+            x: rect.maxX - valueWidth,
+            baselineY: rect.minY + SettingsPanelLayout.sliderTextBaseline,
+            maxWidth: valueWidth,
             color: theme.candidate.commentColor.uiColor,
-            size: candidateCommentSize(),
+            size: SettingsPanelLayout.secondaryTextSize,
             alignment: .right
         )
-        let background = UIBezierPath()
-        background.move(to: CGPoint(x: trackLeft, y: trackY))
-        background.addLine(to: CGPoint(x: trackRight, y: trackY))
-        background.lineWidth = 3
-        background.lineCapStyle = .round
-        theme.panel.borderColor.uiColor.setStroke()
-        background.stroke()
+        let trackRect = CGRect(
+            x: trackLeft,
+            y: trackY - SettingsPanelLayout.sliderTrackHeight / 2,
+            width: trackRight - trackLeft,
+            height: SettingsPanelLayout.sliderTrackHeight
+        )
+        theme.panel.borderColor.uiColor.setFill()
+        UIBezierPath(roundedRect: trackRect, cornerRadius: SettingsPanelLayout.sliderTrackHeight / 2).fill()
         let filledRight = trackLeft + (trackRight - trackLeft) * ratio
-        let filled = UIBezierPath()
-        filled.move(to: CGPoint(x: trackLeft, y: trackY))
-        filled.addLine(to: CGPoint(x: filledRight, y: trackY))
-        filled.lineWidth = 3
-        filled.lineCapStyle = .round
-        theme.candidate.selectedLabelColor.uiColor.setStroke()
-        filled.stroke()
+        if filledRight > trackLeft {
+            theme.candidate.selectedLabelColor.uiColor.setFill()
+            UIBezierPath(
+                roundedRect: CGRect(
+                    x: trackLeft,
+                    y: trackRect.minY,
+                    width: filledRight - trackLeft,
+                    height: trackRect.height
+                ),
+                cornerRadius: SettingsPanelLayout.sliderTrackHeight / 2
+            ).fill()
+        }
+        let thumbRadius = SettingsPanelLayout.sliderThumbDiameter / 2
         theme.candidate.selectedLabelColor.uiColor.setFill()
-        UIBezierPath(ovalIn: CGRect(x: filledRight - 6, y: trackY - 6, width: 12, height: 12)).fill()
+        UIBezierPath(
+            ovalIn: CGRect(
+                x: filledRight - thumbRadius,
+                y: trackY - thumbRadius,
+                width: SettingsPanelLayout.sliderThumbDiameter,
+                height: SettingsPanelLayout.sliderThumbDiameter
+            )
+        ).fill()
+        let thumbBorder = UIBezierPath(
+            ovalIn: CGRect(
+                x: filledRight - thumbRadius + SettingsPanelLayout.sliderThumbBorderWidth / 2,
+                y: trackY - thumbRadius + SettingsPanelLayout.sliderThumbBorderWidth / 2,
+                width: SettingsPanelLayout.sliderThumbDiameter - SettingsPanelLayout.sliderThumbBorderWidth,
+                height: SettingsPanelLayout.sliderThumbDiameter - SettingsPanelLayout.sliderThumbBorderWidth
+            )
+        )
+        thumbBorder.lineWidth = SettingsPanelLayout.sliderThumbBorderWidth
+        theme.candidate.selectedBorderColor.uiColor.setStroke()
+        thumbBorder.stroke()
     }
 
     private func drawSettingsSwatches(_ item: CandidateDrawItem, rect: CGRect) {
-        let cellWidth: CGFloat = 30
-        let radius: CGFloat = 8
-        let startX = rect.maxX - 8 - cellWidth * CGFloat(item.swatches.count)
-        drawTruncatedText(
-            item.label,
-            in: CGRect(x: rect.minX + 10, y: rect.minY, width: max(0, startX - rect.minX - 12), height: rect.height),
-            color: theme.candidate.foreground.uiColor,
-            size: candidateLabelSize(),
-            alignment: .left
-        )
+        let radius = SettingsPanelLayout.swatchDiameter / 2
+        let startX = settingsSwatchStartX(rect: rect, count: item.swatches.count)
+        drawSettingsLabel(item.label, rect: rect, controlLeft: startX)
         let selected = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
         for (index, value) in item.swatches.enumerated() {
             guard let color = KeyTaoThemeColor.from(hex: value) else { continue }
-            let center = CGPoint(x: startX + cellWidth * (CGFloat(index) + 0.5), y: rect.midY)
+            let center = CGPoint(
+                x: startX + radius
+                    + (SettingsPanelLayout.swatchDiameter + SettingsPanelLayout.swatchGap) * CGFloat(index),
+                y: rect.midY
+            )
             color.uiColor.setFill()
             UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true).fill()
             if value.caseInsensitiveCompare(selected) == .orderedSame {
-                let ring = UIBezierPath(arcCenter: center, radius: radius + 3, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                ring.lineWidth = 2
-                theme.candidate.foreground.uiColor.setStroke()
+                let ring = UIBezierPath(
+                    arcCenter: center,
+                    radius: radius - SettingsPanelLayout.swatchRingWidth / 2,
+                    startAngle: 0,
+                    endAngle: .pi * 2,
+                    clockwise: true
+                )
+                ring.lineWidth = SettingsPanelLayout.swatchRingWidth
+                theme.candidate.selectedLabelColor.uiColor.setStroke()
                 ring.stroke()
             }
         }
+    }
+
+    private func drawSettingsLabel(_ label: String, rect: CGRect, controlLeft: CGFloat) {
+        let maxWidth = max(
+            0,
+            min(
+                rect.width * SettingsPanelLayout.labelMaxWidthFraction,
+                controlLeft - SettingsPanelLayout.controlGap - rect.minX
+            )
+        )
+        drawTruncatedText(
+            label,
+            in: CGRect(x: rect.minX, y: rect.minY, width: maxWidth, height: rect.height),
+            color: theme.candidate.foreground.uiColor,
+            size: SettingsPanelLayout.labelTextSize,
+            alignment: .left
+        )
+    }
+
+    private func drawSettingsFooterChip(_ item: CandidateDrawItem, rect: CGRect, pressed: Bool) {
+        drawSurfaceShadow(rect, pressed: pressed, cornerRadius: candidateCornerRadius())
+        (pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
+        drawTruncatedText(
+            item.label,
+            in: rect.insetBy(dx: SettingsPanelLayout.footerHorizontalPadding, dy: 0),
+            color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
+            size: SettingsPanelLayout.footerTextSize,
+            alignment: .center
+        )
+    }
+
+    private func drawSettingsDivider(_ rect: CGRect) {
+        theme.panel.borderColor.uiColor.withAlphaComponent(SettingsPanelLayout.dividerAlpha).setFill()
+        UIBezierPath(
+            rect: CGRect(
+                x: rect.minX,
+                y: rect.maxY - SettingsPanelLayout.dividerHeight,
+                width: rect.width,
+                height: SettingsPanelLayout.dividerHeight
+            )
+        ).fill()
+    }
+
+    private func shouldDrawSettingsDivider(after item: CandidateDrawItem) -> Bool {
+        guard item.style != .section, !isSettingsFooterItem(item) else { return false }
+        let items = expandedCandidateItems()
+        guard let index = items.firstIndex(where: { $0.identifierIndex == item.identifierIndex }),
+              items.indices.contains(index + 1) else { return false }
+        let next = items[index + 1]
+        return next.style != .section && !isSettingsFooterItem(next)
+    }
+
+    private func isSettingsSegmentedItem(_ item: CandidateDrawItem) -> Bool {
+        item.command?.type == KeyTaoCommandType.setting && item.command?.value == "colorScheme"
+    }
+
+    private func isSettingsFooterItem(_ item: CandidateDrawItem) -> Bool {
+        guard let command = item.command else { return false }
+        return command.type == KeyTaoCommandType.openPage
+            || (command.type == KeyTaoCommandType.setting && command.value == "reset")
+    }
+
+    private func settingsSwatchStartX(rect: CGRect, count: Int) -> CGFloat {
+        let totalWidth = SettingsPanelLayout.swatchDiameter * CGFloat(count)
+            + SettingsPanelLayout.swatchGap * CGFloat(max(0, count - 1))
+        return rect.maxX - totalWidth
+    }
+
+    private func settingsFooterChipWidth(_ item: CandidateDrawItem) -> CGFloat {
+        textWidth(item.label, size: SettingsPanelLayout.footerTextSize)
+            + SettingsPanelLayout.footerHorizontalPadding * 2
+    }
+
+    private func drawSettingsBaselineText(
+        _ text: String,
+        x: CGFloat,
+        baselineY: CGFloat,
+        maxWidth: CGFloat,
+        color: UIColor,
+        size: CGFloat,
+        alignment: NSTextAlignment
+    ) {
+        let font = themedFont(size: size, weight: theme.font.weight)
+        let value = truncatedText(text, font: font, maxWidth: maxWidth)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        value.draw(
+            at: CGPoint(x: x, y: baselineY - font.ascender),
+            withAttributes: [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph,
+            ]
+        )
+    }
+
+    private func truncatedText(_ text: String, font: UIFont, maxWidth: CGFloat) -> String {
+        guard maxWidth > 0 else { return "" }
+        if text.size(withAttributes: [.font: font]).width <= maxWidth { return text }
+        let ellipsis = "…"
+        var candidate = text
+        while !candidate.isEmpty {
+            candidate.removeLast()
+            let result = candidate + ellipsis
+            if result.size(withAttributes: [.font: font]).width <= maxWidth { return result }
+        }
+        return ellipsis.size(withAttributes: [.font: font]).width <= maxWidth ? ellipsis : ""
     }
 
     private func drawRimeEmptyState(_ item: CandidateDrawItem, rect: CGRect) {
@@ -2546,6 +2857,8 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawLayoutIcon(in: iconRect)
         case .back:
             drawBackIcon(in: iconRect)
+        case .edit:
+            drawEditIcon(in: iconRect)
         case .settings:
             drawSettingsIcon(in: iconRect)
         }
@@ -2645,6 +2958,21 @@ final class KeyTaoIOSKeyboardView: UIView {
         path.move(to: CGPoint(x: rect.minX + rect.width * 0.18, y: rect.midY))
         path.addLine(to: CGPoint(x: rect.minX + rect.width * 0.42, y: rect.maxY - rect.height * 0.26))
         path.stroke()
+    }
+
+    private func drawEditIcon(in rect: CGRect) {
+        let pencil = UIBezierPath()
+        pencil.move(to: CGPoint(x: rect.minX + rect.width * 0.18, y: rect.maxY - rect.height * 0.27))
+        pencil.addLine(to: CGPoint(x: rect.maxX - rect.width * 0.25, y: rect.minY + rect.height * 0.16))
+        pencil.addLine(to: CGPoint(x: rect.maxX - rect.width * 0.13, y: rect.minY + rect.height * 0.28))
+        pencil.addLine(to: CGPoint(x: rect.minX + rect.width * 0.29, y: rect.maxY - rect.height * 0.16))
+        pencil.addLine(to: CGPoint(x: rect.minX + rect.width * 0.15, y: rect.maxY - rect.height * 0.10))
+        pencil.close()
+        pencil.stroke()
+        let detail = UIBezierPath()
+        detail.move(to: CGPoint(x: rect.minX + rect.width * 0.18, y: rect.maxY - rect.height * 0.27))
+        detail.addLine(to: CGPoint(x: rect.minX + rect.width * 0.29, y: rect.maxY - rect.height * 0.16))
+        detail.stroke()
     }
 
     private func drawSettingsIcon(in rect: CGRect) {
@@ -3276,6 +3604,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private func expandedCandidateLayout() -> [CandidateRect] {
         let top = config.candidateBarHeightDp
         let bottom = keyboardBottom()
+        let items = expandedCandidateItems()
+        let visualScrollY = expandedCandidateVisualScrollY()
+        if functionPanelActive, functionPanelMode == .settings {
+            return settingsPanelLayout(top: top, bottom: bottom, visualScrollY: visualScrollY, items: items)
+        }
         let gap: CGFloat = 7
         let left = gap * 1.5
         let right = bounds.width - left
@@ -3293,14 +3626,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             (right - left - gap * CGFloat(columnCount - 1)) / CGFloat(columnCount)
         }
         var x = left
-        let visualScrollY = expandedCandidateVisualScrollY()
         var y = top + gap - visualScrollY
         var contentBottom = top + gap
         var rects: [CandidateRect] = []
         var sectionRects: [Int: CGRect] = [:]
         var deleteRects: [ClipboardDeleteRect] = []
-        let structuredRime = functionPanelActive && (functionPanelMode == .rime || functionPanelMode == .settings)
-        for (index, item) in expandedCandidateItems().enumerated() {
+        let structuredRime = functionPanelActive && functionPanelMode == .rime
+        for (index, item) in items.enumerated() {
             let width: CGFloat
             let itemRowHeight: CGFloat
             if structuredRime {
@@ -3427,6 +3759,110 @@ final class KeyTaoIOSKeyboardView: UIView {
         return rects
     }
 
+    private func settingsPanelLayout(
+        top: CGFloat,
+        bottom: CGFloat,
+        visualScrollY: CGFloat,
+        items: [CandidateDrawItem]
+    ) -> [CandidateRect] {
+        let left = SettingsPanelLayout.horizontalPadding
+        let right = bounds.width - left
+        var y = top - visualScrollY
+        var contentBottom = top
+        var rects: [CandidateRect] = []
+        var sectionRects: [Int: CGRect] = [:]
+        let footerItems = items.filter(isSettingsFooterItem)
+        let availableFooterWidth = max(0, right - left)
+        let naturalFooterWidths = footerItems.map(settingsFooterChipWidth)
+        let naturalFooterTotal = naturalFooterWidths.reduce(0, +)
+            + SettingsPanelLayout.footerGap * CGFloat(max(0, footerItems.count - 1))
+        let footerWidths: [CGFloat]
+        if naturalFooterTotal <= availableFooterWidth {
+            footerWidths = naturalFooterWidths
+        } else {
+            let splitWidth = max(
+                0,
+                (availableFooterWidth
+                    - SettingsPanelLayout.footerGap * CGFloat(max(0, footerItems.count - 1)))
+                    / CGFloat(max(1, footerItems.count))
+            )
+            footerWidths = Array(repeating: splitWidth, count: footerItems.count)
+        }
+        let footerStartX = naturalFooterTotal <= availableFooterWidth
+            ? right - naturalFooterTotal
+            : left
+        var footerRowTop: CGFloat = 0
+
+        for (index, item) in items.enumerated() {
+            let footer = isSettingsFooterItem(item)
+            let rowTop: CGFloat
+            let rowBottom: CGFloat
+            let drawingRect: CGRect
+            if item.style == .section {
+                if index > 0 { y += SettingsPanelLayout.sectionTopSpacing }
+                rowTop = y
+                rowBottom = rowTop + SettingsPanelLayout.sectionHeight
+                drawingRect = CGRect(x: left, y: rowTop, width: right - left, height: SettingsPanelLayout.sectionHeight)
+                y = rowBottom
+            } else if footer {
+                let footerIndex = footerItems.firstIndex(where: { $0.identifierIndex == item.identifierIndex }) ?? 0
+                if footerIndex == 0 { footerRowTop = y }
+                rowTop = footerRowTop
+                rowBottom = rowTop + SettingsPanelLayout.rowHeight
+                let chipTop = rowTop + (SettingsPanelLayout.rowHeight - SettingsPanelLayout.footerChipHeight) / 2
+                let precedingWidth = footerWidths.prefix(footerIndex).reduce(0, +)
+                let chipLeft = footerStartX + precedingWidth + SettingsPanelLayout.footerGap * CGFloat(footerIndex)
+                drawingRect = CGRect(
+                    x: chipLeft,
+                    y: chipTop,
+                    width: footerWidths.indices.contains(footerIndex) ? footerWidths[footerIndex] : 0,
+                    height: SettingsPanelLayout.footerChipHeight
+                )
+                if footerIndex == footerItems.indices.last { y = rowBottom }
+            } else {
+                rowTop = y
+                let rowHeight = item.style == .slider
+                    ? SettingsPanelLayout.sliderRowHeight
+                    : SettingsPanelLayout.rowHeight
+                rowBottom = rowTop + rowHeight
+                drawingRect = CGRect(x: left, y: rowTop, width: right - left, height: rowHeight)
+                y = rowBottom
+            }
+
+            if drawingRect.maxY >= top, drawingRect.minY <= bottom {
+                if item.style == .section || item.style == .empty {
+                    sectionRects[item.identifierIndex] = drawingRect
+                } else {
+                    rects.append(
+                        CandidateRect(
+                            identifierIndex: item.identifierIndex,
+                            selectIndex: item.selectIndex,
+                            rect: drawingRect,
+                            global: item.global,
+                            command: item.command,
+                            drawingRect: drawingRect,
+                            pageIndex: item.identifierIndex,
+                            label: [item.label, item.text].filter { !$0.isEmpty }.joined(separator: " "),
+                            comment: item.comment,
+                            clipboardText: item.clipboardText
+                        )
+                    )
+                }
+            }
+            contentBottom = max(contentBottom, rowBottom + visualScrollY)
+        }
+
+        expandedCandidateContentHeight = max(contentBottom - top, expandedCandidatePanelHeight())
+        expandedSectionRects = sectionRects
+        clipboardDeleteRects = []
+        let previousScrollY = expandedCandidateScrollY
+        coerceExpandedCandidateScroll()
+        if expandedCandidateScrollY != previousScrollY {
+            return expandedCandidateLayout()
+        }
+        return rects
+    }
+
     private func panelColumns(for mode: KeyTaoFunctionPanelMode) -> Int? {
         switch mode {
         case .clipboard:
@@ -3446,7 +3882,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             let top = (barHeight - chipHeight) / 2
             let backAction = ToolbarAction(
                 label: "返回",
-                command: .panel("close"),
+                command: .panel(functionPanelMode == .settings ? "rime" : "close"),
                 icon: .back
             )
             let pasteAction = ToolbarAction(label: "粘贴", command: .edit("paste"))
@@ -3454,14 +3890,20 @@ final class KeyTaoIOSKeyboardView: UIView {
                 label: clipboardClearConfirmationPending ? "确认清空" : "清空",
                 command: .panel("clearClipboardHistory")
             )
+            let editAction = ToolbarAction(
+                label: "编辑键盘设置",
+                command: .panel("settings"),
+                icon: .edit
+            )
             let settingsAction = ToolbarAction(
-                label: "更多设置",
+                label: "设置",
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
                 icon: .settings
             )
             let backWidth = toolbarChipWidth(backAction)
             let pasteWidth = toolbarChipWidth(pasteAction)
             let clearWidth = toolbarChipWidth(clearAction)
+            let editWidth = toolbarChipWidth(editAction)
             let settingsWidth = toolbarChipWidth(settingsAction)
             var rects = [
                 ToolbarRect(
@@ -3496,6 +3938,16 @@ final class KeyTaoIOSKeyboardView: UIView {
                     rect: CGRect(x: bounds.width - leftPadding - settingsWidth, y: top, width: settingsWidth, height: chipHeight)
                 )
             )
+            if functionPanelMode == .rime {
+                let settingsLeft = bounds.width - leftPadding - settingsWidth
+                rects.insert(
+                    ToolbarRect(
+                        action: editAction,
+                        rect: CGRect(x: settingsLeft - 6 - editWidth, y: top, width: editWidth, height: chipHeight)
+                    ),
+                    at: rects.count - 1
+                )
+            }
             return rects
         }
         if usesFullHeightSymbolKeyboard() {
@@ -3860,29 +4312,31 @@ final class KeyTaoIOSKeyboardView: UIView {
                 identifierIndex: id, selectIndex: id, label: "配色", text: schemeLabel(scheme),
                 comment: nil, selected: scheme != "auto", global: false,
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "colorScheme", fallbackValue: nextScheme),
-                style: .option, statusLabel: "切换"
+                style: .option, statusLabel: "切换", swatches: ["auto", "light", "dark"]
             ) },
             slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8, 1.4, 0.1, String(format: "%.1f×", Double(settingsConfig.candidateFontScale))),
             toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible),
             section("布局"),
-            slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp, 160, 420, 2, "\(Int(settingsConfig.keyboardHeightDp.rounded()))dp"),
-            slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp, 36, 96, 1, "\(Int(settingsConfig.candidateBarHeightDp.rounded()))dp"),
+            slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp, 160, 420, 2, "\(Int(settingsConfig.keyboardHeightDp.rounded())) dp"),
+            slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp, 36, 96, 1, "\(Int(settingsConfig.candidateBarHeightDp.rounded())) dp"),
             toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled),
             section("反馈"),
             toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled),
-            slider("强度", "haptics.intensity", CGFloat(settingsConfig.hapticIntensity), 1, 100, 1, "\(settingsConfig.hapticIntensity)%"),
+            slider("强度", "haptics.intensity", CGFloat(settingsConfig.hapticIntensity), 1, 100, 1, "\(settingsConfig.hapticIntensity)"),
+            toggle("按键音", "keySoundEnabled", settingsConfig.keySoundEnabled),
+            slider("按键音量", "keySoundVolume", CGFloat(settingsConfig.keySoundVolume), 0, 100, 1, "\(settingsConfig.keySoundVolume)"),
             toggle("按键预览气泡", "keyPreviewEnabled", settingsConfig.keyPreviewEnabled),
             indexed { id in CandidateDrawItem(
-                identifierIndex: id, selectIndex: id, label: "更多设置", text: "→ App",
+                identifierIndex: id, selectIndex: id, label: "更多设置 → App", text: "",
                 comment: nil, selected: false, global: false,
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.openPage, value: "settings", fallbackValue: nil),
-                style: .option, statusLabel: "打开"
+                style: .option
             ) },
             indexed { id in CandidateDrawItem(
-                identifierIndex: id, selectIndex: id, label: "恢复默认", text: "面板项目",
+                identifierIndex: id, selectIndex: id, label: "恢复默认", text: "",
                 comment: nil, selected: false, global: false,
                 command: KeyTaoKeyCommand(type: KeyTaoCommandType.setting, value: "reset", fallbackValue: "true"),
-                style: .option, statusLabel: "重置"
+                style: .option
             ) },
         ]
     }
@@ -4223,12 +4677,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             icon: .layout,
             id: "layout"
         )
-        let settings = ToolbarAction(
-            label: "设置",
-            command: .panel("settings"),
-            icon: .settings,
-            id: "settings"
-        )
         if layerMode == .symbols {
             return [
                 function,
@@ -4236,7 +4684,6 @@ final class KeyTaoIOSKeyboardView: UIView {
                 ToolbarAction(label: "En", command: KeyTaoKeyCommand(type: KeyTaoCommandType.mode, value: "ascii", fallbackValue: nil), selected: isEnglishMode, id: "english"),
                 ToolbarAction(label: "123", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "numbers", fallbackValue: nil), id: "numbers"),
                 ToolbarAction(label: "ABC", command: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil), id: "letters"),
-                settings,
                 layout,
             ]
         } else {
@@ -4257,7 +4704,6 @@ final class KeyTaoIOSKeyboardView: UIView {
                     icon: .emoji,
                     id: "emoji"
                 ),
-                settings,
                 layout,
             ]
         }
@@ -4308,7 +4754,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func persistToolbarCustomization() {
         let persistedOrder = (currentToolbarOrder() + toolbarInactiveActionIDs).reduce(into: [String]()) { result, id in
-            if !result.contains(id) { result.append(id) }
+            if id != Self.toolbarSettingsActionID, !result.contains(id) { result.append(id) }
         }
         toolbarActionOrderOverride = persistedOrder
         delegate?.keyboardView(
@@ -4877,7 +5323,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         case .clipboard:
             return "剪贴板"
         case .settings:
-            return "设置"
+            return "键盘设置"
         }
     }
 
@@ -6028,6 +6474,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let maxBackspaceGestureUnitsPerGesture = 96
     private static let emojiRecentLayer = "symbols_emoji_face"
     private static let toolbarPinnedBoundaryID = "__toolbar_pinned_boundary__"
+    private static let toolbarSettingsActionID = "settings"
     private static let recentEmojiPreferenceKey = "recent_emoji"
     private static let maxRecentEmojiCount = 32
     private static let softAccentPunctuation: Set<String> = ["，", "。", ",", "."]

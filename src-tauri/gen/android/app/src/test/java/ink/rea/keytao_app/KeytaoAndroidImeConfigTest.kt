@@ -65,6 +65,7 @@ class KeytaoAndroidImeConfigTest {
         assertEquals(KeyCommandTypes.INPUT, key.action.type)
         assertEquals("a", key.action.value)
         assertNull(key.swipeUp)
+        assertEquals(5, config.toolbarPinnedCount)
     }
 
     @Test
@@ -154,7 +155,7 @@ class KeytaoAndroidImeConfigTest {
 
         assertEquals("schema", config.englishMode)
         assertEquals("selectThenDelete", config.backspaceGestureMode)
-        assertEquals(listOf("emoji", "clipboard", "settings"), config.toolbarActionOrder)
+        assertEquals(listOf("emoji", "clipboard"), config.toolbarActionOrder)
         assertEquals(3, config.toolbarPinnedCount)
     }
 

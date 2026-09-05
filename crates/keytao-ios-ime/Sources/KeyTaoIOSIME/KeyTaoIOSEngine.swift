@@ -411,7 +411,7 @@ final class KeyTaoIOSEngine {
                 root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             }
             let normalizedOrder = order.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
+                .filter { !$0.isEmpty && $0 != "settings" }
                 .reduce(into: [String]()) { result, id in
                     if !result.contains(id) { result.append(id) }
                 }

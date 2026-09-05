@@ -343,7 +343,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         englishMode: String = "ascii",
         backspaceGestureMode: String = "immediate",
         toolbarActionOrder: [String] = [],
-        toolbarPinnedCount: Int = 6,
+        toolbarPinnedCount: Int = 5,
         keySoundEnabled: Bool = true,
         keySoundVolume: Int = 100,
         keyHintVisible: Bool = true,
@@ -860,6 +860,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     private static let keyboardHeightScaleMax = 130
     private static let keyboardHeightScaleStep = 5
     private static let keyboardHeightScaleDefault = 100
+    private static let excludedToolbarActionID = "settings"
 
     private static func normalizeKeyboardHeightScale(_ value: Int) -> Int {
         guard value >= keyboardHeightScaleMin,
@@ -879,7 +880,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         var seen: Set<String> = []
         return value.compactMap { raw in
             let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !id.isEmpty && seen.insert(id).inserted ? id : nil
+            return !id.isEmpty && id != excludedToolbarActionID && seen.insert(id).inserted ? id : nil
         }
     }
 

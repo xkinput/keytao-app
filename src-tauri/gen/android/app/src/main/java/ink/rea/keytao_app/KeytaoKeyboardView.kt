@@ -160,10 +160,39 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     )
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
-    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, SETTINGS }
+    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
     private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { RIME, CLIPBOARD, SETTINGS }
+    private object SettingsPanelLayout {
+        const val horizontalPaddingDp = 16f
+        const val sectionHeightDp = 28f
+        const val sectionTopSpacingDp = 8f
+        const val rowHeightDp = 44f
+        const val sliderRowHeightDp = 56f
+        const val labelTextSizeSp = 14f
+        const val secondaryTextSizeSp = 12f
+        const val sectionTextSizeSp = 12f
+        const val labelMaxWidthFraction = 0.60f
+        const val controlGapDp = 8f
+        const val controlHeightDp = 28f
+        const val toggleWidthDp = 52f
+        const val segmentWidthDp = 56f
+        const val sliderTextBaselineDp = 20f
+        const val sliderTrackCenterYDp = 40f
+        const val sliderTrackHeightDp = 4f
+        const val sliderThumbDiameterDp = 16f
+        const val sliderThumbBorderWidthDp = 1f
+        const val swatchDiameterDp = 24f
+        const val swatchGapDp = 12f
+        const val swatchRingWidthDp = 2f
+        const val footerChipHeightDp = 36f
+        const val footerTextSizeSp = 13f
+        const val footerGapDp = 8f
+        const val footerHorizontalPaddingDp = 12f
+        const val dividerHeightDp = 1f
+        const val dividerAlpha = 0.40f
+    }
     private enum class CandidateBarContent {
         CANDIDATE_MENU,
         STATUS_MESSAGE,
@@ -1484,6 +1513,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (panelHeight <= 0f) return
         val top = dp(config.candidateBarHeightDp)
         val bottom = keyboardBottom()
+        val items = expandedCandidateItems()
+        val visualScrollY = expandedCandidateVisualScrollY()
+        if (functionPanelActive && functionPanelMode == FunctionPanelMode.SETTINGS) {
+            rebuildSettingsPanelLayout(panelHeight, top, bottom, visualScrollY, items)
+            return
+        }
         val gap = dp(7f)
         val left = gap * 1.5f
         val right = width - left
@@ -1498,10 +1533,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val cellWidth = columns?.let { columnCount ->
             (right - left - gap * (columnCount - 1)) / columnCount
         }
-        val items = expandedCandidateItems()
-        val structuredRime = functionPanelActive &&
-            (functionPanelMode == FunctionPanelMode.RIME || functionPanelMode == FunctionPanelMode.SETTINGS)
-        val visualScrollY = expandedCandidateVisualScrollY()
+        val structuredRime = functionPanelActive && functionPanelMode == FunctionPanelMode.RIME
         var x = left
         var y = top + gap - visualScrollY
         var contentBottom = top + gap
@@ -1619,6 +1651,103 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidateContentHeight = (contentBottom - top + gap).coerceAtLeast(panelHeight)
         expandedCandidateRects = nextRects
         clipboardDeleteRects = nextClipboardDeleteRects
+        expandedCandidateDrawingRects = drawingRects
+        val previousScrollY = expandedCandidateScrollY
+        coerceExpandedCandidateScroll()
+        if (expandedCandidateScrollY != previousScrollY) {
+            rebuildExpandedCandidateLayout()
+        }
+    }
+
+    private fun rebuildSettingsPanelLayout(
+        panelHeight: Float,
+        top: Float,
+        bottom: Float,
+        visualScrollY: Float,
+        items: List<CandidateDrawItem>,
+    ) {
+        val left = dp(SettingsPanelLayout.horizontalPaddingDp)
+        val right = width - left
+        var y = top - visualScrollY
+        var contentBottom = top
+        val nextRects = mutableListOf<CandidateRect>()
+        val drawingRects = mutableMapOf<Int, RectF>()
+        val footerItems = items.filter(::isSettingsFooterItem)
+        val footerGap = dp(SettingsPanelLayout.footerGapDp)
+        val availableFooterWidth = (right - left).coerceAtLeast(0f)
+        val naturalFooterWidths = footerItems.map(::settingsFooterChipWidth)
+        val naturalFooterTotal = naturalFooterWidths.sum() + footerGap * (footerItems.size - 1).coerceAtLeast(0)
+        val footerWidths = if (naturalFooterTotal <= availableFooterWidth) {
+            naturalFooterWidths
+        } else {
+            val splitWidth = ((availableFooterWidth - footerGap * (footerItems.size - 1).coerceAtLeast(0)) /
+                footerItems.size.coerceAtLeast(1)).coerceAtLeast(0f)
+            footerItems.map { splitWidth }
+        }
+        val footerStartX = if (naturalFooterTotal <= availableFooterWidth) {
+            right - naturalFooterTotal
+        } else {
+            left
+        }
+        var footerRowTop = 0f
+
+        items.forEachIndexed { index, item ->
+            val isFooter = isSettingsFooterItem(item)
+            val rowTop: Float
+            val rowBottom: Float
+            val drawingRect: RectF
+            if (item.style == PanelItemStyle.SECTION) {
+                if (index > 0) y += dp(SettingsPanelLayout.sectionTopSpacingDp)
+                rowTop = y
+                rowBottom = rowTop + dp(SettingsPanelLayout.sectionHeightDp)
+                drawingRect = RectF(left, rowTop, right, rowBottom)
+                y = rowBottom
+            } else if (isFooter) {
+                val footerIndex = footerItems.indexOfFirst { it.index == item.index }.coerceAtLeast(0)
+                if (footerIndex == 0) footerRowTop = y
+                rowTop = footerRowTop
+                rowBottom = rowTop + dp(SettingsPanelLayout.rowHeightDp)
+                val chipTop = rowTop + (dp(SettingsPanelLayout.rowHeightDp) - dp(SettingsPanelLayout.footerChipHeightDp)) / 2f
+                val chipLeft = footerStartX + footerWidths.take(footerIndex).sum() + footerGap * footerIndex
+                drawingRect = RectF(
+                    chipLeft,
+                    chipTop,
+                    chipLeft + footerWidths.getOrElse(footerIndex) { 0f },
+                    chipTop + dp(SettingsPanelLayout.footerChipHeightDp),
+                )
+                if (footerIndex == footerItems.lastIndex) y = rowBottom
+            } else {
+                rowTop = y
+                val rowHeight = if (item.style == PanelItemStyle.SLIDER) {
+                    dp(SettingsPanelLayout.sliderRowHeightDp)
+                } else {
+                    dp(SettingsPanelLayout.rowHeightDp)
+                }
+                rowBottom = rowTop + rowHeight
+                drawingRect = RectF(left, rowTop, right, rowBottom)
+                y = rowBottom
+            }
+
+            if (drawingRect.bottom >= top && drawingRect.top <= bottom) {
+                drawingRects[item.index] = drawingRect
+                if (item.style != PanelItemStyle.SECTION && item.style != PanelItemStyle.EMPTY) {
+                    nextRects += CandidateRect(
+                        index = item.index,
+                        rect = drawingRect,
+                        global = item.global,
+                        command = item.command,
+                        label = listOf(item.label, item.text).filter(String::isNotBlank).joinToString(" "),
+                        clipboardText = item.clipboardText,
+                        drawingRect = drawingRect,
+                    )
+                }
+            }
+            contentBottom = max(contentBottom, rowBottom + visualScrollY)
+        }
+
+        expandedCandidateContentHeight = (contentBottom - top).coerceAtLeast(panelHeight)
+        expandedCandidateRects = nextRects
+        clipboardDeleteRects = emptyList()
         expandedCandidateDrawingRects = drawingRects
         val previousScrollY = expandedCandidateScrollY
         coerceExpandedCandidateScroll()
@@ -1928,38 +2057,37 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     command = KeyCommand(KeyCommandTypes.SETTING, "colorScheme", nextScheme),
                     style = PanelItemStyle.OPTION,
                     statusLabel = "切换",
+                    swatches = listOf("auto", "light", "dark"),
                 )
             )
             add(slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8f, 1.4f, 0.1f, "%.1f×".format(settingsConfig.candidateFontScale)))
             add(toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible))
             add(section("布局"))
-            add(slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp.toFloat(), 160f, 420f, 2f, "${settingsConfig.keyboardHeightDp}dp"))
-            add(slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp.toFloat(), 36f, 96f, 1f, "${settingsConfig.candidateBarHeightDp}dp"))
+            add(slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp.toFloat(), 160f, 420f, 2f, "${settingsConfig.keyboardHeightDp} dp"))
+            add(slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp.toFloat(), 36f, 96f, 1f, "${settingsConfig.candidateBarHeightDp} dp"))
             add(toggle("常驻数字行", "numberRowEnabled", settingsConfig.numberRowEnabled))
             add(section("反馈"))
             add(toggle("震动", "haptics.enabled", settingsConfig.hapticsEnabled))
-            add(slider("强度", "haptics.intensity", settingsConfig.hapticIntensity.toFloat(), 1f, 100f, 1f, "${settingsConfig.hapticIntensity}%"))
+            add(slider("强度", "haptics.intensity", settingsConfig.hapticIntensity.toFloat(), 1f, 100f, 1f, "${settingsConfig.hapticIntensity}"))
             add(toggle("按键音", "keySoundEnabled", settingsConfig.keySoundEnabled))
-            add(slider("按键音量", "keySoundVolume", settingsConfig.keySoundVolume.toFloat(), 0f, 100f, 1f, "${settingsConfig.keySoundVolume}%"))
+            add(slider("按键音量", "keySoundVolume", settingsConfig.keySoundVolume.toFloat(), 0f, 100f, 1f, "${settingsConfig.keySoundVolume}"))
             add(toggle("按键预览气泡", "keyPreviewEnabled", settingsConfig.keyPreviewEnabled))
             add(
                 CandidateDrawItem(
                     index = nextIndex(),
-                    label = "更多设置",
-                    text = "→ App",
+                    label = "更多设置 → App",
+                    text = "",
                     command = KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"),
                     style = PanelItemStyle.OPTION,
-                    statusLabel = "打开",
                 )
             )
             add(
                 CandidateDrawItem(
                     index = nextIndex(),
                     label = "恢复默认",
-                    text = "面板项目",
+                    text = "",
                     command = KeyCommand(KeyCommandTypes.SETTING, "reset", "true"),
                     style = PanelItemStyle.OPTION,
-                    statusLabel = "重置",
                 )
             )
         }
@@ -2079,6 +2207,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         rect: RectF,
         pressed: Boolean = false,
     ) {
+        if (functionPanelActive && functionPanelMode == FunctionPanelMode.SETTINGS) {
+            drawSettingsPanelItem(canvas, item, rect, pressed)
+            return
+        }
         if (item.style == PanelItemStyle.SECTION) {
             drawRimeSectionHeader(canvas, item, rect)
             return
@@ -2137,54 +2269,239 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun drawSettingsPanelItem(canvas: Canvas, item: CandidateDrawItem, rect: RectF, pressed: Boolean) {
+        when (item.style) {
+            PanelItemStyle.SECTION -> drawSettingsSectionHeader(canvas, item, rect)
+            PanelItemStyle.SLIDER -> drawSettingsSlider(canvas, item, rect)
+            PanelItemStyle.SWATCHES -> drawSettingsSwatches(canvas, item, rect)
+            PanelItemStyle.OPTION -> when {
+                isSettingsFooterItem(item) -> drawSettingsFooterChip(canvas, item, rect, pressed)
+                isSettingsSegmentedItem(item) -> drawSettingsSegmentedControl(canvas, item, rect)
+                else -> drawSettingsToggle(canvas, item, rect)
+            }
+            PanelItemStyle.EMPTY -> drawRimeEmptyState(canvas, item, rect)
+            else -> drawInlineCandidateOption(canvas, item, rect)
+        }
+        if (shouldDrawSettingsDivider(item)) {
+            drawSettingsDivider(canvas, rect)
+        }
+    }
+
+    private fun drawSettingsSectionHeader(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(SettingsPanelLayout.sectionTextSizeSp)
+        textPaint.color = theme.commentColor.toArgb()
+        val label = TextUtils.ellipsize(item.label, textPaint, rect.width(), TextUtils.TruncateAt.END).toString()
+        canvas.drawText(label, rect.left, rect.centerY() + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawSettingsToggle(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val controlWidth = dp(SettingsPanelLayout.toggleWidthDp)
+        val controlHeight = dp(SettingsPanelLayout.controlHeightDp)
+        val controlRect = RectF(
+            rect.right - controlWidth,
+            rect.centerY() - controlHeight / 2f,
+            rect.right,
+            rect.centerY() + controlHeight / 2f,
+        )
+        drawSettingsLabel(canvas, item.label, rect, controlRect.left)
+        paint.style = Paint.Style.FILL
+        paint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.candidateBorderColor.toArgb()
+        canvas.drawRoundRect(controlRect, controlHeight / 2f, controlHeight / 2f, paint)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(SettingsPanelLayout.secondaryTextSizeSp)
+        textPaint.color = if (item.selected) theme.candidateSelectedBackground.toArgb() else theme.commentColor.toArgb()
+        val state = TextUtils.ellipsize(item.text, textPaint, controlWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(state, controlRect.centerX(), controlRect.centerY() + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawSettingsSegmentedControl(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val segmentWidth = dp(SettingsPanelLayout.segmentWidthDp)
+        val controlHeight = dp(SettingsPanelLayout.controlHeightDp)
+        val controlWidth = segmentWidth * item.swatches.size
+        val controlRect = RectF(
+            rect.right - controlWidth,
+            rect.centerY() - controlHeight / 2f,
+            rect.right,
+            rect.centerY() + controlHeight / 2f,
+        )
+        drawSettingsLabel(canvas, item.label, rect, controlRect.left)
+        paint.style = Paint.Style.FILL
+        paint.color = theme.keyBackground.toArgb()
+        canvas.drawRoundRect(controlRect, controlHeight / 4f, controlHeight / 4f, paint)
+        item.swatches.forEachIndexed { index, value ->
+            val segmentRect = RectF(
+                controlRect.left + segmentWidth * index,
+                controlRect.top,
+                controlRect.left + segmentWidth * (index + 1),
+                controlRect.bottom,
+            )
+            val selected = schemeLabel(value) == item.text
+            if (selected) {
+                paint.color = theme.candidateSelectedForeground.toArgb()
+                canvas.drawRoundRect(segmentRect, controlHeight / 4f, controlHeight / 4f, paint)
+            }
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(SettingsPanelLayout.secondaryTextSizeSp)
+            textPaint.color = if (selected) theme.candidateSelectedBackground.toArgb() else theme.commentColor.toArgb()
+            canvas.drawText(
+                schemeLabel(value),
+                segmentRect.centerX(),
+                segmentRect.centerY() + textBaselineOffset(textPaint),
+                textPaint,
+            )
+        }
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(SettingsPanelLayout.sliderThumbBorderWidthDp)
+        paint.color = accentBorderColor(SettingsPanelLayout.dividerAlpha)
+        val inset = paint.strokeWidth / 2f
+        canvas.drawRoundRect(
+            RectF(controlRect.left + inset, controlRect.top + inset, controlRect.right - inset, controlRect.bottom - inset),
+            controlHeight / 4f,
+            controlHeight / 4f,
+            paint,
+        )
+    }
+
     private fun drawSettingsSlider(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
         val minimum = item.minimumValue ?: return
         val maximum = item.maximumValue ?: return
         val value = item.value ?: return
-        val trackLeft = rect.left + dp(10f)
-        val trackRight = rect.right - dp(10f)
-        val trackY = rect.bottom - dp(13f)
+        val trackLeft = rect.left
+        val trackRight = rect.right
+        val trackY = rect.top + dp(SettingsPanelLayout.sliderTrackCenterYDp)
         val ratio = ((value - minimum) / (maximum - minimum)).coerceIn(0f, 1f)
-        textPaint.textSize = sp(candidateLabelSizeSp())
+        textPaint.textSize = sp(SettingsPanelLayout.secondaryTextSizeSp)
+        val valueMaxWidth = rect.width() * (1f - SettingsPanelLayout.labelMaxWidthFraction) -
+            dp(SettingsPanelLayout.controlGapDp)
+        val valueText = TextUtils.ellipsize(item.text, textPaint, valueMaxWidth.coerceAtLeast(0f), TextUtils.TruncateAt.END).toString()
+        val valueWidth = textPaint.measureText(valueText)
+        val labelMaxWidth = min(
+            rect.width() * SettingsPanelLayout.labelMaxWidthFraction,
+            rect.width() - valueWidth - dp(SettingsPanelLayout.controlGapDp),
+        ).coerceAtLeast(0f)
+        textPaint.textSize = sp(SettingsPanelLayout.labelTextSizeSp)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.color = theme.keyForeground.toArgb()
-        canvas.drawText(item.label, trackLeft, rect.top + dp(15f) + textBaselineOffset(textPaint), textPaint)
+        val label = TextUtils.ellipsize(item.label, textPaint, labelMaxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(label, trackLeft, rect.top + dp(SettingsPanelLayout.sliderTextBaselineDp), textPaint)
         textPaint.textAlign = Paint.Align.RIGHT
+        textPaint.textSize = sp(SettingsPanelLayout.secondaryTextSizeSp)
         textPaint.color = theme.commentColor.toArgb()
-        canvas.drawText(item.text, trackRight, rect.top + dp(15f) + textBaselineOffset(textPaint), textPaint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeCap = Paint.Cap.ROUND
-        paint.strokeWidth = dp(3f)
-        paint.color = theme.panelBorder.toArgb()
-        canvas.drawLine(trackLeft, trackY, trackRight, trackY, paint)
-        paint.color = theme.selectedLabelColor.toArgb()
-        canvas.drawLine(trackLeft, trackY, trackLeft + (trackRight - trackLeft) * ratio, trackY, paint)
+        canvas.drawText(valueText, trackRight, rect.top + dp(SettingsPanelLayout.sliderTextBaselineDp), textPaint)
+        val trackHeight = dp(SettingsPanelLayout.sliderTrackHeightDp)
         paint.style = Paint.Style.FILL
-        canvas.drawCircle(trackLeft + (trackRight - trackLeft) * ratio, trackY, dp(6f), paint)
-        paint.strokeCap = Paint.Cap.BUTT
+        paint.color = theme.panelBorder.toArgb()
+        canvas.drawRoundRect(
+            RectF(trackLeft, trackY - trackHeight / 2f, trackRight, trackY + trackHeight / 2f),
+            trackHeight / 2f,
+            trackHeight / 2f,
+            paint,
+        )
+        val filledRight = trackLeft + (trackRight - trackLeft) * ratio
+        paint.color = theme.selectedLabelColor.toArgb()
+        if (filledRight > trackLeft) {
+            canvas.drawRoundRect(
+                RectF(trackLeft, trackY - trackHeight / 2f, filledRight, trackY + trackHeight / 2f),
+                trackHeight / 2f,
+                trackHeight / 2f,
+                paint,
+            )
+        }
+        val thumbRadius = dp(SettingsPanelLayout.sliderThumbDiameterDp) / 2f
+        canvas.drawCircle(filledRight, trackY, thumbRadius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(SettingsPanelLayout.sliderThumbBorderWidthDp)
+        paint.color = theme.candidateSelectedBorderColor.toArgb()
+        canvas.drawCircle(filledRight, trackY, thumbRadius - paint.strokeWidth / 2f, paint)
     }
 
     private fun drawSettingsSwatches(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
-        val cellWidth = dp(30f)
-        val swatchRadius = dp(8f)
-        val startX = rect.right - dp(8f) - cellWidth * item.swatches.size
-        textPaint.textAlign = Paint.Align.LEFT
-        textPaint.textSize = sp(candidateLabelSizeSp())
-        textPaint.color = theme.keyForeground.toArgb()
-        canvas.drawText(item.label, rect.left + dp(10f), rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        val swatchDiameter = dp(SettingsPanelLayout.swatchDiameterDp)
+        val swatchRadius = swatchDiameter / 2f
+        val swatchGap = dp(SettingsPanelLayout.swatchGapDp)
+        val startX = settingsSwatchStartX(rect, item.swatches.size)
+        drawSettingsLabel(canvas, item.label, rect, startX)
         item.swatches.forEachIndexed { index, value ->
             val color = KeytaoColor.fromHex(value) ?: return@forEachIndexed
-            val centerX = startX + cellWidth * index + cellWidth / 2f
+            val centerX = startX + swatchRadius + (swatchDiameter + swatchGap) * index
             paint.style = Paint.Style.FILL
             paint.color = color.toArgb()
             canvas.drawCircle(centerX, rect.centerY(), swatchRadius, paint)
             if (value.equals(theme.accentColor.toHex(), ignoreCase = true)) {
                 paint.style = Paint.Style.STROKE
-                paint.strokeWidth = dp(2f)
-                paint.color = theme.keyForeground.toArgb()
-                canvas.drawCircle(centerX, rect.centerY(), swatchRadius + dp(3f), paint)
+                paint.strokeWidth = dp(SettingsPanelLayout.swatchRingWidthDp)
+                paint.color = theme.selectedLabelColor.toArgb()
+                canvas.drawCircle(centerX, rect.centerY(), swatchRadius - paint.strokeWidth / 2f, paint)
             }
         }
+    }
+
+    private fun drawSettingsLabel(canvas: Canvas, label: String, rect: RectF, controlLeft: Float) {
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(SettingsPanelLayout.labelTextSizeSp)
+        textPaint.color = theme.keyForeground.toArgb()
+        val maxWidth = min(
+            rect.width() * SettingsPanelLayout.labelMaxWidthFraction,
+            controlLeft - dp(SettingsPanelLayout.controlGapDp) - rect.left,
+        ).coerceAtLeast(0f)
+        val ellipsized = TextUtils.ellipsize(label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(ellipsized, rect.left, rect.centerY() + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawSettingsFooterChip(canvas: Canvas, item: CandidateDrawItem, rect: RectF, pressed: Boolean) {
+        drawSurfaceShadow(canvas, rect, pressed)
+        paint.style = Paint.Style.FILL
+        paint.color = if (pressed) theme.candidateSelectedBackground.toArgb() else theme.keyBackground.toArgb()
+        canvas.drawRoundRect(rect, dp(candidateCornerRadiusDp()), dp(candidateCornerRadiusDp()), paint)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(SettingsPanelLayout.footerTextSizeSp)
+        textPaint.color = if (pressed) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val maxWidth = (rect.width() - dp(SettingsPanelLayout.footerHorizontalPaddingDp) * 2f).coerceAtLeast(0f)
+        val label = TextUtils.ellipsize(item.label, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(label, rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun drawSettingsDivider(canvas: Canvas, rect: RectF) {
+        val height = dp(SettingsPanelLayout.dividerHeightDp)
+        val border = theme.panelBorder.toArgb()
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb(
+            (255f * SettingsPanelLayout.dividerAlpha).roundToInt(),
+            Color.red(border),
+            Color.green(border),
+            Color.blue(border),
+        )
+        canvas.drawRect(rect.left, rect.bottom - height, rect.right, rect.bottom, paint)
+    }
+
+    private fun shouldDrawSettingsDivider(item: CandidateDrawItem): Boolean {
+        if (item.style == PanelItemStyle.SECTION || isSettingsFooterItem(item)) return false
+        val items = expandedCandidateItems()
+        val index = items.indexOfFirst { it.index == item.index }
+        val next = items.getOrNull(index + 1) ?: return false
+        return next.style != PanelItemStyle.SECTION && !isSettingsFooterItem(next)
+    }
+
+    private fun isSettingsSegmentedItem(item: CandidateDrawItem): Boolean {
+        return item.command?.type == KeyCommandTypes.SETTING && item.command.value == "colorScheme"
+    }
+
+    private fun isSettingsFooterItem(item: CandidateDrawItem): Boolean {
+        val command = item.command ?: return false
+        return command.type == KeyCommandTypes.OPEN_PAGE ||
+            (command.type == KeyCommandTypes.SETTING && command.value == "reset")
+    }
+
+    private fun settingsSwatchStartX(rect: RectF, count: Int): Float {
+        val totalWidth = dp(SettingsPanelLayout.swatchDiameterDp) * count +
+            dp(SettingsPanelLayout.swatchGapDp) * (count - 1).coerceAtLeast(0)
+        return rect.right - totalWidth
+    }
+
+    private fun settingsFooterChipWidth(item: CandidateDrawItem): Float {
+        textPaint.textSize = sp(SettingsPanelLayout.footerTextSizeSp)
+        return textPaint.measureText(item.label) + dp(SettingsPanelLayout.footerHorizontalPaddingDp) * 2f
     }
 
     private fun drawRimeEmptyState(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
@@ -2359,9 +2676,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val viewport = RectF(leftPadding, 0f, maxRight, barHeight)
         canvas.save()
         canvas.clipRect(viewport)
-        toolbarRects.forEach { toolbar ->
-            drawToolbarChip(canvas, toolbar.copy(rect = toolbar.drawingRect))
-        }
+        toolbarRects.forEach { toolbar -> drawToolbarChip(canvas, toolbar.copy(rect = toolbar.drawingRect)) }
         canvas.restore()
         if (showLogo) {
             drawKeytaoLogo(canvas, barHeight, leftPadding, toolbarLogoSize)
@@ -2545,16 +2860,22 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun functionPanelToolbarLayout(barHeight: Float, leftPadding: Float): List<ToolbarRect> {
         val chipHeight = minOf(dp(34f), barHeight - dp(12f))
         val top = (barHeight - chipHeight) / 2f
-        val backAction = ToolbarAction("返回", KeyCommand.panel("close"), icon = ToolbarIcon.BACK)
+        val backAction = ToolbarAction(
+            "返回",
+            KeyCommand.panel(if (functionPanelMode == FunctionPanelMode.SETTINGS) "rime" else "close"),
+            icon = ToolbarIcon.BACK,
+        )
         val pasteAction = ToolbarAction("粘贴", KeyCommand.edit("paste"))
         val clearAction = ToolbarAction(
             if (clipboardClearConfirmationPending) "确认清空" else "清空",
             KeyCommand.panel("clearClipboardHistory"),
         )
-        val settingsAction = ToolbarAction("更多设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
+        val editAction = ToolbarAction("编辑键盘设置", KeyCommand.panel("settings"), icon = ToolbarIcon.EDIT)
+        val settingsAction = ToolbarAction("设置", KeyCommand(KeyCommandTypes.OPEN_PAGE, "settings"), icon = ToolbarIcon.SETTINGS)
         val backWidth = toolbarChipWidth(backAction)
         val pasteWidth = toolbarChipWidth(pasteAction)
         val clearWidth = toolbarChipWidth(clearAction)
+        val editWidth = toolbarChipWidth(editAction)
         val settingsWidth = toolbarChipWidth(settingsAction)
         val back = ToolbarRect(
             backAction.label,
@@ -2567,6 +2888,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             settingsAction.command,
             RectF(width - leftPadding - settingsWidth, top, width - leftPadding, top + chipHeight),
             icon = settingsAction.icon,
+        )
+        val edit = ToolbarRect(
+            editAction.label,
+            editAction.command,
+            RectF(
+                settings.rect.left - dp(6f) - editWidth,
+                top,
+                settings.rect.left - dp(6f),
+                top + chipHeight,
+            ),
+            icon = editAction.icon,
         )
         val paste = ToolbarRect(
             pasteAction.label,
@@ -2582,6 +2914,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return when {
             showsClear -> listOf(back, paste, clear, settings)
             functionPanelMode == FunctionPanelMode.CLIPBOARD -> listOf(back, paste, settings)
+            functionPanelMode == FunctionPanelMode.RIME -> listOf(back, edit, settings)
             else -> listOf(back, settings)
         }
     }
@@ -2660,6 +2993,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ToolbarIcon.ONE_HANDED -> drawOneHandedToolbarIcon(canvas, iconRect)
             ToolbarIcon.FLOATING -> drawFloatingToolbarIcon(canvas, iconRect)
             ToolbarIcon.BACK -> drawBackToolbarIcon(canvas, iconRect)
+            ToolbarIcon.EDIT -> drawEditToolbarIcon(canvas, iconRect)
             ToolbarIcon.SETTINGS -> drawSettingsToolbarIcon(canvas, iconRect)
         }
 
@@ -2796,6 +3130,26 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         canvas.drawLine(rect.right - rect.width() * 0.15f, rect.centerY(), rect.left + rect.width() * 0.18f, rect.centerY(), paint)
         canvas.drawLine(rect.left + rect.width() * 0.18f, rect.centerY(), rect.left + rect.width() * 0.42f, rect.top + rect.height() * 0.26f, paint)
         canvas.drawLine(rect.left + rect.width() * 0.18f, rect.centerY(), rect.left + rect.width() * 0.42f, rect.bottom - rect.height() * 0.26f, paint)
+    }
+
+    private fun drawEditToolbarIcon(canvas: Canvas, rect: RectF) {
+        paint.style = Paint.Style.STROKE
+        val pencil = Path().apply {
+            moveTo(rect.left + rect.width() * 0.18f, rect.bottom - rect.height() * 0.27f)
+            lineTo(rect.right - rect.width() * 0.25f, rect.top + rect.height() * 0.16f)
+            lineTo(rect.right - rect.width() * 0.13f, rect.top + rect.height() * 0.28f)
+            lineTo(rect.left + rect.width() * 0.29f, rect.bottom - rect.height() * 0.16f)
+            lineTo(rect.left + rect.width() * 0.15f, rect.bottom - rect.height() * 0.10f)
+            close()
+        }
+        canvas.drawPath(pencil, paint)
+        canvas.drawLine(
+            rect.left + rect.width() * 0.18f,
+            rect.bottom - rect.height() * 0.27f,
+            rect.left + rect.width() * 0.29f,
+            rect.bottom - rect.height() * 0.16f,
+            paint,
+        )
     }
 
     private fun drawSettingsToolbarIcon(canvas: Canvas, rect: RectF) {
@@ -3709,12 +4063,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (oneHandedAvailable) add(oneHanded)
             add(floating)
         }
-        val settings = ToolbarAction(
-            "设置",
-            KeyCommand.panel("settings"),
-            icon = ToolbarIcon.SETTINGS,
-            id = "settings",
-        )
         return if (keyboardLayer == "symbols") {
             buildList {
                 addAll(listOf(
@@ -3724,7 +4072,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 ToolbarAction("123", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "numbers"), id = "numbers"),
                 ToolbarAction("ABC", KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters"), id = "letters"),
                 ))
-                add(settings)
                 addAll(layoutActions)
             }
         } else {
@@ -3747,7 +4094,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     id = "emoji",
                 ),
                 ))
-                add(settings)
                 addAll(layoutActions)
             }
         }
@@ -3796,7 +4142,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun persistToolbarCustomization() {
-        val persistedOrder = (currentToolbarOrder() + toolbarInactiveActionIds).distinct()
+        val persistedOrder = (currentToolbarOrder() + toolbarInactiveActionIds)
+            .filterNot { it == toolbarSettingsActionId }
+            .distinct()
         toolbarActionOrderOverride = persistedOrder
         listener?.onToolbarCustomization(persistedOrder, currentToolbarPinnedCount())
     }
@@ -3892,7 +4240,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return when (functionPanelMode) {
             FunctionPanelMode.RIME -> "Rime 选项"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
-            FunctionPanelMode.SETTINGS -> "设置"
+            FunctionPanelMode.SETTINGS -> "键盘设置"
         }
     }
 
@@ -4240,12 +4588,21 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (!functionPanelActive || functionPanelMode != FunctionPanelMode.SETTINGS) return
         val candidate = pressedExpandedCandidate ?: return
         val item = expandedCandidateItems().firstOrNull { it.index == candidate.index } ?: return
-        if (item.style != PanelItemStyle.SLIDER && item.style != PanelItemStyle.SWATCHES) return
+        if (item.style != PanelItemStyle.SLIDER &&
+            item.style != PanelItemStyle.SWATCHES &&
+            !isSettingsSegmentedItem(item)
+        ) return
+        if (isSettingsSegmentedItem(item)) {
+            val segmentLeft = candidate.drawingRect.right -
+                dp(SettingsPanelLayout.segmentWidthDp) * item.swatches.size
+            if (x < segmentLeft) return
+        }
         activeSettingItem = item
         activeSettingRect = candidate.drawingRect
         activeSettingOriginalValue = when (item.style) {
             PanelItemStyle.SLIDER -> item.value?.let(::serializeSettingNumber)
             PanelItemStyle.SWATCHES -> theme.accentColor.toHex()
+            PanelItemStyle.OPTION -> theme.uiColorScheme.takeIf { it in item.swatches } ?: "auto"
             else -> null
         }
         updateSettingControl(x)
@@ -4261,17 +4618,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 val minimum = item.minimumValue ?: return false
                 val maximum = item.maximumValue ?: return false
                 val step = item.step ?: 1f
-                val trackLeft = rect.left + dp(10f)
-                val trackRight = rect.right - dp(10f)
+                val trackLeft = rect.left
+                val trackRight = rect.right
                 val ratio = ((x - trackLeft) / (trackRight - trackLeft)).coerceIn(0f, 1f)
                 val raw = minimum + (maximum - minimum) * ratio
                 serializeSettingNumber((minimum + ((raw - minimum) / step).roundToInt() * step).coerceIn(minimum, maximum))
             }
             PanelItemStyle.SWATCHES -> {
                 if (item.swatches.isEmpty()) return false
-                val cellWidth = dp(30f)
-                val startX = rect.right - dp(8f) - cellWidth * item.swatches.size
-                val index = ((x - startX) / cellWidth).toInt().coerceIn(0, item.swatches.lastIndex)
+                val startX = settingsSwatchStartX(rect, item.swatches.size)
+                val step = dp(SettingsPanelLayout.swatchDiameterDp + SettingsPanelLayout.swatchGapDp)
+                val firstCenter = startX + dp(SettingsPanelLayout.swatchDiameterDp) / 2f
+                val index = ((x - firstCenter) / step).roundToInt().coerceIn(0, item.swatches.lastIndex)
+                item.swatches[index]
+            }
+            PanelItemStyle.OPTION -> {
+                if (!isSettingsSegmentedItem(item) || item.swatches.isEmpty()) return false
+                val segmentWidth = dp(SettingsPanelLayout.segmentWidthDp)
+                val startX = rect.right - segmentWidth * item.swatches.size
+                val index = ((x - startX) / segmentWidth).toInt().coerceIn(0, item.swatches.lastIndex)
                 item.swatches[index]
             }
             else -> return false
@@ -5857,6 +6222,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val recentEmojiPreferenceKey = "recent_emoji"
         private const val emojiRecentLayer = "symbols_emoji_face"
         private const val toolbarPinnedBoundaryId = "__toolbar_pinned_boundary__"
+        private const val toolbarSettingsActionId = "settings"
         private const val maxRecentEmojiCount = 32
         private val softAccentPunctuation = setOf("，", "。", ",", ".")
         private val accentPresets = listOf("#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6")
