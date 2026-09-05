@@ -27,6 +27,17 @@ private enum KeyTaoFunctionPanelMode {
     case clipboard
 }
 
+private enum KeyTaoCandidateBarContent {
+    case candidateMenu
+    case statusMessage
+    case functionPanel
+    case fullHeightSymbolKeyboard
+    case candidates
+    case backspaceHint
+    case completionSuggestions
+    case toolbar
+}
+
 private enum KeyTaoPanelItemStyle {
     case standard
     case section
@@ -591,7 +602,6 @@ final class KeyTaoIOSKeyboardView: UIView {
     override func draw(_ rect: CGRect) {
         drawBackground()
         drawCandidateBar()
-        drawBackspaceDeletionPreview()
         if candidatePanelExpanded {
             drawExpandedCandidatePanel()
         } else {
@@ -1538,7 +1548,15 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func rebuildInteractiveRects() {
         keyRects = keyboardLayout()
-        inlineCandidateRects = inlineCandidateLayout()
+        let barContent = candidateBarContent()
+        switch barContent {
+        case .candidates, .completionSuggestions:
+            inlineCandidateRects = inlineCandidateLayout()
+        default:
+            inlineCandidateRects = []
+            candidateContentWidth = 0
+            candidateViewportWidth = 0
+        }
         if candidatePanelExpanded {
             expandedCandidateRects = expandedCandidateLayout()
         } else {
@@ -1546,10 +1564,23 @@ final class KeyTaoIOSKeyboardView: UIView {
             expandedSectionRects = [:]
             clipboardDeleteRects = []
         }
-        toolbarRects = toolbarLayout()
-        candidateExpandRect = expandButtonRect()
-        candidateMenuActionRects = candidateMenuLayout()
-        backspacePreviewRect = backspacePreviewLayout()
+        toolbarRects = barContent == .functionPanel || barContent == .toolbar ? toolbarLayout() : []
+        candidateExpandRect = barContent == .candidates ? expandButtonRect() : nil
+        candidateMenuActionRects = barContent == .candidateMenu ? candidateMenuLayout() : []
+        backspacePreviewRect = barContent == .backspaceHint ? backspacePreviewLayout() : nil
+    }
+
+    private func candidateBarContent() -> KeyTaoCandidateBarContent {
+        let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
+        if candidateMenu != nil { return .candidateMenu }
+        if message != nil { return .statusMessage }
+        if functionPanelActive { return .functionPanel }
+        if usesFullHeightSymbolKeyboard() { return .fullHeightSymbolKeyboard }
+        if !state.candidatePanel.candidates.isEmpty { return .candidates }
+        if backspacePreviewText?.isEmpty == false { return .backspaceHint }
+        // iOS intentionally has no automatic clipboard-suggestion state; see IMPL.md.
+        if !completionSuggestions.isEmpty { return .completionSuggestions }
+        return .toolbar
     }
 
     private func candidateMenuLayout() -> [CandidateMenuActionRect] {
@@ -1584,12 +1615,13 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func backspacePreviewLayout() -> CGRect? {
         guard backspacePreviewText?.isEmpty == false else { return nil }
-        let gap = max(4, theme.panel.gap)
+        let gap = max(KeyTaoIMEInteractionTuning.backspacePreviewMinimumHorizontalInset, theme.panel.gap)
+        let verticalInset = KeyTaoIMEInteractionTuning.backspacePreviewVerticalInset
         return CGRect(
             x: gap,
-            y: 6,
+            y: verticalInset,
             width: max(0, bounds.width - gap * 2),
-            height: max(0, config.candidateBarHeightDp - 12)
+            height: max(0, config.candidateBarHeightDp - verticalInset * 2)
         )
     }
 
@@ -1710,11 +1742,13 @@ final class KeyTaoIOSKeyboardView: UIView {
         let barHeight = config.candidateBarHeightDp
         let leftPadding = theme.panel.gap * 1.5
         let message = availabilityMessage?.isEmpty == false ? availabilityMessage : nil
-        if let candidateMenu {
-            drawCandidateMenu(candidateMenu)
+        switch candidateBarContent() {
+        case .candidateMenu:
+            if let candidateMenu {
+                drawCandidateMenu(candidateMenu)
+            }
             return
-        }
-        if message != nil && state.candidatePanel.candidates.isEmpty && state.candidatePanel.preedit?.isEmpty != false {
+        case .statusMessage:
             drawText(
                 message ?? "请先在 KeyTao App 安装键道方案",
                 in: CGRect(x: leftPadding, y: 0, width: bounds.width - leftPadding * 2, height: barHeight),
@@ -1724,18 +1758,12 @@ final class KeyTaoIOSKeyboardView: UIView {
                 alignment: .left
             )
             return
-        }
-
-        if functionPanelActive {
+        case .functionPanel:
             drawFunctionPanelBar()
             return
-        }
-
-        if usesFullHeightSymbolKeyboard() {
+        case .fullHeightSymbolKeyboard:
             return
-        }
-
-        if !state.candidatePanel.candidates.isEmpty || !completionSuggestions.isEmpty {
+        case .candidates, .completionSuggestions:
             if let context = UIGraphicsGetCurrentContext() {
                 context.saveGState()
                 UIBezierPath(rect: inlineCandidateViewportRect()).addClip()
@@ -1753,6 +1781,11 @@ final class KeyTaoIOSKeyboardView: UIView {
                 drawExpandButton(expand)
             }
             return
+        case .backspaceHint:
+            drawBackspaceDeletionPreview()
+            return
+        case .toolbar:
+            break
         }
 
         let preedit = state.candidatePanel.preedit ?? state.preedit
@@ -1834,16 +1867,39 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawSurfaceShadow(rect, pressed: backspacePreviewPressed)
         (backspacePreviewPressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()).setFill()
         UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
+        let text = fittedBackspacePreviewText(
+            deleted,
+            availableWidth: max(
+                0,
+                rect.width - KeyTaoIMEInteractionTuning.backspacePreviewTextHorizontalPadding * 2
+            )
+        )
         drawText(
-            backspacePreviewPendingSelection
-                ? "将删除 \(deleted.count) 字：\(String(deleted.suffix(18))) · 抬手删除"
-                : "已删除 \(deleted.count) 字：\(String(deleted.suffix(18))) · 点按恢复",
+            text,
             in: rect,
             color: backspacePreviewPressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
             size: candidateLabelSize(),
             weight: theme.font.weight,
             alignment: .center
         )
+    }
+
+    private func fittedBackspacePreviewText(_ deleted: String, availableWidth: CGFloat) -> String {
+        let graphemes = Array(deleted)
+        let prefix = backspacePreviewPendingSelection
+            ? "将删除 \(graphemes.count) 字："
+            : "已删除 \(graphemes.count) 字："
+        let suffix = backspacePreviewPendingSelection ? " · 抬手删除" : " · 点按恢复"
+        var tailCount = min(graphemes.count, KeyTaoIMEInteractionTuning.backspacePreviewMaxTailGraphemes)
+        while tailCount >= 0 {
+            let tail = String(graphemes.suffix(tailCount))
+            let text = "\(prefix)\(tailCount < graphemes.count ? "…" : "")\(tail)\(suffix)"
+            if textWidth(text, size: candidateLabelSize()) <= availableWidth {
+                return text
+            }
+            tailCount -= 1
+        }
+        return textWidth("…", size: candidateLabelSize()) <= availableWidth ? "…" : ""
     }
 
     private func drawKeyboard() {

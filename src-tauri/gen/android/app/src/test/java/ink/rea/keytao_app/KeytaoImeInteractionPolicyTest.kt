@@ -1,9 +1,24 @@
 package ink.rea.keytao_app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class KeytaoImeInteractionPolicyTest {
+    @Test
+    fun `clipboard suggestion is offered only for a recent unoffered clip`() {
+        val now = 1_000_000L
+        val windowMs = 300_000L
+        val lastOffered = ClipboardSuggestionOffer(text = "same", timestamp = 900_000L)
+
+        assertTrue(shouldOfferClipboardSuggestion("recent", 900_000L, now, null, windowMs))
+        assertFalse(shouldOfferClipboardSuggestion("old", 699_999L, now, null, windowMs))
+        assertFalse(shouldOfferClipboardSuggestion("same", 900_000L, now, lastOffered, windowMs))
+        assertTrue(shouldOfferClipboardSuggestion("new", 0L, now, lastOffered, windowMs))
+        assertFalse(shouldOfferClipboardSuggestion("same", 0L, now, lastOffered, windowMs))
+    }
+
     @Test
     fun `standard backspace cadence matches the mobile UX contract`() {
         val profile = KeytaoImeInteractionTuning.backspaceProfile(DeleteSpeed.STANDARD)

@@ -94,6 +94,10 @@ public enum KeyTaoIMEInteractionTuning {
     static let accentToolbarBorderAlpha: CGFloat = 0.60
     static let candidateBorderAlpha: CGFloat = 0.35
     static let darkAccentBorderAlphaMultiplier: CGFloat = 0.70
+    static let backspacePreviewMinimumHorizontalInset: CGFloat = 4
+    static let backspacePreviewVerticalInset: CGFloat = 6
+    static let backspacePreviewTextHorizontalPadding: CGFloat = 8
+    static let backspacePreviewMaxTailGraphemes = 18
 
     private static let slowBackspace = KeyTaoBackspaceRepeatProfile(
         initialDelayMs: 500,

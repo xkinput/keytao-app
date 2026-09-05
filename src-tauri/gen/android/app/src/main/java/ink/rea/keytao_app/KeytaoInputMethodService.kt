@@ -37,8 +37,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val mainHandler = Handler(Looper.getMainLooper())
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private val clipboardHistory = mutableListOf<String>()
-    private data class ClipboardSnapshot(val text: String, val timestamp: Long?)
+    private data class ClipboardSnapshot(val text: String, val timestamp: Long)
     private var clipboardSuppression: ClipboardSnapshot? = null
+    private var lastOfferedClip: ClipboardSuggestionOffer? = null
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
         // A clipboard change is a new user/system event even when it writes the
         // same text again, so a deletion suppression cannot survive it.
@@ -195,6 +196,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         super.onStartInputView(info, restarting)
         applyEditorInfo(info)
         registerClipboardListener()
+        offerCurrentClipboardSuggestionOnShow()
         keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
         applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
@@ -1316,7 +1318,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val manager = clipboardManager ?: return
         manager.addPrimaryClipChangedListener(clipboardListener)
         clipboardListenerRegistered = true
-        rememberCurrentClipboard(suggest = false)
     }
 
     private fun unregisterClipboardListener() {
@@ -1340,9 +1341,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ?.takeIf { it.isNotEmpty() }
             ?: return null
         val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            clip.description?.timestamp
+            clip.description?.timestamp ?: 0L
         } else {
-            null
+            0L
         }
         return ClipboardSnapshot(text, timestamp)
     }
@@ -1365,17 +1366,39 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
+        val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
+        rememberClipboardText(snapshot.text, suggest, snapshot.timestamp)
+    }
+
+    private fun offerCurrentClipboardSuggestionOnShow() {
+        val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
+        rememberClipboardText(snapshot.text, suggest = false)
+        if (!shouldOfferClipboardSuggestion(
+                text = snapshot.text,
+                timestamp = snapshot.timestamp,
+                now = System.currentTimeMillis(),
+                lastOffered = lastOfferedClip,
+                windowMs = KeytaoImeInteractionTuning.CLIPBOARD_SUGGESTION_WINDOW_MS,
+            )
+        ) {
+            return
+        }
+        lastOfferedClip = ClipboardSuggestionOffer(snapshot.text, snapshot.timestamp)
+        keyboardView?.showRecentClipboardSuggestion(snapshot.text)
+    }
+
+    private fun currentUnsuppressedClipboardSnapshot(): ClipboardSnapshot? {
         val snapshot = currentClipboardSnapshot()
         clipboardSuppression?.let { suppressed ->
             val sameClipboardWrite = snapshot?.text == suppressed.text &&
-                (suppressed.timestamp == null || snapshot.timestamp == suppressed.timestamp)
-            if (sameClipboardWrite) return
+                (suppressed.timestamp == 0L || snapshot.timestamp == suppressed.timestamp)
+            if (sameClipboardWrite) return null
             clipboardSuppression = null
         }
-        snapshot?.text?.let { rememberClipboardText(it, suggest) }
+        return snapshot
     }
 
-    private fun rememberClipboardText(text: String, suggest: Boolean) {
+    private fun rememberClipboardText(text: String, suggest: Boolean, timestamp: Long = 0L) {
         if (text.isBlank() || !privacyMode.allowsClipboard) return
         val wasFirst = clipboardHistory.firstOrNull() == text
         clipboardHistory.remove(text)
@@ -1384,6 +1407,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             clipboardHistory.removeAt(clipboardHistory.lastIndex)
         }
         if (suggest && !wasFirst) {
+            lastOfferedClip = ClipboardSuggestionOffer(text, timestamp)
             keyboardView?.showRecentClipboardSuggestion(text)
         }
     }

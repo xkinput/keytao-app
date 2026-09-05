@@ -97,6 +97,11 @@ internal object KeytaoImeInteractionTuning {
     const val ACCENT_TOOLBAR_BORDER_ALPHA = 0.60f
     const val CANDIDATE_BORDER_ALPHA = 0.35f
     const val DARK_ACCENT_BORDER_ALPHA_MULTIPLIER = 0.70f
+    const val BACKSPACE_PREVIEW_MINIMUM_HORIZONTAL_INSET_DP = 4f
+    const val BACKSPACE_PREVIEW_VERTICAL_INSET_DP = 6f
+    const val BACKSPACE_PREVIEW_TEXT_HORIZONTAL_PADDING_DP = 8f
+    const val BACKSPACE_PREVIEW_MAX_TAIL_GRAPHEMES = 18
+    const val CLIPBOARD_SUGGESTION_WINDOW_MS = 5 * 60 * 1_000L
 
     private val slowBackspace = BackspaceRepeatProfile(
         initialDelayMs = 500L,
@@ -125,6 +130,26 @@ internal object KeytaoImeInteractionTuning {
             sinceLastUpMs < BOUNCE_INTERVAL_MS &&
             distanceFromLastUpDp < BOUNCE_DISTANCE_DP
     }
+}
+
+internal data class ClipboardSuggestionOffer(
+    val text: String,
+    val timestamp: Long,
+)
+
+internal fun shouldOfferClipboardSuggestion(
+    text: String,
+    timestamp: Long,
+    now: Long,
+    lastOffered: ClipboardSuggestionOffer?,
+    windowMs: Long,
+): Boolean {
+    if (text.isBlank()) return false
+    if (lastOffered?.text == text && (timestamp <= 0L || lastOffered.timestamp == timestamp)) {
+        return false
+    }
+    if (timestamp <= 0L) return lastOffered?.text != text
+    return now - timestamp in 0L..windowMs
 }
 
 /**

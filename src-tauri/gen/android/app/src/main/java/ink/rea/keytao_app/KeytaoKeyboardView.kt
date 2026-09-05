@@ -43,6 +43,8 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import android.icu.text.BreakIterator
+import java.util.Locale
 
 internal fun nextRimeSwitchOptionIndex(activeIndex: Int, reset: Int?, optionCount: Int): Int {
     require(optionCount > 0)
@@ -156,6 +158,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION, EMPTY }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { RIME, CLIPBOARD }
+    private enum class CandidateBarContent {
+        CANDIDATE_MENU,
+        STATUS_MESSAGE,
+        FUNCTION_PANEL,
+        FULL_HEIGHT_SYMBOL_KEYBOARD,
+        CANDIDATES,
+        BACKSPACE_HINT,
+        CLIPBOARD_SUGGESTION,
+        COMPLETION_SUGGESTIONS,
+        TOOLBAR,
+    }
     private enum class VerticalScrollSurface { EXPANDED_PANEL, SYMBOL_KEYBOARD }
 
     var listener: Listener? = null
@@ -633,7 +646,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         super.onDraw(canvas)
         drawBackground(canvas)
         drawCandidateBar(canvas)
-        drawBackspaceDeletionPreview(canvas)
         if (candidatePanelExpanded) {
             drawExpandedCandidatePanel(canvas)
         } else {
@@ -656,50 +668,68 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         toolbarLogoSize = 0f
         backspacePreviewRect = null
         if (width <= 0 || height <= 0) return
-        backspacePreviewRect = backspacePreviewText?.takeIf(String::isNotEmpty)?.let {
-            val previewGap = dp(theme.panelGapDp).coerceAtLeast(dp(4f))
-            RectF(previewGap, dp(6f), width - previewGap, dp(config.candidateBarHeightDp) - dp(6f))
-        }
 
         val barHeight = dp(config.candidateBarHeightDp)
         val gap = dp(theme.panelGapDp)
         val leftPadding = gap * 1.5f
-        val panelModel = state.candidatePanel
-        val message = statusMessage?.takeIf(String::isNotBlank)
-        when {
-            candidateMenu != null -> {
+        when (candidateBarContent()) {
+            CandidateBarContent.CANDIDATE_MENU -> {
                 resetCandidateScroll()
                 rebuildCandidateMenuLayout(barHeight, leftPadding)
             }
-            !schemaReady || (message != null && panelModel.candidates.isEmpty() && panelModel.preedit.isNullOrEmpty()) -> {
+            CandidateBarContent.STATUS_MESSAGE -> {
                 resetCandidateScroll()
             }
-            functionPanelActive -> {
+            CandidateBarContent.FUNCTION_PANEL -> {
                 resetCandidateScroll()
                 toolbarRects = functionPanelToolbarLayout(barHeight, leftPadding)
             }
-            usesFullHeightSymbolKeyboard() -> {
+            CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD -> {
                 resetCandidateScroll()
             }
-            panelModel.candidates.isEmpty() && recentClipboardSuggestion != null -> {
-                resetCandidateScroll()
-                toolbarRects = clipboardSuggestionToolbarLayout(barHeight, leftPadding)
-            }
-            panelModel.candidates.isEmpty() && completionSuggestions.isNotEmpty() -> {
-                candidateRects = inlineCandidateLayout(barHeight, leftPadding, null)
-            }
-            panelModel.candidates.isEmpty() -> {
-                resetCandidateScroll()
-                toolbarRects = toolbarLayout(barHeight, leftPadding, toolbarActions(), showLogo = true)
-            }
-            else -> {
+            CandidateBarContent.CANDIDATES -> {
                 val expandRect = candidateExpandButtonRect(barHeight, leftPadding)
                 candidateExpandRect = expandRect
                 candidateRects = inlineCandidateLayout(barHeight, leftPadding, expandRect)
             }
+            CandidateBarContent.BACKSPACE_HINT -> {
+                resetCandidateScroll()
+                val previewGap = dp(theme.panelGapDp).coerceAtLeast(
+                    dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_MINIMUM_HORIZONTAL_INSET_DP),
+                )
+                val verticalInset = dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_VERTICAL_INSET_DP)
+                backspacePreviewRect = RectF(previewGap, verticalInset, width - previewGap, barHeight - verticalInset)
+            }
+            CandidateBarContent.CLIPBOARD_SUGGESTION -> {
+                resetCandidateScroll()
+                toolbarRects = clipboardSuggestionToolbarLayout(barHeight, leftPadding)
+            }
+            CandidateBarContent.COMPLETION_SUGGESTIONS -> {
+                candidateRects = inlineCandidateLayout(barHeight, leftPadding, null)
+            }
+            CandidateBarContent.TOOLBAR -> {
+                resetCandidateScroll()
+                toolbarRects = toolbarLayout(barHeight, leftPadding, toolbarActions(), showLogo = true)
+            }
         }
         if (candidatePanelExpanded) {
             rebuildExpandedCandidateLayout()
+        }
+    }
+
+    private fun candidateBarContent(): CandidateBarContent {
+        val panelModel = state.candidatePanel
+        val message = statusMessage?.takeIf(String::isNotBlank)
+        return when {
+            candidateMenu != null -> CandidateBarContent.CANDIDATE_MENU
+            !schemaReady || message != null -> CandidateBarContent.STATUS_MESSAGE
+            functionPanelActive -> CandidateBarContent.FUNCTION_PANEL
+            usesFullHeightSymbolKeyboard() -> CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD
+            panelModel.candidates.isNotEmpty() -> CandidateBarContent.CANDIDATES
+            !backspacePreviewText.isNullOrEmpty() -> CandidateBarContent.BACKSPACE_HINT
+            recentClipboardSuggestion != null -> CandidateBarContent.CLIPBOARD_SUGGESTION
+            completionSuggestions.isNotEmpty() -> CandidateBarContent.COMPLETION_SUGGESTIONS
+            else -> CandidateBarContent.TOOLBAR
         }
     }
 
@@ -1198,42 +1228,43 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val gap = dp(theme.panelGapDp)
         val leftPadding = gap * 1.5f
         val centerY = barHeight / 2f
-        val panelModel = state.candidatePanel
         val message = statusMessage?.takeIf { it.isNotBlank() }
-        candidateMenu?.let { menu ->
-            drawCandidateMenu(canvas, menu)
-            return
-        }
-
-        if (!schemaReady || (message != null && panelModel.candidates.isEmpty() && panelModel.preedit.isNullOrEmpty())) {
-            textPaint.textSize = sp(theme.preeditSizeSp)
-            textPaint.color = statusMessageColor()
-            textPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText(
-                message ?: "请先在 KeyTao App 安装键道方案",
-                leftPadding,
-                centerY + textBaselineOffset(textPaint),
-                textPaint,
-            )
-            return
-        }
-
-        if (functionPanelActive) {
-            drawFunctionPanelBar(canvas, barHeight, leftPadding)
-            return
-        }
-
-        if (usesFullHeightSymbolKeyboard()) {
-            return
-        }
-
-        if (panelModel.candidates.isEmpty() && completionSuggestions.isEmpty()) {
-            if (recentClipboardSuggestion != null) {
+        when (candidateBarContent()) {
+            CandidateBarContent.CANDIDATE_MENU -> {
+                candidateMenu?.let { drawCandidateMenu(canvas, it) }
+                return
+            }
+            CandidateBarContent.STATUS_MESSAGE -> {
+                textPaint.textSize = sp(theme.preeditSizeSp)
+                textPaint.color = statusMessageColor()
+                textPaint.textAlign = Paint.Align.LEFT
+                canvas.drawText(
+                    message ?: "请先在 KeyTao App 安装键道方案",
+                    leftPadding,
+                    centerY + textBaselineOffset(textPaint),
+                    textPaint,
+                )
+                return
+            }
+            CandidateBarContent.FUNCTION_PANEL -> {
+                drawFunctionPanelBar(canvas, barHeight, leftPadding)
+                return
+            }
+            CandidateBarContent.FULL_HEIGHT_SYMBOL_KEYBOARD -> return
+            CandidateBarContent.BACKSPACE_HINT -> {
+                drawBackspaceDeletionPreview(canvas)
+                return
+            }
+            CandidateBarContent.CLIPBOARD_SUGGESTION -> {
                 drawClipboardSuggestionBar(canvas, barHeight, leftPadding)
                 return
             }
-            drawToolbar(canvas, barHeight, leftPadding)
-            return
+            CandidateBarContent.TOOLBAR -> {
+                drawToolbar(canvas, barHeight, leftPadding)
+                return
+            }
+            CandidateBarContent.CANDIDATES,
+            CandidateBarContent.COMPLETION_SUGGESTIONS -> Unit
         }
 
         val expandRect = candidateExpandRect
@@ -1319,22 +1350,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         paint.color = if (backspacePreviewPressed) {
             theme.candidateSelectedBackground.toArgb()
         } else {
-            theme.keyBackground.toArgb()
+            keyBackgroundColor()
         }
         canvas.drawRoundRect(rect, dp(candidateCornerRadiusDp()), dp(candidateCornerRadiusDp()), paint)
-        val graphemeIterator = java.text.BreakIterator.getCharacterInstance().apply {
-            setText(deleted)
-        }
-        val graphemes = buildList<String> {
-            var start = graphemeIterator.first()
-            var end = graphemeIterator.next()
-            while (end != java.text.BreakIterator.DONE) {
-                add(deleted.substring(start, end))
-                start = end
-                end = graphemeIterator.next()
-            }
-        }
-        val tail = graphemes.takeLast(18).joinToString("")
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = sp(candidateLabelSizeSp())
         textPaint.color = if (backspacePreviewPressed) {
@@ -1342,16 +1360,40 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         } else {
             theme.keyForeground.toArgb()
         }
+        val text = fittedBackspacePreviewText(
+            deleted,
+            (rect.width() - 2f * dp(KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_TEXT_HORIZONTAL_PADDING_DP))
+                .coerceAtLeast(0f),
+        )
         canvas.drawText(
-            if (backspacePreviewPendingSelection) {
-                "将删除 ${graphemes.size} 字：$tail · 抬手删除"
-            } else {
-                "已删除 ${graphemes.size} 字：$tail · 点按恢复"
-            },
+            text,
             rect.centerX(),
             rect.centerY() + textBaselineOffset(textPaint),
             textPaint,
         )
+    }
+
+    private fun fittedBackspacePreviewText(deleted: String, availableWidth: Float): String {
+        val iterator = BreakIterator.getCharacterInstance(Locale.ROOT).apply { setText(deleted) }
+        val graphemes = buildList {
+            var start = iterator.first()
+            var end = iterator.next()
+            while (end != BreakIterator.DONE) {
+                add(deleted.substring(start, end))
+                start = end
+                end = iterator.next()
+            }
+        }
+        val prefix = if (backspacePreviewPendingSelection) "将删除 ${graphemes.size} 字：" else "已删除 ${graphemes.size} 字："
+        val suffix = if (backspacePreviewPendingSelection) " · 抬手删除" else " · 点按恢复"
+        var tailCount = min(graphemes.size, KeytaoImeInteractionTuning.BACKSPACE_PREVIEW_MAX_TAIL_GRAPHEMES)
+        while (tailCount >= 0) {
+            val tail = graphemes.takeLast(tailCount).joinToString("")
+            val text = "$prefix${if (tailCount < graphemes.size) "…" else ""}$tail$suffix"
+            if (textPaint.measureText(text) <= availableWidth) return text
+            tailCount -= 1
+        }
+        return "…".takeIf { textPaint.measureText(it) <= availableWidth }.orEmpty()
     }
 
     private fun drawCandidateExpandButton(canvas: Canvas, rect: RectF) {

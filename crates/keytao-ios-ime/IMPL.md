@@ -33,6 +33,7 @@ iOS 系统键盘必须作为 containing app 内的 custom keyboard extension 发
 - iOS 会在 secure text input、phone pad / name phone pad 等场景临时替换为系统键盘；宿主 App 也可以拒绝第三方键盘。
 - extension 只能在自己的主 view 内绘制，不能像 macOS/Windows/Linux 那样在光标附近显示独立候选窗；但从 iOS 13 起 `UITextDocumentProxy` 提供 `setMarkedText(_:selectedRange:)` / `unmarkText()`，宿主输入框内的 preedit 是可用的。
 - 默认没有网络、App Group 或 containing app shared container 权限；当前模板设置 `RequestsOpenAccess=true`，用户仍必须在系统设置里显式允许“完全访问”，KeyTao 才能读取 App Group 里的方案、主题和 reload stamp。
+- iOS 16+ 会对 extension 主动读取 `UIPasteboard` 弹出系统粘贴提示，因此 iOS 不在键盘显示时读取剪贴板或自动展示粘贴建议。
 
 官方参考：
 
