@@ -335,6 +335,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         backspacePreviewPressed = false
         backspacePreviewSettled = false
         backspacePreviewPendingSelection = false
+        // The hint owns the whole bar while visible, so the toolbar/candidate
+        // rects must be rebuilt when it goes away or the bar stays empty.
+        rebuildInteractiveRects()
         invalidate()
     }
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop

@@ -1316,7 +1316,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         backspacePreviewRect = nil
         backspacePreviewPressed = false
         backspacePreviewPendingSelection = false
-        setNeedsDisplay()
+        // The hint owns the whole bar while visible, so the toolbar/candidate
+        // rects must be rebuilt when it goes away or the bar stays empty.
+        invalidateLayoutAndDisplay()
     }
 
     private func retargetKeyIfNeeded(identifier: ObjectIdentifier, at point: CGPoint) -> Bool {
