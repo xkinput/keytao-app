@@ -8,11 +8,16 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ComposeShader
+import android.graphics.LinearGradient
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.Typeface
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
@@ -161,7 +166,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
-    private enum class PanelItemStyle { DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY }
+    private enum class PanelItemStyle {
+        DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY,
+        COLOR_HUE, COLOR_SQUARE, COLOR_PREVIEW,
+    }
     private enum class ShiftState { OFF, ONCE, LOCKED }
     private enum class FunctionPanelMode { RIME, CLIPBOARD, SETTINGS }
     private object SettingsPanelLayout {
@@ -192,6 +200,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         const val footerHorizontalPaddingDp = 12f
         const val dividerHeightDp = 1f
         const val dividerAlpha = 0.40f
+        // 自定义颜色子页：色相条 / 明度饱和度方块 / 预览行，行间距 12。
+        const val pickerRowGapDp = 12f
+        const val pickerCornerRadiusDp = 8f
+        const val hueStripHeightDp = 28f
+        const val hueMarkerWidthDp = 4f
+        const val colorSquareHeightDp = 140f
+        const val colorMarkerDiameterDp = 14f
+        const val colorMarkerBorderWidthDp = 1f
+        const val colorMarkerBorderAlpha = 0.60f
+        const val previewSwatchWidthDp = 44f
+        const val previewSwatchHeightDp = 28f
+        const val customSwatchSegments = 24
+        const val chipAccentLightValue = 0.60f
     }
     private enum class CandidateBarContent {
         CANDIDATE_MENU,
@@ -319,6 +340,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var activeSettingOriginalValue: String? = null
     private var activeSettingValue: String? = null
     private var activeSettingRect: RectF? = null
+    private var settingsColorPickerOpen = false
+    private var colorPickerHsv = KeytaoHsv(0f, 0f, 0f)
+    private var colorPickerEntryAccent: String? = null
+    private var accentPreviewPending: String? = null
+    private var accentPreviewLastAppliedMs = 0L
+    private val accentPreviewRunnable = Runnable { flushAccentPreview() }
     private var pressedClipboardDelete: ClipboardDeleteRect? = null
     private var pressedToolbar: ToolbarRect? = null
     private var toolbarTouchActive = false
@@ -1094,7 +1121,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 } else {
                     null
                 }
-                beginSettingControl(event.x)
+                beginSettingControl(event.x, event.y)
                 if (!candidateTouchActive && !toolbarTouchActive && !candidateExpandPressed && !expandedTouchActive) {
                     findKey(event.x, event.y)?.let { key ->
                         beginKeyTouch(
@@ -1192,7 +1219,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
-                finishSettingControl(event.x, cancelled = true)
+                finishSettingControl(event.x, event.y, cancelled = true)
                 for (pointerIndex in 0 until event.pointerCount) {
                     touchBounceTracker.cancel(event.getPointerId(pointerIndex))
                 }
@@ -1581,7 +1608,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         chipWidth = right - left
                         itemRowHeight = dp(44f)
                     }
-                    PanelItemStyle.DEFAULT, PanelItemStyle.EMPTY -> {
+                    else -> {
                         chipWidth = right - left
                         itemRowHeight = defaultRowHeight
                     }
@@ -1630,11 +1657,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             contentBottom = max(contentBottom, rect.bottom + visualScrollY)
             if (structuredRime) {
                 when (item.style) {
-                    PanelItemStyle.SECTION, PanelItemStyle.SCHEMA, PanelItemStyle.SLIDER,
-                    PanelItemStyle.SWATCHES, PanelItemStyle.DEFAULT, PanelItemStyle.EMPTY -> {
-                        x = left
-                        y = rect.bottom + gap
-                    }
                     PanelItemStyle.OPTION -> {
                         if (x > left) {
                             x = left
@@ -1642,6 +1664,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         } else {
                             x = rect.right + gap
                         }
+                    }
+                    else -> {
+                        x = left
+                        y = rect.bottom + gap
                     }
                 }
             } else if (columns == null) {
@@ -1716,12 +1742,19 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     chipTop + dp(SettingsPanelLayout.footerChipHeightDp),
                 )
                 if (footerIndex == footerItems.lastIndex) y = rowBottom
+            } else if (item.style == PanelItemStyle.COLOR_PREVIEW) {
+                // Pinned to the panel bottom: 取消 / 确定 can never scroll out of reach.
+                rowBottom = bottom
+                rowTop = bottom - dp(SettingsPanelLayout.rowHeightDp)
+                drawingRect = RectF(left, rowTop, right, rowBottom)
             } else {
+                if (isColorPickerStyle(item.style)) y += dp(SettingsPanelLayout.pickerRowGapDp)
                 rowTop = y
-                val rowHeight = if (item.style == PanelItemStyle.SLIDER) {
-                    dp(SettingsPanelLayout.sliderRowHeightDp)
-                } else {
-                    dp(SettingsPanelLayout.rowHeightDp)
+                val rowHeight = when (item.style) {
+                    PanelItemStyle.SLIDER -> dp(SettingsPanelLayout.sliderRowHeightDp)
+                    PanelItemStyle.COLOR_HUE -> dp(SettingsPanelLayout.hueStripHeightDp)
+                    PanelItemStyle.COLOR_SQUARE -> colorSquareHeight(panelHeight)
+                    else -> dp(SettingsPanelLayout.rowHeightDp)
                 }
                 rowBottom = rowTop + rowHeight
                 drawingRect = RectF(left, rowTop, right, rowBottom)
@@ -1730,7 +1763,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
             if (drawingRect.bottom >= top && drawingRect.top <= bottom) {
                 drawingRects[item.index] = drawingRect
-                if (item.style != PanelItemStyle.SECTION && item.style != PanelItemStyle.EMPTY) {
+                if (item.style == PanelItemStyle.COLOR_PREVIEW) {
+                    // The preview row draws as one item but exposes 取消 / 确定 as separate targets.
+                    val (cancelRect, confirmRect) = colorPickerChipRects(drawingRect)
+                    nextRects += CandidateRect(
+                        index = colorPickerCancelRectIndex,
+                        rect = cancelRect,
+                        command = KeyCommand.panel("colorPickerCancel"),
+                        label = "取消",
+                        drawingRect = cancelRect,
+                    )
+                    nextRects += CandidateRect(
+                        index = colorPickerConfirmRectIndex,
+                        rect = confirmRect,
+                        command = KeyCommand.panel("colorPickerConfirm"),
+                        label = "确定",
+                        drawingRect = confirmRect,
+                    )
+                } else if (item.style != PanelItemStyle.SECTION && item.style != PanelItemStyle.EMPTY) {
                     nextRects += CandidateRect(
                         index = item.index,
                         rect = drawingRect,
@@ -1742,7 +1792,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     )
                 }
             }
-            contentBottom = max(contentBottom, rowBottom + visualScrollY)
+            if (item.style != PanelItemStyle.COLOR_PREVIEW) {
+                contentBottom = max(contentBottom, rowBottom + visualScrollY)
+            }
         }
 
         expandedCandidateContentHeight = (contentBottom - top).coerceAtLeast(panelHeight)
@@ -1754,6 +1806,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (expandedCandidateScrollY != previousScrollY) {
             rebuildExpandedCandidateLayout()
         }
+    }
+
+    /** Shrinks the SV square so hue strip + square + the pinned preview row always fit the panel. */
+    private fun colorSquareHeight(panelHeight: Float): Float {
+        val fixed = dp(SettingsPanelLayout.pickerRowGapDp) * 3f +
+            dp(SettingsPanelLayout.hueStripHeightDp) +
+            dp(SettingsPanelLayout.rowHeightDp)
+        return (panelHeight - fixed).coerceIn(0f, dp(SettingsPanelLayout.colorSquareHeightDp))
     }
 
     private fun panelColumns(mode: FunctionPanelMode): Int? {
@@ -2001,7 +2061,33 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun colorPickerPanelItems(): List<CandidateDrawItem> {
+        return listOf(
+            CandidateDrawItem(
+                index = -4900,
+                label = "色相",
+                text = "",
+                command = KeyCommand.panel("colorPickerDrag"),
+                style = PanelItemStyle.COLOR_HUE,
+            ),
+            CandidateDrawItem(
+                index = -4901,
+                label = "饱和度与亮度",
+                text = "",
+                command = KeyCommand.panel("colorPickerDrag"),
+                style = PanelItemStyle.COLOR_SQUARE,
+            ),
+            CandidateDrawItem(
+                index = -4902,
+                label = "当前颜色",
+                text = "",
+                style = PanelItemStyle.COLOR_PREVIEW,
+            ),
+        )
+    }
+
     private fun settingsPanelItems(): List<CandidateDrawItem> {
+        if (settingsColorPickerOpen) return colorPickerPanelItems()
         val scheme = theme.uiColorScheme.takeIf { it in setOf("auto", "light", "dark") } ?: "auto"
         val nextScheme = when (scheme) {
             "auto" -> "light"
@@ -2009,7 +2095,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             else -> "auto"
         }
         val currentAccent = theme.accentColor.toHex()
-        val swatches = (accentPresets + currentAccent).distinct()
+        val swatches = accentPresets + CUSTOM_SWATCH
         var index = -4000
         fun nextIndex(): Int = index--
         fun section(label: String) = CandidateDrawItem(
@@ -2280,6 +2366,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 else -> drawSettingsToggle(canvas, item, rect)
             }
             PanelItemStyle.EMPTY -> drawRimeEmptyState(canvas, item, rect)
+            PanelItemStyle.COLOR_HUE -> drawColorHueStrip(canvas, rect)
+            PanelItemStyle.COLOR_SQUARE -> drawColorSquare(canvas, rect)
+            PanelItemStyle.COLOR_PREVIEW -> drawColorPreviewRow(canvas, rect)
             else -> drawInlineCandidateOption(canvas, item, rect)
         }
         if (shouldDrawSettingsDivider(item)) {
@@ -2422,19 +2511,202 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val swatchGap = dp(SettingsPanelLayout.swatchGapDp)
         val startX = settingsSwatchStartX(rect, item.swatches.size)
         drawSettingsLabel(canvas, item.label, rect, startX)
+        val accent = theme.accentColor.toHex()
+        val accentIsPreset = accentPresets.any { it.equals(accent, ignoreCase = true) }
         item.swatches.forEachIndexed { index, value ->
-            val color = KeytaoColor.fromHex(value) ?: return@forEachIndexed
             val centerX = startX + swatchRadius + (swatchDiameter + swatchGap) * index
-            paint.style = Paint.Style.FILL
-            paint.color = color.toArgb()
-            canvas.drawCircle(centerX, rect.centerY(), swatchRadius, paint)
-            if (value.equals(theme.accentColor.toHex(), ignoreCase = true)) {
+            val custom = value == CUSTOM_SWATCH
+            val color = if (custom) {
+                KeytaoColor.fromHex(accent).takeIf { !accentIsPreset }
+            } else {
+                KeytaoColor.fromHex(value)
+            }
+            if (custom && color == null) {
+                drawRainbowSwatch(canvas, centerX, rect.centerY(), swatchRadius)
+            } else {
+                paint.style = Paint.Style.FILL
+                paint.color = (color ?: return@forEachIndexed).toArgb()
+                canvas.drawCircle(centerX, rect.centerY(), swatchRadius, paint)
+            }
+            val selected = if (custom) !accentIsPreset else value.equals(accent, ignoreCase = true)
+            if (selected) {
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = dp(SettingsPanelLayout.swatchRingWidthDp)
                 paint.color = theme.selectedLabelColor.toArgb()
                 canvas.drawCircle(centerX, rect.centerY(), swatchRadius - paint.strokeWidth / 2f, paint)
             }
         }
+    }
+
+    /** The 自定义 swatch: a 24-wedge rainbow disc standing in for a conic gradient. */
+    private fun drawRainbowSwatch(canvas: Canvas, centerX: Float, centerY: Float, radius: Float) {
+        val segments = SettingsPanelLayout.customSwatchSegments
+        val sweep = 360f / segments
+        val bounds = RectF(centerX - radius, centerY - radius, centerX + radius, centerY + radius)
+        paint.style = Paint.Style.FILL
+        for (segment in 0 until segments) {
+            val (r, g, b) = KeytaoColorMath.hsvToRgb(segment * sweep, 1f, 1f)
+            paint.color = Color.rgb(r, g, b)
+            // Overlap by 1° so anti-aliasing does not leave hairlines between wedges.
+            canvas.drawArc(bounds, segment * sweep, sweep + 1f, true, paint)
+        }
+    }
+
+    private fun drawColorHueStrip(canvas: Canvas, rect: RectF) {
+        val radius = dp(SettingsPanelLayout.pickerCornerRadiusDp)
+        paint.style = Paint.Style.FILL
+        paint.shader = LinearGradient(
+            rect.left, rect.top, rect.right, rect.top,
+            hueGradientColors(), null, Shader.TileMode.CLAMP,
+        )
+        canvas.drawRoundRect(rect, radius, radius, paint)
+        paint.shader = null
+        val markerX = rect.left + rect.width() * (colorPickerHsv.hue / 360f)
+        val half = dp(SettingsPanelLayout.hueMarkerWidthDp) / 2f
+        val marker = RectF(
+            (markerX - half).coerceIn(rect.left, rect.right - half * 2f),
+            rect.top,
+            (markerX + half).coerceIn(rect.left + half * 2f, rect.right),
+            rect.bottom,
+        )
+        drawColorMarkerFill(canvas, marker, half)
+    }
+
+    private fun drawColorSquare(canvas: Canvas, rect: RectF) {
+        val radius = dp(SettingsPanelLayout.pickerCornerRadiusDp)
+        val (hr, hg, hb) = KeytaoColorMath.hsvToRgb(colorPickerHsv.hue, 1f, 1f)
+        paint.style = Paint.Style.FILL
+        paint.shader = ComposeShader(
+            LinearGradient(
+                rect.left, rect.top, rect.right, rect.top,
+                Color.WHITE, Color.rgb(hr, hg, hb), Shader.TileMode.CLAMP,
+            ),
+            LinearGradient(
+                rect.left, rect.top, rect.left, rect.bottom,
+                Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP,
+            ),
+            PorterDuff.Mode.SRC_OVER,
+        )
+        canvas.drawRoundRect(rect, radius, radius, paint)
+        paint.shader = null
+        val markerRadius = dp(SettingsPanelLayout.colorMarkerDiameterDp) / 2f
+        val centerX = (rect.left + rect.width() * colorPickerHsv.saturation)
+            .coerceIn(rect.left + markerRadius, rect.right - markerRadius)
+        val centerY = (rect.top + rect.height() * (1f - colorPickerHsv.value))
+            .coerceIn(rect.top + markerRadius, rect.bottom - markerRadius)
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+        canvas.drawCircle(centerX, centerY, markerRadius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(SettingsPanelLayout.colorMarkerBorderWidthDp)
+        paint.color = Color.argb((255f * SettingsPanelLayout.colorMarkerBorderAlpha).roundToInt(), 0, 0, 0)
+        canvas.drawCircle(centerX, centerY, markerRadius - paint.strokeWidth / 2f, paint)
+    }
+
+    private fun drawColorMarkerFill(canvas: Canvas, marker: RectF, radius: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+        canvas.drawRoundRect(marker, radius, radius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(SettingsPanelLayout.colorMarkerBorderWidthDp)
+        paint.color = Color.argb((255f * SettingsPanelLayout.colorMarkerBorderAlpha).roundToInt(), 0, 0, 0)
+        val inset = paint.strokeWidth / 2f
+        canvas.drawRoundRect(
+            RectF(marker.left + inset, marker.top + inset, marker.right - inset, marker.bottom - inset),
+            radius, radius, paint,
+        )
+    }
+
+    private fun drawColorPreviewRow(canvas: Canvas, rect: RectF) {
+        val hex = colorPickerHex()
+        val radius = dp(SettingsPanelLayout.pickerCornerRadiusDp)
+        val swatch = RectF(
+            rect.left,
+            rect.centerY() - dp(SettingsPanelLayout.previewSwatchHeightDp) / 2f,
+            rect.left + dp(SettingsPanelLayout.previewSwatchWidthDp),
+            rect.centerY() + dp(SettingsPanelLayout.previewSwatchHeightDp) / 2f,
+        )
+        val (r, g, b) = KeytaoColorMath.hsvToRgb(colorPickerHsv.hue, colorPickerHsv.saturation, colorPickerHsv.value)
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(r, g, b)
+        canvas.drawRoundRect(swatch, radius, radius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(SettingsPanelLayout.colorMarkerBorderWidthDp)
+        paint.color = accentBorderColor(SettingsPanelLayout.dividerAlpha)
+        canvas.drawRoundRect(swatch, radius, radius, paint)
+
+        val previousTypeface = textPaint.typeface
+        textPaint.typeface = Typeface.MONOSPACE
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(SettingsPanelLayout.secondaryTextSizeSp)
+        textPaint.color = theme.commentColor.toArgb()
+        canvas.drawText(
+            hex,
+            swatch.right + dp(SettingsPanelLayout.controlGapDp),
+            rect.centerY() + textBaselineOffset(textPaint),
+            textPaint,
+        )
+        textPaint.typeface = previousTypeface
+
+        val (cancelRect, confirmRect) = colorPickerChipRects(rect)
+        drawColorPickerChip(canvas, cancelRect, "取消", accentFilled = false)
+        drawColorPickerChip(canvas, confirmRect, "确定", accentFilled = true)
+    }
+
+    private fun drawColorPickerChip(canvas: Canvas, rect: RectF, label: String, accentFilled: Boolean) {
+        val pressed = pressedExpandedCandidate?.rect == rect
+        drawSurfaceShadow(canvas, rect, pressed)
+        paint.style = Paint.Style.FILL
+        paint.color = when {
+            accentFilled -> theme.accentColor.toArgb()
+            pressed -> theme.candidateSelectedBackground.toArgb()
+            else -> theme.keyBackground.toArgb()
+        }
+        canvas.drawRoundRect(rect, dp(candidateCornerRadiusDp()), dp(candidateCornerRadiusDp()), paint)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(SettingsPanelLayout.footerTextSizeSp)
+        textPaint.color = when {
+            // A near-white or near-black accent needs the opposite label, not the panel colour.
+            accentFilled -> if (accentIsLight()) Color.BLACK else Color.WHITE
+            pressed -> theme.candidateSelectedForeground.toArgb()
+            else -> theme.keyForeground.toArgb()
+        }
+        canvas.drawText(label, rect.centerX(), rect.centerY() + textBaselineOffset(textPaint), textPaint)
+    }
+
+    private fun accentIsLight(): Boolean {
+        val hsv = KeytaoColorMath.hexToHsv(theme.accentColor.toHex()) ?: return false
+        return hsv.value > SettingsPanelLayout.chipAccentLightValue
+    }
+
+    private fun colorPickerChipRects(rect: RectF): Pair<RectF, RectF> {
+        textPaint.textSize = sp(SettingsPanelLayout.footerTextSizeSp)
+        val padding = dp(SettingsPanelLayout.footerHorizontalPaddingDp) * 2f
+        val cancelWidth = textPaint.measureText("取消") + padding
+        val confirmWidth = textPaint.measureText("确定") + padding
+        val gap = dp(SettingsPanelLayout.footerGapDp)
+        val height = dp(SettingsPanelLayout.footerChipHeightDp)
+        val top = rect.centerY() - height / 2f
+        val confirmLeft = rect.right - confirmWidth
+        val cancelLeft = confirmLeft - gap - cancelWidth
+        return RectF(cancelLeft, top, cancelLeft + cancelWidth, top + height) to
+            RectF(confirmLeft, top, rect.right, top + height)
+    }
+
+    private fun hueGradientColors(): IntArray {
+        return IntArray(7) { stop ->
+            val (r, g, b) = KeytaoColorMath.hsvToRgb(stop * 60f, 1f, 1f)
+            Color.rgb(r, g, b)
+        }
+    }
+
+    private fun colorPickerHex(): String =
+        KeytaoColorMath.hsvToHex(colorPickerHsv.hue, colorPickerHsv.saturation, colorPickerHsv.value)
+
+    private fun isColorPickerStyle(style: PanelItemStyle): Boolean {
+        return style == PanelItemStyle.COLOR_HUE ||
+            style == PanelItemStyle.COLOR_SQUARE ||
+            style == PanelItemStyle.COLOR_PREVIEW
     }
 
     private fun drawSettingsLabel(canvas: Canvas, label: String, rect: RectF, controlLeft: Float) {
@@ -2477,6 +2749,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun shouldDrawSettingsDivider(item: CandidateDrawItem): Boolean {
         if (item.style == PanelItemStyle.SECTION || isSettingsFooterItem(item)) return false
+        if (isColorPickerStyle(item.style)) return false
         val items = expandedCandidateItems()
         val index = items.indexOfFirst { it.index == item.index }
         val next = items.getOrNull(index + 1) ?: return false
@@ -2862,7 +3135,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val top = (barHeight - chipHeight) / 2f
         val backAction = ToolbarAction(
             "返回",
-            KeyCommand.panel(if (functionPanelMode == FunctionPanelMode.SETTINGS) "rime" else "close"),
+            KeyCommand.panel(
+                when {
+                    settingsColorPickerOpen -> "colorPickerCancel"
+                    functionPanelMode == FunctionPanelMode.SETTINGS -> "rime"
+                    else -> "close"
+                }
+            ),
             icon = ToolbarIcon.BACK,
         )
         val pasteAction = ToolbarAction("粘贴", KeyCommand.edit("paste"))
@@ -4240,7 +4519,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return when (functionPanelMode) {
             FunctionPanelMode.RIME -> "Rime 选项"
             FunctionPanelMode.CLIPBOARD -> "剪贴板"
-            FunctionPanelMode.SETTINGS -> "键盘设置"
+            FunctionPanelMode.SETTINGS -> if (settingsColorPickerOpen) "自定义颜色" else "键盘设置"
         }
     }
 
@@ -4360,6 +4639,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = null
+        cancelPendingAccentPreview()
         resetExpandedCandidateTouch()
         resetExpandedCandidateScroll()
         resetKeyboardScroll()
@@ -4375,6 +4657,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         functionPanelActive = true
         candidatePanelExpanded = true
         functionPanelMode = mode
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = null
+        cancelPendingAccentPreview()
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = mode == FunctionPanelMode.CLIPBOARD
@@ -4459,6 +4744,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                     rebuildInteractiveRects()
                 }
                 "toolbarPinnedBoundary" -> Unit
+                // The hue strip / SV square are drag surfaces; a plain activation does nothing.
+                "colorPickerDrag" -> Unit
+                "colorPickerConfirm" -> {
+                    val hex = colorPickerHex()
+                    flushAccentPreview(force = true)
+                    listener?.onSettingChanged("accentColor", hex)
+                    closeColorPicker()
+                }
+                "colorPickerCancel" -> {
+                    restoreColorPickerAccent()
+                    closeColorPicker()
+                }
                 else -> setKeyboardLayer("letters")
             }
             performConfiguredSelectionFeedback()
@@ -4584,12 +4881,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         activeSettingRect = null
     }
 
-    private fun beginSettingControl(x: Float) {
+    private fun beginSettingControl(x: Float, y: Float) {
         if (!functionPanelActive || functionPanelMode != FunctionPanelMode.SETTINGS) return
         val candidate = pressedExpandedCandidate ?: return
         val item = expandedCandidateItems().firstOrNull { it.index == candidate.index } ?: return
         if (item.style != PanelItemStyle.SLIDER &&
             item.style != PanelItemStyle.SWATCHES &&
+            item.style != PanelItemStyle.COLOR_HUE &&
+            item.style != PanelItemStyle.COLOR_SQUARE &&
             !isSettingsSegmentedItem(item)
         ) return
         if (isSettingsSegmentedItem(item)) {
@@ -4605,14 +4904,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             PanelItemStyle.OPTION -> theme.uiColorScheme.takeIf { it in item.swatches } ?: "auto"
             else -> null
         }
-        updateSettingControl(x)
+        updateSettingControl(x, y)
         pressedExpandedCandidate = null
     }
 
-    private fun updateSettingControl(x: Float): Boolean {
+    private fun updateSettingControl(x: Float, y: Float): Boolean {
         val item = activeSettingItem ?: return false
         val rect = activeSettingRect ?: return false
         val key = item.command?.value ?: return false
+        if (item.style == PanelItemStyle.COLOR_HUE || item.style == PanelItemStyle.COLOR_SQUARE) {
+            updateColorPickerDrag(item.style, rect, x, y)
+            return true
+        }
         val value = when (item.style) {
             PanelItemStyle.SLIDER -> {
                 val minimum = item.minimumValue ?: return false
@@ -4643,6 +4946,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         if (value == activeSettingValue) return true
         activeSettingValue = value
+        if (value == CUSTOM_SWATCH) return true
         if (key == "accentColor") {
             previewAccent(value)
         } else {
@@ -4651,16 +4955,25 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return true
     }
 
-    private fun finishSettingControl(x: Float, cancelled: Boolean): Boolean {
+    private fun finishSettingControl(x: Float, y: Float, cancelled: Boolean): Boolean {
         val item = activeSettingItem ?: return false
         val key = item.command?.value ?: return false
-        if (!cancelled) updateSettingControl(x)
-        val value = if (cancelled) activeSettingOriginalValue else activeSettingValue
+        if (!cancelled) updateSettingControl(x, y)
+        val pickerDrag = isColorPickerStyle(item.style)
+        val original = activeSettingOriginalValue
+        val value = if (cancelled) original else activeSettingValue
         activeSettingItem = null
         activeSettingOriginalValue = null
         activeSettingValue = null
         activeSettingRect = null
-        if (value != null) {
+        if (pickerDrag) {
+            // A lifted or cancelled drag keeps what the user dragged to; only 取消 / 返回 roll back.
+            flushAccentPreview(force = true)
+        } else if (value == CUSTOM_SWATCH) {
+            // `original` is the accent before this drag: previews from swatches slid over on the
+            // way to 自定义 were never persisted and must not become the picker's entry colour.
+            if (!cancelled) openColorPicker(original ?: theme.accentColor.toHex())
+        } else if (value != null) {
             if (cancelled) {
                 if (key == "accentColor") previewAccent(value) else listener?.onSettingPreview(key, value)
             } else {
@@ -4672,6 +4985,83 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         rebuildInteractiveRects()
         invalidate()
         return true
+    }
+
+    private fun updateColorPickerDrag(style: PanelItemStyle, rect: RectF, x: Float, y: Float) {
+        colorPickerHsv = if (style == PanelItemStyle.COLOR_HUE) {
+            val ratio = ((x - rect.left) / rect.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+            colorPickerHsv.copy(hue = ratio * 360f)
+        } else {
+            colorPickerHsv.copy(
+                saturation = ((x - rect.left) / rect.width().coerceAtLeast(1f)).coerceIn(0f, 1f),
+                value = 1f - ((y - rect.top) / rect.height().coerceAtLeast(1f)).coerceIn(0f, 1f),
+            )
+        }
+        throttledAccentPreview(colorPickerHex())
+        invalidate()
+    }
+
+    /**
+     * Leading-edge preview, then a trailing one so the last dragged colour always lands:
+     * the theme is re-derived at most once per [KeytaoImeInteractionTuning.COLOR_PREVIEW_THROTTLE_MS].
+     * Nothing is written to disk here — 确定 persists.
+     */
+    private fun throttledAccentPreview(hex: String) {
+        val now = SystemClock.uptimeMillis()
+        val elapsed = now - accentPreviewLastAppliedMs
+        longPressHandler.removeCallbacks(accentPreviewRunnable)
+        if (elapsed >= KeytaoImeInteractionTuning.COLOR_PREVIEW_THROTTLE_MS) {
+            accentPreviewPending = null
+            accentPreviewLastAppliedMs = now
+            previewAccent(hex)
+            return
+        }
+        accentPreviewPending = hex
+        longPressHandler.postDelayed(
+            accentPreviewRunnable,
+            KeytaoImeInteractionTuning.COLOR_PREVIEW_THROTTLE_MS - elapsed,
+        )
+    }
+
+    private fun flushAccentPreview(force: Boolean = false) {
+        longPressHandler.removeCallbacks(accentPreviewRunnable)
+        val hex = accentPreviewPending ?: if (force) colorPickerHex() else return
+        accentPreviewPending = null
+        accentPreviewLastAppliedMs = SystemClock.uptimeMillis()
+        previewAccent(hex)
+    }
+
+    private fun openColorPicker(entry: String) {
+        cancelPendingAccentPreview()
+        previewAccent(entry)
+        colorPickerEntryAccent = entry
+        colorPickerHsv = KeytaoColorMath.hexToHsv(entry) ?: KeytaoHsv(0f, 0f, 0f)
+        settingsColorPickerOpen = true
+        resetExpandedCandidateScroll()
+        invalidateExpandedCandidateItemsCache()
+        rebuildInteractiveRects()
+        invalidate()
+    }
+
+    private fun closeColorPicker() {
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = null
+        cancelPendingAccentPreview()
+        resetExpandedCandidateScroll()
+        invalidateExpandedCandidateItemsCache()
+        rebuildInteractiveRects()
+        invalidate()
+    }
+
+    private fun restoreColorPickerAccent() {
+        cancelPendingAccentPreview()
+        colorPickerEntryAccent?.let(::previewAccent)
+    }
+
+    /** Drops a trailing preview so a stale colour cannot land after the picker is gone. */
+    private fun cancelPendingAccentPreview() {
+        accentPreviewPending = null
+        longPressHandler.removeCallbacks(accentPreviewRunnable)
     }
 
     private fun serializeSettingNumber(value: Float): String {
@@ -5073,7 +5463,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             candidateExpandPressed -> invalidate()
             expandedTouchActive -> {
                 if (activeSettingItem != null) {
-                    updateSettingControl(x)
+                    updateSettingControl(x, y)
                     invalidate()
                     return
                 }
@@ -5229,7 +5619,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (expandedTouchActive) {
             if (activeSettingItem != null) {
                 expandedTouchActive = false
-                return finishSettingControl(x, cancelled = false)
+                return finishSettingControl(x, y, cancelled = false)
             }
             val candidate = pressedExpandedCandidate
             val clipboardDelete = pressedClipboardDelete
@@ -6226,6 +6616,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         private const val maxRecentEmojiCount = 32
         private val softAccentPunctuation = setOf("，", "。", ",", ".")
         private val accentPresets = listOf("#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6")
+        /** Sentinel occupying the last 主题色 swatch: opens the custom colour picker instead of applying a colour. */
+        private const val CUSTOM_SWATCH = "custom"
+        private const val colorPickerCancelRectIndex = -4903
+        private const val colorPickerConfirmRectIndex = -4904
 
         /** Virtual accessibility node id ranges, one block per hit-test list. */
         private const val accessibilityExpandNodeId = 1

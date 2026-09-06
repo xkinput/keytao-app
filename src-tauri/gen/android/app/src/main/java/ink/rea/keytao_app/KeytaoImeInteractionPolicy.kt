@@ -102,6 +102,7 @@ internal object KeytaoImeInteractionTuning {
     const val BACKSPACE_PREVIEW_TEXT_HORIZONTAL_PADDING_DP = 8f
     const val BACKSPACE_PREVIEW_MAX_TAIL_GRAPHEMES = 18
     const val CLIPBOARD_SUGGESTION_WINDOW_MS = 5 * 60 * 1_000L
+    const val COLOR_PREVIEW_THROTTLE_MS = 50L
 
     private val slowBackspace = BackspaceRepeatProfile(
         initialDelayMs = 500L,
@@ -423,3 +424,67 @@ private val punctuationTypes = setOf(
     Character.FINAL_QUOTE_PUNCTUATION.toInt(),
     Character.OTHER_PUNCTUATION.toInt(),
 )
+
+internal data class KeytaoHsv(val hue: Float, val saturation: Float, val value: Float)
+
+/** The only colour maths the in-keyboard 主题色 picker uses: HSV ⇄ sRGB plus `#RRGGBB` text. */
+internal object KeytaoColorMath {
+    fun normalizeHue(hue: Float): Float {
+        if (!hue.isFinite()) return 0f
+        val wrapped = hue % 360f
+        return if (wrapped < 0f) wrapped + 360f else wrapped
+    }
+
+    fun hsvToRgb(hue: Float, saturation: Float, value: Float): Triple<Int, Int, Int> {
+        val h = normalizeHue(hue)
+        val s = saturation.coerceIn(0f, 1f)
+        val v = value.coerceIn(0f, 1f)
+        val chroma = v * s
+        val sector = h / 60f
+        val x = chroma * (1f - kotlin.math.abs(sector % 2f - 1f))
+        val (r, g, b) = when (sector.toInt()) {
+            0 -> Triple(chroma, x, 0f)
+            1 -> Triple(x, chroma, 0f)
+            2 -> Triple(0f, chroma, x)
+            3 -> Triple(0f, x, chroma)
+            4 -> Triple(x, 0f, chroma)
+            else -> Triple(chroma, 0f, x)
+        }
+        val m = v - chroma
+        return Triple(channel(r + m), channel(g + m), channel(b + m))
+    }
+
+    fun rgbToHsv(red: Int, green: Int, blue: Int): KeytaoHsv {
+        val r = red.coerceIn(0, 255) / 255f
+        val g = green.coerceIn(0, 255) / 255f
+        val b = blue.coerceIn(0, 255) / 255f
+        val maxChannel = maxOf(r, g, b)
+        val minChannel = minOf(r, g, b)
+        val delta = maxChannel - minChannel
+        val hue = when {
+            delta == 0f -> 0f
+            maxChannel == r -> 60f * (((g - b) / delta) % 6f)
+            maxChannel == g -> 60f * ((b - r) / delta + 2f)
+            else -> 60f * ((r - g) / delta + 4f)
+        }
+        val saturation = if (maxChannel == 0f) 0f else delta / maxChannel
+        return KeytaoHsv(normalizeHue(hue), saturation, maxChannel)
+    }
+
+    fun hsvToHex(hue: Float, saturation: Float, value: Float): String {
+        val (r, g, b) = hsvToRgb(hue, saturation, value)
+        return "#%02X%02X%02X".format(Locale.ROOT, r, g, b)
+    }
+
+    fun hexToHsv(value: String): KeytaoHsv? {
+        val hex = value.trim().removePrefix("#")
+        if (hex.length != 6 || hex.any { it.digitToIntOrNull(16) == null }) return null
+        return rgbToHsv(
+            hex.substring(0, 2).toInt(16),
+            hex.substring(2, 4).toInt(16),
+            hex.substring(4, 6).toInt(16),
+        )
+    }
+
+    private fun channel(value: Float): Int = kotlin.math.round(value * 255f).toInt().coerceIn(0, 255)
+}

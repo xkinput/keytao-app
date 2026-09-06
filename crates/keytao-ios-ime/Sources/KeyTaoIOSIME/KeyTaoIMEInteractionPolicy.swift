@@ -98,6 +98,7 @@ public enum KeyTaoIMEInteractionTuning {
     static let backspacePreviewVerticalInset: CGFloat = 6
     static let backspacePreviewTextHorizontalPadding: CGFloat = 8
     static let backspacePreviewMaxTailGraphemes = 18
+    public static let colorPreviewThrottleMs: TimeInterval = 0.05
 
     private static let slowBackspace = KeyTaoBackspaceRepeatProfile(
         initialDelayMs: 500,
@@ -447,4 +448,89 @@ private func keyTaoIsLatin(_ value: UInt32) -> Bool {
     (0x0041...0x005A).contains(value) ||
         (0x0061...0x007A).contains(value) ||
         (0x00C0...0x024F).contains(value)
+}
+
+public struct KeyTaoHSV: Equatable {
+    public var hue: CGFloat
+    public var saturation: CGFloat
+    public var value: CGFloat
+
+    public init(hue: CGFloat, saturation: CGFloat, value: CGFloat) {
+        self.hue = hue
+        self.saturation = saturation
+        self.value = value
+    }
+}
+
+/// The only colour maths the in-keyboard 主题色 picker uses: HSV ⇄ sRGB plus `#RRGGBB` text.
+public enum KeyTaoColorMath {
+    public static func normalizeHue(_ hue: CGFloat) -> CGFloat {
+        guard hue.isFinite else { return 0 }
+        let wrapped = hue.truncatingRemainder(dividingBy: 360)
+        return wrapped < 0 ? wrapped + 360 : wrapped
+    }
+
+    public static func rgb(hue: CGFloat, saturation: CGFloat, value: CGFloat) -> (red: Int, green: Int, blue: Int) {
+        let h = normalizeHue(hue)
+        let s = min(max(saturation, 0), 1)
+        let v = min(max(value, 0), 1)
+        let chroma = v * s
+        let sector = h / 60
+        let x = chroma * (1 - abs(sector.truncatingRemainder(dividingBy: 2) - 1))
+        let base: (CGFloat, CGFloat, CGFloat)
+        switch Int(sector) {
+        case 0: base = (chroma, x, 0)
+        case 1: base = (x, chroma, 0)
+        case 2: base = (0, chroma, x)
+        case 3: base = (0, x, chroma)
+        case 4: base = (x, 0, chroma)
+        default: base = (chroma, 0, x)
+        }
+        let m = v - chroma
+        return (channel(base.0 + m), channel(base.1 + m), channel(base.2 + m))
+    }
+
+    public static func hsv(red: Int, green: Int, blue: Int) -> KeyTaoHSV {
+        let r = CGFloat(min(max(red, 0), 255)) / 255
+        let g = CGFloat(min(max(green, 0), 255)) / 255
+        let b = CGFloat(min(max(blue, 0), 255)) / 255
+        let maxChannel = max(r, max(g, b))
+        let minChannel = min(r, min(g, b))
+        let delta = maxChannel - minChannel
+        let hue: CGFloat
+        if delta == 0 {
+            hue = 0
+        } else if maxChannel == r {
+            hue = 60 * (((g - b) / delta).truncatingRemainder(dividingBy: 6))
+        } else if maxChannel == g {
+            hue = 60 * ((b - r) / delta + 2)
+        } else {
+            hue = 60 * ((r - g) / delta + 4)
+        }
+        return KeyTaoHSV(
+            hue: normalizeHue(hue),
+            saturation: maxChannel == 0 ? 0 : delta / maxChannel,
+            value: maxChannel
+        )
+    }
+
+    public static func hex(hue: CGFloat, saturation: CGFloat, value: CGFloat) -> String {
+        let color = rgb(hue: hue, saturation: saturation, value: value)
+        return String(format: "#%02X%02X%02X", color.red, color.green, color.blue)
+    }
+
+    public static func hsv(fromHex value: String) -> KeyTaoHSV? {
+        var hex = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hex.hasPrefix("#") { hex.removeFirst() }
+        guard hex.count == 6, hex.allSatisfy(\.isHexDigit), let packed = UInt32(hex, radix: 16) else { return nil }
+        return hsv(
+            red: Int((packed >> 16) & 0xFF),
+            green: Int((packed >> 8) & 0xFF),
+            blue: Int(packed & 0xFF)
+        )
+    }
+
+    private static func channel(_ value: CGFloat) -> Int {
+        min(max(Int((value * 255).rounded()), 0), 255)
+    }
 }

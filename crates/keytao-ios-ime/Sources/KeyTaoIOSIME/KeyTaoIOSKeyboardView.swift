@@ -48,6 +48,9 @@ private enum KeyTaoPanelItemStyle {
     case slider
     case swatches
     case empty
+    case colorHue
+    case colorSquare
+    case colorPreview
 }
 
 private enum KeyTaoToolbarIcon {
@@ -89,6 +92,19 @@ private enum SettingsPanelLayout {
     static let footerHorizontalPadding: CGFloat = 12
     static let dividerHeight: CGFloat = 1
     static let dividerAlpha: CGFloat = 0.40
+    // 自定义颜色子页：色相条 / 明度饱和度方块 / 预览行，行间距 12。
+    static let pickerRowGap: CGFloat = 12
+    static let pickerCornerRadius: CGFloat = 8
+    static let hueStripHeight: CGFloat = 28
+    static let hueMarkerWidth: CGFloat = 4
+    static let colorSquareHeight: CGFloat = 140
+    static let colorMarkerDiameter: CGFloat = 14
+    static let colorMarkerBorderWidth: CGFloat = 1
+    static let colorMarkerBorderAlpha: CGFloat = 0.60
+    static let previewSwatchWidth: CGFloat = 44
+    static let previewSwatchHeight: CGFloat = 28
+    static let customSwatchSegments = 24
+    static let chipAccentLightValue: CGFloat = 0.60
 }
 
 final class KeyTaoIOSKeyboardView: UIView {
@@ -332,6 +348,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var activeSettingRect: CGRect?
     private var activeSettingOriginalValue: String?
     private var activeSettingValue: String?
+    private var settingsColorPickerOpen = false
+    private var colorPickerHSV = KeyTaoHSV(hue: 0, saturation: 0, value: 0)
+    private var colorPickerEntryAccent: String?
+    private var accentPreviewPending: String?
+    private var accentPreviewLastApplied: TimeInterval = 0
+    private var accentPreviewWorkItem: DispatchWorkItem?
     private var candidateExpandPressed = false
     private var gestureTouchStart: CGPoint = .zero
     private var backspacePreviewText: String?
@@ -714,7 +736,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 touchBounceTracker.cancel(pointerID: pointerSlot)
             }
             if identifier == candidateGestureTouchIdentifier {
-                _ = finishSettingControl(at: 0, cancelled: true)
+                _ = finishSettingControl(at: .zero, cancelled: true)
                 settleVerticalScrollAfterCancellation()
                 clearCandidateOrPanelTouchState()
                 continue
@@ -881,7 +903,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             if pressedClipboardDelete == nil {
                 pressedCandidate = expandedCandidateRects.first { $0.rect.contains(point) }
             }
-            beginSettingControl(at: point.x)
+            beginSettingControl(at: point)
         }
         return candidateExpandPressed ||
             pressedToolbar != nil ||
@@ -987,7 +1009,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         if expandedTouchActive {
             if activeSettingItem != nil {
-                _ = updateSettingControl(at: point.x)
+                _ = updateSettingControl(at: point)
                 setNeedsDisplay()
                 return
             }
@@ -1089,7 +1111,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         }
         if activeSettingItem != nil {
-            _ = finishSettingControl(at: point.x, cancelled: false)
+            _ = finishSettingControl(at: point, cancelled: false)
             clearCandidateOrPanelTouchState()
             return
         }
@@ -1127,12 +1149,14 @@ final class KeyTaoIOSKeyboardView: UIView {
         clearCandidateOrPanelTouchState()
     }
 
-    private func beginSettingControl(at x: CGFloat) {
+    private func beginSettingControl(at point: CGPoint) {
+        let x = point.x
         guard functionPanelActive,
               functionPanelMode == .settings,
               let candidate = pressedCandidate,
               let item = expandedCandidateItems().first(where: { $0.identifierIndex == candidate.identifierIndex }),
-              item.style == .slider || item.style == .swatches || isSettingsSegmentedItem(item) else { return }
+              item.style == .slider || item.style == .swatches || item.style == .colorHue
+                || item.style == .colorSquare || isSettingsSegmentedItem(item) else { return }
         if isSettingsSegmentedItem(item) {
             let segmentLeft = (candidate.drawingRect ?? candidate.rect).maxX
                 - SettingsPanelLayout.segmentWidth * CGFloat(item.swatches.count)
@@ -1150,15 +1174,20 @@ final class KeyTaoIOSKeyboardView: UIView {
         default:
             activeSettingOriginalValue = nil
         }
-        _ = updateSettingControl(at: x)
+        _ = updateSettingControl(at: point)
         pressedCandidate = nil
     }
 
     @discardableResult
-    private func updateSettingControl(at x: CGFloat) -> Bool {
+    private func updateSettingControl(at point: CGPoint) -> Bool {
         guard let item = activeSettingItem,
               let rect = activeSettingRect,
               let key = item.command?.value else { return false }
+        let x = point.x
+        if item.style == .colorHue || item.style == .colorSquare {
+            updateColorPickerDrag(style: item.style, rect: rect, point: point)
+            return true
+        }
         let value: String
         switch item.style {
         case .slider:
@@ -1194,6 +1223,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         guard value != activeSettingValue else { return true }
         activeSettingValue = value
+        if value == Self.customSwatch { return true }
         if key == "accentColor" {
             previewAccent(value)
         } else {
@@ -1203,16 +1233,27 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     @discardableResult
-    private func finishSettingControl(at x: CGFloat, cancelled: Bool) -> Bool {
+    private func finishSettingControl(at point: CGPoint, cancelled: Bool) -> Bool {
         guard let item = activeSettingItem,
               let key = item.command?.value else { return false }
-        if !cancelled { _ = updateSettingControl(at: x) }
-        let value = cancelled ? activeSettingOriginalValue : activeSettingValue
+        if !cancelled { _ = updateSettingControl(at: point) }
+        let pickerDrag = isColorPickerStyle(item.style)
+        let original = activeSettingOriginalValue
+        let value = cancelled ? original : activeSettingValue
         activeSettingItem = nil
         activeSettingRect = nil
         activeSettingOriginalValue = nil
         activeSettingValue = nil
-        if let value {
+        if pickerDrag {
+            // A lifted or cancelled drag keeps what the user dragged to; only 取消 / 返回 roll back.
+            flushAccentPreview(force: true)
+        } else if value == Self.customSwatch {
+            // `original` is the accent before this drag: previews from swatches slid over on the
+            // way to 自定义 were never persisted and must not become the picker's entry colour.
+            if !cancelled {
+                openColorPicker(original ?? (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex)
+            }
+        } else if let value {
             if cancelled {
                 if key == "accentColor" {
                     previewAccent(value)
@@ -1226,6 +1267,80 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
         invalidateLayoutAndDisplay()
         return true
+    }
+
+    private func updateColorPickerDrag(style: KeyTaoPanelItemStyle, rect: CGRect, point: CGPoint) {
+        if style == .colorHue {
+            let ratio = min(max((point.x - rect.minX) / max(rect.width, 1), 0), 1)
+            colorPickerHSV.hue = ratio * 360
+        } else {
+            colorPickerHSV.saturation = min(max((point.x - rect.minX) / max(rect.width, 1), 0), 1)
+            colorPickerHSV.value = 1 - min(max((point.y - rect.minY) / max(rect.height, 1), 0), 1)
+        }
+        throttledAccentPreview(colorPickerHex())
+        setNeedsDisplay()
+    }
+
+    /// Leading-edge preview, then a trailing one so the last dragged colour always lands: the
+    /// theme is re-derived at most once per `colorPreviewThrottleMs`. Nothing is written to
+    /// disk here — 确定 persists.
+    private func throttledAccentPreview(_ hex: String) {
+        let now = CACurrentMediaTime()
+        let elapsed = now - accentPreviewLastApplied
+        accentPreviewWorkItem?.cancel()
+        accentPreviewWorkItem = nil
+        if elapsed >= KeyTaoIMEInteractionTuning.colorPreviewThrottleMs {
+            accentPreviewPending = nil
+            accentPreviewLastApplied = now
+            previewAccent(hex)
+            return
+        }
+        accentPreviewPending = hex
+        let work = DispatchWorkItem { [weak self] in self?.flushAccentPreview() }
+        accentPreviewWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + (KeyTaoIMEInteractionTuning.colorPreviewThrottleMs - elapsed),
+            execute: work
+        )
+    }
+
+    private func flushAccentPreview(force: Bool = false) {
+        accentPreviewWorkItem?.cancel()
+        accentPreviewWorkItem = nil
+        guard let hex = accentPreviewPending ?? (force ? colorPickerHex() : nil) else { return }
+        accentPreviewPending = nil
+        accentPreviewLastApplied = CACurrentMediaTime()
+        previewAccent(hex)
+    }
+
+    private func openColorPicker(_ entry: String) {
+        cancelPendingAccentPreview()
+        previewAccent(entry)
+        colorPickerEntryAccent = entry
+        colorPickerHSV = KeyTaoColorMath.hsv(fromHex: entry) ?? KeyTaoHSV(hue: 0, saturation: 0, value: 0)
+        settingsColorPickerOpen = true
+        resetExpandedCandidateScroll()
+        invalidateLayoutAndDisplay()
+    }
+
+    private func closeColorPicker() {
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = nil
+        cancelPendingAccentPreview()
+        resetExpandedCandidateScroll()
+        invalidateLayoutAndDisplay()
+    }
+
+    private func restoreColorPickerAccent() {
+        cancelPendingAccentPreview()
+        if let accent = colorPickerEntryAccent { previewAccent(accent) }
+    }
+
+    /// Drops a trailing preview so a stale colour cannot land after the picker is gone.
+    private func cancelPendingAccentPreview() {
+        accentPreviewPending = nil
+        accentPreviewWorkItem?.cancel()
+        accentPreviewWorkItem = nil
     }
 
     private func serializeSettingNumber(_ value: CGFloat) -> String {
@@ -2270,6 +2385,12 @@ final class KeyTaoIOSKeyboardView: UIView {
             }
         case .empty:
             drawRimeEmptyState(item, rect: rect)
+        case .colorHue:
+            drawColorHueStrip(rect)
+        case .colorSquare:
+            drawColorSquare(rect)
+        case .colorPreview:
+            drawColorPreviewRow(rect)
         default:
             drawInlineCandidateOption(item, rect: rect)
         }
@@ -2438,17 +2559,28 @@ final class KeyTaoIOSKeyboardView: UIView {
         let radius = SettingsPanelLayout.swatchDiameter / 2
         let startX = settingsSwatchStartX(rect: rect, count: item.swatches.count)
         drawSettingsLabel(item.label, rect: rect, controlLeft: startX)
-        let selected = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        let accent = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
+        let accentIsPreset = Self.accentPresets.contains { $0.caseInsensitiveCompare(accent) == .orderedSame }
         for (index, value) in item.swatches.enumerated() {
-            guard let color = KeyTaoThemeColor.from(hex: value) else { continue }
             let center = CGPoint(
                 x: startX + radius
                     + (SettingsPanelLayout.swatchDiameter + SettingsPanelLayout.swatchGap) * CGFloat(index),
                 y: rect.midY
             )
-            color.uiColor.setFill()
-            UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true).fill()
-            if value.caseInsensitiveCompare(selected) == .orderedSame {
+            let custom = value == Self.customSwatch
+            let color = custom
+                ? (accentIsPreset ? nil : KeyTaoThemeColor.from(hex: accent))
+                : KeyTaoThemeColor.from(hex: value)
+            if let color {
+                color.uiColor.setFill()
+                UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true).fill()
+            } else if custom {
+                drawRainbowSwatch(center: center, radius: radius)
+            } else {
+                continue
+            }
+            let selected = custom ? !accentIsPreset : value.caseInsensitiveCompare(accent) == .orderedSame
+            if selected {
                 let ring = UIBezierPath(
                     arcCenter: center,
                     radius: radius - SettingsPanelLayout.swatchRingWidth / 2,
@@ -2461,6 +2593,228 @@ final class KeyTaoIOSKeyboardView: UIView {
                 ring.stroke()
             }
         }
+    }
+
+    /// The 自定义 swatch: a 24-wedge rainbow disc standing in for a conic gradient.
+    private func drawRainbowSwatch(center: CGPoint, radius: CGFloat) {
+        let segments = SettingsPanelLayout.customSwatchSegments
+        let sweep = CGFloat.pi * 2 / CGFloat(segments)
+        for segment in 0..<segments {
+            let start = sweep * CGFloat(segment)
+            let color = KeyTaoColorMath.rgb(hue: CGFloat(segment) * 360 / CGFloat(segments), saturation: 1, value: 1)
+            let wedge = UIBezierPath()
+            wedge.move(to: center)
+            // Overlap by one degree so anti-aliasing does not leave hairlines between wedges.
+            wedge.addArc(
+                withCenter: center,
+                radius: radius,
+                startAngle: start,
+                endAngle: start + sweep + .pi / 180,
+                clockwise: true
+            )
+            wedge.close()
+            uiColor(red: color.red, green: color.green, blue: color.blue).setFill()
+            wedge.fill()
+        }
+    }
+
+    private func drawColorHueStrip(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        let clip = UIBezierPath(roundedRect: rect, cornerRadius: SettingsPanelLayout.pickerCornerRadius)
+        context.saveGState()
+        clip.addClip()
+        let stops = (0...6).map { stop -> CGColor in
+            let color = KeyTaoColorMath.rgb(hue: CGFloat(stop) * 60, saturation: 1, value: 1)
+            return uiColor(red: color.red, green: color.green, blue: color.blue).cgColor
+        }
+        if let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: stops as CFArray,
+            locations: [0, 1.0 / 6, 2.0 / 6, 3.0 / 6, 4.0 / 6, 5.0 / 6, 1]
+        ) {
+            context.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: rect.minX, y: rect.midY),
+                end: CGPoint(x: rect.maxX, y: rect.midY),
+                options: []
+            )
+        }
+        context.restoreGState()
+        let half = SettingsPanelLayout.hueMarkerWidth / 2
+        let markerX = rect.minX + rect.width * (colorPickerHSV.hue / 360)
+        let marker = CGRect(
+            x: min(max(markerX - half, rect.minX), rect.maxX - half * 2),
+            y: rect.minY,
+            width: SettingsPanelLayout.hueMarkerWidth,
+            height: rect.height
+        )
+        let markerInset = SettingsPanelLayout.colorMarkerBorderWidth / 2
+        drawColorMarker(
+            fill: UIBezierPath(roundedRect: marker, cornerRadius: half),
+            stroke: UIBezierPath(
+                roundedRect: marker.insetBy(dx: markerInset, dy: markerInset),
+                cornerRadius: half
+            )
+        )
+    }
+
+    private func drawColorSquare(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        let space = CGColorSpaceCreateDeviceRGB()
+        context.saveGState()
+        UIBezierPath(roundedRect: rect, cornerRadius: SettingsPanelLayout.pickerCornerRadius).addClip()
+        let hue = KeyTaoColorMath.rgb(hue: colorPickerHSV.hue, saturation: 1, value: 1)
+        if let saturationGradient = CGGradient(
+            colorsSpace: space,
+            colors: [
+                UIColor.white.cgColor,
+                uiColor(red: hue.red, green: hue.green, blue: hue.blue).cgColor,
+            ] as CFArray,
+            locations: [0, 1]
+        ) {
+            context.drawLinearGradient(
+                saturationGradient,
+                start: CGPoint(x: rect.minX, y: rect.midY),
+                end: CGPoint(x: rect.maxX, y: rect.midY),
+                options: []
+            )
+        }
+        if let valueGradient = CGGradient(
+            colorsSpace: space,
+            colors: [
+                UIColor.black.withAlphaComponent(0).cgColor,
+                UIColor.black.cgColor,
+            ] as CFArray,
+            locations: [0, 1]
+        ) {
+            context.drawLinearGradient(
+                valueGradient,
+                start: CGPoint(x: rect.midX, y: rect.minY),
+                end: CGPoint(x: rect.midX, y: rect.maxY),
+                options: []
+            )
+        }
+        context.restoreGState()
+        let markerRadius = SettingsPanelLayout.colorMarkerDiameter / 2
+        let center = CGPoint(
+            x: min(max(rect.minX + rect.width * colorPickerHSV.saturation, rect.minX + markerRadius), rect.maxX - markerRadius),
+            y: min(max(rect.minY + rect.height * (1 - colorPickerHSV.value), rect.minY + markerRadius), rect.maxY - markerRadius)
+        )
+        drawColorMarker(
+            fill: UIBezierPath(arcCenter: center, radius: markerRadius, startAngle: 0, endAngle: .pi * 2, clockwise: true),
+            stroke: UIBezierPath(
+                arcCenter: center,
+                radius: markerRadius - SettingsPanelLayout.colorMarkerBorderWidth / 2,
+                startAngle: 0,
+                endAngle: .pi * 2,
+                clockwise: true
+            )
+        )
+    }
+
+    private func drawColorMarker(fill: UIBezierPath, stroke: UIBezierPath) {
+        UIColor.white.setFill()
+        fill.fill()
+        stroke.lineWidth = SettingsPanelLayout.colorMarkerBorderWidth
+        UIColor.black.withAlphaComponent(SettingsPanelLayout.colorMarkerBorderAlpha).setStroke()
+        stroke.stroke()
+    }
+
+    private func drawColorPreviewRow(_ rect: CGRect) {
+        let swatch = CGRect(
+            x: rect.minX,
+            y: rect.midY - SettingsPanelLayout.previewSwatchHeight / 2,
+            width: SettingsPanelLayout.previewSwatchWidth,
+            height: SettingsPanelLayout.previewSwatchHeight
+        )
+        let color = KeyTaoColorMath.rgb(
+            hue: colorPickerHSV.hue,
+            saturation: colorPickerHSV.saturation,
+            value: colorPickerHSV.value
+        )
+        let swatchPath = UIBezierPath(roundedRect: swatch, cornerRadius: SettingsPanelLayout.pickerCornerRadius)
+        uiColor(red: color.red, green: color.green, blue: color.blue).setFill()
+        swatchPath.fill()
+        swatchPath.lineWidth = SettingsPanelLayout.colorMarkerBorderWidth
+        accentBorderColor(SettingsPanelLayout.dividerAlpha).setStroke()
+        swatchPath.stroke()
+
+        let font = UIFont.monospacedSystemFont(ofSize: SettingsPanelLayout.secondaryTextSize, weight: .regular)
+        let hex = colorPickerHex()
+        let size = hex.size(withAttributes: [.font: font])
+        hex.draw(
+            at: CGPoint(x: swatch.maxX + SettingsPanelLayout.controlGap, y: rect.midY - size.height / 2),
+            withAttributes: [.font: font, .foregroundColor: theme.candidate.commentColor.uiColor]
+        )
+
+        let chips = colorPickerChipRects(rect)
+        drawColorPickerChip(chips.cancel, label: "取消", accentFilled: false)
+        drawColorPickerChip(chips.confirm, label: "确定", accentFilled: true)
+    }
+
+    private func drawColorPickerChip(_ rect: CGRect, label: String, accentFilled: Bool) {
+        let pressed = pressedCandidate?.rect == rect
+        drawSurfaceShadow(rect, pressed: pressed, cornerRadius: candidateCornerRadius())
+        let fill: UIColor
+        let foreground: UIColor
+        if accentFilled {
+            let accent = theme.ui.accentColor ?? theme.candidate.selectedLabelColor
+            fill = accent.uiColor
+            // A near-white or near-black accent needs the opposite label, not the panel colour.
+            foreground = accentIsLight(accent.hex) ? .black : .white
+        } else {
+            fill = pressed ? theme.candidate.selectedBackground.uiColor : keyBackgroundColor()
+            foreground = pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor
+        }
+        fill.setFill()
+        UIBezierPath(roundedRect: rect, cornerRadius: candidateCornerRadius()).fill()
+        drawTruncatedText(
+            label,
+            in: rect.insetBy(dx: SettingsPanelLayout.footerHorizontalPadding, dy: 0),
+            color: foreground,
+            size: SettingsPanelLayout.footerTextSize,
+            alignment: .center
+        )
+    }
+
+    private func accentIsLight(_ hex: String) -> Bool {
+        guard let hsv = KeyTaoColorMath.hsv(fromHex: hex) else { return false }
+        return hsv.value > SettingsPanelLayout.chipAccentLightValue
+    }
+
+    private func colorPickerChipRects(_ rect: CGRect) -> (cancel: CGRect, confirm: CGRect) {
+        let padding = SettingsPanelLayout.footerHorizontalPadding * 2
+        let cancelWidth = textWidth("取消", size: SettingsPanelLayout.footerTextSize) + padding
+        let confirmWidth = textWidth("确定", size: SettingsPanelLayout.footerTextSize) + padding
+        let height = SettingsPanelLayout.footerChipHeight
+        let top = rect.midY - height / 2
+        let confirmLeft = rect.maxX - confirmWidth
+        let cancelLeft = confirmLeft - SettingsPanelLayout.footerGap - cancelWidth
+        return (
+            CGRect(x: cancelLeft, y: top, width: cancelWidth, height: height),
+            CGRect(x: confirmLeft, y: top, width: confirmWidth, height: height)
+        )
+    }
+
+    private func uiColor(red: Int, green: Int, blue: Int) -> UIColor {
+        UIColor(
+            red: CGFloat(red) / 255,
+            green: CGFloat(green) / 255,
+            blue: CGFloat(blue) / 255,
+            alpha: 1
+        )
+    }
+
+    private func colorPickerHex() -> String {
+        KeyTaoColorMath.hex(
+            hue: colorPickerHSV.hue,
+            saturation: colorPickerHSV.saturation,
+            value: colorPickerHSV.value
+        )
+    }
+
+    private func isColorPickerStyle(_ style: KeyTaoPanelItemStyle) -> Bool {
+        style == .colorHue || style == .colorSquare || style == .colorPreview
     }
 
     private func drawSettingsLabel(_ label: String, rect: CGRect, controlLeft: CGFloat) {
@@ -2507,6 +2861,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func shouldDrawSettingsDivider(after item: CandidateDrawItem) -> Bool {
         guard item.style != .section, !isSettingsFooterItem(item) else { return false }
+        guard !isColorPickerStyle(item.style) else { return false }
         let items = expandedCandidateItems()
         guard let index = items.firstIndex(where: { $0.identifierIndex == item.identifierIndex }),
               items.indices.contains(index + 1) else { return false }
@@ -3668,7 +4023,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     }
                     width = right - left
                     itemRowHeight = 44
-                case .standard, .empty:
+                default:
                     width = right - left
                     itemRowHeight = defaultRowHeight
                 }
@@ -3733,9 +4088,6 @@ final class KeyTaoIOSKeyboardView: UIView {
             contentBottom = max(contentBottom, drawingRect.maxY + visualScrollY)
             if structuredRime {
                 switch item.style {
-                case .section, .schema, .slider, .swatches, .standard, .empty:
-                    x = left
-                    y = drawingRect.maxY + gap
                 case .option:
                     if x > left {
                         x = left
@@ -3743,6 +4095,9 @@ final class KeyTaoIOSKeyboardView: UIView {
                     } else {
                         x = drawingRect.maxX + gap
                     }
+                default:
+                    x = left
+                    y = drawingRect.maxY + gap
                 }
             } else if columns == nil {
                 x += width + gap
@@ -3819,11 +4174,21 @@ final class KeyTaoIOSKeyboardView: UIView {
                     height: SettingsPanelLayout.footerChipHeight
                 )
                 if footerIndex == footerItems.indices.last { y = rowBottom }
+            } else if item.style == .colorPreview {
+                // Pinned to the panel bottom: 取消 / 确定 can never scroll out of reach.
+                rowBottom = bottom
+                rowTop = bottom - SettingsPanelLayout.rowHeight
+                drawingRect = CGRect(x: left, y: rowTop, width: right - left, height: SettingsPanelLayout.rowHeight)
             } else {
+                if isColorPickerStyle(item.style) { y += SettingsPanelLayout.pickerRowGap }
                 rowTop = y
-                let rowHeight = item.style == .slider
-                    ? SettingsPanelLayout.sliderRowHeight
-                    : SettingsPanelLayout.rowHeight
+                let rowHeight: CGFloat
+                switch item.style {
+                case .slider: rowHeight = SettingsPanelLayout.sliderRowHeight
+                case .colorHue: rowHeight = SettingsPanelLayout.hueStripHeight
+                case .colorSquare: rowHeight = colorSquareHeight()
+                default: rowHeight = SettingsPanelLayout.rowHeight
+                }
                 rowBottom = rowTop + rowHeight
                 drawingRect = CGRect(x: left, y: rowTop, width: right - left, height: rowHeight)
                 y = rowBottom
@@ -3832,6 +4197,38 @@ final class KeyTaoIOSKeyboardView: UIView {
             if drawingRect.maxY >= top, drawingRect.minY <= bottom {
                 if item.style == .section || item.style == .empty {
                     sectionRects[item.identifierIndex] = drawingRect
+                } else if item.style == .colorPreview {
+                    // The preview row draws as one item but exposes 取消 / 确定 as separate targets.
+                    sectionRects[item.identifierIndex] = drawingRect
+                    let chips = colorPickerChipRects(drawingRect)
+                    rects.append(
+                        CandidateRect(
+                            identifierIndex: Self.colorPickerCancelRectIndex,
+                            selectIndex: Self.colorPickerCancelRectIndex,
+                            rect: chips.cancel,
+                            global: false,
+                            command: .panel("colorPickerCancel"),
+                            drawingRect: chips.cancel,
+                            pageIndex: Self.colorPickerCancelRectIndex,
+                            label: "取消",
+                            comment: nil,
+                            clipboardText: nil
+                        )
+                    )
+                    rects.append(
+                        CandidateRect(
+                            identifierIndex: Self.colorPickerConfirmRectIndex,
+                            selectIndex: Self.colorPickerConfirmRectIndex,
+                            rect: chips.confirm,
+                            global: false,
+                            command: .panel("colorPickerConfirm"),
+                            drawingRect: chips.confirm,
+                            pageIndex: Self.colorPickerConfirmRectIndex,
+                            label: "确定",
+                            comment: nil,
+                            clipboardText: nil
+                        )
+                    )
                 } else {
                     rects.append(
                         CandidateRect(
@@ -3849,7 +4246,9 @@ final class KeyTaoIOSKeyboardView: UIView {
                     )
                 }
             }
-            contentBottom = max(contentBottom, rowBottom + visualScrollY)
+            if item.style != .colorPreview {
+                contentBottom = max(contentBottom, rowBottom + visualScrollY)
+            }
         }
 
         expandedCandidateContentHeight = max(contentBottom - top, expandedCandidatePanelHeight())
@@ -3861,6 +4260,14 @@ final class KeyTaoIOSKeyboardView: UIView {
             return expandedCandidateLayout()
         }
         return rects
+    }
+
+    /// Shrinks the SV square so hue strip + square + the pinned preview row always fit the panel.
+    private func colorSquareHeight() -> CGFloat {
+        let fixed = SettingsPanelLayout.pickerRowGap * 3
+            + SettingsPanelLayout.hueStripHeight
+            + SettingsPanelLayout.rowHeight
+        return min(max(expandedCandidatePanelHeight() - fixed, 0), SettingsPanelLayout.colorSquareHeight)
     }
 
     private func panelColumns(for mode: KeyTaoFunctionPanelMode) -> Int? {
@@ -3880,9 +4287,15 @@ final class KeyTaoIOSKeyboardView: UIView {
             let leftPadding = theme.panel.gap * 1.5
             let chipHeight = min(34, barHeight - 12)
             let top = (barHeight - chipHeight) / 2
+            let backCommand: String
+            if settingsColorPickerOpen {
+                backCommand = "colorPickerCancel"
+            } else {
+                backCommand = functionPanelMode == .settings ? "rime" : "close"
+            }
             let backAction = ToolbarAction(
                 label: "返回",
-                command: .panel(functionPanelMode == .settings ? "rime" : "close"),
+                command: .panel(backCommand),
                 icon: .back
             )
             let pasteAction = ToolbarAction(label: "粘贴", command: .edit("paste"))
@@ -4254,13 +4667,30 @@ final class KeyTaoIOSKeyboardView: UIView {
         }
     }
 
+    private func colorPickerPanelItems() -> [CandidateDrawItem] {
+        let dragCommand = KeyTaoKeyCommand.panel("colorPickerDrag")
+        return [
+            CandidateDrawItem(
+                identifierIndex: -4900, selectIndex: -4900, label: "色相", text: "",
+                comment: nil, selected: false, global: false, command: dragCommand, style: .colorHue
+            ),
+            CandidateDrawItem(
+                identifierIndex: -4901, selectIndex: -4901, label: "饱和度与亮度", text: "",
+                comment: nil, selected: false, global: false, command: dragCommand, style: .colorSquare
+            ),
+            CandidateDrawItem(
+                identifierIndex: -4902, selectIndex: -4902, label: "当前颜色", text: "",
+                comment: nil, selected: false, global: false, command: nil, style: .colorPreview
+            ),
+        ]
+    }
+
     private func settingsPanelItems() -> [CandidateDrawItem] {
+        if settingsColorPickerOpen { return colorPickerPanelItems() }
         let scheme = ["auto", "light", "dark"].contains(theme.ui.colorScheme) ? theme.ui.colorScheme : "auto"
         let nextScheme = scheme == "auto" ? "light" : (scheme == "light" ? "dark" : "auto")
         let currentAccent = (theme.ui.accentColor ?? theme.candidate.selectedLabelColor).hex
-        let swatches = (Self.accentPresets + [currentAccent]).reduce(into: [String]()) { result, value in
-            if !result.contains(value) { result.append(value) }
-        }
+        let swatches = Self.accentPresets + [Self.customSwatch]
         var index = -4000
         func nextIndex() -> Int { defer { index -= 1 }; return index }
         func section(_ label: String) -> CandidateDrawItem {
@@ -4867,6 +5297,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                 rebuildInteractiveRects()
             case "toolbarPinnedBoundary":
                 break
+            // The hue strip / SV square are drag surfaces; a plain activation does nothing.
+            case "colorPickerDrag":
+                break
+            case "colorPickerConfirm":
+                let hex = colorPickerHex()
+                flushAccentPreview(force: true)
+                delegate?.keyboardView(self, persistSetting: "accentColor", value: hex)
+                closeColorPicker()
+            case "colorPickerCancel":
+                restoreColorPickerAccent()
+                closeColorPicker()
             default:
                 setLayer("letters")
             }
@@ -4908,6 +5349,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         candidatePanelExpanded = false
         functionPanelActive = false
         functionPanelMode = .rime
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = nil
+        cancelPendingAccentPreview()
         layerMode = .letters
         rimeOptionsState = .empty
         rimeOptionsLoading = false
@@ -4937,6 +5381,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         functionPanelActive = true
         candidatePanelExpanded = true
         functionPanelMode = mode
+        settingsColorPickerOpen = false
+        colorPickerEntryAccent = nil
+        cancelPendingAccentPreview()
         expandedCandidates = []
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = mode == .clipboard
@@ -5323,7 +5770,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         case .clipboard:
             return "剪贴板"
         case .settings:
-            return "键盘设置"
+            return settingsColorPickerOpen ? "自定义颜色" : "键盘设置"
         }
     }
 
@@ -6479,6 +6926,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     private static let maxRecentEmojiCount = 32
     private static let softAccentPunctuation: Set<String> = ["，", "。", ",", "."]
     private static let accentPresets = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6"]
+    /// Sentinel occupying the last 主题色 swatch: opens the custom colour picker instead of applying a colour.
+    private static let customSwatch = "custom"
+    private static let colorPickerCancelRectIndex = -4903
+    private static let colorPickerConfirmRectIndex = -4904
     private static let keyPressAnimationDuration: TimeInterval = 0.08
     private static let scrollRubberBandFactor: CGFloat = 0.28
     private static let scrollOverscrollDistance: CGFloat = 18

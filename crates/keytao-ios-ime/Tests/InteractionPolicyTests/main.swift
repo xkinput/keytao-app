@@ -200,6 +200,52 @@ expect(doubleSpaceTracker.shouldReplaceSpace(nowMs: 6_101, contextBefore: "word 
 expect(doubleSpaceTracker.shouldReplaceSpace(nowMs: 7_000, contextBefore: "word", enabled: false, hasComposition: false), false, "disabled setting stays inactive")
 expect(doubleSpaceTracker.shouldReplaceSpace(nowMs: 7_100, contextBefore: "word ", enabled: true, hasComposition: true), false, "composition stays inactive")
 
+for hex in ["#3B73D9", "#0F9F8F", "#D87A32", "#8B5CF6", "#FFFFFF", "#000000"] {
+    guard let hsv = KeyTaoColorMath.hsv(fromHex: hex) else {
+        failures.append("\(hex) failed to parse")
+        continue
+    }
+    expect(
+        KeyTaoColorMath.hex(hue: hsv.hue, saturation: hsv.saturation, value: hsv.value),
+        hex,
+        "\(hex) survives a hex to HSV round trip"
+    )
+}
+
+if let lowercase = KeyTaoColorMath.hsv(fromHex: "#3b73d9") {
+    expect(
+        KeyTaoColorMath.hex(hue: lowercase.hue, saturation: lowercase.saturation, value: lowercase.value),
+        "#3B73D9",
+        "lowercase hex round trips to the canonical uppercase form"
+    )
+} else {
+    failures.append("#3b73d9 failed to parse")
+}
+
+expect(KeyTaoColorMath.normalizeHue(360), 0, "360 wraps to 0")
+expect(KeyTaoColorMath.normalizeHue(-10), 350, "negative hue wraps forward")
+expect(KeyTaoColorMath.normalizeHue(730), 10, "hue wraps repeatedly")
+expect(
+    KeyTaoColorMath.hex(hue: 360, saturation: 1, value: 1),
+    KeyTaoColorMath.hex(hue: 0, saturation: 1, value: 1),
+    "wrapped hue produces the same colour"
+)
+
+expect(KeyTaoColorMath.hex(hue: 210, saturation: 0, value: 0.5019608), "#808080", "zero saturation is grey")
+expect(KeyTaoColorMath.hex(hue: 210, saturation: 1, value: 0), "#000000", "zero value is black")
+expect(KeyTaoColorMath.hsv(red: 128, green: 128, blue: 128).saturation, 0, "grey has no saturation")
+expect(KeyTaoColorMath.hsv(red: 0, green: 0, blue: 0).value, 0, "black has no value")
+
+expect(KeyTaoColorMath.hex(hue: 0, saturation: 1, value: 1), "#FF0000", "hue 0 is red")
+expect(KeyTaoColorMath.hex(hue: 120, saturation: 1, value: 1), "#00FF00", "hue 120 is green")
+expect(KeyTaoColorMath.hex(hue: 240, saturation: 1, value: 1), "#0000FF", "hue 240 is blue")
+expect(KeyTaoColorMath.hsv(red: 0, green: 0, blue: 255).hue, 240, "blue reads back as hue 240")
+
+expect(KeyTaoColorMath.hsv(fromHex: "#12345") == nil, true, "short hex is rejected")
+expect(KeyTaoColorMath.hsv(fromHex: "#GGGGGG") == nil, true, "non-hex digits are rejected")
+expect(KeyTaoColorMath.hsv(fromHex: "custom") == nil, true, "the custom swatch sentinel is not a colour")
+expect(KeyTaoColorMath.hsv(fromHex: "+12345") == nil, true, "a signed literal is not a colour")
+
 if failures.isEmpty {
     print("interaction policy tests passed")
 } else {
