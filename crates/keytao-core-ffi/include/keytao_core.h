@@ -81,6 +81,24 @@ typedef struct KeytaoState {
 } KeytaoState;
 
 /**
+ * Whether a runtime log level is enabled (0 = off, 1 = info, 2 = verbose).
+ * Invalid levels are disabled.
+ */
+bool keytao_log_enabled(int32_t level);
+
+/**
+ * Record a runtime event. `dur_ms` may be NaN to omit the duration;
+ * `kv_json` may be null, otherwise it must be a UTF-8 JSON object.
+ * `cat` and `ev` must be non-null, null-terminated UTF-8 strings.
+ * Fields must contain only metadata, never typed, candidate or committed text.
+ */
+void keytao_log_event(int32_t level,
+                      const char *cat,
+                      const char *ev,
+                      double dur_ms,
+                      const char *kv_json);
+
+/**
  * Initialize the Rime runtime. Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.

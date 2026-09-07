@@ -285,13 +285,39 @@ fn current_ui_capabilities() -> keytao_theme::UiCapabilities {
 /// input method means the frontend disappears mid-typing, so every exported
 /// function funnels through here.
 fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
+    #[cfg(not(target_os = "android"))]
+    let started = (!matches!(name, "keytao_log_enabled" | "keytao_log_event")
+        && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
+    .then(std::time::Instant::now);
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
-        Ok(value) => value,
+        Ok(value) => {
+            #[cfg(not(target_os = "android"))]
+            if let Some(started) = started {
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    keytao_core::rt_log!(
+                        keytao_core::runtime_log::Level::Verbose,
+                        "rime",
+                        "ffi",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        fn = name
+                    );
+                }));
+            }
+            value
+        }
         Err(payload) => {
-            log_error(format_args!(
-                "{name}: panicked: {}",
-                panic_message(&payload)
-            ));
+            let message = panic_message(&payload);
+            #[cfg(not(target_os = "android"))]
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                keytao_core::rt_log!(
+                    keytao_core::runtime_log::Level::Info,
+                    "error",
+                    "ffi_panic",
+                    fn = name,
+                    msg = message
+                );
+            }));
+            log_error(format_args!("{name}: panicked: {message}"));
             default
         }
     }
@@ -325,6 +351,68 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 
 // ── Public C API ──────────────────────────────────────────────────────────────
 
+/// Whether a runtime log level is enabled (0 = off, 1 = info, 2 = verbose).
+/// Invalid levels are disabled.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_log_enabled(level: i32) -> bool {
+    guard("keytao_log_enabled", false, || {
+        let level = match level {
+            1 => keytao_core::runtime_log::Level::Info,
+            2 => keytao_core::runtime_log::Level::Verbose,
+            _ => return false,
+        };
+        keytao_core::runtime_log::enabled(level)
+    })
+}
+
+/// Record a runtime event. `dur_ms` may be NaN to omit the duration;
+/// `kv_json` may be null, otherwise it must be a UTF-8 JSON object.
+/// `cat` and `ev` must be non-null, null-terminated UTF-8 strings.
+/// Fields must contain only metadata, never typed, candidate or committed text.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_log_event(
+    level: i32,
+    cat: *const c_char,
+    ev: *const c_char,
+    dur_ms: f64,
+    kv_json: *const c_char,
+) {
+    guard("keytao_log_event", (), || {
+        let level = match level {
+            1 => keytao_core::runtime_log::Level::Info,
+            2 => keytao_core::runtime_log::Level::Verbose,
+            _ => return,
+        };
+        if !keytao_core::runtime_log::enabled(level) {
+            return;
+        }
+        let (Ok(cat), Ok(ev)) = (c_string_arg(cat, "cat"), c_string_arg(ev, "ev")) else {
+            return;
+        };
+        let kv = if kv_json.is_null() {
+            serde_json::Map::new()
+        } else {
+            let Ok(json) = c_string_arg(kv_json, "kv_json") else {
+                return;
+            };
+            let Ok(kv) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            else {
+                return;
+            };
+            kv
+        };
+        keytao_core::runtime_log::log_event(
+            level,
+            &cat,
+            &ev,
+            (!dur_ms.is_nan()).then_some(dur_ms),
+            kv,
+        );
+    });
+}
+
 /// Initialize the Rime runtime. Must be called once before any other function.
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.
@@ -352,6 +440,10 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
                 return false;
             }
         };
+        #[cfg(target_os = "ios")]
+        keytao_core::runtime_log::init(Path::new(&user), "ios-ime");
+        #[cfg(not(target_os = "ios"))]
+        keytao_core::runtime_log::init_for_engine(Path::new(&user));
 
         let _serialized = lock_ignore_poison(&INIT_LOCK);
         let dirs = InitDirs {

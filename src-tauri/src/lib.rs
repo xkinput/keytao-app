@@ -3602,17 +3602,42 @@ mod android_log {
 /// JNI export funnels through here.
 #[cfg(target_os = "android")]
 fn android_jni_guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
+    let started = (!matches!(name, "nativeLogEnabled" | "nativeLogEvent")
+        && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
+    .then(std::time::Instant::now);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
-        Ok(value) => value,
+        Ok(value) => {
+            if let Some(started) = started {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    keytao_core::rt_log!(
+                        keytao_core::runtime_log::Level::Verbose,
+                        "rime",
+                        "jni",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        fn = name
+                    );
+                }));
+            }
+            value
+        }
         Err(payload) => {
-            let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
-                message
-            } else if let Some(message) = payload.downcast_ref::<String>() {
-                message.as_str()
-            } else {
-                "unknown panic"
-            };
-            android_log::error(&format!("{name}: panicked: {message}"));
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
+                    message
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.as_str()
+                } else {
+                    "unknown panic"
+                };
+                keytao_core::rt_log!(
+                    keytao_core::runtime_log::Level::Info,
+                    "error",
+                    "jni_panic",
+                    fn = name,
+                    msg = message
+                );
+                android_log::error(&format!("{name}: panicked: {message}"));
+            }));
             default
         }
     }
@@ -3895,6 +3920,71 @@ fn android_session<'a>(session: jlong) -> Option<&'a keytao_core::ImeRuntimeSess
         return None;
     }
     Some(unsafe { &*(session as *mut keytao_core::ImeRuntimeSession) })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogEnabled(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    level: jint,
+) -> jboolean {
+    android_jni_guard("nativeLogEnabled", 0, || {
+        let level = match level {
+            1 => keytao_core::runtime_log::Level::Info,
+            2 => keytao_core::runtime_log::Level::Verbose,
+            _ => return 0,
+        };
+        keytao_core::runtime_log::enabled(level) as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogEvent(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    level: jint,
+    cat: JString<'_>,
+    ev: JString<'_>,
+    dur_ms: jni::sys::jdouble,
+    kv_json: JString<'_>,
+) {
+    android_jni_guard("nativeLogEvent", (), || {
+        let level = match level {
+            1 => keytao_core::runtime_log::Level::Info,
+            2 => keytao_core::runtime_log::Level::Verbose,
+            _ => return,
+        };
+        if !keytao_core::runtime_log::enabled(level) {
+            return;
+        }
+        let Some(cat) = optional_jni_text(&mut env, cat) else {
+            return;
+        };
+        let Some(ev) = optional_jni_text(&mut env, ev) else {
+            return;
+        };
+        let kv = if kv_json.is_null() {
+            serde_json::Map::new()
+        } else {
+            let Some(json) = optional_jni_raw_text(&mut env, kv_json) else {
+                return;
+            };
+            let Ok(kv) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            else {
+                return;
+            };
+            kv
+        };
+        keytao_core::runtime_log::log_event(
+            level,
+            &cat,
+            &ev,
+            (!dur_ms.is_nan()).then_some(dur_ms),
+            kv,
+        );
+    });
 }
 
 #[cfg(target_os = "android")]

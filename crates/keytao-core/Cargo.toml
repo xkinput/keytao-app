@@ -7,6 +7,7 @@ description = "Platform-agnostic librime engine wrapper for KeyTao IME"
 [dependencies]
 serde = { workspace = true }
 serde_yaml = "0.9"
+serde_json = "1"
 dirs = { workspace = true }
 
 # The Rust librime API is linked by native platform IME frontends.

@@ -2,16 +2,19 @@
 //! Every platform frontend (Tauri app, ibus engine, macOS IMKit, Windows TSF)
 //! links against this crate as its rime back-end.
 
+pub mod runtime_log;
+
+use runtime_log::Level;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// A poisoned lock only means some other caller panicked while holding it; the
@@ -488,6 +491,9 @@ mod desktop {
     }
 
     pub fn setup_only(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
+        runtime_log::init_for_engine(Path::new(&user_data_dir));
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        crate::rt_log!(Level::Info, "rime", "setup_start");
         let initialized_now = {
             let _rime = rime_api_lock();
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
@@ -501,6 +507,15 @@ mod desktop {
         };
         if initialized_now {
             initialize_user_dictionary_cache(Path::new(&user_data_dir));
+        }
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "setup_end",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                initialized = initialized_now
+            );
         }
         Ok(())
     }
@@ -560,47 +575,71 @@ mod desktop {
     /// exhausting the app process while producing the same build artifacts.
     /// Blocking — run inside `tokio::task::spawn_blocking` when called from async code.
     pub fn deploy(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
-        let log_dir = rime_log_dir(Path::new(&user_data_dir));
+        runtime_log::init_for_engine(Path::new(&user_data_dir));
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let schema_count = started
+            .map(|_| parse_schema_list_from_dir(Path::new(&user_data_dir)).len())
+            .unwrap_or_default();
+        crate::rt_log!(
+            Level::Info,
+            "rime",
+            "deploy_start",
+            schema_count = schema_count
+        );
+        let result = (|| {
+            let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+            let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
-        #[cfg(target_os = "windows")]
-        patch_windows_lua_compatibility(Path::new(&user_data_dir))?;
+            #[cfg(target_os = "windows")]
+            patch_windows_lua_compatibility(Path::new(&user_data_dir))?;
 
-        #[cfg(target_os = "android")]
-        {
-            setup_only(user_data_dir.clone(), shared_data_dir)?;
-            return deploy_android_staged(&user_data_dir).map_err(|error| {
-                format!(
-                    "Rime deployment failed: {error}. See librime logs in {}",
-                    log_dir.display()
-                )
-            });
-        }
-
-        #[cfg(not(target_os = "android"))]
-        {
-            setup_only(user_data_dir.clone(), shared_data_dir)?;
-            if !full_deploy_and_wait() {
-                return Err(format!(
-                    "Rime deployment failed. See librime logs in {}",
-                    log_dir.display()
-                ));
+            #[cfg(target_os = "android")]
+            {
+                setup_only(user_data_dir.clone(), shared_data_dir)?;
+                return deploy_android_staged(&user_data_dir).map_err(|error| {
+                    format!(
+                        "Rime deployment failed: {error}. See librime logs in {}",
+                        log_dir.display()
+                    )
+                });
             }
 
-            let user_dir = Path::new(&user_data_dir);
-            deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
-                format!(
-                    "Rime dependency deployment failed: {error}. See librime logs in {}",
-                    log_dir.display()
-                )
-            })?;
-            validate_deployed_schemas(user_dir).map_err(|error| {
-                format!(
-                    "Rime deployment validation failed: {error}. See librime logs in {}",
-                    log_dir.display()
-                )
-            })
+            #[cfg(not(target_os = "android"))]
+            {
+                setup_only(user_data_dir.clone(), shared_data_dir)?;
+                if !full_deploy_and_wait() {
+                    return Err(format!(
+                        "Rime deployment failed. See librime logs in {}",
+                        log_dir.display()
+                    ));
+                }
+
+                let user_dir = Path::new(&user_data_dir);
+                deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
+                    format!(
+                        "Rime dependency deployment failed: {error}. See librime logs in {}",
+                        log_dir.display()
+                    )
+                })?;
+                validate_deployed_schemas(user_dir).map_err(|error| {
+                    format!(
+                        "Rime deployment validation failed: {error}. See librime logs in {}",
+                        log_dir.display()
+                    )
+                })
+            }
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "deploy_end",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                schema_count = schema_count,
+                ok = result.is_ok()
+            );
         }
+        result
     }
 
     #[cfg(target_os = "android")]
@@ -608,6 +647,7 @@ mod desktop {
         user_data_dir: String,
         shared_data_dir: String,
     ) -> Result<Vec<String>, String> {
+        runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         deploy_config_file("default.yaml", "config_version")?;
@@ -625,6 +665,7 @@ mod desktop {
         shared_data_dir: String,
         schema_id: String,
     ) -> Result<Vec<String>, String> {
+        runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
@@ -1564,14 +1605,51 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
+            static HISTOGRAM: runtime_log::DurationHistogram =
+                runtime_log::DurationHistogram::new();
+            static CALLS: AtomicU32 = AtomicU32::new(0);
+            let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
             let state = extract_state_with_commit(&self.session);
             self.remember_committed_user_phrase(&state);
-            KeyProcessResult {
+            drop(_rime);
+            let result = KeyProcessResult {
                 state,
                 accepted: matches!(status, KeyStatus::Accept),
+            };
+            if let Some(started) = started {
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                HISTOGRAM.record(ms);
+                if CALLS
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1)
+                    .is_multiple_of(100)
+                {
+                    HISTOGRAM.drain_into("process_key");
+                }
+                if ms > 50.0 {
+                    crate::rt_log!(
+                        Level::Info,
+                        "rime",
+                        "slow_key",
+                        dur_ms = ms,
+                        accepted = result.accepted,
+                        preedit_len = result.state.preedit.len(),
+                        cand = result.state.candidates.len()
+                    );
+                }
+                crate::rt_log!(
+                    Level::Verbose,
+                    "rime",
+                    "process_key",
+                    dur_ms = ms,
+                    accepted = result.accepted,
+                    preedit_len = result.state.preedit.len(),
+                    cand = result.state.candidates.len()
+                );
             }
+            result
         }
 
         /// Read-only snapshot: `RimeGetCommit` consumes the pending commit, so a
@@ -1592,6 +1670,7 @@ mod desktop {
         /// own API, so that selection does not depend on `menu/select_keys`
         /// being long enough or on the schema's alphabet.
         pub fn select_candidate_on_page(&self, index: usize) -> ImeState {
+            let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; the entry point is optional in
             // older ABIs, so a missing pointer falls back to the select key.
@@ -1605,6 +1684,17 @@ mod desktop {
             }
             let state = extract_state_with_commit(&self.session);
             self.remember_committed_user_phrase(&state);
+            drop(_rime);
+            if let Some(started) = started {
+                crate::rt_log!(
+                    Level::Info,
+                    "rime",
+                    "select_candidate",
+                    dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    index = index,
+                    global = false
+                );
+            }
             state
         }
 
@@ -1760,6 +1850,7 @@ mod desktop {
         }
 
         pub fn select_candidate_global(&self, index: usize) -> ImeState {
+            let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; the pointer is checked.
             unsafe {
@@ -1770,6 +1861,17 @@ mod desktop {
             }
             let state = extract_state_with_commit(&self.session);
             self.remember_committed_user_phrase(&state);
+            drop(_rime);
+            if let Some(started) = started {
+                crate::rt_log!(
+                    Level::Info,
+                    "rime",
+                    "select_candidate",
+                    dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    index = index,
+                    global = true
+                );
+            }
             state
         }
 
@@ -1839,6 +1941,7 @@ mod desktop {
         /// Commit whatever librime currently holds, the way a frontend has to
         /// finish a composition when the input context goes away.
         pub fn commit_composition(&self) -> ImeState {
+            let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; a missing pointer falls back to
             // handing Return to the schema's editor.
@@ -1851,7 +1954,18 @@ mod desktop {
                 self.session
                     .process_key(key_event(key_policy::XK_RETURN, 0));
             }
-            extract_state_with_commit(&self.session)
+            let state = extract_state_with_commit(&self.session);
+            drop(_rime);
+            if let Some(started) = started {
+                crate::rt_log!(
+                    Level::Info,
+                    "rime",
+                    "commit",
+                    dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    committed_len = state.committed.as_ref().map_or(0, String::len)
+                );
+            }
+            state
         }
 
         /// The raw input string librime is composing from, before any editor or
@@ -3316,83 +3430,133 @@ impl ImeRuntime {
     /// already running for is a no-op instead of a second deployment.
     pub fn init(&self) -> Result<(), String> {
         let dirs = self.data_dirs()?;
-        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
-        if initialized.as_ref() == Some(&dirs) {
-            return Ok(());
-        }
+        runtime_log::init_for_engine(&dirs.user);
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let mut deployed = false;
+        let result = (|| {
+            let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            if initialized.as_ref() == Some(&dirs) {
+                return Ok(());
+            }
 
-        PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
-        deploy(
-            dirs.user.to_string_lossy().into_owned(),
-            dirs.shared.clone(),
-        )?;
-        *initialized = Some(dirs);
-        Ok(())
+            PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
+            deploy(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            )?;
+            deployed = true;
+            *initialized = Some(dirs);
+            Ok(())
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "init",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                deployed = deployed,
+                ok = result.is_ok()
+            );
+        }
+        result
     }
 
     pub fn init_without_deploy(&self) -> Result<(), String> {
         let dirs = self.data_dirs()?;
-        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
-        if initialized.as_ref() == Some(&dirs) {
-            return Ok(());
-        }
+        runtime_log::init_for_engine(&dirs.user);
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let result = (|| {
+            let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            if initialized.as_ref() == Some(&dirs) {
+                return Ok(());
+            }
 
-        let user_dir = dirs.user.clone();
-        let schema_state = schema_install_state(&user_dir);
-        if !schema_state.installed {
-            return Err(
-                "no KeyTao scheme is installed; install one in the KeyTao app first".into(),
-            );
-        }
-        if !schema_state.deployed {
-            return Err(
-                "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
-            );
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if windows_rime_build_repair_required(&user_dir) {
+            let user_dir = dirs.user.clone();
+            let schema_state = schema_install_state(&user_dir);
+            if !schema_state.installed {
                 return Err(
-                    "Windows RIME build repair is pending; open the KeyTao app to finish it".into(),
+                    "no KeyTao scheme is installed; install one in the KeyTao app first".into(),
                 );
             }
-            patch_windows_lua_compatibility(&user_dir)?;
-        }
+            if !schema_state.deployed {
+                return Err(
+                    "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
+                );
+            }
 
-        PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
-        setup_only(
-            dirs.user.to_string_lossy().into_owned(),
-            dirs.shared.clone(),
-        )?;
-        *initialized = Some(dirs);
-        Ok(())
+            #[cfg(target_os = "windows")]
+            {
+                if windows_rime_build_repair_required(&user_dir) {
+                    return Err(
+                        "Windows RIME build repair is pending; open the KeyTao app to finish it"
+                            .into(),
+                    );
+                }
+                patch_windows_lua_compatibility(&user_dir)?;
+            }
+
+            PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
+            setup_only(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            )?;
+            *initialized = Some(dirs);
+            Ok(())
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "init",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                deployed = false,
+                ok = result.is_ok()
+            );
+        }
+        result
     }
 
     pub fn reload_without_deploy(&self) -> Result<(), String> {
         let dirs = self.data_dirs()?;
-        let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
-        let schema_state = schema_install_state(&dirs.user);
-        if !schema_state.deployed {
-            return Err(
-                "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
+        runtime_log::init_for_engine(&dirs.user);
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let result = (|| {
+            let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            let schema_state = schema_install_state(&dirs.user);
+            if !schema_state.deployed {
+                return Err(
+                    "the installed KeyTao scheme has not been deployed in the KeyTao app".into(),
+                );
+            }
+
+            let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+            PROCESS_RIME.drop_live_engines();
+            let result = desktop::reinitialize_rime(
+                dirs.user.to_string_lossy().into_owned(),
+                dirs.shared.clone(),
+            );
+            PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
+            *initialized = result.is_ok().then_some(dirs);
+            drop(barrier);
+            result
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "reload",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                deployed = false,
+                ok = result.is_ok()
             );
         }
-
-        let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
-        PROCESS_RIME.drop_live_engines();
-        let result = desktop::reinitialize_rime(
-            dirs.user.to_string_lossy().into_owned(),
-            dirs.shared.clone(),
-        );
-        PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-        *initialized = result.is_ok().then_some(dirs);
-        drop(barrier);
         result
     }
 
     pub fn reload(&self) -> Result<(), String> {
         let dirs = self.data_dirs()?;
+        runtime_log::init_for_engine(&dirs.user);
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
 
         let barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
@@ -3415,6 +3579,16 @@ impl ImeRuntime {
         PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
         *initialized = result.is_ok().then(|| dirs.clone());
         drop(barrier);
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "reload",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                deployed = result.is_ok(),
+                ok = result.is_ok()
+            );
+        }
         result
     }
 
@@ -3435,34 +3609,48 @@ impl ImeRuntime {
 
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
         let dirs = self.data_dirs()?;
-        if lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() != Some(&dirs) {
-            self.init_without_deploy()?;
-        }
+        runtime_log::init_for_engine(&dirs.user);
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let result = (|| {
+            if lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() != Some(&dirs) {
+                self.init_without_deploy()?;
+            }
 
-        // Every teardown takes `initialized` before the reload barrier, so
-        // holding it here keeps librime from being finalized between the check
-        // and the session that is about to be created against it.
-        let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
-        if initialized.as_ref() != Some(&dirs) {
-            return Err("librime is running for other data directories".into());
+            // Every teardown takes `initialized` before the reload barrier, so
+            // holding it here keeps librime from being finalized between the check
+            // and the session that is about to be created against it.
+            let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            if initialized.as_ref() != Some(&dirs) {
+                return Err("librime is running for other data directories".into());
+            }
+            let barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
+            let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
+            let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
+                engine: Some(Engine::new_with_user_data_dir(
+                    self.0.user_data_dir.as_deref(),
+                )?),
+                generation,
+                carried_ascii_mode: None,
+                policy: InputContextPolicy::default(),
+            }));
+            PROCESS_RIME.register(&inner);
+            drop(barrier);
+            drop(initialized);
+            Ok(ImeRuntimeSession {
+                shared: self.0.clone(),
+                inner,
+            })
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "create_session",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                ok = result.is_ok()
+            );
         }
-        let barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
-        let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
-        let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
-            engine: Some(Engine::new_with_user_data_dir(
-                self.0.user_data_dir.as_deref(),
-            )?),
-            generation,
-            carried_ascii_mode: None,
-            policy: InputContextPolicy::default(),
-        }));
-        PROCESS_RIME.register(&inner);
-        drop(barrier);
-        drop(initialized);
-        Ok(ImeRuntimeSession {
-            shared: self.0.clone(),
-            inner,
-        })
+        result
     }
 }
 
@@ -3696,19 +3884,32 @@ impl ImeRuntimeSession {
         if inner.generation == current && inner.engine.is_some() {
             return Ok(());
         }
-        // Drop the previous engine before creating the replacement: librime
-        // hands a new session the cached config and dictionaries as long as any
-        // other session still references them.
-        if let Some(engine) = inner.engine.take() {
-            inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+        let started = runtime_log::enabled(Level::Info).then(Instant::now);
+        let result = (|| {
+            // Drop the previous engine before creating the replacement: librime
+            // hands a new session the cached config and dictionaries as long as any
+            // other session still references them.
+            if let Some(engine) = inner.engine.take() {
+                inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+            }
+            let engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
+            if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
+                engine.apply_ascii_mode(ascii_mode);
+            }
+            inner.engine = Some(engine);
+            inner.generation = current;
+            Ok(())
+        })();
+        if let Some(started) = started {
+            crate::rt_log!(
+                Level::Info,
+                "rime",
+                "engine_rebuild",
+                dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                ok = result.is_ok()
+            );
         }
-        let engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
-        if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
-            engine.apply_ascii_mode(ascii_mode);
-        }
-        inner.engine = Some(engine);
-        inner.generation = current;
-        Ok(())
+        result
     }
 }
 

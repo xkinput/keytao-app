@@ -11,6 +11,18 @@ object KeytaoNativeBridge {
         true
     }.getOrDefault(false)
 
+    inline fun rtLog(
+        level: Int,
+        cat: String,
+        ev: String,
+        durMs: Double = Double.NaN,
+        noinline build: (JSONObject.() -> Unit)? = null,
+    ) {
+        if (!loaded || !runCatching { nativeLogEnabled(level) }.getOrDefault(false)) return
+        val kv = runCatching { build?.let { JSONObject().apply(it).toString() } }.getOrNull()
+        runCatching { nativeLogEvent(level, cat, ev, durMs, kv) }
+    }
+
     fun resolveThemeJson(
         defaultThemePath: String?,
         userThemePath: String?,
@@ -268,6 +280,10 @@ object KeytaoNativeBridge {
             runCatching { nativeSetAsciiMode(session, enabled) }.getOrNull()
         )
     }
+
+    external fun nativeLogEnabled(level: Int): Boolean
+
+    external fun nativeLogEvent(level: Int, cat: String, ev: String, durMs: Double, kvJson: String?)
 
     external fun nativeResolveThemeJson(
         defaultThemePath: String?,

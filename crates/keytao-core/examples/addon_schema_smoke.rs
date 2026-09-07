@@ -17,10 +17,7 @@ fn usage() -> String {
     "usage: addon_schema_smoke <scratch-user-dir> <shared-dir>".into()
 }
 
-fn type_text(
-    session: &keytao_core::ImeRuntimeSession,
-    text: &str,
-) -> Result<ImeState, String> {
+fn type_text(session: &keytao_core::ImeRuntimeSession, text: &str) -> Result<ImeState, String> {
     let mut state = session.state();
     for character in text.chars() {
         state = session
