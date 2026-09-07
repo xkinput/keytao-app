@@ -5,8 +5,8 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
-    CandidatePanelInput, PanelOrientation, ResolvedImeTheme, RgbaColor, ThemeCandidate,
-    ThemeResolver, UiCapabilities,
+    CandidatePanelInput, CandidatePanelModel, PanelOrientation, ResolvedImeTheme, RgbaColor,
+    ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use std::path::{Path as FsPath, PathBuf};
 use tiny_skia::*;
@@ -93,7 +93,6 @@ pub fn load_font() -> Option<FontSet> {
 
 pub struct PanelRenderer {
     fonts: Vec<fontdue::Font>,
-    theme_resolver: ThemeResolver,
 }
 
 /// A clickable area inside the rendered panel, in panel-local pixels.
@@ -150,21 +149,18 @@ impl RenderedPanel {
 
 impl PanelRenderer {
     pub fn new(fonts: FontSet) -> Self {
-        Self {
-            fonts: fonts.fonts,
-            theme_resolver: windows_theme_resolver(),
-        }
+        Self { fonts: fonts.fonts }
     }
 
     /// Render panel to a premultiplied BGRA byte buffer plus the hit areas the
     /// window needs for mouse selection.
-    pub fn render(&self, state: &ImeState, scale: f32, embedded: bool) -> RenderedPanel {
-        let mut theme = self.theme_resolver.current();
+    pub fn render(
+        &self,
+        model: &CandidatePanelModel,
+        scale: f32,
+        mut theme: ResolvedImeTheme,
+    ) -> RenderedPanel {
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
-        let model = theme.candidate_panel_model(
-            state_to_panel_input(state, embedded),
-            &UiCapabilities::full_custom(),
-        );
         let font_size = theme.font.size;
         let label_size = theme.font.label_size;
         let comment_size = theme.font.comment_size;
@@ -381,8 +377,12 @@ impl PanelRenderer {
         }
     }
 
-    pub fn render_mode_hint(&self, ascii_mode: bool, scale: f32) -> (Vec<u8>, u32, u32) {
-        let mut theme = self.theme_resolver.current();
+    pub fn render_mode_hint(
+        &self,
+        ascii_mode: bool,
+        scale: f32,
+        mut theme: ResolvedImeTheme,
+    ) -> (Vec<u8>, u32, u32) {
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
         let font_size = theme.mode_hint.font_size;
@@ -428,8 +428,7 @@ impl PanelRenderer {
         (out, width, height)
     }
 
-    pub fn mode_hint_duration_ms(&self) -> u32 {
-        let theme = self.theme_resolver.current();
+    pub fn mode_hint_duration_ms(theme: &ResolvedImeTheme) -> u32 {
         (theme.mode_hint.duration * 1000.0)
             .round()
             .clamp(150.0, 4000.0) as u32
@@ -756,6 +755,17 @@ fn dll_related_dirs() -> Vec<PathBuf> {
 #[inline]
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
+}
+
+pub(crate) fn candidate_panel_model(
+    state: &ImeState,
+    embedded: bool,
+    theme: &ResolvedImeTheme,
+) -> CandidatePanelModel {
+    theme.candidate_panel_model(
+        state_to_panel_input(state, embedded),
+        &UiCapabilities::full_custom(),
+    )
 }
 
 fn state_to_panel_input(state: &ImeState, embedded: bool) -> CandidatePanelInput {

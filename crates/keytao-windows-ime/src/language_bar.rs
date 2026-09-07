@@ -40,6 +40,10 @@ struct LanguageBarModel {
     sink: Option<ITfLangBarItemSink>,
 }
 
+fn update_cached_mode(current: &mut bool, next: bool) -> bool {
+    std::mem::replace(current, next) != next
+}
+
 fn notify_model(model: &Rc<RefCell<LanguageBarModel>>) {
     let sink = model.borrow().sink.clone();
     if let Some(sink) = sink {
@@ -239,15 +243,10 @@ impl LanguageBarItem {
     pub(crate) fn update_mode(&self, ascii_mode: bool) {
         let changed = {
             let mut model = self.model.borrow_mut();
-            if model.ascii_mode == ascii_mode {
-                false
-            } else {
-                model.ascii_mode = ascii_mode;
-                true
-            }
+            update_cached_mode(&mut model.ascii_mode, ascii_mode)
         };
-        self.update_input_mode_compartment(ascii_mode);
         if changed {
+            self.update_input_mode_compartment(ascii_mode);
             notify_model(&self.model);
         }
     }
@@ -276,5 +275,21 @@ impl LanguageBarItem {
         unsafe {
             let _ = self.manager.RemoveItem(&self.item);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_cached_mode;
+
+    #[test]
+    fn input_mode_compartment_updates_only_when_mode_changes() {
+        let mut ascii_mode = false;
+        assert!(!update_cached_mode(&mut ascii_mode, false));
+        assert!(update_cached_mode(&mut ascii_mode, true));
+        assert!(ascii_mode);
+        assert!(!update_cached_mode(&mut ascii_mode, true));
+        assert!(update_cached_mode(&mut ascii_mode, false));
+        assert!(!ascii_mode);
     }
 }

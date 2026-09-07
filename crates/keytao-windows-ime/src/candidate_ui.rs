@@ -22,6 +22,25 @@ use windows::{
 
 use crate::{globals::DllActivityGuard, guard};
 
+// UI metadata can require a refresh without making a declined key consumed.
+fn ui_state_changed(before: &ImeState, after: &ImeState) -> bool {
+    before.preedit != after.preedit
+        || before.cursor != after.cursor
+        || before.sel_start != after.sel_start
+        || before.sel_end != after.sel_end
+        || before.highlighted_candidate_index != after.highlighted_candidate_index
+        || before.page != after.page
+        || before.page_size != after.page_size
+        || before.is_last_page != after.is_last_page
+        || before.select_keys != after.select_keys
+        || before.candidates.len() != after.candidates.len()
+        || before
+            .candidates
+            .iter()
+            .zip(after.candidates.iter())
+            .any(|(before, after)| before.text != after.text || before.comment != after.comment)
+}
+
 const CANDIDATE_UI_GUID: GUID = GUID {
     data1: 0x8d7f2864,
     data2: 0x69b8,
@@ -195,7 +214,14 @@ impl CandidateUiManager {
         allow_fallback_window: bool,
     ) -> bool {
         let has_content = !state.preedit.is_empty() || !state.candidates.is_empty();
-        {
+        let changed = {
+            let data = self.data.borrow();
+            self.ui_element_id.is_none()
+                || ui_state_changed(&data.state, state)
+                || data.document_mgr.as_ref().map(Interface::as_raw)
+                    != document_mgr.map(Interface::as_raw)
+        };
+        if changed {
             let mut data = self.data.borrow_mut();
             data.state = state.clone();
             data.document_mgr = document_mgr.cloned();
@@ -236,9 +262,11 @@ impl CandidateUiManager {
 
         // `pbShow=TRUE` only means the TIP may draw its own window; the advised
         // ITfUIElementSinks (accessibility, automation) still need every change.
-        if let (Some(manager), Some(element_id)) = (&self.ui_element_mgr, self.ui_element_id) {
-            unsafe {
-                let _ = manager.UpdateUIElement(element_id);
+        if changed {
+            if let (Some(manager), Some(element_id)) = (&self.ui_element_mgr, self.ui_element_id) {
+                unsafe {
+                    let _ = manager.UpdateUIElement(element_id);
+                }
             }
         }
 
@@ -264,5 +292,35 @@ impl CandidateUiManager {
 impl Drop for CandidateUiManager {
     fn drop(&mut self) {
         self.end();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ui_state_changed;
+    use keytao_core::{Candidate, ImeState};
+
+    #[test]
+    fn ui_state_comparison_includes_cursor_selection_comments_and_paging() {
+        let mut before = ImeState::empty();
+        before.candidates.push(Candidate {
+            text: "candidate".into(),
+            comment: None,
+        });
+        let changes: [fn(&mut ImeState); 7] = [
+            |state| state.cursor += 1,
+            |state| state.sel_start += 1,
+            |state| state.sel_end += 1,
+            |state| state.page_size += 1,
+            |state| state.is_last_page = !state.is_last_page,
+            |state| state.select_keys = Some("asdf".into()),
+            |state| state.candidates[0].comment = Some("comment".into()),
+        ];
+        for change in changes {
+            let mut after = before.clone();
+            change(&mut after);
+            assert!(ui_state_changed(&before, &after));
+        }
+        assert!(!ui_state_changed(&before, &before));
     }
 }

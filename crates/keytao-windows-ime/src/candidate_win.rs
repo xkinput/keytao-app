@@ -11,6 +11,9 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::hash_map::DefaultHasher,
+    fmt::{self, Debug, Write},
+    hash::Hasher,
     time::{Duration, Instant},
 };
 
@@ -47,17 +50,49 @@ use crate::{
     globals::DLL_INSTANCE,
     guard,
     key_event_sink::{handle_panel_click, PanelClick},
-    panel::{PanelHitAreas, PanelRenderer},
-    state::{append_diagnostic, diagnostics_enabled, WeakState},
+    panel::{candidate_panel_model, PanelHitAreas, PanelRenderer},
+    state::{append_diagnostic, current_theme, diagnostics_enabled, WeakState},
 };
 
 const CLASS_NAME: &str = "KeyTaoCandidate\0";
 const MODE_HINT_TIMER_ID: usize = 1;
 const CARET_RETRY_TIMER_ID: usize = 2;
+const LAYOUT_REPOSITION_TIMER_ID: usize = 3;
 const PENDING_IME_UI_MESSAGE: u32 = WM_APP + 0x4B;
 const WINDOWS_CANDIDATE_DENSITY: f32 = 0.82;
 const INPUT_PANE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CARET_RETRY_DELAYS_MS: [u32; 5] = [16, 32, 64, 128, 256];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanelUploadSignature {
+    model: u64,
+    position: (i32, i32),
+    scale: u32,
+    theme: u64,
+}
+
+// Hash all fields of the derived model/theme Debug output without allocating
+// a formatted string. These signatures are only compared within this process.
+fn value_signature(value: &impl Debug) -> u64 {
+    struct SignatureWriter(DefaultHasher);
+    impl Write for SignatureWriter {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            self.0.write(value.as_bytes());
+            Ok(())
+        }
+    }
+    let mut writer = SignatureWriter(DefaultHasher::new());
+    let _ = write!(&mut writer, "{value:?}");
+    writer.0.finish()
+}
+
+fn can_skip_panel_upload(
+    visible: bool,
+    previous: Option<PanelUploadSignature>,
+    next: PanelUploadSignature,
+) -> bool {
+    visible && previous == Some(next)
+}
 
 pub(crate) fn caret_retry_delay_ms(completed_attempts: u8) -> Option<u32> {
     CARET_RETRY_DELAYS_MS
@@ -219,6 +254,15 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             }
             return LRESULT(0);
         }
+        WM_TIMER if wparam.0 == LAYOUT_REPOSITION_TIMER_ID => {
+            let _ = KillTimer(hwnd, LAYOUT_REPOSITION_TIMER_ID);
+            if let Some(target) = click_target(hwnd) {
+                if let Some(state) = target.state.upgrade() {
+                    crate::key_event_sink::flush_layout_reposition(&state);
+                }
+            }
+            return LRESULT(0);
+        }
         WM_TIMER if wparam.0 == MODE_HINT_TIMER_ID => {
             let _ = KillTimer(hwnd, MODE_HINT_TIMER_ID);
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -242,6 +286,7 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
         WM_NCDESTROY => {
             let _ = KillTimer(hwnd, CARET_RETRY_TIMER_ID);
+            let _ = KillTimer(hwnd, LAYOUT_REPOSITION_TIMER_ID);
             let raw = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if raw != 0 {
                 drop(Box::from_raw(raw as *mut ClickTarget));
@@ -263,6 +308,8 @@ pub struct CandidateWindow {
     input_pane_unavailable: bool,
     input_pane_rect: Option<RECT>,
     input_pane_queried_at: Option<Instant>,
+    last_upload: Option<PanelUploadSignature>,
+    last_upload_size: (u32, u32),
 }
 
 impl CandidateWindow {
@@ -277,6 +324,8 @@ impl CandidateWindow {
             input_pane_unavailable: false,
             input_pane_rect: None,
             input_pane_queried_at: None,
+            last_upload: None,
+            last_upload_size: (0, 0),
         }
     }
 
@@ -455,6 +504,29 @@ impl CandidateWindow {
         unsafe { PostMessageW(self.hwnd, PENDING_IME_UI_MESSAGE, WPARAM(0), LPARAM(0)).is_ok() }
     }
 
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub fn arm_layout_reposition(&mut self) -> bool {
+        if self.hwnd.0.is_null() || !self.visible {
+            return false;
+        }
+        unsafe { SetTimer(self.hwnd, LAYOUT_REPOSITION_TIMER_ID, 16, None) != 0 }
+    }
+
+    fn disarm_layout_reposition(&mut self) {
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = KillTimer(self.hwnd, LAYOUT_REPOSITION_TIMER_ID);
+        }
+        if let Some(state) = click_target(self.hwnd).and_then(|target| target.state.upgrade()) {
+            state.borrow_mut().layout_reposition_pending = false;
+        }
+    }
+
     pub fn disarm_caret_reprobe(&mut self) {
         if self.hwnd.0.is_null() {
             return;
@@ -476,32 +548,52 @@ impl CandidateWindow {
         owner_hwnd: HWND,
         state: &WeakState,
         embedded: bool,
-    ) {
+    ) -> bool {
         let has_content = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if !has_content {
             self.hide();
-            return;
+            return false;
         }
         if !self.ensure_window(owner_hwnd, state) || !self.ensure_renderer() {
-            return;
+            return false;
         }
-        let Some(renderer) = &self.renderer else {
-            return;
-        };
-
         let scale = dpi_scale(self.owner_hwnd);
-        let rendered = renderer.render(ime_state, scale, embedded);
-        let (w, h) = (rendered.width, rendered.height);
-        if w == 0 || h == 0 {
-            return;
-        }
-
+        let theme = current_theme();
+        let model = candidate_panel_model(ime_state, embedded, &theme);
+        let mut signature = PanelUploadSignature {
+            model: value_signature(&model),
+            position: (0, 0),
+            scale: scale.to_bits(),
+            theme: value_signature(&theme),
+        };
         let work = self.available_area(POINT {
             x: caret_x,
             y: caret_y,
         });
-        let position =
-            popup_position_in(work, caret_x, caret_y, w, h, (4.0 * scale).round() as i32);
+        let gap = (4.0 * scale).round() as i32;
+        if let Some(previous) = self.last_upload {
+            if previous.model == signature.model
+                && previous.scale == signature.scale
+                && previous.theme == signature.theme
+            {
+                let (w, h) = self.last_upload_size;
+                let position = popup_position_in(work, caret_x, caret_y, w, h, gap);
+                signature.position = (position.x, position.y);
+                if can_skip_panel_upload(self.visible, self.last_upload, signature) {
+                    return true;
+                }
+            }
+        }
+        let Some(renderer) = &self.renderer else {
+            return false;
+        };
+        let rendered = renderer.render(&model, scale, theme);
+        let (w, h) = (rendered.width, rendered.height);
+        if w == 0 || h == 0 {
+            return false;
+        }
+        let position = popup_position_in(work, caret_x, caret_y, w, h, gap);
+        signature.position = (position.x, position.y);
         if diagnostics_enabled() {
             append_diagnostic(format!(
                 "panel show caret=({caret_x},{caret_y}) pos=({},{}) size={w}x{h}",
@@ -509,13 +601,14 @@ impl CandidateWindow {
             ));
         }
 
+        if !unsafe { self.upload_pixels(&rendered.pixels, w, h, position.x, position.y) } {
+            return false;
+        }
         if let Some(target) = click_target(self.hwnd) {
             *target.hit_areas.borrow_mut() = rendered.hit_areas;
         }
-
-        unsafe {
-            self.upload_pixels(&rendered.pixels, w, h, position.x, position.y);
-        }
+        self.last_upload = Some(signature);
+        self.last_upload_size = (w, h);
 
         if !self.visible {
             unsafe {
@@ -524,11 +617,14 @@ impl CandidateWindow {
             self.visible = true;
             self.notify_ime_event(EVENT_OBJECT_IME_SHOW);
         }
+        true
     }
 
     pub fn hide(&mut self) {
+        self.last_upload = None;
         if !self.hwnd.0.is_null() {
             self.disarm_caret_reprobe();
+            self.disarm_layout_reposition();
             unsafe {
                 let _ = KillTimer(self.hwnd, MODE_HINT_TIMER_ID);
                 if self.visible {
@@ -558,8 +654,9 @@ impl CandidateWindow {
         };
 
         let scale = dpi_scale(self.owner_hwnd);
-        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode, scale);
-        let hint_duration_ms = renderer.mode_hint_duration_ms();
+        let theme = current_theme();
+        let hint_duration_ms = PanelRenderer::mode_hint_duration_ms(&theme);
+        let (pixels, w, h) = renderer.render_mode_hint(ascii_mode, scale, theme);
         if w == 0 || h == 0 {
             return;
         }
@@ -573,7 +670,9 @@ impl CandidateWindow {
             popup_position_in(work, anchor_x, caret_y, w, h, (8.0 * scale).round() as i32);
 
         unsafe {
-            self.upload_pixels(&pixels, w, h, position.x, position.y);
+            if !self.upload_pixels(&pixels, w, h, position.x, position.y) {
+                return;
+            }
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             let _ = SetTimer(self.hwnd, MODE_HINT_TIMER_ID, hint_duration_ms, None);
         }
@@ -582,7 +681,7 @@ impl CandidateWindow {
     }
 
     /// Upload BGRA pixel buffer via UpdateLayeredWindow (per-pixel alpha).
-    unsafe fn upload_pixels(&self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) {
+    unsafe fn upload_pixels(&self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) -> bool {
         let screen_dc = GetDC(HWND(std::ptr::null_mut()));
         let mem_dc = CreateCompatibleDC(screen_dc);
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -603,13 +702,13 @@ impl CandidateWindow {
             Err(_) => {
                 let _ = DeleteDC(mem_dc);
                 ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-                return;
+                return false;
             }
         };
         if bitmap.0.is_null() || bits.is_null() {
             let _ = DeleteDC(mem_dc);
             ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            return;
+            return false;
         }
         let old_bmp = SelectObject(mem_dc, bitmap);
 
@@ -628,7 +727,7 @@ impl CandidateWindow {
             cy: h as i32,
         };
 
-        let _ = UpdateLayeredWindow(
+        let uploaded = UpdateLayeredWindow(
             self.hwnd,
             screen_dc,
             Some(&pt_dst),
@@ -638,13 +737,17 @@ impl CandidateWindow {
             COLORREF(0),
             Some(&blend),
             ULW_ALPHA,
-        );
-        self.notify_ime_event(EVENT_OBJECT_IME_CHANGE);
+        )
+        .is_ok();
+        if uploaded {
+            self.notify_ime_event(EVENT_OBJECT_IME_CHANGE);
+        }
 
         SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(mem_dc);
         ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+        uploaded
     }
 
     fn notify_ime_event(&self, event: u32) {
@@ -669,11 +772,15 @@ impl Drop for CandidateWindow {
 
 #[cfg(test)]
 mod tests {
+    use keytao_theme::{
+        CandidateOptionModel, CandidatePanelModel, PageNavigationModel, PanelOrientation,
+        ResolvedCapabilities,
+    };
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        caret_retry_delay_ms, click_at, popup_position_in, render_scale_for_dpi,
-        subtract_touch_keyboard,
+        can_skip_panel_upload, caret_retry_delay_ms, click_at, popup_position_in,
+        render_scale_for_dpi, subtract_touch_keyboard, value_signature, PanelUploadSignature,
     };
     use crate::{
         key_event_sink::PanelClick,
@@ -686,6 +793,83 @@ mod tests {
             top: 0,
             right: 1920,
             bottom: 1080,
+        }
+    }
+
+    #[test]
+    fn panel_upload_skips_only_an_equal_visible_signature() {
+        let signature = PanelUploadSignature {
+            model: 1,
+            position: (200, 300),
+            scale: 1.23_f32.to_bits(),
+            theme: 2,
+        };
+        assert!(can_skip_panel_upload(true, Some(signature), signature));
+        assert!(!can_skip_panel_upload(false, Some(signature), signature));
+        assert!(!can_skip_panel_upload(true, None, signature));
+        for changed in [
+            PanelUploadSignature {
+                model: 3,
+                ..signature
+            },
+            PanelUploadSignature {
+                position: (201, 300),
+                ..signature
+            },
+            PanelUploadSignature {
+                scale: 1.64_f32.to_bits(),
+                ..signature
+            },
+            PanelUploadSignature {
+                theme: 4,
+                ..signature
+            },
+        ] {
+            assert!(!can_skip_panel_upload(true, Some(signature), changed));
+        }
+    }
+
+    #[test]
+    fn panel_signature_covers_the_full_model_not_only_candidate_text() {
+        let model = CandidatePanelModel {
+            preedit: Some("n|i".to_owned()),
+            orientation: PanelOrientation::Horizontal,
+            candidates: vec![CandidateOptionModel {
+                index: 0,
+                label: "1".to_owned(),
+                text: "candidate".to_owned(),
+                comment: None,
+                selected: true,
+            }],
+            navigation: PageNavigationModel {
+                can_go_previous: false,
+                can_go_next: true,
+            },
+            capabilities: ResolvedCapabilities {
+                custom_colors: true,
+                vertical: true,
+                hover: true,
+                shadow: true,
+                separator: true,
+                system_lookup_table_only: false,
+            },
+        };
+        let signature = value_signature(&model);
+        assert_eq!(signature, value_signature(&model.clone()));
+        let changes: [fn(&mut CandidatePanelModel); 8] = [
+            |model| model.preedit = Some("ni|".to_owned()),
+            |model| model.orientation = PanelOrientation::Vertical,
+            |model| model.candidates[0].index = 1,
+            |model| model.candidates[0].label = "a".to_owned(),
+            |model| model.candidates[0].comment = Some("comment".to_owned()),
+            |model| model.candidates[0].selected = false,
+            |model| model.navigation.can_go_next = false,
+            |model| model.capabilities.separator = false,
+        ];
+        for change in changes {
+            let mut changed = model.clone();
+            change(&mut changed);
+            assert_ne!(signature, value_signature(&changed));
         }
     }
 

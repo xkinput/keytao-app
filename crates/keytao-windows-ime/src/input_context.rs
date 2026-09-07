@@ -33,7 +33,7 @@ use windows::{
             GUID_COMPARTMENT_KEYBOARD_DISABLED, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
             GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, GUID_PROP_INPUTSCOPE, IS_ALPHANUMERIC_PIN,
             IS_ALPHANUMERIC_PIN_SET, IS_NUMERIC_PASSWORD, IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE,
-            TF_CONVERSIONMODE_NATIVE, TF_DEFAULT_SELECTION, TF_SELECTION,
+            TF_CONVERSIONMODE_NATIVE, TF_DEFAULT_SELECTION, TF_SELECTION, TS_E_SYNCHRONOUS,
         },
     },
 };
@@ -387,9 +387,9 @@ fn thread_compartment_value(thread_mgr: Option<&ITfThreadMgr>, guid: &GUID) -> O
 /// Ask the context for its input scopes. Requires an edit cookie, so it runs in
 /// a synchronous read session; hosts refuse one while the document is locked and
 /// that answer is `ProbeFailed`, distinct from an invalid property answer.
-fn context_password_probe(context: &ITfContext, client_id: u32) -> ContextProbe {
+fn context_password_probe(context: &ITfContext, client_id: u32) -> (ContextProbe, bool) {
     if client_id == 0 {
-        return ContextProbe::Unknown;
+        return (ContextProbe::Unknown, false);
     }
     let probe = Rc::new(Cell::new(ContextProbe::Unknown));
     let probe_for_session = Rc::clone(&probe);
@@ -402,9 +402,9 @@ fn context_password_probe(context: &ITfContext, client_id: u32) -> ContextProbe 
             "password probe session hr=0x{:08X}",
             error.code().0 as u32
         ));
-        return ContextProbe::ProbeFailed;
+        return (ContextProbe::ProbeFailed, error.code() == TS_E_SYNCHRONOUS);
     }
-    probe.get()
+    (probe.get(), false)
 }
 
 fn read_password_scope(ec: u32, context: &ITfContext) -> ContextProbe {
@@ -482,20 +482,24 @@ pub(crate) fn inspect_context(
     thread_mgr: Option<&ITfThreadMgr>,
     context: Option<&ITfContext>,
     client_id: u32,
-) -> ContextInputState {
+) -> (ContextInputState, bool) {
     let Some(context) = resolve_context(thread_mgr, context) else {
         // Nothing to inspect: no focus document, or the host refused to hand one
         // out. Both leave every probe `Unknown`, which keeps the session in
         // pass-through and marks the state for a retry on the next key.
-        return ContextInputState::default();
+        return (ContextInputState::default(), false);
     };
     let (keyboard_disabled, empty_context) = context_compartment_probes(&context);
-    ContextInputState {
-        keyboard_disabled,
-        empty_context,
-        password: context_password_probe(&context, client_id),
-        password_probe_failed: false,
-    }
+    let (password, sync_refused) = context_password_probe(&context, client_id);
+    (
+        ContextInputState {
+            keyboard_disabled,
+            empty_context,
+            password,
+            password_probe_failed: false,
+        },
+        sync_refused,
+    )
 }
 
 /// Re-read the two compartments, keeping the input scope from the last full

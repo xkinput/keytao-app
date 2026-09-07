@@ -241,6 +241,7 @@ pub(crate) struct PendingWindowUpdate {
     document_mgr: Option<ITfDocumentMgr>,
     show_mode_hint: bool,
     embedded: bool,
+    reposition_only: bool,
 }
 
 pub(crate) struct PendingCommitRetry {
@@ -258,6 +259,10 @@ pub(crate) enum CaretSource {
 
 pub(crate) fn should_arm_caret_reprobe(source: Option<CaretSource>) -> bool {
     source != Some(CaretSource::Probe)
+}
+
+fn should_schedule_layout_reposition(visible: bool, lcode: TfLayoutCode, pending: bool) -> bool {
+    visible && lcode == TF_LC_CHANGE && !pending
 }
 
 fn caret_probe_extent_is_usable(rect: &RECT, clipped: bool) -> bool {
@@ -757,10 +762,12 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
         return;
     }
 
-    if has_visible_state(&update.ime_state) {
-        ensure_layout_sink(shared_state, &update.context);
-    } else {
-        clear_layout_sink(shared_state);
+    if !update.reposition_only {
+        if has_visible_state(&update.ime_state) {
+            ensure_layout_sink(shared_state, &update.context);
+        } else {
+            clear_layout_sink(shared_state);
+        }
     }
     if shared_state.borrow().ime_state.is_none() {
         return;
@@ -773,12 +780,24 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
             return;
         }
         if caret_source == Some(CaretSource::Probe) {
-            st.caret_retry_attempts = 0;
+            st.caret_retry_armed = true;
+            st.caret_retry_active = false;
         }
         st.caret_retry_mode_hint = update.show_mode_hint && should_arm_caret_reprobe(caret_source);
         st.panel_context = has_visible_state(&update.ime_state).then(|| update.context.clone());
     }
-    update_language_bar_mode(shared_state, update.ime_state.ascii_mode);
+    if caret_source == Some(CaretSource::Probe) {
+        crate::state::stop_caret_reprobe(shared_state);
+    }
+    if update.reposition_only
+        && !update.show_mode_hint
+        && caret.map(|(position, _)| position) == shared_state.borrow().last_shown_caret
+    {
+        return;
+    }
+    if !update.reposition_only {
+        update_language_bar_mode(shared_state, update.ime_state.ascii_mode);
+    }
     if shared_state.borrow().ime_state.is_none() {
         return;
     }
@@ -828,6 +847,15 @@ fn apply_ime_state(
     // coverage expands, cache CandidateUiManager::host_allows_window in
     // TsfState and include it in this effective-mode decision.
     let embedded = embedded_composition() || uiless;
+    {
+        let mut st = shared_state.borrow_mut();
+        st.embedded_mode_cached = embedded;
+        st.caret_retry_attempts = 0;
+        st.caret_retry_armed = false;
+        st.caret_retry_active = false;
+        st.caret_retry_mode_hint = false;
+    }
+    crate::state::stop_caret_reprobe(shared_state);
     let display_attribute_atom = if embedded {
         display_attribute_atom
     } else {
@@ -966,13 +994,16 @@ fn apply_ime_state(
         let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
         let mode_changed = {
             let mut st = state_arc_for_session.borrow_mut();
-            if composition.is_none() || committed.is_some() {
+            let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
+            // Retain the caret only for a mode-only hint without a commit.
+            // Normal panel applies must discard the previous caret cache.
+            let mode_only_update = mode_changed && !has_visible_state(&ime_state_clone);
+            if committed.is_some() || (composition.is_none() && !mode_only_update) {
                 st.last_caret = None;
             }
             st.composition_context = composition.as_ref().map(|_| ctx.clone());
             st.composition_in_flight = None;
             st.composition = composition;
-            let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
             st.ascii_mode = ime_state_clone.ascii_mode;
             st.ime_state = Some(ime_state_clone.clone());
             mode_changed
@@ -987,6 +1018,7 @@ fn apply_ime_state(
                 document_mgr,
                 show_mode_hint,
                 embedded,
+                reposition_only: false,
             });
         }
         if async_dontcare {
@@ -1030,13 +1062,13 @@ fn reposition_ime_windows(
     let Some(_probe_session_guard) = CaretProbeSessionGuard::enter(shared_state, context) else {
         return false;
     };
-    let (client_id, ime_state, composition, uiless) = {
+    let (client_id, ime_state, composition, embedded) = {
         let st = shared_state.borrow();
         (
             st.client_id,
             st.ime_state.clone(),
             st.composition.clone(),
-            host_is_uiless(&st),
+            st.embedded_mode_cached,
         )
     };
     let Some(ime_state) = ime_state else {
@@ -1045,7 +1077,6 @@ fn reposition_ime_windows(
     if client_id == 0 || (!has_visible_state(&ime_state) && !show_mode_hint) {
         return true;
     }
-    let embedded = embedded_composition() || uiless;
     let owner_hwnd = unsafe {
         context
             .GetActiveView()
@@ -1096,6 +1127,7 @@ fn reposition_ime_windows(
         document_mgr,
         show_mode_hint,
         embedded,
+        reposition_only: true,
     });
     flush_pending_ime_ui(shared_state);
     true
@@ -1104,6 +1136,12 @@ fn reposition_ime_windows(
 pub(crate) fn retry_caret_probe(shared_state: &SharedState) {
     let (attempt, context, show_mode_hint) = {
         let mut st = shared_state.borrow_mut();
+        if !st.caret_retry_active
+            || crate::candidate_win::caret_retry_delay_ms(st.caret_retry_attempts).is_none()
+        {
+            st.caret_retry_active = false;
+            return;
+        }
         st.caret_retry_attempts = st.caret_retry_attempts.saturating_add(1);
         (
             st.caret_retry_attempts,
@@ -1111,19 +1149,34 @@ pub(crate) fn retry_caret_probe(shared_state: &SharedState) {
             st.caret_retry_mode_hint,
         )
     };
-    if crate::candidate_win::caret_retry_delay_ms(attempt.saturating_sub(1)).is_none() {
-        if diagnostics_enabled() {
-            append_diagnostic(format!("caret retry attempt={attempt} gave_up"));
-        }
-        return;
-    }
     if diagnostics_enabled() {
         append_diagnostic(format!("caret retry attempt={attempt} fired"));
     }
     if let Some(context) = context {
         if !reposition_ime_windows(shared_state, &context, show_mode_hint) {
-            crate::state::request_caret_reprobe_rearm(shared_state);
+            // A reentrant callback did not probe; it must not spend a step.
+            let mut st = shared_state.borrow_mut();
+            st.caret_retry_attempts = st.caret_retry_attempts.saturating_sub(1);
         }
+        crate::state::request_caret_reprobe_rearm(shared_state);
+    }
+}
+
+pub(crate) fn flush_layout_reposition(shared_state: &SharedState) {
+    let context = {
+        let mut st = shared_state.borrow_mut();
+        if !std::mem::take(&mut st.layout_reposition_pending)
+            || !st
+                .candidate_win
+                .as_ref()
+                .is_some_and(|window| window.is_visible())
+        {
+            return;
+        }
+        st.panel_context.clone()
+    };
+    if let Some(context) = context {
+        reposition_ime_windows(shared_state, &context, false);
     }
 }
 
@@ -1215,6 +1268,10 @@ fn visible_state_changed(before: &ImeState, after: &ImeState) -> bool {
             .any(|(before, after)| before.text != after.text)
 }
 
+fn should_apply_processed_state(consumed: bool, before: &ImeState, after: &ImeState) -> bool {
+    consumed || before.ascii_mode != after.ascii_mode
+}
+
 /// Whether `OnKeyDown` should report the key as eaten.
 ///
 /// `OnTestKeyDown` deliberately claims more than librime will take (every
@@ -1271,7 +1328,11 @@ pub(crate) fn handle_panel_click(shared_state: &SharedState, click: PanelClick) 
     }
 }
 
-fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> Result<Option<u32>> {
+fn prepare_engine_for_key(
+    context: &ITfContext,
+    shared_state: &SharedState,
+    callback: &str,
+) -> Result<Option<u32>> {
     poll_engine_builds(shared_state);
     let (engine_ready, engine_building, engine_error) = {
         let st = shared_state.borrow();
@@ -1284,7 +1345,7 @@ fn prepare_engine_for_key(context: &ITfContext, shared_state: &SharedState) -> R
     if !engine_ready {
         start_engine_warmup(shared_state);
         append_key_diagnostic!(
-            "OnKeyDown engine not ready building={engine_building} error={engine_error:?}"
+            "{callback} engine not ready building={engine_building} error={engine_error:?}"
         );
         return Ok(None);
     }
@@ -1361,6 +1422,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // has to be maintained in the test callback (windows-1).
             state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk);
             if is_shift_vk(vk) {
+                append_key_diagnostic!("OnTestKeyDown shift vk=0x{vk:02x} pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
             // An unanswered probe counts as blocked, so the retry has to run before
@@ -1419,6 +1481,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if input_is_blocked(&state, pic) {
+                append_key_diagnostic!("OnTestKeyUp shift vk=0x{vk:02x} blocked=true eat=false");
                 return Ok(BOOL::from(false));
             }
             let (should_eat, should_retry, should_reload) = {
@@ -1436,6 +1499,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             if should_reload {
                 start_reload_if_needed(&state);
             }
+            append_key_diagnostic!(
+                "OnTestKeyUp shift vk=0x{vk:02x} pending={} ready={} reload={} eat={should_eat}",
+                state.borrow().shift_pressed_without_key,
+                !should_retry,
+                should_reload,
+            );
             Ok(BOOL::from(should_eat))
         })
         .or(Ok(BOOL::from(false)))
@@ -1466,7 +1535,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             st.shift_pressed_without_key = false;
             st.key_context = Some(context.clone());
             drop(st);
-            prepare_engine_for_key(&context, &state)?
+            prepare_engine_for_key(&context, &state, "OnKeyDown")?
         };
         let client_id = match prepared_engine {
             Some(client_id) => client_id,
@@ -1551,7 +1620,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 st.shift_pressed_without_key = false;
                 st.key_context = Some(context.clone());
                 drop(st);
-                prepare_engine_for_key(&context, &state)?
+                prepare_engine_for_key(&context, &state, "OnKeyUp")?
             };
             let client_id = match prepared_engine {
                 Some(client_id) => client_id,
@@ -1559,13 +1628,25 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             };
 
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
+            // ascii_composer only recognizes a release after seeing its press.
+            // Both run here so test callbacks remain entirely outside librime.
+            let _ = process_key_result(&state, keysym, 0);
             let result = process_key_result(&state, keysym, RIME_RELEASE_MASK);
             let Some(result) = result else {
+                append_key_diagnostic!("OnKeyUp shift keysym=0x{keysym:x} pending=true no result");
                 return Ok(BOOL::from(false));
             };
+            append_key_diagnostic!(
+                "OnKeyUp shift keysym=0x{:x} pending={} accepted={} ascii={}->{}",
+                keysym,
+                true,
+                result.accepted,
+                before_state.ascii_mode,
+                result.state.ascii_mode,
+            );
             let consumed =
                 should_consume_processed_state(result.accepted, &before_state, &result.state);
-            if consumed
+            if should_apply_processed_state(consumed, &before_state, &result.state)
                 && apply_ime_state(&context, client_id, &state, result.state, true, false).is_err()
             {
                 return Ok(BOOL::from(consumed));
@@ -1625,23 +1706,36 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
         _pview: Option<&ITfContextView>,
     ) -> Result<()> {
         guard(|| {
-            if diagnostics_enabled() {
-                append_diagnostic(format!(
-                    "layout change lcode={} ctx=0x{:x}",
-                    lcode.0,
-                    pic.map_or(0, |context| context.as_raw() as usize)
-                ));
-            }
-            if lcode == TF_LC_DESTROY {
-                return Ok(());
-            }
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(());
             };
             let Some(context) = pic else {
                 return Ok(());
             };
-            reposition_ime_windows(&state, context, false);
+            let schedule = {
+                let mut st = state.borrow_mut();
+                let visible = st
+                    .candidate_win
+                    .as_ref()
+                    .is_some_and(|window| window.is_visible())
+                    && st
+                        .panel_context
+                        .as_ref()
+                        .is_some_and(|active| active.as_raw() == context.as_raw());
+                let schedule =
+                    should_schedule_layout_reposition(visible, lcode, st.layout_reposition_pending);
+                if schedule {
+                    st.layout_reposition_pending = true;
+                }
+                schedule
+            };
+            if schedule {
+                append_key_diagnostic!(
+                    "layout change scheduled ctx=0x{:x}",
+                    context.as_raw() as usize
+                );
+                crate::state::schedule_layout_reposition(&state);
+            }
             Ok(())
         })
     }
@@ -1651,15 +1745,63 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
 mod tests {
     use keytao_core::{Candidate, ImeState};
     use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::TextServices::{TF_LC_CHANGE, TF_LC_CREATE, TF_LC_DESTROY};
 
     use super::{
         caret_is_inside_monitor, caret_probe_extent_is_usable, plan_composition,
-        should_arm_caret_reprobe, should_consume_processed_state, system_caret_extent_is_usable,
-        AdjacentChar, CaretSource, CompositionPlan, CompositionTarget, ImeWriteSessionGuard,
+        should_apply_processed_state, should_arm_caret_reprobe, should_consume_processed_state,
+        should_schedule_layout_reposition, system_caret_extent_is_usable, AdjacentChar,
+        CaretSource, CompositionPlan, CompositionTarget, ImeWriteSessionGuard,
     };
 
     fn empty_state() -> ImeState {
         ImeState::empty()
+    }
+
+    #[test]
+    fn mode_change_applies_even_when_the_key_is_not_consumed() {
+        let before = empty_state();
+        let mut after = before.clone();
+        after.is_last_page = false;
+        after.ascii_mode = !before.ascii_mode;
+        let consumed = should_consume_processed_state(false, &before, &after);
+        assert!(!consumed);
+        assert!(should_apply_processed_state(consumed, &before, &after));
+        assert!(should_apply_processed_state(true, &before, &before));
+        assert!(!should_apply_processed_state(false, &before, &before));
+    }
+
+    #[test]
+    fn layout_changes_coalesce_only_while_the_panel_is_visible() {
+        assert!(should_schedule_layout_reposition(true, TF_LC_CHANGE, false));
+        assert!(!should_schedule_layout_reposition(true, TF_LC_CHANGE, true));
+        assert!(!should_schedule_layout_reposition(
+            false,
+            TF_LC_CHANGE,
+            false
+        ));
+        for lcode in [TF_LC_CREATE, TF_LC_DESTROY] {
+            assert!(!should_schedule_layout_reposition(true, lcode, false));
+        }
+    }
+
+    #[test]
+    fn ui_metadata_changes_do_not_consume_declined_keys() {
+        let before = state_with_candidate("candidate");
+        let changes: [fn(&mut ImeState); 7] = [
+            |state| state.cursor += 1,
+            |state| state.sel_start += 1,
+            |state| state.sel_end += 1,
+            |state| state.page_size += 1,
+            |state| state.is_last_page = !state.is_last_page,
+            |state| state.select_keys = Some("asdf".into()),
+            |state| state.candidates[0].comment = Some("comment".into()),
+        ];
+        for change in changes {
+            let mut after = before.clone();
+            change(&mut after);
+            assert!(!should_consume_processed_state(false, &before, &after));
+        }
     }
 
     fn state_with_preedit(text: &str) -> ImeState {
@@ -1917,6 +2059,19 @@ mod tests {
             false,
             &empty_state(),
             &empty_state()
+        ));
+    }
+
+    #[test]
+    fn passes_first_key_after_focus_reset_when_only_no_menu_metadata_changes() {
+        let no_menu_state = ImeState {
+            is_last_page: false,
+            ..ImeState::empty()
+        };
+        assert!(!should_consume_processed_state(
+            false,
+            &ImeState::empty(),
+            &no_menu_state
         ));
     }
 

@@ -5,8 +5,9 @@ use keytao_core::{
     InputContextPolicy, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::cell::RefCell;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -59,8 +60,58 @@ const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// known answer or stays open on its first attempt. Both need bounded retries,
 /// but a host that never grants the session must not get one request per key.
 const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const INPUT_CONTEXT_SYNC_BACKOFF: Duration = Duration::from_secs(1);
+const THEME_POLL_INTERVAL: Duration = Duration::from_millis(250);
 static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
-static THEME_RESOLVER: OnceLock<keytao_theme::ThemeResolver> = OnceLock::new();
+static DIAGNOSTIC_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static THEME_CACHE: OnceLock<Mutex<ThemeCache>> = OnceLock::new();
+
+struct ThemeCache {
+    resolver: keytao_theme::ThemeResolver,
+    theme: keytao_theme::ResolvedImeTheme,
+    checked_at: Instant,
+}
+
+#[derive(Default)]
+struct InputContextRetry {
+    last_attempt: Option<Instant>,
+    last_context: Option<usize>,
+    consecutive_sync_refusals: u8,
+    retry_pending: bool,
+}
+
+impl InputContextRetry {
+    fn due(&self, context: Option<usize>, client_id: u32, now: Instant) -> bool {
+        let interval = if self.last_context == context && self.consecutive_sync_refusals >= 3 {
+            INPUT_CONTEXT_SYNC_BACKOFF
+        } else {
+            INPUT_CONTEXT_RETRY_INTERVAL
+        };
+        client_id != 0
+            && (!self.retry_pending
+                || self
+                    .last_attempt
+                    .is_none_or(|attempt| now.saturating_duration_since(attempt) >= interval))
+    }
+
+    fn begin_attempt(&mut self, context: Option<usize>, now: Instant) {
+        if self.last_context != context {
+            self.consecutive_sync_refusals = 0;
+        }
+        self.last_context = context;
+        self.last_attempt = Some(now);
+        self.retry_pending = true;
+    }
+
+    fn finish_attempt(&mut self, needs_retry: bool, sync_refused: bool) {
+        self.retry_pending = needs_retry;
+        self.consecutive_sync_refusals = if sync_refused {
+            self.consecutive_sync_refusals.saturating_add(1)
+        } else {
+            0
+        };
+    }
+}
 
 // ── Shared TsfState ───────────────────────────────────────────────────────────
 
@@ -85,6 +136,8 @@ pub struct TsfState {
     pub composition: Option<ITfComposition>,
     pub composition_context: Option<ITfContext>,
     pub panel_context: Option<ITfContext>,
+    pub embedded_mode_cached: bool,
+    pub layout_reposition_pending: bool,
     pub ime_state: Option<ImeState>,
     pub candidate_win: Option<crate::candidate_win::CandidateWindow>,
     pub mode_hint_win: Option<crate::candidate_win::CandidateWindow>,
@@ -114,17 +167,20 @@ pub struct TsfState {
     /// Whether the running session already runs with the sensitive policy;
     /// `None` after an engine (re)build, so the policy is pushed again.
     input_policy_applied: Option<bool>,
-    /// Earliest instant at which an unanswered `input_context` probe may be
-    /// retried. Cleared by every inspection, so a fresh context is probed at
-    /// once and only a repeatedly failing one is throttled.
-    input_context_retry_after: Option<Instant>,
+    /// Last actual input-scope attempt; focus and compartment notifications
+    /// cannot reset its deadline. Sync refusal counts belong to one context.
+    input_context_retry: InputContextRetry,
+    input_context_retry_source: Option<ITfContext>,
     /// Context of the last key event, used by candidate-window clicks which
     /// arrive outside any TSF callback.
     pub key_context: Option<ITfContext>,
     /// Last caret position the host reported. Reused while the layout is not
     /// computed yet (`TF_E_NOLAYOUT`) so the panel never jumps to a corner.
     pub last_caret: Option<CaretPosition>,
+    pub last_shown_caret: Option<CaretPosition>,
     pub caret_retry_attempts: u8,
+    pub caret_retry_armed: bool,
+    pub caret_retry_active: bool,
     pub caret_retry_mode_hint: bool,
     caret_rearm_pending: bool,
     pub ime_write_session_active: bool,
@@ -147,7 +203,7 @@ pub struct TsfState {
 
 /// Caret position in screen coordinates plus the window the candidate popup is
 /// owned by.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CaretPosition {
     pub x: i32,
     pub y: i32,
@@ -270,6 +326,8 @@ impl TsfState {
             composition: None,
             composition_context: None,
             panel_context: None,
+            embedded_mode_cached: false,
+            layout_reposition_pending: false,
             ime_state: None,
             candidate_win: Some(crate::candidate_win::CandidateWindow::new()),
             mode_hint_win: Some(crate::candidate_win::CandidateWindow::new_mode_hint()),
@@ -292,10 +350,14 @@ impl TsfState {
             input_context_source: None,
             keyboard_open: true,
             input_policy_applied: None,
-            input_context_retry_after: None,
+            input_context_retry: InputContextRetry::default(),
+            input_context_retry_source: None,
             key_context: None,
             last_caret: None,
+            last_shown_caret: None,
             caret_retry_attempts: 0,
+            caret_retry_armed: false,
+            caret_retry_active: false,
             caret_retry_mode_hint: false,
             caret_rearm_pending: false,
             ime_write_session_active: false,
@@ -491,28 +553,44 @@ pub(crate) fn diagnostics_enabled() -> bool {
 
 /// Missing theme file or key means panel-only preedit by default.
 pub(crate) fn embedded_composition() -> bool {
-    THEME_RESOLVER
-        .get_or_init(|| {
-            let theme_path = keytao_theme::default_user_theme_path()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "missing".to_string());
-            let resolver = crate::panel::windows_theme_resolver();
-            let embedded = resolver.current().ui.embedded_composition;
-            append_diagnostic(format!(
-                "embedded_composition setting={} theme={theme_path}",
-                u8::from(embedded)
-            ));
-            resolver
+    with_current_theme(|theme| theme.ui.embedded_composition)
+}
+
+pub(crate) fn current_theme() -> keytao_theme::ResolvedImeTheme {
+    with_current_theme(Clone::clone)
+}
+
+fn with_current_theme<R>(read: impl FnOnce(&keytao_theme::ResolvedImeTheme) -> R) -> R {
+    let cache = THEME_CACHE.get_or_init(|| {
+        let theme_path = keytao_theme::default_user_theme_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        let resolver = crate::panel::windows_theme_resolver();
+        let theme = resolver.current();
+        append_diagnostic(format!(
+            "embedded_composition setting={} theme={theme_path}",
+            u8::from(theme.ui.embedded_composition)
+        ));
+        Mutex::new(ThemeCache {
+            resolver,
+            theme,
+            checked_at: Instant::now(),
         })
-        .current()
-        .ui
-        .embedded_composition
+    });
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.checked_at.elapsed() >= THEME_POLL_INTERVAL {
+        cache.checked_at = Instant::now();
+        cache.theme = cache.resolver.current();
+    }
+    read(&cache.theme)
 }
 
 /// Resolve the theme once before a TSF document write can synchronously call
 /// `OnCompositionTerminated`. Later calls still observe theme-file changes.
 pub(crate) fn prime_theme_resolver() {
-    if THEME_RESOLVER.get().is_none() {
+    if THEME_CACHE.get().is_none() {
         let _ = embedded_composition();
     }
 }
@@ -522,29 +600,38 @@ pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
         return;
     }
 
-    let Some(user_dir) = default_user_data_dir() else {
+    // Resolve the user directory and open the append handle once per process.
+    let file = DIAGNOSTIC_FILE.get_or_init(|| {
+        Mutex::new(default_user_data_dir().and_then(|user_dir| {
+            let log_dir = user_dir.join("log");
+            fs::create_dir_all(&log_dir).ok()?;
+            const FILE_SHARE_READ: u32 = 0x1;
+            const FILE_SHARE_WRITE: u32 = 0x2;
+            const FILE_SHARE_DELETE: u32 = 0x4;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(log_dir.join("windows-ime.log"))
+                .ok()
+        }))
+    });
+    let mut file = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(file) = file.as_mut() else {
         return;
     };
-
-    let log_dir = user_dir.join("log");
-    if fs::create_dir_all(&log_dir).is_err() {
-        return;
-    }
-
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let log_path = log_dir.join("windows-ime.log");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let pid = unsafe { GetCurrentProcessId() };
-        let tid = unsafe { GetCurrentThreadId() };
-        let _ = writeln!(
-            file,
-            "[{timestamp}][pid:{pid}][tid:{tid}] {}",
-            message.as_ref()
-        );
-    }
+        .unwrap_or_default();
+    let pid = unsafe { GetCurrentProcessId() };
+    let tid = unsafe { GetCurrentThreadId() };
+    let _ = writeln!(
+        file,
+        "[{}.{:03}][pid:{pid}][tid:{tid}] {}",
+        timestamp.as_secs(),
+        timestamp.subsec_millis(),
+        message.as_ref()
+    );
 }
 
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
@@ -710,7 +797,47 @@ pub(crate) fn refresh_input_context(shared_state: &SharedState, context: Option<
     };
     let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
     crate::text_service::advise_context_compartment_sinks(shared_state, context.as_ref());
-    let inspected = inspect_context(thread_mgr.as_ref(), context.as_ref(), client_id);
+    let context_identity = context.as_ref().map(|context| context.as_raw() as usize);
+    let (probe_due, previous) = {
+        let st = shared_state.borrow();
+        let same_context = st.input_context_source.as_ref().map(Interface::as_raw)
+            == context.as_ref().map(Interface::as_raw);
+        (
+            context.is_some()
+                && st
+                    .input_context_retry
+                    .due(context_identity, client_id, Instant::now()),
+            if same_context {
+                st.input_context
+            } else {
+                ContextInputState::default()
+            },
+        )
+    };
+    let inspected = if probe_due {
+        let previous_source = {
+            let mut st = shared_state.borrow_mut();
+            st.input_context_retry
+                .begin_attempt(context_identity, Instant::now());
+            std::mem::replace(&mut st.input_context_retry_source, context.clone())
+        };
+        drop(previous_source);
+        let (inspected, sync_refused) =
+            inspect_context(thread_mgr.as_ref(), context.as_ref(), client_id);
+        shared_state
+            .borrow_mut()
+            .input_context_retry
+            .finish_attempt(inspected.needs_retry(), sync_refused);
+        inspected
+    } else {
+        // Churn still gets fresh safety compartments, but cannot spend another
+        // synchronous input-scope request before the last attempt's deadline.
+        crate::input_context::refresh_context_compartments(
+            thread_mgr.as_ref(),
+            context.as_ref(),
+            previous,
+        )
+    };
     if apply_input_context_state(shared_state, context.as_ref(), inspected) {
         // Ends a composition that may still be on screen as well as hiding the
         // UI. Every caller happens to reset first today, but a context that
@@ -751,9 +878,6 @@ fn apply_input_context_state(
         let mut st = shared_state.borrow_mut();
         st.input_context = input_context;
         st.input_context_source = context.cloned();
-        // A fresh answer re-arms the throttle: the next failure gets an
-        // immediate retry rather than inheriting an old deadline.
-        st.input_context_retry_after = None;
         st.keyboard_open = keyboard_open;
     }
     let password_diagnostic = if input_context.password_probe_failed {
@@ -785,35 +909,18 @@ pub(crate) fn retry_input_context_if_unknown(
 ) {
     let due = {
         let st = shared_state.borrow();
-        input_context_retry_due(
-            st.input_context.needs_retry(),
-            st.client_id,
-            st.input_context_retry_after,
-            Instant::now(),
-        )
+        let context_identity = context
+            .or(st.input_context_source.as_ref())
+            .map(|context| context.as_raw() as usize);
+        st.input_context.needs_retry()
+            && st
+                .input_context_retry
+                .due(context_identity, st.client_id, Instant::now())
     };
     if !due {
         return;
     }
     refresh_input_context(shared_state, context);
-    // Set after the inspection: it clears the field, and a still-unanswered
-    // probe has to wait before costing another edit session.
-    shared_state.borrow_mut().input_context_retry_after =
-        Some(Instant::now() + INPUT_CONTEXT_RETRY_INTERVAL);
-}
-
-/// Whether an unanswered context probe may be inspected again.
-///
-/// A context that answered is left alone, an inspection without a client id
-/// cannot open the read session it needs, and a deadline in the future means
-/// the previous attempt just failed.
-fn input_context_retry_due(
-    needs_retry: bool,
-    client_id: u32,
-    retry_after: Option<Instant>,
-    now: Instant,
-) -> bool {
-    needs_retry && client_id != 0 && retry_after.is_none_or(|deadline| now >= deadline)
 }
 
 /// A `KEYBOARD_DISABLED` / `EMPTYCONTEXT` compartment on the focused context
@@ -1099,24 +1206,40 @@ pub(crate) fn update_ime_windows(
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if show && allow_candidate_window {
             if let Some((caret, _)) = caret {
-                candidate_win.show(
+                if candidate_win.show(
                     ime_state,
                     caret.x,
                     caret.y,
                     caret.owner_hwnd,
                     &weak_state,
                     embedded,
-                );
+                ) {
+                    shared_state.borrow_mut().last_shown_caret = Some(caret);
+                }
             }
         } else {
             candidate_win.hide();
+            shared_state.borrow_mut().last_shown_caret = None;
         }
         let caret_source = caret.map(|(_, source)| source);
+        let retry_armed = shared_state.borrow().caret_retry_armed;
         if caret_source == Some(CaretSource::Probe) {
+            {
+                let mut st = shared_state.borrow_mut();
+                st.caret_retry_armed = true;
+                st.caret_retry_active = false;
+            }
             candidate_win.disarm_caret_reprobe();
-        } else if should_arm_caret_reprobe(caret_source)
-            && ((show && allow_candidate_window) || show_mode_hint)
-        {
+        } else if should_start_caret_reprobe(
+            retry_armed,
+            caret_source,
+            (show && allow_candidate_window) || show_mode_hint,
+        ) {
+            {
+                let mut st = shared_state.borrow_mut();
+                st.caret_retry_armed = true;
+                st.caret_retry_active = true;
+            }
             candidate_win.arm_caret_reprobe(&weak_state);
         }
         if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
@@ -1132,6 +1255,10 @@ pub(crate) fn update_ime_windows(
     .is_some()
 }
 
+fn should_start_caret_reprobe(armed: bool, source: Option<CaretSource>, visible: bool) -> bool {
+    !armed && visible && should_arm_caret_reprobe(source)
+}
+
 pub(crate) fn host_is_uiless(state: &TsfState) -> bool {
     state.activation_flags & TF_TMAE_UIELEMENTENABLEDONLY != 0
         || state.thread_mgr_flags & TF_TMF_UIELEMENTENABLEDONLY != 0
@@ -1143,6 +1270,10 @@ pub(crate) fn hide_ime_windows(shared_state: &SharedState) {
         st.panel_context = None;
         st.pending_window_update = None;
         st.caret_rearm_pending = false;
+        st.last_shown_caret = None;
+        st.layout_reposition_pending = false;
+        st.caret_retry_armed = false;
+        st.caret_retry_active = false;
     }
     clear_layout_sink(shared_state);
     with_detached_candidate_ui(shared_state, CandidateUiManager::end);
@@ -1199,8 +1330,33 @@ pub(crate) fn request_caret_reprobe_rearm(shared_state: &SharedState) {
 pub(crate) fn rearm_caret_reprobe(shared_state: &SharedState) {
     let weak_state = Rc::downgrade(shared_state);
     let _ = with_detached_windows(shared_state, false, |candidate_win, _mode_hint_win| {
-        candidate_win.arm_caret_reprobe(&weak_state);
+        let active = {
+            let mut st = shared_state.borrow_mut();
+            if crate::candidate_win::caret_retry_delay_ms(st.caret_retry_attempts).is_none() {
+                st.caret_retry_active = false;
+            }
+            st.caret_retry_active
+        };
+        if active {
+            candidate_win.arm_caret_reprobe(&weak_state);
+        }
     });
+}
+
+pub(crate) fn stop_caret_reprobe(shared_state: &SharedState) {
+    shared_state.borrow_mut().caret_retry_active = false;
+    let _ = with_detached_windows(shared_state, false, |candidate_win, _mode_hint_win| {
+        candidate_win.disarm_caret_reprobe();
+    });
+}
+
+pub(crate) fn schedule_layout_reposition(shared_state: &SharedState) {
+    let armed = with_detached_windows(shared_state, false, |candidate_win, _mode_hint_win| {
+        candidate_win.arm_layout_reposition()
+    });
+    if armed != Some(true) {
+        shared_state.borrow_mut().layout_reposition_pending = false;
+    }
 }
 
 pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
@@ -1227,6 +1383,7 @@ fn take_active_composition(
     shared_state: &SharedState,
 ) -> Option<(ITfContext, ITfComposition, u32)> {
     let mut st = shared_state.borrow_mut();
+    let shift_pending = st.shift_pressed_without_key;
     st.shift_pressed_without_key = false;
     st.session_reset_pending = true;
     let active_composition = st
@@ -1237,7 +1394,11 @@ fn take_active_composition(
     st.ime_state = None;
     st.panel_context = None;
     st.last_caret = None;
+    st.last_shown_caret = None;
+    st.layout_reposition_pending = false;
     st.caret_retry_attempts = 0;
+    st.caret_retry_armed = false;
+    st.caret_retry_active = false;
     st.caret_retry_mode_hint = false;
     st.caret_rearm_pending = false;
     st.composition_in_flight = None;
@@ -1246,6 +1407,11 @@ fn take_active_composition(
     // The panel is about to be hidden, so no click can still be pending; the
     // stale context must not keep the host object alive.
     st.key_context = None;
+    drop(st);
+    append_diagnostic(format!(
+        "focus reset cleared shift_pending={}",
+        u8::from(shift_pending)
+    ));
     active_composition
 }
 
@@ -1254,6 +1420,7 @@ pub(crate) fn clear_input_after_composition_terminated(
     terminated: Option<&ITfComposition>,
 ) {
     let Some(terminated) = terminated else {
+        append_diagnostic("composition terminated identity_match=0 cleared=0");
         return;
     };
     let terminated_identity = terminated.as_raw() as usize;
@@ -1262,12 +1429,14 @@ pub(crate) fn clear_input_after_composition_terminated(
         termination_policy(st.composition_in_flight, terminated_identity)
     };
     if policy == TerminationPolicy::Ignore {
+        append_diagnostic("composition terminated identity_match=1 cleared=0");
         return;
     }
 
-    let in_write_session = {
+    let (in_write_session, shift_pending) = {
         let mut st = shared_state.borrow_mut();
         let in_write_session = st.ime_write_session_active;
+        let shift_pending = st.shift_pressed_without_key;
         st.shift_pressed_without_key = false;
         st.session_reset_pending = true;
         st.composition = None;
@@ -1275,7 +1444,11 @@ pub(crate) fn clear_input_after_composition_terminated(
         st.panel_context = None;
         st.ime_state = None;
         st.last_caret = None;
+        st.last_shown_caret = None;
+        st.layout_reposition_pending = false;
         st.caret_retry_attempts = 0;
+        st.caret_retry_armed = false;
+        st.caret_retry_active = false;
         st.caret_retry_mode_hint = false;
         st.pending_window_update = None;
         st.composition_clear_pending = in_write_session;
@@ -1283,8 +1456,12 @@ pub(crate) fn clear_input_after_composition_terminated(
             st.windows_dirty = true;
             st.windows_hide_pending = true;
         }
-        in_write_session
+        (in_write_session, shift_pending)
     };
+    append_diagnostic(format!(
+        "composition terminated identity_match=0 cleared=1 shift_pending={}",
+        u8::from(shift_pending)
+    ));
     if in_write_session {
         post_pending_ime_ui(shared_state);
     } else {
@@ -1407,6 +1584,10 @@ pub(crate) fn hide_candidate_window(shared_state: &SharedState) {
         st.panel_context = None;
         st.pending_window_update = None;
         st.caret_rearm_pending = false;
+        st.last_shown_caret = None;
+        st.layout_reposition_pending = false;
+        st.caret_retry_armed = false;
+        st.caret_retry_active = false;
     }
     with_detached_candidate_ui(shared_state, CandidateUiManager::end);
     let _ = with_detached_windows(shared_state, true, |candidate_win, _mode_hint_win| {
@@ -1574,44 +1755,67 @@ pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {
 #[cfg(test)]
 mod tests {
     use super::{
-        input_context_retry_due, termination_policy, with_detached_windows, TerminationPolicy,
-        INPUT_CONTEXT_RETRY_INTERVAL,
+        should_start_caret_reprobe, termination_policy, with_detached_windows, CaretSource,
+        InputContextRetry, TerminationPolicy, INPUT_CONTEXT_RETRY_INTERVAL,
+        INPUT_CONTEXT_SYNC_BACKOFF,
     };
     use std::cell::Cell;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn a_context_that_answered_is_not_probed_again() {
+    fn probe_retry_timestamp_survives_focus_and_compartment_churn() {
         let now = Instant::now();
-        assert!(!input_context_retry_due(false, 1, None, now));
-        // Even long after the throttle would have expired.
-        assert!(!input_context_retry_due(
-            false,
-            1,
-            Some(now - INPUT_CONTEXT_RETRY_INTERVAL),
-            now
-        ));
+        let mut retry = InputContextRetry::default();
+        retry.begin_attempt(Some(1), now);
+        retry.finish_attempt(true, true);
+        for context in [Some(1), None, Some(2), Some(1)] {
+            // Every callback consults the last attempt; querying or refreshing
+            // compartments cannot create an earlier deadline.
+            assert!(!retry.due(context, 1, now + Duration::from_millis(249)));
+            assert_eq!(retry.last_attempt, Some(now));
+        }
+        assert!(retry.due(Some(1), 1, now + INPUT_CONTEXT_RETRY_INTERVAL));
     }
 
     #[test]
-    fn an_unanswered_probe_is_retried_at_once_then_throttled() {
+    fn context_state_and_compartment_callbacks_do_not_reset_the_last_attempt() {
+        let state = super::new_shared_state();
         let now = Instant::now();
-        // No deadline yet: the first key after the failed inspection retries.
-        assert!(input_context_retry_due(true, 1, None, now));
-        // A retry just ran; the next keystroke must not cost another session.
-        assert!(!input_context_retry_due(
-            true,
-            1,
-            Some(now + INPUT_CONTEXT_RETRY_INTERVAL),
-            now
-        ));
-        // Once the interval has passed it is due again.
-        assert!(input_context_retry_due(
-            true,
-            1,
-            Some(now - INPUT_CONTEXT_RETRY_INTERVAL),
-            now
-        ));
+        {
+            let mut st = state.borrow_mut();
+            st.input_context_retry.begin_attempt(Some(1), now);
+            st.input_context_retry.finish_attempt(true, true);
+        }
+        // No COM context is needed to exercise the actual state-write paths.
+        // The initial context is already sensitive, so no UI teardown occurs.
+        super::apply_input_context_state(&state, None, super::ContextInputState::default());
+        super::apply_context_compartment_change(&state);
+        let st = state.borrow();
+        assert_eq!(st.input_context_retry.last_attempt, Some(now));
+        assert_eq!(st.input_context_retry.consecutive_sync_refusals, 1);
+        assert!(!st.input_context_retry.due(Some(1), 1, now));
+    }
+
+    #[test]
+    fn three_sync_refusals_back_off_only_the_same_context() {
+        let now = Instant::now();
+        let mut retry = InputContextRetry::default();
+        for attempt in 0..3 {
+            let at = now + INPUT_CONTEXT_RETRY_INTERVAL * attempt;
+            assert!(retry.due(Some(1), 1, at));
+            retry.begin_attempt(Some(1), at);
+            retry.finish_attempt(true, true);
+        }
+        let last_attempt = retry.last_attempt.unwrap();
+        assert!(!retry.due(Some(1), 1, last_attempt + INPUT_CONTEXT_RETRY_INTERVAL));
+        assert!(retry.due(Some(1), 1, last_attempt + INPUT_CONTEXT_SYNC_BACKOFF));
+        assert!(retry.due(Some(2), 1, last_attempt + INPUT_CONTEXT_RETRY_INTERVAL));
+        retry.begin_attempt(Some(2), last_attempt + INPUT_CONTEXT_RETRY_INTERVAL);
+        retry.finish_attempt(true, true);
+        assert_eq!(retry.consecutive_sync_refusals, 1);
+        retry.begin_attempt(Some(2), last_attempt + INPUT_CONTEXT_RETRY_INTERVAL * 2);
+        retry.finish_attempt(false, false);
+        assert_eq!(retry.consecutive_sync_refusals, 0);
     }
 
     #[test]
@@ -1620,7 +1824,21 @@ mod tests {
         // requested before Activate handed one out. Retrying would only burn
         // the throttle and keep the context stuck in pass-through.
         let now = Instant::now();
-        assert!(!input_context_retry_due(true, 0, None, now));
+        assert!(!InputContextRetry::default().due(Some(1), 0, now));
+    }
+
+    #[test]
+    fn caret_ladder_starts_at_most_once_per_apply() {
+        for source in [None, Some(CaretSource::Cache), Some(CaretSource::System)] {
+            assert!(should_start_caret_reprobe(false, source, true));
+            assert!(!should_start_caret_reprobe(true, source, true));
+            assert!(!should_start_caret_reprobe(false, source, false));
+        }
+        assert!(!should_start_caret_reprobe(
+            false,
+            Some(CaretSource::Probe),
+            true
+        ));
     }
 
     #[test]

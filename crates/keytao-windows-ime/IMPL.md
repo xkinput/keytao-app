@@ -52,7 +52,7 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 - `Deactivate` 与 `OnKillThreadFocus` 不能用异步 edit session 收尾：前者返回后 TSF 立刻释放 text service 与 client id，后者之后本线程不再泵我们的 session，排队的 `EndComposition` 永远不会执行。这两条路径改用同步 write session，宿主拒绝同步锁时退回 `ITfContextOwnerCompositionServices::TerminateComposition`（该接口允许在 edit session 之外调用）。普通 focus 切换仍走异步路径。
 - `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 与 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` 在 `Activate` 时写入初值（开 + native），并各自 `AdviseSink(ITfCompartmentEventSink)`；系统 Ctrl+Space、输入指示器改写这两个 compartment 时会反向驱动 Rime（关闭即停止组字并透传按键，conversion mode 变化即 `set_ascii_mode`）。语言栏写回同一数值，因此 sink 只在数值真正不同时才动 Rime，不会产生回环。
 - `OnTestKeyDown` / `OnTestKeyUp` 只声明当前按键是否会被处理；真正的状态更新、commit 和 composition 操作在 `OnKeyDown` / `OnKeyUp` 中完成。solo Shift 的 pending 标志必须在测试回调里维护：TSF 不会为测试回调拒绝的按键调用 `OnKeyDown`，只在 `OnKeyDown` 里置位/清零会让该标志永远为 false，中英切换链路整条断开。
-- 候选面板定位结果带 `CaretSource::Probe / Cache / System` 来源；只有未裁剪且位于 owner monitor 内的 fresh Probe 会写入 `last_caret`、清零重试预算并停止重探，Cache/System 仅作临时显示，不能冒充新探测。`TF_E_NOLAYOUT` 或其他无可用 Probe 的结果会在原 context 上 `AdviseSink(ITfTextLayoutSink)`，并按 `16/32/64/128/256 ms` 有界退避；`OnLayoutChange` 同样用只读 edit session 重探。系统 caret 只通过 `GetGUIThreadInfo(GetCurrentThreadId())` 获取，并拒绝非同一 root window、退化矩形和 client origin；所有来源都必须通过 owner-monitor sanity check，失败时不伪造窗口原点坐标。
+- 候选面板定位结果带 `CaretSource::Probe / Cache / System` 来源；只有未裁剪且位于 owner monitor 内的 fresh Probe 会写入 `last_caret` 并停止重探，Cache/System 仅作临时显示，不能冒充新探测。每次 `apply_ime_state` 只允许启动一次 `16/32/64/128/256 ms` 退避链，总计最多 5 次；Probe 成功停止当前链，layout 回调不能重置预算或重启链。`OnLayoutChange` 只对可见面板当前 context 的 `TF_LC_CHANGE` 安排独立的 16 ms 单次 timer，同一 burst 合并成一次只读重探。系统 caret 只通过 `GetGUIThreadInfo(GetCurrentThreadId())` 获取，并拒绝非同一 root window、退化矩形和 client origin；所有来源都必须通过 owner-monitor sanity check，失败时不伪造窗口原点坐标。
 - `reposition_ime_windows` 在任何 TSF 探测前校验 `panel_context`（最后一次显示面板的 context）的 COM identity，并用进程内 guard 阻止自身重入；timer 在 guard 忙时不会消耗一次重试预算，并在文档锁外重新布置 timer，继续原有退避链。
 - composition 必须在 TSF edit session 里用 `ITfContextComposition::StartComposition` 创建，用 `ITfRange::SetText` 更新 range，用 `ITfComposition::EndComposition` 结束。非嵌入模式不持有 composition；所有 commit 都在同一个 write session 内从 QUERYONLY insertion range 创建临时 composition、写入提交文本并结束。嵌入模式可复用 active composition；两种模式都不存在 `TF_IAS_NOQUERY` 裸写路径。
 - composition range 会写入 `GUID_PROP_ATTRIBUTE`，对应的 `ITfDisplayAttributeProvider` 提供 input display attribute；更新 preedit 后同步 TSF selection 到 Rime cursor。任何 edit session 失败都会终止残留 composition 并复位输入状态。
@@ -173,7 +173,11 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 11. `ImeState.cursor` 是 Unicode 标量偏移（通用层 D8 契约）；嵌入模式写 TSF selection 前用 `keytao_core::utf16_offset_from_chars` 换算成 UTF-16 code unit 偏移，非嵌入模式则由候选面板在对应标量位置插入 `|`。
 12. 候选窗口用 `CandidateWindow` 绘制并按 caret screen position 定位。
 
-`OnKeyUp` 只处理 solo Shift release：发送 `Shift_L` 或 `Shift_R` keysym，mask 为 `RIME_RELEASE_MASK`。Shift key down 本身不送 Rime；如果 Shift 按下后又出现其它 keyDown，pending flag 会被清除。该 flag 由 `OnTestKeyDown` 维护——TSF 只对测试回调声明拦截的按键调用 `OnKeyDown`，而 Shift 本身从不被拦截，只在 `OnKeyDown` 里置位会让整条中英切换链路失效。
+`OnKeyUp` 只处理 solo Shift：先发送 `Shift_L` 或 `Shift_R` keysym 的 press（mask `0`），再发送同一 keysym 的 release（`RIME_RELEASE_MASK`）。librime 的 ascii composer 必须先看到 press 才会在 release 上切换；两次调用都在真实 `OnKeyUp` 内，`OnTestKeyDown` 始终不调用 librime。如果 Shift 按下后出现其它 keyDown，pending flag 会被清除。该 flag 仍由 `OnTestKeyDown` 维护，Shift keydown 仍向宿主透传。
+
+release 即使返回 `accepted=false`，只要 `ascii_mode` 改变也必须 apply；返回宿主的 eaten 仍是原来的 `consumed`，不因模式变化而吞掉 keyup。只有无 commit、模式改变且没有可见 preedit / 候选的 mode-only apply 可以在 composition 为空时保留有效 caret cache；普通非嵌入 apply 或任何 commit 都清除旧 cache。新 probe 不可用时，模式提示使用可验证的上次 caret / system caret；完全无坐标时省略提示，但照常更新 `st.ascii_mode` 与语言栏。
+
+Caps Lock 本批保留宿主原有路径，不新增 `VK_CAPITAL` keysym 或拦截规则。vendored `ascii_composer.cc::ProcessCapsLock` 在 press 上立即切换并可能提交，且明确区分 Windows 与 IBus 的 lock modifier 时序；简单复用 Shift 的“丢弃 press 返回值、处理 release”会丢失 press commit，mask `0` 也不能表达原生 Caps Lock 状态。这是 F1 允许保留的例外，不能宣称 Caps Lock schema 切换已修复。
 
 ## 敏感与禁用输入上下文
 
@@ -184,7 +188,7 @@ Windows 侧按 `docs/ime-common-layer.md`《敏感输入上下文》落地通用
 - `GUID_COMPARTMENT_KEYBOARD_DISABLED`（Chromium/Edge/WebView2/Electron 的密码框由 `InitializeDisabledContext` 设置）与 `GUID_COMPARTMENT_EMPTYCONTEXT` 在 context 的 `ITfCompartmentMgr` 上读取；焦点文档为空同样视为禁用。四个按键回调开头统一短路，`OnKeyDown` 还会顺手清掉可能残留的 composition 与候选窗。
 - 不设置上述 compartment 的密码框，通过 context 的 `GUID_PROP_INPUTSCOPE` 属性查 `ITfInputScope::GetInputScopes`。判敏感的 scope 不止 `IS_PASSWORD`：`IS_NUMERIC_PASSWORD`、`IS_NUMERIC_PIN`、`IS_ALPHANUMERIC_PIN`、`IS_ALPHANUMERIC_PIN_SET`（锁屏、支付 PIN 盘）和 `IS_PRIVATE`（宿主要求不要记住该字段）同样命中，与 IBus 侧 `purpose PASSWORD/PIN` + `hint PRIVATE` 的判定保持一致。该查询需要 edit cookie，用同步只读 session 执行，正常只在焦点变化时跑一次。
 - 探测结果区分 `ContextProbe::Restricted` / `Clear` / `Unknown` / `ProbeFailed`。属性值、selection 或 compartment 形态无效仍为 `Unknown` 并 fail closed；只有密码 input-scope 的同步 read session 被拒绝时才是 `ProbeFailed`。同一个 COM context 保留上次已知的 `Clear` / `Restricted` 答案；没有历史答案时 `ProbeFailed` 暂按非敏感处理，不阻塞当前按键。
-- `Unknown` 与 `ProbeFailed` 都需要重试。`OnTestKeyDown` / `OnKeyDown` 在判断是否放行**之前**先跑 `retry_input_context_if_unknown()`：首次失败后的下一键立即重试，重复失败再按 250 ms 节流，避免 Chromium 在持有 document lock 时的一次拒绝造成连续多键透传。重试必须放在测试回调里——TSF 对测试回调拒绝的按键不会调 `OnKeyDown`。
+- `Unknown` 与 `ProbeFailed` 都需要重试。`OnTestKeyDown` / `OnKeyDown` 在判断是否放行**之前**先跑 `retry_input_context_if_unknown()`，未解答或仍在执行的 probe 从上一次真实尝试起至少间隔 250 ms，包括 focus 入口。同一 context 连续 3 次 `TS_E_SYNCHRONOUS` 后退避到 1 s；focus / compartment churn 不能清除尝试时间戳，等待期间只刷新两个 compartment。换 context 清同步拒绝计数但保留时间戳，未探测的新 context 保持 `Unknown`；上次成功解答后新焦点可立即探测。重试必须放在测试回调里——TSF 对测试回调拒绝的按键不会调 `OnKeyDown`。
 - 命中任意一项即对 session 调用 `set_input_policy(InputContextPolicy::sensitive())`：通用层此后完全不把按键交给 librime，因而不产生 preedit / 候选，也不会有用户词学习。离开该上下文时恢复 `InputContextPolicy::default()`。
 - `GUID_COMPARTMENT_KEYBOARD_DISABLED` / `GUID_COMPARTMENT_EMPTYCONTEXT` 长在 **context** 上而不是 thread manager 上，因此除了按键路径的实时读取，还随焦点 context `AdviseSink(ITfCompartmentEventSink)`，并在 context 切换（`refresh_input_context` 按 COM identity 判定）与 `Deactivate` 时按 cookie 注销。宿主在已有 preedit 时把当前 context 改成 disabled/empty 只会写这两个 compartment，不注册 sink 就完全听不到，旧 preedit、候选窗和 native composition 会一直留在屏幕上。sink 触发时立即重新读取 compartment、下敏感 policy，并在"由不敏感变敏感"时用排队 write session 结束 composition、隐藏候选 UI。
 - sink 回调里**只重读两个 compartment，不重跑 input scope 探测**（`with_compartments` 保留上一次的 `password` 答案）：这两个 compartment 变化不可能改变 input scope，而在通知回调里申请同步 read session 大概率被拒，反而会把已知的普通输入框误判成 `Unknown`。
@@ -196,7 +200,7 @@ Windows 的 composition 生命周期比较显式，所以 commit 与新 preedit 
 
 ## 嵌入 / 非嵌入模式
 
-Windows 默认使用非嵌入模式。设置保存在 `%APPDATA%/keytao/theme.yaml` 的 `ui.embeddedComposition`，兼容别名 `embedded_composition`；文件缺失、key 缺失和新安装都解析为 `false`。TIP 通过进程级 `OnceLock<ThemeResolver>` 读取并跟随 theme 文件签名变化，不把 resolver 放入 `TsfState`。主 App 的「输入法外观」卡片只在 Windows 显示开关，并由桌面命令 `set_ime_embedded_composition` 原子更新 YAML、写 reload stamp。
+Windows 默认使用非嵌入模式。设置保存在 `%APPDATA%/keytao/theme.yaml` 的 `ui.embeddedComposition`，兼容别名 `embedded_composition`；文件缺失、key 缺失和新安装都解析为 `false`。TIP 通过进程级 `ThemeResolver` 和 `OnceLock` / `Mutex` 的 250 ms theme cache 跟随文件签名变化，不把 resolver 放入 `TsfState`。`apply_ime_state` 每次只读一次模式并保存有效值到 `embedded_mode_cached`；reposition 只消费该缓存，不再重新检查主题文件。主 App 的「输入法外观」卡片只在 Windows 显示开关，并由桌面命令 `set_ime_embedded_composition` 原子更新 YAML、写 reload stamp。
 
 - 非嵌入模式不把 preedit 写入宿主文档，也不创建或保留 composition；panel 的 `panel_context` 独立记录最后一次显示上下文。候选窗定位只走 selection 的相邻单字符 range，再依次回退到同线程 system caret 和 `last_caret` cache。commit 在一个 write session 内临时 `StartComposition`、写入并 `EndComposition`。
 - 嵌入模式保持原有行为：非空 preedit 写进 composition range 并设置 display attribute，preedit 为空时结束 composition。UIless host 没有 panel preedit 通道，因此无条件强制嵌入模式。
@@ -225,17 +229,19 @@ Windows 默认使用非嵌入模式。设置保存在 `%APPDATA%/keytao/theme.ya
 
 用户主题路径跟随 `keytao_core::default_user_data_dir()`，即 `%APPDATA%/keytao/theme.yaml`；开发覆盖可用 `KEYTAO_IME_THEME_PATH`。
 
+候选窗缓存上次成功上传的完整 `CandidatePanelModel` 签名、位置、scale 和主题签名；四项相同即跳过字体栅格化与 layered-window 上传。每次 render 只取得一份解析后的 theme，panel 和 mode hint 辅助方法通过参数共享它，不再嵌套调用 `ThemeResolver::current()`。layout / caret retry 若解析位置与最后显示的 caret 相同，直接跳过整条 `update_ime_windows` 路径；真实状态更新仍进入变更检测。`CandidateUiManager` 使用独立的 `ui_state_changed`，包含 cursor、selection、分页元数据、select keys 和候选 comment，只有 UI 数据或 document manager 变化时才通知 `UpdateUIElement`。吞键路径的 `visible_state_changed` 只比较 preedit、候选 text / 数量、高亮和页码，不因 UI 元数据变化吞掉焦点切换后的首键或 solo Shift keyup；语言栏只有模式变化时才写 conversion compartment。隐藏窗口会取消 layout timer 并失效显示缓存。
+
 ## key map
 
 `src/key_map.rs` 维护 VK 到 X11 keysym 的转换：
 
 - 字母按 `CapsLock XOR Shift` 传小写或大写 ASCII keysym，同时保留 Shift modifier mask，语义与 Linux/macOS 的“keysym 表示实际字符、mask 表示修饰键”一致。
-- `current_mod_mask()` 额外上报 `RIME_MOD_LOCK`（CapsLock 的 toggle 位）和 `RIME_MOD_SUPER`（Win 键）。CapsLock 不会进入 librime：通用层的 `key_policy::normalize_key_for_modifiers` 把它折进 keysym 后剥掉该位，因此 ascii_composer 能按 schema 的 caps_lock 策略工作；Win 键映射为 Super，用于 `key_policy::is_system_reserved_modifier` 的系统保留判定。
+- `current_mod_mask()` 额外上报 `RIME_MOD_LOCK`（CapsLock 的 toggle 位）和 `RIME_MOD_SUPER`（Win 键）。通用层 `key_policy::normalize_key_for_modifiers` 把 Lock modifier 折进字符 keysym 后剥掉该位；`VK_CAPITAL` 本身仍不送 librime，因此这不代表支持 schema 的 Caps Lock 切换策略。Win 键映射为 Super，用于 `key_policy::is_system_reserved_modifier` 的系统保留判定。
 - 数字行和 OEM 标点通过当前 HKL 的 `ToUnicodeEx(..., flag=4)` 解析，正确支持非 US 布局和 Shift 符号；dead key 不会被伪装成 US 标点。小键盘操作符映射到对应 ASCII keysym。带 Control 的组合跳过 `ToUnicodeEx`（它会把 `Ctrl+[` 折成 U+001B 这类控制字符），改用布局无关的 fallback 表，保证 Rime 收到的是"字符 + Control mask"。
 - Backspace、Tab、Return、Escape、Space、Delete、方向键等映射到 XK 值。
 - `VK_F4` 映射为 `XK_F4` / `0xffc1`，用于打开 Rime schema / options 菜单。
 - `VK_PACKET` 使用 `GetKeyboardState` + `ToUnicode` 解包 Unicode 字符；触摸键盘发送的 `0xF003` / `0xF004` 会映射到 `XK_Page_Down` / `XK_Page_Up`。
-- `Shift_L` / `Shift_R` 只在 solo key up 时以 release mask 送入 Rime。
+- `Shift_L` / `Shift_R` 只在 solo `OnKeyUp` 内依次以 press mask `0`、release mask `RIME_RELEASE_MASK` 送入 Rime。
 - 其它 function key、媒体键等返回 `None`，输入法不拦截。
 
 ## 重载
@@ -254,7 +260,11 @@ stamp 的路径、签名格式和变化检测统一由 `keytao_core::ReloadStamp
 
 ## 排查入口
 
-诊断行统一带 `[pid:...][tid:...]`，并记录 input block reason、input-context 三项探测、password probe HRESULT、session reset、commit 丢失长度和 TSF edit-session 失败阶段。所有按键与 commit 诊断只写长度和布尔状态，不写输入正文。
+诊断行时间戳精确到毫秒，统一带 `[pid:...][tid:...]`，并记录 input block reason、input-context 三项探测、password probe HRESULT、session reset、commit 丢失长度和 TSF edit-session 失败阶段。用户数据目录只解析一次，append log File 保存在进程级 `OnceLock` / `Mutex`，显式允许 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`，避免常驻句柄阻止其他进程删除或轮转日志；每行可 flush 但不 fsync，不再逐行建目录、open / close。保留现有 `KEY_DIAGNOSTIC_LIMIT = 65_536`；所有按键与 commit 诊断只写长度和布尔状态，不写输入正文。
+
+增加 `composition terminated identity_match={0|1} cleared={0|1}`、solo Shift 测试回调诊断及 `OnKeyUp shift keysym=... pending=... accepted=... ascii=...->...`。termination 实际清理时追加清零前的 `shift_pending={0|1}`，focus reset 同样记录 `focus reset cleared shift_pending={0|1}`，便于分辨 pending 被 focus / termination 清除、引擎未就绪和 Rime 已切换但未消费按键。engine-not-ready 日志使用实际 callback 名称。
+
+F8 纯逻辑回归覆盖 mode-only apply、可见面板 layout 合并、每 apply 单次 ladder、相同上传签名跳过、语言栏只在 change 时写 compartment，以及 churn 不重置 probe 时间戳和三次同步拒绝后的退避。Windows `--tests` 检查只验证这些测试能够编译，不等同于已执行测试或 Windows / Chromium 性能验收。
 
 ### 取证脚本
 
