@@ -41,6 +41,7 @@ class KeytaoImeEngine(context: Context) {
     private var reloadStampSignature: String? = null
     private var inputPolicyComposing = true
     private var inputPolicyLearning = true
+    private val schemaNameDurations = KeytaoDurationHistogram()
 
     /**
      * Everything that touches the filesystem or librime runs here: the IME main
@@ -56,14 +57,22 @@ class KeytaoImeEngine(context: Context) {
 
     init {
         backgroundExecutor.execute {
-            runCatching { KeytaoAndroidPaths.migrateLegacyRootIfNeeded(appContext) }
-            runCatching { ensureBundledSharedData(appContext) }
+            val started = System.nanoTime()
+            val migrationOk = runCatching { KeytaoAndroidPaths.migrateLegacyRootIfNeeded(appContext) }.isSuccess
+            val bundledDataOk = runCatching { ensureBundledSharedData(appContext) }.isSuccess
             // Materialise keyboard.yaml and warm the configuration and theme
             // caches before the first input view exists, so showing the keyboard
             // never blocks on YAML parsing or on writing a default config.
-            runCatching { KeytaoAndroidImeConfig.ensureDefaults(appContext) }
-            runCatching { KeytaoAndroidImeConfig.load(appContext) }
-            runCatching { KeytaoThemeResolver.resolve(appContext) }
+            val defaultsOk = runCatching { KeytaoAndroidImeConfig.ensureDefaults(appContext) }.isSuccess
+            val configOk = runCatching { KeytaoAndroidImeConfig.load(appContext) }.isSuccess
+            val themeOk = runCatching { KeytaoThemeResolver.resolve(appContext) }.isSuccess
+            KeytaoRuntimeLog.event("rime", "engine_warmup", KeytaoRuntimeLog.elapsedMs(started)) {
+                put("migration_ok", migrationOk)
+                put("bundled_data_ok", bundledDataOk)
+                put("defaults_ok", defaultsOk)
+                put("config_ok", configOk)
+                put("theme_ok", themeOk)
+            }
         }
     }
 
@@ -184,11 +193,19 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun selectSchema(schemaId: String): KeytaoImeState? {
-        val state = KeytaoNativeBridge.selectSchema(session, schemaId)
-            ?.let { stableSchemaState(it) }
-            ?: return null
-        lastState = state.withoutTransientCommit()
-        return state
+        val started = System.nanoTime()
+        var success = false
+        try {
+            val state = KeytaoNativeBridge.selectSchema(session, schemaId)
+                ?.let { stableSchemaState(it) }
+                ?: return null
+            lastState = state.withoutTransientCommit()
+            success = true
+            return state
+        } finally {
+            val ok = success
+            KeytaoRuntimeLog.event("rime", "schema_switch", KeytaoRuntimeLog.elapsedMs(started)) { put("success", ok) }
+        }
     }
 
     @Synchronized
@@ -323,49 +340,75 @@ class KeytaoImeEngine(context: Context) {
     }
 
     private fun initializeRuntime(deploy: Boolean, reinitialize: Boolean = false): Boolean {
-        if (!hasInstalledSchema()) return false
-        if (!deploy && !hasDeployedSchema()) return false
-        ensureBundledSharedData(appContext)
-        val sharedDir = findSharedDataDir(appContext)
-        sharedDataDir = sharedDir
-        if (session != 0L) {
-            KeytaoNativeBridge.destroySession(session)
-            session = 0L
+        val started = System.nanoTime()
+        var success = false
+        try {
+            if (!hasInstalledSchema()) return false
+            if (!deploy && !hasDeployedSchema()) return false
+            ensureBundledSharedData(appContext)
+            val sharedDir = findSharedDataDir(appContext)
+            sharedDataDir = sharedDir
+            if (session != 0L) {
+                KeytaoNativeBridge.destroySession(session)
+                session = 0L
+            }
+            val initialized = if (reinitialize) {
+                KeytaoNativeBridge.reinitialize(userDir.absolutePath, sharedDir?.absolutePath)
+            } else {
+                KeytaoNativeBridge.init(userDir.absolutePath, sharedDir?.absolutePath, deploy)
+            }
+            nativeReady = KeytaoNativeBridge.engineAvailable() && initialized
+            if (!nativeReady) {
+                lastState = lastState.withoutTransientCommit()
+                return false
+            }
+            val sessionStarted = System.nanoTime()
+            session = KeytaoNativeBridge.createSession()
+            val sessionCreated = session != 0L
+            KeytaoRuntimeLog.event("rime", "create_session", KeytaoRuntimeLog.elapsedMs(sessionStarted)) {
+                put("success", sessionCreated)
+            }
+            if (session != 0L && (!inputPolicyComposing || !inputPolicyLearning)) {
+                KeytaoNativeBridge.setInputPolicy(session, inputPolicyComposing, inputPolicyLearning)
+            }
+            lastState = KeytaoNativeBridge.sessionState(session)
+                ?.let { stableSchemaState(it) }
+                ?: KeytaoImeState.empty()
+            reloadStampSignature = reloadStampSignature()
+            nativeReady = session != 0L
+            success = nativeReady
+            return nativeReady
+        } finally {
+            val ok = success
+            KeytaoRuntimeLog.event("rime", "engine_init", KeytaoRuntimeLog.elapsedMs(started)) {
+                put("deploy", deploy)
+                put("reinitialize", reinitialize)
+                put("success", ok)
+            }
         }
-        val initialized = if (reinitialize) {
-            KeytaoNativeBridge.reinitialize(userDir.absolutePath, sharedDir?.absolutePath)
-        } else {
-            KeytaoNativeBridge.init(userDir.absolutePath, sharedDir?.absolutePath, deploy)
-        }
-        nativeReady = KeytaoNativeBridge.engineAvailable() && initialized
-        if (!nativeReady) {
-            lastState = lastState.withoutTransientCommit()
-            return false
-        }
-        session = KeytaoNativeBridge.createSession()
-        if (session != 0L && (!inputPolicyComposing || !inputPolicyLearning)) {
-            KeytaoNativeBridge.setInputPolicy(session, inputPolicyComposing, inputPolicyLearning)
-        }
-        lastState = KeytaoNativeBridge.sessionState(session)
-            ?.let { stableSchemaState(it) }
-            ?: KeytaoImeState.empty()
-        reloadStampSignature = reloadStampSignature()
-        nativeReady = session != 0L
-        return nativeReady
     }
 
     private fun stableSchemaState(state: KeytaoImeState): KeytaoImeState {
-        val name = state.schemaName.trim()
-        if (name.isNotEmpty() && !name.startsWith(".")) {
-            val displayName = RimeSchemaNameResolver.resolveDisplayName(userDir, sharedDataDir, name)
-            lastDisplaySchemaName = displayName
-            return state.copy(schemaName = displayName)
+        val started = schemaNameDurations.start()
+        try {
+            val name = state.schemaName.trim()
+            if (name.isNotEmpty() && !name.startsWith(".")) {
+                val displayName = RimeSchemaNameResolver.resolveDisplayName(userDir, sharedDataDir, name)
+                lastDisplaySchemaName = displayName
+                return state.copy(schemaName = displayName)
+            }
+            return if (lastDisplaySchemaName.isNotEmpty()) {
+                state.copy(schemaName = lastDisplaySchemaName)
+            } else {
+                state
+            }
+        } finally {
+            schemaNameDurations.finish(started)
         }
-        return if (lastDisplaySchemaName.isNotEmpty()) {
-            state.copy(schemaName = lastDisplaySchemaName)
-        } else {
-            state
-        }
+    }
+
+    fun flushRuntimeHistograms() {
+        schemaNameDurations.drain("rime", "schema_name_resolve")
     }
 
     private fun findSharedDataDir(context: Context): File? {

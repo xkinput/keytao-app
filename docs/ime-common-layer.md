@@ -620,24 +620,26 @@ FFI 的 JSON 状态路径现在持一个带签名缓存的 `ThemeResolver`，按
 
 ## 日志与隐私
 
-输入法进程看得到用户输入的一切，日志必须按“默认什么都不记”设计。
+输入法进程看得到用户输入的一切，结构化运行日志只记录诊断所需的长度、数量、布尔值与耗时，默认级别为 info。
 
 跨平台不变量：
 
-- **release 默认级别（info）下不得出现提交文本、preedit 全文、keysym/keycode 明细**。
-- 全文只允许 trace 级；debug 级只允许打字符数与候选数量。
+- **任何级别（包括 verbose）均不得记录 preedit、候选或提交文本、剪贴板内容、key/keysym/keycode 值、EditorInfo 文本**。
+- 允许记录长度、数量、布尔值、耗时、应用自有错误消息与宿主 packageName；字符串超过 128 字符时截断并标记 `_trunc`。不得记录设备标识、序列号、账号或 IP；路径中的用户主目录替换为 `<user>`。
 - 日志文件必须在用户私有位置，权限 0700/0600，不得用 `/tmp` 下的固定路径（世界可读且可被抢占）。
-- 日志打不开必须降级到 stderr 或系统日志，**不得让输入法启动失败**。
+- 结构化日志初始化或写入失败时静默关闭，**不得让输入法启动失败**；有界队列批量写入，超过 2 MB 时轮转，每进程最多保留 3 个文件，不执行 fsync。
 - FFI/JNI 的 panic 日志只含 panic 消息与出错的导出函数名，不含按键与提交内容。
+- `<user_data_dir>/runtime-log.json` 独立保存开关与 info/verbose 级别；默认开启 info，写线程每 5 秒检查一次变更，无需重启输入法；`enabled=false` 优先于 Windows 诊断环境变量。
 
 平台落地：
 
 | 平台 | 日志位置 | 说明 |
 | --- | --- | --- |
 | Linux daemon | `$XDG_STATE_HOME/keytao/log/keytao-ime.log`（默认 `~/.local/state/keytao/log`） | 目录 0700，按天滚动保留 3 天；旧版本的 `/tmp/keytao-ime.log*` 在启动时删除；App 的 `read_debug_logs` 先读状态目录再兼容 `/tmp` |
-| macOS | `NSLog` + `~/Library/keytao/log` 下的 librime 日志 | — |
-| Windows | 诊断文件需显式打开（`KEYTAO_WINDOWS_IME_DIAGNOSTICS=1`），且按键诊断宏在 release 下展开为 `if false` | release 只写 TSF 生命周期事件 |
-| Android | logcat，TAG=`KeytaoNative` 为原生侧 | — |
+| macOS | `~/Library/keytao/log/keytao-<tag>.log`（`macos-ime` / `desktop-app`），另保留 librime 日志 | 目录 0700、文件 0600；结构化日志每进程 2 MB × 3 |
+| Windows | `%APPDATA%\keytao\log\keytao-windows-ime.log` / `keytao-desktop-app.log` | 每进程 2 MB × 3；`KEYTAO_WINDOWS_IME_DIAGNOSTICS=1` 将 info 提升为 verbose，关闭仍优先；按键诊断保留 65536 次计数上限，失败与按键耗时在 info 可见 |
+| Android | `KeytaoAndroidPaths.userRoot()/log/keytao-<tag>.log`（`android-ime` / `android-app` / `android-deploy`） | App 专属外部目录，不可用时回退 `filesDir/keytao`；每进程 2 MB × 3；App 通过 FileProvider 分享缓存 ZIP |
+| iOS | App Group 容器 `keytao/log/keytao-ios-ime.log` | 容器 App 与键盘扩展共享目录；每进程 2 MB × 3；App 通过系统分享面板导出 |
 
 ## 简化后的目标架构
 

@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use keytao_core::ImeState;
+use keytao_core::{
+    runtime_log::{self, Level},
+    ImeState,
+};
 use windows::{
     core::Result,
     Win32::{
@@ -482,9 +485,12 @@ impl CandidateWindow {
         };
         let completed_attempts = shared_state.borrow().caret_retry_attempts;
         let Some(delay_ms) = caret_retry_delay_ms(completed_attempts) else {
-            if diagnostics_enabled() {
-                append_diagnostic(format!("caret retry attempt={completed_attempts} gave_up"));
-            }
+            keytao_core::rt_log!(
+                Level::Info,
+                "ui",
+                "caret_retry_gave_up",
+                attempts = completed_attempts,
+            );
             return;
         };
         let attempt = completed_attempts + 1;
@@ -549,6 +555,7 @@ impl CandidateWindow {
         state: &WeakState,
         embedded: bool,
     ) -> bool {
+        let started = (!self.visible && runtime_log::enabled(Level::Info)).then(Instant::now);
         let has_content = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
         if !has_content {
             self.hide();
@@ -616,11 +623,23 @@ impl CandidateWindow {
             }
             self.visible = true;
             self.notify_ime_event(EVENT_OBJECT_IME_SHOW);
+            if let Some(started) = started {
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "ui",
+                    "candidate_show",
+                    dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    candidates = ime_state.candidates.len(),
+                    preedit_len = ime_state.preedit.chars().count(),
+                );
+            }
         }
         true
     }
 
     pub fn hide(&mut self) {
+        let started = (self.visible && !self.click_through && runtime_log::enabled(Level::Info))
+            .then(Instant::now);
         self.last_upload = None;
         if !self.hwnd.0.is_null() {
             self.disarm_caret_reprobe();
@@ -634,6 +653,14 @@ impl CandidateWindow {
             if self.visible {
                 self.visible = false;
                 self.notify_ime_event(EVENT_OBJECT_IME_HIDE);
+                if let Some(started) = started {
+                    keytao_core::rt_log!(
+                        Level::Info,
+                        "ui",
+                        "candidate_hide",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
             }
         }
     }

@@ -105,6 +105,16 @@ pub extern "system" fn DllMain(hinstance: HMODULE, reason: u32, _: *mut ()) -> B
     .map_or(BOOL::from(false), |_| BOOL::from(true))
 }
 
+fn init_runtime_log() {
+    if let Some(user_dir) = keytao_core::default_user_data_dir() {
+        // The writer outlives COM objects. Pin before starting it, and keep
+        // thread creation and user-directory lookup outside DllMain's loader lock.
+        if globals::pin_module().is_ok() {
+            keytao_core::runtime_log::init(&user_dir, "windows-ime");
+        }
+    }
+}
+
 // ── COM DLL exports ───────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -125,6 +135,7 @@ pub unsafe extern "system" fn DllGetClassObject(
         if *clsid != CLSID_TEXT_SERVICE {
             return Err(windows::Win32::Foundation::CLASS_E_CLASSNOTAVAILABLE.into());
         }
+        init_runtime_log();
         let factory: IClassFactory = ClassFactory::new().into();
         factory.query(riid, ppv as *mut _).ok()
     })
@@ -140,6 +151,7 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 #[no_mangle]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
     guard(|| {
+        init_runtime_log();
         state::append_diagnostic("DllRegisterServer started");
         match registration::register() {
             Ok(()) => {

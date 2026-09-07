@@ -322,6 +322,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var keyPressAnimations: [Int: KeyPressAnimationState] = [:]
     private var keyPressDisplayLink: CADisplayLink?
     private var keyPressLastTimestamp: CFTimeInterval = 0
+    private var drawHistogram = KeyTaoDurationHistogram()
+    private var runtimeFrameTimestamp: CFTimeInterval = 0
+    private var runtimeDisplayFrames: UInt64 = 0
+    private var runtimeJankFrames: UInt64 = 0
+    var runtimeMetricsEnabled = true
     private var verticalScrollSurface: VerticalScrollSurface?
     private var verticalScrollVelocityY: CGFloat = 0
     private var verticalScrollDisplayLink: CADisplayLink?
@@ -653,6 +658,10 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     override func draw(_ rect: CGRect) {
+        let started = runtimeMetricsEnabled ? KeyTaoLog.now() : nil
+        defer {
+            if let started { drawHistogram.record((KeyTaoLog.now() - started) * 1000) }
+        }
         drawBackground()
         drawCandidateBar()
         if candidatePanelExpanded {
@@ -662,6 +671,29 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawKeyFeedbackOverlays()
         }
         drawLayoutInteractionHints()
+    }
+
+    func flushRuntimeMetrics() {
+        var fields = drawHistogram.drain() ?? [:]
+        fields["frames"] = fields["n"] ?? 0
+        fields["draw_gt_16ms"] = fields["jank_gt_16ms"] ?? 0
+        fields["display_frames"] = runtimeDisplayFrames
+        fields["jank_gt_16ms"] = runtimeJankFrames
+        if fields["n"] != nil || runtimeDisplayFrames > 0 {
+            KeyTaoLog.event("render", "draw_summary") { fields }
+        }
+        runtimeFrameTimestamp = 0
+        runtimeDisplayFrames = 0
+        runtimeJankFrames = 0
+    }
+
+    private func recordRuntimeDisplayFrame(_ timestamp: CFTimeInterval, previous: CFTimeInterval) {
+        // Both existing display links may fire for the same frame.
+        guard runtimeMetricsEnabled, previous > 0,
+              timestamp > previous, timestamp > runtimeFrameTimestamp else { return }
+        runtimeFrameTimestamp = timestamp
+        runtimeDisplayFrames += 1
+        if (timestamp - previous) * 1000 > 16 { runtimeJankFrames += 1 }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -5673,6 +5705,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     @objc private func stepVerticalScroll(_ displayLink: CADisplayLink) {
         let previousTimestamp = verticalScrollLastTimestamp
         verticalScrollLastTimestamp = displayLink.timestamp
+        recordRuntimeDisplayFrame(displayLink.timestamp, previous: previousTimestamp)
         guard previousTimestamp > 0 else { return }
         let elapsed = min(1.0 / 30.0, displayLink.timestamp - previousTimestamp)
         if let surface = verticalScrollSurface {
@@ -6071,6 +6104,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     @objc private func stepKeyPressAnimations(_ displayLink: CADisplayLink) {
         let previousTimestamp = keyPressLastTimestamp
         keyPressLastTimestamp = displayLink.timestamp
+        recordRuntimeDisplayFrame(displayLink.timestamp, previous: previousTimestamp)
         guard previousTimestamp > 0 else { return }
         let step = CGFloat(min(1, (displayLink.timestamp - previousTimestamp) / Self.keyPressAnimationDuration))
         var completed: [Int] = []

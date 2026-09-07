@@ -213,6 +213,22 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 - `didReceiveMemoryWarning` 释放可重建缓存：剪贴板历史、按键重放队列、展开候选、logo 图片、theme/config 缓存；session 与已部署方案不动，打字不受影响。
 - App Group 共享文件可能正被主 App 写入，`resolveTheme` / `loadConfig` 解析结果为空时保留上一次成功的 theme/config，而不是回退到内置默认值。
 
+## 运行日志挂点
+
+`KeyTaoIOSEngine.swift` 的 `KeyTaoLog` 通过 B1 已有的 `keytao_log_enabled` / `keytao_log_event` C ABI 提交粗粒度事件。现有 `keytao_init(userRoot, sharedDir)` 已在 Rust 内以 `ios-ime` 初始化日志，目标为实际用户目录下的 `log/keytao-ios-ime.log`；Swift 不使用桌面的默认目录，也不为日志额外初始化 Rime。
+
+- 生命周期：两条 controller 初始化路径记录 `ext_init` 与 `ProcessInfo.systemUptime` 的 T0；记录 `view_did_load`、`view_will_appear`、新增的 `view_did_appear` / `view_did_disappear`、`view_will_disappear` 耗时。`startup_latency` 只在该 controller 第一次 `viewWillAppear` 结束时记录，表示 T0 到该回调结束，不代表异步引擎已经就绪。
+- 启动缓冲：native init 前最多暂存 32 条粗粒度元数据，保留原始 `event_uptime`，在已有 `keytao_init` 返回后顺序提交。日志关闭时丢弃缓冲，之后不再缓存。若缺少安装或部署方案导致原路径从未调用 `keytao_init`，这些早期事件只留在有界内存中，不能声称已经写入文件。
+- 输入：`didTrigger` 只按固定 command type 白名单计数，配置中的未知 type 归为 `other`；启动队列重放不重复计数。`apply(_:)` 的宿主 proxy 操作总耗时留在本地直方图。`viewWillDisappear` 排空为 `input/command_summary` 与 `input/apply_summary`；两个 `advanceToNextInputMode()` 分支记录 `ui/input_mode_switch`。
+- 引擎：记录 `rime/ensure_ready_async`（含串行队列等待、准备及主队列安装完成）、`prepare_runtime`、`keytao_init`、`keytao_create_session`、`schema_switch`、`reload` 耗时与结果。高频 `reloadIfNeeded` 无变更检查只进本地直方图，会话结束提交 `reload_if_needed_summary`；实际 reload 成功才单独提交 `reload_if_needed`。
+- 绘制：`draw(_:)` 用 11 个对数桶记录耗时，会话结束提交 `render/draw_summary` 的 `frames`、`p50` / `p95` / `max`（毫秒）、`draw_gt_16ms`。`jank_gt_16ms` 与 `display_frames` 使用已有按键动画、垂直滚动 `CADisplayLink.timestamp` 的原始帧间隔，早于滚动时间 clamp；同一 timestamp 去重，不新建 display link，也不把未运行 display link 时段当成已观测帧。
+- 内存：仅在 `viewWillAppear`、`viewWillDisappear`、`didReceiveMemoryWarning` 调用 `task_info(TASK_VM_INFO)`，记录 `phys_footprint` 换算的 `mem_mb`；警告另记 `memory/mem_warning`。`limit_pct` 以 60 MiB 为诊断参考，同时带 `limit_mb=60` / `limit_estimated=true`，不是系统报告的 jetsam 上限；查询失败只记不可用与数值错误码，不填零。没有内存定时器。
+- 写入错误：用户目录、keyboard seed/hash、toolbar、settings、theme UI 写入失败记 `error/config_write`。仅使用固定 operation 与自有错误字符串，不记录系统错误描述、路径或配置值。
+
+按键、绘制和 reload 检查不逐次跨 C bridge。采样开关仅在主线程的生命周期、初始化完成等粗粒度边界刷新并保存在各对象中；已关闭时不取每键计时。Rust 写入线程仍负责运行日志设置的热更新，Swift 本地采样开关在下一个粗粒度刷新点同步。所有记录只含类型、计数、布尔、耗时与内存数值；不含输入文本、候选、提交内容、剪贴板、键值或 schema 名称。
+
+`viewWillDisappear` 提交会话统计后，`viewDidDisappear` 在最后生命周期事件之后通过 `KeyTaoLog.flush(200)` 调用 `keytao_log_flush(200)`，最多等待 Rust writer 200 ms，不执行 fsync；超时或提前挂起仍可能丢失尾部日志。
+
 ## 键盘反馈
 
 `KeyTaoInputView`（`inputView`）与 `KeyTaoIOSKeyboardView` 都遵循 `UIInputViewAudioFeedback` 并返回 `enableInputClicksWhenVisible = true`，每次确认按键调用 `UIDevice.current.playInputClick()`，是否发声由用户在「设置 > 声音」决定。触觉反馈额外要求完全访问，未授权时不再空转调用 `UIImpactFeedbackGenerator`。

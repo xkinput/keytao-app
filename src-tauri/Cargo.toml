@@ -49,6 +49,12 @@ jni = "0.21"
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.5"
 objc2-foundation = { version = "0.3", features = ["NSFileManager", "NSString", "NSURL"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+  "std", "UIActivity", "UIActivityViewController", "UIApplication", "UIResponder",
+  "UIView", "UIViewController", "UIWindow", "UIScene", "UIWindowScene",
+  "UIPopoverPresentationController", "UIPresentationController", "block2",
+  "objc2-core-foundation",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows]
 version = "0.58"

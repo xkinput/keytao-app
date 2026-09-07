@@ -99,6 +99,11 @@ void keytao_log_event(int32_t level,
                       const char *kv_json);
 
 /**
+ * Wait up to `timeout_ms` for queued runtime log events to be written, without fsync.
+ */
+void keytao_log_flush(uint32_t timeout_ms);
+
+/**
  * Initialize the Rime runtime. Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.

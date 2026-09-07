@@ -2869,7 +2869,7 @@ export default function App() {
         {activeTab === "debug" && (
           <Card>
             <CardContent className="pt-6">
-              <DebugTab />
+              <DebugTab isMobile={isMobilePlatform} />
             </CardContent>
           </Card>
         )}

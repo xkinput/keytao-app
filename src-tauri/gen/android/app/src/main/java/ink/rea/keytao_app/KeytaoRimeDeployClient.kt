@@ -56,11 +56,15 @@ object KeytaoRimeDeployClient {
         private val processed = linkedSetOf<String>()
         private var initialSchemas = emptyList<String>()
         private var current: PendingSchema? = null
+        private var startedNs = 0L
+        private var stepStartedNs = 0L
         private val timeout = Runnable {
             finish(Result(success = false, error = "Android RIME deployment timed out"))
         }
 
         fun start() {
+            startedNs = System.nanoTime()
+            KeytaoRuntimeLog.event("rime", "deploy_start")
             handler.postDelayed(timeout, timeoutMs)
             startStep(null)
         }
@@ -68,6 +72,7 @@ object KeytaoRimeDeployClient {
         private fun startStep(schema: PendingSchema?) {
             if (finished.get()) return
             current = schema
+            stepStartedNs = System.nanoTime()
             val delivered = AtomicBoolean(false)
             val receiver = object : ResultReceiver(handler) {
                 override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
@@ -107,6 +112,7 @@ object KeytaoRimeDeployClient {
 
         private fun handleStepResult(success: Boolean, schemas: List<String>, error: String) {
             if (finished.get()) return
+            logStepResult(success, schemas.size)
             if (!success) {
                 finish(Result(success = false, error = error.ifBlank { "Android RIME 部署失败" }))
                 return
@@ -179,9 +185,30 @@ object KeytaoRimeDeployClient {
 
         private fun finish(result: Result) {
             if (!finished.compareAndSet(false, true)) return
+            logStepResult(result.success, 0)
+            val success = result.success
+            val schemaCount = processed.size
+            KeytaoRuntimeLog.event("rime", "deploy", KeytaoRuntimeLog.elapsedMs(startedNs)) {
+                put("success", success)
+                put("schema_count", schemaCount)
+            }
             handler.removeCallbacks(timeout)
             deploymentRunning.set(false)
             callback(result)
+        }
+
+        private fun logStepResult(success: Boolean, schemaCount: Int) {
+            if (stepStartedNs == 0L) return
+            val duration = KeytaoRuntimeLog.elapsedMs(stepStartedNs)
+            stepStartedNs = 0L
+            val configStep = current == null
+            val schemaIndex = processed.size
+            KeytaoRuntimeLog.event("rime", "deploy_step", duration) {
+                put("success", success)
+                put("config_step", configStep)
+                put("schema_index", schemaIndex)
+                put("schema_count", schemaCount)
+            }
         }
     }
 

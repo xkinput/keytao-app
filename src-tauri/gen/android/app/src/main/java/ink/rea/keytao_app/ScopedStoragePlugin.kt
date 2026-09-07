@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -9,6 +10,7 @@ import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.result.ActivityResult
+import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -23,6 +25,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 @TauriPlugin
 class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
@@ -70,6 +74,60 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (ex: Exception) {
             invoke.reject(ex.message ?: "Failed to resolve KeyTao data directory")
         }
+    }
+
+    @Command
+    fun shareRuntimeLog(invoke: Invoke) {
+        Thread {
+            var archive: File? = null
+            try {
+                val logDir = File(KeytaoAndroidPaths.userRoot(activity), "log")
+                val logFiles = logDir.listFiles()
+                    ?.filter { it.isFile && it.name.matches(Regex("""keytao-.*\.log.*""")) }
+                    ?.sortedBy { it.name }
+                    .orEmpty()
+                if (logFiles.isEmpty()) {
+                    return@Thread invoke.reject("No runtime logs available")
+                }
+                val zipFile = File.createTempFile("keytao-runtime-", ".zip", activity.cacheDir)
+                archive = zipFile
+                ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+                    for (file in logFiles) {
+                        file.inputStream().use { input ->
+                            zip.putNextEntry(ZipEntry(file.name))
+                            input.copyTo(zip)
+                            zip.closeEntry()
+                        }
+                    }
+                }
+                val uri = FileProvider.getUriForFile(
+                    activity,
+                    "${activity.packageName}.fileprovider",
+                    zipFile,
+                )
+                activity.runOnUiThread {
+                    try {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/zip"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            clipData = ClipData.newUri(activity.contentResolver, "KeyTao runtime log", uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        val chooser = Intent.createChooser(intent, "分享运行日志").apply {
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        activity.startActivity(chooser)
+                        invoke.resolve(JSObject().apply { put("path", zipFile.absolutePath) })
+                    } catch (ex: Exception) {
+                        zipFile.delete()
+                        invoke.reject(ex.message ?: "Failed to share runtime logs")
+                    }
+                }
+            } catch (ex: Exception) {
+                archive?.delete()
+                invoke.reject(ex.message ?: "Failed to prepare runtime log archive")
+            }
+        }.start()
     }
 
     @Command

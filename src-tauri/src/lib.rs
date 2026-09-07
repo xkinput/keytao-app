@@ -3602,7 +3602,10 @@ mod android_log {
 /// JNI export funnels through here.
 #[cfg(target_os = "android")]
 fn android_jni_guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
-    let started = (!matches!(name, "nativeLogEnabled" | "nativeLogEvent")
+    let started = (!matches!(
+        name,
+        "nativeLogEnabled" | "nativeLogEvent" | "nativeLogFlush"
+    )
         && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
     .then(std::time::Instant::now);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
@@ -3984,6 +3987,20 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogEven
             (!dur_ms.is_nan()).then_some(dur_ms),
             kv,
         );
+    });
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogFlush(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    timeout_ms: jint,
+) {
+    android_jni_guard("nativeLogFlush", (), || {
+        keytao_core::runtime_log::flush_blocking(std::time::Duration::from_millis(
+            timeout_ms.max(0) as u64,
+        ));
     });
 }
 
@@ -7097,6 +7114,259 @@ pub struct DebugLogs {
     pub macos_ime: Option<DebugLogFile>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeLogLevel {
+    Info,
+    Verbose,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuntimeLogConfig {
+    enabled: bool,
+    level: RuntimeLogLevel,
+}
+
+#[derive(Serialize)]
+struct RuntimeLogFileInfo {
+    name: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeLogSettings {
+    #[serde(flatten)]
+    config: RuntimeLogConfig,
+    log_dir: String,
+    files: Vec<RuntimeLogFileInfo>,
+    file_count: usize,
+    total_bytes: u64,
+}
+
+fn runtime_log_directory(root: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = root;
+        ime_state_log_dir().ok_or("Cannot determine runtime log directory".into())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(root.join("log"))
+    }
+}
+
+fn is_runtime_log_name(name: &str) -> bool {
+    let Some((tag, suffix)) = name
+        .strip_prefix("keytao-")
+        .and_then(|n| n.split_once(".log"))
+    else {
+        return false;
+    };
+    // The existing Linux daemon log is not a structured runtime log.
+    !tag.is_empty()
+        && tag != "ime"
+        && tag.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        && (suffix.is_empty()
+            || suffix.strip_prefix('.').is_some_and(|rotation| {
+                !rotation.is_empty() && rotation.bytes().all(|c| c.is_ascii_digit())
+            }))
+}
+
+fn runtime_log_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    // Surface permission failures instead of reporting a misleading empty list.
+    match std::fs::read_dir(dir) {
+        Ok(_) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Cannot read runtime log directory: {e}")),
+    }
+    let mut paths = collect_dir_log_paths(dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_runtime_log_name)
+                && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+        })
+        .collect::<Vec<_>>();
+    // Read older rotations first; a cross-process timestamp merge is deferred.
+    paths.sort_by_cached_key(|path| {
+        (
+            std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+            path.clone(),
+        )
+    });
+    Ok(paths)
+}
+
+#[tauri::command]
+async fn get_runtime_log_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<RuntimeLogSettings, String> {
+    let root = default_keytao_user_root(&app)?;
+    let config = match std::fs::read(root.join("runtime-log.json")) {
+        Ok(bytes) => serde_json::from_slice::<RuntimeLogConfig>(&bytes)
+            .map_err(|e| format!("Cannot parse runtime log settings: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeLogConfig {
+            enabled: true,
+            level: RuntimeLogLevel::Info,
+        },
+        Err(e) => return Err(format!("Cannot read runtime log settings: {e}")),
+    };
+    let dir = runtime_log_directory(&root)?;
+    let mut files = Vec::new();
+    for path in runtime_log_paths(&dir)? {
+        match path.metadata() {
+            Ok(metadata) => files.push(RuntimeLogFileInfo {
+                name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                size: metadata.len(),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("Cannot inspect runtime log: {e}")),
+        }
+    }
+    Ok(RuntimeLogSettings {
+        config,
+        log_dir: path_string(dir),
+        file_count: files.len(),
+        total_bytes: files.iter().map(|file| file.size).sum(),
+        files,
+    })
+}
+
+#[tauri::command]
+async fn set_runtime_log_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+    level: RuntimeLogLevel,
+) -> Result<(), String> {
+    let root = default_keytao_user_root(&app)?;
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let bytes =
+        serde_json::to_vec(&RuntimeLogConfig { enabled, level }).map_err(|e| e.to_string())?;
+    write_file_atomic(&root.join("runtime-log.json"), &bytes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn read_runtime_log<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    max_lines: Option<usize>,
+) -> Result<DebugLogFile, String> {
+    let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
+    let paths = runtime_log_paths(&dir)?;
+    if paths.is_empty() {
+        return Ok(DebugLogFile {
+            lines: Vec::new(),
+            truncated: false,
+        });
+    }
+    // Runtime logs are size-bounded. Do not prune, rewrite, or time-filter them.
+    let mut logs = read_log_paths(paths, "", OffsetDateTime::UNIX_EPOCH, None);
+    let limit = max_lines
+        .unwrap_or(DEBUG_LOG_MAX_LINES)
+        .min(DEBUG_LOG_MAX_LINES);
+    if logs.lines.len() > limit {
+        logs.lines.drain(..logs.lines.len() - limit);
+        logs.truncated = true;
+    }
+    Ok(logs)
+}
+
+#[tauri::command]
+async fn clear_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
+    for path in runtime_log_paths(&dir)? {
+        match std::fs::remove_file(path) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("Cannot clear runtime log: {e}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "ios")]
+#[allow(deprecated)] // Foundation re-exports the UIKit-compatible main-thread token.
+fn present_runtime_log_share(paths: Vec<PathBuf>) -> Result<(), String> {
+    use objc2_foundation::{MainThreadMarker, NSArray, NSURL};
+    use objc2_ui_kit::{UIActivityViewController, UIApplication, UIWindowScene};
+
+    let mtm = MainThreadMarker::new().ok_or("Sharing must run on the main thread")?;
+    let application = UIApplication::sharedApplication(mtm);
+    let window = application
+        .connectedScenes()
+        .iter()
+        .filter_map(|scene| scene.downcast::<UIWindowScene>().ok())
+        .flat_map(|scene| scene.windows().to_vec())
+        .find(|window| window.isKeyWindow())
+        .or_else(|| application.keyWindow())
+        .ok_or("No active window is available for sharing")?;
+    let presenter = window
+        .rootViewController()
+        .ok_or("No root view controller is available")?;
+    if presenter.presentedViewController().is_some() {
+        return Err("Dismiss the current sheet before sharing logs".into());
+    }
+    let urls = paths
+        .iter()
+        .map(|path| NSURL::from_file_path(path).ok_or("Cannot create runtime log file URL"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let items = NSArray::from_retained_slice(&urls);
+    // UIKit accepts file NSURL items; erasing the array's generic type is safe.
+    let controller = unsafe {
+        UIActivityViewController::initWithActivityItems_applicationActivities(
+            mtm.alloc(),
+            items.cast_unchecked(),
+            None,
+        )
+    };
+    if let Some(popover) = controller.popoverPresentationController() {
+        let view = presenter.view().ok_or("No source view is available for sharing")?;
+        popover.setSourceView(Some(&view));
+        popover.setSourceRect(view.bounds());
+    }
+    presenter.presentViewController_animated_completion(&controller, true, None);
+    Ok(())
+}
+
+#[tauri::command]
+async fn share_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<ScopedStorageHandle<R>>()
+            .0
+            .run_mobile_plugin("shareRuntimeLog", ())
+            .map(|_: serde_json::Value| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let dir = runtime_log_directory(&ios_keytao_root(&app)?)?;
+        let paths = runtime_log_paths(&dir)?;
+        if paths.is_empty() {
+            return Err("No runtime logs to share".into());
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = sender.send(present_runtime_log_share(paths));
+        })
+        .map_err(|e| e.to_string())?;
+        receiver.await.map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
+        app.opener()
+            .open_path(path_string(dir), None::<&str>)
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[tauri::command]
 async fn read_debug_logs() -> Result<DebugLogs, String> {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
@@ -7325,6 +7595,28 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(scoped_storage_plugin());
 
+    #[cfg(not(any(target_os = "linux", target_os = "ios")))]
+    let builder = builder.setup(|app| {
+        #[cfg(target_os = "android")]
+        {
+            // The JNI engine initialization only covers the IME/deploy processes.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Ok(root) = android_keytao_root(&handle) {
+                    keytao_core::runtime_log::init(&root, "android-app");
+                }
+            });
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = app;
+            if let Some(root) = keytao_core::default_user_data_dir() {
+                keytao_core::runtime_log::init(&root, "desktop-app");
+            }
+        }
+        Ok(())
+    });
+
     #[cfg(target_os = "linux")]
     let builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::default().build())
@@ -7342,6 +7634,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            if let Some(root) = keytao_core::default_user_data_dir() {
+                keytao_core::runtime_log::init(&root, "desktop-app");
+            }
             use tauri_plugin_global_shortcut::{
                 Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
             };
@@ -7424,6 +7719,11 @@ pub fn run() {
             set_ime_embedded_composition,
             set_ime_ui_settings,
             read_debug_logs,
+            get_runtime_log_settings,
+            set_runtime_log_settings,
+            read_runtime_log,
+            clear_runtime_log,
+            share_runtime_log,
             #[cfg(not(any(target_os = "android", target_os = "linux")))]
             rime_get_data_dir,
             #[cfg(target_os = "linux")]

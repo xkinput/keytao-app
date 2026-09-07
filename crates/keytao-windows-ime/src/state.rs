@@ -1,17 +1,16 @@
 //! Shared state between all TSF COM objects.
 
 use keytao_core::{
-    default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
-    InputContextPolicy, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
+    default_shared_data_dir, default_user_data_dir,
+    runtime_log::{self, Level},
+    ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy, ReloadStamp,
+    WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::cell::RefCell;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use windows::{
     core::{Interface, PCWSTR},
     Win32::{
@@ -22,10 +21,7 @@ use windows::{
             LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         },
-        System::Threading::{
-            CreateMutexW, GetCurrentProcessId, GetCurrentThreadId, ReleaseMutex,
-            WaitForSingleObject,
-        },
+        System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
             ITfComposition, ITfContext, ITfContextOwnerCompositionServices, ITfDocumentMgr,
@@ -62,8 +58,6 @@ const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_CONTEXT_SYNC_BACKOFF: Duration = Duration::from_secs(1);
 const THEME_POLL_INTERVAL: Duration = Duration::from_millis(250);
-static FILE_DIAGNOSTICS_ENABLED: OnceLock<bool> = OnceLock::new();
-static DIAGNOSTIC_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static THEME_CACHE: OnceLock<Mutex<ThemeCache>> = OnceLock::new();
 
 struct ThemeCache {
@@ -543,12 +537,7 @@ pub fn new_shared_state() -> SharedState {
 }
 
 pub(crate) fn diagnostics_enabled() -> bool {
-    *FILE_DIAGNOSTICS_ENABLED.get_or_init(|| {
-        cfg!(debug_assertions)
-            || std::env::var("KEYTAO_WINDOWS_IME_DIAGNOSTICS")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-    })
+    runtime_log::enabled(Level::Verbose)
 }
 
 /// Missing theme file or key means panel-only preedit by default.
@@ -596,42 +585,7 @@ pub(crate) fn prime_theme_resolver() {
 }
 
 pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
-    if !diagnostics_enabled() {
-        return;
-    }
-
-    // Resolve the user directory and open the append handle once per process.
-    let file = DIAGNOSTIC_FILE.get_or_init(|| {
-        Mutex::new(default_user_data_dir().and_then(|user_dir| {
-            let log_dir = user_dir.join("log");
-            fs::create_dir_all(&log_dir).ok()?;
-            const FILE_SHARE_READ: u32 = 0x1;
-            const FILE_SHARE_WRITE: u32 = 0x2;
-            const FILE_SHARE_DELETE: u32 = 0x4;
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-                .open(log_dir.join("windows-ime.log"))
-                .ok()
-        }))
-    });
-    let mut file = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(file) = file.as_mut() else {
-        return;
-    };
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let pid = unsafe { GetCurrentProcessId() };
-    let tid = unsafe { GetCurrentThreadId() };
-    let _ = writeln!(
-        file,
-        "[{}.{:03}][pid:{pid}][tid:{tid}] {}",
-        timestamp.as_secs(),
-        timestamp.subsec_millis(),
-        message.as_ref()
-    );
+    keytao_core::rt_log!(Level::Verbose, "ui", "tsf", msg = message.as_ref());
 }
 
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
@@ -643,7 +597,8 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
         Arc::clone(&st.engine_build_mailbox)
     };
 
-    append_diagnostic("engine warmup started");
+    let started = Instant::now();
+    keytao_core::rt_log!(Level::Info, "lifecycle", "engine_warmup_start");
     let dll_guard = DllActivityGuard::new();
     let spawn_result = std::thread::Builder::new()
         .name("keytao-ime-warmup".into())
@@ -652,11 +607,24 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
             match &result {
                 Ok(_) => {
                     tracing::info!("KeyTao Windows IME engine warmed up");
-                    append_diagnostic("engine warmup succeeded");
+                    keytao_core::rt_log!(
+                        Level::Info,
+                        "lifecycle",
+                        "engine_warmup_end",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        ok = true,
+                    );
                 }
                 Err(error) => {
                     tracing::error!("librime init failed: {error}");
-                    append_diagnostic(format!("engine warmup failed: {error}"));
+                    keytao_core::rt_log!(
+                        Level::Info,
+                        "error",
+                        "engine_warmup_end",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        ok = false,
+                        msg = error,
+                    );
                 }
             }
             mailbox.store(result);
@@ -665,7 +633,14 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine warmup thread: {error}");
-        append_diagnostic(&message);
+        keytao_core::rt_log!(
+            Level::Info,
+            "error",
+            "engine_warmup_end",
+            dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ok = false,
+            msg = message,
+        );
         shared_state.borrow_mut().finish_engine_build_error(message);
     }
 }
@@ -687,7 +662,8 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
         Arc::clone(&st.reload_mailbox)
     };
     let dll_guard = DllActivityGuard::new();
-    append_diagnostic("engine reload started");
+    let started = Instant::now();
+    keytao_core::rt_log!(Level::Info, "lifecycle", "engine_reload_start");
     let spawn_result = std::thread::Builder::new()
         .name("keytao-ime-reload".into())
         .spawn(move || {
@@ -695,11 +671,24 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
             match &bundle {
                 Ok(_) => {
                     tracing::info!("librime session refreshed after reload stamp change");
-                    append_diagnostic("engine reload succeeded");
+                    keytao_core::rt_log!(
+                        Level::Info,
+                        "lifecycle",
+                        "engine_reload_end",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        ok = true,
+                    );
                 }
                 Err(error) => {
                     tracing::error!("librime reload failed: {error}");
-                    append_diagnostic(format!("engine reload failed: {error}"));
+                    keytao_core::rt_log!(
+                        Level::Info,
+                        "error",
+                        "engine_reload_end",
+                        dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+                        ok = false,
+                        msg = error,
+                    );
                 }
             }
             mailbox.store(bundle);
@@ -708,7 +697,14 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine reload thread: {error}");
-        append_diagnostic(&message);
+        keytao_core::rt_log!(
+            Level::Info,
+            "error",
+            "engine_reload_end",
+            dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+            ok = false,
+            msg = message,
+        );
         shared_state.borrow_mut().finish_reload(Err(message));
         return false;
     }

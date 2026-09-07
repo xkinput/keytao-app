@@ -9,11 +9,15 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Instant,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use keytao_core::{utf16_offset_from_chars, ImeRuntimeSession, ImeState, KeyProcessResult};
+use keytao_core::{
+    runtime_log::{self, Level},
+    utf16_offset_from_chars, ImeRuntimeSession, ImeState, KeyProcessResult,
+};
 use windows::{
     core::{implement, Interface, Result, GUID, PCWSTR, VARIANT},
     Win32::{
@@ -242,6 +246,7 @@ pub(crate) struct PendingWindowUpdate {
     show_mode_hint: bool,
     embedded: bool,
     reposition_only: bool,
+    key_started: Option<Instant>,
 }
 
 pub(crate) struct PendingCommitRetry {
@@ -713,7 +718,7 @@ fn queue_lost_commit_once(
         return;
     }
     let committed_len = committed.chars().count();
-    append_diagnostic(format!("commit lost len={committed_len}"));
+    keytao_core::rt_log!(Level::Info, "error", "commit_lost", len = committed_len);
     shared_state.borrow_mut().pending_commit_retry = Some(PendingCommitRetry {
         context: context.clone(),
         client_id,
@@ -741,16 +746,24 @@ pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
             })();
             track_composition_in_flight(&state, None);
             if let Err(error) = &result {
-                append_diagnostic(format!(
-                    "TSF edit session failed stage=commit-retry-apply: {error}"
-                ));
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "error",
+                    "edit_session_failed",
+                    stage = "commit-retry-apply",
+                    hr = error.code().0,
+                );
             }
             result
         })
     {
-        append_diagnostic(format!(
-            "TSF edit session failed stage=commit-retry-request: {error}"
-        ));
+        keytao_core::rt_log!(
+            Level::Info,
+            "error",
+            "edit_session_failed",
+            stage = "commit-retry-request",
+            hr = error.code().0,
+        );
     }
 }
 
@@ -813,6 +826,13 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
         if st.pending_window_update.is_none() {
             st.pending_window_update = Some(update);
         }
+    } else if let Some(started) = update.key_started {
+        keytao_core::rt_log!(
+            Level::Info,
+            "input",
+            "keystroke",
+            dur_ms = started.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 }
 
@@ -823,6 +843,7 @@ fn apply_ime_state(
     ime_state: ImeState,
     show_mode_hint_on_change: bool,
     async_dontcare: bool,
+    key_started: Option<Instant>,
 ) -> Result<()> {
     let state_arc = Rc::clone(shared_state);
     let state_arc_for_session = Rc::clone(&state_arc);
@@ -962,7 +983,13 @@ fn apply_ime_state(
             st.ime_state = None;
             st.pending_window_update = None;
             drop(st);
-            append_diagnostic(format!("TSF edit session failed stage=apply: {error}"));
+            keytao_core::rt_log!(
+                Level::Info,
+                "error",
+                "edit_session_failed",
+                stage = "apply",
+                hr = error.code().0,
+            );
             if let Some(committed) = committed {
                 queue_lost_commit_once(
                     ctx,
@@ -1019,6 +1046,7 @@ fn apply_ime_state(
                 show_mode_hint,
                 embedded,
                 reposition_only: false,
+                key_started,
             });
         }
         if async_dontcare {
@@ -1032,7 +1060,13 @@ fn apply_ime_state(
         with_write_session(context, client_id, apply_session)
     };
     if let Err(error) = &session_result {
-        append_diagnostic(format!("TSF edit session failed stage=request: {error}"));
+        keytao_core::rt_log!(
+            Level::Info,
+            "error",
+            "edit_session_failed",
+            stage = "request",
+            hr = error.code().0,
+        );
         if let Some(committed) = committed_for_retry.as_deref() {
             queue_lost_commit_once(
                 context,
@@ -1128,6 +1162,7 @@ fn reposition_ime_windows(
         show_mode_hint,
         embedded,
         reposition_only: true,
+        key_started: None,
     });
     flush_pending_ime_ui(shared_state);
     true
@@ -1324,7 +1359,15 @@ pub(crate) fn handle_panel_click(shared_state: &SharedState, click: PanelClick) 
         PanelClick::NextPage => session.change_page(false),
     };
     if let Some(ime_state) = ime_state {
-        let _ = apply_ime_state(&context, client_id, shared_state, ime_state, false, true);
+        let _ = apply_ime_state(
+            &context,
+            client_id,
+            shared_state,
+            ime_state,
+            false,
+            true,
+            None,
+        );
     }
 }
 
@@ -1373,6 +1416,7 @@ fn prepare_engine_for_key(
             ImeState::empty(),
             false,
             false,
+            None,
         )?;
     }
 
@@ -1422,7 +1466,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // has to be maintained in the test callback (windows-1).
             state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk);
             if is_shift_vk(vk) {
-                append_key_diagnostic!("OnTestKeyDown shift vk=0x{vk:02x} pending=true eat=false");
+                append_key_diagnostic!("OnTestKeyDown modifier pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
             // An unanswered probe counts as blocked, so the retry has to run before
@@ -1448,7 +1492,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     start_reload_if_needed(&state);
                 }
                 append_key_diagnostic!(
-                    "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_needed} composing=false eat=false"
+                    "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing=false eat=false"
                 );
                 return Ok(BOOL::from(false));
             }
@@ -1458,7 +1502,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 .unwrap_or(false);
             let eat = should_eat_key(vk, is_composing, mods);
             append_key_diagnostic!(
-                "OnTestKeyDown vk=0x{vk:02x} mods=0x{mods:x} ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
+                "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
             );
             Ok(BOOL::from(eat))
         })
@@ -1481,7 +1525,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if input_is_blocked(&state, pic) {
-                append_key_diagnostic!("OnTestKeyUp shift vk=0x{vk:02x} blocked=true eat=false");
+                append_key_diagnostic!("OnTestKeyUp modifier blocked=true eat=false");
                 return Ok(BOOL::from(false));
             }
             let (should_eat, should_retry, should_reload) = {
@@ -1500,7 +1544,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 start_reload_if_needed(&state);
             }
             append_key_diagnostic!(
-                "OnTestKeyUp shift vk=0x{vk:02x} pending={} ready={} reload={} eat={should_eat}",
+                "OnTestKeyUp modifier pending={} ready={} reload={} eat={should_eat}",
                 state.borrow().shift_pressed_without_key,
                 !should_retry,
                 should_reload,
@@ -1511,6 +1555,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
     }
 
     fn OnKeyDown(&self, pic: Option<&ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        let key_started = runtime_log::enabled(Level::Info).then(Instant::now);
         guard(|| {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
@@ -1519,79 +1564,87 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
 
-        if is_shift_vk(vk) {
-            state.borrow_mut().shift_pressed_without_key = true;
-            return Ok(BOOL::from(false));
-        }
+            if is_shift_vk(vk) {
+                state.borrow_mut().shift_pressed_without_key = true;
+                return Ok(BOOL::from(false));
+            }
 
-        retry_input_context_if_unknown(&state, Some(&context));
-        if input_is_blocked(&state, Some(&context)) {
-            reset_input_for_focus_change(&state);
-            return Ok(BOOL::from(false));
-        }
+            retry_input_context_if_unknown(&state, Some(&context));
+            if input_is_blocked(&state, Some(&context)) {
+                reset_input_for_focus_change(&state);
+                return Ok(BOOL::from(false));
+            }
 
-        let prepared_engine = {
-            let mut st = state.borrow_mut();
-            st.shift_pressed_without_key = false;
-            st.key_context = Some(context.clone());
-            drop(st);
-            prepare_engine_for_key(&context, &state, "OnKeyDown")?
-        };
-        let client_id = match prepared_engine {
-            Some(client_id) => client_id,
-            None => return Ok(BOOL::from(false)),
-        };
+            let prepared_engine = {
+                let mut st = state.borrow_mut();
+                st.shift_pressed_without_key = false;
+                st.key_context = Some(context.clone());
+                drop(st);
+                prepare_engine_for_key(&context, &state, "OnKeyDown")?
+            };
+            let client_id = match prepared_engine {
+                Some(client_id) => client_id,
+                None => return Ok(BOOL::from(false)),
+            };
 
-        let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
+            let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
 
-        if should_bypass_empty_composition(vk, mods, &before_state) {
-            hide_candidate_window(&state);
-            return Ok(BOOL::from(false));
-        }
+            if should_bypass_empty_composition(vk, mods, &before_state) {
+                hide_candidate_window(&state);
+                return Ok(BOOL::from(false));
+            }
 
-        // Enter has exactly one meaning across all platforms: hand XK_Return to
-        // Rime and let core fall back to committing the raw input (D5).
-        let (result, keysym) = if is_enter_vk(vk) {
-            let result = runtime_session(&state).and_then(|session| session.process_enter());
-            (result, 0xff0du32)
-        } else {
-            let keysym = match vk_to_keysym(vk, lparam.0, mods) {
-                Some(keysym) => keysym,
+            // Enter has exactly one meaning across all platforms: hand XK_Return to
+            // Rime and let core fall back to committing the raw input (D5).
+            let result = if is_enter_vk(vk) {
+                runtime_session(&state).and_then(|session| session.process_enter())
+            } else {
+                let keysym = match vk_to_keysym(vk, lparam.0, mods) {
+                    Some(keysym) => keysym,
+                    None => {
+                        append_key_diagnostic!("OnKeyDown mapped=false");
+                        return Ok(BOOL::from(false));
+                    }
+                };
+                process_key_result(&state, keysym, mods)
+            };
+            let result = match result {
+                Some(r) => r,
                 None => {
-                    append_key_diagnostic!("OnKeyDown vk=0x{vk:02x} mods=0x{mods:x} no keysym");
+                    append_key_diagnostic!("OnKeyDown result=false");
                     return Ok(BOOL::from(false));
                 }
             };
-            (process_key_result(&state, keysym, mods), keysym)
-        };
-        let result = match result {
-            Some(r) => r,
-            None => {
-                append_key_diagnostic!(
-                    "OnKeyDown vk=0x{vk:02x} keysym=0x{keysym:x} mods=0x{mods:x} no result"
-                );
+            let ime_state = result.state;
+
+            let consumed =
+                should_consume_processed_state(result.accepted, &before_state, &ime_state);
+            append_key_diagnostic!(
+                "OnKeyDown accepted={} consumed={} preedit_len={} candidates={} commit={}",
+                result.accepted,
+                consumed,
+                ime_state.preedit.chars().count(),
+                ime_state.candidates.len(),
+                has_commit(&ime_state),
+            );
+
+            if !consumed {
                 return Ok(BOOL::from(false));
             }
-        };
-        let ime_state = result.state;
 
-        let consumed = should_consume_processed_state(result.accepted, &before_state, &ime_state);
-        append_key_diagnostic!(
-            "OnKeyDown vk=0x{vk:02x} keysym=0x{keysym:x} mods=0x{mods:x} accepted={} consumed={} preedit_len={} candidates={} commit={}",
-            result.accepted,
-            consumed,
-            ime_state.preedit.chars().count(),
-            ime_state.candidates.len(),
-            has_commit(&ime_state),
-        );
-
-        if !consumed {
-            return Ok(BOOL::from(false));
-        }
-
-        if apply_ime_state(&context, client_id, &state, ime_state, true, false).is_err() {
-            return Ok(BOOL::from(consumed));
-        }
+            if apply_ime_state(
+                &context,
+                client_id,
+                &state,
+                ime_state,
+                true,
+                false,
+                key_started,
+            )
+            .is_err()
+            {
+                return Ok(BOOL::from(consumed));
+            }
 
             Ok(BOOL::from(consumed))
         })
@@ -1633,12 +1686,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let _ = process_key_result(&state, keysym, 0);
             let result = process_key_result(&state, keysym, RIME_RELEASE_MASK);
             let Some(result) = result else {
-                append_key_diagnostic!("OnKeyUp shift keysym=0x{keysym:x} pending=true no result");
+                append_key_diagnostic!("OnKeyUp modifier pending=true result=false");
                 return Ok(BOOL::from(false));
             };
             append_key_diagnostic!(
-                "OnKeyUp shift keysym=0x{:x} pending={} accepted={} ascii={}->{}",
-                keysym,
+                "OnKeyUp modifier pending={} accepted={} ascii={}->{}",
                 true,
                 result.accepted,
                 before_state.ascii_mode,
@@ -1647,7 +1699,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let consumed =
                 should_consume_processed_state(result.accepted, &before_state, &result.state);
             if should_apply_processed_state(consumed, &before_state, &result.state)
-                && apply_ime_state(&context, client_id, &state, result.state, true, false).is_err()
+                && apply_ime_state(&context, client_id, &state, result.state, true, false, None)
+                    .is_err()
             {
                 return Ok(BOOL::from(consumed));
             }

@@ -286,9 +286,12 @@ fn current_ui_capabilities() -> keytao_theme::UiCapabilities {
 /// function funnels through here.
 fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
     #[cfg(not(target_os = "android"))]
-    let started = (!matches!(name, "keytao_log_enabled" | "keytao_log_event")
-        && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
-    .then(std::time::Instant::now);
+    let started =
+        (!matches!(
+            name,
+            "keytao_log_enabled" | "keytao_log_event" | "keytao_log_flush"
+        ) && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
+        .then(std::time::Instant::now);
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => {
             #[cfg(not(target_os = "android"))]
@@ -410,6 +413,17 @@ pub extern "C" fn keytao_log_event(
             (!dur_ms.is_nan()).then_some(dur_ms),
             kv,
         );
+    });
+}
+
+/// Wait up to `timeout_ms` for queued runtime log events to be written, without fsync.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
+    guard("keytao_log_flush", (), || {
+        keytao_core::runtime_log::flush_blocking(std::time::Duration::from_millis(
+            timeout_ms as u64,
+        ));
     });
 }
 

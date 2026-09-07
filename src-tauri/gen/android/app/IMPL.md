@@ -628,6 +628,31 @@ cd src-tauri/gen/android
 - shared data/runtime 查找可以随 Android 发行闭包落成后收敛到 `keytao-core::default_shared_data_dir()` 或一个 Android 专用 Rust helper，减少 Kotlin 目录猜测。
 - Android 诊断 JSON 应尽量由 Rust 返回 core/runtime 状态，Kotlin 只补 Android framework 状态。
 
+## 运行日志挂点
+
+Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtLog` → `nativeLogEnabled` / `nativeLogEvent` 写入公共 NDJSON 日志。已有 `nativeInit` / `nativeReinitialize` 通过 core 的 `init_for_engine()` 初始化日志，进程命令行中的 `:ime` 映射为 `android-ime`；已有 `nativeDeployStep` 的 config/schema 部署入口显式使用 `android-deploy`。当前工作区另一个并行改动已在 Rust Tauri setup 中通过 `spawn_blocking` 异步执行 `runtime_log::init(root, "android-app")`；本批 Kotlin 只采用该现成日志实例，不为写日志额外初始化或部署 Rime。
+
+| 挂点 | 事件与数据 |
+| --- | --- |
+| `onCreate` / `onCreateInputView` | `ime_create`、`ime_create_input_view`；`onCreate` 记录单调时钟 T0，首次 `onStartInputView` 结束记录一次 `startup_latency` |
+| `onStartInput` / `onStartInputView` / `onFinishInputView` / `onFinishInput` | `ime_start_input` / `ime_finish_input`，含 phase、耗时、restarting、secure；仅启动事件允许宿主 packageName |
+| `onWindowShown` / `onWindowHidden` | `window_shown` / `window_hidden` 耗时 |
+| `onTrimMemory` / `onLowMemory` | `mem_trim` 含系统 level；`mem_low` 只记录回调。内存快照只在 `onStartInputView`、`onFinishInputView`、`onTrimMemory` 采集 native heap、Java 已用 heap、`ActivityManager.MemoryInfo`；没有内存定时器 |
+| 输入与宿主 IPC | 硬键 down/up、软键 command.type、退格手势、direct commit、剪贴板读取/写入仅累计次数；`applyState` 仅记录本地耗时直方图 |
+| engine | `engine_warmup` 总耗时及 migration/bundled data/defaults/config/theme 五个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；逐键 `stableSchemaState` 的 `schema_name_resolve` 仅进本地直方图 |
+| 部署 | client `start` → `finish` 的 `deploy` 总耗时、每次 `startStep` → `handleStepResult` 的 `deploy_step`（含失败/超时收尾）；service `runDeployment` 的 `deploy_step` 含 success/config_step/schema_count，不记录方案名或错误对象 |
+| 绘制与触摸 | `onDraw` 的 11 桶本地直方图；`ACTION_DOWN` 的 `rebuildInteractiveRects` 记录为本地 `touch_down_rebuild` 直方图；不增加 Choreographer |
+| 界面 | 面板打开/关闭、键盘层切换、完成的内容过渡分别记录 `panel_open` / `panel_close` / `layer_switch` / `content_transition` 耗时 |
+| 原生库与 App | 加载库失败以固定 Logcat JSON 记录 `error/native_lib_missing`，不携带异常消息或路径；`MainActivity.onCreate` 记录 `app_create`，在 `super.onCreate` 之后及 `onResume` 检查现成原生日志是否已启用，满足时重放待发送事件，并保留固定 Logcat 回退 |
+
+`onFinishInputView` 汇总并清空输入计数、`apply_state`、`draw`、`touch_down_rebuild` 和 engine 的 `schema_name_resolve`；`onFinishInput` 补充收尾但不会重复已清空的汇总。engine 直方图使用自己的短锁，在会话结束当下截取并清零，随后在锁外发送汇总，不等待后台 reload 持有的 engine 锁，也不延迟到下一会话。汇总含 n/p50_ms/p95_ms/max_ms，draw 另含 frames/jank_gt_16ms；百分位是 11 桶估算值，max 为实际最大值。逐键、逐帧、逐触摸不跨 JNI，不输出逐键明细；command.type 采用固定白名单，未知类型只计入 other。
+
+首次 native init 前只保留最多 32 条粗粒度事件的标量元数据，内存数值在指定回调当时采样，重放时不重新读取系统。每条事件的 uptime_ms 保留原始时刻；已有 init/deploy 返回后重放，native 为 Off 或不可用则清掉待发送事件。首次 init 前本地统计遵循默认开启，之后在粗粒度边界刷新 enabled 快照；热路径只读本地开关，日志最终写入仍由 native 开关门控。任何级别都不记录输入文本、preedit、候选、commit、剪贴板内容、key value/keysym、EditorInfo 文本或任意配置字符串；只记录长度/次数/布尔值/耗时及允许的包名。
+
+`KeytaoRuntimeLog.flush(200)` 通过 `nativeLogFlush` 调用 `runtime_log::flush_blocking`，在部署步骤最后事件之后、`Process.killProcess` 紧前及 IME `onDestroy` 收尾时最多等待 200 ms；helper 不抛异常、不为 flush 加载原生库，不执行 fsync，超时仍可能丢失尾部日志。
+
+App 的异步 setup 若晚于 `onCreate` / `onResume`，或日志当时为 Off，单一 `nativeLogEnabled` 不能区分“尚未初始化”和“已关闭”；Kotlin 会继续保留最多 32 条待发送事件，等下一个 App 粗粒度生命周期检查成功再重放，不加计时器、不触发 Rime 初始化、也不在 IME 初次 `onCreate` 提前加载原生库。因此早期 `app_create` 写入仍受 setup 与生命周期时序影响；三进程日志文件及实际落盘需要设备验证，不能从 Kotlin 构建通过推断。
+
 ## 排查入口
 
 当前可查：

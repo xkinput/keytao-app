@@ -1,6 +1,165 @@
 import Foundation
 import CryptoKit
 import CKeytaoCore
+import Darwin
+
+enum KeyTaoLog {
+    private struct PendingEvent {
+        let category: String
+        let name: String
+        let duration: Double
+        let fields: [String: Any]
+    }
+
+    private static let lock = NSLock()
+    private static var awaitingNativeInit = true
+    private static var pending: [PendingEvent] = []
+
+    static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    static func flush(_ timeoutMs: UInt32) {
+        keytao_log_flush(timeoutMs)
+    }
+
+    /// Refresh only at coarse main-thread boundaries; hot paths keep a local Bool.
+    static func collectionEnabled() -> Bool {
+        lock.lock()
+        let waiting = awaitingNativeInit
+        lock.unlock()
+        return waiting || keytao_log_enabled(1)
+    }
+
+    /// Only coarse events call the C bridge. Startup metadata waits for the
+    /// existing keytao_init entry point to initialize the ios-ime logger.
+    static func event(
+        _ category: String,
+        _ name: String,
+        duration: Double = .nan,
+        fields: () -> [String: Any] = { [:] }
+    ) {
+        lock.lock()
+        if awaitingNativeInit {
+            if pending.count < 32 {
+                var values = fields()
+                values["event_uptime"] = now()
+                pending.append(PendingEvent(category: category, name: name, duration: duration, fields: values))
+            }
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        guard keytao_log_enabled(1) else { return }
+        write(category, name, duration: duration, fields: fields())
+    }
+
+    static func nativeDidInitialize() {
+        lock.lock()
+        guard awaitingNativeInit else {
+            lock.unlock()
+            return
+        }
+        awaitingNativeInit = false
+        let buffered = pending
+        pending.removeAll(keepingCapacity: false)
+        if keytao_log_enabled(1) {
+            for event in buffered {
+                write(event.category, event.name, duration: event.duration, fields: event.fields)
+            }
+        }
+        lock.unlock()
+    }
+
+    private static func write(_ category: String, _ name: String, duration: Double, fields: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: fields),
+              let json = String(data: data, encoding: .utf8) else { return }
+        category.withCString { categoryPointer in
+            name.withCString { namePointer in
+                json.withCString { fieldsPointer in
+                    keytao_log_event(1, categoryPointer, namePointer, duration, fieldsPointer)
+                }
+            }
+        }
+    }
+
+    static func configWriteFailed(_ operation: String) {
+        event("error", "config_write") { ["operation": operation, "msg": "config_write_failed"] }
+    }
+
+    static func memorySnapshot(_ moment: String) {
+        event("memory", "footprint") {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let capacity = Int(count)
+            let result = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: capacity) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+                }
+            }
+            guard result == KERN_SUCCESS else {
+                return ["moment": moment, "available": false, "error_code": result]
+            }
+            let megabytes = Double(info.phys_footprint) / (1024 * 1024)
+            // This is a diagnostic reference budget, not an OS-reported jetsam limit.
+            return [
+                "moment": moment, "available": true, "mem_mb": megabytes,
+                "limit_pct": megabytes / 60 * 100, "limit_mb": 60, "limit_estimated": true,
+            ]
+        }
+    }
+
+    static func commandType(_ type: String) -> String {
+        switch type {
+        case KeyTaoCommandType.input, KeyTaoCommandType.directInput, KeyTaoCommandType.rimeInput,
+             KeyTaoCommandType.backspace, KeyTaoCommandType.backspaceGesture, KeyTaoCommandType.enter,
+             KeyTaoCommandType.space, KeyTaoCommandType.shift, KeyTaoCommandType.mode,
+             KeyTaoCommandType.openPage, KeyTaoCommandType.keyboardPicker, KeyTaoCommandType.nextInputMethod,
+             KeyTaoCommandType.keyboardMode, KeyTaoCommandType.nextCandidatePage,
+             KeyTaoCommandType.previousCandidatePage, KeyTaoCommandType.reset, KeyTaoCommandType.rimeMenu,
+             KeyTaoCommandType.rimeSchema, KeyTaoCommandType.rimeOption, KeyTaoCommandType.edit,
+             KeyTaoCommandType.panel, KeyTaoCommandType.floating, KeyTaoCommandType.setting:
+            return type
+        default:
+            return "other"
+        }
+    }
+}
+
+/// Main-thread local samples; no bridge calls or per-sample JSON allocation.
+struct KeyTaoDurationHistogram {
+    private static let bounds: [Double] = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, .infinity]
+    private var buckets = [UInt64](repeating: 0, count: 11)
+    private var count: UInt64 = 0
+    private var maximum = 0.0
+    private var over16ms: UInt64 = 0
+
+    mutating func record(_ milliseconds: Double) {
+        guard milliseconds.isFinite, milliseconds >= 0 else { return }
+        let index = Self.bounds.firstIndex { milliseconds <= $0 } ?? 10
+        buckets[index] += 1
+        count += 1
+        maximum = max(maximum, milliseconds)
+        if milliseconds > 16 { over16ms += 1 }
+    }
+
+    mutating func drain() -> [String: Any]? {
+        guard count > 0 else { return nil }
+        func percentile(_ percent: UInt64) -> Double {
+            let target = (count * percent + 99) / 100
+            var cumulative: UInt64 = 0
+            for (index, samples) in buckets.enumerated() {
+                cumulative += samples
+                if cumulative >= target { return min(Self.bounds[index], maximum) }
+            }
+            return maximum
+        }
+        let fields: [String: Any] = [
+            "n": count, "p50": percentile(50), "p95": percentile(95),
+            "max": maximum, "jank_gt_16ms": over16ms,
+        ]
+        self = Self()
+        return fields
+    }
+}
 
 struct KeyTaoRimeSchema: Codable, Equatable {
     var id: String
@@ -134,7 +293,11 @@ enum KeyTaoIOSPaths {
     }
 
     static func ensureUserRoot(_ url: URL) {
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            KeyTaoLog.configWriteFailed("user_root")
+        }
     }
 
     /// Drops the bundled layout into the App Group so that users have a
@@ -158,7 +321,11 @@ enum KeyTaoIOSPaths {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if existingHash == bundledHash {
                     if seededHash != bundledHash {
-                        try? bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
+                        do {
+                            try bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
+                        } catch {
+                            KeyTaoLog.configWriteFailed("keyboard_seed_hash")
+                        }
                     }
                     return
                 }
@@ -178,6 +345,7 @@ enum KeyTaoIOSPaths {
             try yaml.write(to: url, atomically: true, encoding: .utf8)
             try bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
         } catch {
+            KeyTaoLog.configWriteFailed("keyboard_seed")
             return
         }
     }
@@ -241,6 +409,8 @@ final class KeyTaoIOSEngine {
     private let startupQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.startup", qos: .userInitiated)
     private var startupInFlight = false
     private var startupCompletions: [(Bool) -> Void] = []
+    private var reloadCheckHistogram = KeyTaoDurationHistogram()
+    private var runtimeMetricsEnabled = true
 
     private(set) var nativeReady = false
 
@@ -282,7 +452,11 @@ final class KeyTaoIOSEngine {
     /// Only the resulting session pointer crosses back to the main queue, where
     /// every other member of this class is read and written.
     func ensureReadyAsync(_ completion: @escaping (Bool) -> Void) {
+        let started = KeyTaoLog.now()
         if nativeReady {
+            KeyTaoLog.event("rime", "ensure_ready_async", duration: (KeyTaoLog.now() - started) * 1000) {
+                ["ok": true, "cached": true]
+            }
             completion(true)
             return
         }
@@ -301,10 +475,16 @@ final class KeyTaoIOSEngine {
                     if let prepared {
                         keytao_destroy_session(prepared)
                     }
+                    KeyTaoLog.event("rime", "ensure_ready_async", duration: (KeyTaoLog.now() - started) * 1000) {
+                        ["ok": false, "cancelled": true]
+                    }
                     return
                 }
                 let ready = self.installPreparedSession(prepared)
                 self.startupInFlight = false
+                KeyTaoLog.event("rime", "ensure_ready_async", duration: (KeyTaoLog.now() - started) * 1000) {
+                    ["ok": ready, "cancelled": false]
+                }
                 let pending = self.startupCompletions
                 self.startupCompletions = []
                 for completion in pending {
@@ -315,23 +495,41 @@ final class KeyTaoIOSEngine {
     }
 
     private static func prepareRuntime(userRoot: URL) -> UnsafeMutableRawPointer? {
+        let started = KeyTaoLog.now()
+        var ready = false
+        defer {
+            KeyTaoLog.event("rime", "prepare_runtime", duration: (KeyTaoLog.now() - started) * 1000) {
+                ["ok": ready]
+            }
+        }
         guard KeyTaoIOSPaths.hasInstalledSchema(userRoot: userRoot),
               KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot),
               let sharedDir = KeyTaoIOSPaths.sharedDataDir(userRoot: userRoot) else {
             return nil
         }
+        let initStarted = KeyTaoLog.now()
         let ok = userRoot.path.withCString { userPtr in
             sharedDir.path.withCString { sharedPtr in
                 keytao_init(userPtr, sharedPtr)
             }
         }
+        let initDuration = (KeyTaoLog.now() - initStarted) * 1000
+        KeyTaoLog.nativeDidInitialize()
+        KeyTaoLog.event("rime", "keytao_init", duration: initDuration) { ["ok": ok] }
         guard ok else {
             return nil
         }
-        return keytao_create_session()
+        let sessionStarted = KeyTaoLog.now()
+        let prepared = keytao_create_session()
+        ready = prepared != nil
+        KeyTaoLog.event("rime", "keytao_create_session", duration: (KeyTaoLog.now() - sessionStarted) * 1000) {
+            ["ok": ready]
+        }
+        return prepared
     }
 
     private func installPreparedSession(_ prepared: UnsafeMutableRawPointer?) -> Bool {
+        refreshRuntimeLogCollection()
         if nativeReady {
             // A synchronous ensureReady() won the race; drop the spare session.
             if let prepared {
@@ -404,7 +602,7 @@ final class KeyTaoIOSEngine {
 
     func persistToolbarCustomization(order: [String], pinnedCount: Int) -> Bool {
         let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
-        return (try? {
+        do {
             var root: [String: Any] = [:]
             if FileManager.default.fileExists(atPath: url.path) {
                 let data = try Data(contentsOf: url)
@@ -425,12 +623,15 @@ final class KeyTaoIOSEngine {
             try data.write(to: url, options: .atomic)
             lastConfig = nil
             return true
-        }()) ?? false
+        } catch {
+            KeyTaoLog.configWriteFailed("toolbar")
+            return false
+        }
     }
 
     func persistSettings(patch: [String: Any]) -> Bool {
         let url = KeyTaoIOSPaths.configFile(userRoot: userRoot)
-        return (try? {
+        do {
             var root: [String: Any] = [:]
             if FileManager.default.fileExists(atPath: url.path) {
                 let data = try Data(contentsOf: url)
@@ -453,7 +654,10 @@ final class KeyTaoIOSEngine {
             try data.write(to: url, options: .atomic)
             lastConfig = nil
             return true
-        }()) ?? false
+        } catch {
+            KeyTaoLog.configWriteFailed("settings")
+            return false
+        }
     }
 
     func persistThemeUi(colorScheme: String, accentHex: String?) -> Bool {
@@ -471,6 +675,8 @@ final class KeyTaoIOSEngine {
         if written {
             lastTheme = nil
             lastThemeColorScheme = nil
+        } else {
+            KeyTaoLog.configWriteFailed("theme_ui")
         }
         return written
     }
@@ -572,6 +778,13 @@ final class KeyTaoIOSEngine {
     }
 
     func selectSchema(_ schemaID: String) -> KeyTaoImeState? {
+        let started = KeyTaoLog.now()
+        var selected = false
+        defer {
+            KeyTaoLog.event("rime", "schema_switch", duration: (KeyTaoLog.now() - started) * 1000) {
+                ["ok": selected]
+            }
+        }
         guard let session else {
             return nil
         }
@@ -583,6 +796,7 @@ final class KeyTaoIOSEngine {
         }
         let stable = stableSchemaState(state)
         lastState = stable.withoutTransientCommit()
+        selected = true
         return stable
     }
 
@@ -704,10 +918,19 @@ final class KeyTaoIOSEngine {
     }
 
     func reload() -> Bool {
+        refreshRuntimeLogCollection()
+        let started = KeyTaoLog.now()
+        var reloaded = false
+        defer {
+            KeyTaoLog.event("rime", "reload", duration: (KeyTaoLog.now() - started) * 1000) {
+                ["ok": reloaded]
+            }
+        }
         if !nativeReady && !ensureReady() {
             return false
         }
         let ok = keytao_reload()
+        reloaded = ok
         if ok {
             refreshCapabilities()
             lastState = state().withoutTransientCommit()
@@ -719,6 +942,10 @@ final class KeyTaoIOSEngine {
     /// signature the containing app reports and the one the keyboard compares
     /// come from the same function.
     func reloadIfNeeded() -> Bool {
+        let started = runtimeMetricsEnabled ? KeyTaoLog.now() : nil
+        defer {
+            if let started { reloadCheckHistogram.record((KeyTaoLog.now() - started) * 1000) }
+        }
         guard nativeReady else {
             return false
         }
@@ -727,7 +954,22 @@ final class KeyTaoIOSEngine {
         }
         refreshCapabilities()
         lastState = state().withoutTransientCommit()
+        KeyTaoLog.event("rime", "reload_if_needed", duration: started.map { (KeyTaoLog.now() - $0) * 1000 } ?? .nan) {
+            ["reloaded": true]
+        }
         return true
+    }
+
+    func flushRuntimeMetrics() {
+        if let fields = reloadCheckHistogram.drain() {
+            KeyTaoLog.event("rime", "reload_if_needed_summary") { fields }
+        }
+    }
+
+    @discardableResult
+    func refreshRuntimeLogCollection() -> Bool {
+        runtimeMetricsEnabled = KeyTaoLog.collectionEnabled()
+        return runtimeMetricsEnabled
     }
 
     func close() {
@@ -740,6 +982,7 @@ final class KeyTaoIOSEngine {
     }
 
     private func initializeRuntime() -> Bool {
+        defer { refreshRuntimeLogCollection() }
         guard let prepared = Self.prepareRuntime(userRoot: userRoot) else {
             nativeReady = false
             return false

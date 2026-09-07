@@ -509,6 +509,11 @@ impl LogFile {
     }
 
     fn write_batch(&mut self, lines: impl Iterator<Item = String>) -> io::Result<()> {
+        let mut lines = lines.peekable();
+        if lines.peek().is_some() && !self.path.try_exists()? {
+            self.file.take();
+            self.open()?;
+        }
         let mut batch = String::new();
         for line in lines {
             if line.len() + self.header.len() > ROTATE_BYTES as usize {
@@ -559,8 +564,14 @@ impl Settings {
             .and_then(|m| Some((m.modified().ok()?, m.len())))
     }
     fn read(&mut self) -> Level {
+        self.read_with_windows_diagnostics(
+            cfg!(target_os = "windows")
+                && std::env::var("KEYTAO_WINDOWS_IME_DIAGNOSTICS").as_deref() == Ok("1"),
+        )
+    }
+    fn read_with_windows_diagnostics(&mut self, diagnostics: bool) -> Level {
         self.stamp = self.stamp();
-        match fs::read(&self.path) {
+        let level = match fs::read(&self.path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Level::Info,
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value) if value.get("enabled").and_then(Value::as_bool) == Some(true) => {
@@ -573,6 +584,11 @@ impl Settings {
                 _ => Level::Off,
             },
             Err(_) => Level::Off,
+        };
+        if diagnostics && level == Level::Info {
+            Level::Verbose
+        } else {
+            level
         }
     }
     fn refresh(&mut self) -> Option<Level> {
@@ -982,6 +998,26 @@ mod tests {
     }
 
     #[test]
+    fn cleared_log_is_recreated_only_for_a_nonempty_batch() {
+        let dir = TempDir::new();
+        let header = "{\"ev\":\"session_begin\"}\n";
+        let mut writer = LogFile::new(dir.file(), header.into()).unwrap();
+        writer
+            .write_batch(std::iter::once("{\"ev\":\"before_clear\"}\n".into()))
+            .unwrap();
+        fs::remove_file(dir.file()).unwrap();
+        writer.write_batch(std::iter::empty()).unwrap();
+        assert!(!dir.file().exists());
+        let next = "{\"ev\":\"after_clear\"}\n";
+        writer.write_batch(std::iter::once(next.into())).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.file()).unwrap(),
+            format!("{header}{next}")
+        );
+        assert_eq!(writer.size, (header.len() + next.len()) as u64);
+    }
+
+    #[test]
     fn unwritable_dir_turns_off_without_panic_or_retry() {
         let dir = TempDir::new();
         let blocked = dir.0.join("blocked");
@@ -1097,6 +1133,26 @@ mod tests {
         assert_eq!(settings.refresh(), Some(Level::Verbose));
         fs::remove_file(path).unwrap();
         assert_eq!(settings.refresh(), Some(Level::Info));
+    }
+
+    #[test]
+    fn windows_diagnostics_raises_info_without_overriding_disabled_settings() {
+        let dir = TempDir::new();
+        let path = dir.0.join("runtime-log.json");
+        let mut settings = Settings::new(path.clone());
+        assert_eq!(settings.read_with_windows_diagnostics(false), Level::Info);
+        assert_eq!(settings.read_with_windows_diagnostics(true), Level::Verbose);
+        for (contents, expected) in [
+            (r#"{"enabled":true,"level":"info"}"#, Level::Verbose),
+            (r#"{"enabled":true,"level":"verbose"}"#, Level::Verbose),
+            (r#"{"enabled":false,"level":"info"}"#, Level::Off),
+            (r#"{"enabled":false,"level":"verbose"}"#, Level::Off),
+            (r#"{"enabled":true,"level":"invalid"}"#, Level::Off),
+            ("invalid json", Level::Off),
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert_eq!(settings.read_with_windows_diagnostics(true), expected);
+        }
     }
 
     #[test]

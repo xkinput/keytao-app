@@ -19,6 +19,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private static let deleteAllBatchLimit = 4096
     private static let rimeOptionChoicePrefix = "choice:"
 
+    private let extensionStarted = ProcessInfo.processInfo.systemUptime
+    private var startupLatencyRecorded = false
+    private var commandCounts: [String: UInt64] = [:]
+    private var applyHistogram = KeyTaoDurationHistogram()
+    private var runtimeMetricsEnabled = true
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
     private let layoutStateStore = KeyTaoIOSKeyboardLayoutStateStore()
@@ -74,11 +79,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
         keyTaoKeyboardLog.info("KeyTao keyboard init")
         super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        KeyTaoLog.event("lifecycle", "ext_init") { ["t0_uptime": extensionStarted] }
     }
 
     public required init?(coder: NSCoder) {
         keyTaoKeyboardLog.info("KeyTao keyboard init coder")
         super.init(coder: coder)
+        KeyTaoLog.event("lifecycle", "ext_init") { ["t0_uptime": extensionStarted] }
     }
 
     public override func loadView() {
@@ -89,6 +96,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     public override func viewDidLoad() {
+        let started = KeyTaoLog.now()
+        defer { KeyTaoLog.event("lifecycle", "view_did_load", duration: (KeyTaoLog.now() - started) * 1000) }
         super.viewDidLoad()
         keyTaoKeyboardLog.info("KeyTao keyboard viewDidLoad")
 
@@ -141,6 +150,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         layoutSideButton = sideButton
         inputModeSwitchButton = switchButton
         keyboardView = view
+        refreshRuntimeLogCollection()
         view.update(hapticsAvailable: hasFullAccess)
         applyKeyboardPresentation(config: config, force: true)
         applyHostTraits()
@@ -148,7 +158,17 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     public override func viewWillAppear(_ animated: Bool) {
+        let started = KeyTaoLog.now()
+        defer {
+            KeyTaoLog.event("lifecycle", "view_will_appear", duration: (KeyTaoLog.now() - started) * 1000)
+            if !startupLatencyRecorded {
+                startupLatencyRecorded = true
+                KeyTaoLog.event("lifecycle", "startup_latency", duration: (KeyTaoLog.now() - extensionStarted) * 1000)
+            }
+            KeyTaoLog.memorySnapshot("view_will_appear")
+        }
         super.viewWillAppear(animated)
+        refreshRuntimeLogCollection()
         // The keyboard is coming back for a (possibly different) input context:
         // start from a clean composition instead of resurrecting whatever the
         // librime session still held from the previous one.
@@ -166,10 +186,49 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
+        let started = KeyTaoLog.now()
+        defer {
+            KeyTaoLog.event("lifecycle", "view_will_disappear", duration: (KeyTaoLog.now() - started) * 1000)
+            KeyTaoLog.memorySnapshot("view_will_disappear")
+            flushRuntimeMetrics()
+        }
         super.viewWillDisappear(animated)
         // Equivalent of macOS deactivateServer / Android onFinishInput: the
         // input context is over, so nothing may survive into the next one.
         resetInputContextCaches()
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        let started = KeyTaoLog.now()
+        super.viewDidAppear(animated)
+        refreshRuntimeLogCollection()
+        KeyTaoLog.event("lifecycle", "view_did_appear", duration: (KeyTaoLog.now() - started) * 1000)
+    }
+
+    public override func viewDidDisappear(_ animated: Bool) {
+        let started = KeyTaoLog.now()
+        super.viewDidDisappear(animated)
+        KeyTaoLog.event("lifecycle", "view_did_disappear", duration: (KeyTaoLog.now() - started) * 1000)
+        KeyTaoLog.flush(200)
+    }
+
+    private func flushRuntimeMetrics() {
+        let counts = commandCounts
+        commandCounts.removeAll(keepingCapacity: true)
+        if !counts.isEmpty {
+            KeyTaoLog.event("input", "command_summary") { ["counts": counts] }
+        }
+        if let fields = applyHistogram.drain() {
+            KeyTaoLog.event("input", "apply_summary") { fields }
+        }
+        keyboardView?.flushRuntimeMetrics()
+        engine.flushRuntimeMetrics()
+        // viewDidDisappear flushes the writer after these summaries are queued.
+    }
+
+    private func refreshRuntimeLogCollection() {
+        runtimeMetricsEnabled = engine.refreshRuntimeLogCollection()
+        keyboardView?.runtimeMetricsEnabled = runtimeMetricsEnabled
     }
 
     public override func textDidChange(_ textInput: UITextInput?) {
@@ -185,6 +244,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     public override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
+        KeyTaoLog.event("memory", "mem_warning")
+        KeyTaoLog.memorySnapshot("memory_warning")
         clipboardHistory.removeAll()
         clipboardSuppression = nil
         queuedCommands.removeAll()
@@ -269,6 +330,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didTrigger command: KeyTaoKeyCommand) {
+        if runtimeMetricsEnabled {
+            commandCounts[KeyTaoLog.commandType(command.type), default: 0] += 1
+        }
+        performCommand(command)
+    }
+
+    private func performCommand(_ command: KeyTaoKeyCommand) {
         // The runtime is still coming up on the startup queue. Queue the key
         // instead of committing it raw, otherwise the first few characters of
         // every cold start would land in the host as latin letters.
@@ -311,8 +379,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case KeyTaoCommandType.keyboardPicker:
             // Reached only when the transparent handleInputModeList overlay is
             // not in place (expanded panel, custom layout position).
+            KeyTaoLog.event("ui", "input_mode_switch")
             advanceToNextInputMode()
         case KeyTaoCommandType.nextInputMethod:
+            KeyTaoLog.event("ui", "input_mode_switch")
             advanceToNextInputMode()
         case KeyTaoCommandType.keyboardMode:
             keyboardView?.setLayer(command.value)
@@ -1276,6 +1346,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func apply(_ state: KeyTaoImeState) {
+        let started = runtimeMetricsEnabled ? KeyTaoLog.now() : nil
+        defer {
+            if let started { applyHistogram.record((KeyTaoLog.now() - started) * 1000) }
+        }
         if !state.committed.isEmpty {
             insertHostText(state.committed)
         }
@@ -1380,6 +1454,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 return
             }
             self.runtimeStarting = false
+            self.refreshRuntimeLogCollection()
             self.refreshInputAvailability()
             self.applyInputPolicyForHost()
             self.flushQueuedCommands()
@@ -1392,11 +1467,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         let pending = queuedCommands
         queuedCommands.removeAll()
-        guard let keyboardView else {
+        guard keyboardView != nil else {
             return
         }
         for command in pending {
-            self.keyboardView(keyboardView, didTrigger: command)
+            performCommand(command)
         }
     }
 

@@ -46,6 +46,7 @@ class KeytaoRimeDeployService : Service() {
                 // librime's compiler allocator retains a large native heap after finalize.
                 // Ending this dedicated process is the only reliable way to return it to Android.
                 Thread.sleep(processExitDelayMs)
+                KeytaoRuntimeLog.flush(200)
                 Process.killProcess(Process.myPid())
             },
             "KeyTao-Rime-Deployer",
@@ -111,6 +112,10 @@ class KeytaoRimeDeployService : Service() {
     }
 
     private fun runDeployment(schemaId: String?): DeploymentResult {
+        val started = System.nanoTime()
+        var success = false
+        var schemaCount = 0
+        val configStep = schemaId == null
         var engine: KeytaoImeEngine? = null
         return try {
             Log.i(tag, "Starting deployment step: ${schemaId ?: "default"}")
@@ -123,6 +128,8 @@ class KeytaoRimeDeployService : Service() {
                 return DeploymentResult(error = step.error.ifBlank { "Android RIME 部署失败" })
             }
             Log.i(tag, "Completed deployment step: ${schemaId ?: "default"}")
+            success = true
+            schemaCount = step.schemas.size
             DeploymentResult(
                 success = true,
                 schemas = step.schemas,
@@ -132,6 +139,14 @@ class KeytaoRimeDeployService : Service() {
             DeploymentResult(error = error.message ?: "Android RIME 部署失败")
         } finally {
             engine?.close()
+            val ok = success
+            val count = schemaCount
+            KeytaoRuntimeLog.event("rime", "deploy_step", KeytaoRuntimeLog.elapsedMs(started)) {
+                put("success", ok)
+                put("schema_count", count)
+                put("config_step", configStep)
+                put("source", "service")
+            }
         }
     }
 

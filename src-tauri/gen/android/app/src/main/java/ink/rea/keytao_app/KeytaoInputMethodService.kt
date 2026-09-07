@@ -1,5 +1,6 @@
 package ink.rea.keytao_app
 
+import android.app.ActivityManager
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -11,6 +12,7 @@ import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.icu.text.BreakIterator
 import android.os.Build
+import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -33,6 +35,10 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listener {
+    private var createdAtMs = 0L
+    private var startupLatencyLogged = false
+    private val inputCounts = KeytaoInputCounts()
+    private val applyStateDurations = KeytaoDurationHistogram()
     private lateinit var engine: KeytaoImeEngine
     private val mainHandler = Handler(Looper.getMainLooper())
     private val candidateExecutor = Executors.newSingleThreadExecutor()
@@ -111,7 +117,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onCreate() {
+        createdAtMs = SystemClock.elapsedRealtime()
         super.onCreate()
+        KeytaoRuntimeLog.event("lifecycle", "ime_create")
         engine = KeytaoImeEngine(applicationContext)
         clipboardManager = getSystemService(ClipboardManager::class.java)
         scheduleAvailabilityRefresh()
@@ -124,9 +132,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         candidateExecutor.shutdownNow()
         super.onDestroy()
+        KeytaoRuntimeLog.flush(200)
     }
 
     override fun onCreateInputView(): View {
+        val started = System.nanoTime()
         window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         val host = KeytaoKeyboardHost(this)
         host.listener = object : KeytaoKeyboardHost.Listener {
@@ -156,6 +166,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         view.updateSystemBottomInsetDp(systemBottomInsetDp)
         view.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
+        KeytaoRuntimeLog.event("lifecycle", "ime_create_input_view", KeytaoRuntimeLog.elapsedMs(started))
         return host
     }
 
@@ -175,6 +186,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
         backspaceSelectionSession = null
         // doStartInput() skips doFinishInput() when restarting, so the editor can
@@ -194,9 +206,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         lastCommittedText = null
         keyboardView?.updateState(currentState)
         scheduleAvailabilityRefresh()
+        logStartInput("input", attribute, restarting, started)
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        val started = System.nanoTime()
         super.onStartInputView(info, restarting)
         applyEditorInfo(info)
         registerClipboardListener()
@@ -208,13 +222,96 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateState(currentState)
         scheduleReloadIfNeeded()
         scheduleAvailabilityRefresh()
+        logStartInput("input_view", info, restarting, started)
+        logMemorySnapshot("start_input_view")
+        if (!startupLatencyLogged) {
+            startupLatencyLogged = true
+            KeytaoRuntimeLog.event("lifecycle", "startup_latency", (SystemClock.elapsedRealtime() - createdAtMs).toDouble())
+        }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        val started = System.nanoTime()
         unregisterClipboardListener()
         keyboardView?.clearRecentClipboardSuggestion()
         keyboardView?.resetClipboardClearConfirmation()
         super.onFinishInputView(finishingInput)
+        flushSessionHistograms()
+        logMemorySnapshot("finish_input_view")
+        KeytaoRuntimeLog.event("lifecycle", "ime_finish_input", KeytaoRuntimeLog.elapsedMs(started)) {
+            put("phase", "input_view")
+            put("finishing_input", finishingInput)
+        }
+    }
+
+    override fun onWindowShown() {
+        val started = System.nanoTime()
+        super.onWindowShown()
+        KeytaoRuntimeLog.event("lifecycle", "window_shown", KeytaoRuntimeLog.elapsedMs(started))
+    }
+
+    override fun onWindowHidden() {
+        val started = System.nanoTime()
+        super.onWindowHidden()
+        KeytaoRuntimeLog.event("lifecycle", "window_hidden", KeytaoRuntimeLog.elapsedMs(started))
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        KeytaoRuntimeLog.event("memory", "mem_trim") { put("level", level) }
+        logMemorySnapshot("trim_memory")
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        // Snapshots belong only to start/finish input view and onTrimMemory.
+        KeytaoRuntimeLog.event("memory", "mem_low")
+    }
+
+    private fun logStartInput(phase: String, info: EditorInfo?, restarting: Boolean, started: Long) {
+        val pkg = info?.packageName
+        val secure = !privacyMode.allowsComposing
+        KeytaoRuntimeLog.event("lifecycle", "ime_start_input", KeytaoRuntimeLog.elapsedMs(started)) {
+            put("phase", phase)
+            pkg?.let { put("pkg", it) }
+            put("restarting", restarting)
+            put("secure", secure)
+        }
+    }
+
+    private fun logMemorySnapshot(moment: String) {
+        // Defer only scalar metadata when the native logger has not initialized yet.
+        KeytaoRuntimeLog.refreshEnabled()
+        if (!KeytaoRuntimeLog.collecting) return
+        val nativeBytes = Debug.getNativeHeapAllocatedSize()
+        val runtime = Runtime.getRuntime()
+        val javaBytes = runtime.totalMemory() - runtime.freeMemory()
+        val memory = ActivityManager.MemoryInfo()
+        val manager = getSystemService(ActivityManager::class.java)
+        val available = runCatching { manager?.getMemoryInfo(memory); manager != null }.getOrDefault(false)
+        val availableBytes = memory.availMem
+        val totalBytes = memory.totalMem
+        val lowMemory = memory.lowMemory
+        KeytaoRuntimeLog.event("memory", "snapshot") {
+            put("moment", moment)
+            put("native_heap_mb", nativeBytes / 1_048_576.0)
+            put("java_heap_mb", javaBytes / 1_048_576.0)
+            if (available) {
+                put("available_mb", availableBytes / 1_048_576.0)
+                put("total_mb", totalBytes / 1_048_576.0)
+                put("low_memory", lowMemory)
+            }
+        }
+    }
+
+    private fun flushSessionHistograms() {
+        inputCounts.drain()
+        applyStateDurations.drain("input", "apply_state")
+        keyboardView?.flushRuntimeHistograms()
+        if (::engine.isInitialized) {
+            // The histogram has its own short lock; this never takes the engine monitor.
+            engine.flushRuntimeHistograms()
+        }
     }
 
     /**
@@ -447,6 +544,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        val started = System.nanoTime()
         // finishComposingText() already puts the composing text into the editor,
         // so Rime only needs its own composition discarded — committing here too
         // would duplicate the text.
@@ -460,11 +558,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         keyboardView?.updateState(currentState)
         super.onFinishInput()
+        flushSessionHistograms()
+        KeytaoRuntimeLog.event("lifecycle", "ime_finish_input", KeytaoRuntimeLog.elapsedMs(started)) {
+            put("phase", "input")
+        }
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        inputCounts.record("key_down")
         if (isShiftKey(keyCode)) {
             shiftPressedWithoutKey = true
             pendingShiftKeyCode = keyCode
@@ -496,6 +599,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        inputCounts.record("key_up")
         if (!isShiftKey(keyCode)) return super.onKeyUp(keyCode, event)
         val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode
         shiftPressedWithoutKey = false
@@ -523,6 +627,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyCommand(command: KeyCommand) {
+        inputCounts.record(command.type)
         if (!inputAvailable && command.requiresInstalledSchema()) {
             showUnavailableMessage()
             return
@@ -823,6 +928,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleBackspaceGesture(action: String, countValue: String?) {
+        inputCounts.record("backspace_gesture")
         val count = countValue
             ?.toIntOrNull()
             ?.coerceIn(1, maxBackspaceGestureBatchCount)
@@ -1502,6 +1608,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun currentClipboardSnapshot(): ClipboardSnapshot? {
+        inputCounts.record("clipboard_read")
         if (!privacyMode.allowsClipboard) return null
         val clip = clipboardManager?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
@@ -1530,6 +1637,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun setClipboardText(text: String) {
+        inputCounts.record("clipboard_write")
         // Copy/cut through KeyTao is an explicit new clipboard write.
         clipboardSuppression = null
         clipboardManager?.setPrimaryClip(ClipData.newPlainText("KeyTao", text))
@@ -1669,6 +1777,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun commitDirect(text: String) {
+        inputCounts.record("commit_direct")
         val connection = currentInputConnection ?: return
         val hadComposition = composing || currentState.hasComposition
         backspaceRestoreStack.clear()
@@ -1691,36 +1800,41 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun applyState(state: KeytaoImeState) {
-        val connection = currentInputConnection
-        if (connection != null) {
-            connection.beginBatchEdit()
-            // commitText replaces the composing region, so the next composition
-            // starts where the committed text ends.
-            var regionStart = composingRegionStart
-            if (state.committed.isNotEmpty()) {
-                backspaceRestoreStack.clear()
-                restoreAllOnNextDirectionalRestore = false
-                connection.commitText(state.committed, 1)
-                rememberCommittedText(state.committed)
-                composing = false
-                selectionModeActive = false
-                if (regionStart >= 0) regionStart += state.committed.length
+        val started = applyStateDurations.start()
+        try {
+            val connection = currentInputConnection
+            if (connection != null) {
+                connection.beginBatchEdit()
+                // commitText replaces the composing region, so the next composition
+                // starts where the committed text ends.
+                var regionStart = composingRegionStart
+                if (state.committed.isNotEmpty()) {
+                    backspaceRestoreStack.clear()
+                    restoreAllOnNextDirectionalRestore = false
+                    connection.commitText(state.committed, 1)
+                    rememberCommittedText(state.committed)
+                    composing = false
+                    selectionModeActive = false
+                    if (regionStart >= 0) regionStart += state.committed.length
+                }
+
+                if (state.preedit.isNotEmpty()) {
+                    connection.setComposingText(state.preedit, 1)
+                    composing = true
+                    composingRegionStart = regionStart
+                    applyPreeditCaret(connection, state, regionStart)
+                } else if (composing) {
+                    connection.commitText("", 1)
+                    composing = false
+                }
+                connection.endBatchEdit()
             }
 
-            if (state.preedit.isNotEmpty()) {
-                connection.setComposingText(state.preedit, 1)
-                composing = true
-                composingRegionStart = regionStart
-                applyPreeditCaret(connection, state, regionStart)
-            } else if (composing) {
-                connection.commitText("", 1)
-                composing = false
-            }
-            connection.endBatchEdit()
+            currentState = state.withoutTransientCommit()
+            keyboardView?.updateState(currentState)
+        } finally {
+            applyStateDurations.finish(started)
         }
-
-        currentState = state.withoutTransientCommit()
-        keyboardView?.updateState(currentState)
     }
 
     /**

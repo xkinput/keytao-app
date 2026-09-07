@@ -1,5 +1,6 @@
 package ink.rea.keytao_app
 
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -9,6 +10,9 @@ object KeytaoNativeBridge {
     val loaded: Boolean = runCatching {
         System.loadLibrary(libraryName)
         true
+    }.onFailure {
+        // JNI is unavailable here; never include loader messages or filesystem paths.
+        runCatching { Log.e("KeytaoNative", "{\"cat\":\"error\",\"ev\":\"native_lib_missing\"}") }
     }.getOrDefault(false)
 
     inline fun rtLog(
@@ -64,17 +68,22 @@ object KeytaoNativeBridge {
     fun deployStep(userDir: String, sharedDir: String?, schemaId: String?): KeytaoRimeDeployStepResult {
         if (!loaded) return KeytaoRimeDeployStepResult(error = "KeyTao native bridge is unavailable")
         val json = runCatching { nativeDeployStep(userDir, sharedDir, schemaId) }.getOrNull()
+        KeytaoRuntimeLog.nativeInitialized()
         return KeytaoRimeDeployStepResult.fromJson(json)
     }
 
     fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
         if (!loaded) return false
-        return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false)
+        return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false).also {
+            KeytaoRuntimeLog.nativeInitialized()
+        }
     }
 
     fun reinitialize(userDir: String, sharedDir: String?): Boolean {
         if (!loaded) return false
-        return runCatching { nativeReinitialize(userDir, sharedDir) }.getOrDefault(false)
+        return runCatching { nativeReinitialize(userDir, sharedDir) }.getOrDefault(false).also {
+            KeytaoRuntimeLog.nativeInitialized()
+        }
     }
 
     fun createSession(): Long {
@@ -284,6 +293,8 @@ object KeytaoNativeBridge {
     external fun nativeLogEnabled(level: Int): Boolean
 
     external fun nativeLogEvent(level: Int, cat: String, ev: String, durMs: Double, kvJson: String?)
+
+    external fun nativeLogFlush(timeoutMs: Int)
 
     external fun nativeResolveThemeJson(
         defaultThemePath: String?,
