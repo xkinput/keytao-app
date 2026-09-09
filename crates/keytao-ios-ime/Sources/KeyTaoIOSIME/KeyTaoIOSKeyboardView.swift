@@ -4565,22 +4565,25 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func expandedCandidateItemsSignature(_ items: [CandidateDrawItem]) -> String {
         let mode = functionPanelActive ? functionPanelMode : .rime
-        let itemSignature = items.map { item in
-            [
-                String(item.identifierIndex),
-                String(item.selectIndex),
-                item.label,
-                item.text,
-                item.comment ?? "",
-                item.selected ? "1" : "0",
-                item.global ? "1" : "0",
-                item.command?.type ?? "",
-                item.command?.value ?? "",
-                item.command?.fallbackValue ?? "",
-                item.clipboardKey ?? "",
-                String(describing: item.style),
-                item.statusLabel ?? "",
-            ].joined(separator: "\u{0}")
+        let itemSignature = items.map { item -> String in
+            // Split into typed statements: a single 13-element literal with mixed
+            // ternaries and `??` makes the release type-checker time out.
+            let selected: String = item.selected ? "1" : "0"
+            let global: String = item.global ? "1" : "0"
+            let commandType: String = item.command?.type ?? ""
+            let commandValue: String = item.command?.value ?? ""
+            let commandFallback: String = item.command?.fallbackValue ?? ""
+            var parts: [String] = [String(item.identifierIndex), String(item.selectIndex), item.label, item.text]
+            parts.append(item.comment ?? "")
+            parts.append(selected)
+            parts.append(global)
+            parts.append(commandType)
+            parts.append(commandValue)
+            parts.append(commandFallback)
+            parts.append(item.clipboardKey ?? "")
+            parts.append(String(describing: item.style))
+            parts.append(item.statusLabel ?? "")
+            return parts.joined(separator: "\u{0}")
         }.joined(separator: "\u{1}")
         return [
             functionPanelActive ? "1" : "0",
