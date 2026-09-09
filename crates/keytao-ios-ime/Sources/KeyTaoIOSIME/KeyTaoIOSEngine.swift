@@ -213,6 +213,10 @@ enum KeyTaoIOSPaths {
         return applicationSupportRoot().appendingPathComponent("keytao", isDirectory: true)
     }
 
+    static func clipboardDir() -> URL {
+        userRoot().appendingPathComponent("clipboard", isDirectory: true)
+    }
+
     static func sharedDataDir(userRoot: URL) -> URL? {
         if let override = ProcessInfo.processInfo.environment["KEYTAO_RIME_SHARED_DATA_DIR"], !override.isEmpty {
             let url = URL(fileURLWithPath: (override as NSString).expandingTildeInPath)

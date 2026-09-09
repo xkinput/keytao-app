@@ -1,4 +1,16 @@
 import Foundation
+import UIKit
+
+struct ClipboardEntry {
+    var key: String
+    var text: String? = nil
+    var mime: String? = nil
+    var name: String? = nil
+    var size: Int = 0
+    var width: Int = 0
+    var height: Int = 0
+    var thumb: UIImage? = nil
+}
 
 public struct KeyTaoCandidate: Codable, Equatable {
     public var text: String

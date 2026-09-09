@@ -328,7 +328,7 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 - `reset`：调用 `reset()` 清当前 composition。
 - `rimeMenu`：读取当前方案及其 schema `switches`，打开结构化设置页，不向 librime 发送 F4。
 - `rimeSchema` / `rimeOption`：直接调用 session 级方案选择或选项 API；布尔项切换实际 `name`，单选组依次关闭旧 option、开启下一项，然后刷新结构化设置页。
-- `panel`：Android 本地功能面板命令，例如 `rime` / `clipboard` / `close`；不进入 Rime。
+- `panel`：Android 本地功能面板命令，例如 `rime` / `clipboard` / `pasteMedia:<key>` / `close`；不进入 Rime。媒体项在宿主声明接受对应 MIME 时通过 `InputConnectionCompat.commitContent` 授予临时读取权限；接口不可用、拒绝或提交失败时回写系统剪贴板，提示「已复制到系统剪贴板，请在输入框长按粘贴」。
 - `edit`：Android `InputConnection` 编辑命令，例如 `toggleSelection`、`selectLeft`、`selectRight`、`selectAll`、`copy`、`cut`、`paste`、`lineStart`、`lineEnd`、`tab`；不进入 Rime。
 
 内置配置当前把顶排 q-p 的 hint 长按/上滑映射为 1-0，并在 a-l / z-m 上提供常用符号长按/上滑输入。未单独声明 `swipeUp` 时，Android 会复用长按动作，所以 `m` 上滑/长按 `=` 会走 Rime 输入路径，底部 `!` / `?` 上滑/长按则按配置走 `directInput` 立即上屏。`123` 映射为数字键盘，数字页 `#+=` 映射为符号键盘，`ABC` 映射回字母键盘。模式键点击切换中英，空格键只负责空格和输入态重置，不再承担打开主题页动作。
@@ -348,6 +348,12 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 | `imeOptions` 的 `IME_ACTION_*` 与 `actionLabel` | Enter 键帽显示对应文案（优先 `actionLabel`，否则「前往/搜索/发送/下一项/完成/上一项」）；多行编辑器保留布局自带的换行键帽 |
 
 隐私模式还会联动剪贴板：`ClipboardManager.OnPrimaryClipChangedListener` 只在 `onStartInputView` ~ `onFinishInputView` 之间注册（不再是整个 `:ime` 进程存活期间），且读取 primary clip 前会检查 `ClipDescription.EXTRA_IS_SENSITIVE`（API 33+），命中时既不入历史也不做粘贴建议。
+
+图片/文件只读取首个 `content://` 项：在剪贴板回调的主线程打开流以保留当次 URI 授权窗口，字节复制与缩略图处理交给 `candidateExecutor`。本应用 `${packageName}.fileprovider` 的回写会被吞掉，媒体 URI 不再经 `coerceToText()` 混入文本历史；文本 MIME 的 HTTP/HTTPS 链接仍可进入文本历史，无法解析 MIME（含空 MIME 描述）时忽略该 URI 项。媒体与文本按捕获时间合并，媒体为普通剪贴板行的 2 倍高度（默认 88dp），图片展示捕获时生成的缩略图，视频/普通文件展示占位符；删除按钮的无障碍文案只报项目序号，媒体行本身仍朗读序号和可见名称或尺寸。
+
+媒体元数据和缩略图只留在内存中，不写索引。URI 授权所需字节临时存于 `userRoot/clipboard/`，最多 12 项、单项 8 MiB、合计 48 MiB，按捕获时间保留新项、淘汰旧项并删除文件；在途捕获也计入预算，点击回写不改变历史顺序。图片只在捕获时解码一次，缩略图使用 `RGB_565`、最长边不超过 176px；超过 2000 万像素只显示占位符。`FileProvider` 显式声明 `external-files-path` 的 `keytao/clipboard/`，内部目录回退沿用 `files-path`，并显式依赖 `androidx.core:core-ktx:1.15.0`。
+
+进程创建时清残留、销毁时清媒体；禁用剪贴板权限和用户「清空」也清除媒体文件和缩略图引用。完整清理同时使在途捕获失效并重置媒体去重快照，后台结果不得重新填回已清空的历史；只有用户「清空」会重新记录当前系统媒体快照以抑制重新入列，隐私限制解除后允许重新捕获。`onTrimMemory` / `onLowMemory` 只释放媒体及 view 缓存中的缩略图引用，保留条目和文件，行改用占位符。运行日志 `ui/clipboard_media` 只含项数与字节计数，不记录名称、MIME、尺寸或内容。
 
 **`learning=false` 在 composing 开启时由随包 schema 的 `enable_user_dict:false` 保证不学习**：通用层 `InputContextPolicy.learning` 还用于约束前端自己的历史存储。密码框仍一律 `composing=false, learning=false`，按键完全不进 librime；无痕（`IME_FLAG_NO_PERSONALIZED_LEARNING`）和 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 则保留组字并关闭学习、剪贴板记忆与建议。第三方 schema 若启用用户词典，librime 没有 per-session no-memorize 开关，仍可能学习。
 
@@ -502,7 +508,7 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 剪贴板监听只在输入会话期间注册，并尊重 `ClipDescription.EXTRA_IS_SENSITIVE`。
 - 应用私有数据目录 + 旧共享存储目录一次性迁移，Manifest 无任何存储权限。
 - 部署服务以 `dataSync` 前台服务承载长耗时词库编译。
-- 生命周期回调不做磁盘 IO / librime 初始化：目录探测、`nativeInit`、reload 检测全部在后台线程，配置与主题按签名缓存。
+- 生命周期回调不做 librime 初始化：目录探测、`nativeInit`、reload 检测在后台线程，配置与主题按签名缓存；剪贴板媒体的有界目录清理是隐私擦除所需的同步磁盘操作，媒体复制与解码仍在后台。
 - 硬键 solo Shift release 中英切换和 fallback。
 - `keytao-theme` resolved theme 接入。
 - `CandidatePanelModel` / `ModeHintModel` 接入。
@@ -511,7 +517,7 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 键盘层和展开层切换动画。
 - 空闲候选栏工具栏、KeyTao logo、输入法地球键、常驻 editor/剪贴板/Emoji 入口和结构化 Rime 选项页。
 - 均匀 5×5 editor 键盘层：选择、方向、全选、复制、剪切、粘贴、行首、行尾、Tab 等编辑动作沿用原有门控和派发路径。
-- 功能面板 `剪贴板` 子页：读取当前系统剪贴板，并显示输入法会话内复制/剪切历史。
+- 功能面板 `剪贴板` 子页：显示当前文本与会话内文本/图片/文件历史，支持删除单项、清空、图片缩略图、宿主媒体插入及剪贴板回写降级。
 - 功能面板 `Emoji` 子页：常用 emoji 直接上屏。
 - 数字页和符号页分离，符号键支持中英状态覆盖。
 - 回退键长按 repeat：按住后连续派发 `backspace`，松手或移出按键停止；没有 composition 时直接删除宿主输入框正文，不再同步进入 Rime。
@@ -553,7 +559,7 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
    已按 `inputType` 处理密码、数字/电话/日期和多行，按 `imeOptions` 处理 Enter 动作与键帽。仍未按 `TYPE_TEXT_VARIATION_EMAIL_ADDRESS` / `URI` 提供 `@`、`.`、`.com` 之类的专用键位，也没有读取 surrounding text 做上下文预测。
 
 10. 系统级剪贴板历史不可完整枚举
-    Android 公开 `ClipboardManager` 只能可靠读取当前 primary clip；当前剪贴板页显示当前系统剪贴板和 KeyTao IME 会话内复制/剪切历史。若要展示系统键盘那种完整历史，需要用户显式授权的辅助服务、厂商私有能力或 KeyTao 自己持久化后续剪贴板变化。
+    Android 公开 `ClipboardManager` 只能可靠读取当前 primary clip；当前剪贴板页显示当前系统剪贴板和 KeyTao IME 会话内文本/图片/文件历史。历史不持久化，也没有 `index.json`；媒体临时文件只用于 URI 授权，进程下次创建时会清除强停遗留文件，不能枚举系统键盘的完整历史。强停不会保证执行 `onDestroy`，不承诺强停瞬间目录已经为空。
 
 11. 多 session / 多 display 并发未细化
     当前 service 级一个 session 对普通手机输入足够，但多窗口、多 display、外接硬键盘复杂场景可能需要按 input context 管理 session。

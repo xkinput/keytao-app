@@ -33,7 +33,7 @@ iOS 系统键盘必须作为 containing app 内的 custom keyboard extension 发
 - iOS 会在 secure text input、phone pad / name phone pad 等场景临时替换为系统键盘；宿主 App 也可以拒绝第三方键盘。
 - extension 只能在自己的主 view 内绘制，不能像 macOS/Windows/Linux 那样在光标附近显示独立候选窗；但从 iOS 13 起 `UITextDocumentProxy` 提供 `setMarkedText(_:selectedRange:)` / `unmarkText()`，宿主输入框内的 preedit 是可用的。
 - 默认没有网络、App Group 或 containing app shared container 权限；当前模板设置 `RequestsOpenAccess=true`，用户仍必须在系统设置里显式允许“完全访问”，KeyTao 才能读取 App Group 里的方案、主题和 reload stamp。
-- iOS 16+ 会对 extension 主动读取 `UIPasteboard` 弹出系统粘贴提示，因此 iOS 不在键盘显示时读取剪贴板或自动展示粘贴建议。
+- iOS 16+ 会对 extension 主动读取 `UIPasteboard` 弹出系统粘贴提示，因此 iOS 不在键盘显示时读取剪贴板或自动展示粘贴建议。用户主动打开剪贴板面板时是媒体读取的唯一入口：先做 `hasImages` 元数据预检，再按 pasteboard type 读取原始字节；系统可能在这次明确操作时请求粘贴授权，不重编码图片。
 
 官方参考：
 
@@ -205,6 +205,12 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 系统会在 secure text entry 场景把键盘临时换成系统键盘，但本扩展仍做防御性处理：`isSecureTextEntry` 或上表中的直通类 `keyboardType` 出现时，调用 `keytao_session_set_input_policy(session, composing: false, learning: false)`，按键完全不进 librime，不产生 preedit/候选，也不可能发生用户词学习；同时清空剪贴板历史与退格恢复栈。
 
 剪贴板读取需要完全访问：`currentClipboardText()` 先 `guard hasFullAccess`，再用 `UIPasteboard.general.hasStrings` 预检（metadata 访问，不会触发 iOS 16 起的系统粘贴授权弹窗），未授权时给出明确提示而不是误报「剪贴板为空」。剪贴板历史绑定当前输入上下文，`textWillChange` / `selectionWillChange` / `viewWillDisappear` 都会清空。
+
+剪贴板媒体项与文本按捕获时间合并，仅支持查看和「复制到剪贴板」：`UITextDocumentProxy` 无法插入非文本，点击媒体项只用原始 pasteboard type 回写字节并提示「已复制到剪贴板，请在输入框长按粘贴」。回写的 `changeCount` 用于吞掉自身回声，删除单项和清空也抑制同一次系统剪贴板内容重新入列。文件支持首项提供的原始非文本 Data representation；只提供 `fileURL` 的剪贴板不捕获，也不解引用扩展没有授权的外部文件。
+
+媒体元数据与缩略图只在当前输入上下文的内存中存在，不持久化、不写索引；字节临时放在 App Group `keytao/clipboard/`。上限为 8 项、单项 8 MiB、合计 48 MiB，按捕获时间保留新项、淘汰旧项并同时删文件。文件写入和缩略图工作在后台完成，主线程安装结果；用 ImageIO 直接生成最长边不超过 176px 的缩略图，不完整解码，超过 2000 万像素使用占位符。媒体行高度为普通剪贴板行的 2 倍，四列 Emoji 网格不变；KB/MB 大小与 Android 一样保留一位小数。删除按钮无障碍文案只包含项目序号；媒体行本身的朗读保留与可见正文一致的名称或图片尺寸、大小，并包含「剪贴 N」序号和「复制到剪贴板」提示。
+
+创建/销毁、输入上下文重置、敏感输入、无完全访问、用户「清空」和内存警告都会清媒体与临时文件，并使在途任务失效，防止后台完成后恢复已清除的数据。强制终止扩展不保证运行销毁回调，遗留字节在下次创建时清除。`ui/clipboard_media` 事件只记录项数和字节计数，不含名称、类型、尺寸或内容。
 
 ## 冷启动与内存
 

@@ -6,6 +6,8 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Region
 import android.graphics.drawable.ColorDrawable
@@ -16,6 +18,7 @@ import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import android.text.InputType
 import android.text.Spanned
 import android.text.style.ReplacementSpan
@@ -29,7 +32,15 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
+import androidx.core.view.inputmethod.EditorInfoCompat
+import androidx.core.view.inputmethod.InputConnectionCompat
+import androidx.core.view.inputmethod.InputContentInfoCompat
+import java.io.File
+import java.io.InputStream
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -43,6 +54,24 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val mainHandler = Handler(Looper.getMainLooper())
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private val clipboardHistory = mutableListOf<String>()
+    private val clipboardHistoryTimestamps = mutableMapOf<String, Long>()
+    private data class ClipboardMedia(
+        val id: String,
+        val file: File,
+        val mime: String,
+        val name: String,
+        val size: Long,
+        val width: Int,
+        val height: Int,
+        val ts: Long,
+        val thumb: Bitmap?,
+    )
+    private val clipboardMedia = mutableListOf<ClipboardMedia>()
+    private data class ClipboardMediaSnapshot(val uri: String, val timestamp: Long)
+    private var lastSeenClipboardMedia: ClipboardMediaSnapshot? = null
+    @Volatile private var clipboardMediaGeneration = 0L
+    private val clipboardMediaFileLock = Any()
+    private val clipboardMediaStreams = mutableMapOf<String, InputStream>()
     private data class ClipboardSnapshot(val text: String, val timestamp: Long)
     private var clipboardSuppression: ClipboardSnapshot? = null
     private var lastOfferedClip: ClipboardSuggestionOffer? = null
@@ -50,6 +79,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         // A clipboard change is a new user/system event even when it writes the
         // same text again, so a deletion suppression cannot survive it.
         clipboardSuppression = null
+        lastSeenClipboardMedia = null
         rememberCurrentClipboard(suggest = true)
     }
     private var clipboardManager: ClipboardManager? = null
@@ -122,11 +152,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         KeytaoRuntimeLog.event("lifecycle", "ime_create")
         engine = KeytaoImeEngine(applicationContext)
         clipboardManager = getSystemService(ClipboardManager::class.java)
+        wipeClipboardMedia()
         scheduleAvailabilityRefresh()
     }
 
     override fun onDestroy() {
         unregisterClipboardListener()
+        wipeClipboardMedia()
         if (::engine.isInitialized) {
             engine.close()
         }
@@ -258,12 +290,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        releaseClipboardMediaThumbnails()
         KeytaoRuntimeLog.event("memory", "mem_trim") { put("level", level) }
         logMemorySnapshot("trim_memory")
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
+        releaseClipboardMediaThumbnails()
         // Snapshots belong only to start/finish input view and onTrimMemory.
         KeytaoRuntimeLog.event("memory", "mem_low")
     }
@@ -327,6 +361,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             privacyMode = nextPrivacy
             if (!nextPrivacy.allowsClipboard) {
                 clipboardHistory.clear()
+                clipboardHistoryTimestamps.clear()
+                wipeClipboardMedia()
                 clipboardSuppression = null
                 keyboardView?.clearRecentClipboardSuggestion()
             }
@@ -709,29 +745,76 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
-    override fun onRequestClipboardHistory(callback: (List<String>) -> Unit) {
+    override fun onRequestClipboardHistory(callback: (List<ClipboardEntry>) -> Unit) {
         if (!privacyMode.allowsClipboard) {
             callback(emptyList())
             return
         }
         rememberCurrentClipboard(suggest = false)
-        callback(clipboardHistory.toList())
+        callback(clipboardEntries())
     }
 
-    override fun onDeleteClipboardEntry(text: String) {
+    override fun onDeleteClipboardEntry(key: String, media: Boolean) {
         if (!privacyMode.allowsClipboard) return
+        if (media) {
+            val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
+            clipboardMedia.remove(item)
+            item.file.delete()
+            logClipboardMedia()
+            return
+        }
         // History is de-duplicated on insert, so text identity is stable while
         // the asynchronously rendered panel index may already be stale.
-        clipboardHistory.remove(text)
-        currentClipboardSnapshot()?.takeIf { it.text == text }?.let { clipboardSuppression = it }
+        clipboardHistory.remove(key)
+        clipboardHistoryTimestamps.remove(key)
+        currentClipboardSnapshot()?.takeIf { it.text == key }?.let { clipboardSuppression = it }
         keyboardView?.clearRecentClipboardSuggestion()
     }
 
     override fun onClearClipboardHistory() {
         if (!privacyMode.allowsClipboard) return
+        val clip = runCatching { clipboardManager?.primaryClip }.getOrNull()
         clipboardHistory.clear()
+        clipboardHistoryTimestamps.clear()
+        wipeClipboardMedia()
+        // Only an explicit clear suppresses re-capturing the current media clip.
+        lastSeenClipboardMedia = clip?.takeIf { it.itemCount > 0 }?.let {
+            val uri = it.getItemAt(0).uri ?: return@let null
+            val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) it.description.timestamp else 0L
+            ClipboardMediaSnapshot(uri.toString(), timestamp)
+        }
         clipboardSuppression = currentClipboardSnapshot()
         keyboardView?.clearRecentClipboardSuggestion()
+    }
+
+    override fun onCommitClipboardMedia(key: String) {
+        if (!privacyMode.allowsClipboard) return
+        val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
+        val uri = runCatching {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", item.file)
+        }.getOrNull() ?: return
+        val editor = currentInputEditorInfo
+        val connection = currentInputConnection
+        if (editor != null && connection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1 &&
+            mimeAccepted(item.mime, EditorInfoCompat.getContentMimeTypes(editor))
+        ) {
+            val info = InputContentInfoCompat(uri, ClipDescription(item.name, arrayOf(item.mime)), null)
+            val committed = runCatching {
+                InputConnectionCompat.commitContent(
+                    connection, editor, info,
+                    InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION, null,
+                )
+            }.getOrDefault(false)
+            if (committed) return
+        }
+        val copied = runCatching {
+            val manager = clipboardManager ?: return@runCatching false
+            manager.setPrimaryClip(ClipData.newUri(contentResolver, item.name, uri))
+            true
+        }.getOrDefault(false)
+        keyboardView?.showMessage(
+            if (copied) "已复制到系统剪贴板，请在输入框长按粘贴" else "复制到系统剪贴板失败",
+        )
     }
 
     override fun onToolbarCustomization(order: List<String>, pinnedCount: Int) {
@@ -1612,11 +1695,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val clip = clipboardManager?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
         if (isSensitiveClip(clip.description)) return null
+        // Never coerce a media URI into a literal content:// text-history entry.
+        clip.getItemAt(0).uri?.let { uri ->
+            if (uri.authority == "$packageName.fileprovider") return null
+            val mime = runCatching {
+                contentResolver.getType(uri) ?: clip.description.getMimeType(0)
+            }.getOrNull() ?: return null
+            if (!mime.startsWith("text/")) return null
+        }
         val text = clip.getItemAt(0)
             ?.coerceToText(this)
             ?.toString()
             ?.takeIf { it.isNotEmpty() }
             ?: return null
+        val uri = clip.getItemAt(0).uri
+        if (uri?.scheme == "content" && text == uri.toString()) return null
         val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             clip.description?.timestamp ?: 0L
         } else {
@@ -1640,17 +1733,186 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         // Copy/cut through KeyTao is an explicit new clipboard write.
         clipboardSuppression = null
         clipboardManager?.setPrimaryClip(ClipData.newPlainText("KeyTao", text))
-        rememberClipboardText(text, suggest = false)
+        rememberClipboardText(text, suggest = false, timestamp = System.currentTimeMillis())
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
+        if (!privacyMode.allowsClipboard) return
+        val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return
+        if (captureClipboardMedia(clip)) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
-        rememberClipboardText(snapshot.text, suggest, snapshot.timestamp)
+        val timestamp = snapshot.timestamp.takeIf { it > 0 }
+            ?: if (suggest) System.currentTimeMillis() else 0L
+        rememberClipboardText(snapshot.text, suggest, timestamp)
+    }
+
+    private fun clipboardDirectory(): File = File(KeytaoAndroidPaths.userRoot(this), "clipboard")
+
+    private fun clipboardEntries(): List<ClipboardEntry> {
+        if (!privacyMode.allowsClipboard) return emptyList()
+        val text = clipboardHistory.map {
+            (clipboardHistoryTimestamps[it] ?: 0L) to ClipboardEntry(key = it, text = it)
+        }
+        val media = clipboardMedia.map {
+            it.ts to ClipboardEntry("media:${it.id}", mime = it.mime, name = it.name,
+                size = it.size, width = it.width, height = it.height, thumb = it.thumb)
+        }
+        return (media + text).sortedByDescending { it.first }.map { it.second }
+    }
+
+    /** Open the provider stream during the focused IME's clipboard callback grant window. */
+    private fun captureClipboardMedia(clip: ClipData): Boolean {
+        if (!privacyMode.allowsClipboard || isSensitiveClip(clip.description)) return true
+        if (clip.itemCount == 0) return false
+        val uri = clip.getItemAt(0).uri ?: return false
+        if (uri.authority == "$packageName.fileprovider") return true
+        val mime = runCatching {
+            contentResolver.getType(uri) ?: clip.description.getMimeType(0)
+        }.getOrNull() ?: return false
+        if (mime.startsWith("text/")) return false
+        if (uri.scheme != "content") return true
+        keyboardView?.clearRecentClipboardSuggestion()
+        val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else 0L
+        val snapshot = ClipboardMediaSnapshot(uri.toString(), timestamp)
+        if (snapshot == lastSeenClipboardMedia) return true
+        val reservedBytes = (clipboardMediaStreams.size + 1L) * clipboardMediaMaxBytes
+        if (clipboardMediaStreams.size >= clipboardMediaLimit || reservedBytes > clipboardMediaTotalBytes) return true
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull()?.take(160)?.takeIf { it.isNotBlank() } ?: "剪贴板文件"
+        val stream = runCatching { contentResolver.openInputStream(uri) }.getOrNull() ?: return true
+        // Reserve a full item budget for every opened stream, including jobs awaiting main completion.
+        // This bounds backing files during capture as well as after insertion.
+        evictClipboardMedia(clipboardMedia, clipboardMediaLimit - clipboardMediaStreams.size - 1,
+            clipboardMediaTotalBytes - reservedBytes) { it.size }.forEach { it.file.delete() }
+        keyboardView?.refreshClipboardItems(clipboardEntries())
+        val id = UUID.randomUUID().toString()
+        val generation = clipboardMediaGeneration
+        val capturedAt = timestamp.takeIf { it > 0 } ?: System.currentTimeMillis()
+        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+            ?.takeIf { it.matches(Regex("[a-zA-Z0-9]{1,10}")) } ?: "bin"
+        clipboardMediaStreams[id] = stream
+        try {
+            candidateExecutor.execute {
+                val media = snapshotClipboardStream(stream, id, extension, mime, name, capturedAt, generation)
+                mainHandler.post {
+                    clipboardMediaStreams.remove(id)
+                    if (generation != clipboardMediaGeneration || !privacyMode.allowsClipboard) {
+                        media?.file?.delete()
+                        return@post
+                    }
+                    if (media != null) {
+                        clipboardMedia.add(0, media)
+                        clipboardMedia.sortByDescending { it.ts }
+                        evictClipboardMedia(clipboardMedia, clipboardMediaLimit, clipboardMediaTotalBytes) { it.size }
+                            .forEach { it.file.delete() }
+                        keyboardView?.refreshClipboardItems(clipboardEntries())
+                    }
+                    logClipboardMedia()
+                }
+            }
+            lastSeenClipboardMedia = snapshot
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            clipboardMediaStreams.remove(id)
+            runCatching { stream.close() }
+            if (lastSeenClipboardMedia == snapshot) lastSeenClipboardMedia = null
+        }
+        return true
+    }
+
+    private fun snapshotClipboardStream(
+        stream: InputStream, id: String, extension: String, mime: String, name: String,
+        timestamp: Long, generation: Long,
+    ): ClipboardMedia? {
+        val file = File(clipboardDirectory(), "$id.$extension")
+        var retained = false
+        try {
+            stream.use { input ->
+                // Only file creation is locked. A wipe can unlink an in-flight copy immediately.
+                val output = synchronized(clipboardMediaFileLock) {
+                    if (generation != clipboardMediaGeneration) return null
+                    file.parentFile?.mkdirs()
+                    file.outputStream()
+                }
+                var bytes = 0L
+                output.use {
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        if (generation != clipboardMediaGeneration || Thread.currentThread().isInterrupted) return null
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        bytes += read
+                        if (bytes > clipboardMediaMaxBytes) return null
+                        it.write(buffer, 0, read)
+                    }
+                }
+                if (bytes == 0L || generation != clipboardMediaGeneration) return null
+                var width = 0
+                var height = 0
+                var thumb: Bitmap? = null
+                if (mime.startsWith("image/")) {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(file.path, bounds)
+                    width = bounds.outWidth.coerceAtLeast(0)
+                    height = bounds.outHeight.coerceAtLeast(0)
+                    if (width > 0 && height > 0 && width.toLong() * height <= clipboardMaxPixels) {
+                        var sample = 1
+                        while ((maxOf(width, height) + sample - 1) / sample > clipboardThumbPx) sample *= 2
+                        val options = BitmapFactory.Options().apply {
+                            inSampleSize = sample
+                            inPreferredConfig = Bitmap.Config.RGB_565
+                        }
+                        thumb = BitmapFactory.decodeFile(file.path, options)?.let { decoded ->
+                            if (decoded.config == Bitmap.Config.RGB_565) decoded
+                            else decoded.copy(Bitmap.Config.RGB_565, false).also { decoded.recycle() }
+                        }
+                    }
+                }
+                if (generation != clipboardMediaGeneration) return null
+                retained = true
+                return ClipboardMedia(id, file, mime, name, bytes, width, height, timestamp, thumb)
+            }
+        } catch (_: Exception) {
+            return null
+        } catch (_: OutOfMemoryError) {
+            return null
+        } finally {
+            if (!retained) file.delete()
+        }
+    }
+
+    private fun releaseClipboardMediaThumbnails() {
+        clipboardMedia.replaceAll { it.copy(thumb = null) }
+        keyboardView?.refreshClipboardItems(clipboardEntries())
+    }
+
+    private fun wipeClipboardMedia() {
+        synchronized(clipboardMediaFileLock) {
+            clipboardMediaGeneration++
+            clipboardDirectory().deleteRecursively()
+        }
+        clipboardMediaStreams.values.forEach { runCatching { it.close() } }
+        clipboardMediaStreams.clear()
+        clipboardMedia.clear()
+        lastSeenClipboardMedia = null
+        keyboardView?.refreshClipboardItems(clipboardEntries())
+        logClipboardMedia()
+    }
+
+    private fun logClipboardMedia() {
+        val count = clipboardMedia.size
+        val bytes = clipboardMedia.sumOf { it.size }
+        KeytaoRuntimeLog.event("ui", "clipboard_media") {
+            put("count", count)
+            put("bytes", bytes)
+        }
     }
 
     private fun offerCurrentClipboardSuggestionOnShow() {
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
-        rememberClipboardText(snapshot.text, suggest = false)
+        rememberClipboardText(snapshot.text, suggest = false, timestamp = snapshot.timestamp)
         if (!shouldOfferClipboardSuggestion(
                 text = snapshot.text,
                 timestamp = snapshot.timestamp,
@@ -1681,8 +1943,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val wasFirst = clipboardHistory.firstOrNull() == text
         clipboardHistory.remove(text)
         clipboardHistory.add(0, text)
+        clipboardHistoryTimestamps[text] = timestamp.takeIf { it > 0 }
+            ?: clipboardHistoryTimestamps[text] ?: System.currentTimeMillis()
         while (clipboardHistory.size > clipboardHistoryLimit) {
-            clipboardHistory.removeAt(clipboardHistory.lastIndex)
+            clipboardHistoryTimestamps.remove(clipboardHistory.removeAt(clipboardHistory.lastIndex))
         }
         if (suggest && !wasFirst) {
             lastOfferedClip = ClipboardSuggestionOffer(text, timestamp)
@@ -1912,6 +2176,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         private const val defaultUnavailableMessage = "请先在 KeyTao App 安装键道方案"
         private const val preparingMessage = "正在准备 KeyTao 输入法"
         private const val clipboardHistoryLimit = 24
+        private const val clipboardMediaLimit = 12
+        private const val clipboardMediaMaxBytes = 8L * 1024 * 1024
+        private const val clipboardMediaTotalBytes = 48L * 1024 * 1024
+        private const val clipboardThumbPx = 176
+        private const val clipboardMaxPixels = 20_000_000L
         private const val expandedCandidateLimit = 96
 
         /** `EditorInfo.MEMORY_EFFICIENT_TEXT_LENGTH`: the budget AOSP recommends

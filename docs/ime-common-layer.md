@@ -446,7 +446,11 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 - **Android 的 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 不走完全直通**。对中文输入法而言，`textNoSuggestions` 字段（用户名、编号等）大量存在，完全直通等于让用户在这些字段里无法输入中文，危害大于它要解决的隐私问题；AOSP `LatinIME` 的 `InputAttributes` 同样只据此关闭建议与词典学习，不关闭组字。真正的隐私契约（密码框）没有放宽，与 iOS 的 `isSecureTextEntry` 口径一致。
 - Wayland 两套 `content_type` 常量表与 IBus 的 `(purpose, hints)` **三者互不通用**，跨端只共享“命中即 `InputContextPolicy::sensitive()`”这个结论。
 
-平台除了 `set_input_policy` 之外还要做两件事：切进敏感上下文时立刻清候选/preedit UI；按键入口第一件事就检查 `input_policy().composing`，为 false 时直接放行且不发任何 UI 信号。剪贴板服务另需尊重 `ClipDescription.EXTRA_IS_SENSITIVE`（Android）与 `hasFullAccess` / `UIPasteboard.hasStrings` 探测（iOS）。
+平台除了 `set_input_policy` 之外还要做两件事：切进敏感上下文时立刻清候选/preedit UI；按键入口第一件事就检查 `input_policy().composing`，为 false 时直接放行且不发任何 UI 信号。剪贴板服务另需尊重 `ClipDescription.EXTRA_IS_SENSITIVE`（Android）与 `hasFullAccess` / `UIPasteboard.hasStrings`、`hasImages` 元数据探测（iOS）。
+
+移动端剪贴板媒体仍由平台适配层管理，不进入 Rust 状态模型或持久化索引。Android 最多 12 项、iOS 最多 8 项，两端均限制单项 8 MiB、总计 48 MiB；媒体临时字节位于各自 `userRoot/clipboard/`，按捕获时间淘汰旧项时删文件。缩略图只在捕获时生成，最长边 176px，Android 使用 `RGB_565`、iOS 使用 ImageIO 缩略图接口；超过 2000 万像素只显示占位符，视频/文件不解码缩略图。媒体行使用普通剪贴板行的 2 倍高度，无需修改通用层布局常量。
+
+Android 在剪贴板回调内打开授权流，后台复制/解码；宿主 MIME 接受时尝试 `commitContent`，其余情况回写剪贴板并提示长按粘贴，自身 FileProvider authority 的回声不入历史。iOS 只在用户打开面板时读取媒体字节，仅支持查看及回写剪贴板，不承诺向宿主插入媒体。创建/销毁、隐私禁用及清空会清理媒体，iOS 还随输入上下文和内存警告清理；完整清理必须同时使在途捕获失效并释放 view 持有的缩略图。Android 内存压力回调只释放缩略图引用，保留媒体条目和文件以占位符显示。完整清理重置媒体读取去重状态，用户「清空」再显式抑制当前系统媒体重新入列。强停可能跳过销毁回调，下一次创建清除残留。运行日志 `ui/clipboard_media` 只允许项数/字节计数，不得包含名称、MIME、尺寸或内容。
 
 ## 数据目录与部署
 

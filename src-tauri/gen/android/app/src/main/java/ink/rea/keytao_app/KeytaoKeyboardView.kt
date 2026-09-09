@@ -71,9 +71,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onDeleteCandidate(index: Int): Boolean
         fun onDismissKeyboard()
         fun onRequestExpandCandidates(callback: (List<KeytaoCandidate>) -> Unit)
-        fun onRequestClipboardHistory(callback: (List<String>) -> Unit)
-        fun onDeleteClipboardEntry(text: String)
+        fun onRequestClipboardHistory(callback: (List<ClipboardEntry>) -> Unit)
+        fun onDeleteClipboardEntry(key: String, media: Boolean = false)
         fun onClearClipboardHistory()
+        fun onCommitClipboardMedia(key: String)
         fun onToolbarCustomization(order: List<String>, pinnedCount: Int)
         fun onSettingPreview(key: String, value: String)
         fun onSettingChanged(key: String, value: String)
@@ -113,7 +114,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val label: String = "",
         val pageIndex: Int = index,
         val comment: String? = null,
-        val clipboardText: String? = null,
+        val clipboardKey: String? = null,
         val drawingRect: RectF = rect,
     )
     private data class CandidateMenuState(
@@ -123,7 +124,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val deletionUnavailable: Boolean = false,
     )
     private data class CandidateMenuActionRect(val action: String, val rect: RectF)
-    private data class ClipboardDeleteRect(val text: String, val rect: RectF)
+    private data class ClipboardDeleteRect(val clipboardKey: String, val rect: RectF, val media: Boolean = false)
     private data class CandidateDrawItem(
         val index: Int,
         val label: String,
@@ -132,7 +133,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val selected: Boolean = false,
         val global: Boolean = false,
         val command: KeyCommand? = null,
-        val clipboardText: String? = null,
+        val clipboardKey: String? = null,
+        val clipboardEntry: ClipboardEntry? = null,
         val style: PanelItemStyle = PanelItemStyle.DEFAULT,
         val statusLabel: String? = null,
         val minimumValue: Float? = null,
@@ -167,7 +169,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
     private enum class PanelItemStyle {
-        DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY,
+        DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY, MEDIA,
         COLOR_HUE, COLOR_SQUARE, COLOR_PREVIEW,
     }
     private enum class ShiftState { OFF, ONCE, LOCKED }
@@ -280,7 +282,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var expandedDragging = false
     private var expandedCandidatesLoading = false
     private var clipboardItemsLoading = false
-    private var clipboardItems: List<String> = emptyList()
+    private var clipboardItems: List<ClipboardEntry> = emptyList()
     private var clipboardClearConfirmationPending = false
     private var recentClipboardSuggestion: String? = null
     private var expandedCandidateScrollY = 0f
@@ -653,6 +655,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun refreshClipboardItems(items: List<ClipboardEntry>) {
+        clipboardItems = if (functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD) items else emptyList()
+        invalidateExpandedCandidateItemsCache()
+        if (clipboardItems.isEmpty()) clipboardClearConfirmationPending = false
+        rebuildInteractiveRects()
+        invalidate()
+    }
+
     fun setKeyboardLayer(value: String?) {
         val started = System.nanoTime()
         val panelWasOpen = candidatePanelExpanded || functionPanelActive
@@ -668,6 +678,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
+        clipboardItems = emptyList()
+        invalidateExpandedCandidateItemsCache()
         clearActiveKeyTouches()
         pressedToolbar = null
         toolbarTouchActive = false
@@ -939,9 +951,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             targets.add(
                 AccessibilityTarget(
                     accessibilityClipboardDeleteNodeBase + index,
-                    "删除剪贴板历史：${delete.text}",
+                    if (delete.media) "删除剪贴板项目 ${index + 1}" else "删除剪贴板历史：${delete.clipboardKey}",
                     delete.rect,
-                ) { deleteClipboardEntry(delete.text) }
+                ) { deleteClipboardEntry(delete.clipboardKey, delete.media) }
             )
         }
         expandedCandidateRects.forEachIndexed { index, candidate ->
@@ -1637,6 +1649,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         itemRowHeight = defaultRowHeight
                     }
                 }
+            } else if (columns == 1 && cellWidth != null) {
+                chipWidth = cellWidth
+                itemRowHeight = if (item.style == PanelItemStyle.MEDIA) defaultRowHeight * 2 else defaultRowHeight
             } else if (columns != null && cellWidth != null) {
                 val column = index % columns
                 val row = index / columns
@@ -1655,7 +1670,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             val rect = RectF(x, y, x + chipWidth, y + itemRowHeight)
             if (rect.bottom >= top && rect.top <= bottom) {
                 drawingRects[item.index] = rect
-                val hitRect = if (item.clipboardText != null) {
+                val hitRect = if (item.clipboardKey != null) {
                     RectF(rect.left, rect.top, rect.right - dp(config.clipboardDeleteHitWidthDp), rect.bottom)
                 } else {
                     rect
@@ -1667,14 +1682,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         global = item.global,
                         command = item.command,
                         label = listOf(item.label, item.text).filter(String::isNotBlank).joinToString(" "),
-                        clipboardText = item.clipboardText,
+                        clipboardKey = item.clipboardKey,
                         drawingRect = rect,
                     )
                 }
-                item.clipboardText?.let { clipboardText ->
+                item.clipboardKey?.let { clipboardKey ->
                     nextClipboardDeleteRects += ClipboardDeleteRect(
-                        clipboardText,
+                        clipboardKey,
                         RectF(hitRect.right, rect.top, rect.right, rect.bottom),
+                        item.style == PanelItemStyle.MEDIA,
                     )
                 }
             }
@@ -1694,6 +1710,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         y = rect.bottom + gap
                     }
                 }
+            } else if (columns == 1) {
+                x = left
+                y = rect.bottom + gap
             } else if (columns == null) {
                 x = rect.right + gap
             }
@@ -1811,7 +1830,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                         global = item.global,
                         command = item.command,
                         label = listOf(item.label, item.text).filter(String::isNotBlank).joinToString(" "),
-                        clipboardText = item.clipboardText,
+                        clipboardKey = item.clipboardKey,
                         drawingRect = drawingRect,
                     )
                 }
@@ -2047,9 +2066,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (functionPanelActive && functionPanelMode == FunctionPanelMode.CLIPBOARD) {
                 append('|')
                 clipboardItems.forEach { item ->
-                    append(item.length)
+                    append(item.key.length)
                     append(':')
-                    append(item)
+                    append(item.key)
                     append('\u0001')
                 }
             }
@@ -2073,15 +2092,34 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun clipboardPanelItems(): List<CandidateDrawItem> {
-        return clipboardItems.mapIndexed { index, text ->
-            val previewEnd = text.offsetByCodePoints(0, minOf(120, text.codePointCount(0, text.length)))
-            CandidateDrawItem(
-                index = -1000 - index,
-                label = "剪贴 ${index + 1}",
-                text = text.substring(0, previewEnd),
-                command = KeyCommand.directInput(text),
-                clipboardText = text,
-            )
+        return clipboardItems.mapIndexed { index, entry ->
+            val text = entry.text
+            if (text != null) {
+                val previewEnd = text.offsetByCodePoints(0, minOf(120, text.codePointCount(0, text.length)))
+                CandidateDrawItem(
+                    index = -1000 - index,
+                    label = "剪贴 ${index + 1}",
+                    text = text.substring(0, previewEnd),
+                    command = KeyCommand.directInput(text),
+                    clipboardKey = entry.key,
+                )
+            } else {
+                val sizeLabel = if (entry.size >= 1024 * 1024) {
+                    String.format(Locale.ROOT, "%.1f MB", entry.size / (1024.0 * 1024))
+                } else String.format(Locale.ROOT, "%.1f KB", entry.size / 1024.0)
+                val description = if (entry.mime?.startsWith("image/") == true) {
+                    if (entry.width > 0 && entry.height > 0) "图片 ${entry.width}×${entry.height}" else "图片"
+                } else entry.name ?: "文件"
+                CandidateDrawItem(
+                    index = -1000 - index,
+                    label = "剪贴 ${index + 1}",
+                    text = "$description · $sizeLabel",
+                    command = KeyCommand.panel("pasteMedia:${entry.key}"),
+                    clipboardKey = entry.key,
+                    clipboardEntry = entry,
+                    style = PanelItemStyle.MEDIA,
+                )
+            }
         }
     }
 
@@ -2371,6 +2409,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             PanelItemStyle.OPTION -> drawRimeOptionPill(canvas, displayItem, rect)
             PanelItemStyle.SLIDER -> drawSettingsSlider(canvas, displayItem, rect)
             PanelItemStyle.SWATCHES -> drawSettingsSwatches(canvas, displayItem, rect)
+            PanelItemStyle.MEDIA -> drawClipboardMediaRow(canvas, displayItem, rect)
             else -> when (panelColumns(if (functionPanelActive) functionPanelMode else FunctionPanelMode.RIME)) {
                 4 -> drawCandidateGridCell(canvas, displayItem, rect)
                 1 -> drawClipboardCandidateRow(canvas, displayItem, rect)
@@ -2924,6 +2963,53 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val preview = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
         canvas.drawText(preview, textX, centerY + textBaselineOffset(textPaint), textPaint)
 
+        drawClipboardDelete(canvas, rect)
+    }
+
+    private fun drawClipboardMediaRow(canvas: Canvas, item: CandidateDrawItem, rect: RectF) {
+        val entry = item.clipboardEntry ?: return
+        val inset = dp(8f)
+        val side = (rect.height() - 2 * inset).coerceAtLeast(0f)
+        val thumbnailRect = RectF(rect.left + inset, rect.top + inset, rect.left + inset + side, rect.bottom - inset)
+        val thumb = entry.thumb
+        if (thumb != null) {
+            val scale = minOf(side / thumb.width, side / thumb.height)
+            val halfWidth = thumb.width * scale / 2f
+            val halfHeight = thumb.height * scale / 2f
+            val target = RectF(thumbnailRect.centerX() - halfWidth, thumbnailRect.centerY() - halfHeight,
+                thumbnailRect.centerX() + halfWidth, thumbnailRect.centerY() + halfHeight)
+            paint.style = Paint.Style.FILL
+            paint.alpha = 255
+            canvas.drawBitmap(thumb, null, target, paint)
+        } else {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = max(1f, dp(0.7f))
+            paint.color = theme.candidateBorderColor.toArgb()
+            canvas.drawRoundRect(thumbnailRect, dp(5f), dp(5f), paint)
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(14f)
+            textPaint.color = theme.commentColor.toArgb()
+            val kind = when {
+                entry.mime?.startsWith("image/") == true -> "IMG"
+                entry.mime?.startsWith("video/") == true -> "VID"
+                else -> "DOC"
+            }
+            canvas.drawText(kind, thumbnailRect.centerX(), thumbnailRect.centerY() + textBaselineOffset(textPaint), textPaint)
+        }
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = sp(candidateTextSizeSp())
+        textPaint.color = if (item.selected) theme.candidateSelectedForeground.toArgb() else theme.keyForeground.toArgb()
+        val textX = thumbnailRect.right + inset
+        val maxWidth = (rect.right - dp(config.clipboardDeleteHitWidthDp) - inset - textX).coerceAtLeast(0f)
+        val preview = TextUtils.ellipsize(item.text, textPaint, maxWidth, TextUtils.TruncateAt.END).toString()
+        canvas.drawText(preview, textX, rect.centerY() + textBaselineOffset(textPaint), textPaint)
+        drawClipboardDelete(canvas, rect)
+    }
+
+    private fun drawClipboardDelete(canvas: Canvas, rect: RectF) {
+        val deleteWidth = dp(config.clipboardDeleteHitWidthDp)
+        val deleteLeft = rect.right - deleteWidth
+        val centerY = rect.centerY()
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(1f, dp(0.7f))
         paint.color = theme.candidateBorderColor.toArgb()
@@ -4669,6 +4755,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
         clipboardItemsLoading = false
+        clipboardItems = emptyList()
         settingsColorPickerOpen = false
         colorPickerEntryAccent = null
         cancelPendingAccentPreview()
@@ -4742,6 +4829,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             return true
         }
         if (command.type == KeyCommandTypes.PANEL) {
+            if (command.value?.startsWith("pasteMedia:") == true) {
+                listener?.onCommitClipboardMedia(command.value.removePrefix("pasteMedia:"))
+                performConfiguredSelectionFeedback()
+                return true
+            }
             when (command.value) {
                 "close" -> closeCandidatePanel()
                 "dismissClipboard" -> clearRecentClipboardSuggestion()
@@ -4808,7 +4900,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val command = candidate.command
         if (command != null) {
             handlePanelCommand(command)
-            if (candidate.clipboardText != null) {
+            if (candidate.clipboardKey != null) {
                 closeCandidatePanel()
             }
             return
@@ -5105,11 +5197,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return if (abs(value - value.roundToInt()) < 0.0001f) value.roundToInt().toString() else "%.1f".format(Locale.ROOT, value)
     }
 
-    private fun deleteClipboardEntry(text: String) {
+    private fun deleteClipboardEntry(key: String, media: Boolean) {
         if (!functionPanelActive || functionPanelMode != FunctionPanelMode.CLIPBOARD) return
         clipboardClearConfirmationPending = false
         performConfiguredSelectionFeedback()
-        listener?.onDeleteClipboardEntry(text)
+        listener?.onDeleteClipboardEntry(key, media)
         requestClipboardItemsAsync()
         invalidate()
     }
@@ -5677,7 +5769,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 startVerticalFling(VerticalScrollSurface.EXPANDED_PANEL)
             }
             if (!expandedDragging && !wasBrakingScroll && clipboardDelete != null && clipboardDelete.rect.contains(x, y)) {
-                deleteClipboardEntry(clipboardDelete.text)
+                deleteClipboardEntry(clipboardDelete.clipboardKey, clipboardDelete.media)
             } else if (!expandedDragging && !wasBrakingScroll && candidate != null && candidate.rect.contains(x, y)) {
                 activateExpandedCandidate(candidate)
             }

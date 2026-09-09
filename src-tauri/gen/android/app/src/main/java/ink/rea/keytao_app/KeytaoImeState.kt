@@ -1,7 +1,19 @@
 package ink.rea.keytao_app
 
+import android.graphics.Bitmap
 import org.json.JSONArray
 import org.json.JSONObject
+
+data class ClipboardEntry(
+    val key: String,
+    val text: String? = null,
+    val mime: String? = null,
+    val name: String? = null,
+    val size: Long = 0,
+    val width: Int = 0,
+    val height: Int = 0,
+    val thumb: Bitmap? = null,
+)
 
 data class KeytaoCandidate(
     val index: Int = 0,
