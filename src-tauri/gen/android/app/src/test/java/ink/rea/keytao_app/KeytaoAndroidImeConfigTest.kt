@@ -1,10 +1,35 @@
 package ink.rea.keytao_app
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class KeytaoAndroidImeConfigTest {
+    @Test
+    fun `keyboard and runtime files retain bundled row fallback`() {
+        val bundled = JSONObject(
+            """
+            {
+              "rows": [[{ "label": "bundled-letter", "value": "a" }]],
+              "numberRows": [[{ "label": "bundled-number", "value": "1" }]],
+              "symbolRows": [[{ "label": "bundled-symbol", "value": "!" }]]
+            }
+            """.trimIndent()
+        )
+        val config = KeytaoAndroidImeConfig.parseSources(
+            userKeyboard = JSONObject("""{ "height": 270 }"""),
+            userJson = """{ "keyPreviewEnabled": false }""",
+            defaultRoot = bundled,
+        )
+
+        assertEquals("bundled-letter", config.rows.single().single().label)
+        assertEquals("bundled-number", config.numberRows.single().single().label)
+        assertEquals("bundled-symbol", config.symbolRows.single().single().label)
+        assertEquals(270, config.keyboardHeightDp)
+        assertEquals(false, config.keyPreviewEnabled)
+    }
+
     @Test
     fun `parse config keeps key hints and swipe page commands`() {
         val config = KeytaoAndroidImeConfig.parse(

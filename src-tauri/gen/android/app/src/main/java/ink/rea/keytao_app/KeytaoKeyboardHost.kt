@@ -36,6 +36,7 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     private var normalHeightPx = 0
     private var safeBottomInsetPx = 0
     private var reportedBottomInsetPx = -1
+    private var insetsAfterLayoutPending = true
     private var isLandscape = false
     private var dragMode = FloatingDragMode.NONE
     private var dragStartX = 0f
@@ -114,16 +115,28 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
     }
 
     fun populateFloatingTouchableRegion(outRegion: Region): Boolean {
-        if (layoutState.mode != KeyboardLayoutMode.FLOATING || width <= 0 || height <= 0) {
+        if (layoutState.mode == KeyboardLayoutMode.FULL || width <= 0 || height <= 0) {
             return false
         }
         val child = getChildAt(0) ?: return false
-        val left = (child.left - edgeTouchSizePx).roundToInt().coerceIn(0, width)
-        val top = (child.top - edgeTouchSizePx).roundToInt().coerceIn(0, height)
-        val right = (child.right + edgeTouchSizePx).roundToInt().coerceIn(left, width)
-        val bottom = (child.bottom + edgeTouchSizePx).roundToInt().coerceIn(top, height)
+        if (child.width <= 0 || child.height <= 0) return false
+        val edge = if (layoutState.mode == KeyboardLayoutMode.FLOATING) edgeTouchSizePx else 0f
+        val left = (child.left - edge).roundToInt().coerceIn(0, width)
+        val top = (child.top - edge).roundToInt().coerceIn(0, height)
+        val right = (child.right + edge).roundToInt().coerceIn(left, width)
+        val bottom = (child.bottom + edge).roundToInt().coerceIn(top, height)
         outRegion.set(left, top, right, bottom)
+        if (layoutState.mode == KeyboardLayoutMode.ONE_HANDED && sideSwitchView.visibility == View.VISIBLE) {
+            outRegion.op(
+                sideSwitchView.left, sideSwitchView.top, sideSwitchView.right, sideSwitchView.bottom,
+                Region.Op.UNION,
+            )
+        }
         return true
+    }
+
+    fun requestInsetsAfterLayout() {
+        insetsAfterLayoutPending = true
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -213,6 +226,11 @@ class KeytaoKeyboardHost(context: Context) : FrameLayout(context) {
                     (childTop + child.measuredHeight).roundToInt(),
                 )
             }
+        }
+        if (insetsAfterLayoutPending && width > 0 && height > 0 && child.width > 0 && child.height > 0) {
+            insetsAfterLayoutPending = false
+            // A single traversal after the first usable layout recomputes IME insets.
+            post { requestLayout() }
         }
     }
 

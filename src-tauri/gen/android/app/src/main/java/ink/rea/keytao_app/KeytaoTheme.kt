@@ -128,7 +128,10 @@ data class KeytaoImeTheme(
         )
 
         fun fromJson(json: String?): KeytaoImeTheme {
-            if (json.isNullOrBlank()) return fallback()
+            if (json.isNullOrBlank()) {
+                KeytaoRuntimeLog.event("error", "theme_resolve_failed")
+                return fallback()
+            }
             return runCatching {
                 val root = JSONObject(json)
                 val ui = root.optJSONObject("ui")
@@ -189,7 +192,10 @@ data class KeytaoImeTheme(
                     modeHintEnglishText = modeHint?.optString("englishText", fallback.modeHintEnglishText)
                         ?: fallback.modeHintEnglishText,
                 )
-            }.getOrElse { fallback() }
+            }.getOrElse {
+                KeytaoRuntimeLog.event("error", "theme_resolve_failed")
+                fallback()
+            }
         }
     }
 }

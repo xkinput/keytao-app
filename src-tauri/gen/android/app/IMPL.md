@@ -88,7 +88,15 @@ Android 不需要像 macOS TIS 或 Windows TSF 那样写系统注册表/输入�
 8. `nativeCreateSession()` 创建独立 `ImeRuntimeSession`，service 持有 session handle。
 9. `onDestroy()` 调用 `nativeDestroySession(session)`。
 
-生命周期回调只读内存态：`onStartInput` / `onStartInputView` 调 `applyAvailability()` 应用上一次的就绪快照，真正的目录探测、`nativeInit` 和 `reloadIfNeeded()` 都由 `scheduleAvailabilityRefresh()` / `scheduleReloadIfNeeded()` 投到后台线程，完成后 post 回主线程刷新键盘。`KeytaoAndroidImeConfig.load()` 与 `KeytaoThemeResolver.resolve()` 按文件签名缓存，命中时只做几次 `stat`；会写盘的 `ensureDefaults()`（补默认 `keyboard.yaml`）只在后台预热时调用，不在输入路径上。
+显示路径线程规则：**no engine monitor runs on the main thread during show**。`onStartInput`、`onStartInputView`、`applyReadiness`、`applyKeyboardPresentation` 及其同步调用链不得在主线程取得 `KeytaoImeEngine` monitor，即使是可能直接返回的 `@Synchronized` setter；reload 可能持有同一把锁数秒。目录探测、`nativeInit`、reload、编辑器策略、ASCII 模式恢复、组字清理及 Rime 方案/开关读取统一通过 `engine.runInBackground` 串行执行，仅将结果 post 回主线程更新内存快照与 view。逐键输入路径保持原样。
+
+`scheduleEditorUpdate()` 在 show 时先检查 reload，再应用捕获的编辑器策略及 ASCII 模式，最后读取 state；`onStartInput` 才额外清除旧组字，重复 `onStartInputView` 不主动清除组字。策略任务完成前保持 `inputAvailable=false`，readiness 回调也不能提前放行；editor generation 丢弃旧输入框及 finish/destroy 之后的策略回调，若等待期间宿主移光标使本地组字失效，则先在后台补清除再释放门禁。Rime 选项另以请求 generation 丢弃旧快照；show/readiness 必须调用 `refreshRimeOptions(inBackground = true)`，已有交互入口保留同步刷新及模式切换顺序。`onFinishInput` 的组字清理也在同一后台队列执行。`KeytaoAndroidImeConfig.load()` 与 `KeytaoThemeResolver.resolve()` 按文件签名缓存，命中时只做几次 `stat`；会写盘的 `ensureDefaults()`（补默认 `keyboard.yaml`）只在后台预热时调用，不在输入路径上。
+
+当 `editorUpdatePending=true` 时，`commitDirect()` 和 `commitLineBreak()` 一律将 engine 视为未就绪，只更新本地快照，由待处理的编辑器回调随后发布真实 state，避免主线程等待 engine monitor。
+
+空帧自愈：`rebuildInteractiveRects()` 遇到零尺寸时保留已有矩形；全高符号层没有行时回退到 letters 并延后记录 `error/config_rows_empty`。`onDraw` 结束时，尺寸有效、候选面板未展开且按键/工具栏矩形均为空，则每次 `onStartInputView` 会话最多重建一次并请求下一动画帧，延后记录 `render/empty_frame` 的 layer、rows、panel、schema_ready，布尔门禁防止循环。内容过渡起点和进度统一使用 `SystemClock.uptimeMillis()`，完成日志通过 `post` 离开 draw 后发送；draw 内不执行 JNI 或日志 IO。
+
+Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 `super.onComputeInsets()`，由系统保留停靠键盘顶起宿主内容的 content/visible Insets，service 仅缩小触区（包含左右切换按钮）。FLOATING 将 content/visible top Insets 设为 host 在窗口内的底边，仅报告已布局的紧凑触区；触区尚不可用时先将两项 top Insets 设为 `host.height`，避免首帧保留零值，host 第一次有效布局后仅追加一次 `requestLayout()`，使系统重新计算 Insets。
 
 当前实现是一进程一个 service session。Android framework 通常一个输入法 service 同时服务当前 focus editor；如果后续要支持多 display、多窗口并发或更细粒度 input context，可以把 session 生命周期从 service 级下沉到 editor/input connection 级。
 
@@ -282,6 +290,8 @@ Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`as
 1. 用户目录下的 `keyboard.yaml`（经 `nativeResolveKeyboardJson()`）
 2. 用户目录下的 `android_ime.json`
 3. `res/raw/keytao_android_ime.json`
+
+`keyboard.yaml` 和 `android_ime.json` 同时存在时，缺失的行数组仍直接回退到 bundled raw 默认配置；`android_ime.json` 继续覆盖运行时设置，不占用布局 fallbackRoot。解析后仍为空的层记录 `error/config_rows_empty`，保留内建行的最终兜底。
 
 `keytao-theme` 已经把移动端布局从共享 `ResolvedImeTheme` 拆到独立的 `mobile_layout`，所以 `theme.yaml` 里的 `keyboard:` 段不再作为 Android 布局来源，`resolvedThemeKeyboard()` 这条死路径已删除。
 
@@ -645,13 +655,14 @@ Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtL
 | --- | --- |
 | `onCreate` / `onCreateInputView` | `ime_create`、`ime_create_input_view`；`onCreate` 记录单调时钟 T0，首次 `onStartInputView` 结束记录一次 `startup_latency` |
 | `onStartInput` / `onStartInputView` / `onFinishInputView` / `onFinishInput` | `ime_start_input` / `ime_finish_input`，含 phase、耗时、restarting、secure；仅启动事件允许宿主 packageName |
-| `onWindowShown` / `onWindowHidden` | `window_shown` / `window_hidden` 耗时 |
+| `onWindowShown` / `onWindowHidden` | `window_shown` / `window_hidden` 耗时；shown 附带 mode、host_h、child_h、view_w、view_h、key_rects、toolbar_rects、layer、schema_ready、panel_expanded 的主线程内存快照 |
 | `onTrimMemory` / `onLowMemory` | `mem_trim` 含系统 level；`mem_low` 只记录回调。内存快照只在 `onStartInputView`、`onFinishInputView`、`onTrimMemory` 采集 native heap、Java 已用 heap、`ActivityManager.MemoryInfo`；没有内存定时器 |
 | 输入与宿主 IPC | 硬键 down/up、软键 command.type、退格手势、direct commit、剪贴板读取/写入仅累计次数；`applyState` 仅记录本地耗时直方图 |
 | engine | `engine_warmup` 总耗时及 migration/bundled data/defaults/config/theme 五个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；`stableSchemaState` 按 schema ID 缓存显示名，deploy/reload/select_schema 失效，`schema_name_resolve` 仅在实际解析时进入本地直方图 |
 | 部署 | client `start` → `finish` 的 `deploy` 总耗时、每次 `startStep` → `handleStepResult` 的 `deploy_step`（含失败/超时收尾）；service `runDeployment` 的 `deploy_step` 含 success/config_step/schema_count，不记录方案名或错误对象 |
 | 绘制与触摸 | `onDraw` 的 11 桶本地直方图；`ACTION_DOWN` 的 `rebuildInteractiveRects` 记录为本地 `touch_down_rebuild` 直方图；不增加 Choreographer |
 | 界面 | 面板打开/关闭、键盘层切换、完成的内容过渡分别记录 `panel_open` / `panel_close` / `layer_switch` / `content_transition` 耗时 |
+| 主题回退 | 空或无法解析的 resolved JSON 记录 `error/theme_resolve_failed` 后使用默认主题，不携带异常内容或路径 |
 | 原生库与 App | 加载库失败以固定 Logcat JSON 记录 `error/native_lib_missing`，不携带异常消息或路径；`MainActivity.onCreate` 记录 `app_create`，在 `super.onCreate` 之后及 `onResume` 检查现成原生日志是否已启用，满足时重放待发送事件，并保留固定 Logcat 回退 |
 
 `onFinishInputView` 汇总并清空输入计数、`apply_state`、`draw`、`touch_down_rebuild` 和 engine 的 `schema_name_resolve`；`onFinishInput` 补充收尾但不会重复已清空的汇总。engine 直方图使用自己的短锁，在会话结束当下截取并清零，随后在锁外发送汇总，不等待后台 reload 持有的 engine 锁，也不延迟到下一会话。汇总含 n/p50_ms/p95_ms/max_ms，draw 另含 frames/jank_gt_16ms；百分位是 11 桶估算值，max 为实际最大值。逐键、逐帧、逐触摸不跨 JNI，不输出逐键明细；command.type 采用固定白名单，未知类型只计入 other。

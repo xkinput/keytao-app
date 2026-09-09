@@ -264,23 +264,30 @@ data class KeytaoAndroidImeConfig(
             val userJson = userConfig.takeIf { it.isFile }?.readText()
             val userKeyboard = resolvedUserKeyboard(context)
             val defaultRoot = JSONObject(defaultJson)
-            val parsed = runCatching {
-                val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: defaultRoot
-                val fallbackRoot = when {
-                    userKeyboard != null && userJson != null -> JSONObject(userJson)
-                    userKeyboard != null -> defaultRoot
-                    userJson != null -> defaultRoot
-                    else -> null
-                }
-                parseRoot(root, fallbackRoot)
-            }.getOrElse { parseRoot(defaultRoot, null) }
-            val config = applyRuntimeSettings(
-                parsed,
-                userJson?.let { runCatching { JSONObject(it) }.getOrNull() },
-            )
+            val config = parseSources(userKeyboard, userJson, defaultRoot) { layer ->
+                KeytaoRuntimeLog.event("error", "config_rows_empty") { put("layer", layer) }
+            }
             cachedSignature = signature
             cachedConfig = config
             return config
+        }
+
+        internal fun parseSources(
+            userKeyboard: JSONObject?,
+            userJson: String?,
+            defaultRoot: JSONObject,
+            onEmptyRows: (String) -> Unit = {},
+        ): KeytaoAndroidImeConfig {
+            val parsed = runCatching {
+                val root = userKeyboard ?: userJson?.let { JSONObject(it) } ?: defaultRoot
+                // Runtime settings do not carry rows; missing layout rows come from the bundle.
+                val fallbackRoot = if (root === defaultRoot) null else defaultRoot
+                parseRoot(root, fallbackRoot, onEmptyRows)
+            }.getOrElse { parseRoot(defaultRoot, null, onEmptyRows) }
+            return applyRuntimeSettings(
+                parsed,
+                userJson?.let { runCatching { JSONObject(it) }.getOrNull() },
+            )
         }
 
         fun parse(json: String): KeytaoAndroidImeConfig {
@@ -347,7 +354,11 @@ data class KeytaoAndroidImeConfig(
             return parseRoot(JSONObject(json), JSONObject(defaultJson))
         }
 
-        private fun parseRoot(root: JSONObject, fallbackRoot: JSONObject?): KeytaoAndroidImeConfig {
+        private fun parseRoot(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            onEmptyRows: (String) -> Unit = {},
+        ): KeytaoAndroidImeConfig {
             val rows = rowArray(root, fallbackRoot, "rows")
                 ?.let { normalizeRows(parseRows(it)) }
                 .orEmpty()
@@ -357,7 +368,10 @@ data class KeytaoAndroidImeConfig(
             val symbolRows = rowArray(root, fallbackRoot, "symbolRows")
                 ?.let { normalizeRows(parseRows(it)) }
                 .orEmpty()
-            val customRows = layerRows(root, fallbackRoot)
+            if (rows.isEmpty()) onEmptyRows("letters")
+            if (numberRows.isEmpty()) onEmptyRows("numbers")
+            if (symbolRows.isEmpty()) onEmptyRows("symbols")
+            val customRows = layerRows(root, fallbackRoot, onEmptyRows)
             val haptics = root.optJSONObject("haptics")
             val fallbackHaptics = fallbackRoot?.optJSONObject("haptics")
             val floating = parseFloatingConfig(root, fallbackRoot)
@@ -703,10 +717,20 @@ data class KeytaoAndroidImeConfig(
                 .distinct()
         }
 
-        private fun layerRows(root: JSONObject, fallbackRoot: JSONObject?): Map<String, List<List<KeySpec>>> {
-            return parseLayerRows(fallbackRoot).toMutableMap().apply {
-                putAll(parseLayerRows(root))
-            }.filterKeys { it.isNotBlank() && it !in builtInLayers }
+        private fun layerRows(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            onEmptyRows: (String) -> Unit,
+        ): Map<String, List<List<KeySpec>>> {
+            val fallbackRows = parseLayerRows(fallbackRoot)
+            val primaryRows = parseLayerRows(root)
+            return buildMap {
+                for (layer in fallbackRows.keys + primaryRows.keys) {
+                    if (layer.isBlank() || layer in builtInLayers) continue
+                    val rows = primaryRows[layer]?.takeIf { it.isNotEmpty() } ?: fallbackRows[layer].orEmpty()
+                    if (rows.isEmpty()) onEmptyRows(layer) else put(layer, rows)
+                }
+            }
         }
 
         private fun parseLayerRows(root: JSONObject?): Map<String, List<List<KeySpec>>> {
@@ -725,7 +749,7 @@ data class KeytaoAndroidImeConfig(
                         else -> null
                     } ?: continue
                     val parsed = normalizeRows(parseRows(rows))
-                    if (parsed.isNotEmpty()) put(name, parsed)
+                    put(name, parsed)
                 }
             }
         }

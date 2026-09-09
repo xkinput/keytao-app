@@ -310,7 +310,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var expandedDownScrollY = 0f
     private var candidateSignature = ""
     private var contentTransitionStartMs = 0L
-    private var contentTransitionStartedNs = 0L
+    private var emptyFrameRecoveryAttempted = false
     private val drawDurations = KeytaoDurationHistogram()
     private val touchDownRebuildDurations = KeytaoDurationHistogram()
     private val expandedPanelScroller = OverScroller(context)
@@ -450,6 +450,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun currentConfig(): KeytaoAndroidImeConfig = config
+
+    internal fun beginRenderSession() {
+        if (BuildConfig.DEBUG) check(Looper.myLooper() == Looper.getMainLooper())
+        emptyFrameRecoveryAttempted = false
+    }
+
+    internal fun renderDiagnostics(): Map<String, Any> {
+        if (BuildConfig.DEBUG) check(Looper.myLooper() == Looper.getMainLooper())
+        return mapOf(
+            "view_w" to width,
+            "view_h" to height,
+            "key_rects" to keyRects.size,
+            "toolbar_rects" to toolbarRects.size,
+            "layer" to keyboardLayer,
+            "schema_ready" to schemaReady,
+            "panel_expanded" to candidatePanelExpanded,
+        )
+    }
 
     fun updateSettingsConfig(next: KeytaoAndroidImeConfig) {
         settingsConfig = next
@@ -693,7 +711,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     fun toggleShift() {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.uptimeMillis()
         shiftState = when (shiftState) {
             ShiftState.OFF -> {
                 lastShiftTapTimeMs = now
@@ -742,6 +760,27 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
             drawFloatingInteractionHints(canvas)
             refreshAccessibilityNodes()
+            if (
+                !emptyFrameRecoveryAttempted && width > 0 && height > 0 &&
+                !candidatePanelExpanded && keyRects.isEmpty() && toolbarRects.isEmpty()
+            ) {
+                emptyFrameRecoveryAttempted = true
+                val emptyLayer = keyboardLayer
+                val emptyRows = activeRows().size
+                val panelExpanded = candidatePanelExpanded
+                val ready = schemaReady
+                rebuildInteractiveRects()
+                postInvalidateOnAnimation()
+                // Runtime logging may cross JNI; only enqueue it while drawing.
+                post {
+                    KeytaoRuntimeLog.event("render", "empty_frame") {
+                        put("layer", emptyLayer)
+                        put("rows", emptyRows)
+                        put("panel", panelExpanded)
+                        put("schema_ready", ready)
+                    }
+                }
+            }
         } finally {
             drawDurations.finish(started)
         }
@@ -753,7 +792,18 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun rebuildInteractiveRects() {
-        keyRects = if (width > 0 && height > 0 && !candidatePanelExpanded) keyboardLayout() else emptyList()
+        if (width <= 0 || height <= 0) return
+        if (usesFullHeightSymbolKeyboard() && config.rowsForLayer(keyboardLayer).isEmpty()) {
+            val emptyLayer = keyboardLayer
+            keyboardLayer = "letters"
+            keyboardLayoutCache = KeyboardLayoutCache("", emptyList())
+            post {
+                KeytaoRuntimeLog.event("error", "config_rows_empty") {
+                    put("layer", emptyLayer)
+                }
+            }
+        }
+        keyRects = if (!candidatePanelExpanded) keyboardLayout() else emptyList()
         candidateRects = emptyList()
         expandedCandidateRects = emptyList()
         expandedCandidateDrawingRects = emptyMap()
@@ -763,8 +813,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         visibleCandidateGlobalIndexes = emptySet()
         toolbarLogoSize = 0f
         backspacePreviewRect = null
-        if (width <= 0 || height <= 0) return
-
         val barHeight = dp(config.candidateBarHeightDp)
         val gap = dp(theme.panelGapDp)
         val leftPadding = gap * 1.5f
@@ -5491,18 +5539,17 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun startContentTransition() {
-        contentTransitionStartedNs = System.nanoTime()
-        contentTransitionStartMs = System.currentTimeMillis()
+        contentTransitionStartMs = SystemClock.uptimeMillis()
         postInvalidateOnAnimation()
     }
 
     private fun contentTransitionProgress(): Float {
         if (contentTransitionStartMs == 0L) return 1f
-        val elapsed = System.currentTimeMillis() - contentTransitionStartMs
+        val elapsed = SystemClock.uptimeMillis() - contentTransitionStartMs
         if (elapsed >= contentTransitionDurationMs) {
-            if (contentTransitionStartedNs != 0L) {
-                val duration = KeytaoRuntimeLog.elapsedMs(contentTransitionStartedNs)
-                contentTransitionStartedNs = 0L
+            contentTransitionStartMs = 0L
+            val duration = elapsed.toDouble()
+            post {
                 KeytaoRuntimeLog.event("ui", "content_transition", duration)
             }
             return 1f
