@@ -37,6 +37,9 @@ class KeytaoImeEngine(context: Context) {
     private var session: Long = 0L
     private var lastState = KeytaoImeState.empty()
     private var lastDisplaySchemaName = ""
+    private val schemaDisplayNames = mutableMapOf<String, String>()
+    private var displaySchemaId: String? = null
+    private var rawDisplaySchemaName = ""
     private var sharedDataDir: File? = null
     private var reloadStampSignature: String? = null
     private var inputPolicyComposing = true
@@ -196,6 +199,7 @@ class KeytaoImeEngine(context: Context) {
         val started = System.nanoTime()
         var success = false
         try {
+            invalidateSchemaNameCache()
             val state = KeytaoNativeBridge.selectSchema(session, schemaId)
                 ?.let { stableSchemaState(it) }
                 ?: return null
@@ -267,13 +271,20 @@ class KeytaoImeEngine(context: Context) {
         if (!hasInstalledSchema()) {
             return KeytaoRimeDeployStepResult(error = "No KeyTao schema is installed")
         }
-        ensureBundledSharedData(appContext)
-        val sharedDir = findSharedDataDir(appContext)
-        return KeytaoNativeBridge.deployStep(
-            userDir.absolutePath,
-            sharedDir?.absolutePath,
-            schemaId,
-        )
+        invalidateSchemaNameCache()
+        try {
+            ensureBundledSharedData(appContext)
+            val sharedDir = findSharedDataDir(appContext)
+            return KeytaoNativeBridge.deployStep(
+                userDir.absolutePath,
+                sharedDir?.absolutePath,
+                schemaId,
+            )
+        } finally {
+            // Deployment does not hold the engine monitor; discard anything
+            // resolved concurrently while the compiled files were changing.
+            invalidateSchemaNameCache()
+        }
     }
 
     fun isUserDataWritable(): Boolean = KeytaoAndroidPaths.isWritable(userDir)
@@ -343,6 +354,7 @@ class KeytaoImeEngine(context: Context) {
         val started = System.nanoTime()
         var success = false
         try {
+            invalidateSchemaNameCache()
             if (!hasInstalledSchema()) return false
             if (!deploy && !hasDeployedSchema()) return false
             ensureBundledSharedData(appContext)
@@ -389,22 +401,38 @@ class KeytaoImeEngine(context: Context) {
     }
 
     private fun stableSchemaState(state: KeytaoImeState): KeytaoImeState {
-        val started = schemaNameDurations.start()
-        try {
-            val name = state.schemaName.trim()
-            if (name.isNotEmpty() && !name.startsWith(".")) {
-                val displayName = RimeSchemaNameResolver.resolveDisplayName(userDir, sharedDataDir, name)
-                lastDisplaySchemaName = displayName
-                return state.copy(schemaName = displayName)
+        val name = state.schemaName.trim()
+        if (name.isNotEmpty() && !name.startsWith(".")) {
+            // State exposes a name, not an id. Query the id only when the raw
+            // name changes; ordinary keys use the per-schema map below.
+            if (displaySchemaId == null || rawDisplaySchemaName != name) {
+                displaySchemaId = KeytaoNativeBridge.currentSchema(session)?.id
+                    ?.takeIf { it.isNotBlank() && !it.startsWith(".") } ?: name
+                rawDisplaySchemaName = name
             }
-            return if (lastDisplaySchemaName.isNotEmpty()) {
-                state.copy(schemaName = lastDisplaySchemaName)
-            } else {
-                state
+            val displayName = schemaDisplayNames.getOrPut(displaySchemaId!!) {
+                val started = schemaNameDurations.start()
+                try {
+                    RimeSchemaNameResolver.resolveDisplayName(userDir, sharedDataDir, name)
+                } finally {
+                    schemaNameDurations.finish(started)
+                }
             }
-        } finally {
-            schemaNameDurations.finish(started)
+            lastDisplaySchemaName = displayName
+            return state.copy(schemaName = displayName)
         }
+        return if (lastDisplaySchemaName.isNotEmpty()) {
+            state.copy(schemaName = lastDisplaySchemaName)
+        } else {
+            state
+        }
+    }
+
+    @Synchronized
+    private fun invalidateSchemaNameCache() {
+        schemaDisplayNames.clear()
+        displaySchemaId = null
+        rawDisplaySchemaName = ""
     }
 
     fun flushRuntimeHistograms() {

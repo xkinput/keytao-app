@@ -136,18 +136,39 @@ internal class KeytaoDurationHistogram {
 
 /** Only known command types become field names; arbitrary config strings never do. */
 internal class KeytaoInputCounts {
-    private val types = arrayOf(
-        "key_down", "key_up", "backspace_gesture", "commit_direct", "clipboard_read", "clipboard_write",
-        KeyCommandTypes.INPUT, KeyCommandTypes.DIRECT_INPUT, KeyCommandTypes.RIME_INPUT,
-        KeyCommandTypes.BACKSPACE, KeyCommandTypes.BACKSPACE_GESTURE, KeyCommandTypes.ENTER,
-        KeyCommandTypes.SPACE, KeyCommandTypes.SHIFT, KeyCommandTypes.MODE, KeyCommandTypes.OPEN_PAGE,
-        KeyCommandTypes.KEYBOARD_PICKER, KeyCommandTypes.NEXT_INPUT_METHOD, KeyCommandTypes.KEYBOARD_MODE,
-        KeyCommandTypes.NEXT_PAGE, KeyCommandTypes.PREVIOUS_PAGE, KeyCommandTypes.RESET,
-        KeyCommandTypes.RIME_MENU, KeyCommandTypes.RIME_SCHEMA, KeyCommandTypes.RIME_OPTION,
-        KeyCommandTypes.PANEL, KeyCommandTypes.EDIT, KeyCommandTypes.ONE_HANDED, KeyCommandTypes.FLOATING,
-        KeyCommandTypes.SETTING, "other",
+    private val commandCounters = mapOf(
+        KeyCommandTypes.INPUT to "input",
+        KeyCommandTypes.DIRECT_INPUT to "input",
+        KeyCommandTypes.RIME_INPUT to "input",
+        KeyCommandTypes.BACKSPACE to "backspace",
+        KeyCommandTypes.BACKSPACE_GESTURE to "backspace_gesture",
+        KeyCommandTypes.ENTER to "enter",
+        KeyCommandTypes.SPACE to "space",
+        KeyCommandTypes.SHIFT to "shift",
+        KeyCommandTypes.MODE to "mode",
+        KeyCommandTypes.OPEN_PAGE to "open_page",
+        KeyCommandTypes.KEYBOARD_PICKER to "keyboard_picker",
+        KeyCommandTypes.NEXT_INPUT_METHOD to "next_input_method",
+        KeyCommandTypes.KEYBOARD_MODE to "keyboard_mode",
+        KeyCommandTypes.NEXT_PAGE to "next_candidate_page",
+        KeyCommandTypes.PREVIOUS_PAGE to "previous_candidate_page",
+        KeyCommandTypes.RESET to "reset",
+        KeyCommandTypes.RIME_MENU to "rime_menu",
+        KeyCommandTypes.RIME_SCHEMA to "rime_schema",
+        KeyCommandTypes.RIME_OPTION to "rime_option",
+        KeyCommandTypes.PANEL to "panel",
+        KeyCommandTypes.EDIT to "edit",
+        KeyCommandTypes.ONE_HANDED to "one_handed",
+        KeyCommandTypes.FLOATING to "floating",
+        KeyCommandTypes.SETTING to "setting",
     )
+    private val types = (listOf("key_down", "key_up", "commit_direct", "clipboard_read", "clipboard_write") +
+        commandCounters.values + "other").distinct()
     private val counts = LongArray(types.size)
+
+    fun recordCommand(type: String) {
+        record(commandCounters[type] ?: "other")
+    }
 
     fun record(type: String) {
         if (!KeytaoRuntimeLog.collecting) return

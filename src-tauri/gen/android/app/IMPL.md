@@ -630,6 +630,9 @@ cd src-tauri/gen/android
 
 ## 运行日志挂点
 
+- Android 分享将 `keytao-runtime-log-<yyyyMMdd-HHmm>.zip` 保存到公共 `Download/KeyTao`：API 29+ 使用 MediaStore Downloads 的 pending 握手，API 24–28 在用户授予旧版存储权限后写入并扫描；仅 MediaStore 插入失败时回退 FileProvider，每次分享清理本应用超过 7 天的导出，App 显示实际保存路径供手动附加。
+- 日志页已移除“复制最近 200 行”及大文本复制调用；保留分享、清空、刷新、开关与级别，桌面保留打开目录/复制路径，iOS 保留系统分享面板。
+
 Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtLog` → `nativeLogEnabled` / `nativeLogEvent` 写入公共 NDJSON 日志。已有 `nativeInit` / `nativeReinitialize` 通过 core 的 `init_for_engine()` 初始化日志，进程命令行中的 `:ime` 映射为 `android-ime`；已有 `nativeDeployStep` 的 config/schema 部署入口显式使用 `android-deploy`。当前工作区另一个并行改动已在 Rust Tauri setup 中通过 `spawn_blocking` 异步执行 `runtime_log::init(root, "android-app")`；本批 Kotlin 只采用该现成日志实例，不为写日志额外初始化或部署 Rime。
 
 | 挂点 | 事件与数据 |
@@ -639,7 +642,7 @@ Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtL
 | `onWindowShown` / `onWindowHidden` | `window_shown` / `window_hidden` 耗时 |
 | `onTrimMemory` / `onLowMemory` | `mem_trim` 含系统 level；`mem_low` 只记录回调。内存快照只在 `onStartInputView`、`onFinishInputView`、`onTrimMemory` 采集 native heap、Java 已用 heap、`ActivityManager.MemoryInfo`；没有内存定时器 |
 | 输入与宿主 IPC | 硬键 down/up、软键 command.type、退格手势、direct commit、剪贴板读取/写入仅累计次数；`applyState` 仅记录本地耗时直方图 |
-| engine | `engine_warmup` 总耗时及 migration/bundled data/defaults/config/theme 五个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；逐键 `stableSchemaState` 的 `schema_name_resolve` 仅进本地直方图 |
+| engine | `engine_warmup` 总耗时及 migration/bundled data/defaults/config/theme 五个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；`stableSchemaState` 按 schema ID 缓存显示名，deploy/reload/select_schema 失效，`schema_name_resolve` 仅在实际解析时进入本地直方图 |
 | 部署 | client `start` → `finish` 的 `deploy` 总耗时、每次 `startStep` → `handleStepResult` 的 `deploy_step`（含失败/超时收尾）；service `runDeployment` 的 `deploy_step` 含 success/config_step/schema_count，不记录方案名或错误对象 |
 | 绘制与触摸 | `onDraw` 的 11 桶本地直方图；`ACTION_DOWN` 的 `rebuildInteractiveRects` 记录为本地 `touch_down_rebuild` 直方图；不增加 Choreographer |
 | 界面 | 面板打开/关闭、键盘层切换、完成的内容过渡分别记录 `panel_open` / `panel_close` / `layer_switch` / `content_transition` 耗时 |

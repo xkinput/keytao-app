@@ -638,8 +638,10 @@ FFI 的 JSON 状态路径现在持一个带签名缓存的 `ThemeResolver`，按
 | Linux daemon | `$XDG_STATE_HOME/keytao/log/keytao-ime.log`（默认 `~/.local/state/keytao/log`） | 目录 0700，按天滚动保留 3 天；旧版本的 `/tmp/keytao-ime.log*` 在启动时删除；App 的 `read_debug_logs` 先读状态目录再兼容 `/tmp` |
 | macOS | `~/Library/keytao/log/keytao-<tag>.log`（`macos-ime` / `desktop-app`），另保留 librime 日志 | 目录 0700、文件 0600；结构化日志每进程 2 MB × 3 |
 | Windows | `%APPDATA%\keytao\log\keytao-windows-ime.log` / `keytao-desktop-app.log` | 每进程 2 MB × 3；`KEYTAO_WINDOWS_IME_DIAGNOSTICS=1` 将 info 提升为 verbose，关闭仍优先；按键诊断保留 65536 次计数上限，失败与按键耗时在 info 可见 |
-| Android | `KeytaoAndroidPaths.userRoot()/log/keytao-<tag>.log`（`android-ime` / `android-app` / `android-deploy`） | App 专属外部目录，不可用时回退 `filesDir/keytao`；每进程 2 MB × 3；App 通过 FileProvider 分享缓存 ZIP |
+| Android | `KeytaoAndroidPaths.userRoot()/log/keytao-<tag>.log`（`android-ime` / `android-app` / `android-deploy`） | App 专属外部目录，不可用时回退 `filesDir/keytao`；每进程 2 MB × 3；主动分享时导出 ZIP 到公共 `Download/KeyTao`，API 29+ 用 MediaStore、旧版获存储权限后写入并扫描，仅插入失败回退 FileProvider；每次分享清理本应用超过 7 天的 ZIP 并显示保存路径 |
 | iOS | App Group 容器 `keytao/log/keytao-ios-ime.log` | 容器 App 与键盘扩展共享目录；每进程 2 MB × 3；App 通过系统分享面板导出 |
+
+日志页移除“复制最近 200 行”，分享默认导出文件；保留清空、刷新、开关与级别，桌面保留打开目录/复制路径，iOS 保持系统分享面板。
 
 ## 简化后的目标架构
 

@@ -1,11 +1,19 @@
 package ink.rea.keytao_app
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
@@ -14,6 +22,8 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -23,12 +33,19 @@ import app.tauri.plugin.Channel
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-@TauriPlugin
+@TauriPlugin(permissions = [Permission(
+    strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE],
+    alias = "legacyLogExport",
+)])
 class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
@@ -78,9 +95,28 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun shareRuntimeLog(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissionForAlias("legacyLogExport", invoke, "handleLogExportPermission")
+            return
+        }
+        prepareRuntimeLogShare(invoke)
+    }
+
+    @PermissionCallback
+    private fun handleLogExportPermission(invoke: Invoke) {
+        if (activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            invoke.reject("保存到下载目录需要存储权限")
+            return
+        }
+        prepareRuntimeLogShare(invoke)
+    }
+
+    private fun prepareRuntimeLogShare(invoke: Invoke) {
         Thread {
-            var archive: File? = null
             try {
+                cleanOldRuntimeLogExports()
                 val logDir = File(KeytaoAndroidPaths.userRoot(activity), "log")
                 val logFiles = logDir.listFiles()
                     ?.filter { it.isFile && it.name.matches(Regex("""keytao-.*\.log.*""")) }
@@ -89,45 +125,151 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
                 if (logFiles.isEmpty()) {
                     return@Thread invoke.reject("No runtime logs available")
                 }
-                val zipFile = File.createTempFile("keytao-runtime-", ".zip", activity.cacheDir)
-                archive = zipFile
-                ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
-                    for (file in logFiles) {
-                        file.inputStream().use { input ->
-                            zip.putNextEntry(ZipEntry(file.name))
-                            input.copyTo(zip)
-                            zip.closeEntry()
-                        }
+                val name = "keytao-runtime-log-${SimpleDateFormat("yyyyMMdd-HHmm", Locale.ROOT).format(Date())}.zip"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/KeyTao")
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
-                }
-                val uri = FileProvider.getUriForFile(
-                    activity,
-                    "${activity.packageName}.fileprovider",
-                    zipFile,
-                )
-                activity.runOnUiThread {
-                    try {
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/zip"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            clipData = ClipData.newUri(activity.contentResolver, "KeyTao runtime log", uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        val chooser = Intent.createChooser(intent, "分享运行日志").apply {
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        activity.startActivity(chooser)
-                        invoke.resolve(JSObject().apply { put("path", zipFile.absolutePath) })
+                    val resolver = activity.contentResolver
+                    // Only insertion failure uses the cache/FileProvider fallback.
+                    val uri = runCatching {
+                        resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    }.getOrNull()
+                    if (uri == null) {
+                        val cacheDir = File(activity.cacheDir, "runtime-log-share")
+                        val archive = writeRuntimeLogFile(cacheDir, name, logFiles)
+                        presentRuntimeLogShare(invoke, archive.absolutePath, runtimeLogFileUri(archive))
+                        return@Thread
+                    }
+                    val savedName = try {
+                        val output = resolver.openOutputStream(uri, "w")
+                            ?: throw IllegalStateException("Failed to open runtime log export")
+                        writeRuntimeLogZip(output, logFiles)
+                        // MediaStore can rename a second export made in the same minute.
+                        val actualName = resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                            ?: throw IllegalStateException("Failed to read saved runtime log name")
+                        val published = resolver.update(uri, ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }, null, null)
+                        check(published == 1) { "Failed to publish runtime log export" }
+                        actualName
                     } catch (ex: Exception) {
-                        zipFile.delete()
-                        invoke.reject(ex.message ?: "Failed to share runtime logs")
+                        runCatching { resolver.delete(uri, null, null) }
+                        throw ex
+                    }
+                    presentRuntimeLogShare(invoke, "Download/KeyTao/$savedName", uri)
+                } else {
+                    val directory = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "KeyTao")
+                    val archive = writeRuntimeLogFile(directory, name, logFiles)
+                    MediaScannerConnection.scanFile(activity, arrayOf(archive.absolutePath), arrayOf("application/zip")) { _, uri ->
+                        try {
+                            // A null scan URI means the legacy MediaStore insertion failed.
+                            presentRuntimeLogShare(invoke, "Download/KeyTao/${archive.name}", uri ?: runtimeLogFileUri(archive))
+                        } catch (ex: Exception) {
+                            invoke.reject(ex.message ?: "Failed to share saved runtime logs")
+                        }
                     }
                 }
             } catch (ex: Exception) {
-                archive?.delete()
                 invoke.reject(ex.message ?: "Failed to prepare runtime log archive")
             }
         }.start()
+    }
+
+    private fun writeRuntimeLogZip(output: OutputStream, logFiles: List<File>) {
+        ZipOutputStream(output.buffered()).use { zip ->
+            for (file in logFiles) {
+                file.inputStream().use { input ->
+                    zip.putNextEntry(ZipEntry(file.name))
+                    input.copyTo(zip)
+                    zip.closeEntry()
+                }
+            }
+        }
+    }
+
+    private fun writeRuntimeLogFile(directory: File, name: String, logFiles: List<File>): File {
+        check(directory.isDirectory || directory.mkdirs()) { "Failed to create runtime log export directory" }
+        var archive = File(directory, name)
+        var suffix = 1
+        // Reserve a unique path so repeated shares never overwrite an in-flight attachment.
+        while (!archive.createNewFile()) {
+            archive = File(directory, "${name.removeSuffix(".zip")} (${suffix++}).zip")
+        }
+        try {
+            writeRuntimeLogZip(archive.outputStream(), logFiles)
+        } catch (ex: Exception) {
+            archive.delete()
+            throw ex
+        }
+        return archive
+    }
+
+    private fun runtimeLogFileUri(file: File): Uri = FileProvider.getUriForFile(
+        activity, "${activity.packageName}.fileprovider", file,
+    )
+
+    private fun presentRuntimeLogShare(invoke: Invoke, path: String, uri: Uri) {
+        activity.runOnUiThread {
+            val result = JSObject().apply {
+                put("path", path)
+                put("uri", uri.toString())
+            }
+            try {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = ClipData.newUri(activity.contentResolver, "KeyTao runtime log", uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val chooser = Intent.createChooser(intent, "分享运行日志").apply {
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                activity.startActivity(chooser)
+            } catch (ex: Exception) {
+                // Keep the saved file and its path available even without a share target.
+                result.put("shareError", ex.message ?: "Failed to open runtime log share sheet")
+            }
+            invoke.resolve(result)
+        }
+    }
+
+    private fun cleanOldRuntimeLogExports() {
+        val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
+        val exportName = Regex("""keytao-runtime-log-\d{8}-\d{4}( \(\d+\))?\.zip""")
+        // Retention is best effort; inaccessible files must not block a fresh export.
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val resolver = activity.contentResolver
+                resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME),
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} IN (?, ?) AND ${MediaStore.MediaColumns.DATE_ADDED} < ? AND ${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ?",
+                    arrayOf("Download/KeyTao", "Download/KeyTao/", (cutoff / 1000).toString(), activity.packageName), null,
+                )?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        if (exportName.matches(cursor.getString(1).orEmpty())) {
+                            runCatching { resolver.delete(ContentUris.withAppendedId(collection, cursor.getLong(0)), null, null) }
+                        }
+                    }
+                }
+            } else {
+                val directory = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "KeyTao")
+                directory.listFiles()?.filter { it.isFile && exportName.matches(it.name) && it.lastModified() < cutoff }
+                    ?.forEach { file ->
+                        if (file.delete()) {
+                            runCatching { activity.contentResolver.delete(MediaStore.Files.getContentUri("external"),
+                                "${MediaStore.MediaColumns.DATA} = ?", arrayOf(file.absolutePath)) }
+                        }
+                    }
+            }
+        }
+        File(activity.cacheDir, "runtime-log-share").listFiles()
+            ?.filter { it.isFile && exportName.matches(it.name) && it.lastModified() < cutoff }
+            ?.forEach { it.delete() }
     }
 
     @Command

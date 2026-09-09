@@ -7334,13 +7334,14 @@ fn present_runtime_log_share(paths: Vec<PathBuf>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn share_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+async fn share_runtime_log<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "android")]
     {
         app.state::<ScopedStorageHandle<R>>()
             .0
             .run_mobile_plugin("shareRuntimeLog", ())
-            .map(|_: serde_json::Value| ())
             .map_err(|e| e.to_string())
     }
     #[cfg(target_os = "ios")]
@@ -7355,7 +7356,10 @@ async fn share_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Resul
             let _ = sender.send(present_runtime_log_share(paths));
         })
         .map_err(|e| e.to_string())?;
-        receiver.await.map_err(|e| e.to_string())?
+        receiver
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|()| serde_json::Value::Null)
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -7363,6 +7367,7 @@ async fn share_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Resul
         let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
         app.opener()
             .open_path(path_string(dir), None::<&str>)
+            .map(|()| serde_json::Value::Null)
             .map_err(|e| e.to_string())
     }
 }

@@ -104,6 +104,43 @@ struct Queue {
     failed: bool,
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn numeric_thread_id() -> u64 {
+    extern "C" {
+        fn gettid() -> std::os::raw::c_int;
+    }
+    // SAFETY: gettid takes no arguments and always returns the caller's ID.
+    unsafe { gettid() as u64 }
+}
+
+#[cfg(target_vendor = "apple")]
+fn numeric_thread_id() -> u64 {
+    extern "C" {
+        fn pthread_threadid_np(thread: *mut std::ffi::c_void, id: *mut u64) -> std::os::raw::c_int;
+    }
+    let mut id = 0;
+    // SAFETY: a null thread selects the caller; id points to a writable u64.
+    if unsafe { pthread_threadid_np(std::ptr::null_mut(), &mut id) } == 0 {
+        id
+    } else {
+        rust_thread_id()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn numeric_thread_id() -> u64 {
+    rust_thread_id()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn rust_thread_id() -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    // ThreadId::as_u64 is unstable; hashing preserves a numeric, per-thread ID.
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
+
 impl Queue {
     fn push(&mut self, line: String) {
         self.submitted += 1;
@@ -218,7 +255,10 @@ impl Logger {
         kv.insert("pid".into(), std::process::id().into());
         // Thread names are application-defined, unlike OS/user host names.
         let thread = std::thread::current();
-        let mut tid = Value::from(thread.name().unwrap_or("unnamed"));
+        let mut tid = thread
+            .name()
+            .map(Value::from)
+            .unwrap_or_else(|| numeric_thread_id().into());
         let tid_truncated = sanitize_value(&mut tid, self.home.as_deref());
         kv.insert("tid".into(), tid);
         if let Some(ms) = dur_ms.filter(|ms| ms.is_finite() && *ms >= 0.0) {
@@ -862,6 +902,49 @@ mod tests {
 
     fn local_logger() -> Logger {
         Logger::new(Box::leak(Box::new(AtomicU8::new(Level::Info as u8))))
+    }
+
+    #[test]
+    fn thread_identity_preserves_named_threads() {
+        let tid = std::thread::Builder::new()
+            .name("keytao-named-test".into())
+            .spawn(|| {
+                let line = local_logger().line(Level::Info, "rime", "test", None, Map::new());
+                serde_json::from_str::<Value>(&line).unwrap()["tid"].clone()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(tid, "keytao-named-test");
+    }
+
+    #[test]
+    fn thread_identity_distinguishes_unnamed_threads() {
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            let record = || {
+                assert!(std::thread::current().name().is_none());
+                let logger = local_logger();
+                let read_tid = || {
+                    let line = logger.line(Level::Info, "rime", "test", None, Map::new());
+                    serde_json::from_str::<Value>(&line).unwrap()["tid"].clone()
+                };
+                let first = read_tid();
+                let second = read_tid();
+                // Keep both threads alive so the OS cannot reuse their IDs.
+                barrier.wait();
+                assert_eq!(first, second);
+                first.as_u64().expect("unnamed thread ID must be numeric")
+            };
+            let first = scope.spawn(record);
+            let second = scope.spawn(record);
+            barrier.wait();
+            let first = first.join().unwrap();
+            let second = second.join().unwrap();
+            assert_ne!(first, 0);
+            assert_ne!(second, 0);
+            assert_ne!(first, second);
+        });
     }
 
     #[test]

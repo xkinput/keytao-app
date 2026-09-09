@@ -20,6 +20,12 @@ interface RuntimeLogSettings {
   totalBytes: number
 }
 
+interface RuntimeLogShare {
+  path: string
+  uri: string
+  shareError?: string
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -37,6 +43,7 @@ export default function DebugTab({ isMobile }: { isMobile: boolean }) {
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [savedLogPath, setSavedLogPath] = useState<string | null>(null)
   const busy = loading || acting
 
   const fetchLogs = async () => {
@@ -83,10 +90,14 @@ export default function DebugTab({ isMobile }: { isMobile: boolean }) {
     setSettings(await invoke<RuntimeLogSettings>("get_runtime_log_settings"))
   }, "更新日志设置失败")
 
-  const copyRecentLogs = () => runAction(async () => {
-    const logs = await invoke<DebugLogFile>("read_runtime_log", { maxLines: 200 })
-    await navigator.clipboard.writeText(logs.lines.join("\n"))
-  }, "复制日志失败", "已复制最近的运行日志（最多 200 行）")
+  const shareLogs = () => runAction(async () => {
+    setSavedLogPath(null)
+    const result = await invoke<RuntimeLogShare | null>("share_runtime_log")
+    if (result) {
+      setSavedLogPath(result.path)
+      if (result.shareError) throw new Error(result.shareError)
+    }
+  }, "分享失败")
 
   const openLogDirectory = () => settings && runAction(async () => {
     try {
@@ -153,6 +164,13 @@ export default function DebugTab({ isMobile }: { isMobile: boolean }) {
         </div>
       )}
       {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
+      {savedLogPath && (
+        <p role="status" className="break-all text-xs text-muted-foreground">
+          {savedLogPath.startsWith("Download/")
+            ? `已保存到 ${savedLogPath.replace(/^Download\//, "下载/")}`
+            : `下载目录保存失败，日志暂存于应用缓存：${savedLogPath}`}
+        </p>
+      )}
 
       <div className="space-y-2">
         {settings && (
@@ -167,7 +185,7 @@ export default function DebugTab({ isMobile }: { isMobile: boolean }) {
         <div className="flex flex-wrap items-center gap-2">
           {isMobile ? (
             <button
-              onClick={() => runAction(() => invoke("share_runtime_log"), "分享失败，可尝试复制最近 200 行")}
+              onClick={shareLogs}
               disabled={busy}
               className={actionClassName}
             >
@@ -191,9 +209,6 @@ export default function DebugTab({ isMobile }: { isMobile: boolean }) {
               </button>
             </>
           )}
-          <button onClick={copyRecentLogs} disabled={busy} className={actionClassName}>
-            复制最近 200 行
-          </button>
           <button onClick={clearLogs} disabled={busy} className={actionClassName}>
             清空
           </button>

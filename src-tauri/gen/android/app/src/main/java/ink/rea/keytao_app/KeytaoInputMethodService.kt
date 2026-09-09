@@ -627,7 +627,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyCommand(command: KeyCommand) {
-        inputCounts.record(command.type)
+        inputCounts.recordCommand(command.type)
         if (!inputAvailable && command.requiresInstalledSchema()) {
             showUnavailableMessage()
             return
@@ -928,7 +928,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleBackspaceGesture(action: String, countValue: String?) {
-        inputCounts.record("backspace_gesture")
         val count = countValue
             ?.toIntOrNull()
             ?.coerceIn(1, maxBackspaceGestureBatchCount)

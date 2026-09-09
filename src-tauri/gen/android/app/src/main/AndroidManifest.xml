@@ -2,9 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- KeyTao data lives in app-specific storage (getExternalFilesDir/filesDir),
-         so no storage permission is needed; user-visible import/export goes
-         through the Storage Access Framework. -->
+    <!-- Private data needs no storage permission. Public log export uses
+         MediaStore on API 29+ and requests legacy write access only on API 24-28. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
