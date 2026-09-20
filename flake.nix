@@ -151,6 +151,14 @@
             mkdir -p src-tauri/binaries
             cp ${keytaoLinuxIme}/bin/keytao-ime \
               src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu
+
+            # tauri.linux.conf.json bundles ../target/keytao-linux-runtime as a
+            # resource and the tauri build script fails if it is absent. On Nix
+            # librime resolves via RPATH and rime shared data via the usual
+            # candidate scan (empty dirs are skipped there), so an empty bundle
+            # only satisfies the build-time existence check.
+            mkdir -p target/keytao-linux-runtime/lib \
+              target/keytao-linux-runtime/rime-data
           '';
           doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
