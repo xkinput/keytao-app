@@ -123,7 +123,7 @@
             inherit (finalAttrs) pname version src;
             pnpm = pkgs.pnpm_10;
             fetcherVersion = 3;
-            hash = "sha256-DBZKGbeBJUtK/zEM39w9NW0hofnlERGJrMcTnqZ+pxg=";
+            hash = "sha256-1++bRE2nIYlQXKxtvrW8ThkjLkDcKYQnT5opA4upxOk=";
           };
           buildInputs = with pkgs; [
             librime
