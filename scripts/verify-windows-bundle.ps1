@@ -322,6 +322,7 @@ Require-DelayLoadedDependency $imeDll "rime.dll"
 Require-NoCrtDependency $imeDll
 Require-EmbeddedIcon $imeDll 1
 Verify-AuthenticodeSignature $imeDll
+& (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeDll
 if ($Arch -eq "x64") {
     Require-File $imeX86Dll "Windows x64 packages must include the x86 TSF DLL for 32-bit applications"
     Require-File $imeX86RimeDll "Windows x86 IME runtime is missing rime.dll"
@@ -337,6 +338,7 @@ if ($Arch -eq "x64") {
     Require-NoCrtDependency $imeX86Dll
     Require-EmbeddedIcon $imeX86Dll 1
     Verify-AuthenticodeSignature $imeX86Dll
+    & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeX86Dll
 
     Require-File $imeArm64XForwarder "Windows x64 packages must include the ARM64X TSF forwarder"
     Require-File $imeArm64X64Target "Windows ARM64X runtime is missing its x64 TSF target"

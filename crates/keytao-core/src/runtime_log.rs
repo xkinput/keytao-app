@@ -405,7 +405,11 @@ impl Logger {
         kv.insert("device".into(), Value::Null);
         kv.insert("mem_class_mb".into(), Value::Null);
         kv.insert("locale".into(), Value::Null);
-        kv.insert("librime".into(), super::librime_runtime_version().into());
+        // Diagnostics can start before the engine is loaded. Querying its version
+        // here would trigger Windows' delay-load import before the IME has
+        // preloaded the bundled DLL, potentially terminating the host process.
+        // The engine reports its version in setup_end after initialization.
+        kv.insert("librime".into(), Value::Null);
         kv.insert("tag".into(), tag.into());
         self.line(Level::Info, "lifecycle", "session_begin", None, kv)
     }
@@ -902,6 +906,44 @@ mod tests {
 
     fn local_logger() -> Logger {
         Logger::new(Box::leak(Box::new(AtomicU8::new(Level::Info as u8))))
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    ))]
+    #[test]
+    fn writer_starts_and_flushes_without_waiting_for_the_engine() {
+        let dir = TempDir::new();
+        // Engine startup may still be loading its DLL or holding its API lock.
+        // Logging must neither call the native API nor wait for that work.
+        let engine_guard = crate::desktop::rime_api_lock();
+        let logger = Arc::new(local_logger());
+        let handle = logger
+            .start(dir.0.clone(), "windows-ime".into(), |root| {
+                Some(root.join("log"))
+            })
+            .unwrap();
+        logger.event(Level::Info, "lifecycle", "before_engine", None, Map::new());
+        logger.flush(Duration::from_secs(2));
+        let written = fs::read_to_string(dir.0.join("log/keytao-windows-ime.log"));
+        // Release the engine before cleanup so a regression cannot hang tests.
+        drop(engine_guard);
+        logger.disable();
+        handle.join().unwrap();
+
+        let written = written.expect("diagnostics must write before engine startup completes");
+        let records: Vec<Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["ev"], "session_begin");
+        assert!(records[0]["librime"].is_null());
+        assert_eq!(records[1]["ev"], "before_engine");
     }
 
     #[test]

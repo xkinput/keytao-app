@@ -49,6 +49,24 @@ installer copies the complete runtimes into a unique directory below
 `%ProgramData%\KeyTao\keytao-windows-ime-runtime` before registration. Loaded
 TIP files are therefore never overwritten during an upgrade.
 
+### Host-process startup check
+
+After building, test COM factory loading from an isolated host process:
+
+```powershell
+.\scripts\test-windows-ime-load.ps1 -DllPath .\target\keytao-windows-ime-runtime\x64\keytao_windows_ime.dll
+```
+
+This check does not register or activate the input method. The host must stay
+alive without loading librime until the engine explicitly preloads the bundled
+DLL. Installer verification runs this check as well.
+
+In alpha.77 through alpha.80, the runtime logger queried the librime version
+while creating the COM factory, before engine preload. This could terminate
+unrelated host applications with delay-load exception `0xc06d007e`, even when
+runtime logging was disabled. Diagnostics now leave the initial `librime` field
+null and report the version in `setup_end`, after engine initialization.
+
 To only download librime:
 
 ```powershell

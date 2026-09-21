@@ -514,7 +514,8 @@ mod desktop {
                 "rime",
                 "setup_end",
                 dur_ms = started.elapsed().as_secs_f64() * 1000.0,
-                initialized = initialized_now
+                initialized = initialized_now,
+                librime = librime_runtime_version()
             );
         }
         Ok(())
