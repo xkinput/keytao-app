@@ -113,6 +113,10 @@ its TSF profile index is the zero-based value `0`, so no external profile ICO
 is required. It uses the same white-star identity as the macOS input source,
 rendered on a dark tile so it remains legible on the light Windows taskbar.
 Resource IDs 2 and 3 remain dedicated Chinese and English language-bar icons.
+They use larger white glyphs on a transparent background, with separate frames
+for 16, 20, 24, 32, 40, 48, and 64 pixels. Regenerate them on Windows with
+`powershell -ExecutionPolicy Bypass -File scripts/generate-windows-mode-icons.ps1`
+(uses the built-in Microsoft YaHei UI font).
 The text service also publishes the standard input-mode conversion compartment.
 
 Candidate text uses the installed Windows font stack: a CJK face first, then

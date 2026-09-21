@@ -2,6 +2,7 @@
 #define _UNICODE
 
 #include <msctf.h>
+#include <ctffunc.h>
 #include <oleauto.h>
 #include <stdio.h>
 #include <windows.h>
@@ -16,11 +17,7 @@ const GUID kProfile = {0x1B2C3D4E,
                        0x5F60,
                        0x7A8B,
                        {0x9C, 0x0D, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D}};
-const GUID kInputModeItem = {
-    0xB35F6C5B,
-    0xF641,
-    0x42E4,
-    {0x89, 0x74, 0x95, 0xFF, 0x7E, 0x1F, 0x38, 0x5C}};
+const GUID& kInputModeItem = GUID_LBI_INPUTMODE;
 constexpr LANGID kLanguage = 0x0804;
 
 template <typename T> void Release(T *&value) {

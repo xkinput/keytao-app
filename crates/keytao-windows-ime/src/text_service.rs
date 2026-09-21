@@ -21,15 +21,14 @@ use crate::{
     guard,
     input_context::CONTEXT_SENSITIVITY_COMPARTMENTS,
     key_event_sink::KeyEventSink,
-    language_bar::LanguageBarItem,
     state::{
         append_diagnostic, apply_context_compartment_change, apply_conversion_mode_change,
         apply_open_close_change, clear_compartment_sinks, clear_context_compartment_sinks,
         context_compartment_sinks_cover, hide_ime_windows, new_shared_state,
         publish_initial_compartments, refresh_engine_for_focus, refresh_input_context,
-        reset_input_for_focus_change, start_engine_warmup, store_compartment_sink,
-        store_context_compartment_sinks, terminate_input_now, CompartmentSinkRegistration,
-        SharedState, WeakState,
+        refresh_language_bar, reset_input_for_focus_change, start_engine_warmup,
+        store_compartment_sink, store_context_compartment_sinks, terminate_input_now,
+        CompartmentSinkRegistration, SharedState, WeakState,
     },
 };
 
@@ -118,6 +117,8 @@ fn activate_service(
     {
         let mut st = state.borrow_mut();
         if st.thread_mgr.is_some() {
+            drop(st);
+            refresh_language_bar(state);
             return Ok(());
         }
         st.thread_mgr = Some(thread_mgr.clone());
@@ -212,22 +213,15 @@ fn activate_service(
             }
         };
 
-    let language_bar =
-        match LanguageBarItem::add(thread_mgr, client_id, std::rc::Rc::downgrade(state)) {
-            Ok(item) => Some(item),
-            Err(error) => {
-                append_diagnostic(format!("Add TSF language bar item failed: {error}"));
-                None
-            }
-        };
-
     let mut st = state.borrow_mut();
     st.key_sink = Some(key_sink_iface);
     st.thread_mgr_sink = Some(thread_sink_iface);
     st.thread_mgr_sink_cookie = Some(thread_sink_cookie);
     st.thread_focus_sink = Some(thread_focus_sink_iface);
     st.thread_focus_sink_cookie = Some(thread_focus_sink_cookie);
-    st.language_bar = language_bar;
+    // Sinks can reenter during activation; register UI only after activation
+    // has installed every required sink successfully.
+    st.language_bar_enabled = true;
     drop(st);
 
     advise_compartment_sinks(state, thread_mgr);
@@ -321,6 +315,9 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
     fn Deactivate(&self) -> Result<()> {
         guard(|| {
+            // Cleanup calls into TSF and may synchronously deliver focus events.
+            // Close the recovery gate before removing any registrations.
+            self.state.borrow_mut().language_bar_enabled = false;
             // TSF releases its last reference right after this returns, so a queued
             // edit session would never run — end the composition synchronously.
             terminate_input_now(&self.state);
@@ -442,6 +439,9 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
                 refresh_engine_for_focus(&state);
                 let context = pdimfocus.and_then(|manager| unsafe { manager.GetTop() }.ok());
                 refresh_input_context(&state, context.as_ref());
+                if pdimfocus.is_some() {
+                    refresh_language_bar(&state);
+                }
             }
             append_diagnostic(format!(
                 "ThreadMgrEventSink OnSetFocus focus={}",
@@ -457,6 +457,9 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
                 reset_input_for_focus_change(&state);
                 refresh_engine_for_focus(&state);
                 refresh_input_context(&state, pic);
+                if pic.is_some() {
+                    refresh_language_bar(&state);
+                }
             }
             append_diagnostic("ThreadMgrEventSink OnPushContext");
             Ok(())
@@ -524,6 +527,7 @@ impl ITfThreadFocusSink_Impl for ThreadFocusSink_Impl {
             if let Some(state) = self.state.upgrade() {
                 refresh_engine_for_focus(&state);
                 refresh_input_context(&state, None);
+                refresh_language_bar(&state);
             }
             append_diagnostic("ThreadFocusSink OnSetThreadFocus");
             Ok(())

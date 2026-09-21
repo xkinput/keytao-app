@@ -321,6 +321,8 @@ Require-PeMachine $imeVcRuntime $nativeMachine $Arch
 Require-DelayLoadedDependency $imeDll "rime.dll"
 Require-NoCrtDependency $imeDll
 Require-EmbeddedIcon $imeDll 1
+Require-EmbeddedIcon $imeDll 2
+Require-EmbeddedIcon $imeDll 3
 Verify-AuthenticodeSignature $imeDll
 & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeDll
 if ($Arch -eq "x64") {
@@ -337,6 +339,8 @@ if ($Arch -eq "x64") {
     Require-DelayLoadedDependency $imeX86Dll "rime.dll"
     Require-NoCrtDependency $imeX86Dll
     Require-EmbeddedIcon $imeX86Dll 1
+    Require-EmbeddedIcon $imeX86Dll 2
+    Require-EmbeddedIcon $imeX86Dll 3
     Verify-AuthenticodeSignature $imeX86Dll
     & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeX86Dll
 
@@ -383,8 +387,8 @@ Require-File $imeBrandIconSource "Missing dedicated Windows IME branding icon: $
 Require-File $imeChineseModeIconSource "Missing Windows IME Chinese mode icon: $imeChineseModeIconSource"
 Require-File $imeEnglishModeIconSource "Missing Windows IME English mode icon: $imeEnglishModeIconSource"
 Require-IcoFrames $imeBrandIconSource @(16, 20, 24, 32, 40, 48)
-Require-IcoFrames $imeChineseModeIconSource @(16, 20, 24, 32)
-Require-IcoFrames $imeEnglishModeIconSource @(16, 20, 24, 32)
+Require-IcoFrames $imeChineseModeIconSource @(16, 20, 24, 32, 40, 48, 64)
+Require-IcoFrames $imeEnglishModeIconSource @(16, 20, 24, 32, 40, 48, 64)
 
 Require-Pattern $hookFile 'NSIS_HOOK_POSTINSTALL' "NSIS hook file does not define NSIS_HOOK_POSTINSTALL"
 Require-Pattern $hookFile 'NSIS_HOOK_PREUNINSTALL' "NSIS hook file does not define NSIS_HOOK_PREUNINSTALL"
@@ -409,7 +413,7 @@ if ((Get-Content -Raw -LiteralPath $imeBrandSvgSource) -match '<text(?:\s|>)') {
 }
 Require-Pattern $globalsSource 'GET_MODULE_HANDLE_EX_FLAG_PIN' "The in-process TSF module must remain loaded while background engine work can execute"
 Require-Pattern $languageBarSource 'ITfLangBarItemButton' "Windows TSF must expose a standard Chinese/English language bar item"
-Require-Pattern $languageBarSource 'item\.Show\(BOOL::from\(true\)\)' "Windows TSF must explicitly show its language bar item after registration"
+Require-Pattern $imeLibSource 'GUID_LBI_INPUTMODE' "Windows TSF mode button must use the system GUID recognized by the Input Indicator"
 Require-Pattern $languageBarSource 'GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION' "Windows TSF must publish its input mode through the standard conversion compartment"
 Require-Pattern $coreSource 'KeyTao\.WindowsIme\.EngineInit' "Windows IME engine mutex name must be shared by the app and TSF"
 Require-Pattern $coreSource 'Some\(5 \| 32 \| 33 \| 1224\)' "Windows RIME build invalidation must retry mapped or shared files"

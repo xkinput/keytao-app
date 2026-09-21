@@ -77,13 +77,8 @@ pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID = GUID {
     data4: [0xb0, 0x63, 0x29, 0x2d, 0x4c, 0xe3, 0x7b, 0x91],
 };
 
-/// Language bar input mode item — {B35F6C5B-F641-42E4-8974-95FF7E1F385C}
-pub const GUID_LANG_BAR_INPUT_MODE: GUID = GUID {
-    data1: 0xB35F6C5B,
-    data2: 0xF641,
-    data3: 0x42E4,
-    data4: [0x89, 0x74, 0x95, 0xFF, 0x7E, 0x1F, 0x38, 0x5C],
-};
+/// Windows Input Indicator identifies the tray's mode button by this GUID.
+pub const GUID_LANG_BAR_INPUT_MODE: GUID = windows::Win32::UI::TextServices::GUID_LBI_INPUTMODE;
 
 pub const MODE_ICON_CHINESE_RESOURCE_ID: u32 = 2;
 pub const MODE_ICON_ENGLISH_RESOURCE_ID: u32 = 3;

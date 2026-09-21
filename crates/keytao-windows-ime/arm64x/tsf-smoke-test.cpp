@@ -2,6 +2,7 @@
 #define _UNICODE
 
 #include <msctf.h>
+#include <ctffunc.h>
 #include <oleauto.h>
 #include <stdio.h>
 #include <windows.h>
@@ -16,11 +17,7 @@ const GUID kProfile = {0x1B2C3D4E,
                        0x5F60,
                        0x7A8B,
                        {0x9C, 0x0D, 0x1E, 0x2F, 0x3A, 0x4B, 0x5C, 0x6D}};
-const GUID kInputModeItem = {
-    0xB35F6C5B,
-    0xF641,
-    0x42E4,
-    {0x89, 0x74, 0x95, 0xFF, 0x7E, 0x1F, 0x38, 0x5C}};
+const GUID& kInputModeItem = GUID_LBI_INPUTMODE;
 constexpr LANGID kLanguage = 0x0804;
 
 template <typename T> void Release(T *&value) {
@@ -58,6 +55,51 @@ HRESULT GetLanguageBarItem(ITfLangBarItemMgr *manager,
   return result;
 }
 
+HRESULT VerifyConversionMode(ITfThreadMgr *manager, bool ascii_mode) {
+  ITfCompartmentMgr *compartments = nullptr;
+  ITfCompartment *conversion = nullptr;
+  VARIANT value;
+  VariantInit(&value);
+  HRESULT result = manager->QueryInterface(IID_PPV_ARGS(&compartments));
+  if (SUCCEEDED(result)) {
+    result = compartments->GetCompartment(
+        GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, &conversion);
+  }
+  if (SUCCEEDED(result)) {
+    result = conversion->GetValue(&value);
+  }
+  if (SUCCEEDED(result) &&
+      (value.vt != VT_I4 ||
+       ((value.lVal & TF_CONVERSIONMODE_NATIVE) == 0) != ascii_mode)) {
+    result = E_FAIL;
+  }
+  VariantClear(&value);
+  Release(conversion);
+  Release(compartments);
+  return result;
+}
+
+HRESULT VerifyOwnedModeIcons(ITfLangBarItemButton *button) {
+  HICON first = nullptr;
+  HICON second = nullptr;
+  HRESULT result = button->GetIcon(&first);
+  if (SUCCEEDED(result)) {
+    result = button->GetIcon(&second);
+  }
+  if (SUCCEEDED(result) &&
+      (first == nullptr || second == nullptr || first == second)) {
+    result = E_FAIL;
+  }
+  // ITfLangBarItemButton::GetIcon transfers ownership of each returned icon.
+  if (second != nullptr && second != first) {
+    DestroyIcon(second);
+  }
+  if (first != nullptr) {
+    DestroyIcon(first);
+  }
+  return result;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t **argv) {
@@ -87,7 +129,8 @@ int wmain(int argc, wchar_t **argv) {
   LANGID active_language = 0;
   GUID active_profile{};
   BSTR mode_text = nullptr;
-  HICON mode_icon = nullptr;
+  TF_LANGBARITEMINFO mode_info{};
+  DWORD language_bar_status = TF_LBI_STATUS_HIDDEN;
   POINT point{};
   RECT area{};
   int exit_code = 1;
@@ -249,7 +292,14 @@ int wmain(int argc, wchar_t **argv) {
     goto cleanup;
   }
 
-  DWORD language_bar_status = TF_LBI_STATUS_HIDDEN;
+  result = language_bar_item->GetInfo(&mode_info);
+  if (FAILED(result) || !IsEqualGUID(mode_info.guidItem, GUID_LBI_INPUTMODE) ||
+      !IsEqualGUID(mode_info.clsidService, kTextService)) {
+    Fail("ITfLangBarItem::GetInfo(system input mode)",
+         FAILED(result) ? result : E_FAIL);
+    goto cleanup;
+  }
+
   result = language_bar_item->GetStatus(&language_bar_status);
   if (FAILED(result) || (language_bar_status & TF_LBI_STATUS_HIDDEN) != 0) {
     Fail("ITfLangBarItem::GetStatus(visible)",
@@ -276,9 +326,9 @@ int wmain(int argc, wchar_t **argv) {
                L"Unexpected initial input mode text: '%ls' (length=%u, "
                L"U+%04X U+%04X U+%04X)\n",
                mode_text, static_cast<unsigned int>(SysStringLen(mode_text)),
-               static_cast<unsigned int>(mode_text[0]),
-               static_cast<unsigned int>(mode_text[1]),
-               static_cast<unsigned int>(mode_text[2]));
+               static_cast<unsigned int>(SysStringLen(mode_text) > 0 ? mode_text[0] : 0),
+               static_cast<unsigned int>(SysStringLen(mode_text) > 1 ? mode_text[1] : 0),
+               static_cast<unsigned int>(SysStringLen(mode_text) > 2 ? mode_text[2] : 0));
     }
     if (mode_text != nullptr) {
       SysFreeString(mode_text);
@@ -289,9 +339,14 @@ int wmain(int argc, wchar_t **argv) {
   }
   SysFreeString(mode_text);
 
-  result = language_bar_button->GetIcon(&mode_icon);
-  if (FAILED(result) || mode_icon == nullptr) {
-    Fail("ITfLangBarItemButton::GetIcon", FAILED(result) ? result : E_FAIL);
+  result = VerifyConversionMode(thread_manager, false);
+  if (FAILED(result)) {
+    Fail("Initial Chinese conversion compartment", result);
+    goto cleanup;
+  }
+  result = VerifyOwnedModeIcons(language_bar_button);
+  if (FAILED(result)) {
+    Fail("ITfLangBarItemButton::GetIcon(owned Chinese icons)", result);
     goto cleanup;
   }
 
@@ -314,9 +369,25 @@ int wmain(int argc, wchar_t **argv) {
   }
   SysFreeString(mode_text);
 
+  result = VerifyConversionMode(thread_manager, true);
+  if (FAILED(result)) {
+    Fail("English conversion compartment", result);
+    goto cleanup;
+  }
+  result = VerifyOwnedModeIcons(language_bar_button);
+  if (FAILED(result)) {
+    Fail("ITfLangBarItemButton::GetIcon(owned English icons)", result);
+    goto cleanup;
+  }
+
   result = language_bar_button->OnClick(TF_LBI_CLK_LEFT, point, &area);
   if (FAILED(result)) {
     Fail("ITfLangBarItemButton::OnClick(Chinese)", result);
+    goto cleanup;
+  }
+  result = VerifyConversionMode(thread_manager, false);
+  if (FAILED(result)) {
+    Fail("Restored Chinese conversion compartment", result);
     goto cleanup;
   }
 

@@ -266,8 +266,8 @@ pub(crate) fn should_arm_caret_reprobe(source: Option<CaretSource>) -> bool {
     source != Some(CaretSource::Probe)
 }
 
-fn should_schedule_layout_reposition(visible: bool, lcode: TfLayoutCode, pending: bool) -> bool {
-    visible && lcode == TF_LC_CHANGE && !pending
+fn should_schedule_layout_reposition(has_content: bool, lcode: TfLayoutCode, pending: bool) -> bool {
+    has_content && lcode == TF_LC_CHANGE && !pending
 }
 
 fn caret_probe_extent_is_usable(rect: &RECT, clipped: bool) -> bool {
@@ -476,6 +476,16 @@ fn probe_caret(
                             };
                         }
                     }
+                    // Empty editors have no adjacent character to expand into.
+                    // They can still report a valid, zero-width caret extent.
+                    if let Some(position) =
+                        try_range("selection-caret", &caret, AdjacentChar::After, None)
+                    {
+                        return CaretProbe {
+                            owner_hwnd,
+                            position: Some(position),
+                        };
+                    }
                 }
             }
         }
@@ -521,6 +531,14 @@ fn probe_caret(
                                 position: Some(position),
                             };
                         }
+                    }
+                    if let Some(position) =
+                        try_range("composition-caret", &caret, AdjacentChar::After, None)
+                    {
+                        return CaretProbe {
+                            owner_hwnd,
+                            position: Some(position),
+                        };
                     }
                 }
                 Err(error) => log_probe(
@@ -1201,10 +1219,7 @@ pub(crate) fn flush_layout_reposition(shared_state: &SharedState) {
     let context = {
         let mut st = shared_state.borrow_mut();
         if !std::mem::take(&mut st.layout_reposition_pending)
-            || !st
-                .candidate_win
-                .as_ref()
-                .is_some_and(|window| window.is_visible())
+            || !st.ime_state.as_ref().is_some_and(has_visible_state)
         {
             return;
         }
@@ -1767,16 +1782,18 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
             };
             let schedule = {
                 let mut st = state.borrow_mut();
-                let visible = st
-                    .candidate_win
-                    .as_ref()
-                    .is_some_and(|window| window.is_visible())
+                // A first GetTextExt can return TF_E_NOLAYOUT before a popup
+                // has ever been shown. Its later layout event must recover it.
+                let has_content = st.ime_state.as_ref().is_some_and(has_visible_state)
                     && st
                         .panel_context
                         .as_ref()
                         .is_some_and(|active| active.as_raw() == context.as_raw());
-                let schedule =
-                    should_schedule_layout_reposition(visible, lcode, st.layout_reposition_pending);
+                let schedule = should_schedule_layout_reposition(
+                    has_content,
+                    lcode,
+                    st.layout_reposition_pending,
+                );
                 if schedule {
                     st.layout_reposition_pending = true;
                 }
@@ -1793,6 +1810,10 @@ impl ITfTextLayoutSink_Impl for TextLayoutSink_Impl {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "caret_tests.rs"]
+mod caret_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1825,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_changes_coalesce_only_while_the_panel_is_visible() {
+    fn layout_changes_coalesce_while_candidates_are_waiting_for_layout() {
         assert!(should_schedule_layout_reposition(true, TF_LC_CHANGE, false));
         assert!(!should_schedule_layout_reposition(true, TF_LC_CHANGE, true));
         assert!(!should_schedule_layout_reposition(

@@ -470,19 +470,23 @@ impl CandidateWindow {
         Ok(hwnd)
     }
 
-    pub fn arm_caret_reprobe(&mut self, state: &WeakState) {
-        if self.hwnd.0.is_null() {
-            return;
+    pub fn arm_caret_reprobe(&mut self, state: &WeakState) -> bool {
+        let Some(shared_state) = state.upgrade() else {
+            return false;
+        };
+        // The first caret query can fail before show() has created our HWND.
+        // Create a hidden popup to receive the timer; no position is invented.
+        if self.hwnd.0.is_null()
+            && !self.ensure_window(crate::state::fallback_focus_window(), state)
+        {
+            return false;
         }
         let Some(target) = click_target(self.hwnd) else {
-            return;
+            return false;
         };
         if target.caret_reprobe_pending.get() {
-            return;
+            return true;
         }
-        let Some(shared_state) = state.upgrade() else {
-            return;
-        };
         let completed_attempts = shared_state.borrow().caret_retry_attempts;
         let Some(delay_ms) = caret_retry_delay_ms(completed_attempts) else {
             keytao_core::rt_log!(
@@ -491,7 +495,7 @@ impl CandidateWindow {
                 "caret_retry_gave_up",
                 attempts = completed_attempts,
             );
-            return;
+            return false;
         };
         let attempt = completed_attempts + 1;
         let timer_id = unsafe { SetTimer(self.hwnd, CARET_RETRY_TIMER_ID, delay_ms, None) };
@@ -501,6 +505,7 @@ impl CandidateWindow {
                 append_diagnostic(format!("caret retry attempt={attempt} armed"));
             }
         }
+        timer_id != 0
     }
 
     pub fn post_pending_ime_ui(&self) -> bool {
@@ -510,12 +515,10 @@ impl CandidateWindow {
         unsafe { PostMessageW(self.hwnd, PENDING_IME_UI_MESSAGE, WPARAM(0), LPARAM(0)).is_ok() }
     }
 
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-
-    pub fn arm_layout_reposition(&mut self) -> bool {
-        if self.hwnd.0.is_null() || !self.visible {
+    pub fn arm_layout_reposition(&mut self, state: &WeakState) -> bool {
+        if self.hwnd.0.is_null()
+            && !self.ensure_window(crate::state::fallback_focus_window(), state)
+        {
             return false;
         }
         unsafe { SetTimer(self.hwnd, LAYOUT_REPOSITION_TIMER_ID, 16, None) != 0 }
@@ -821,6 +824,59 @@ mod tests {
             right: 1920,
             bottom: 1080,
         }
+    }
+
+    #[test]
+    fn first_caret_retry_creates_a_hidden_window_and_receives_its_timer() {
+        use std::rc::Rc;
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{IsWindowVisible, SendMessageW, WM_TIMER},
+        };
+
+        let state = crate::state::new_shared_state();
+        state.borrow_mut().caret_retry_active = true;
+        let mut window = super::CandidateWindow::new();
+        assert!(window.hwnd.0.is_null());
+        assert!(window.arm_caret_reprobe(&Rc::downgrade(&state)));
+        assert!(!window.hwnd.0.is_null());
+        assert!(!unsafe { IsWindowVisible(window.hwnd) }.as_bool());
+        assert!(super::click_target(window.hwnd)
+            .unwrap()
+            .caret_reprobe_pending
+            .get());
+        // Deliver the timer through Win32 to exercise the window procedure and
+        // its weak state reference without waiting on the test runner's pump.
+        unsafe {
+            SendMessageW(
+                window.hwnd,
+                WM_TIMER,
+                WPARAM(super::CARET_RETRY_TIMER_ID),
+                LPARAM(0),
+            );
+        }
+        assert_eq!(state.borrow().caret_retry_attempts, 1);
+        assert!(!super::click_target(window.hwnd)
+            .unwrap()
+            .caret_reprobe_pending
+            .get());
+        assert!(!window.visible);
+    }
+
+    #[test]
+    fn layout_reposition_can_start_before_the_first_panel_show() {
+        let state = crate::state::new_shared_state();
+        let mut window = super::CandidateWindow::new();
+        assert!(window.arm_layout_reposition(&std::rc::Rc::downgrade(&state)));
+        assert!(!window.hwnd.0.is_null());
+        assert!(!window.visible);
+    }
+
+    #[test]
+    fn caret_retry_does_not_create_a_window_for_a_released_service() {
+        let mut window = super::CandidateWindow::new();
+        assert!(!window.arm_caret_reprobe(&std::rc::Weak::new()));
+        assert!(window.hwnd.0.is_null());
     }
 
     #[test]

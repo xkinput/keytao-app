@@ -127,6 +127,9 @@ pub struct TsfState {
     pub display_attribute_atom: Option<u32>,
     pub key_sink: Option<ITfKeyEventSink>,
     pub(crate) language_bar: Option<LanguageBarItem>,
+    pub(crate) language_bar_enabled: bool,
+    pub(crate) language_bar_refreshing: bool,
+    language_bar_add_error: Option<windows::core::HRESULT>,
     pub composition: Option<ITfComposition>,
     pub composition_context: Option<ITfContext>,
     pub panel_context: Option<ITfContext>,
@@ -317,6 +320,9 @@ impl TsfState {
             display_attribute_atom: None,
             key_sink: None,
             language_bar: None,
+            language_bar_enabled: false,
+            language_bar_refreshing: false,
+            language_bar_add_error: None,
             composition: None,
             composition_context: None,
             panel_context: None,
@@ -973,13 +979,13 @@ pub(crate) fn set_keyboard_open_state(shared_state: &SharedState, open: bool) {
 /// Declare the thread compartments a keyboard TIP owns: the keyboard is open
 /// and, unless the user already switched, in native (Chinese) conversion mode.
 pub(crate) fn publish_initial_compartments(shared_state: &SharedState) {
-    let (thread_mgr, client_id, ascii_mode) = {
+    let (thread_mgr, client_id) = {
         let st = shared_state.borrow();
-        (st.thread_mgr.clone(), st.client_id, st.ascii_mode)
+        (st.thread_mgr.clone(), st.client_id)
     };
     crate::input_context::set_keyboard_open(thread_mgr.as_ref(), client_id, true);
     shared_state.borrow_mut().keyboard_open = true;
-    update_language_bar_mode(shared_state, ascii_mode);
+    refresh_language_bar(shared_state);
 }
 
 /// `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` changed (system Ctrl+Space, the input
@@ -1142,12 +1148,98 @@ fn unadvise_all(registrations: Vec<CompartmentSinkRegistration>) {
     }
 }
 
+/// Recover a failed initial registration and republish the current mode on
+/// focus. Never remove/re-add a healthy item: only the first INPUTMODE item is
+/// shown by Windows, and another service may own other entries in the manager.
+pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
+    let (thread_mgr, client_id, ascii_mode, existing) = {
+        let mut st = shared_state.borrow_mut();
+        if !st.language_bar_enabled || st.language_bar_refreshing {
+            return;
+        }
+        let Some(thread_mgr) = st.thread_mgr.clone() else {
+            return;
+        };
+        st.language_bar_refreshing = true;
+        (
+            thread_mgr,
+            st.client_id,
+            st.ascii_mode,
+            st.language_bar.clone(),
+        )
+    };
+    struct RefreshGuard(SharedState);
+    impl Drop for RefreshGuard {
+        fn drop(&mut self) {
+            self.0.borrow_mut().language_bar_refreshing = false;
+        }
+    }
+    let _refresh_guard = RefreshGuard(Rc::clone(shared_state));
+    let language_bar = match existing {
+        Some(item) => item,
+        None => {
+            // AddItem can synchronously call TSF sinks. The guard above prevents
+            // a nested focus event from registering a second button, without
+            // keeping a RefCell borrow alive across the COM call.
+            let item = match LanguageBarItem::add(
+                &thread_mgr,
+                client_id,
+                Rc::downgrade(shared_state),
+                ascii_mode,
+            ) {
+                Ok(item) => item,
+                Err(error) => {
+                    let code = error.code();
+                    let changed = shared_state
+                        .borrow_mut()
+                        .language_bar_add_error
+                        .replace(code)
+                        != Some(code);
+                    if changed {
+                        keytao_core::rt_log!(
+                            Level::Info,
+                            "error",
+                            "language_bar_add",
+                            hresult = format!("0x{:08X}", code.0 as u32),
+                            msg = error.to_string()
+                        );
+                    }
+                    return;
+                }
+            };
+            let still_active = {
+                let mut st = shared_state.borrow_mut();
+                st.language_bar_add_error = None;
+                let active = st.language_bar_enabled
+                    && st.thread_mgr.as_ref() == Some(&thread_mgr)
+                    && st.client_id == client_id;
+                if active {
+                    st.language_bar = Some(item.clone());
+                }
+                active
+            };
+            if !still_active {
+                // Deactivate may also arrive from a synchronous TSF callback.
+                item.remove();
+                return;
+            }
+            item
+        }
+    };
+    let ascii_mode = shared_state.borrow().ascii_mode;
+    language_bar.refresh_mode(ascii_mode);
+}
+
 pub(crate) fn update_language_bar_mode(shared_state: &SharedState, ascii_mode: bool) {
     let language_bar = shared_state.borrow().language_bar.clone();
     if let Some(language_bar) = language_bar {
         language_bar.update_mode(ascii_mode);
     }
 }
+
+#[cfg(test)]
+#[path = "language_bar_lifecycle_tests.rs"]
+mod language_bar_lifecycle_tests;
 
 pub(crate) fn set_ascii_mode_from_language_bar(shared_state: &SharedState, ascii_mode: bool) {
     reset_input_for_focus_change(shared_state);
@@ -1236,7 +1328,11 @@ pub(crate) fn update_ime_windows(
                 st.caret_retry_armed = true;
                 st.caret_retry_active = true;
             }
-            candidate_win.arm_caret_reprobe(&weak_state);
+            if !candidate_win.arm_caret_reprobe(&weak_state) {
+                let mut st = shared_state.borrow_mut();
+                st.caret_retry_armed = false;
+                st.caret_retry_active = false;
+            }
         }
         if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
             mode_hint_win.show_mode_hint(
@@ -1333,8 +1429,10 @@ pub(crate) fn rearm_caret_reprobe(shared_state: &SharedState) {
             }
             st.caret_retry_active
         };
-        if active {
-            candidate_win.arm_caret_reprobe(&weak_state);
+        if active && !candidate_win.arm_caret_reprobe(&weak_state) {
+            let mut st = shared_state.borrow_mut();
+            st.caret_retry_armed = false;
+            st.caret_retry_active = false;
         }
     });
 }
@@ -1347,8 +1445,9 @@ pub(crate) fn stop_caret_reprobe(shared_state: &SharedState) {
 }
 
 pub(crate) fn schedule_layout_reposition(shared_state: &SharedState) {
+    let weak_state = Rc::downgrade(shared_state);
     let armed = with_detached_windows(shared_state, false, |candidate_win, _mode_hint_win| {
-        candidate_win.arm_layout_reposition()
+        candidate_win.arm_layout_reposition(&weak_state)
     });
     if armed != Some(true) {
         shared_state.borrow_mut().layout_reposition_pending = false;

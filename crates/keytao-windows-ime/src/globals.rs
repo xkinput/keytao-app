@@ -87,6 +87,18 @@ mod tests {
 
     #[test]
     fn activity_guard_prevents_unload() {
+        // Other tests create COM objects in parallel. Check both zero-count
+        // transitions in an isolated process so their guards cannot race us.
+        const CHILD_ENV: &str = "KEYTAO_TEST_ACTIVITY_GUARD_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "globals::tests::activity_guard_prevents_unload"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated activity guard test failed");
+            return;
+        }
         assert!(can_unload());
         let guard = DllActivityGuard::new();
         assert!(!can_unload());
