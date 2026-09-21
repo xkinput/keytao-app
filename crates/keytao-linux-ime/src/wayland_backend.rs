@@ -151,6 +151,13 @@ struct App {
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
+    /// Pristine state built from the same keymap but never updated with
+    /// modifier events. Modifier-key detection must not consult the live
+    /// state: with Shift held, `key_get_one_sym` resolves the Shift key itself
+    /// at level 2 — e.g. left Shift comes back as `Caps_Lock` (0xffe5) — so a
+    /// Shift release would never match `is_shift_key` and the zh/en toggle
+    /// would silently die.
+    xkb_base_state: Option<xkb::State>,
     mods: u32,
 
     // Popup panel — compositor auto-positions it at the cursor
@@ -195,6 +202,7 @@ impl App {
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
+            xkb_base_state: None,
             mods: 0,
             panel_surface: None,
             panel_popup: None,
@@ -397,6 +405,16 @@ impl App {
             .into()
     }
 
+    /// Keysym resolved without modifier state — see `xkb_base_state`.
+    fn base_key_sym(&self, evdev_keycode: u32) -> u32 {
+        let keycode = evdev_keycode + 8;
+        self.xkb_base_state
+            .as_ref()
+            .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
+            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
+            .into()
+    }
+
     /// Publish one `ImeState` to the client: commit first, then the new
     /// preedit, then a single `commit(serial)` — the order
     /// `zwp_input_method_v2.commit` prescribes.  Every path that produces a
@@ -552,8 +570,20 @@ impl App {
 
         // When inactive (e.g. during debounce window after deactivate), forward
         // all keys directly to the application instead of processing them.
+        // A solo Shift press is the exception: Hyprland starts delivering keys
+        // to the grab right after `activate`, long before the `done` that sets
+        // `active`, so a Shift tapped right after focus lands here. It must
+        // still arm librime's ascii_composer, or the release path below sees
+        // an unpaired Shift and the zh/en toggle never fires.
         if !self.active {
-            self.forward_unhandled_key(evdev_keycode, self.key_sym(evdev_keycode));
+            let sym = self.key_sym(evdev_keycode);
+            let base_sym = self.base_key_sym(evdev_keycode);
+            if is_shift_key(base_sym) && self.session.input_policy().composing {
+                let _ = self
+                    .session
+                    .process_key_result(base_sym, self.mods & !RIME_MOD_SHIFT);
+            }
+            self.forward_unhandled_key(evdev_keycode, sym);
             return;
         }
 
@@ -579,7 +609,9 @@ impl App {
             return;
         }
 
-        let effective_mods = if is_shift_key(sym_raw) {
+        let base_sym = self.base_key_sym(evdev_keycode);
+        let shift_press = is_shift_key(base_sym);
+        let effective_mods = if shift_press {
             self.mods & !RIME_MOD_SHIFT
         } else {
             self.mods
@@ -610,7 +642,10 @@ impl App {
             return;
         }
 
-        let result = match self.session.process_key_result(sym_raw, effective_mods) {
+        let result = match self
+            .session
+            .process_key_result(if shift_press { base_sym } else { sym_raw }, effective_mods)
+        {
             Some(r) => r,
             None => {
                 // librime says it cannot process this key at all.
@@ -662,10 +697,26 @@ impl App {
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
         self.cancel_key_repeat_for(evdev_keycode);
-        let sym_raw = self.key_sym(evdev_keycode);
+        // Modifier detection must use the pristine state: at release time the
+        // Shift key is still depressed in the live state, which resolves it to
+        // its level-2 keysym (Caps_Lock) and breaks `is_shift_key`.
+        let sym_raw = self.base_key_sym(evdev_keycode);
+        tracing::debug!(
+            "key release: keycode={} sym={sym_raw:#x} is_shift={} composing={}",
+            evdev_keycode + 8,
+            is_shift_key(sym_raw),
+            self.session.input_policy().composing
+        );
         if is_shift_key(sym_raw) && self.session.input_policy().composing {
-            if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
-                self.update_ascii_mode(result.state.ascii_mode, qh);
+            match self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
+                Some(result) => {
+                    tracing::debug!(
+                        "shift release processed: ascii_mode={}",
+                        result.state.ascii_mode
+                    );
+                    self.update_ascii_mode(result.state.ascii_mode, qh);
+                }
+                None => tracing::debug!("shift release: process_key_result returned None"),
             }
         }
         if self.forwarded_keys.remove(&evdev_keycode) {
@@ -889,6 +940,7 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                         xkb::KEYMAP_COMPILE_NO_FLAGS,
                     ) {
                         state.xkb_state = Some(xkb::State::new(&km));
+                        state.xkb_base_state = Some(xkb::State::new(&km));
                         state.xkb_keymap = Some(km);
                         state.install_virtual_keymap(keymap_bytes);
                     }
