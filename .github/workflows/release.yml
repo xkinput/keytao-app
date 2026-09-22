@@ -252,6 +252,8 @@ jobs:
           distribution: temurin
 
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - run: sdkmanager "ndk;27.0.12077973"
 
