@@ -66,11 +66,19 @@ App installs schema/dict/lua/opencc files
   -> ImeRuntimeSession refreshes internal Engine lazily
 ```
 
-附加方案走同一条部署链路。当前唯一受支持的 add-on id 是 `easy_en`：Tauri 将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
+附加方案走同一条部署链路。内置英文 add-on id 是 `easy_en`：Tauri 将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
 
 `easy_en` 的 14,566,541 B 词典在 macOS Apple Silicon 上增量部署实测为 4,328 ms，生成 28,216,820 B（table 15,784,108 B、prism 6,320,444 B、reverse 6,112,268 B）编译产物。中低端 Android 可能慢一个数量级以上；含 `easy_en` 的 staged deploy 总预算因此由 180 s 提高到 300 s，未含 add-on 的部署仍保持 180 s。以上不是 Android 真机耗时证据，合并前仍需在目标中低端真机记录完整 staged deploy 用时。
 
 键道包重装时，`keytao-core` 和 Android ZIP 合并器都按 `用户自定义方案 -> 当前包方案 -> add-on` 排序并去重。启动方案选择会跳过 add-on，因此即使列表只剩 `easy_en` 也不会把它当作默认中文方案。移动端仅在 `easy_en` 已安装且已有 `build/easy_en.schema.yaml` 时允许选择 `englishMode: "schema"`；卸载会将该设置原子地恢复为 `ascii`。
+
+可选的 `wanxiang` 使用同一平台用户目录和部署入口。App 下载固定版本的万象官方基础包并校验 SHA256，只安装万象主词库、全拼拼写规则和基于 Rime 内建组件的基础方案，不包含 Lua 扩展或独立语法模型。词表放在 `wanxiang-dicts/`，避免覆盖其他方案的 `dicts/`。安装清单记录文件 hash；部署失败回滚源文件与方案列表，卸载保留个人修改、custom 和学习词库。Windows、macOS、Linux、Android、iOS 共用 Rust 安装器，平台保留各自部署流程。
+
+桌面“英文模式”与移动端一样可选择 ASCII 或 English 词库。桌面偏好保存到 `keytao-ime.json` 的 `englishMode` 字段，修改后使用现有 reload stamp 通知输入法。`ImeRuntimeSession::set_english_mode()` 在词库模式切换 schema，并保存/恢复中文方案和选项；`ImeState::is_english_mode()` 用于中英指示，原始 `ascii_mode` 仍只表示透传，英文候选方案保持它为 false。移动端已有的 schema 切换继续使用原始 ASCII API。
+
+Windows 系统搜索等 AppContainer 宿主读取 App 从原始公开发行包生成的只读快照，首次在宿主自己的私有目录后台部署。普通应用的个人词库不会复制或授予沙箱权限。旧安装首次启动 App 时按已安装主方案准备公开包；后续公开包更新通过快照标记通知宿主。DLL 支持 IMMERSIVE/COMLESS 注册，部署与复制不在 TSF 输入线程执行。
+
+Windows 和 macOS 共享 `ui.embeddedComposition` 开关：开启时在输入框显示预编辑，关闭时仅候选窗显示。候选窗口使用单独的 `panel.preeditGap`（默认 10）分隔预编辑与候选行，嵌入模式不预留这一行；Windows、macOS、Linux 自绘候选窗口均读取该间距。
 
 按键通信里只有两种输入从平台进入通用层：
 
@@ -98,7 +106,7 @@ librime 的 C API 没有线程安全承诺：`Service`、`ConfigComponent`、`Di
 - 平台层不得绕过 `keytao-core` 直接调用 librime。
 - 多后端（Linux daemon 的三条后端线程、Windows 的后台引擎线程、Android 的 IME 线程）共享同一个 `ImeRuntime` 即可，不需要各自再加锁。
 - 锁只覆盖单次 librime 调用或一个逻辑事务（`process_key` + `extract_state`），不跨慢 IO 持有。
-- reload 会用读写屏障短暂阻塞该 runtime 上的全部 session 调用，因此 reload 的**检测与触发都必须在按键同步路径之外**。
+- reload 的检测和部署在后台执行；session 输入入口使用非阻塞的屏障/锁检查，部署期间返回暂不可用，让宿主继续处理按键。输入上下文策略先记录，再在引擎恢复后应用，不能丢失密码框等敏感限制。
 - `keytao-core` 内不再有 `lock().unwrap()`；中毒锁一律 `PoisonError::into_inner()` 后继续使用，避免 panic 穿过 FFI 边界导致进程 abort。
 
 ## 代码分层
@@ -167,7 +175,7 @@ native key event
 - `init_without_deploy()`：只加载 App 已部署的方案；未安装或未部署时拒绝初始化。
 - `reload_without_deploy()`：只重载现有编译产物并递增 generation，不在输入法进程中部署。
 - `reload()`：`reload_without_deploy()` 的语义再加一次部署。
-- `create_session()`：为输入上下文创建 `ImeRuntimeSession`，并把它登记进 runtime 的 session 注册表。
+- `create_session()`：在对应目录已初始化且未重载时，为输入上下文创建 `ImeRuntimeSession` 并登记；初始化/重载尚未完成时立即返回错误，由宿主稍后重试。
 
 `reload_without_deploy()` 的完整语义是：
 
@@ -180,7 +188,7 @@ native key event
   -> 各 session 下次访问时懒重建 Engine，并写回重建前的 ascii_mode
 ```
 
-必须走到 finalize/initialize 的原因：librime 的 `ConfigComponent` / `DictionaryComponent` 用 `weak_ptr` 缓存编译产物，只要进程内还有一个存活 session，新建 session 就会拿到旧产物；只递增 generation 并重建 session 不能让新词库生效。代价是 macOS 上实测约 20–60ms（三线程并发时），且 reload 期间该 runtime 的 session 调用会被短暂阻塞。
+必须走到 finalize/initialize 的原因：librime 的 `ConfigComponent` / `DictionaryComponent` 用 `weak_ptr` 缓存编译产物，只要进程内还有一个存活 session，新建 session 就会拿到旧产物；只递增 generation 并重建 session 不能让新词库生效。代价是 macOS 上实测约 20–60ms（三线程并发时），reload 期间输入入口会暂时返回不可用，不等待部署锁。
 
 `ImeRuntimeSession` 当前职责：
 
@@ -351,7 +359,7 @@ mask = Rime modifier mask
 
 明确不再放行、必须先送 Rime 的：
 
-- **Ctrl / Alt / Option 组合键**。Rime 自己的热键（`Ctrl+grave` 切方案、F4、key_binder 里的 emacs 编辑键）此前永远进不了 librime，现在一律先送、按 `accepted` 决定吞否。
+- **Ctrl / Alt / Option 组合键**。通用层支持 Rime 的热键和 key_binder。Windows TSF 先保留应用快捷键，只向 Rime 传递 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；其它组合在两个按键入口直接透传，避免默认 Emacs 绑定覆盖复制/粘贴等操作，以及宿主在 Test 阶段改变快捷键路由。
 - **`ascii_mode` 不是 bypass 判据**。英文模式下按键仍需进 `ascii_composer`，否则 Rime 侧的开关键与标点规则失效。macOS 与 Android 的“ascii 模式整段绕过 core”私货已删除。
 
 有 active composition 或 candidates 时，上述按键交给 Rime 或平台候选交互处理。
@@ -433,12 +441,14 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 | Linux Wayland v2 | `zwp_input_method_v2.content_type`，**text-input-v3 编号** | purpose password=8 / pin=9；hint hidden_text=0x40 / sensitive_data=0x80 |
 | Linux KDE v1 | `zwp_input_method_context_v1.content_type`，**text-input-v1 编号** | purpose password=8（v1 没有 pin，9 是 date）；hint 同 0x40 / 0x80，password 简写 0xc0 |
 | Linux XIM | 无 | **XIM 协议不表达输入用途，X11/XWayland 路径无法检测密码框**，属能力缺口而非实现缺陷 |
-| Windows | `GUID_COMPARTMENT_KEYBOARD_DISABLED`（Chromium/Edge/WebView2/Electron 的密码框主力路径）、`GUID_COMPARTMENT_EMPTYCONTEXT`、`GUID_PROP_INPUTSCOPE` 上的 `IS_PASSWORD` | 任一命中即敏感；焦点文档为空同样视为禁用。InputScope 只在焦点变化时用同步只读 edit session 查，不在按键路径 |
+| Windows | `GUID_COMPARTMENT_KEYBOARD_DISABLED`、`GUID_COMPARTMENT_EMPTYCONTEXT`、`GUID_PROP_INPUTSCOPE` 的密码/PIN/private 声明，以及原生 RichEdit 密码状态 | 任一命中即敏感；焦点文档为空同样禁用。焦点变化时同步只读探测，未知状态在按键入口限流重试；缓存仅属于已探测的 context，后台文档事件不能替换它 |
 | macOS | 无需检测 | 系统 secure input 下 IMK 自动切走。仍需确认代码无按键内容日志 |
 | Android | `inputType` 的四个 password 变体 | 直通（`composing = false, learning = false`） |
 | Android | `IME_FLAG_NO_PERSONALIZED_LEARNING`、`TYPE_TEXT_FLAG_NO_SUGGESTIONS` | 只置 `learning = false` 并关闭剪贴板记忆/建议与输入历史，**保留组字能力** |
 | iOS | `textDocumentProxy.isSecureTextEntry` | 直通 |
 | iOS | `keyboardType` 为 numberPad / decimalPad / phonePad / asciiCapableNumberPad | 强制数字层且直通 |
+
+Windows RichEdit 兼容：系统 `RICHEDIT50W` 和记事本的 `RichEditD2DPT` 在未设置 InputScope 时，`GetAppProperty` 成功而 `GetValue` 返回 `E_FAIL`。只有 `GetActiveView().GetWnd()` 确认是本线程的已知原生 RichEdit 类，且 `ES_PASSWORD` 和 `EM_GETPASSWORDCHAR` 均未声明密码时，才允许这一失败路径继续组字；其他未知属性和失败仍保持阻挡。原生窗口回归覆盖普通文本及密码样式/密码字符，默认忽略，需在隔离 Windows 账户/虚拟机手动执行：`NOACTIVATETIP` 只限制初次激活，RichEdit 后续仍可能在测试进程中加载已安装的输入法，不能把它当作隔离保证。
 
 三条容易照抄错的口径：
 
@@ -687,7 +697,7 @@ KeyTao App 的理想操作方式：
 2. 初始化：在平台允许的位置创建 `ImeRuntime` 或调用 `keytao_init()`；初始化不得阻塞系统输入法的同步回调线程。
 3. Session：为每个输入上下文创建独立 `ImeRuntimeSession`，并在上下文销毁时释放。
 4. Key map：把平台原生 key event 转为 X11 keysym + Rime modifier mask；文本到 keysym 一律调 `keytao_text_to_keysym` / `nativeTextToKeysym`，返回 0 时直接上屏。
-5. Bypass：调 `keytao_key_policy_should_bypass` / `nativeShouldBypassKey`，不要自己维护键表；Ctrl/Alt 组合与 ascii 模式都不是放行理由。
+5. Bypass：调 `keytao_key_policy_should_bypass` / `nativeShouldBypassKey`；ascii 模式本身不是放行理由。Windows TSF 在此之前执行平台应用快捷键策略（见 Windows IMPL），其它平台保留各自的系统快捷键处理。
 6. Process：调用 `ImeRuntimeSession::process_key_result()` 或 `keytao_session_process_key()`；Enter 走 `process_enter()`。
 7. Apply state：按固定顺序应用 `committed`、`preedit`、`cursor`、`candidates`、`ascii_mode`；`cursor` / `sel_start` / `sel_end` 用 `keytao_utf16_offset_from_chars` 之类的官方换算。
 8. Candidate actions：实现 select candidate on page、highlight、change page、clear/commit composition，包括鼠标点选。
@@ -708,7 +718,7 @@ KeyTao App 的理想操作方式：
 - 平台传给 core 的按键必须是 X11 keysym + Rime modifier mask。
 - `ImeState` 是提交、预编辑和候选显示的唯一来源。
 - `committed` 必须先于新 `preedit` 应用，且提交后必须在同一次协议提交里写回新 preedit 与 cursor。
-- 任何模式下按键都先进 Rime；没有 composition 时不能吞应用快捷键和导航键。
+- 任何模式下普通输入都交由 Rime；系统和应用保留快捷键先由平台透传，没有 composition 时不能吞应用导航键。
 - 结束组字只有 `commit_composition()` 与 `clear_composition()` 两条路径，不伪造 Enter/Escape。
 - 密码等敏感上下文必须直通，且不得让内容进入候选、用户词、剪贴板历史或日志。
 - FFI/JNI 返回 null/false 表示“本次操作没有发生”，不是崩溃信号。

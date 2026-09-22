@@ -269,6 +269,16 @@ bool keytao_session_get_ascii_mode(void *session);
 struct KeytaoState *keytao_session_set_ascii_mode(void *session, bool enabled);
 
 /**
+ * Logical English input (ASCII or the configured English dictionary schema).
+ * The existing get_ascii_mode export continues to mean raw pass-through.
+ */
+bool keytao_session_get_english_mode(void *session);
+
+struct KeytaoState *keytao_session_set_english_mode(void *session, bool enabled);
+
+char *keytao_session_set_english_mode_json(void *session, bool enabled);
+
+/**
  * What the linked librime can do through its own entry points, as a mask of
  * the `KEYTAO_CAP_*` bits.
  *

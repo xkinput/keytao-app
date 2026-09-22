@@ -6,12 +6,19 @@
 !define KEYTAO_IME_STAGING_ARM64X "$INSTDIR\keytao-windows-ime-runtime\arm64x"
 !define KEYTAO_IME_STAGING_X86 "$INSTDIR\keytao-windows-ime-runtime\x86"
 !define KEYTAO_IME_REG_KEY "Software\KeyTao"
+!define KEYTAO_APP_PROTOCOL_KEY "Software\Classes\keytao"
 !define KEYTAO_IME_LEGACY_X86_DIR "$PROGRAMFILES32\KeyTao\keytao-windows-ime-runtime\x86"
 
 !macro NSIS_HOOK_POSTINSTALL
   ${If} ${RunningX64}
     SetRegView 64
   ${EndIf}
+  ; Both native and x86 TIPs use the system URL broker to open the one GUI
+  ; instance. Register before IME setup, which may return early on failure.
+  WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}" "" "URL:KeyTao App"
+  WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}" "URL Protocol" ""
+  WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}\DefaultIcon" "" '$\"$INSTDIR\keytao-app.exe$\",0'
+  WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}\shell\open\command" "" '$\"$INSTDIR\keytao-app.exe$\" $\"%1$\"'
   ReadEnvStr $R6 "ProgramData"
   ${If} $R6 == ""
     StrCpy $R6 "$WINDIR\..\ProgramData"
@@ -72,6 +79,22 @@
     Return
   ${EndIf}
 
+  ; AppContainer hosts load this shared runtime read-only. Never grant access
+  ; to the user's Rime directory: Search uses its own private writable cache.
+  ClearErrors
+  ExecWait '"$WINDIR\System32\icacls.exe" "$R7" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q' $2
+  ${If} ${Errors}
+    WriteRegStr HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus" "runtime AppContainer ACL failed to start"
+    DetailPrint "Unable to prepare read-only access for Windows search."
+    RMDir /r /REBOOTOK "$R7"
+    Return
+  ${ElseIf} $2 != 0
+    WriteRegStr HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus" "runtime AppContainer ACL failed: $2"
+    DetailPrint "Unable to prepare read-only access for Windows search (exit $2)."
+    RMDir /r /REBOOTOK "$R7"
+    Return
+  ${EndIf}
+
   ${If} ${RunningX64}
     ${If} ${FileExists} "${KEYTAO_IME_STAGING_X86}\keytao_windows_ime.dll"
       DetailPrint "Installing the KeyTao x86 text service in the versioned runtime..."
@@ -128,6 +151,11 @@
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} ${RunningX64}
     SetRegView 64
+  ${EndIf}
+  ; An older installer must not remove another installation's handler.
+  ReadRegStr $R0 HKLM "${KEYTAO_APP_PROTOCOL_KEY}\shell\open\command" ""
+  ${If} $R0 == '$\"$INSTDIR\keytao-app.exe$\" $\"%1$\"'
+    DeleteRegKey HKLM "${KEYTAO_APP_PROTOCOL_KEY}"
   ${EndIf}
   ReadRegStr $R7 HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeRuntimeDir"
   ReadRegStr $3 HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeNativeDll"

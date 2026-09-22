@@ -636,7 +636,7 @@ impl App {
                 self.forward_unhandled_key(evdev_keycode, sym_raw);
                 return;
             }
-            self.update_ascii_mode(result.state.ascii_mode, qh);
+            self.update_ascii_mode(result.state.is_english_mode(), qh);
             self.apply_state_to_input_method(&result.state);
             self.show_panel(result.state, qh);
             return;
@@ -657,7 +657,7 @@ impl App {
         let ime_state = result.state;
 
         let consumed = result.accepted;
-        self.update_ascii_mode(ime_state.ascii_mode, qh);
+        self.update_ascii_mode(ime_state.is_english_mode(), qh);
 
         tracing::trace!(
             "ime state: consumed={} ascii_mode={} commit={:?} preedit={:?} candidates={}",
@@ -714,7 +714,7 @@ impl App {
                         "shift release processed: ascii_mode={}",
                         result.state.ascii_mode
                     );
-                    self.update_ascii_mode(result.state.ascii_mode, qh);
+                    self.update_ascii_mode(result.state.is_english_mode(), qh);
                 }
                 None => tracing::debug!("shift release: process_key_result returned None"),
             }

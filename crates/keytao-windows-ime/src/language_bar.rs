@@ -3,30 +3,34 @@
 use std::{cell::RefCell, rc::Rc};
 
 use windows::{
-    core::{implement, Error, IUnknown, Interface, Result, BSTR, HRESULT, PCWSTR},
+    core::{implement, w, Error, IUnknown, Interface, Result, BSTR, HRESULT, PCWSTR},
     Win32::{
-        Foundation::{BOOL, E_INVALIDARG, HINSTANCE, POINT, RECT},
+        Foundation::{BOOL, E_INVALIDARG, HINSTANCE, HWND, POINT, RECT},
         UI::{
             TextServices::{
                 ITfCompartmentMgr, ITfLangBarItem, ITfLangBarItemButton, ITfLangBarItemButton_Impl,
                 ITfLangBarItemMgr, ITfLangBarItemSink, ITfLangBarItem_Impl, ITfMenu, ITfSource,
                 ITfSource_Impl, ITfThreadMgr, TfLBIClick,
                 GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, TF_CONVERSIONMODE_NATIVE,
-                TF_LANGBARITEMINFO, TF_LBI_CLK_LEFT, TF_LBI_ICON, TF_LBI_STATUS,
+                TF_LANGBARITEMINFO, TF_LBI_CLK_LEFT, TF_LBI_CLK_RIGHT, TF_LBI_ICON, TF_LBI_STATUS,
                 TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY, TF_LBI_TEXT, TF_LBI_TOOLTIP,
             },
             WindowsAndMessaging::{
-                GetSystemMetrics, LoadImageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, SM_CXSMICON,
-                SM_CYSMICON,
+                AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, DestroyWindow,
+                GetForegroundWindow, GetSystemMetrics, LoadImageW, SetForegroundWindow,
+                TrackPopupMenuEx, HICON, HMENU, IMAGE_ICON, LR_DEFAULTCOLOR, MF_STRING,
+                SM_CXSMICON, SM_CYSMICON, SM_MENUDROPALIGNMENT, TPMPARAMS, TPM_NONOTIFY,
+                TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
     },
 };
 
 use crate::{
+    app_actions::{launch_action, AppAction},
     globals::{DllActivityGuard, DLL_INSTANCE},
     guard,
-    state::{set_ascii_mode_from_language_bar, WeakState},
+    state::{set_english_mode_from_language_bar, WeakState},
     CLSID_TEXT_SERVICE, GUID_LANG_BAR_INPUT_MODE, MODE_ICON_CHINESE_RESOURCE_ID,
     MODE_ICON_ENGLISH_RESOURCE_ID,
 };
@@ -35,16 +39,152 @@ const LANG_BAR_SINK_COOKIE: u32 = 0x4B54_4C42;
 const CONNECT_E_NOCONNECTION: HRESULT = HRESULT(0x8004_0200_u32 as i32);
 const CONNECT_E_ADVISELIMIT: HRESULT = HRESULT(0x8004_0201_u32 as i32);
 const CONNECT_E_CANNOTCONNECT: HRESULT = HRESULT(0x8004_0202_u32 as i32);
+const MENU_REDEPLOY: u32 = 1;
+const MENU_OPEN_APP: u32 = 2;
+const MODE_MENU_ITEMS: [(u32, &str); 2] =
+    [(MENU_REDEPLOY, "重新部署"), (MENU_OPEN_APP, "打开 App")];
 
 #[derive(Default)]
 struct LanguageBarModel {
     // The icon must already reflect the current mode when AddItem queries it.
-    ascii_mode: Option<bool>,
+    english_mode: Option<bool>,
     sink: Option<ITfLangBarItemSink>,
     notification_pending: bool,
     notifying: bool,
     notification_error: Option<HRESULT>,
     compartment_error: Option<HRESULT>,
+    menu_open: bool,
+}
+
+fn dispatch_menu_action(id: u32, launch: impl FnOnce(AppAction) -> Result<()>) -> Result<()> {
+    match id {
+        0 => Ok(()), // TrackPopupMenuEx returns zero when the menu is dismissed.
+        MENU_REDEPLOY => launch(AppAction::Redeploy),
+        MENU_OPEN_APP => launch(AppAction::OpenApp),
+        _ => Err(E_INVALIDARG.into()),
+    }
+}
+
+fn handle_button_click(
+    click: TfLBIClick,
+    toggle: impl FnOnce() -> Result<()>,
+    menu: impl FnOnce() -> Result<u32>,
+    launch: impl FnOnce(AppAction) -> Result<()>,
+) -> Result<()> {
+    if click == TF_LBI_CLK_LEFT {
+        toggle()
+    } else if click == TF_LBI_CLK_RIGHT {
+        dispatch_menu_action(menu()?, launch)
+    } else {
+        Ok(())
+    }
+}
+
+struct OwnedMenu(HMENU);
+
+impl Drop for OwnedMenu {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
+        }
+    }
+}
+
+fn create_context_menu() -> Result<OwnedMenu> {
+    let menu = OwnedMenu(unsafe { CreatePopupMenu()? });
+    for (id, label) in MODE_MENU_ITEMS {
+        let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+        unsafe { AppendMenuW(menu.0, MF_STRING, id as usize, PCWSTR(label.as_ptr()))? };
+    }
+    Ok(menu)
+}
+
+struct MenuOpenGuard(Rc<RefCell<LanguageBarModel>>);
+
+impl MenuOpenGuard {
+    fn begin(model: &Rc<RefCell<LanguageBarModel>>) -> Option<Self> {
+        if std::mem::replace(&mut model.borrow_mut().menu_open, true) {
+            return None;
+        }
+        Some(Self(Rc::clone(model)))
+    }
+}
+
+impl Drop for MenuOpenGuard {
+    fn drop(&mut self) {
+        self.0.borrow_mut().menu_open = false;
+    }
+}
+
+struct MenuOwner {
+    window: HWND,
+    previous_foreground: HWND,
+}
+
+impl Drop for MenuOwner {
+    fn drop(&mut self) {
+        unsafe {
+            // Do not take focus back if the user switched windows while the
+            // menu was open. Dispatch the selected App action only after this.
+            if GetForegroundWindow() == self.window && !self.previous_foreground.is_invalid() {
+                let _ = SetForegroundWindow(self.previous_foreground);
+            }
+            let _ = DestroyWindow(self.window);
+        }
+    }
+}
+
+fn show_context_menu(
+    model: &Rc<RefCell<LanguageBarModel>>,
+    point: &POINT,
+    area: Option<RECT>,
+) -> Result<u32> {
+    let Some(_open) = MenuOpenGuard::begin(model) else {
+        return Ok(0);
+    };
+    let menu = create_context_menu()?;
+    unsafe {
+        // Use our own hidden owner, not an editor's window procedure. A
+        // foreground owner lets a tray menu dismiss on an outside click.
+        // STATIC is a system class: no DLL callback remains after this call.
+        let owner = MenuOwner {
+            previous_foreground: GetForegroundWindow(),
+            window: CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("KeyTao input mode menu"),
+                WS_POPUP,
+                point.x,
+                point.y,
+                0,
+                0,
+                HWND::default(),
+                HMENU::default(),
+                HINSTANCE::default(),
+                None,
+            )?,
+        };
+        let _ = SetForegroundWindow(owner.window);
+        let mut flags = TPM_NONOTIFY | TPM_RETURNCMD | TPM_RIGHTBUTTON;
+        if GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0 {
+            flags |= TPM_RIGHTALIGN;
+        }
+        let params = area.map(|area| TPMPARAMS {
+            cbSize: std::mem::size_of::<TPMPARAMS>() as u32,
+            rcExclude: area,
+        });
+        // Only this native menu owns right-click display. BTN_MENU would add a
+        // separate TSF menu route / traditional language-bar dropdown arrow.
+        Ok(TrackPopupMenuEx(
+            menu.0,
+            flags.0,
+            point.x,
+            point.y,
+            owner.window,
+            params.as_ref().map(|value| value as *const _),
+        )
+        .0 as u32)
+    }
 }
 
 fn log_language_bar_error(event: &str, error: &Error) {
@@ -62,8 +202,8 @@ fn update_cached_mode(current: &mut Option<bool>, next: bool) -> bool {
     std::mem::replace(current, Some(next)) != Some(next)
 }
 
-fn load_mode_icon(instance: HINSTANCE, ascii_mode: bool) -> Result<HICON> {
-    let resource_id = if ascii_mode {
+fn load_mode_icon(instance: HINSTANCE, english_mode: bool) -> Result<HICON> {
+    let resource_id = if english_mode {
         MODE_ICON_ENGLISH_RESOURCE_ID
     } else {
         MODE_ICON_CHINESE_RESOURCE_ID
@@ -162,7 +302,7 @@ impl ITfLangBarItem_Impl for LanguageBarButton_Impl {
 
     fn GetTooltipString(&self) -> Result<BSTR> {
         guard(|| {
-            let label = if self.model.borrow().ascii_mode.unwrap_or(false) {
+            let label = if self.model.borrow().english_mode.unwrap_or(false) {
                 "KeyTao English input"
             } else {
                 "KeyTao Chinese input"
@@ -173,38 +313,49 @@ impl ITfLangBarItem_Impl for LanguageBarButton_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for LanguageBarButton_Impl {
-    fn OnClick(&self, click: TfLBIClick, _point: &POINT, _area: *const RECT) -> Result<()> {
+    fn OnClick(&self, click: TfLBIClick, point: &POINT, area: *const RECT) -> Result<()> {
         guard(|| {
-            if click == TF_LBI_CLK_LEFT {
-                let ascii_mode = !self.model.borrow().ascii_mode.unwrap_or(false);
-                if let Some(state) = self.state.upgrade() {
-                    set_ascii_mode_from_language_bar(&state, ascii_mode);
-                }
+            let result = handle_button_click(
+                click,
+                || {
+                    let english_mode = !self.model.borrow().english_mode.unwrap_or(false);
+                    if let Some(state) = self.state.upgrade() {
+                        set_english_mode_from_language_bar(&state, english_mode);
+                    }
+                    Ok(())
+                },
+                || show_context_menu(&self.model, point, unsafe { area.as_ref().copied() }),
+                launch_action,
+            );
+            if let Err(error) = &result {
+                log_language_bar_error("language_bar_menu", error);
             }
-            Ok(())
+            result
         })
     }
 
     fn InitMenu(&self, _menu: Option<&ITfMenu>) -> Result<()> {
+        // GUID_LBI_INPUTMODE stays a BTN_BUTTON: modern tray right-clicks are
+        // delivered to OnClick. Do not add a second shell-managed menu.
         guard(|| Ok(()))
     }
 
-    fn OnMenuSelect(&self, _id: u32) -> Result<()> {
-        guard(|| Ok(()))
+    fn OnMenuSelect(&self, id: u32) -> Result<()> {
+        guard(|| dispatch_menu_action(id, launch_action))
     }
 
     fn GetIcon(&self) -> Result<HICON> {
         guard(|| {
-            let ascii_mode = self.model.borrow().ascii_mode.unwrap_or(false);
+            let english_mode = self.model.borrow().english_mode.unwrap_or(false);
             let instance = DLL_INSTANCE.get().copied().unwrap_or_default();
-            load_mode_icon(HINSTANCE(instance as *mut _), ascii_mode)
+            load_mode_icon(HINSTANCE(instance as *mut _), english_mode)
         })
     }
 
     fn GetText(&self) -> Result<BSTR> {
         guard(|| {
             Ok(BSTR::from(
-                if self.model.borrow().ascii_mode.unwrap_or(false) {
+                if self.model.borrow().english_mode.unwrap_or(false) {
                     "\u{82f1}"
                 } else {
                     "\u{4e2d}"
@@ -213,6 +364,10 @@ impl ITfLangBarItemButton_Impl for LanguageBarButton_Impl {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "language_bar_menu_tests.rs"]
+mod menu_tests;
 
 impl ITfSource_Impl for LanguageBarButton_Impl {
     fn AdviseSink(
@@ -269,12 +424,12 @@ impl LanguageBarItem {
         thread_mgr: &ITfThreadMgr,
         client_id: u32,
         state: WeakState,
-        ascii_mode: bool,
+        english_mode: bool,
     ) -> Result<Self> {
         let manager: ITfLangBarItemMgr = thread_mgr.cast()?;
         let model = Rc::new(RefCell::new(LanguageBarModel {
             // AddItem can query the icon before it returns.
-            ascii_mode: Some(ascii_mode),
+            english_mode: Some(english_mode),
             sink: None,
             notification_pending: true,
             ..Default::default()
@@ -298,33 +453,33 @@ impl LanguageBarItem {
         })
     }
 
-    pub(crate) fn update_mode(&self, ascii_mode: bool) {
+    pub(crate) fn update_mode(&self, english_mode: bool) {
         let changed = {
             let mut model = self.model.borrow_mut();
-            update_cached_mode(&mut model.ascii_mode, ascii_mode)
+            update_cached_mode(&mut model.english_mode, english_mode)
         };
         if changed {
-            self.update_input_mode_compartment(ascii_mode);
+            self.update_input_mode_compartment(english_mode);
         }
         if changed || self.model.borrow().notification_pending {
             notify_model(&self.model);
         }
     }
 
-    pub(crate) fn refresh_mode(&self, ascii_mode: bool) {
-        update_cached_mode(&mut self.model.borrow_mut().ascii_mode, ascii_mode);
+    pub(crate) fn refresh_mode(&self, english_mode: bool) {
+        update_cached_mode(&mut self.model.borrow_mut().english_mode, english_mode);
         // A focus change or a delayed sink attachment needs a fresh snapshot
         // even when Rime stayed in the same Chinese/English mode.
-        self.update_input_mode_compartment(ascii_mode);
+        self.update_input_mode_compartment(english_mode);
         notify_model(&self.model);
     }
 
-    fn update_input_mode_compartment(&self, ascii_mode: bool) {
+    fn update_input_mode_compartment(&self, english_mode: bool) {
         let result = (|| -> Result<()> {
             let manager = self.thread_mgr.cast::<ITfCompartmentMgr>()?;
             let compartment =
                 unsafe { manager.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)? };
-            let flags = if ascii_mode {
+            let flags = if english_mode {
                 0
             } else {
                 TF_CONVERSIONMODE_NATIVE as i32
@@ -404,7 +559,7 @@ mod tests {
             if let Some(model) = self.model.upgrade() {
                 self.observations
                     .borrow_mut()
-                    .push((flags, model.borrow().ascii_mode.unwrap_or(false)));
+                    .push((flags, model.borrow().english_mode.unwrap_or(false)));
                 if self.reenter_once.replace(false) {
                     notify_model(&model);
                 }
@@ -435,14 +590,14 @@ mod tests {
 
     #[test]
     fn input_mode_publishes_initial_chinese_then_only_changes() {
-        let mut ascii_mode = None;
-        assert!(update_cached_mode(&mut ascii_mode, false));
-        assert!(!update_cached_mode(&mut ascii_mode, false));
-        assert!(update_cached_mode(&mut ascii_mode, true));
-        assert_eq!(ascii_mode, Some(true));
-        assert!(!update_cached_mode(&mut ascii_mode, true));
-        assert!(update_cached_mode(&mut ascii_mode, false));
-        assert_eq!(ascii_mode, Some(false));
+        let mut english_mode = None;
+        assert!(update_cached_mode(&mut english_mode, false));
+        assert!(!update_cached_mode(&mut english_mode, false));
+        assert!(update_cached_mode(&mut english_mode, true));
+        assert_eq!(english_mode, Some(true));
+        assert!(!update_cached_mode(&mut english_mode, true));
+        assert!(update_cached_mode(&mut english_mode, false));
+        assert_eq!(english_mode, Some(false));
     }
 
     #[test]
@@ -457,7 +612,7 @@ mod tests {
             assert_ne!(info.dwStyle & TF_LBI_STYLE_BTN_BUTTON, 0);
             assert_eq!(item.GetStatus().unwrap() & TF_LBI_STATUS_HIDDEN, 0);
             assert_eq!(button.GetText().unwrap().to_string(), "中");
-            model.borrow_mut().ascii_mode = Some(true);
+            model.borrow_mut().english_mode = Some(true);
             assert_eq!(button.GetText().unwrap().to_string(), "英");
         }
     }
@@ -486,7 +641,7 @@ mod tests {
     fn sink_reconnection_replays_current_mode_without_notifying_inside_advise() {
         let (model, button) = button();
         let source: ITfSource = button.cast().unwrap();
-        model.borrow_mut().ascii_mode = Some(true);
+        model.borrow_mut().english_mode = Some(true);
         notify_model(&model);
         assert!(model.borrow().notification_pending);
         let first = Rc::new(RefCell::new(Vec::new()));
@@ -498,7 +653,7 @@ mod tests {
         assert!(!model.borrow().notification_pending);
         unsafe { source.UnadviseSink(cookie).unwrap() };
 
-        model.borrow_mut().ascii_mode = Some(false);
+        model.borrow_mut().english_mode = Some(false);
         notify_model(&model);
         let second = Rc::new(RefCell::new(Vec::new()));
         let cookie = advise_recording_sink(&source, &model, &second, false);
@@ -529,9 +684,9 @@ mod tests {
     #[test]
     fn mode_icons_are_individually_owned_by_the_caller() {
         let instance = unsafe { GetModuleHandleW(None).unwrap() }.into();
-        for ascii_mode in [false, true] {
-            let first = load_mode_icon(instance, ascii_mode).unwrap();
-            let second = load_mode_icon(instance, ascii_mode).unwrap();
+        for english_mode in [false, true] {
+            let first = load_mode_icon(instance, english_mode).unwrap();
+            let second = load_mode_icon(instance, english_mode).unwrap();
             assert_ne!(first, second, "GetIcon must not return a shared icon");
             unsafe {
                 DestroyIcon(first).unwrap();

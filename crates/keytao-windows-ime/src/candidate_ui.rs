@@ -296,6 +296,10 @@ impl Drop for CandidateUiManager {
 }
 
 #[cfg(test)]
+#[path = "candidate_uiless_tests.rs"]
+mod uiless_tests;
+
+#[cfg(test)]
 mod tests {
     use super::ui_state_changed;
     use keytao_core::{Candidate, ImeState};

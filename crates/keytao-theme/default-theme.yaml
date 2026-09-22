@@ -29,6 +29,7 @@ panel:
   paddingX: 10
   paddingY: 10
   gap: 4
+  preeditGap: 10
   minWidth: 128
   maxWidth: 320
   maxHeight: 460

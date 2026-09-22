@@ -102,7 +102,7 @@ impl InputContext {
 
     /// Show the mode Rime is actually in, not the one this context last saw.
     async fn publish_current_mode(&self) {
-        let ascii_mode = self.session.state().ascii_mode;
+        let ascii_mode = self.session.state().is_english_mode();
         self.mode.adopt(ascii_mode);
         self.publish_mode_property(ascii_mode).await;
     }
@@ -131,7 +131,7 @@ impl InputContext {
     }
 
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
-        let ascii_mode = ime_state.ascii_mode;
+        let ascii_mode = ime_state.is_english_mode();
         let has_candidates = !ime_state.candidates.is_empty();
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {

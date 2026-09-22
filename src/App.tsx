@@ -200,6 +200,7 @@ interface LocalSchemaInfo {
 }
 
 interface AddonSchemaStatus {
+  english_available?: boolean
   installed: boolean
   deployed: boolean
   version: string
@@ -431,6 +432,7 @@ export default function App() {
   const [windowsImeStatus, setWindowsImeStatus] = useState<WindowsImeStatus | null>(null)
   const [windowsImeError, setWindowsImeError] = useState<string | null>(null)
   const [isManagingWindowsIme, setIsManagingWindowsIme] = useState(false)
+  const [hasCheckedWindowsRegistration, setHasCheckedWindowsRegistration] = useState(false)
   const [macosImeStatus, setMacosImeStatus] = useState<MacosImeStatus | null>(null)
   const [macosImeError, setMacosImeError] = useState<string | null>(null)
   const [androidImeStatus, setAndroidImeStatus] = useState<AndroidImeStatus | null>(null)
@@ -458,6 +460,13 @@ export default function App() {
 
   // Local schema info
   const [localSchemaInfo, setLocalSchemaInfo] = useState<LocalSchemaInfo | null>(null)
+  const [hasCheckedLocalSchema, setHasCheckedLocalSchema] = useState(false)
+  const [localSchemaCheckError, setLocalSchemaCheckError] = useState<string | null>(null)
+  const [desktopEnglishMode, setDesktopEnglishMode] = useState<MobileImeEnglishMode>("ascii")
+  const [isSavingEnglishMode, setIsSavingEnglishMode] = useState(false)
+  const [wanxiangStatus, setWanxiangStatus] = useState<AddonSchemaStatus | null>(null)
+  const [wanxiangError, setWanxiangError] = useState<string | null>(null)
+  const [isManagingWanxiang, setIsManagingWanxiang] = useState(false)
   const [addonSchemaStatus, setAddonSchemaStatus] = useState<AddonSchemaStatus | null>(null)
   const [addonSchemaError, setAddonSchemaError] = useState<string | null>(null)
   const [isManagingAddonSchema, setIsManagingAddonSchema] = useState(false)
@@ -475,6 +484,11 @@ export default function App() {
   // Deploy
   const [isDeploying, setIsDeploying] = useState(false)
   const [deploySteps, setDeploySteps] = useState<DeployStep[]>([])
+  const deployInFlightRef = useRef(false)
+  const windowsActionInFlightRef = useRef(false)
+  const windowsActionEligibleRef = useRef(false)
+  const [windowsActionsListening, setWindowsActionsListening] = useState(false)
+  const [windowsActionSignal, setWindowsActionSignal] = useState(0)
 
   // Log buffer
   const [logBuffer, setLogBuffer] = useState<string[]>([])
@@ -589,6 +603,10 @@ export default function App() {
     const os = map[p] ?? "unknown"
     setOsType(os)
     if (hasSystemIme(os)) {
+      invoke<AddonSchemaStatus>("wanxiang_status").then(setWanxiangStatus).catch((e) => setWanxiangError(String(e)))
+      if (os !== "android" && os !== "ios") {
+        invoke<MobileImeEnglishMode>("get_desktop_english_mode").then(setDesktopEnglishMode).catch((e) => setImeUiError(String(e)))
+      }
       setActiveTab("ime")
     } else {
       setActiveTab("extension")
@@ -610,7 +628,8 @@ export default function App() {
 
     invoke<LocalSchemaInfo>("check_local_schema")
       .then(setLocalSchemaInfo)
-      .catch(() => { })
+      .catch((e) => setLocalSchemaCheckError(String(e)))
+      .finally(() => setHasCheckedLocalSchema(true))
 
     invoke<AddonSchemaStatus>("addon_schema_status", { id: "easy_en" })
       .then(setAddonSchemaStatus)
@@ -626,6 +645,12 @@ export default function App() {
         .catch((e) => setLinuxImeError(String(e)))
     }
     if (os === "windows") {
+      setIsManagingWindowsIme(true)
+      invoke("windows_prepare_search_schemas").catch((e) => {
+        const message = `系统搜索框方案准备失败，可在方案页重新安装主方案重试：${String(e)}`
+        setImeUiError(message)
+        addLogs([`[WINDOWS SEARCH] ${message}`])
+      })
       void (async () => {
         const unlisten = await listen<WindowsImeStatus>("windows-ime-status", (e) => {
           setWindowsImeStatus(e.payload)
@@ -650,6 +675,8 @@ export default function App() {
           setWindowsImeError(String(e))
           setIsManagingWindowsIme(false)
         }
+      }).finally(() => {
+        if (!windowsImeDisposed) setHasCheckedWindowsRegistration(true)
       })
     }
     if (os === "macos") {
@@ -680,6 +707,32 @@ export default function App() {
       unlistenWindowsImeRef.current?.()
     }
   }, [])
+
+  useEffect(() => {
+    if (osType !== "windows") return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen("windows-ime-action", () => {
+      setActiveTab("ime")
+      setWindowsActionSignal((value) => value + 1)
+    }).then((stop) => {
+      if (disposed) {
+        stop()
+        return
+      }
+      unlisten = stop
+      // Query the backend only after listening: requests from before the
+      // webview existed remain pending, and later requests send a wakeup.
+      setWindowsActionsListening(true)
+      setWindowsActionSignal((value) => value + 1)
+    }).catch((e) => {
+      if (!disposed) setWindowsImeError(String(e))
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [osType])
 
   useEffect(() => {
     if (osType !== "android") return
@@ -781,7 +834,32 @@ export default function App() {
   const windowsRegistrationBusy = osType === "windows" && (
     isManagingWindowsIme || windowsImeStatus?.registration_busy === true
   )
-  const isBusy = isInstalling || isDeploying || isManagingAddonSchema || isCheckingAndroidStoragePermission || windowsRegistrationBusy
+  const isBusy = isInstalling || isDeploying || isManagingAddonSchema || isManagingWanxiang || isCheckingAndroidStoragePermission || windowsRegistrationBusy
+  windowsActionEligibleRef.current = !isBusy && !isSyncingUserDictionary && !isInstallingExt && hasCheckedLocalSchema && hasCheckedWindowsRegistration
+
+  useEffect(() => {
+    if (osType !== "windows" || !windowsActionsListening || !windowsActionEligibleRef.current || windowsActionInFlightRef.current) return
+    let disposed = false
+    let handled = false
+    windowsActionInFlightRef.current = true
+    void (async () => {
+      // Peeking is non-destructive, including when StrictMode tears down an
+      // effect while this IPC is pending. Only starting deployment claims it.
+      const id = await invoke<number | null>("windows_pending_ime_action")
+      if (disposed || id === null || !windowsActionEligibleRef.current || deployInFlightRef.current) return
+      setActiveTab("ime")
+      handled = await handleDeploy(id)
+      if (handled) await invoke("windows_dismiss_ime_action", { id })
+    })().catch((e) => {
+      setDeploySteps([{ msg: String(e), error: true }])
+    }).finally(() => {
+      windowsActionInFlightRef.current = false
+      // Revisit a wakeup that arrived during the previous effect/deployment.
+      if (disposed || handled) setWindowsActionSignal((value) => value + 1)
+    })
+    return () => { disposed = true }
+  }, [osType, windowsActionsListening, windowsActionSignal, isBusy, isSyncingUserDictionary, isInstallingExt, hasCheckedLocalSchema, hasCheckedWindowsRegistration])
+
   const systemImeAvailable = hasSystemIme(osType)
   const isMobilePlatform = osType === "android" || osType === "ios"
   const canOpenDefaultDir = osType !== "android"
@@ -792,12 +870,42 @@ export default function App() {
   const longPressDelayMs = longPressDelayDraft ?? androidImeInputSettings?.longPressDelayMs ?? 300
   const keyboardHeightScale = keyboardHeightScaleDraft ?? androidImeInputSettings?.keyboardHeightScale ?? 100
   const deleteSpeed = androidImeInputSettings?.deleteSpeed ?? "standard"
-  const englishMode = androidImeInputSettings?.englishMode ?? "ascii"
+  const englishMode = isMobilePlatform ? androidImeInputSettings?.englishMode ?? "ascii" : desktopEnglishMode
   // An English schema shipped inside the installed scheme package (e.g. xmjd6's
   // `english`) counts as available, same as the bundled easy_en add-on.
   const packageShipsEnglishSchema = (localSchemaInfo?.schemas ?? []).includes("english")
   const englishAddonReady =
-    (addonSchemaStatus?.installed === true && addonSchemaStatus.deployed === true) || packageShipsEnglishSchema
+    addonSchemaStatus?.english_available === true || (addonSchemaStatus?.installed === true && addonSchemaStatus.deployed === true) || packageShipsEnglishSchema
+  const EnglishModeSelector = (
+    <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="text-muted-foreground">英文模式</span>
+        <span className="text-xs text-muted-foreground/80">
+          {englishMode === "schema" ? "English 方案" : "ASCII 模式"}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {(["ascii", "schema"] as const).map((mode) => (
+          <Button
+            key={mode}
+            type="button"
+            variant={englishMode === mode ? "default" : "outline"}
+            size="sm"
+            onClick={() => handleSetEnglishMode(mode)}
+            disabled={isSavingAndroidImeInputSettings || isSavingEnglishMode || isBusy || (mode === "schema" && !englishAddonReady)}
+            className="h-8 text-xs"
+          >
+            {mode === "schema" ? "English 方案" : "ASCII 模式"}
+          </Button>
+        ))}
+      </div>
+      {!englishAddonReady && (
+        <div className="text-[11px] text-muted-foreground/80">
+          请先在方案页安装附加方案 English
+        </div>
+      )}
+    </div>
+  )
   const backspaceGestureMode = androidImeInputSettings?.backspaceGestureMode ?? "immediate"
   const swipeThresholdDp = swipeThresholdDraft ?? androidImeInputSettings?.swipeThresholdDp ?? 34
   const flickKeysEnabled = androidImeInputSettings?.flickKeysEnabled ?? true
@@ -959,9 +1067,11 @@ export default function App() {
       const [info] = await Promise.all([
         invoke<LocalSchemaInfo>("check_local_schema"),
         refreshAddonSchemaStatus(),
+        invoke<AddonSchemaStatus>("wanxiang_status").then(setWanxiangStatus).catch((e) => setWanxiangError(String(e))),
       ])
       setLocalSchemaInfo(info)
-    } catch { }
+      setLocalSchemaCheckError(null)
+    } catch (e) { setLocalSchemaCheckError(String(e)) }
     finally { setIsCheckingLocal(false) }
   }
 
@@ -1018,24 +1128,26 @@ export default function App() {
     }
   }
 
-  async function handleDeploy() {
+  async function handleDeploy(imeActionId?: number): Promise<boolean> {
+    if (deployInFlightRef.current) return false
     if (!localSchemaInfo?.installed) {
-      setDeploySteps([{ msg: "未安装方案，请先安装", error: true }])
-      return
+      setDeploySteps([{ msg: localSchemaCheckError ? `检查本地方案失败：${localSchemaCheckError}` : "未安装方案，请先安装", error: true }])
+      return true
     }
+    deployInFlightRef.current = true
     setIsDeploying(true)
     const steps: DeployStep[] = [{ msg: "正在部署 librime..." }]
     setDeploySteps([...steps])
 
-    unlistenDeployRef.current?.()
-    const unlisten = await listen<string>("deploy-progress", (e) => {
-      steps.push({ msg: e.payload })
-      setDeploySteps([...steps])
-    })
-    unlistenDeployRef.current = unlisten
-
     try {
-      const result = await invoke<DeployResult>("rime_deploy_default")
+      unlistenDeployRef.current?.()
+      unlistenDeployRef.current = await listen<string>("deploy-progress", (e) => {
+        steps.push({ msg: e.payload })
+        setDeploySteps([...steps])
+      })
+      const result = imeActionId === undefined
+        ? await invoke<DeployResult>("rime_deploy_default")
+        : await invoke<DeployResult>("windows_redeploy_ime_action", { id: imeActionId })
       steps.push({ msg: result.message, done: true })
       setDeploySteps([...steps])
       addLogs([`[DEPLOY] ${result.message}`])
@@ -1055,7 +1167,44 @@ export default function App() {
       setDeploySteps([...steps])
       addLogs([`[DEPLOY ERROR] ${msg}`])
     } finally {
+      unlistenDeployRef.current?.()
+      unlistenDeployRef.current = null
+      deployInFlightRef.current = false
       setIsDeploying(false)
+    }
+    return true
+  }
+
+  async function handleSetEnglishMode(mode: MobileImeEnglishMode) {
+    if (isMobilePlatform) {
+      await handleUpdateAndroidImeInputSettings({ englishMode: mode })
+      return
+    }
+    setIsSavingEnglishMode(true)
+    setImeUiError(null)
+    try {
+      setDesktopEnglishMode(await invoke<MobileImeEnglishMode>("set_desktop_english_mode", { mode }))
+    } catch (e) {
+      setImeUiError(String(e))
+    } finally {
+      setIsSavingEnglishMode(false)
+    }
+  }
+
+  async function handleManageWanxiang(installed: boolean) {
+    if (isBusy) return
+    setIsManagingWanxiang(true)
+    setWanxiangError(null)
+    setInstallProgress(null)
+    try {
+      setWanxiangStatus(await invoke<AddonSchemaStatus>("manage_wanxiang", { installed }))
+      await handleCheckLocalSchema()
+      addLogs([installed ? "[ADDON] 万象拼音基础词库已安装并部署" : "[ADDON] 万象拼音已卸载"])
+    } catch (e) {
+      await handleCheckLocalSchema()
+      setWanxiangError(String(e))
+    } finally {
+      setIsManagingWanxiang(false)
     }
   }
 
@@ -1091,6 +1240,8 @@ export default function App() {
       await handleCheckLocalSchema()
       if (isMobilePlatform) {
         await refreshAndroidImeInputSettings()
+      } else {
+        setDesktopEnglishMode(await invoke<MobileImeEnglishMode>("get_desktop_english_mode"))
       }
     } catch (e) {
       const message = String(e)
@@ -1614,7 +1765,7 @@ export default function App() {
         onShowPicker={handleShowAndroidImePicker}
         onOpenStorageSettings={handleOpenAndroidStoragePermissionSettings}
         onInstallSchema={handleInstall}
-        onDeploySchema={handleDeploy}
+        onDeploySchema={() => { void handleDeploy() }}
         onRefresh={refreshAndroidSetupStatus}
       />
     )
@@ -1905,7 +2056,7 @@ export default function App() {
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-semibold flex items-center gap-2">
                     <Palette className="h-4 w-4 text-muted-foreground" />
-                    输入法外观
+                    输入法设置
                     {isSavingImeUiSettings && (
                       <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-muted-foreground" />
                     )}
@@ -1967,7 +2118,8 @@ export default function App() {
                       })}
                     </div>
                   )}
-                  {osType === "windows" && (
+                  {EnglishModeSelector}
+                  {(osType === "windows" || osType === "macos") && (
                     <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
                       <div className="min-w-0 space-y-1 text-xs">
                         <div className="flex items-center gap-2">
@@ -2093,34 +2245,7 @@ export default function App() {
                       aria-label="长按延迟"
                     />
                   </div>
-                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs">
-                      <span className="text-muted-foreground">英文模式</span>
-                      <span className="text-xs text-muted-foreground/80">
-                        {englishMode === "schema" ? "English 方案" : "ASCII 模式"}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {(["ascii", "schema"] as const).map((mode) => (
-                        <Button
-                          key={mode}
-                          type="button"
-                          variant={englishMode === mode ? "default" : "outline"}
-                          size="sm"
-                          onClick={() => handleUpdateAndroidImeInputSettings({ englishMode: mode })}
-                          disabled={isSavingAndroidImeInputSettings || (mode === "schema" && !englishAddonReady)}
-                          className="h-8 text-xs"
-                        >
-                          {mode === "schema" ? "English 方案" : "ASCII 模式"}
-                        </Button>
-                      ))}
-                    </div>
-                    {!englishAddonReady && (
-                      <div className="text-[11px] text-muted-foreground/80">
-                        请先在方案页安装附加方案 English
-                      </div>
-                    )}
-                  </div>
+                  {EnglishModeSelector}
                   <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <div className="flex min-w-0 items-center gap-2">
@@ -2592,7 +2717,7 @@ export default function App() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={handleDeploy}
+                            onClick={() => { void handleDeploy() }}
                             disabled={isBusy || !localSchemaInfo?.installed}
                             className="gap-1.5"
                             title={localSchemaInfo?.installed ? "部署当前方案" : "请先安装方案"}
@@ -2685,6 +2810,33 @@ export default function App() {
                       <span>{addonSchemaError}</span>
                     </div>
                   )}
+                  <div className="space-y-3 rounded-lg border border-border bg-muted/30 px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium">万象拼音 · 基础词库</div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {!wanxiangStatus ? "检测中" : !wanxiangStatus.installed ? "未安装" : !wanxiangStatus.deployed ? "已安装 · 未部署" : `已部署 v${wanxiangStatus.version}`}
+                        </p>
+                      </div>
+                      <Button size="sm" disabled={isBusy || !localSchemaInfo?.installed} title={localSchemaInfo?.installed ? "安装并部署万象拼音基础词库" : "请先安装主方案"} onClick={() => void handleManageWanxiang(true)}>
+                        {isManagingWanxiang ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                        {wanxiangStatus?.installed ? "重新部署" : "安装"}
+                      </Button>
+                      {wanxiangStatus?.installed && (
+                        <Button variant="outline" size="sm" disabled={isBusy} onClick={() => void handleManageWanxiang(false)}>卸载</Button>
+                      )}
+                    </div>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      下载约 35 MB，支持所有平台。不含额外语法模型和 Lua 扩展。安装后可在输入法方案菜单中选择“万象拼音”，保留现有方案和个人词库。
+                    </p>
+                    {isManagingWanxiang && installProgress && (
+                      <div className="space-y-1.5">
+                        <Progress value={installProgress.percent} className="h-1.5" />
+                        <p className="text-xs text-muted-foreground">{installProgress.message}</p>
+                      </div>
+                    )}
+                    {wanxiangError && <p className="text-xs text-destructive">{wanxiangError}</p>}
+                  </div>
                 </CardContent>
               </Card>
             )}

@@ -77,6 +77,7 @@ struct ImeTheme: Codable {
         var colorScheme: ThemeColorScheme
         var effectiveColorScheme: EffectiveThemeColorScheme
         var accentColor: ThemeColor?
+        var embeddedComposition: Bool
     }
 
     struct Font: Codable {
@@ -97,6 +98,7 @@ struct ImeTheme: Codable {
         var paddingX: CGFloat
         var paddingY: CGFloat
         var gap: CGFloat
+        var preeditGap: CGFloat
         var minWidth: CGFloat
         var maxWidth: CGFloat
         var maxHeight: CGFloat
@@ -165,7 +167,8 @@ struct ImeTheme: Codable {
             ui: Ui(
                 colorScheme: .auto,
                 effectiveColorScheme: .light,
-                accentColor: nil
+                accentColor: nil,
+                embeddedComposition: false
             ),
             font: Font(
                 family: nil,
@@ -184,6 +187,7 @@ struct ImeTheme: Codable {
                 paddingX: 10,
                 paddingY: 10,
                 gap: 4,
+                preeditGap: 10,
                 minWidth: 128,
                 maxWidth: 320,
                 maxHeight: 460,

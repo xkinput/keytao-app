@@ -623,7 +623,7 @@ impl App {
                 self.forward_key_press(evdev_keycode);
                 return;
             }
-            self.update_ascii_mode(result.state.ascii_mode, qh);
+            self.update_ascii_mode(result.state.is_english_mode(), qh);
             self.commit_state_to_context(&result.state);
             self.update_kimpanel(&result.state);
             self.show_panel(result.state, qh);
@@ -636,7 +636,7 @@ impl App {
         };
         let ime_state = result.state;
 
-        self.update_ascii_mode(ime_state.ascii_mode, qh);
+        self.update_ascii_mode(ime_state.is_english_mode(), qh);
 
         if result.accepted {
             self.commit_state_to_context(&ime_state);
@@ -667,7 +667,7 @@ impl App {
         let sym_raw = self.key_sym(evdev_keycode);
         if is_shift_key(sym_raw) && self.session.input_policy().composing {
             if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
-                self.update_ascii_mode(result.state.ascii_mode, qh);
+                self.update_ascii_mode(result.state.is_english_mode(), qh);
             }
         }
         // Only keys whose press reached the client may deliver a release, or

@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+mod wanxiang;
+#[cfg(target_os = "windows")]
+mod windows_app_actions;
+#[cfg(target_os = "windows")]
+mod windows_public_schemas;
+
 #[cfg(target_os = "android")]
 use jni::{
     objects::{JObject, JString},
@@ -139,6 +145,7 @@ pub struct AddonSchemaStatus {
     pub installed: bool,
     pub deployed: bool,
     pub version: String,
+    pub english_available: bool,
 }
 
 const API_BASE: &str = "https://keytao.rea.ink";
@@ -2203,6 +2210,60 @@ fn windows_register_ime_blocking(app: &AppHandle) -> Result<WindowsImeStatus, St
 
 #[tauri::command]
 #[cfg(target_os = "windows")]
+async fn windows_prepare_search_schemas(app: AppHandle) -> Result<(), String> {
+    static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = PREPARING.lock().await;
+    if windows_public_schemas::has_schemas() {
+        return Ok(());
+    }
+    let root = default_keytao_user_root(&app)?;
+    let installed = keytao_core::schema_install_state(&root);
+    if !installed.installed {
+        return Ok(());
+    }
+    // Infer the public distribution from schema IDs only. Personal source and
+    // learned dictionaries must never be copied into the sandbox-readable seed.
+    let scheme = installed.schemas.iter().find_map(|id| {
+        if id.starts_with("xmjd6") { Some("xmjd") }
+        else if id.starts_with("txjx") { Some("txjx") }
+        else if id.starts_with("keydo") { Some("keydo") }
+        else if id.starts_with("keytao") { Some("keytao") }
+        else { None }
+    }).ok_or("无法识别公共方案来源，请在方案页重新安装主方案以启用系统搜索框输入")?;
+    let _ = app.emit("install-progress", InstallProgress {
+        stage: "windows-search".into(), percent: 0,
+        message: "正在准备 Windows 系统搜索框使用的公共方案…".into(),
+    });
+    let release = fetch_scheme_release(app.clone(), scheme.into()).await?;
+    let response = build_client(&app)?.get(&release.download_url)
+        .timeout(std::time::Duration::from_secs(180)).send().await
+        .map_err(|e| format!("下载搜索框公共方案失败：{e}"))?
+        .error_for_status().map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > 128 * 1024 * 1024 {
+            return Err("搜索框公共方案压缩包过大".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    windows_public_schemas::publish_package(&bytes)?;
+    if addon_schema_status_at(&root, EASY_EN_ADDON_ID).installed {
+        publish_windows_english_addon(&app)?;
+    }
+    windows_public_schemas::publish_english_settings(
+        keytao_core::english_mode::read_english_mode(&root) == keytao_core::english_mode::EnglishMode::Schema,
+    )?;
+    let _ = app.emit("install-progress", InstallProgress {
+        stage: "done".into(), percent: 100,
+        message: "Windows 系统搜索框公共方案已就绪".into(),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
 async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatus, String> {
     let status_app = app.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
@@ -3474,6 +3535,12 @@ async fn smart_install<R: tauri::Runtime>(
             .into_iter()
             .map(|path| format!("[INVALIDATED] {path}")),
     );
+    #[cfg(target_os = "windows")]
+    if keytao_core::default_user_data_dir().as_ref() == Some(&dest) {
+        // Publish the original package, before any user customizations were merged.
+        windows_public_schemas::publish_package(&zip_bytes)?;
+        logs.push("[WINDOWS] 已更新系统搜索框使用的公共方案".into());
+    }
     std::fs::remove_file(&zip_path).ok();
     emit("done", 100, "安装完成！");
 
@@ -6255,6 +6322,24 @@ fn addon_schema_source_files(id: &str) -> [(&'static str, String); 4] {
     ]
 }
 
+fn deployed_english_schema_available(root: &Path) -> bool {
+    let schemas = ["default.custom.yaml", "default-custom.yaml", "default.yaml", "build/default.yaml"]
+        .into_iter()
+        .filter_map(|name| std::fs::read_to_string(root.join(name)).ok())
+        .map(|text| parse_schema_list(&text))
+        .find(|schemas| !schemas.is_empty())
+        .unwrap_or_default();
+    schemas.iter().filter(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')))
+        .any(|id| {
+            let path = root.join("build").join(format!("{id}.schema.yaml"));
+            let Some(schema) = std::fs::read(&path).ok()
+                .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok()) else { return false; };
+            let name = schema.get("schema").and_then(|v| v.get("name"))
+                .and_then(serde_yaml::Value::as_str).unwrap_or("");
+            keytao_core::english_mode::is_english_schema(id, name)
+        })
+}
+
 fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
     let configured = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
@@ -6277,6 +6362,7 @@ fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
         installed,
         deployed,
         version: EASY_EN_ADDON_VERSION.into(),
+        english_available: deployed_english_schema_available(root),
     }
 }
 
@@ -6420,6 +6506,18 @@ fn remove_path_if_present(path: &Path) -> Result<(), String> {
     .map_err(|error| format!("删除 {} 失败: {error}", path.display()))
 }
 
+#[cfg(target_os = "windows")]
+fn publish_windows_english_addon(app: &AppHandle) -> Result<(), String> {
+    let source = bundled_addon_schema_dir(app, EASY_EN_ADDON_ID)?;
+    let files = addon_schema_source_files(EASY_EN_ADDON_ID).into_iter()
+        .map(|(source_relative, destination)| {
+            std::fs::read(source.join(source_relative))
+                .map(|bytes| (PathBuf::from(destination), bytes))
+                .map_err(|e| e.to_string())
+        }).collect::<Result<Vec<_>, _>>()?;
+    windows_public_schemas::publish_files(&files)
+}
+
 fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
     for (_, relative) in addon_schema_source_files(id) {
         remove_path_if_present(&root.join(relative))?;
@@ -6469,7 +6567,108 @@ fn reset_mobile_english_mode(root: &Path) -> Result<bool, String> {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
-    Ok(false)
+    use keytao_core::english_mode::{read_english_mode, write_english_mode, EnglishMode};
+    let changed = read_english_mode(_root) != EnglishMode::Ascii;
+    if changed {
+        write_english_mode(_root, EnglishMode::Ascii)?;
+    }
+    Ok(changed)
+}
+
+#[tauri::command]
+fn wanxiang_status(app: AppHandle) -> Result<wanxiang::Status, String> {
+    Ok(wanxiang::status_at(&default_keytao_user_root(&app)?))
+}
+
+#[tauri::command]
+async fn manage_wanxiang(app: AppHandle, installed: bool) -> Result<wanxiang::Status, String> {
+    let root = default_keytao_user_root(&app)?;
+    let config_path = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+        .ok_or("请先安装主方案")?;
+    let previous_config = std::fs::read(&config_path).map_err(|e| e.to_string())?;
+    let receipt = if installed {
+        let progress_app = app.clone();
+        wanxiang::install(&root, move |percent, message| {
+            let _ = progress_app.emit("install-progress", InstallProgress {
+                stage: "wanxiang-download".into(),
+                percent: u32::from(percent),
+                message: message.into(),
+            });
+        }).await?
+    } else {
+        wanxiang::uninstall(&root)?
+    };
+    let deploy_result = async {
+        write_addon_schema_list(&root, wanxiang::SCHEMA_ID, installed)?;
+        rime_deploy_default(app.clone()).await?;
+        if installed && !wanxiang::status_at(&root).deployed {
+            return Err("万象拼音部署产物缺失".to_string());
+        }
+        #[cfg(target_os = "windows")]
+        if installed {
+            windows_public_schemas::publish_source_files(&receipt.public_source_files())?;
+        } else {
+            windows_public_schemas::remove_schema(wanxiang::SCHEMA_ID, &[])?;
+        }
+        Ok(())
+    }.await;
+    if let Err(error) = deploy_result {
+        let rollback = receipt.rollback();
+        let restore = write_file_atomic(&config_path, &previous_config);
+        if let Err(rollback_error) = rollback {
+            return Err(format!("{error}；恢复词库失败：{rollback_error}"));
+        }
+        restore.map_err(|e| format!("{error}；恢复方案列表失败：{e}"))?;
+        if let Err(restore_error) = rime_deploy_default(app.clone()).await {
+            return Err(format!("{error}；已恢复文件，请重新部署：{restore_error}"));
+        }
+        return Err(error);
+    }
+    receipt.finish()?;
+    if !installed {
+        for extension in ["schema.yaml", "table.bin", "prism.bin", "reverse.bin"] {
+            let path = root.join("build").join(format!("wanxiang.{extension}"));
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::info!(%error, path = %path.display(), "unused Wanxiang build cache remains locked");
+                }
+            }
+        }
+    }
+    let _ = app.emit("install-progress", InstallProgress {
+        stage: "done".into(),
+        percent: 100,
+        message: if installed { "万象拼音基础词库已安装并部署" } else { "万象拼音已卸载，保留用户自定义和学习记录" }.into(),
+    });
+    Ok(wanxiang::status_at(&root))
+}
+
+#[tauri::command]
+fn get_desktop_english_mode(app: AppHandle) -> Result<keytao_core::english_mode::EnglishMode, String> {
+    let root = default_keytao_user_root(&app)?;
+    Ok(keytao_core::english_mode::read_english_mode(&root))
+}
+
+#[tauri::command]
+async fn set_desktop_english_mode(
+    app: AppHandle,
+    mode: keytao_core::english_mode::EnglishMode,
+) -> Result<keytao_core::english_mode::EnglishMode, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use keytao_core::english_mode::{write_english_mode, EnglishMode};
+        let root = default_keytao_user_root(&app)?;
+        if mode == EnglishMode::Schema && !deployed_english_schema_available(&root) {
+            return Err("请先安装并部署附加方案 English".into());
+        }
+        #[cfg(target_os = "windows")]
+        windows_public_schemas::publish_english_settings(mode == EnglishMode::Schema)?;
+        write_english_mode(&root, mode)?;
+        write_default_reload_stamp(&app, &root)?;
+        Ok(mode)
+    }).await.map_err(|e| format!("保存英文模式失败：{e}"))?
 }
 
 #[tauri::command]
@@ -6503,6 +6702,8 @@ async fn addon_schema_install(app: AppHandle, id: String) -> Result<AddonSchemaS
     if !status.deployed {
         return Err("附加方案文件已安装，但部署产物缺失".into());
     }
+    #[cfg(target_os = "windows")]
+    publish_windows_english_addon(&app)?;
     let _ = app.emit(
         "install-progress",
         InstallProgress {
@@ -6529,6 +6730,13 @@ async fn addon_schema_uninstall(app: AppHandle, id: String) -> Result<AddonSchem
     write_addon_schema_list(&root, id, false)?;
     remove_addon_schema_files(&root, id)?;
     let reset_english_mode = reset_mobile_english_mode(&root)?;
+    #[cfg(target_os = "windows")]
+    {
+        let files = addon_schema_source_files(id).into_iter()
+            .map(|(_, relative)| PathBuf::from(relative)).collect::<Vec<_>>();
+        windows_public_schemas::remove_schema(id, &files)?;
+        windows_public_schemas::publish_english_settings(false)?;
+    }
     if keytao_core::schema_install_state(&root).installed {
         rime_deploy_default(app.clone()).await?;
     } else {
@@ -6629,6 +6837,13 @@ fn windows_deploy_rime_blocking(user_dir: PathBuf, shared_data_dir: String) -> R
 #[tauri::command]
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 async fn rime_deploy_default(app: AppHandle) -> Result<DeployResult, String> {
+    #[cfg(target_os = "windows")]
+    let _guard = app.state::<windows_app_actions::AppActions>().begin_deploy(None)?;
+    rime_deploy_default_inner(app).await
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+async fn rime_deploy_default_inner(app: AppHandle) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     #[cfg(not(target_os = "windows"))]
@@ -7594,7 +7809,10 @@ fn strip_ansi_codes(line: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "windows")]
+    let builder = windows_app_actions::configure(builder);
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -7602,6 +7820,8 @@ pub fn run() {
 
     #[cfg(not(any(target_os = "linux", target_os = "ios")))]
     let builder = builder.setup(|app| {
+        #[cfg(target_os = "windows")]
+        windows_app_actions::show_main_window(app.handle());
         #[cfg(target_os = "android")]
         {
             // The JNI engine initialization only covers the IME/deploy processes.
@@ -7716,6 +7936,10 @@ pub fn run() {
             check_local_schema,
             addon_schema_status,
             addon_schema_install,
+            wanxiang_status,
+            manage_wanxiang,
+            get_desktop_english_mode,
+            set_desktop_english_mode,
             addon_schema_uninstall,
             rime_deploy_default,
             get_ime_ui_settings,
@@ -7743,6 +7967,14 @@ pub fn run() {
             windows_ime_status,
             #[cfg(target_os = "windows")]
             windows_ime_ensure_registered,
+            #[cfg(target_os = "windows")]
+            windows_prepare_search_schemas,
+            #[cfg(target_os = "windows")]
+            windows_app_actions::windows_pending_ime_action,
+            #[cfg(target_os = "windows")]
+            windows_app_actions::windows_dismiss_ime_action,
+            #[cfg(target_os = "windows")]
+            windows_app_actions::windows_redeploy_ime_action,
             // ── IME engine commands (Linux only for now) ──
             #[cfg(target_os = "linux")]
             rime::rime_setup,
@@ -7779,6 +8011,21 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn english_availability_includes_packaged_and_named_schemas_only_after_deploy() {
+        let root = std::env::temp_dir().join(format!("keytao-english-status-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: english\n").unwrap();
+        assert!(!deployed_english_schema_available(&root));
+        std::fs::write(root.join("build/english.schema.yaml"), "schema: {schema_id: english, name: English}\n").unwrap();
+        assert!(deployed_english_schema_available(&root));
+        std::fs::write(root.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: custom_english\n").unwrap();
+        assert!(!deployed_english_schema_available(&root));
+        std::fs::write(root.join("build/custom_english.schema.yaml"), "schema: {schema_id: custom_english, name: Easy English}\n").unwrap();
+        assert!(deployed_english_schema_available(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_write_ime_ui_settings_persists_candidate_font_size() {
@@ -8431,12 +8678,17 @@ mod tests {
                 while cursor < lines.len() && !lines[cursor].trim_end().ends_with('{') {
                     cursor += 1;
                 }
-                let opens_with_guard = lines
+                let body_start = lines
                     .get(cursor + 1..)
                     .unwrap_or_default()
                     .iter()
-                    .find(|line| !line.trim().is_empty())
-                    .is_some_and(|line| line.contains(&format!("android_jni_guard(\"{name}\"")));
+                    .take(4)
+                    .copied()
+                    .collect::<String>();
+                let opens_with_guard = body_start.trim_start()
+                    .strip_prefix("android_jni_guard")
+                    .and_then(|rest| rest.trim_start().strip_prefix('('))
+                    .is_some_and(|rest| rest.trim_start().starts_with(&format!("\"{name}\"")));
                 if opens_with_guard {
                     guarded.push(name.to_owned());
                 } else {
@@ -8507,6 +8759,12 @@ mod tests {
         }
 
         let (found, unguarded) = scan_jni_export_guards(&[("guarded".into(), guarded)]);
+        assert!(unguarded.is_empty());
+        assert_eq!(found, vec!["nativeThing".to_owned()]);
+        let multiline = format!(
+            "{signature}\n    android_jni_guard(\n        \"nativeThing\",\n        0, || 1)\n}}\n"
+        );
+        let (found, unguarded) = scan_jni_export_guards(&[("multiline".into(), multiline)]);
         assert!(unguarded.is_empty());
         assert_eq!(found, vec!["nativeThing".to_owned()]);
     }

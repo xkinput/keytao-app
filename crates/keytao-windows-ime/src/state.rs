@@ -144,6 +144,8 @@ pub struct TsfState {
     pub(crate) pending_commit_retry: Option<PendingCommitRetry>,
     pub candidate_ui: Option<CandidateUiManager>,
     pub ascii_mode: bool,
+    /// UI language: English can use a candidate schema while raw ASCII is off.
+    pub english_mode: bool,
     pub reload_stamp_path: Option<PathBuf>,
     pub reload_stamp_signature: Option<String>,
     pub reload_in_progress: bool,
@@ -158,6 +160,9 @@ pub struct TsfState {
     pub input_context: ContextInputState,
     /// Strong reference used to scope cached probe answers to one live context.
     input_context_source: Option<ITfContext>,
+    /// Retained while the context is attached, so Pop/Uninit notifications can
+    /// still be attributed after TSF detaches it from its document manager.
+    input_context_document_mgr: Option<ITfDocumentMgr>,
     /// Cached `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`. A closed keyboard passes
     /// every keystroke through unaltered.
     pub keyboard_open: bool,
@@ -264,8 +269,15 @@ unsafe impl Send for LoadedRimeDll {}
 unsafe impl Send for EngineInitGuard {}
 
 impl EngineInitGuard {
-    fn acquire() -> Result<Self, String> {
-        let mut name: Vec<u16> = WINDOWS_IME_ENGINE_INIT_MUTEX_NAME.encode_utf16().collect();
+    fn acquire(appcontainer: bool) -> Result<Self, String> {
+        // An unprefixed name uses the AppContainer's own object namespace;
+        // the desktop Local\\ mutex is neither needed nor accessible there.
+        let mutex_name = if appcontainer {
+            "KeyTao.WindowsIme.EngineInit"
+        } else {
+            WINDOWS_IME_ENGINE_INIT_MUTEX_NAME
+        };
+        let mut name: Vec<u16> = mutex_name.encode_utf16().collect();
         name.push(0);
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
             .map_err(|error| format!("create engine initialization mutex: {error}"))?;
@@ -337,6 +349,7 @@ impl TsfState {
             pending_commit_retry: None,
             candidate_ui: Some(CandidateUiManager::new()),
             ascii_mode: false,
+            english_mode: false,
             reload_stamp_path: None,
             reload_stamp_signature: None,
             reload_in_progress: false,
@@ -348,6 +361,7 @@ impl TsfState {
             session_reset_pending: false,
             input_context: ContextInputState::default(),
             input_context_source: None,
+            input_context_document_mgr: None,
             keyboard_open: true,
             input_policy_applied: None,
             input_context_retry: InputContextRetry::default(),
@@ -374,15 +388,43 @@ impl TsfState {
     }
 
     pub(crate) fn build_engine() -> Result<EngineBundle, String> {
-        let _init_guard = EngineInitGuard::acquire()?;
-        let user_dir = default_user_data_dir().ok_or("cannot determine keytao data directory")?;
+        let sandboxed = crate::appcontainer::is_appcontainer()
+            .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
+        let _init_guard = EngineInitGuard::acquire(sandboxed)?;
+        let sandbox = if sandboxed {
+            Some(crate::appcontainer::prepare_data()?)
+        } else {
+            None
+        };
+        let user_dir = match &sandbox {
+            Some(data) => data.user_dir.clone(),
+            None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
+        };
         let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
         let rime_dll = preload_rime_dll(&shared)?;
-        let reload_stamp_path = ReloadStamp::path(&user_dir);
+        let reload_stamp_path = sandbox.as_ref().map_or_else(
+            || ReloadStamp::path(&user_dir),
+            |data| data.reload_stamp_path.clone(),
+        );
+        let needs_deploy = sandbox.as_ref().is_some_and(|data| {
+            data.changed
+                || !keytao_core::schema_install_state(&user_dir).deployed
+                || keytao_core::windows_rime_build_repair_required(&user_dir)
+        });
         let runtime = ImeRuntime::with_dirs(user_dir, shared);
-        runtime.init_without_deploy()?;
+        if needs_deploy {
+            // This function only runs on the warmup/reload worker, never the
+            // host's input thread. Public package updates preserve private userdb.
+            runtime.reload()?;
+            sandbox.as_ref().unwrap().mark_deployed()?;
+        } else {
+            runtime.init_without_deploy()?;
+        }
         let session = runtime.create_session()?;
-        let reload_stamp_signature = ReloadStamp::signature_at(&reload_stamp_path);
+        let reload_stamp_signature = sandbox.as_ref().map_or_else(
+            || ReloadStamp::signature_at(&reload_stamp_path),
+            |data| data.reload_stamp_signature.clone(),
+        );
         Ok(EngineBundle {
             runtime,
             session,
@@ -402,11 +444,17 @@ impl TsfState {
         // A fresh session starts with the default policy, so the sensitive
         // policy of the focused context has to be pushed again.
         self.input_policy_applied = None;
-        if self.ascii_mode {
-            self.ime_state = self
-                .session
-                .as_ref()
-                .and_then(|session| session.set_ascii_mode(true));
+        if let Some(session) = self.session.as_ref() {
+            self.ime_state = Some(session.set_english_mode(self.english_mode).unwrap_or_else(
+                |error| {
+                    keytao_core::rt_log!(Level::Info, "error", "restore_english_mode", msg = error);
+                    session.state()
+                },
+            ));
+            if let Some(ime_state) = &self.ime_state {
+                self.ascii_mode = ime_state.ascii_mode;
+                self.english_mode = ime_state.is_english_mode();
+            }
         }
         self.engine_building = false;
         self.engine_error = None;
@@ -800,10 +848,9 @@ pub(crate) fn refresh_input_context(shared_state: &SharedState, context: Option<
     let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
     crate::text_service::advise_context_compartment_sinks(shared_state, context.as_ref());
     let context_identity = context.as_ref().map(|context| context.as_raw() as usize);
+    let same_context = input_context_matches(shared_state, context.as_ref());
     let (probe_due, previous) = {
         let st = shared_state.borrow();
-        let same_context = st.input_context_source.as_ref().map(Interface::as_raw)
-            == context.as_ref().map(Interface::as_raw);
         (
             context.is_some()
                 && st
@@ -859,34 +906,51 @@ fn apply_input_context_state(
     context: Option<&ITfContext>,
     inspected: ContextInputState,
 ) -> bool {
-    let (input_context, thread_mgr) = {
+    let same_context = input_context_matches(shared_state, context);
+    let document_mgr = context
+        .and_then(|context| unsafe { context.GetDocumentMgr() }.ok())
+        .or_else(|| {
+            same_context
+                .then(|| shared_state.borrow().input_context_document_mgr.clone())
+                .flatten()
+        });
+    let (input_context, thread_mgr, changed) = {
         let st = shared_state.borrow();
-        let previous_same_context = context
-            .filter(|context| {
-                st.input_context_source
-                    .as_ref()
-                    .is_some_and(|previous| previous.as_raw() == context.as_raw())
-            })
-            .map(|_| st.input_context);
-        (
-            merge_probe_failed_state(previous_same_context, inspected),
-            st.thread_mgr.clone(),
-        )
+        let previous_same_context = context.filter(|_| same_context).map(|_| st.input_context);
+        let merged = merge_probe_failed_state(previous_same_context, inspected);
+        (merged, st.thread_mgr.clone(), st.input_context != merged)
     };
     let sensitive = input_context.is_sensitive();
     let retry_due = input_context.needs_retry();
     let keyboard_open = crate::input_context::keyboard_is_open(thread_mgr.as_ref());
-    {
+    let previous_context_handles = {
         let mut st = shared_state.borrow_mut();
         st.input_context = input_context;
-        st.input_context_source = context.cloned();
         st.keyboard_open = keyboard_open;
-    }
+        (
+            std::mem::replace(&mut st.input_context_source, context.cloned()),
+            std::mem::replace(&mut st.input_context_document_mgr, document_mgr),
+        )
+    };
+    // COM Release, like QueryInterface, may reenter the text service.
+    drop(previous_context_handles);
     let password_diagnostic = if input_context.password_probe_failed {
         "probe_failed"
     } else {
         input_context.password.diagnostic_name()
     };
+    if changed {
+        keytao_core::rt_log!(
+            Level::Info,
+            "input",
+            "context_policy",
+            keyboard_disabled = input_context.keyboard_disabled.diagnostic_name(),
+            empty_context = input_context.empty_context.diagnostic_name(),
+            input_scope = password_diagnostic,
+            keyboard_open = keyboard_open,
+            blocked = sensitive
+        );
+    }
     append_diagnostic(format!(
         "input context inspected kd={} ec={} pw={} sensitive={} retry_due={}",
         input_context.keyboard_disabled.diagnostic_name(),
@@ -909,20 +973,57 @@ pub(crate) fn retry_input_context_if_unknown(
     shared_state: &SharedState,
     context: Option<&ITfContext>,
 ) {
+    let thread_mgr = shared_state.borrow().thread_mgr.clone();
+    let context = crate::input_context::resolve_context(thread_mgr.as_ref(), context);
+    let changed_context = !input_context_matches(shared_state, context.as_ref());
     let due = {
         let st = shared_state.borrow();
-        let context_identity = context
-            .or(st.input_context_source.as_ref())
-            .map(|context| context.as_raw() as usize);
-        st.input_context.needs_retry()
-            && st
-                .input_context_retry
-                .due(context_identity, st.client_id, Instant::now())
+        let context_identity = context.as_ref().map(|context| context.as_raw() as usize);
+        changed_context
+            || (st.input_context.needs_retry()
+                && st
+                    .input_context_retry
+                    .due(context_identity, st.client_id, Instant::now()))
     };
     if !due {
         return;
     }
-    refresh_input_context(shared_state, context);
+    // A different context must never inherit either a clear or a restricted
+    // input scope. refresh_input_context still bounds synchronous probes; if
+    // throttled, this context starts Unknown until its own probe can run.
+    refresh_input_context(shared_state, context.as_ref());
+}
+
+pub(crate) fn same_com_object<T: Interface>(left: &T, right: &T) -> bool {
+    left.as_raw() == right.as_raw()
+        || match (
+            left.cast::<windows::core::IUnknown>(),
+            right.cast::<windows::core::IUnknown>(),
+        ) {
+            (Ok(left), Ok(right)) => left.as_raw() == right.as_raw(),
+            _ => false,
+        }
+}
+
+pub(crate) fn input_context_matches(
+    shared_state: &SharedState,
+    context: Option<&ITfContext>,
+) -> bool {
+    let previous = shared_state.borrow().input_context_source.clone();
+    // QueryInterface can call back into the TIP; release RefCell borrows first.
+    match (previous.as_ref(), context) {
+        (Some(previous), Some(context)) => same_com_object(previous, context),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn input_document_matches(
+    shared_state: &SharedState,
+    document: &ITfDocumentMgr,
+) -> bool {
+    let previous = shared_state.borrow().input_context_document_mgr.clone();
+    previous.is_some_and(|previous| same_com_object(&previous, document))
 }
 
 /// A `KEYBOARD_DISABLED` / `EMPTYCONTEXT` compartment on the focused context
@@ -1007,7 +1108,7 @@ pub(crate) fn apply_open_close_change(shared_state: &SharedState) {
 pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
     let (thread_mgr, current) = {
         let st = shared_state.borrow();
-        (st.thread_mgr.clone(), st.ascii_mode)
+        (st.thread_mgr.clone(), st.english_mode)
     };
     let Some(ascii_mode) = crate::input_context::conversion_mode_is_ascii(thread_mgr.as_ref())
     else {
@@ -1016,11 +1117,14 @@ pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
     if ascii_mode == current {
         return;
     }
-    set_ascii_mode_from_language_bar(shared_state, ascii_mode);
+    set_english_mode_from_language_bar(shared_state, ascii_mode);
 }
 
 /// True when neither the context nor the system state allows composing.
 pub(crate) fn input_is_blocked(shared_state: &SharedState, context: Option<&ITfContext>) -> bool {
+    // OnKeyUp and candidate clicks do not all pass through OnTestKeyDown.
+    // Validate their supplied context too before consulting any cached policy.
+    retry_input_context_if_unknown(shared_state, context);
     let reason = input_block_reason(shared_state, context);
     if let Some(reason) = reason {
         append_input_blocked_diagnostic(reason, context);
@@ -1033,6 +1137,9 @@ fn input_block_reason(
     shared_state: &SharedState,
     context: Option<&ITfContext>,
 ) -> Option<InputBlockReason> {
+    if context.is_some() && !input_context_matches(shared_state, context) {
+        return Some(InputBlockReason::ProbeFailed);
+    }
     let (thread_mgr, keyboard_open, cached_reason) = {
         let st = shared_state.borrow();
         (
@@ -1152,7 +1259,7 @@ fn unadvise_all(registrations: Vec<CompartmentSinkRegistration>) {
 /// focus. Never remove/re-add a healthy item: only the first INPUTMODE item is
 /// shown by Windows, and another service may own other entries in the manager.
 pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
-    let (thread_mgr, client_id, ascii_mode, existing) = {
+    let (thread_mgr, client_id, english_mode, existing) = {
         let mut st = shared_state.borrow_mut();
         if !st.language_bar_enabled || st.language_bar_refreshing {
             return;
@@ -1164,7 +1271,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
         (
             thread_mgr,
             st.client_id,
-            st.ascii_mode,
+            st.english_mode,
             st.language_bar.clone(),
         )
     };
@@ -1185,7 +1292,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
                 &thread_mgr,
                 client_id,
                 Rc::downgrade(shared_state),
-                ascii_mode,
+                english_mode,
             ) {
                 Ok(item) => item,
                 Err(error) => {
@@ -1226,14 +1333,14 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
             item
         }
     };
-    let ascii_mode = shared_state.borrow().ascii_mode;
-    language_bar.refresh_mode(ascii_mode);
+    let english_mode = shared_state.borrow().english_mode;
+    language_bar.refresh_mode(english_mode);
 }
 
-pub(crate) fn update_language_bar_mode(shared_state: &SharedState, ascii_mode: bool) {
+pub(crate) fn update_language_bar_mode(shared_state: &SharedState, english_mode: bool) {
     let language_bar = shared_state.borrow().language_bar.clone();
     if let Some(language_bar) = language_bar {
-        language_bar.update_mode(ascii_mode);
+        language_bar.update_mode(english_mode);
     }
 }
 
@@ -1241,22 +1348,31 @@ pub(crate) fn update_language_bar_mode(shared_state: &SharedState, ascii_mode: b
 #[path = "language_bar_lifecycle_tests.rs"]
 mod language_bar_lifecycle_tests;
 
-pub(crate) fn set_ascii_mode_from_language_bar(shared_state: &SharedState, ascii_mode: bool) {
+pub(crate) fn set_english_mode_from_language_bar(shared_state: &SharedState, english_mode: bool) {
     reset_input_for_focus_change(shared_state);
     poll_engine_builds(shared_state);
     let session = shared_state.borrow().session();
-    let ime_state = session
+    let ime_state = session.as_ref().map(|session| {
+        session
+            .set_english_mode(english_mode)
+            .unwrap_or_else(|error| {
+                keytao_core::rt_log!(Level::Info, "error", "set_english_mode", msg = error);
+                session.state()
+            })
+    });
+    let english_mode = ime_state
         .as_ref()
-        .and_then(|session| session.set_ascii_mode(ascii_mode));
+        .map_or(english_mode, ImeState::is_english_mode);
     {
         let mut state = shared_state.borrow_mut();
-        state.ascii_mode = ascii_mode;
+        state.ascii_mode = ime_state.as_ref().is_some_and(|state| state.ascii_mode);
+        state.english_mode = english_mode;
         state.ime_state = ime_state;
     }
     if session.is_none() {
         start_engine_warmup(shared_state);
     }
-    update_language_bar_mode(shared_state, ascii_mode);
+    update_language_bar_mode(shared_state, english_mode);
 }
 
 pub(crate) fn update_ime_windows(
@@ -1336,7 +1452,7 @@ pub(crate) fn update_ime_windows(
         }
         if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
             mode_hint_win.show_mode_hint(
-                ime_state.ascii_mode,
+                ime_state.is_english_mode(),
                 caret.x,
                 caret.y,
                 caret.owner_hwnd,
@@ -1856,6 +1972,18 @@ mod tests {
     };
     use std::cell::Cell;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn missing_public_seed_failure_does_not_permanently_disable_warmup() {
+        let mut state = super::TsfState::new();
+        assert!(state.begin_engine_build());
+        state.finish_engine_build_error("public schemas are unavailable".into());
+        assert!(!state.begin_engine_build());
+        state.engine_retry_after = Some(Instant::now());
+        assert!(state.begin_engine_build());
+        assert!(state.engine_error.is_none());
+        assert!(!state.begin_engine_build());
+    }
 
     #[test]
     fn probe_retry_timestamp_survives_focus_and_compartment_churn() {

@@ -21,20 +21,22 @@ fn serialized() -> MutexGuard<'static, ()> {
     LIBRIME.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn compose(session: &ImeRuntimeSession) -> Result<usize, String> {
-    session.reset().ok_or("session has no engine")?;
+fn compose(session: &ImeRuntimeSession) -> Result<Option<usize>, String> {
+    if session.reset().is_none() {
+        return Ok(None);
+    }
     let mut state = None;
     for character in smoke_fixture::CODE.chars() {
-        state = Some(
-            session
-                .process_key_result(character as u32, 0)
-                .ok_or("session has no engine")?
-                .state,
-        );
+        let Some(result) = session.process_key_result(character as u32, 0) else {
+            return Ok(None);
+        };
+        state = Some(result.state);
     }
     let state = state.ok_or("fixture code is empty")?;
-    session.reset().ok_or("session has no engine")?;
-    Ok(state.candidates.len())
+    if session.reset().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(state.candidates.len()))
 }
 
 fn report(failures: &Mutex<Vec<String>>, message: String) {
@@ -46,8 +48,9 @@ fn report(failures: &Mutex<Vec<String>>, message: String) {
 
 fn assert_composes(session: &ImeRuntimeSession, stage: &str) {
     match compose(session) {
-        Ok(0) => panic!("{stage}: the session produced no candidates"),
-        Ok(_) => {}
+        Ok(Some(0)) => panic!("{stage}: the session produced no candidates"),
+        Ok(Some(_)) => {}
+        Ok(None) => panic!("{stage}: the session is unexpectedly busy without a reload"),
         Err(error) => panic!("{stage}: {error}"),
     }
 }
@@ -114,12 +117,18 @@ fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
     let reloads = Arc::new(AtomicU64::new(0));
     let mut workers = Vec::new();
 
-    let mut sessions = Vec::new();
+    // Create all sessions before starting reload workers. Session creation is
+    // deliberately nonblocking while those workers own the runtime locks.
+    let sessions: Vec<_> = [&first, &second]
+        .into_iter()
+        .map(|runtime| {
+            runtime
+                .create_session()
+                .expect("session for the typing thread")
+        })
+        .collect();
     for (index, runtime) in [&first, &second].into_iter().enumerate() {
-        let session = runtime
-            .create_session()
-            .expect("session for the typing thread");
-        sessions.push(session.clone());
+        let session = sessions[index].clone();
         let typing_stop = stop.clone();
         let typing_failures = failures.clone();
         let typing_reloads = reloads.clone();
@@ -130,10 +139,13 @@ fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
                 // candidates.
                 let before = typing_reloads.load(Ordering::SeqCst);
                 match compose(&session) {
-                    Ok(0) if typing_reloads.load(Ordering::SeqCst) == before => report(
+                    Ok(Some(0)) if typing_reloads.load(Ordering::SeqCst) == before => report(
                         &typing_failures,
                         format!("runtime {index}: no candidates without a concurrent reload"),
                     ),
+                    // Contending keys now pass through instead of waiting for
+                    // deployment. The checks after the storm still require
+                    // every session to recover and produce real candidates.
                     Ok(_) => {}
                     Err(error) => report(&typing_failures, format!("runtime {index}: {error}")),
                 }

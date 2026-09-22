@@ -397,8 +397,10 @@ pub fn is_shift_vk(vk: u16) -> bool {
 /// `OnKeyDown` only runs for keys the test callback claimed, so a flag kept
 /// there alone would never be cleared by a passed-through key and, worse,
 /// would never be set at all because Shift itself is never claimed.
-pub fn shift_pending_after_key_down(vk: u16) -> bool {
+pub fn shift_pending_after_key_down(vk: u16, mods: u32) -> bool {
     is_shift_vk(vk)
+        && mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) == 0
+        && !key_policy::is_system_reserved_modifier(mods)
 }
 
 pub fn is_enter_vk(vk: u16) -> bool {
@@ -411,20 +413,45 @@ pub fn should_bypass_empty_composition(vk: u16, mods: u32, state: &keytao_core::
     key_policy::should_bypass_empty_composition_key(is_nonstarter_vk(vk), mods, state)
 }
 
+/// Windows applications own Ctrl/Alt/Win chords, even with a live preedit.
+/// Rime's default Emacs bindings otherwise turn Ctrl+V into candidate paging
+/// and Ctrl+A into preedit navigation. Preserve only the desktop IME's menu
+/// and option hotkeys; ordinary shortcuts must never be offered to the schema.
+pub fn is_application_shortcut(vk: u16, mods: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_1, VK_5, VK_DELETE, VK_F4, VK_INSERT, VK_OEM_3,
+    };
+
+    if key_policy::is_system_reserved_modifier(mods) || mods & RIME_MOD_ALT != 0 {
+        // This also leaves AltGr (Ctrl+Alt) to the host's keyboard layout.
+        return true;
+    }
+    if mods & RIME_MOD_SHIFT != 0 && [VK_F4.0, VK_INSERT.0, VK_DELETE.0].contains(&vk) {
+        return true;
+    }
+    if mods & RIME_MOD_CONTROL == 0 {
+        return false;
+    }
+    if vk == VK_OEM_3.0 {
+        return false;
+    }
+    if mods & RIME_MOD_SHIFT != 0 && (VK_1.0..=VK_5.0).contains(&vk) {
+        return false;
+    }
+    true
+}
+
 /// Returns true for keys the IME may handle, i.e. the keys `OnTestKeyDown`
 /// claims so that TSF calls `OnKeyDown` for them.
 ///
 /// TSF never calls `OnKeyDown` for a key the test callback declined, so this is
-/// deliberately an over-approximation: every key that can reach librime is
-/// claimed here and released again in `OnKeyDown` when librime does not accept
-/// it (`should_consume_processed_state`). The one rule both callbacks must
-/// agree on is which keys never reach librime at all — that rule lives in
-/// `key_policy::should_bypass_empty_composition_key` and is mirrored below.
+/// deliberately an over-approximation for ordinary printable input. Application
+/// shortcuts are declined in both callbacks before any engine processing;
+/// they cannot depend on a schema declining them later.
 pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-    // Windows-key chords belong to the shell.
-    if key_policy::is_system_reserved_modifier(mods) {
+    if is_application_shortcut(vk, mods) {
         return false;
     }
 
@@ -531,8 +558,9 @@ mod tests {
     };
 
     use super::{
-        fallback_printable_keysym, letters_are_uppercase, shift_pending_after_key_down,
-        should_bypass_empty_composition, should_eat_key, unicode_to_keysym, vk_to_keysym,
+        fallback_printable_keysym, is_application_shortcut, letters_are_uppercase,
+        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
+        unicode_to_keysym, vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -603,15 +631,50 @@ mod tests {
     }
 
     #[test]
-    fn control_and_alt_chords_are_offered_to_rime() {
-        // Rime binds Control+grave and the emacs editing keys; OnKeyDown hands
-        // them back to the host when librime declines (D6 / core-8).
-        assert!(should_eat_key(VK_A.0, false, RIME_MOD_CONTROL));
-        assert!(should_eat_key(VK_A.0, true, RIME_MOD_ALT));
-        assert!(!should_bypass_empty_composition(
-            VK_A.0,
-            RIME_MOD_CONTROL,
-            &ImeState::empty()
+    fn application_chords_bypass_rime_even_during_composition() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        for vk in [
+            VK_A, VK_C, VK_V, VK_X, VK_Z, VK_Y, VK_F, VK_S, VK_O, VK_INSERT, VK_DELETE, VK_BACK,
+            VK_RETURN, VK_TAB, VK_LEFT, VK_SPACE, VK_F4,
+        ] {
+            for mods in [
+                RIME_MOD_CONTROL,
+                RIME_MOD_CONTROL | RIME_MOD_SHIFT,
+                RIME_MOD_CONTROL | RIME_MOD_LOCK,
+                RIME_MOD_CONTROL | RIME_MOD_ALT,
+            ] {
+                assert!(is_application_shortcut(vk.0, mods));
+                assert!(!should_eat_key(vk.0, false, mods));
+                assert!(!should_eat_key(vk.0, true, mods));
+            }
+        }
+        assert!(!should_eat_key(VK_A.0, true, RIME_MOD_ALT));
+        for vk in [VK_F4, VK_INSERT, VK_DELETE] {
+            assert!(is_application_shortcut(vk.0, RIME_MOD_SHIFT));
+            assert!(!should_eat_key(vk.0, true, RIME_MOD_SHIFT));
+        }
+    }
+
+    #[test]
+    fn ime_menu_and_option_hotkeys_remain_available() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        for composing in [false, true] {
+            assert!(should_eat_key(VK_F4.0, composing, 0));
+            for mods in [RIME_MOD_CONTROL, RIME_MOD_CONTROL | RIME_MOD_SHIFT] {
+                assert!(should_eat_key(VK_OEM_3.0, composing, mods));
+            }
+            for vk in VK_1.0..=VK_5.0 {
+                assert!(should_eat_key(
+                    vk,
+                    composing,
+                    RIME_MOD_CONTROL | RIME_MOD_SHIFT
+                ));
+            }
+        }
+        assert!(!should_eat_key(
+            VK_OEM_3.0,
+            true,
+            RIME_MOD_CONTROL | RIME_MOD_ALT
         ));
     }
 
@@ -619,9 +682,15 @@ mod tests {
     fn solo_shift_survives_keys_the_test_callback_declines() {
         // Shift arms the toggle; any other key down disarms it, including keys
         // that are passed through to the host and never reach OnKeyDown.
-        assert!(shift_pending_after_key_down(VK_SHIFT.0));
-        assert!(!shift_pending_after_key_down(VK_A.0));
-        assert!(!shift_pending_after_key_down(VK_BACK.0));
+        assert!(shift_pending_after_key_down(VK_SHIFT.0, RIME_MOD_SHIFT));
+        assert!(!shift_pending_after_key_down(VK_A.0, RIME_MOD_SHIFT));
+        assert!(!shift_pending_after_key_down(VK_BACK.0, 0));
+        for modifier in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+            assert!(!shift_pending_after_key_down(
+                VK_SHIFT.0,
+                modifier | RIME_MOD_SHIFT
+            ));
+        }
         assert!(!should_eat_key(VK_BACK.0, false, 0));
     }
 

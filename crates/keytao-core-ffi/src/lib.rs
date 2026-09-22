@@ -1097,6 +1097,58 @@ pub extern "C" fn keytao_session_set_ascii_mode(
 
 // ── Engine capabilities ───────────────────────────────────────────────────────
 
+/// Logical English input (ASCII or the configured English dictionary schema).
+/// The existing get_ascii_mode export continues to mean raw pass-through.
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_get_english_mode(session: *mut c_void) -> bool {
+    guard("keytao_session_get_english_mode", false, || {
+        session_handle(session).is_some_and(|handle| handle.session.is_english_mode())
+    })
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_set_english_mode(
+    session: *mut c_void,
+    enabled: bool,
+) -> *mut KeytaoState {
+    guard(
+        "keytao_session_set_english_mode",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            match handle.session.set_english_mode(enabled) {
+                Ok(state) => Box::into_raw(Box::new(state_to_c(state, true))),
+                Err(_) => std::ptr::null_mut(),
+            }
+        },
+    )
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_set_english_mode_json(
+    session: *mut c_void,
+    enabled: bool,
+) -> *mut c_char {
+    guard(
+        "keytao_session_set_english_mode_json",
+        std::ptr::null_mut(),
+        || {
+            let Some(handle) = session_handle(session) else {
+                return std::ptr::null_mut();
+            };
+            match handle.session.set_english_mode(enabled) {
+                Ok(state) => to_cstring(&state_json(state, true)),
+                Err(_) => std::ptr::null_mut(),
+            }
+        },
+    )
+}
+
 // The values are written as plain literals rather than shifts because these go
 // through cbindgen into `#define`s, and Swift's importer only picks up macros
 // whose body is a literal — `(1 << 4)` would arrive in Swift as nothing at all.
@@ -2118,7 +2170,8 @@ fn state_json(state: ImeState, accepted: bool) -> String {
         },
         &ui_capabilities,
     );
-    let mode_hint = theme.mode_hint_model(state.ascii_mode);
+    let english_mode = state.is_english_mode();
+    let mode_hint = theme.mode_hint_model(english_mode);
     let value = serde_json::json!({
         "preedit": state.preedit,
         "cursor": state.cursor,
@@ -2132,6 +2185,8 @@ fn state_json(state: ImeState, accepted: bool) -> String {
         "committed": state.committed.unwrap_or_default(),
         "selectKeys": state.select_keys.unwrap_or_default(),
         "asciiMode": state.ascii_mode,
+        "englishMode": english_mode,
+        "schemaId": state.schema_id,
         "schemaName": state.schema_name,
         "accepted": accepted,
         "candidatePanel": candidate_panel,
@@ -2594,6 +2649,19 @@ mod tests {
     }
 
     #[test]
+    fn english_dictionary_json_keeps_candidates_enabled_and_shows_english_hint() {
+        let mut state = ImeState::empty();
+        state.schema_id = "easy_en".into();
+        state.schema_name = "Easy English".into();
+        let value: serde_json::Value = serde_json::from_str(&state_json(state, true)).unwrap();
+        assert_eq!(value["asciiMode"], false);
+        assert_eq!(value["englishMode"], true);
+        assert_eq!(value["schemaId"], "easy_en");
+        assert_eq!(value["modeHint"]["asciiMode"], true);
+        assert_eq!(value["accepted"], true);
+    }
+
+    #[test]
     fn session_exports_refuse_a_null_handle() {
         assert!(keytao_session_state(std::ptr::null_mut()).is_null());
         assert!(keytao_session_process_key(std::ptr::null_mut(), 0x61, 0).is_null());
@@ -2605,6 +2673,9 @@ mod tests {
         assert!(keytao_session_set_input_policy(std::ptr::null_mut(), false, false).is_null());
         assert!(!keytao_session_input_policy_composing(std::ptr::null_mut()));
         assert!(!keytao_session_get_ascii_mode(std::ptr::null_mut()));
+        assert!(!keytao_session_get_english_mode(std::ptr::null_mut()));
+        assert!(keytao_session_set_english_mode(std::ptr::null_mut(), true).is_null());
+        assert!(keytao_session_set_english_mode_json(std::ptr::null_mut(), true).is_null());
         // Destroying nothing is not an error either.
         keytao_destroy_session(std::ptr::null_mut());
     }

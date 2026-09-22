@@ -24,9 +24,12 @@
 use std::{cell::Cell, rc::Rc};
 
 use windows::{
-    core::{Interface, GUID, VARIANT},
+    core::{Interface, GUID, HRESULT, VARIANT},
     Win32::{
+        Foundation::{E_FAIL, E_NOTIMPL, E_POINTER, LPARAM, S_FALSE, S_OK, WPARAM},
         System::Com::CoTaskMemFree,
+        System::Threading::GetCurrentThreadId,
+        UI::Controls::EM_GETPASSWORDCHAR,
         UI::TextServices::{
             ITfCompartmentMgr, ITfContext, ITfDocumentMgr, ITfInputScope, ITfReadOnlyProperty,
             ITfThreadMgr, InputScope, GUID_COMPARTMENT_EMPTYCONTEXT,
@@ -34,6 +37,10 @@ use windows::{
             GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, GUID_PROP_INPUTSCOPE, IS_ALPHANUMERIC_PIN,
             IS_ALPHANUMERIC_PIN_SET, IS_NUMERIC_PASSWORD, IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE,
             TF_CONVERSIONMODE_NATIVE, TF_DEFAULT_SELECTION, TF_SELECTION, TS_E_SYNCHRONOUS,
+        },
+        UI::WindowsAndMessaging::{
+            GetWindowLongW, GetWindowThreadProcessId, RealGetWindowClassW, SendMessageTimeoutW,
+            ES_PASSWORD, GWL_STYLE, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT,
         },
     },
 };
@@ -409,7 +416,39 @@ fn context_password_probe(context: &ITfContext, client_id: u32) -> (ContextProbe
 
 fn read_password_scope(ec: u32, context: &ITfContext) -> ContextProbe {
     unsafe {
-        let Ok(property) = context.GetAppProperty(&GUID_PROP_INPUTSCOPE) else {
+        let native_password = native_edit_password_probe(context);
+        if native_password == ContextProbe::Restricted {
+            return native_password;
+        }
+        // S_FALSE explicitly means the host does not support this optional
+        // application property. The generated GetAppProperty projection turns
+        // its null output into E_POINTER and loses that distinction, which made
+        // ordinary editors with no input-scope property permanently restricted.
+        let mut raw_property = std::ptr::null_mut();
+        let result = (Interface::vtable(context).GetAppProperty)(
+            context.as_raw(),
+            &GUID_PROP_INPUTSCOPE,
+            &mut raw_property,
+        );
+        let property = if raw_property.is_null() {
+            None
+        } else {
+            Some(ITfReadOnlyProperty::from_raw(raw_property))
+        };
+        if (result == S_FALSE || result == E_NOTIMPL) && property.is_none() {
+            // GetAppProperty documents E_NOTIMPL as an owner that does not
+            // implement this optional method, rather than a failed scope read.
+            // Keyboard-disabled/empty-context compartments still apply.
+            report_scope_probe("app_property_absent", result, 0);
+            return ContextProbe::Clear;
+        }
+        if result.is_err() {
+            report_scope_probe("app_property", result, 0);
+            return ContextProbe::Unknown;
+        }
+        let Some(property) = property else {
+            // S_OK with a null object is malformed, not an absent property.
+            report_scope_probe("app_property_null", result, 0);
             return ContextProbe::Unknown;
         };
         let mut selections = [TF_SELECTION::default()];
@@ -419,36 +458,161 @@ fn read_password_scope(ec: u32, context: &ITfContext) -> ContextProbe {
         // failed after filling the entry.
         let range = take_selection_range(&mut selections[0]);
         if fetched.is_err() || count == 0 {
+            report_scope_probe("selection", fetched.err().map_or(S_OK, |e| e.code()), count);
             return ContextProbe::Unknown;
         }
         let Some(range) = range else {
+            report_scope_probe("selection_null", E_POINTER, count);
             return ContextProbe::Unknown;
         };
-        input_scopes_probe(&property, ec, &range)
+        input_scopes_probe(&property, ec, &range, native_password)
     }
 }
+
+/// RichEdit exposes its password state independently of the optional TSF
+/// input-scope property. Use only the exact view's native RichEdit window, on
+/// this thread: a container/foreground window says nothing about its field.
+unsafe fn native_edit_password_probe(context: &ITfContext) -> ContextProbe {
+    let Ok(view) = context.GetActiveView() else {
+        return ContextProbe::Unknown;
+    };
+    let Ok(window) = view.GetWnd() else {
+        return ContextProbe::Unknown;
+    };
+    if window.0.is_null() || GetWindowThreadProcessId(window, None) != GetCurrentThreadId() {
+        return ContextProbe::Unknown;
+    }
+    let mut name = [0_u16; 64];
+    let length = RealGetWindowClassW(window, &mut name) as usize;
+    if length == 0 || length >= name.len() {
+        return ContextProbe::Unknown;
+    }
+    let name = String::from_utf16_lossy(&name[..length]);
+    if ![
+        "RichEdit20A",
+        "RichEdit20W",
+        "RICHEDIT50A",
+        "RICHEDIT50W",
+        "RICHEDIT60A",
+        "RICHEDIT60W",
+        "RichEditD2D",
+        "RichEditD2DPT",
+    ]
+    .iter()
+    .any(|class| name.eq_ignore_ascii_case(class))
+    {
+        return ContextProbe::Unknown;
+    }
+    if GetWindowLongW(window, GWL_STYLE) & ES_PASSWORD != 0 {
+        return ContextProbe::Restricted;
+    }
+    let mut password_char = 0;
+    if SendMessageTimeoutW(
+        window,
+        EM_GETPASSWORDCHAR,
+        WPARAM(0),
+        LPARAM(0),
+        SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+        10,
+        Some(&mut password_char),
+    )
+    .0 == 0
+    {
+        return ContextProbe::Unknown;
+    }
+    ContextProbe::declared(password_char != 0)
+}
+
+/// Record only the failing API and numeric result, never document text or keys.
+/// Deduplication and a per-thread cap keep a refusing host from flooding its log.
+fn report_scope_probe(stage: &'static str, hr: HRESULT, detail: u32) {
+    thread_local! {
+        static LAST: Cell<Option<(&'static str, i32, u32)>> = const { Cell::new(None) };
+        static COUNT: Cell<u32> = const { Cell::new(0) };
+    }
+    let signature = (stage, hr.0, detail);
+    if LAST.with(|last| last.replace(Some(signature)) == Some(signature)) {
+        return;
+    }
+    if COUNT.with(|count| {
+        let n = count.get();
+        count.set(n.saturating_add(1));
+        n >= 64
+    }) {
+        return;
+    }
+    keytao_core::rt_log!(
+        keytao_core::runtime_log::Level::Info,
+        "input",
+        "input_scope_probe",
+        stage = stage,
+        hr = format!("0x{:08X}", hr.0 as u32),
+        detail = detail
+    );
+}
+
+#[cfg(test)]
+#[path = "input_context_property_tests.rs"]
+mod property_tests;
+
+#[cfg(test)]
+#[path = "input_context_native_tests.rs"]
+mod native_tests;
 
 unsafe fn input_scopes_probe(
     property: &ITfReadOnlyProperty,
     ec: u32,
     range: &windows::Win32::UI::TextServices::ITfRange,
+    native_password: ContextProbe,
 ) -> ContextProbe {
-    let Ok(value) = property.GetValue(ec, range) else {
-        return ContextProbe::Unknown;
+    let value = match property.GetValue(ec, range) {
+        Ok(value) => value,
+        Err(error) => {
+            // Windows RichEdit (including Notepad's RichEditD2DPT) returns
+            // E_FAIL for an unset input scope, despite GetAppProperty succeeding.
+            // Only accept that answer when this exact native control confirms
+            // it is not a password field; other hosts and failures stay unknown.
+            if error.code() == E_FAIL && native_password == ContextProbe::Clear {
+                report_scope_probe("richedit_scope_unset", error.code(), 0);
+                return ContextProbe::Clear;
+            }
+            report_scope_probe("property_value", error.code(), 0);
+            return ContextProbe::Unknown;
+        }
     };
+    input_scope_value_probe(&value)
+}
+
+unsafe fn input_scope_value_probe(value: &VARIANT) -> ContextProbe {
     // No input scope attached to this range: an ordinary, unrestricted field.
     if value.is_empty() {
         return ContextProbe::Clear;
     }
-    let Ok(unknown) = windows::core::IUnknown::try_from(&value) else {
-        return ContextProbe::Unknown;
+    let unknown = match windows::core::IUnknown::try_from(value) {
+        Ok(unknown) => unknown,
+        Err(error) => {
+            report_scope_probe(
+                "value_unknown",
+                error.code(),
+                value.as_raw().Anonymous.Anonymous.vt as u32,
+            );
+            return ContextProbe::Unknown;
+        }
     };
-    let Ok(scopes) = unknown.cast::<ITfInputScope>() else {
-        return ContextProbe::Unknown;
+    let scopes = match unknown.cast::<ITfInputScope>() {
+        Ok(scopes) => scopes,
+        Err(error) => {
+            report_scope_probe("input_scope_interface", error.code(), 0);
+            return ContextProbe::Unknown;
+        }
     };
     let mut buffer: *mut InputScope = std::ptr::null_mut();
     let mut count = 0u32;
-    if scopes.GetInputScopes(&mut buffer, &mut count).is_err() {
+    if let Err(error) = scopes.GetInputScopes(&mut buffer, &mut count) {
+        if !buffer.is_null() {
+            CoTaskMemFree(Some(buffer.cast()));
+        }
+        report_scope_probe("input_scopes", error.code(), count);
         return ContextProbe::Unknown;
     }
     if buffer.is_null() {
@@ -456,6 +620,7 @@ unsafe fn input_scopes_probe(
         return if count == 0 {
             ContextProbe::Clear
         } else {
+            report_scope_probe("input_scopes_null", E_POINTER, count);
             ContextProbe::Unknown
         };
     }

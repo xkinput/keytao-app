@@ -179,7 +179,7 @@ impl PanelRenderer {
         let preedit_height = model
             .preedit
             .as_ref()
-            .map(|_| preedit_size + panel_gap)
+            .map(|_| preedit_size + theme.panel.preedit_gap)
             .unwrap_or(0.0);
         let option_widths: Vec<f32> = model
             .candidates
@@ -675,6 +675,7 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
     theme.panel.padding_x *= scale;
     theme.panel.padding_y *= scale;
     theme.panel.gap *= scale;
+    theme.panel.preedit_gap *= scale;
     theme.panel.min_width *= scale;
     theme.panel.max_width *= scale;
     theme.panel.max_height *= scale;

@@ -48,6 +48,8 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 - 现代 Windows 可能查询 `ITfTextInputProcessorEx`；KeyTao 同时实现 `ITfTextInputProcessor` 和 `ITfTextInputProcessorEx`。两条激活路径共用轻量接线逻辑，并通过 `ITfThreadMgrEx::GetActiveFlags` 保存 thread mode。
 - `ITfKeyEventSink` 由 text service 实现，并通过 `ITfKeystrokeMgr::AdviseKeyEventSink` 安装到当前 `ITfThreadMgr`。
 - `ITfLangBarItemButton` 通过 `ITfLangBarItemMgr::AddItem` 暴露持久的“中/英”状态、图标和左键切换，并同步 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION`。
+- “中/英”右键提供“重新部署”和“打开 App”。保持 `BTN_BUTTON`，在 `OnClick` 中显示原生菜单；菜单使用独立的临时 owner，避免向宿主发送 `WM_COMMAND`，且不持有状态借用进入菜单消息循环。
+- 菜单操作通过持有 DLL activity guard 的后台线程打开固定的 `keytao://ime/open` 或 `keytao://ime/redeploy` URI。NSIS 注册带引号的协议命令；主程序使用 Windows single-instance 插件唤醒已有窗口，并将部署请求保留至前端就绪。重新部署复用主程序的进度、错误提示及现有安全部署流程，输入线程不执行部署。
 - `ITfThreadMgrEventSink` 和 `ITfThreadFocusSink` 在 `Activate` 时通过 `ITfSource::AdviseSink` 安装，并在 `Deactivate` 时按 cookie 反注册；document/context 焦点变化会异步申请 TSF write edit session，清空未提交 range/display attribute 并真正结束旧 composition，然后复位 Rime session 和候选 UI。除与 `composition_in_flight` COM identity 匹配的主动终止外，任何 `OnCompositionTerminated` 都是宿主的真实终止事件，必须清空 Rime 状态、caret cache 与候选 UI。
 - `Deactivate` 与 `OnKillThreadFocus` 不能用异步 edit session 收尾：前者返回后 TSF 立刻释放 text service 与 client id，后者之后本线程不再泵我们的 session，排队的 `EndComposition` 永远不会执行。这两条路径改用同步 write session，宿主拒绝同步锁时退回 `ITfContextOwnerCompositionServices::TerminateComposition`（该接口允许在 edit session 之外调用）。普通 focus 切换仍走异步路径。
 - `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 与 `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` 在 `Activate` 时写入初值（开 + native），并各自 `AdviseSink(ITfCompartmentEventSink)`；系统 Ctrl+Space、输入指示器改写这两个 compartment 时会反向驱动 Rime（关闭即停止组字并透传按键，conversion mode 变化即 `set_ascii_mode`）。语言栏写回同一数值，因此 sink 只在数值真正不同时才动 Rime，不会产生回环。
@@ -160,20 +162,20 @@ Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲�
 
 流程：
 
-1. `OnTestKeyDown` 先按上下文短路（见下），再调用 `should_eat_key()`，告诉 TSF 是否拦截当前按键，同时维护 solo Shift 的 pending 标志。
+1. `OnTestKeyDown` 先透传应用快捷键，再按上下文短路（见下），最后调用 `should_eat_key()` 告诉 TSF 是否拦截，同时维护 solo Shift 的 pending 标志。直接调用 `OnKeyDown` 的宿主也执行相同的快捷键透传。
 2. `OnTestKeyUp` 只对 solo Shift release 返回拦截，避免 Shift+字母/数字误触发中英切换。
 3. `OnKeyDown` 把 Windows Virtual Key 转成 librime 使用的 X11 keysym。
 4. `current_mod_mask()` 读取 Shift、Control、Alt、Win 与 CapsLock 状态。
-5. 没有 composition 时放行 Space、Return、Backspace、Delete、Tab、Escape 和导航键；**Ctrl / Alt 组合不再提前放行**，一律先送 Rime（`key_binder` 里的 `Control+grave`、emacs 编辑键等需要收到它们），Rime 未接受时由 `OnKeyDown` 返回 false 交回宿主。只有 Win 键组合（`key_policy::is_system_reserved_modifier`）属于系统保留，始终不拦。
+5. 不论是否正在组字，Ctrl / Alt / Win 组合以及 Shift+Insert、Shift+Delete、Shift+F4 都在进入 Rime 前交给宿主。只保留输入法的 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；附加 Alt/Win 时仍透传。这样 Ctrl+V 不再被默认 Emacs 绑定当作候选翻页，Ctrl+A 不再变成预编辑 Home，AltGr 字符也交由宿主布局处理。没有 composition 时，裸 Space、Return、Backspace、Delete、Tab、Escape 和导航键继续放行。
 6. 有 composition 时 Enter 走 `ImeRuntimeSession::process_enter()`：先把 `XK_Return` 交给 Rime，Rime 未接受时由通用层 fallback 到 `commit_raw_input()`。**平台不再自行提交 preedit 字面量**，也**不再本地拦截数字键或空格做选词**——选择键语义完全由 schema 的 `select_keys` / `key_binder` 决定，鼠标点选走 `select_candidate_on_page(index)`。
 7. 普通按键调用 `ImeRuntimeSession::process_key_result(keysym, mods)`。
-8. `should_eat_key()` 是刻意放宽的：为了让 Rime 的 punctuator 收到标点、让 `key_binder` 收到 Ctrl/Alt 组合，所有可打印键（字母、数字行、OEM 标点、小键盘）在无 composition 时也会被声明拦截；真正的放行发生在 `OnKeyDown`——`should_consume_processed_state()` 只在 `accepted`、产生 commit、或 preedit/候选/高亮/页码确实发生变化时才吃掉按键，否则返回 false 由 TSF 把按键交回宿主。因此中文模式下无 preedit 直接按 `,` 会上屏 `，`，而 `Ctrl+C`、无候选时的数字键仍然照常到达应用。
+8. `should_eat_key()` 仅对普通可打印输入保持宽松判定，让 Rime 的 punctuator 收到标点；`OnKeyDown` 的 `should_consume_processed_state()` 根据 `accepted`、commit 或可见组字状态变化决定是否消费。应用快捷键不走这条“先声明拦截、随后放行”的路径：WPF 等宿主在 Test 阶段就改变快捷键路由，而 Rime 也可能真正接受冲突绑定。中文标点仍由 Rime 处理，Ctrl+C/V/X 等从两个入口直接透传。
 9. 有 `committed` 时一律通过 composition：嵌入模式可复用已有 composition；非嵌入模式在本次 write session 内从 QUERYONLY insertion range 创建临时 composition。写入提交文本后先把 TSF selection 折叠到 range 末尾，再 `EndComposition`。若该帧的 TSF 写入失败，按键仍保持 eaten、session 标记为下一键复位；带 commit 的失败帧记录长度并通过 `TF_ES_ASYNCDONTCARE` 只重试一次提交。
 10. `plan_composition(state, embedded)` 是唯一模式决策：嵌入模式把非空 preedit 写进 composition range；非嵌入模式永远返回 `CompositionTarget::None`，不创建或保留 composition。
 11. `ImeState.cursor` 是 Unicode 标量偏移（通用层 D8 契约）；嵌入模式写 TSF selection 前用 `keytao_core::utf16_offset_from_chars` 换算成 UTF-16 code unit 偏移，非嵌入模式则由候选面板在对应标量位置插入 `|`。
 12. 候选窗口用 `CandidateWindow` 绘制并按 caret screen position 定位。
 
-`OnKeyUp` 只处理 solo Shift：先发送 `Shift_L` 或 `Shift_R` keysym 的 press（mask `0`），再发送同一 keysym 的 release（`RIME_RELEASE_MASK`）。librime 的 ascii composer 必须先看到 press 才会在 release 上切换；两次调用都在真实 `OnKeyUp` 内，`OnTestKeyDown` 始终不调用 librime。如果 Shift 按下后出现其它 keyDown，pending flag 会被清除。该 flag 仍由 `OnTestKeyDown` 维护，Shift keydown 仍向宿主透传。
+`OnKeyUp` 只处理 solo Shift：先发送 `Shift_L` 或 `Shift_R` keysym 的 press（mask `0`），再发送同一 keysym 的 release（`RIME_RELEASE_MASK`）。librime 的 ascii composer 必须先看到 press 才会在 release 上切换；两次调用都在真实 `OnKeyUp` 内，`OnTestKeyDown` 始终不调用 librime。如果 Shift 按下后出现其它 keyDown，或同时按着 Ctrl/Alt/Win，pending flag 会被清除；两个 release 入口也复核组合修饰键，避免 Ctrl+Shift 触发额外中英切换。Shift keydown 仍向宿主透传。
 
 release 即使返回 `accepted=false`，只要 `ascii_mode` 改变也必须 apply；返回宿主的 eaten 仍是原来的 `consumed`，不因模式变化而吞掉 keyup。只有无 commit、模式改变且没有可见 preedit / 候选的 mode-only apply 可以在 composition 为空时保留有效 caret cache；普通非嵌入 apply 或任何 commit 都清除旧 cache。新 probe 不可用时，模式提示使用可验证的上次 caret / system caret；完全无坐标时省略提示，但照常更新 `st.ascii_mode` 与语言栏。
 

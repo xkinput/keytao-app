@@ -40,7 +40,7 @@ use crate::{
     globals::DllActivityGuard,
     guard,
     key_map::{
-        current_mod_mask, is_enter_vk, is_shift_vk, shift_keysym_for_vk,
+        current_mod_mask, is_application_shortcut, is_enter_vk, is_shift_vk, shift_keysym_for_vk,
         shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
         vk_to_keysym, RIME_RELEASE_MASK,
     },
@@ -266,7 +266,11 @@ pub(crate) fn should_arm_caret_reprobe(source: Option<CaretSource>) -> bool {
     source != Some(CaretSource::Probe)
 }
 
-fn should_schedule_layout_reposition(has_content: bool, lcode: TfLayoutCode, pending: bool) -> bool {
+fn should_schedule_layout_reposition(
+    has_content: bool,
+    lcode: TfLayoutCode,
+    pending: bool,
+) -> bool {
     has_content && lcode == TF_LC_CHANGE && !pending
 }
 
@@ -827,7 +831,7 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
         return;
     }
     if !update.reposition_only {
-        update_language_bar_mode(shared_state, update.ime_state.ascii_mode);
+        update_language_bar_mode(shared_state, update.ime_state.is_english_mode());
     }
     if shared_state.borrow().ime_state.is_none() {
         return;
@@ -1039,7 +1043,7 @@ fn apply_ime_state(
         let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
         let mode_changed = {
             let mut st = state_arc_for_session.borrow_mut();
-            let mode_changed = ime_state_clone.ascii_mode != st.ascii_mode;
+            let mode_changed = ime_state_clone.is_english_mode() != st.english_mode;
             // Retain the caret only for a mode-only hint without a commit.
             // Normal panel applies must discard the previous caret cache.
             let mode_only_update = mode_changed && !has_visible_state(&ime_state_clone);
@@ -1050,6 +1054,7 @@ fn apply_ime_state(
             st.composition_in_flight = None;
             st.composition = composition;
             st.ascii_mode = ime_state_clone.ascii_mode;
+            st.english_mode = ime_state_clone.is_english_mode();
             st.ime_state = Some(ime_state_clone.clone());
             mode_changed
         };
@@ -1473,17 +1478,20 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
-            prime_theme_resolver();
-            poll_engine_builds(&state);
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
             // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
             // has to be maintained in the test callback (windows-1).
-            state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk);
+            state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
+            if is_application_shortcut(vk, mods) {
+                return Ok(BOOL::from(false));
+            }
             if is_shift_vk(vk) {
                 append_key_diagnostic!("OnTestKeyDown modifier pending=true eat=false");
                 return Ok(BOOL::from(false));
             }
+            prime_theme_resolver();
+            poll_engine_builds(&state);
             // An unanswered probe counts as blocked, so the retry has to run before
             // the check that consumes it: TSF skips `OnKeyDown` for a key this
             // callback declines, and a stale `Unknown` would never be revisited.
@@ -1534,11 +1542,17 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
-            poll_engine_builds(&state);
             let vk = (wparam.0 & 0xFFFF) as u16;
             if !is_shift_vk(vk) {
                 return Ok(BOOL::from(false));
             }
+            if !state.borrow().shift_pressed_without_key
+                || is_application_shortcut(vk, current_mod_mask())
+            {
+                state.borrow_mut().shift_pressed_without_key = false;
+                return Ok(BOOL::from(false));
+            }
+            poll_engine_builds(&state);
             if input_is_blocked(&state, pic) {
                 append_key_diagnostic!("OnTestKeyUp modifier blocked=true eat=false");
                 return Ok(BOOL::from(false));
@@ -1575,14 +1589,19 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(state) = upgrade_state(&self.state) else {
                 return Ok(BOOL::from(false));
             };
-            let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
             let vk = (wparam.0 & 0xFFFF) as u16;
             let mods = current_mod_mask();
-
-            if is_shift_vk(vk) {
-                state.borrow_mut().shift_pressed_without_key = true;
+            state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
+            // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
+            // shortcut policy before context inspection, warmup, or Enter's
+            // modifier-free process_enter path.
+            if is_application_shortcut(vk, mods) {
                 return Ok(BOOL::from(false));
             }
+            if is_shift_vk(vk) {
+                return Ok(BOOL::from(false));
+            }
+            let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
 
             retry_input_context_if_unknown(&state, Some(&context));
             if input_is_blocked(&state, Some(&context)) {
@@ -1627,6 +1646,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 Some(r) => r,
                 None => {
                     append_key_diagnostic!("OnKeyDown result=false");
+                    // Another text service in this host may be deploying a
+                    // new public snapshot. Core declines without waiting for
+                    // its reload lock; do not leave obsolete candidates up.
+                    hide_candidate_window(&state);
                     return Ok(BOOL::from(false));
                 }
             };
@@ -1675,6 +1698,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let Some(keysym) = shift_keysym_for_vk(vk) else {
                 return Ok(BOOL::from(false));
             };
+            if !state.borrow().shift_pressed_without_key
+                || is_application_shortcut(vk, current_mod_mask())
+            {
+                state.borrow_mut().shift_pressed_without_key = false;
+                return Ok(BOOL::from(false));
+            }
 
             let context = pic.ok_or(windows::core::Error::from(E_INVALIDARG))?.clone();
             if input_is_blocked(&state, Some(&context)) {
@@ -1702,6 +1731,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let result = process_key_result(&state, keysym, RIME_RELEASE_MASK);
             let Some(result) = result else {
                 append_key_diagnostic!("OnKeyUp modifier pending=true result=false");
+                hide_candidate_window(&state);
                 return Ok(BOOL::from(false));
             };
             append_key_diagnostic!(
@@ -2151,9 +2181,9 @@ mod tests {
 
     #[test]
     fn passes_shortcuts_rime_declined_while_composing() {
-        // OnTestKeyDown claims Ctrl chords so key_binder gets a chance at them;
-        // when librime leaves the composition untouched the host must still get
-        // its Ctrl+C.
+        // Any remaining schema key that leaves the composition untouched and
+        // is declined must be released too. Application shortcuts bypass the
+        // engine before reaching this decision.
         assert!(!should_consume_processed_state(
             false,
             &state_with_preedit("ni"),
@@ -2161,3 +2191,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "shortcut_passthrough_tests.rs"]
+mod shortcut_passthrough_tests;

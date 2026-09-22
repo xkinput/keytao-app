@@ -29,7 +29,8 @@ final class KeyTaoInputController: IMKInputController {
     private var shiftPressedWithoutKey = false
     private var hasComposition = false
     private var isActive = false
-    private var asciiMode = false
+    private var englishMode = false
+    private var hasMarkedText = false
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
     private var reloadObserver: NSObjectProtocol?
@@ -188,7 +189,7 @@ final class KeyTaoInputController: IMKInputController {
         if hasComposition {
             // librime kept something composing; the session is over regardless.
             if let state = KeyTaoImeState.consuming(keytao_session_clear_composition_json(session)) {
-                asciiMode = state.asciiMode
+                englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
             }
             clearMarkedText(client: client)
         }
@@ -201,7 +202,7 @@ final class KeyTaoInputController: IMKInputController {
         rememberCursorRect(for: client, reason: "beforeApply")
 
         if !state.committed.isEmpty {
-            if hasComposition {
+            if hasMarkedText {
                 clearMarkedText(client: client)
             }
             client?.insertText(
@@ -212,21 +213,23 @@ final class KeyTaoInputController: IMKInputController {
 
         updateMarkedText(state, client: client)
         hasComposition = state.hasComposition
-        asciiMode = state.asciiMode
+        englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
 
-        if state.candidatePanel.candidates.isEmpty {
+        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.embeddedComposition) {
             hideCandidates()
         } else {
-            showCandidates(state.candidatePanel, client: client)
+            showCandidates(panelModel(for: state), client: client)
         }
     }
 
     private func clearMarkedText(client: IMKTextInput?) {
-        defer {
-            hasComposition = false
-            lastPreeditCursor = 0
-        }
-        guard let client else { return }
+        // Client callbacks can synchronously reenter the controller. Release
+        // ownership before asking the client to clear our marked text.
+        let ownedMarkedText = hasMarkedText
+        hasComposition = false
+        lastPreeditCursor = 0
+        hasMarkedText = false
+        guard ownedMarkedText, let client else { return }
         client.setMarkedText(
             "",
             selectionRange: NSRange(location: 0, length: 0),
@@ -235,6 +238,11 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?) {
+        guard ImeThemeManager.shared.theme().ui.embeddedComposition else {
+            if hasMarkedText { clearMarkedText(client: client) }
+            lastPreeditCursor = 0
+            return
+        }
         let preedit = state.preedit
         let length = preedit.utf16.count
         // ImeState counts in Unicode scalars, IMKit's NSRange counts UTF-16.
@@ -242,7 +250,7 @@ final class KeyTaoInputController: IMKInputController {
         guard let client else { return }
 
         if preedit.isEmpty {
-            if hasComposition {
+            if hasMarkedText {
                 clearMarkedText(client: client)
             }
             return
@@ -280,6 +288,7 @@ final class KeyTaoInputController: IMKInputController {
             )
         }
 
+        hasMarkedText = true
         client.setMarkedText(
             marked,
             selectionRange: NSRange(location: min(lastPreeditCursor, length), length: 0),
@@ -296,6 +305,18 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     // MARK: Candidate window helpers
+
+    private func panelModel(for state: KeyTaoImeState) -> KeyTaoPanelModel {
+        var model = state.candidatePanel
+        if ImeThemeManager.shared.theme().ui.embeddedComposition || state.preedit.isEmpty {
+            model.preedit = nil
+        } else {
+            var scalars = Array(state.preedit.unicodeScalars)
+            scalars.insert("|", at: min(max(state.cursor, 0), scalars.count))
+            model.preedit = String(String.UnicodeScalarView(scalars))
+        }
+        return model
+    }
 
     private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?) {
         let panel = candidatePanel ?? CandidatePanel()
@@ -383,7 +404,10 @@ final class KeyTaoInputController: IMKInputController {
 
         var attemptedRects: [String] = []
         var lineRect = NSRect.zero
-        _ = client.attributes(forCharacterIndex: lastPreeditCursor, lineHeightRectangle: &lineRect)
+        // This IMKit API uses an inline-relative index. Without our own marked
+        // text, zero requests the current selection, not document character 0.
+        let inlineCursor = hasMarkedText ? lastPreeditCursor : 0
+        _ = client.attributes(forCharacterIndex: inlineCursor, lineHeightRectangle: &lineRect)
         attemptedRects.append("lineHeight=\(NSStringFromRect(lineRect))")
         if let normalizedLineRect = normalizeTextInputRect(lineRect, source: "lineHeight") {
             return normalizedLineRect
@@ -406,7 +430,7 @@ final class KeyTaoInputController: IMKInputController {
         var queries: [(source: String, range: NSRange)] = []
 
         let markedRange = client.markedRange()
-        if markedRange.location != NSNotFound {
+        if hasMarkedText, markedRange.location != NSNotFound {
             let cursor = min(lastPreeditCursor, max(markedRange.length, 0))
             queries.append((
                 source: "markedRange",
@@ -479,11 +503,11 @@ final class KeyTaoInputController: IMKInputController {
         guard let session = ensureSession() else { return }
         guard let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
         hasComposition = state.hasComposition
-        asciiMode = state.asciiMode
-        if state.candidatePanel.candidates.isEmpty {
+        englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
+        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.embeddedComposition) {
             hideCandidates()
         } else {
-            showCandidates(state.candidatePanel, client: client)
+            showCandidates(panelModel(for: state), client: client)
         }
     }
 
@@ -518,29 +542,33 @@ final class KeyTaoInputController: IMKInputController {
         guard let session = ensureSession() else { return false }
 
         let keyval: UInt32 = Int(event.keyCode) == kVK_RightShift ? rimeKeyShiftRight : rimeKeyShiftLeft
+        let wasEnglishMode = keytao_session_get_english_mode(session)
         guard let state = KeyTaoImeState.consuming(
             keytao_session_process_key_json(session, keyval, rimeReleaseMask)
         ) else {
-            return toggleAsciiMode(client: client)
+            return toggleEnglishMode(client: client)
         }
 
         apply(state, to: client)
-        if state.accepted {
+        // ascii_composer may change a mode while leaving the release event
+        // unhandled. Falling back after that would undo the language switch.
+        if state.accepted || englishMode != wasEnglishMode {
             showModeIndicator(state.modeHint, client: client)
             return true
         }
-        return toggleAsciiMode(client: client)
+        return toggleEnglishMode(client: client)
     }
 
-    private func toggleAsciiMode(client: IMKTextInput?) -> Bool {
+    private func toggleEnglishMode(client: IMKTextInput?) -> Bool {
         guard let session = ensureSession() else { return false }
+        let nextEnglishMode = !keytao_session_get_english_mode(session)
         if hasComposition {
             endComposition(commit: false, client: client)
             hideCandidates()
         }
 
         guard let state = KeyTaoImeState.consuming(
-            keytao_session_set_ascii_mode_json(session, !asciiMode)
+            keytao_session_set_english_mode_json(session, nextEnglishMode)
         ) else { return false }
         apply(state, to: client)
         showModeIndicator(state.modeHint, client: client)

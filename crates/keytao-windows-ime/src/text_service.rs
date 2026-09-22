@@ -24,11 +24,12 @@ use crate::{
     state::{
         append_diagnostic, apply_context_compartment_change, apply_conversion_mode_change,
         apply_open_close_change, clear_compartment_sinks, clear_context_compartment_sinks,
-        context_compartment_sinks_cover, hide_ime_windows, new_shared_state,
-        publish_initial_compartments, refresh_engine_for_focus, refresh_input_context,
-        refresh_language_bar, reset_input_for_focus_change, start_engine_warmup,
-        store_compartment_sink, store_context_compartment_sinks, terminate_input_now,
-        CompartmentSinkRegistration, SharedState, WeakState,
+        context_compartment_sinks_cover, hide_ime_windows, input_context_matches,
+        input_document_matches, new_shared_state, publish_initial_compartments,
+        refresh_engine_for_focus, refresh_input_context, refresh_language_bar,
+        reset_input_for_focus_change, same_com_object, start_engine_warmup, store_compartment_sink,
+        store_context_compartment_sinks, terminate_input_now, CompartmentSinkRegistration,
+        SharedState, WeakState,
     },
 };
 
@@ -228,6 +229,13 @@ fn activate_service(
     publish_initial_compartments(state);
 
     tracing::info!("KeyTao TSF activated (client_id={})", client_id);
+    keytao_core::rt_log!(
+        keytao_core::runtime_log::Level::Info,
+        "lifecycle",
+        "tsf_activated",
+        activation_flags = activation_flags,
+        thread_manager_flags = thread_mgr_flags
+    );
     append_diagnostic(format!(
         "TSF activated client_id={client_id} activation_flags=0x{activation_flags:08x} thread_mgr_flags=0x{thread_mgr_flags:08x}"
     ));
@@ -410,6 +418,40 @@ struct ThreadMgrEventSink {
     _dll_guard: DllActivityGuard,
 }
 
+fn focused_document(state: &SharedState) -> Option<ITfDocumentMgr> {
+    let manager = state.borrow().thread_mgr.clone()?;
+    unsafe { manager.GetFocus() }.ok()
+}
+
+fn is_focused_top_context(state: &SharedState, context: Option<&ITfContext>) -> bool {
+    let Some(context) = context else {
+        return false;
+    };
+    focused_document(state)
+        .and_then(|document| unsafe { document.GetTop() }.ok())
+        .is_some_and(|top| same_com_object(&top, context))
+}
+
+fn document_event_affects_input(state: &SharedState, document: Option<&ITfDocumentMgr>) -> bool {
+    let Some(document) = document else {
+        return false;
+    };
+    input_document_matches(state, document)
+        || focused_document(state).is_some_and(|focused| same_com_object(&focused, document))
+}
+
+fn pop_event_affects_input(state: &SharedState, context: Option<&ITfContext>) -> bool {
+    let Some(context) = context else {
+        return false;
+    };
+    // GetDocumentMgr may already return S_FALSE after Pop, so consult the
+    // tracked context before asking TSF about a still-attached context.
+    input_context_matches(state, Some(context))
+        || unsafe { context.GetDocumentMgr() }
+            .ok()
+            .is_some_and(|document| document_event_affects_input(state, Some(&document)))
+}
+
 impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     fn OnInitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
         guard(|| {
@@ -418,11 +460,14 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         })
     }
 
-    fn OnUninitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> Result<()> {
+    fn OnUninitDocumentMgr(&self, pdim: Option<&ITfDocumentMgr>) -> Result<()> {
         guard(|| {
             append_diagnostic("ThreadMgrEventSink OnUninitDocumentMgr");
             if let Some(state) = self.state.upgrade() {
-                reset_input_for_focus_change(&state);
+                if document_event_affects_input(&state, pdim) {
+                    reset_input_for_focus_change(&state);
+                    refresh_input_context(&state, None);
+                }
             }
             Ok(())
         })
@@ -454,6 +499,12 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
     fn OnPushContext(&self, pic: Option<&ITfContext>) -> Result<()> {
         guard(|| {
             if let Some(state) = self.state.upgrade() {
+                // Push is broadcast for every document in the thread, including
+                // background tabs and controls. Only the focused top may replace
+                // the active editor's policy and composition.
+                if !is_focused_top_context(&state, pic) {
+                    return Ok(());
+                }
                 reset_input_for_focus_change(&state);
                 refresh_engine_for_focus(&state);
                 refresh_input_context(&state, pic);
@@ -466,9 +517,12 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         })
     }
 
-    fn OnPopContext(&self, _pic: Option<&ITfContext>) -> Result<()> {
+    fn OnPopContext(&self, pic: Option<&ITfContext>) -> Result<()> {
         guard(|| {
             if let Some(state) = self.state.upgrade() {
+                if !pop_event_affects_input(&state, pic) {
+                    return Ok(());
+                }
                 reset_input_for_focus_change(&state);
                 refresh_input_context(&state, None);
             }
@@ -477,6 +531,10 @@ impl ITfThreadMgrEventSink_Impl for ThreadMgrEventSink_Impl {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "input_context_focus_tests.rs"]
+mod input_context_focus_tests;
 
 // ── ITfCompartmentEventSink ───────────────────────────────────────────────────
 

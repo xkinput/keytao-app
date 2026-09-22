@@ -2,6 +2,12 @@
 //! Every platform frontend (Tauri app, ibus engine, macOS IMKit, Windows TSF)
 //! links against this crate as its rime back-end.
 
+pub mod english_mode;
+#[cfg(all(
+    test,
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
+mod runtime_access_tests;
 pub mod runtime_log;
 
 use runtime_log::Level;
@@ -11,8 +17,9 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
+        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        TryLockError, Weak,
     },
     time::{Duration, Instant},
 };
@@ -24,8 +31,20 @@ fn lock_ignore_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn read_ignore_poison<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(PoisonError::into_inner)
+fn try_read_ignore_poison<T>(lock: &RwLock<T>) -> Option<RwLockReadGuard<'_, T>> {
+    match lock.try_read() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+fn try_lock_ignore_poison<T>(lock: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match lock.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
@@ -58,6 +77,8 @@ pub struct ImeState {
     pub committed: Option<String>,
     pub select_keys: Option<String>,
     pub ascii_mode: bool,
+    #[serde(default)]
+    pub schema_id: String,
     pub schema_name: String,
 }
 
@@ -105,6 +126,48 @@ impl InputContextPolicy {
             composing: true,
             learning: false,
         }
+    }
+}
+
+/// Recording a sensitive context must never wait for deployment or be lost
+/// when an engine is temporarily busy. The clear bit survives later policy
+/// changes until a session can safely discard its old composition.
+struct SessionInputPolicy(AtomicU8);
+
+impl SessionInputPolicy {
+    const CLEAR: u8 = 4;
+
+    fn new(policy: InputContextPolicy) -> Self {
+        Self(AtomicU8::new(Self::encode(policy)))
+    }
+
+    fn encode(policy: InputContextPolicy) -> u8 {
+        u8::from(policy.composing) | (u8::from(policy.learning) << 1)
+    }
+
+    fn decode(bits: u8) -> InputContextPolicy {
+        InputContextPolicy {
+            composing: bits & 1 != 0,
+            learning: bits & 2 != 0,
+        }
+    }
+
+    fn current(&self) -> InputContextPolicy {
+        Self::decode(self.0.load(Ordering::Acquire))
+    }
+
+    fn set(&self, policy: InputContextPolicy) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |previous| {
+                let clear = previous & Self::CLEAR != 0 || (previous & 1 != 0 && !policy.composing);
+                Some(Self::encode(policy) | if clear { Self::CLEAR } else { 0 })
+            });
+    }
+
+    fn take_for_engine(&self) -> (InputContextPolicy, bool) {
+        let bits = self.0.fetch_and(!Self::CLEAR, Ordering::AcqRel);
+        (Self::decode(bits), bits & Self::CLEAR != 0)
     }
 }
 
@@ -203,6 +266,12 @@ pub struct KeyProcessResult {
 }
 
 impl ImeState {
+    /// Display mode only. Dictionary English still has `ascii_mode == false`
+    /// because its letters must reach librime and produce candidates.
+    pub fn is_english_mode(&self) -> bool {
+        self.ascii_mode || english_mode::is_english_schema(&self.schema_id, &self.schema_name)
+    }
+
     pub fn empty() -> Self {
         Self {
             preedit: String::new(),
@@ -217,6 +286,7 @@ impl ImeState {
             committed: None,
             select_keys: None,
             ascii_mode: false,
+            schema_id: String::new(),
             schema_name: String::new(),
         }
     }
@@ -1923,6 +1993,16 @@ mod desktop {
         /// Discard the composition through librime, so that the outcome does
         /// not depend on how a schema bound `Escape`.
         pub fn clear_composition(&self) -> ImeState {
+            self.clear_composition_impl(true)
+        }
+
+        /// Clear preedit without consuming a pending commit during a schema
+        /// transition that can still fail and roll back.
+        pub(crate) fn discard_composition(&self) {
+            self.clear_composition_impl(false);
+        }
+
+        fn clear_composition_impl(&self, consume_commit: bool) -> ImeState {
             let _rime = rime_api_lock();
             // SAFETY: the librime lock is held; a missing pointer falls back to
             // the historical synthetic key.
@@ -1936,7 +2016,11 @@ mod desktop {
                 self.session
                     .process_key(key_event(key_policy::XK_ESCAPE, 0));
             }
-            extract_state_with_commit(&self.session)
+            if consume_commit {
+                extract_state_with_commit(&self.session)
+            } else {
+                extract_state_readonly(&self.session)
+            }
         }
 
         /// Commit whatever librime currently holds, the way a frontend has to
@@ -2521,9 +2605,22 @@ mod desktop {
     }
 
     fn extract_state(session: &rime_api::Session, committed: Option<String>) -> ImeState {
+        let status = session.status().ok();
+        let ascii_mode = status.as_ref().map(|s| s.is_ascii_mode).unwrap_or(false);
+        let schema_id = status
+            .as_ref()
+            .map(|s| s.schema_id().to_string())
+            .unwrap_or_default();
+        let schema_name = status
+            .as_ref()
+            .map(|s| s.schema_name().to_string())
+            .unwrap_or_default();
         let Some(ctx) = session.context() else {
             return ImeState {
                 committed,
+                ascii_mode,
+                schema_id,
+                schema_name,
                 ..ImeState::empty()
             };
         };
@@ -2545,13 +2642,6 @@ mod desktop {
             })
             .collect();
 
-        let status = session.status().ok();
-        let ascii_mode = status.as_ref().map(|s| s.is_ascii_mode).unwrap_or(false);
-        let schema_name = status
-            .as_ref()
-            .map(|s| s.schema_name().to_string())
-            .unwrap_or_default();
-
         ImeState {
             preedit,
             cursor,
@@ -2565,6 +2655,7 @@ mod desktop {
             committed,
             select_keys: menu.select_keys.map(|s: &str| s.to_string()),
             ascii_mode,
+            schema_id,
             schema_name,
         }
     }
@@ -3216,6 +3307,7 @@ pub struct ImeRuntime(Arc<ImeRuntimeState>);
 pub struct ImeRuntimeSession {
     shared: Arc<ImeRuntimeState>,
     inner: Arc<Mutex<ImeRuntimeSessionInner>>,
+    policy: Arc<SessionInputPolicy>,
 }
 
 #[cfg(any(
@@ -3312,6 +3404,7 @@ impl ProcessRimeState {
             let mut inner = lock_ignore_poison(&session);
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+                inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
             }
             true
         });
@@ -3326,6 +3419,7 @@ impl ProcessRimeState {
     /// Tear librime down when it is up for different directories, so that the
     /// caller can bring it back up for the ones it wants. Every live engine is
     /// dropped first, exactly like a reload.
+    /// The caller holds the reload barrier for writing through initialization.
     fn shutdown_for_dir_change(
         &self,
         initialized: &mut Option<RimeDataDirs>,
@@ -3336,7 +3430,6 @@ impl ProcessRimeState {
             Some(current) if current == wanted => return Ok(()),
             Some(_) => {}
         }
-        let _barrier = write_ignore_poison(&self.reload_barrier);
         self.drop_live_engines();
         *initialized = None;
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -3391,8 +3484,8 @@ struct ImeRuntimeSessionInner {
     generation: u64,
     /// ascii_mode of the engine that was dropped, restored on the rebuilt one.
     carried_ascii_mode: Option<bool>,
-    /// What the current input context allows; survives engine rebuilds.
-    policy: InputContextPolicy,
+    carried_english_mode: Option<bool>,
+    english_mode: english_mode::EnglishModeController,
 }
 
 #[cfg(any(
@@ -3440,6 +3533,7 @@ impl ImeRuntime {
                 return Ok(());
             }
 
+            let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
             PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
             deploy(
                 dirs.user.to_string_lossy().into_owned(),
@@ -3496,6 +3590,7 @@ impl ImeRuntime {
                 patch_windows_lua_compatibility(&user_dir)?;
             }
 
+            let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
             PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
             setup_only(
                 dirs.user.to_string_lossy().into_owned(),
@@ -3608,31 +3703,36 @@ impl ImeRuntime {
         Ok(RimeDataDirs { user, shared })
     }
 
+    /// Create a session after a worker initialized this runtime. UI callers
+    /// receive an error while initialization/deployment is busy and can retry;
+    /// this entry point never waits for a process-wide reload.
     pub fn create_session(&self) -> Result<ImeRuntimeSession, String> {
         let dirs = self.data_dirs()?;
-        runtime_log::init_for_engine(&dirs.user);
         let started = runtime_log::enabled(Level::Info).then(Instant::now);
         let result = (|| {
-            if lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() != Some(&dirs) {
-                self.init_without_deploy()?;
-            }
-
             // Every teardown takes `initialized` before the reload barrier, so
             // holding it here keeps librime from being finalized between the check
             // and the session that is about to be created against it.
-            let initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+            let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)
+                .ok_or("librime initialization or reload is busy")?;
             if initialized.as_ref() != Some(&dirs) {
                 return Err("librime is running for other data directories".into());
             }
-            let barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
+            let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
+                .ok_or("librime initialization or reload is busy")?;
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
+            let engine = Engine::new_with_user_data_dir(self.0.user_data_dir.as_deref())?;
+            let mut english_mode = english_mode::EnglishModeController::default();
+            english_mode.configure(
+                english_mode::read_english_mode(&dirs.user),
+                engine.list_schemas(),
+            );
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
-                engine: Some(Engine::new_with_user_data_dir(
-                    self.0.user_data_dir.as_deref(),
-                )?),
+                engine: Some(engine),
                 generation,
                 carried_ascii_mode: None,
-                policy: InputContextPolicy::default(),
+                carried_english_mode: None,
+                english_mode,
             }));
             PROCESS_RIME.register(&inner);
             drop(barrier);
@@ -3640,6 +3740,7 @@ impl ImeRuntime {
             Ok(ImeRuntimeSession {
                 shared: self.0.clone(),
                 inner,
+                policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
             })
         })();
         if let Some(started) = started {
@@ -3682,14 +3783,34 @@ impl ImeRuntimeSession {
     }
 
     pub fn process_key_result(&self, keycode: u32, mask: u32) -> Option<KeyProcessResult> {
+        if !self.input_policy().composing {
+            return Some(KeyProcessResult {
+                state: ImeState::empty(),
+                accepted: false,
+            });
+        }
         let (keycode, mask) = key_policy::normalize_key_for_modifiers(keycode, mask);
         let mask = rime_modifier_mask(mask);
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
-        self.with_engine_and_policy(|engine, policy| {
+        self.with_engine_and_mode(|engine, policy, english_mode| {
             if policy.composing {
-                engine.process_key_result(keycode, mask)
+                let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
+                    && english_mode.mode == english_mode::EnglishMode::Schema;
+                let before = desktop_dictionary && engine.is_ascii_mode();
+                let mut result = engine.process_key_result(keycode, mask);
+                // Mobile keyboards already select schemas themselves. Desktop
+                // ascii_composer toggles become dictionary-mode switches only
+                // when the user explicitly selected the schema preference.
+                if desktop_dictionary {
+                    if let Err(error) =
+                        english_mode.reconcile_ascii_toggle(engine, before, &mut result)
+                    {
+                        crate::rt_log!(Level::Info, "error", "english_mode_switch", msg = error);
+                    }
+                }
+                result
             } else {
                 // A sensitive context never reaches librime: no composition, no
                 // candidates and nothing for the user dictionary to learn.
@@ -3703,6 +3824,12 @@ impl ImeRuntimeSession {
 
     /// `Return` handling shared by every frontend, see [`Engine::process_enter`].
     pub fn process_enter(&self) -> Option<KeyProcessResult> {
+        if !self.input_policy().composing {
+            return Some(KeyProcessResult {
+                state: ImeState::empty(),
+                accepted: false,
+            });
+        }
         self.with_engine_and_policy(|engine, policy| {
             if policy.composing {
                 engine.process_enter()
@@ -3717,29 +3844,27 @@ impl ImeRuntimeSession {
 
     /// What the current input context allows.
     pub fn input_policy(&self) -> InputContextPolicy {
-        lock_ignore_poison(&self.inner).policy
+        self.policy.current()
     }
 
     /// Declare what the current input context allows, e.g. on focus change.
     ///
     /// Turning composing off discards whatever was being composed, so the
-    /// returned state is the one the frontend has to apply. The switch and the
-    /// discard share one critical section, so a key being handled concurrently
-    /// is either fully before or fully after the switch.
+    /// returned state is the one the frontend has to apply. A busy engine
+    /// defers the discard, but records the policy immediately; later keys
+    /// cannot pass the sensitive-context check using an older policy.
     ///
     /// The policy is recorded even when no engine can be built, otherwise a
     /// context that turned sensitive while librime was down would come back as
     /// a composing one.
     pub fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState> {
-        let _barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
-        let mut inner = lock_ignore_poison(&self.inner);
-        let previous = std::mem::replace(&mut inner.policy, policy);
-        self.refresh_if_needed(&mut inner).ok()?;
-        let engine = inner.engine.as_ref()?;
-        Some(if previous.composing && !policy.composing {
-            engine.clear_composition()
-        } else {
-            engine.state()
+        self.policy.set(policy);
+        self.with_engine_and_policy(|engine, policy| {
+            if !policy.composing {
+                engine.clear_composition()
+            } else {
+                engine.state()
+            }
         })
     }
 
@@ -3832,6 +3957,20 @@ impl ImeRuntimeSession {
         self.with_engine(|engine| engine.set_ascii_mode(enabled))
     }
 
+    /// Logical English mode, including a dictionary schema with ASCII off.
+    /// Keep `is_ascii_mode` for deciding whether keys should pass through.
+    pub fn is_english_mode(&self) -> bool {
+        self.with_engine_and_mode(|engine, _, mode| mode.is_english(engine))
+            .unwrap_or(false)
+    }
+
+    /// Switch desktop input using the saved ASCII/dictionary preference.
+    /// Mobile clients that manage schemas themselves keep using set_ascii_mode.
+    pub fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String> {
+        self.with_engine_and_mode(|engine, _, mode| mode.switch(engine, enabled))
+            .ok_or_else(|| "Rime session is unavailable".to_string())?
+    }
+
     pub fn get_option(&self, option_name: &str) -> bool {
         self.with_engine(|engine| engine.get_option(option_name))
             .unwrap_or(false)
@@ -3850,13 +3989,13 @@ impl ImeRuntimeSession {
     /// Whether [`ImeRuntimeSession::change_page`] pages through librime instead
     /// of replaying the `-`/`=` bindings a schema may not have.
     pub fn supports_native_paging(&self) -> bool {
-        engine_capabilities().supports_native_paging()
+        self.capabilities().supports_native_paging()
     }
 
     /// Whether [`ImeRuntimeSession::select_candidate_on_page`] selects through
     /// librime instead of sending a select key the schema may not have.
     pub fn supports_candidate_selection(&self) -> bool {
-        engine_capabilities().supports_candidate_selection()
+        self.capabilities().supports_candidate_selection()
     }
 
     /// Run `action` on an engine that matches the current generation,
@@ -3873,11 +4012,29 @@ impl ImeRuntimeSession {
         &self,
         action: impl FnOnce(&Engine, InputContextPolicy) -> T,
     ) -> Option<T> {
-        let _barrier = read_ignore_poison(&PROCESS_RIME.reload_barrier);
-        let mut inner = lock_ignore_poison(&self.inner);
+        self.with_engine_and_mode(|engine, policy, _| action(engine, policy))
+    }
+
+    fn with_engine_and_mode<T>(
+        &self,
+        action: impl FnOnce(&Engine, InputContextPolicy, &mut english_mode::EnglishModeController) -> T,
+    ) -> Option<T> {
+        // A reload may compile dictionaries for many seconds. No synchronous
+        // host key/focus callback may wait for that worker's write lock.
+        let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
+        let mut inner = try_lock_ignore_poison(&self.inner)?;
         self.refresh_if_needed(&mut inner).ok()?;
-        let policy = inner.policy;
-        Some(action(inner.engine.as_ref()?, policy))
+        let (policy, clear_composition) = self.policy.take_for_engine();
+        let ImeRuntimeSessionInner {
+            engine,
+            english_mode,
+            ..
+        } = &mut *inner;
+        let engine = engine.as_ref()?;
+        if clear_composition {
+            engine.discard_composition();
+        }
+        Some(action(engine, policy, english_mode))
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
@@ -3892,10 +4049,32 @@ impl ImeRuntimeSession {
             // other session still references them.
             if let Some(engine) = inner.engine.take() {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
+                inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
             }
             let engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
+            let root = self
+                .shared
+                .user_data_dir
+                .clone()
+                .or_else(default_user_data_dir);
+            inner.english_mode.configure(
+                root.as_deref()
+                    .map(english_mode::read_english_mode)
+                    .unwrap_or_default(),
+                engine.list_schemas(),
+            );
             if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
                 engine.apply_ascii_mode(ascii_mode);
+            }
+            if cfg!(not(any(target_os = "android", target_os = "ios"))) {
+                if let Some(english) = inner.carried_english_mode.take() {
+                    if let Err(error) = inner.english_mode.restore(&engine, english) {
+                        // A removed or broken optional dictionary must not
+                        // prevent the rebuilt session from accepting input.
+                        engine.apply_ascii_mode(english);
+                        crate::rt_log!(Level::Info, "error", "english_mode_restore", msg = error);
+                    }
+                }
             }
             inner.engine = Some(engine);
             inner.generation = current;
@@ -4414,7 +4593,7 @@ fn is_keytao_managed_schema(schema: &str) -> bool {
 }
 
 pub fn is_addon_schema(schema: &str) -> bool {
-    schema == "easy_en"
+    matches!(schema, "easy_en" | "wanxiang")
 }
 
 fn dedupe_schemas(schemas: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -5663,25 +5842,27 @@ mod tests {
 
     #[test]
     fn merge_default_custom_preserves_addon_after_package_schemas() {
-        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: keydo\n";
-        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n";
+        let existing = "patch:\n  schema_list:\n    - schema: user_schema\n    - schema: easy_en\n    - schema: wanxiang\n    - schema: keydo\n";
+        let package = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n    - schema: keytao-dz\n";
         let (merged, user) = merge_default_custom_content(Some(existing), package).unwrap();
         let schemas = parse_schema_list(&merged);
 
         assert_eq!(user, vec!["user_schema"]);
         assert_eq!(
             schemas,
-            vec!["user_schema", "keytao", "keytao-dz", "easy_en"]
+            vec!["user_schema", "keytao", "keytao-dz", "easy_en", "wanxiang"]
         );
     }
 
     #[test]
     fn preferred_schema_never_uses_addon_as_startup_schema() {
-        assert_eq!(
-            preferred_schema_from_list(vec!["easy_en".into(), "user_schema".into()]),
-            Some("user_schema".into())
-        );
-        assert_eq!(preferred_schema_from_list(vec!["easy_en".into()]), None);
+        for addon in ["easy_en", "wanxiang"] {
+            assert_eq!(
+                preferred_schema_from_list(vec![addon.into(), "user_schema".into()]),
+                Some("user_schema".into())
+            );
+            assert_eq!(preferred_schema_from_list(vec![addon.into()]), None);
+        }
     }
 
     #[test]

@@ -318,7 +318,7 @@ impl IBusEngine {
     /// Announce the conversion-mode indicator, showing the mode Rime is actually
     /// in rather than the one this engine object last saw.
     async fn register_mode_property(&self, ctxt: &SignalContext<'_>) {
-        let ascii_mode = self.session.state().ascii_mode;
+        let ascii_mode = self.session.state().is_english_mode();
         self.mode.adopt(ascii_mode);
         let props = ibus_prop_list_variant(vec![ibus_mode_property_variant(ascii_mode)]);
         let _ = IBusEngine::register_properties(ctxt, props).await;
@@ -337,7 +337,7 @@ impl IBusEngine {
     }
 
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
-        let ascii_mode = ime_state.ascii_mode;
+        let ascii_mode = ime_state.is_english_mode();
         let has_candidates = !ime_state.candidates.is_empty();
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {

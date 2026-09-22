@@ -12,6 +12,7 @@ class CandidatePanel: NSPanel {
     private let rootView = NSView()
     private let containerView = NSView()
     private let stackView = NSStackView()
+    private let candidateStack = NSStackView()
     private var stackLeadingConstraint: NSLayoutConstraint?
     private var stackTrailingConstraint: NSLayoutConstraint?
     private var stackTopConstraint: NSLayoutConstraint?
@@ -51,6 +52,7 @@ class CandidatePanel: NSPanel {
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.setContentHuggingPriority(.required, for: .horizontal)
         stackView.setContentHuggingPriority(.required, for: .vertical)
+        candidateStack.translatesAutoresizingMaskIntoConstraints = false
 
         rootView.addSubview(containerView)
         containerView.addSubview(stackView)
@@ -87,8 +89,28 @@ class CandidatePanel: NSPanel {
         let theme = ImeThemeManager.shared.theme()
         level = windowLevel
         apply(theme, orientation: model.orientation)
+        let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let chromeInset = Self.chromeInset
+        let maxWidth = min(theme.panel.maxWidth, max(80, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2))
+        let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
 
         stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        candidateStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if let preedit = model.preedit, !preedit.isEmpty {
+            let label = NSTextField(labelWithString: preedit)
+            label.font = NSFont.keytaoThemeFont(family: theme.font.family, size: theme.font.preeditSize, weight: theme.font.weight)
+            label.textColor = theme.candidate.foreground.nsColor
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            label.widthAnchor.constraint(lessThanOrEqualToConstant: max(1, maxWidth - theme.panel.paddingX * 2)).isActive = true
+            stackView.addArrangedSubview(label)
+            stackView.setCustomSpacing(theme.panel.preeditGap, after: label)
+        }
+        if !model.candidates.isEmpty || model.navigation.canGoPrevious || model.navigation.canGoNext {
+            stackView.addArrangedSubview(candidateStack)
+        }
 
         for (position, candidate) in model.candidates.enumerated() {
             let option = CandidateOptionView(
@@ -101,10 +123,10 @@ class CandidatePanel: NSPanel {
             option.target = self
             option.tag = candidate.index
             option.action = #selector(candidateClicked(_:))
-            stackView.addArrangedSubview(option)
+            candidateStack.addArrangedSubview(option)
 
             if theme.candidate.separatorVisible && position < model.candidates.count - 1 {
-                stackView.addArrangedSubview(makeSeparator(theme: theme))
+                candidateStack.addArrangedSubview(makeSeparator(theme: theme))
             }
         }
 
@@ -114,11 +136,6 @@ class CandidatePanel: NSPanel {
 
         contentView?.layoutSubtreeIfNeeded()
         let contentSize = stackView.fittingSize
-        let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let chromeInset = Self.chromeInset
-        let maxWidth = min(theme.panel.maxWidth, max(80, visibleFrame.width - theme.panel.screenMargin * 2 - chromeInset * 2))
-        let maxHeight = min(theme.panel.maxHeight, max(60, visibleFrame.height - theme.panel.screenMargin * 2 - chromeInset * 2))
         let panelSize = NSSize(
             width: min(max(contentSize.width + theme.panel.paddingX * 2, theme.panel.minWidth), maxWidth),
             height: min(contentSize.height + theme.panel.paddingY * 2, maxHeight)
@@ -151,9 +168,12 @@ class CandidatePanel: NSPanel {
         containerView.layer?.borderColor = theme.panel.borderColor.cgColor
         containerView.layer?.borderWidth = theme.panel.borderWidth
 
-        stackView.orientation = orientation == .vertical ? .vertical : .horizontal
-        stackView.alignment = orientation == .vertical ? .leading : .centerY
-        stackView.spacing = theme.panel.gap
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.spacing = 0
+        candidateStack.orientation = orientation == .vertical ? .vertical : .horizontal
+        candidateStack.alignment = orientation == .vertical ? .leading : .centerY
+        candidateStack.spacing = theme.panel.gap
         stackLeadingConstraint?.constant = theme.panel.paddingX
         stackTrailingConstraint?.constant = -theme.panel.paddingX
         stackTopConstraint?.constant = theme.panel.paddingY
@@ -183,15 +203,15 @@ class CandidatePanel: NSPanel {
             if navigation.canGoNext {
                 row.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
             }
-            stackView.addArrangedSubview(row)
+            candidateStack.addArrangedSubview(row)
             return
         }
 
         if navigation.canGoPrevious {
-            stackView.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
+            candidateStack.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
         }
         if navigation.canGoNext {
-            stackView.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
+            candidateStack.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
         }
     }
 

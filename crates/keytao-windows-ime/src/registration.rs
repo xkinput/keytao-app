@@ -25,7 +25,8 @@ use windows::{
         UI::TextServices::{
             CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, ITfCategoryMgr,
             ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
-            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
+            GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIPCAP_COMLESS,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
             GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
             GUID_TFCAT_TIP_KEYBOARD,
         },
@@ -95,7 +96,7 @@ struct CategoryRegistration {
     item: windows::core::GUID,
 }
 
-fn category_registrations() -> [CategoryRegistration; 5] {
+fn category_registrations() -> [CategoryRegistration; 7] {
     [
         CategoryRegistration {
             category: GUID_TFCAT_TIP_KEYBOARD,
@@ -115,6 +116,17 @@ fn category_registrations() -> [CategoryRegistration; 5] {
         },
         CategoryRegistration {
             category: GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
+            item: CLSID_TEXT_SERVICE,
+        },
+        // Modern Windows text hosts (including Start/taskbar Search) filter
+        // desktop-only TIPs. The DLL supports direct class-factory activation,
+        // UIElement candidates, and isolated writable AppContainer data.
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+            item: CLSID_TEXT_SERVICE,
+        },
+        CategoryRegistration {
+            category: GUID_TFCAT_TIPCAP_COMLESS,
             item: CLSID_TEXT_SERVICE,
         },
     ]

@@ -1,0 +1,67 @@
+# KeyTao's portable Wanxiang dictionary integration.
+# Uses the upstream tone-aware dictionary and full-pinyin algebra, with only
+# built-in Rime components. No Lua modules or grammar model are required.
+schema:
+  schema_id: wanxiang
+  name: 万象拼音
+  version: "18.0.5-keytao-basic"
+  author:
+    - amzxyz and Wanxiang contributors (dictionary and spelling algebra)
+    - KeyTao contributors (portable basic schema)
+  description: 万象全拼基础词库，支持词频调频与原生组句，不含语法模型和 Lua 扩展。
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [中文, 英文]
+  - name: full_shape
+    states: [半角, 全角]
+  - name: ascii_punct
+    states: [中标, 英标]
+
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - uniquifier
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+  algebra:
+    __patch:
+      - wanxiang_algebra:/base/全拼
+
+translator:
+  dictionary: wanxiang
+  enable_user_dict: true
+  enable_sentence: true
+  enable_completion: true
+  contextual_suggestions: false
+  spelling_hints: 0
+
+grammar:
+  language: ""
+
+punctuator:
+  import_preset: default
+key_binder:
+  import_preset: default
+recognizer:
+  import_preset: default

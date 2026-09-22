@@ -561,7 +561,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
                         .session
                         .process_key_result(keysym, RIME_RELEASE_MASK)
                     {
-                        self.update_ascii_mode(result.state.ascii_mode);
+                        self.update_ascii_mode(result.state.is_english_mode());
                     }
                 }
                 return Ok(false);
@@ -614,7 +614,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         let ime_state = result.state;
         let consumed = result.accepted;
 
-        self.update_ascii_mode(ime_state.ascii_mode);
+        self.update_ascii_mode(ime_state.is_english_mode());
 
         if let Some(text) = &ime_state.committed {
             draw_client_preedit(server, &mut user_ic.ic, "")?;

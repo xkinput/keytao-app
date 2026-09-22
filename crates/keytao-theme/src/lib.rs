@@ -294,6 +294,7 @@ pub struct PanelTheme {
     pub padding_x: f32,
     pub padding_y: f32,
     pub gap: f32,
+    pub preedit_gap: f32,
     pub min_width: f32,
     pub max_width: f32,
     pub max_height: f32,
@@ -734,6 +735,7 @@ impl ResolvedImeTheme {
                 padding_x: 10.0,
                 padding_y: 10.0,
                 gap: 4.0,
+                preedit_gap: 10.0,
                 min_width: 128.0,
                 max_width: 320.0,
                 max_height: 460.0,
@@ -925,6 +927,7 @@ impl ResolvedImeTheme {
         self.panel.padding_x = clamp(self.panel.padding_x, 0.0, 32.0);
         self.panel.padding_y = clamp(self.panel.padding_y, 0.0, 28.0);
         self.panel.gap = clamp(self.panel.gap, 0.0, 24.0);
+        self.panel.preedit_gap = clamp(self.panel.preedit_gap, 0.0, 48.0);
         self.panel.min_width = clamp(self.panel.min_width, 48.0, 480.0);
         self.panel.max_width = clamp(self.panel.max_width, 160.0, 2400.0);
         self.panel.max_height = clamp(self.panel.max_height, 80.0, 1600.0);
@@ -1033,6 +1036,7 @@ struct PartialPanelTheme {
     padding_x: Option<f32>,
     padding_y: Option<f32>,
     gap: Option<f32>,
+    preedit_gap: Option<f32>,
     min_width: Option<f32>,
     max_width: Option<f32>,
     max_height: Option<f32>,
@@ -1158,6 +1162,7 @@ impl PanelTheme {
         assign(&mut self.padding_x, partial.padding_x);
         assign(&mut self.padding_y, partial.padding_y);
         assign(&mut self.gap, partial.gap);
+        assign(&mut self.preedit_gap, partial.preedit_gap);
         assign(&mut self.min_width, partial.min_width);
         assign(&mut self.max_width, partial.max_width);
         assign(&mut self.max_height, partial.max_height);

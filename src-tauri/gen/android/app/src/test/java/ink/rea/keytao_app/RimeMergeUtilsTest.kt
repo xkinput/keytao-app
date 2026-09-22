@@ -14,6 +14,23 @@ class RimeMergeUtilsTest {
             300_000L,
             KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "easy_en")),
         )
+        assertEquals(
+            300_000L,
+            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "wanxiang")),
+        )
+        assertEquals(
+            300_000L,
+            KeytaoRimeDeployClient.timeoutMsForSchemas(listOf("keytao", "easy_en", "wanxiang")),
+        )
+    }
+
+    @Test
+    fun `addon recognition does not claim similarly named user schemas`() {
+        assertTrue(isAddonSchema("wanxiang"))
+        assertTrue(isAddonSchema("easy_en"))
+        assertFalse(isAddonSchema("wanxiang_custom"))
+        assertFalse(isAddonSchema("wanxiang_pro"))
+        assertFalse(isAddonSchema("easy_en_personal"))
     }
 
     // ── extractLuaRequire ─────────────────────────────────────────────────────
@@ -182,6 +199,29 @@ class RimeMergeUtilsTest {
             listOf("user_schema", "keytao", "keytao-dz", "easy_en"),
             parseSchemas(result.mergedContent),
         )
+    }
+
+    @Test
+    fun `main scheme updates preserve wanxiang and English after package schemas`() {
+        val existing = "patch:\n  schema_list:\n    - schema: wanxiang_custom\n    - schema: wanxiang\n    - schema: easy_en\n    - schema: keydo\n"
+        val zip = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n"
+        val result = mergeDefaultCustom(existing, zip)
+
+        assertEquals(listOf("wanxiang_custom"), result.userSchemas)
+        assertEquals(
+            listOf("wanxiang_custom", "keytao", "keytao-dz", "wanxiang", "easy_en"),
+            parseSchemas(result.mergedContent),
+        )
+    }
+
+    @Test
+    fun `merged addon schemas are deduplicated without reordering the main scheme`() {
+        val existing = "patch:\n  schema_list:\n    - schema: wanxiang\n    - schema: keytao\n"
+        val zip = "patch:\n  schema_list:\n    - schema: keytao\n    - schema: wanxiang\n"
+        val result = mergeDefaultCustom(existing, zip)
+
+        assertTrue(result.userSchemas.isEmpty())
+        assertEquals(listOf("keytao", "wanxiang"), parseSchemas(result.mergedContent))
     }
 
     // ── real keytao rime.lua ──────────────────────────────────────────────────

@@ -4,7 +4,7 @@ data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
 data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)
 
 private val managedSchemaPrefixes = listOf("keytao", "txjx", "xmjd6", "keydo")
-private const val easyEnglishAddonSchema = "easy_en"
+private val addonSchemaIds = setOf("easy_en", "wanxiang")
 
 fun isDefaultCustom(filename: String) =
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
@@ -12,7 +12,7 @@ fun isDefaultCustom(filename: String) =
 fun isManagedSchema(schema: String) =
     managedSchemaPrefixes.any { schema.startsWith(it) }
 
-fun isAddonSchema(schema: String) = schema == easyEnglishAddonSchema
+fun isAddonSchema(schema: String) = schema in addonSchemaIds
 
 private fun dedupeSchemas(schemas: List<String>): List<String> {
     val seen = linkedSetOf<String>()

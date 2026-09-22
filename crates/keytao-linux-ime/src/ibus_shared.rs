@@ -91,7 +91,7 @@ pub enum KeyOutcome {
     Forward,
     /// Tear the preedit and candidate UI down, then the client keeps the key.
     ClearUi,
-    /// Only the conversion mode moved.
+    /// Only the displayed language mode moved (including English dictionary).
     ModeChanged { ascii_mode: bool, accepted: bool },
     /// Publish the new IME state.
     Publish {
@@ -135,7 +135,7 @@ pub fn process_key_event(session: &ImeSession, keyval: u32, state: u32) -> KeyOu
                     result.state.ascii_mode
                 );
                 KeyOutcome::ModeChanged {
-                    ascii_mode: result.state.ascii_mode,
+                    ascii_mode: result.state.is_english_mode(),
                     accepted: result.accepted,
                 }
             }

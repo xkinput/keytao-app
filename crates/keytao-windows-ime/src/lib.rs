@@ -13,6 +13,8 @@
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case)]
 
+mod app_actions;
+mod appcontainer;
 mod candidate_ui;
 mod candidate_win;
 mod display_attribute;

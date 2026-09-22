@@ -584,7 +584,7 @@ impl PanelRenderer {
         let preedit_height = model
             .preedit
             .as_ref()
-            .map(|_| preedit_size + panel_gap)
+            .map(|_| preedit_size + self.s(theme.panel.preedit_gap))
             .unwrap_or(0.0);
         let option_widths: Vec<f32> = model
             .candidates
