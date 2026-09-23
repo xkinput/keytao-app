@@ -310,7 +310,20 @@ unsafe fn run_native_fixture() {
             !refused,
             "{label}: native read session was unexpectedly refused"
         );
-        assert_eq!(result.password, expected, "{label}");
+        if expected == ContextProbe::Clear {
+            // Hosts may return either an empty optional value or E_FAIL.
+            // Both ordinary cases allow input; E_FAIL remains retryable.
+            assert!(
+                matches!(
+                    result.password,
+                    ContextProbe::Clear | ContextProbe::Unavailable
+                ),
+                "{label}: {:?}",
+                result.password
+            );
+        } else {
+            assert_eq!(result.password, expected, "{label}");
+        }
         assert_eq!(
             result.is_sensitive(),
             expected == ContextProbe::Restricted,

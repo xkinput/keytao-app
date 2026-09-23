@@ -10,7 +10,7 @@ use windows::{
     },
 };
 
-use super::CandidateUiManager;
+use super::{CandidateUiManager, ALL_CANDIDATE_FLAGS};
 
 macro_rules! unimplemented_methods {
     ($(fn $name:ident(&self $(, $arg:ident: $ty:ty)*) -> $ret:ty;)*) => {
@@ -27,6 +27,8 @@ struct Host {
     fail_begin: Cell<bool>,
     element: RefCell<Option<ITfUIElement>>,
     snapshots: RefCell<Vec<Vec<String>>>,
+    begin_flags: RefCell<Option<[u32; 2]>>,
+    update_flags: RefCell<Vec<[u32; 2]>>,
     ended: Cell<usize>,
 }
 
@@ -65,7 +67,12 @@ impl ITfUIElementMgr_Impl for ThreadManager_Impl {
             return Err(E_INVALIDARG.into());
         }
         self.host.element.replace(element.cloned());
+        let candidates = element.unwrap().cast::<ITfCandidateListUIElement>()?;
         unsafe {
+            self.host.begin_flags.replace(Some([
+                candidates.GetUpdatedFlags()?,
+                candidates.GetUpdatedFlags()?,
+            ]));
             *show = BOOL::from(self.host.show_own_window.get());
             *id = 123;
         }
@@ -74,8 +81,13 @@ impl ITfUIElementMgr_Impl for ThreadManager_Impl {
 
     fn UpdateUIElement(&self, id: u32) -> Result<()> {
         let candidates = self.GetUIElement(id)?.cast::<ITfCandidateListUIElement>()?;
+        let second_observer = self.GetUIElement(id)?.cast::<ITfCandidateListUIElement>()?;
         let mut snapshot = Vec::new();
         unsafe {
+            self.host.update_flags.borrow_mut().push([
+                candidates.GetUpdatedFlags()?,
+                second_observer.GetUpdatedFlags()?,
+            ]);
             for index in 0..candidates.GetCount()? {
                 snapshot.push(candidates.GetString(index)?.to_string());
             }
@@ -153,4 +165,22 @@ fn uiless_host_failure_never_falls_back_to_an_unapproved_window() {
     host.fail_begin.set(false);
     assert!(!manager.update(Some(&thread), None, &state, false));
     assert_eq!(host.snapshots.borrow().len(), 1);
+}
+
+#[test]
+fn every_observer_receives_flags_during_begin_and_each_update() {
+    let (mut manager, thread, host, mut state) = fixture();
+    assert!(!manager.update(Some(&thread), None, &state, false));
+    assert_eq!(*host.begin_flags.borrow(), Some([ALL_CANDIDATE_FLAGS; 2]));
+    assert_eq!(*host.update_flags.borrow(), vec![[ALL_CANDIDATE_FLAGS; 2]]);
+
+    // A later candidate change must still notify both observers, even though
+    // both already queried the element during BeginUIElement and its update.
+    state.candidates[0].text = "拟".into();
+    assert!(!manager.update(Some(&thread), None, &state, false));
+    assert_eq!(
+        *host.update_flags.borrow(),
+        vec![[ALL_CANDIDATE_FLAGS; 2], [ALL_CANDIDATE_FLAGS; 2]]
+    );
+    assert_eq!(host.snapshots.borrow().last().unwrap(), &vec!["拟"]);
 }

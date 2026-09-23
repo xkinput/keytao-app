@@ -6,7 +6,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use keytao_core::ImeState;
+use keytao_core::{runtime_log::Level, ImeState};
 use windows::{
     core::{implement, Interface, Result, BSTR, GUID},
     Win32::{
@@ -80,6 +80,13 @@ impl ITfUIElement_Impl for CandidateUiElement_Impl {
     fn Show(&self, show: BOOL) -> Result<()> {
         guard(|| {
             self.data.borrow_mut().shown = show.as_bool();
+            keytao_core::rt_log!(
+                Level::Verbose,
+                "ui",
+                "candidate_ui_show",
+                ui = Rc::as_ptr(&self.data) as usize,
+                show = show.as_bool(),
+            );
             Ok(())
         })
     }
@@ -91,7 +98,9 @@ impl ITfUIElement_Impl for CandidateUiElement_Impl {
 
 impl ITfCandidateListUIElement_Impl for CandidateUiElement_Impl {
     fn GetUpdatedFlags(&self) -> Result<u32> {
-        guard(|| Ok(std::mem::take(&mut self.data.borrow_mut().updated_flags)))
+        // Every UIElement sink must see the same update. Reading these flags
+        // must not consume them before another observer queries the element.
+        guard(|| Ok(self.data.borrow().updated_flags))
     }
 
     fn GetDocumentMgr(&self) -> Result<ITfDocumentMgr> {
@@ -249,15 +258,34 @@ impl CandidateUiManager {
 
             let mut show = BOOL::from(true);
             let mut element_id = u32::MAX;
-            if unsafe { ui_element_mgr.BeginUIElement(&element, &mut show, &mut element_id) }
-                .is_err()
+            if let Err(error) =
+                unsafe { ui_element_mgr.BeginUIElement(&element, &mut show, &mut element_id) }
             {
+                keytao_core::rt_log!(
+                    Level::Verbose,
+                    "ui",
+                    "candidate_ui_begin",
+                    ui = Rc::as_ptr(&self.data) as usize,
+                    ok = false,
+                    hr = format!("0x{:08X}", error.code().0 as u32),
+                    allow_fallback_window = allow_fallback_window,
+                );
                 return allow_fallback_window;
             }
 
             self.host_allows_window = show.as_bool();
             self.ui_element_id = Some(element_id);
             self.ui_element_mgr = Some(ui_element_mgr);
+            keytao_core::rt_log!(
+                Level::Verbose,
+                "ui",
+                "candidate_ui_begin",
+                ui = Rc::as_ptr(&self.data) as usize,
+                ok = true,
+                element_id = element_id,
+                host_allows_window = show.as_bool(),
+                allow_fallback_window = allow_fallback_window,
+            );
         }
 
         // `pbShow=TRUE` only means the TIP may draw its own window; the advised

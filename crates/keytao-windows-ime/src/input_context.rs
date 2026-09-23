@@ -12,14 +12,14 @@
 //! dictionary.
 //!
 //! Probe outcomes distinguish a declared restriction, a clear answer, an
-//! invalid/unknown answer, and a refused password edit session. TSF reports "no restriction" and "cannot answer
-//! right now" through the same shapes — a refused synchronous read session, a
-//! failed `GetSelection`, a property in an unexpected form — and reading any of
-//! them as "no restriction" would hand a password field straight to Rime. A
-//! Most failed probes therefore count as restricted and are retried from the
-//! key path. A refused password-probe edit session is distinct: the caller can
-//! retain a known answer for the same context, or allow one key-path retry when
-//! there is no prior answer.
+//! invalid/unknown answer, and unavailable optional metadata. Failed selection
+//! reads and malformed properties remain restricted. Word can return E_FAIL
+//! for the optional input-scope value even in a valid, enabled text context;
+//! that alone must not disable Chinese input. As with a refused synchronous
+//! scope session, retain a known answer for the same context and retry later.
+//! An unavailable value is not proof that a field is non-sensitive: native
+//! password controls, declared scopes and disabled/empty compartments still
+//! take precedence.
 
 use std::{cell::Cell, rc::Rc};
 
@@ -94,6 +94,10 @@ pub(crate) enum ContextProbe {
     /// The read failed. Counts as restricted until a later probe answers.
     #[default]
     Unknown,
+    /// A valid selection's optional input-scope value is unavailable (E_FAIL).
+    /// This is not a host instruction to disable input. Keep any known answer
+    /// for the same context and retry; do not treat it as an explicit Clear.
+    Unavailable,
     /// TSF refused the synchronous password-probe edit session. Unlike an
     /// invalid property answer, this does not prove the field is sensitive.
     ProbeFailed,
@@ -136,6 +140,7 @@ impl ContextProbe {
             Self::Restricted => "restricted",
             Self::Clear => "clear",
             Self::Unknown => "unknown",
+            Self::Unavailable => "unavailable",
             Self::ProbeFailed => "probe_failed",
         }
     }
@@ -154,7 +159,7 @@ pub(crate) struct ContextInputState {
     pub(crate) empty_context: ContextProbe,
     /// The context declares an `IS_PASSWORD` input scope.
     pub(crate) password: ContextProbe,
-    /// The most recent password-scope edit session was refused. The effective
+    /// The most recent password-scope read was unavailable or refused. The effective
     /// `password` value may still be the last known answer for this context.
     pub(crate) password_probe_failed: bool,
 }
@@ -221,7 +226,14 @@ impl ContextInputState {
         self.password_probe_failed
             || [self.keyboard_disabled, self.empty_context, self.password]
                 .into_iter()
-                .any(|probe| matches!(probe, ContextProbe::Unknown | ContextProbe::ProbeFailed))
+                .any(|probe| {
+                    matches!(
+                        probe,
+                        ContextProbe::Unknown
+                            | ContextProbe::Unavailable
+                            | ContextProbe::ProbeFailed
+                    )
+                })
     }
 }
 
@@ -229,7 +241,17 @@ pub(crate) fn merge_probe_failed_state(
     previous_same_context: Option<ContextInputState>,
     mut inspected: ContextInputState,
 ) -> ContextInputState {
-    if inspected.password == ContextProbe::ProbeFailed {
+    let unavailable = matches!(
+        inspected.password,
+        ContextProbe::ProbeFailed | ContextProbe::Unavailable
+    );
+    // Do not lose a declared restriction through a sequence such as
+    // Restricted -> Unknown -> Unavailable in the same context. Only a new
+    // known scope answer or a context change may clear that restriction.
+    let retain_restriction = inspected.password == ContextProbe::Unknown
+        && previous_same_context
+            .is_some_and(|previous| previous.password == ContextProbe::Restricted);
+    if unavailable || retain_restriction {
         if let Some(previous) = previous_same_context.filter(|state| state.password.is_known()) {
             inspected.password = previous.password;
         }
@@ -465,7 +487,7 @@ fn read_password_scope(ec: u32, context: &ITfContext) -> ContextProbe {
             report_scope_probe("selection_null", E_POINTER, count);
             return ContextProbe::Unknown;
         };
-        input_scopes_probe(&property, ec, &range, native_password)
+        input_scopes_probe(&property, ec, &range)
     }
 }
 
@@ -556,6 +578,10 @@ fn report_scope_probe(stage: &'static str, hr: HRESULT, detail: u32) {
 mod property_tests;
 
 #[cfg(test)]
+#[path = "input_context_unavailable_tests.rs"]
+mod unavailable_tests;
+
+#[cfg(test)]
 #[path = "input_context_native_tests.rs"]
 mod native_tests;
 
@@ -563,18 +589,20 @@ unsafe fn input_scopes_probe(
     property: &ITfReadOnlyProperty,
     ec: u32,
     range: &windows::Win32::UI::TextServices::ITfRange,
-    native_password: ContextProbe,
 ) -> ContextProbe {
     let value = match property.GetValue(ec, range) {
         Ok(value) => value,
         Err(error) => {
-            // Windows RichEdit (including Notepad's RichEditD2DPT) returns
-            // E_FAIL for an unset input scope, despite GetAppProperty succeeding.
-            // Only accept that answer when this exact native control confirms
-            // it is not a password field; other hosts and failures stay unknown.
-            if error.code() == E_FAIL && native_password == ContextProbe::Clear {
-                report_scope_probe("richedit_scope_unset", error.code(), 0);
-                return ContextProbe::Clear;
+            if error.code() == E_FAIL {
+                // Word and RichEdit return E_FAIL here despite a successful property
+                // lookup and valid selection. Input scopes are optional; this
+                // failure must not turn every letter into permanent passthrough.
+                // Keep it distinct from Clear so a previously declared password
+                // remains blocked in merge_probe_failed_state, and retry later.
+                // A native control's lack of password masking cannot disprove
+                // a previously declared PIN/private scope either.
+                report_scope_probe("property_value_unavailable", error.code(), 0);
+                return ContextProbe::Unavailable;
             }
             report_scope_probe("property_value", error.code(), 0);
             return ContextProbe::Unknown;

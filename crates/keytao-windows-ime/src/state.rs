@@ -24,9 +24,9 @@ use windows::{
         System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
-            ITfComposition, ITfContext, ITfContextOwnerCompositionServices, ITfDocumentMgr,
-            ITfKeyEventSink, ITfSource, ITfTextLayoutSink, ITfThreadFocusSink, ITfThreadMgr,
-            ITfThreadMgrEventSink, GUID_PROP_ATTRIBUTE, TF_TMAE_UIELEMENTENABLEDONLY,
+            ITfComposition, ITfCompositionView, ITfContext, ITfContextOwnerCompositionServices,
+            ITfDocumentMgr, ITfKeyEventSink, ITfSource, ITfTextLayoutSink, ITfThreadFocusSink,
+            ITfThreadMgr, ITfThreadMgrEventSink, GUID_PROP_ATTRIBUTE, TF_TMAE_UIELEMENTENABLEDONLY,
             TF_TMF_UIELEMENTENABLEDONLY,
         },
     },
@@ -37,12 +37,14 @@ use crate::{
     edit_session::with_write_session,
     globals::DllActivityGuard,
     input_context::{
-        inspect_context, merge_probe_failed_state, ContextInputState, InputBlockReason,
+        inspect_context, merge_probe_failed_state, ContextInputState, ContextProbe,
+        InputBlockReason,
     },
     key_event_sink::{
         should_arm_caret_reprobe, CaretSource, PendingCommitRetry, PendingWindowUpdate,
     },
     language_bar::LanguageBarItem,
+    panel_anchor::PanelAnchor,
 };
 
 const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -52,8 +54,9 @@ const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
 /// key of the next focus; this only keeps typing off the file system.
 const RELOAD_STAMP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How soon a context with an unanswered probe may be inspected again from the
-/// key path. `Unknown` fails closed; a refused password edit session keeps a
-/// known answer or stays open on its first attempt. Both need bounded retries,
+/// key path. `Unknown` fails closed; unavailable optional scopes and refused
+/// password edit sessions keep a known answer or stay open on the first attempt.
+/// All need bounded retries,
 /// but a host that never grants the session must not get one request per key.
 const INPUT_CONTEXT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_CONTEXT_SYNC_BACKOFF: Duration = Duration::from_secs(1);
@@ -132,6 +135,8 @@ pub struct TsfState {
     language_bar_add_error: Option<windows::core::HRESULT>,
     pub composition: Option<ITfComposition>,
     pub composition_context: Option<ITfContext>,
+    pub panel_anchor: Option<PanelAnchor>,
+    pub input_generation: u64,
     pub panel_context: Option<ITfContext>,
     pub embedded_mode_cached: bool,
     pub layout_reposition_pending: bool,
@@ -337,6 +342,8 @@ impl TsfState {
             language_bar_add_error: None,
             composition: None,
             composition_context: None,
+            panel_anchor: None,
+            input_generation: 0,
             panel_context: None,
             embedded_mode_cached: false,
             layout_reposition_pending: false,
@@ -934,7 +941,9 @@ fn apply_input_context_state(
     };
     // COM Release, like QueryInterface, may reenter the text service.
     drop(previous_context_handles);
-    let password_diagnostic = if input_context.password_probe_failed {
+    let password_diagnostic = if input_context.password == ContextProbe::Unavailable {
+        input_context.password.diagnostic_name()
+    } else if input_context.password_probe_failed {
         "probe_failed"
     } else {
         input_context.password.diagnostic_name()
@@ -1062,7 +1071,7 @@ pub(crate) fn apply_context_compartment_change(shared_state: &SharedState) {
 pub(crate) fn clear_input_for_blocked_context(shared_state: &SharedState) {
     let has_input = {
         let st = shared_state.borrow();
-        st.composition.is_some() || st.ime_state.is_some()
+        st.composition.is_some() || st.panel_anchor.is_some() || st.ime_state.is_some()
     };
     if !has_input {
         return;
@@ -1405,6 +1414,13 @@ pub(crate) fn update_ime_windows(
     if shared_state.borrow().ime_state.is_none() {
         return true;
     }
+    keytao_core::rt_log!(
+        Level::Verbose,
+        "ui",
+        "candidate_window_policy",
+        allowed = allow_candidate_window,
+        caret_source = format!("{:?}", caret.map(|(_, source)| source)),
+    );
     let weak_state = Rc::downgrade(shared_state);
     with_detached_windows(shared_state, false, |candidate_win, mode_hint_win| {
         let show = !ime_state.candidates.is_empty() || !ime_state.preedit.is_empty();
@@ -1450,7 +1466,9 @@ pub(crate) fn update_ime_windows(
                 st.caret_retry_active = false;
             }
         }
-        if let Some((caret, _)) = caret.filter(|_| show_mode_hint) {
+        if let Some((caret, _)) = caret.filter(|(_, source)| {
+            show_mode_hint && !matches!(source, CaretSource::View | CaretSource::Window)
+        }) {
             mode_hint_win.show_mode_hint(
                 ime_state.is_english_mode(),
                 caret.x,
@@ -1514,6 +1532,13 @@ pub(crate) fn post_pending_ime_ui(shared_state: &SharedState) {
 pub(crate) fn flush_pending_ime_ui(shared_state: &SharedState) {
     let (hide_pending, rearm_pending) = {
         let mut st = shared_state.borrow_mut();
+        // A failed PostMessage may reach this fallback from DoEditSession.
+        // Keep the queued work until the document lock has been released;
+        // accessibility and window calls can synchronously reenter the host.
+        if st.ime_write_session_active || st.caret_probe_session_in_progress {
+            st.windows_dirty = true;
+            return;
+        }
         st.windows_dirty = false;
         (
             std::mem::take(&mut st.windows_hide_pending),
@@ -1571,7 +1596,14 @@ pub(crate) fn schedule_layout_reposition(shared_state: &SharedState) {
 }
 
 pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
+    let (anchor, client_id) = {
+        let mut st = shared_state.borrow_mut();
+        (st.panel_anchor.take(), st.client_id)
+    };
     let active_composition = take_active_composition(shared_state);
+    if let Some(anchor) = anchor {
+        request_panel_anchor_end(anchor, client_id);
+    }
     if let Some((context, composition, client_id)) = active_composition {
         request_composition_end(shared_state, context, composition, client_id);
     }
@@ -1583,17 +1615,88 @@ pub(crate) fn reset_input_for_focus_change(shared_state: &SharedState) {
 /// (`Deactivate`) or where the thread stops pumping our sessions
 /// (`OnKillThreadFocus`); a queued session would simply never run.
 pub(crate) fn terminate_input_now(shared_state: &SharedState) {
+    let (anchor, client_id) = {
+        let mut st = shared_state.borrow_mut();
+        (st.panel_anchor.take(), st.client_id)
+    };
     let active_composition = take_active_composition(shared_state);
+    if let Some(anchor) = anchor {
+        let context = anchor.context().clone();
+        let to_end = anchor.clone();
+        if client_id == 0
+            || with_write_session(&context, client_id, move |ec, _| to_end.end(ec)).is_err()
+        {
+            terminate_panel_anchor(&anchor);
+        }
+    }
     if let Some((context, composition, client_id)) = active_composition {
         end_composition_now(shared_state, &context, composition, client_id);
     }
     hide_ime_windows(shared_state);
 }
 
+/// End only the native positioning anchor. Its range never owned any text.
+pub(crate) fn request_panel_anchor_end(anchor: PanelAnchor, client_id: u32) {
+    if anchor.composition().is_none() {
+        return;
+    }
+    if client_id == 0 {
+        terminate_panel_anchor(&anchor);
+        return;
+    }
+    let context = anchor.context().clone();
+    let to_end = anchor.clone();
+    if let Err(error) =
+        crate::edit_session::with_async_write_session(&context, client_id, move |ec, _| {
+            let result = to_end.end(ec);
+            if let Err(error) = &result {
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "error",
+                    "panel_anchor_end",
+                    hr = error.code().0
+                );
+            }
+            result
+        })
+    {
+        keytao_core::rt_log!(
+            Level::Info,
+            "error",
+            "panel_anchor_end_request",
+            hr = error.code().0
+        );
+        terminate_panel_anchor(&anchor);
+    }
+}
+
+fn terminate_panel_anchor(anchor: &PanelAnchor) {
+    let Some(composition) = anchor.composition() else {
+        return;
+    };
+    // A null view would terminate other services' compositions as well.
+    if let (Ok(services), Ok(view)) = (
+        anchor
+            .context()
+            .cast::<ITfContextOwnerCompositionServices>(),
+        composition.cast::<ITfCompositionView>(),
+    ) {
+        if let Err(error) = unsafe { services.TerminateComposition(&view) } {
+            keytao_core::rt_log!(
+                Level::Info,
+                "error",
+                "panel_anchor_terminate",
+                hr = error.code().0
+            );
+        }
+    }
+}
+
 fn take_active_composition(
     shared_state: &SharedState,
 ) -> Option<(ITfContext, ITfComposition, u32)> {
     let mut st = shared_state.borrow_mut();
+    st.input_generation = st.input_generation.wrapping_add(1);
     let shift_pending = st.shift_pressed_without_key;
     st.shift_pressed_without_key = false;
     st.session_reset_pending = true;
@@ -1644,8 +1747,9 @@ pub(crate) fn clear_input_after_composition_terminated(
         return;
     }
 
-    let (in_write_session, shift_pending) = {
+    let (in_write_session, shift_pending, panel_anchor, client_id) = {
         let mut st = shared_state.borrow_mut();
+        st.input_generation = st.input_generation.wrapping_add(1);
         let in_write_session = st.ime_write_session_active;
         let shift_pending = st.shift_pressed_without_key;
         st.shift_pressed_without_key = false;
@@ -1667,8 +1771,16 @@ pub(crate) fn clear_input_after_composition_terminated(
             st.windows_dirty = true;
             st.windows_hide_pending = true;
         }
-        (in_write_session, shift_pending)
+        (
+            in_write_session,
+            shift_pending,
+            st.panel_anchor.take(),
+            st.client_id,
+        )
     };
+    if let Some(anchor) = panel_anchor {
+        request_panel_anchor_end(anchor, client_id);
+    }
     append_diagnostic(format!(
         "composition terminated identity_match=0 cleared=1 shift_pending={}",
         u8::from(shift_pending)
@@ -2052,7 +2164,14 @@ mod tests {
 
     #[test]
     fn caret_ladder_starts_at_most_once_per_apply() {
-        for source in [None, Some(CaretSource::Cache), Some(CaretSource::System)] {
+        for source in [
+            None,
+            Some(CaretSource::Cache),
+            Some(CaretSource::System),
+            Some(CaretSource::Accessibility),
+            Some(CaretSource::View),
+            Some(CaretSource::Window),
+        ] {
             assert!(should_start_caret_reprobe(false, source, true));
             assert!(!should_start_caret_reprobe(true, source, true));
             assert!(!should_start_caret_reprobe(false, source, false));
@@ -2062,6 +2181,25 @@ mod tests {
             Some(CaretSource::Probe),
             true
         ));
+    }
+
+    #[test]
+    fn ui_flush_preserves_pending_work_inside_document_sessions() {
+        for write_session in [true, false] {
+            let state = super::new_shared_state();
+            {
+                let mut st = state.borrow_mut();
+                st.ime_write_session_active = write_session;
+                st.caret_probe_session_in_progress = !write_session;
+                st.windows_hide_pending = true;
+                st.caret_rearm_pending = true;
+            }
+            super::flush_pending_ime_ui(&state);
+            let st = state.borrow();
+            assert!(st.windows_dirty);
+            assert!(st.windows_hide_pending);
+            assert!(st.caret_rearm_pending);
+        }
     }
 
     #[test]

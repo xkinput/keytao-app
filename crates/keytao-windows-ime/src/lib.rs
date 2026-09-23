@@ -13,6 +13,7 @@
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case)]
 
+mod accessible_caret;
 mod app_actions;
 mod appcontainer;
 mod candidate_ui;
@@ -25,6 +26,7 @@ mod key_event_sink;
 mod key_map;
 mod language_bar;
 mod panel;
+mod panel_anchor;
 mod registration;
 mod state;
 mod text_service;

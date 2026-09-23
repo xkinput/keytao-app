@@ -448,7 +448,7 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 | iOS | `textDocumentProxy.isSecureTextEntry` | 直通 |
 | iOS | `keyboardType` 为 numberPad / decimalPad / phonePad / asciiCapableNumberPad | 强制数字层且直通 |
 
-Windows RichEdit 兼容：系统 `RICHEDIT50W` 和记事本的 `RichEditD2DPT` 在未设置 InputScope 时，`GetAppProperty` 成功而 `GetValue` 返回 `E_FAIL`。只有 `GetActiveView().GetWnd()` 确认是本线程的已知原生 RichEdit 类，且 `ES_PASSWORD` 和 `EM_GETPASSWORDCHAR` 均未声明密码时，才允许这一失败路径继续组字；其他未知属性和失败仍保持阻挡。原生窗口回归覆盖普通文本及密码样式/密码字符，默认忽略，需在隔离 Windows 账户/虚拟机手动执行：`NOACTIVATETIP` 只限制初次激活，RichEdit 后续仍可能在测试进程中加载已安装的输入法，不能把它当作隔离保证。
+Windows 可选 InputScope 兼容：Word 和 RichEdit 可能在 `GetAppProperty`、`GetSelection` 成功后，对 `GetValue` 返回 `E_FAIL`。将这一特定错误记为 `Unavailable`，允许未声明敏感的有效上下文继续组字并限流重试，而不是永久透传字母。`Unavailable` 不等于已证实安全，也不会关闭 Rime 自身的学习；显式密码/PIN/private、disabled/empty 声明以及本线程原生 RichEdit 的密码样式/密码字符始终优先，同 context 的既有敏感答案不能被后续失败清除。原生控件未遮蔽文字也不能否定此前的 PIN/private 声明。其他错误和畸形属性仍保持阻挡。原生窗口回归默认忽略，需在隔离 Windows 账户/虚拟机手动执行：`NOACTIVATETIP` 只限制初次激活，RichEdit 后续仍可能在测试进程中加载已安装的输入法，不能把它当作隔离保证。
 
 三条容易照抄错的口径：
 

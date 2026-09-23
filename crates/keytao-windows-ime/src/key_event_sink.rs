@@ -26,9 +26,12 @@ use windows::{
             ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO,
             MONITOR_DEFAULTTONEAREST,
         },
-        System::Threading::GetCurrentThreadId,
+        System::Threading::{GetCurrentProcessId, GetCurrentThreadId},
         UI::TextServices::*,
-        UI::WindowsAndMessaging::{GetAncestor, GetGUIThreadInfo, GA_ROOT, GUITHREADINFO},
+        UI::WindowsAndMessaging::{
+            GetAncestor, GetClientRect, GetForegroundWindow, GetGUIThreadInfo,
+            GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GA_ROOT, GUITHREADINFO,
+        },
     },
 };
 
@@ -44,6 +47,7 @@ use crate::{
         shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
         vk_to_keysym, RIME_RELEASE_MASK,
     },
+    panel_anchor::{start_panel_anchor, PanelAnchor},
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
         clear_input_for_blocked_context, clear_layout_sink, defer_ime_ui_hide, diagnostics_enabled,
@@ -235,11 +239,14 @@ fn clear_composition_display_attribute(ec: u32, context: &ITfContext, range: &IT
 struct CaretProbe {
     owner_hwnd: HWND,
     position: Option<(i32, i32)>,
+    // An editing viewport is a last-resort panel anchor, never a caret.
+    viewport: Option<RECT>,
 }
 
 #[derive(Clone)]
 pub(crate) struct PendingWindowUpdate {
     context: ITfContext,
+    input_generation: u64,
     ime_state: ImeState,
     caret: CaretProbe,
     document_mgr: Option<ITfDocumentMgr>,
@@ -260,6 +267,9 @@ pub(crate) enum CaretSource {
     Probe,
     Cache,
     System,
+    Accessibility,
+    View,
+    Window,
 }
 
 pub(crate) fn should_arm_caret_reprobe(source: Option<CaretSource>) -> bool {
@@ -345,6 +355,7 @@ fn probe_caret(
             return CaretProbe {
                 owner_hwnd: fallback_focus_window(),
                 position: None,
+                viewport: None,
             };
         };
         let owner_hwnd = view
@@ -477,6 +488,7 @@ fn probe_caret(
                             return CaretProbe {
                                 owner_hwnd,
                                 position: Some(position),
+                                viewport: None,
                             };
                         }
                     }
@@ -488,6 +500,7 @@ fn probe_caret(
                         return CaretProbe {
                             owner_hwnd,
                             position: Some(position),
+                            viewport: None,
                         };
                     }
                 }
@@ -533,6 +546,7 @@ fn probe_caret(
                             return CaretProbe {
                                 owner_hwnd,
                                 position: Some(position),
+                                viewport: None,
                             };
                         }
                     }
@@ -542,6 +556,7 @@ fn probe_caret(
                         return CaretProbe {
                             owner_hwnd,
                             position: Some(position),
+                            viewport: None,
                         };
                     }
                 }
@@ -559,6 +574,7 @@ fn probe_caret(
         CaretProbe {
             owner_hwnd,
             position: None,
+            viewport: view.GetScreenExt().ok().filter(valid_panel_area),
         }
     }
 }
@@ -568,6 +584,7 @@ fn resolve_caret(
     shared_state: &SharedState,
     probe: CaretProbe,
     embedded: bool,
+    allow_panel_fallback: bool,
 ) -> Option<(CaretPosition, CaretSource)> {
     if let Some((x, y)) = probe.position {
         let caret = CaretPosition {
@@ -606,10 +623,167 @@ fn resolve_caret(
             return Some(caret);
         }
     }
+    if let Some(rect) = crate::accessible_caret::accessible_caret_rect(probe.owner_hwnd) {
+        if rect.right >= rect.left
+            && keytao_core::caret_extent_is_usable(rect.left, rect.top, rect.right, rect.bottom)
+            && caret_is_inside_owner_monitor(probe.owner_hwnd, rect.left, rect.bottom)
+        {
+            if diagnostics_enabled() {
+                append_diagnostic(format!(
+                    "caret resolved via=accessibility x={} y={}",
+                    rect.left, rect.bottom
+                ));
+            }
+            return Some((
+                CaretPosition {
+                    x: rect.left,
+                    y: rect.bottom,
+                    owner_hwnd: probe.owner_hwnd,
+                },
+                CaretSource::Accessibility,
+            ));
+        }
+    }
+    if allow_panel_fallback {
+        let visible_client = visible_owner_client(probe.owner_hwnd);
+        if let Some(((x, y), source)) =
+            panel_fallback_position(probe.viewport, visible_client, allow_panel_fallback)
+        {
+            if diagnostics_enabled() {
+                append_diagnostic(format!(
+                    "caret resolved via={} x={x} y={y} owner=0x{:x}",
+                    if source == CaretSource::View {
+                        "view"
+                    } else {
+                        "window"
+                    },
+                    probe.owner_hwnd.0 as usize,
+                ));
+            }
+            // Do not cache this position or label it Probe: layout callbacks
+            // and the bounded retry ladder must immediately prefer a real caret.
+            return Some((
+                CaretPosition {
+                    x,
+                    y,
+                    owner_hwnd: probe.owner_hwnd,
+                },
+                source,
+            ));
+        }
+    }
     if diagnostics_enabled() {
         append_diagnostic("caret resolved via=none x=0 y=0");
     }
     None
+}
+
+fn valid_panel_area(rect: &RECT) -> bool {
+    rect.right > rect.left && rect.bottom > rect.top
+}
+
+fn intersect_panel_areas(first: RECT, second: RECT) -> Option<RECT> {
+    if !valid_panel_area(&first) || !valid_panel_area(&second) {
+        return None;
+    }
+    let intersection = RECT {
+        left: first.left.max(second.left),
+        top: first.top.max(second.top),
+        right: first.right.min(second.right),
+        bottom: first.bottom.min(second.bottom),
+    };
+    valid_panel_area(&intersection).then_some(intersection)
+}
+
+/// Geometry only. `visible_client` is supplied only after ownership, focus,
+/// visibility and clipping checks; an arbitrary TSF viewport is not sufficient.
+fn panel_fallback_position(
+    viewport: Option<RECT>,
+    visible_client: Option<RECT>,
+    has_panel_content: bool,
+) -> Option<((i32, i32), CaretSource)> {
+    if !has_panel_content {
+        return None;
+    }
+    let client = visible_client.filter(valid_panel_area)?;
+    let (area, source) = match viewport.and_then(|view| intersect_panel_areas(view, client)) {
+        Some(area) => (area, CaretSource::View),
+        None => (client, CaretSource::Window),
+    };
+    let width = i64::from(area.right) - i64::from(area.left);
+    let height = i64::from(area.bottom) - i64::from(area.top);
+    let x = i64::from(area.left) + 8.min(width - 1);
+    let y = i64::from(area.top) + 8.min(height - 1);
+    Some(((x as i32, y as i32), source))
+}
+
+/// Never place a fallback panel over an unrelated or hidden application. TSF
+/// can hand back a stale HWND, so check its current owner rather than trusting it.
+fn visible_owner_client(owner: HWND) -> Option<RECT> {
+    unsafe {
+        if owner.0.is_null() || !IsWindow(owner).as_bool() || !IsWindowVisible(owner).as_bool() {
+            return None;
+        }
+        let mut process = 0;
+        if GetWindowThreadProcessId(owner, Some(&mut process)) != GetCurrentThreadId()
+            || process != GetCurrentProcessId()
+        {
+            return None;
+        }
+        let focus = fallback_focus_window();
+        if !has_same_root_window(focus, owner)
+            || !has_same_root_window(GetForegroundWindow(), owner)
+        {
+            return None;
+        }
+        let root = GetAncestor(owner, GA_ROOT);
+        if root.0.is_null()
+            || !IsWindowVisible(root).as_bool()
+            || IsIconic(owner).as_bool()
+            || IsIconic(root).as_bool()
+        {
+            return None;
+        }
+        let owner_client = client_screen_rect(owner)?;
+        let root_client = client_screen_rect(root)?;
+        let visible = intersect_panel_areas(owner_client, root_client)?;
+        let monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        intersect_panel_areas(visible, info.rcWork)
+    }
+}
+
+unsafe fn client_screen_rect(window: HWND) -> Option<RECT> {
+    let mut rect = RECT::default();
+    GetClientRect(window, &mut rect).ok()?;
+    if !valid_panel_area(&rect) {
+        return None;
+    }
+    let mut start = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    let mut end = POINT {
+        x: rect.right,
+        y: rect.bottom,
+    };
+    if !ClientToScreen(window, &mut start).as_bool() || !ClientToScreen(window, &mut end).as_bool()
+    {
+        return None;
+    }
+    let rect = RECT {
+        left: start.x,
+        top: start.y,
+        right: end.x,
+        bottom: end.y,
+    };
+    valid_panel_area(&rect).then_some(rect)
 }
 
 fn resolved_system_caret(owner_hwnd: HWND) -> Option<(CaretPosition, CaretSource)> {
@@ -789,11 +963,61 @@ pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
     }
 }
 
+fn window_update_context_matches(
+    has_ime_state: bool,
+    expected: usize,
+    key_context: Option<usize>,
+    panel_context: Option<usize>,
+) -> bool {
+    has_ime_state && key_context.or(panel_context) == Some(expected)
+}
+
+thread_local! {
+    // A provider may synchronously flush a newer update for the same context.
+    // Context identity and an empty pending slot alone cannot detect that case.
+    static WINDOW_UPDATE_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+fn next_window_update_generation() -> u64 {
+    WINDOW_UPDATE_GENERATION.with(|current| {
+        let next = current.get().wrapping_add(1);
+        current.set(next);
+        next
+    })
+}
+
+fn window_update_generation_is_current(generation: u64) -> bool {
+    WINDOW_UPDATE_GENERATION.with(|current| current.get() == generation)
+}
+
+fn window_update_is_current(
+    shared_state: &SharedState,
+    update: &PendingWindowUpdate,
+    generation: u64,
+) -> bool {
+    if !window_update_generation_is_current(generation) {
+        return false;
+    }
+    let st = shared_state.borrow();
+    window_update_context_matches(
+        st.ime_state.is_some(),
+        update.context.as_raw() as usize,
+        st.key_context
+            .as_ref()
+            .map(|context| context.as_raw() as usize),
+        st.panel_context
+            .as_ref()
+            .map(|context| context.as_raw() as usize),
+    ) && st.input_generation == update.input_generation
+        && st.pending_window_update.is_none()
+}
+
 pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
     let Some(update) = shared_state.borrow_mut().pending_window_update.take() else {
         return;
     };
-    if shared_state.borrow().ime_state.is_none() {
+    let generation = next_window_update_generation();
+    if !window_update_is_current(shared_state, &update, generation) {
         return;
     }
 
@@ -804,10 +1028,21 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
             clear_layout_sink(shared_state);
         }
     }
-    if shared_state.borrow().ime_state.is_none() {
+    if !window_update_is_current(shared_state, &update, generation) {
         return;
     }
-    let caret = resolve_caret(shared_state, update.caret.clone(), update.embedded);
+    let caret = resolve_caret(
+        shared_state,
+        update.caret.clone(),
+        update.embedded,
+        has_visible_state(&update.ime_state),
+    );
+    // Accessibility providers can synchronously reenter TSF and move focus,
+    // even to another document in the same HWND. Never resurrect the old panel
+    // after such a callback or overwrite a newer pending update.
+    if !window_update_is_current(shared_state, &update, generation) {
+        return;
+    }
     let caret_source = caret.map(|(_, source)| source);
     {
         let mut st = shared_state.borrow_mut();
@@ -833,7 +1068,7 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
     if !update.reposition_only {
         update_language_bar_mode(shared_state, update.ime_state.is_english_mode());
     }
-    if shared_state.borrow().ime_state.is_none() {
+    if !window_update_is_current(shared_state, &update, generation) {
         return;
     }
     if !update_ime_windows(
@@ -844,6 +1079,9 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
         update.show_mode_hint,
         update.embedded,
     ) {
+        if !window_update_is_current(shared_state, &update, generation) {
+            return;
+        }
         let mut st = shared_state.borrow_mut();
         if st.pending_window_update.is_none() {
             st.pending_window_update = Some(update);
@@ -855,6 +1093,15 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
             "keystroke",
             dur_ms = started.elapsed().as_secs_f64() * 1000.0,
         );
+    }
+}
+
+fn finish_panel_anchor(ec: u32, anchor: Option<PanelAnchor>, client_id: u32) {
+    if let Some(anchor) = anchor {
+        if let Err(error) = anchor.end(ec) {
+            append_key_diagnostic!("panel anchor end hr=0x{:08X}", error.code().0 as u32);
+            crate::state::request_panel_anchor_end(anchor, client_id);
+        }
     }
 }
 
@@ -919,7 +1166,12 @@ fn apply_ime_state(
             u8::from(plan.commit),
         ));
     }
+    let input_generation = state_arc_for_session.borrow().input_generation;
     let apply_session = move |ec: u32, ctx: &ITfContext| {
+        // A queued mouse edit can run after this input session has ended.
+        if state_arc_for_session.borrow().input_generation != input_generation {
+            return Ok(());
+        }
         let _write_session_guard = ImeWriteSessionGuard::enter(&state_arc_for_session);
         let committed = ime_state_clone
             .committed
@@ -933,6 +1185,30 @@ fn apply_ime_state(
         };
         track_composition_in_flight(&state_arc_for_session, composition.as_ref());
         let original_composition = composition.clone();
+        let mut panel_anchor = state_arc_for_session.borrow_mut().panel_anchor.take();
+        if panel_anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.context().as_raw() != ctx.as_raw())
+        {
+            if let Some(anchor) = panel_anchor.take() {
+                crate::state::request_panel_anchor_end(anchor, client_id);
+            }
+        }
+        // Anchors own no text. End them before the original selection-based
+        // commit/inline path, and never run the preedit range-clearing helper.
+        if embedded || committed.is_some() || !has_visible_state(&ime_state_clone) {
+            finish_panel_anchor(ec, panel_anchor.take(), client_id);
+        }
+        panel_anchor = panel_anchor.filter(|anchor| anchor.composition().is_some());
+        if state_arc_for_session.borrow().input_generation != input_generation {
+            finish_panel_anchor(ec, panel_anchor.take(), client_id);
+            if let Some(comp) = composition.as_ref() {
+                track_composition_in_flight(&state_arc_for_session, Some(comp));
+                let _ = end_composition(ec, ctx, comp, None);
+                track_composition_in_flight(&state_arc_for_session, None);
+            }
+            return Ok(());
+        }
 
         let apply_result = (|| -> Result<()> {
             if let Some(committed) = committed {
@@ -993,6 +1269,7 @@ fn apply_ime_state(
         })();
 
         if let Err(error) = apply_result {
+            finish_panel_anchor(ec, panel_anchor.take(), client_id);
             if let Some(comp) = composition.as_ref().or(original_composition.as_ref()) {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
                 let _ = end_composition(ec, ctx, comp, None);
@@ -1029,6 +1306,7 @@ fn apply_ime_state(
         }
 
         if std::mem::take(&mut state_arc_for_session.borrow_mut().composition_clear_pending) {
+            finish_panel_anchor(ec, panel_anchor.take(), client_id);
             if let Some(comp) = composition.as_ref() {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
                 let _ = end_composition(ec, ctx, comp, None);
@@ -1039,8 +1317,57 @@ fn apply_ime_state(
             }
             return Ok(());
         }
-        let caret = probe_caret(ec, ctx, composition.as_ref(), &ime_state_clone, embedded);
+        let mut caret = probe_caret(
+            ec,
+            ctx,
+            composition
+                .as_ref()
+                .or_else(|| panel_anchor.as_ref().and_then(PanelAnchor::composition)),
+            &ime_state_clone,
+            embedded,
+        );
+        if !embedded
+            && has_visible_state(&ime_state_clone)
+            && caret.position.is_none()
+            && panel_anchor
+                .as_ref()
+                .and_then(PanelAnchor::composition)
+                .is_none()
+            && state_arc_for_session.borrow().input_generation == input_generation
+        {
+            // Some TSF/IMM hosts supply geometry only after WM_IME_STARTCOMPOSITION.
+            // A native empty range activates that protocol without writing the
+            // panel preedit into the document or moving the original selection.
+            panel_anchor = match start_panel_anchor(ec, ctx) {
+                Ok(anchor) => anchor,
+                Err(error) => {
+                    append_key_diagnostic!("panel anchor start hr=0x{:08X}", error.code().0 as u32);
+                    None
+                }
+            };
+            if state_arc_for_session.borrow().input_generation == input_generation {
+                caret = probe_caret(
+                    ec,
+                    ctx,
+                    panel_anchor.as_ref().and_then(PanelAnchor::composition),
+                    &ime_state_clone,
+                    false,
+                );
+            }
+        }
         let document_mgr = unsafe { ctx.GetDocumentMgr().ok() };
+        // Start/GetRange/GetTextExt/GetDocumentMgr may synchronously reset focus,
+        // including leave+reenter of the same context. Never restore that state.
+        if state_arc_for_session.borrow().input_generation != input_generation {
+            finish_panel_anchor(ec, panel_anchor.take(), client_id);
+            if let Some(comp) = composition.as_ref() {
+                track_composition_in_flight(&state_arc_for_session, Some(comp));
+                let _ = end_composition(ec, ctx, comp, None);
+                track_composition_in_flight(&state_arc_for_session, None);
+            }
+            return Ok(());
+        }
+        let live_panel_anchor = panel_anchor.filter(|anchor| anchor.composition().is_some());
         let mode_changed = {
             let mut st = state_arc_for_session.borrow_mut();
             let mode_changed = ime_state_clone.is_english_mode() != st.english_mode;
@@ -1053,6 +1380,7 @@ fn apply_ime_state(
             st.composition_context = composition.as_ref().map(|_| ctx.clone());
             st.composition_in_flight = None;
             st.composition = composition;
+            st.panel_anchor = live_panel_anchor;
             st.ascii_mode = ime_state_clone.ascii_mode;
             st.english_mode = ime_state_clone.is_english_mode();
             st.ime_state = Some(ime_state_clone.clone());
@@ -1063,6 +1391,7 @@ fn apply_ime_state(
             let mut st = state_arc_for_session.borrow_mut();
             st.pending_window_update = Some(PendingWindowUpdate {
                 context: ctx.clone(),
+                input_generation,
                 ime_state: ime_state_clone.clone(),
                 caret,
                 document_mgr,
@@ -1119,13 +1448,19 @@ fn reposition_ime_windows(
     let Some(_probe_session_guard) = CaretProbeSessionGuard::enter(shared_state, context) else {
         return false;
     };
-    let (client_id, ime_state, composition, embedded) = {
+    let (client_id, ime_state, composition, embedded, input_generation) = {
         let st = shared_state.borrow();
         (
             st.client_id,
             st.ime_state.clone(),
-            st.composition.clone(),
+            st.composition.clone().or_else(|| {
+                st.panel_anchor
+                    .as_ref()
+                    .and_then(PanelAnchor::composition)
+                    .cloned()
+            }),
             st.embedded_mode_cached,
+            st.input_generation,
         )
     };
     let Some(ime_state) = ime_state else {
@@ -1159,9 +1494,16 @@ fn reposition_ime_windows(
     });
     let session_probe = probe.borrow_mut().take();
     let probe = match session_result {
-        Ok(()) => session_probe.unwrap_or(CaretProbe {
+        Ok(()) => session_probe.unwrap_or_else(|| CaretProbe {
             owner_hwnd,
             position: None,
+            viewport: unsafe {
+                context
+                    .GetActiveView()
+                    .and_then(|view| view.GetScreenExt())
+                    .ok()
+            }
+            .filter(valid_panel_area),
         }),
         Err(error) => {
             if diagnostics_enabled() {
@@ -1173,12 +1515,23 @@ fn reposition_ime_windows(
             CaretProbe {
                 owner_hwnd,
                 position: None,
+                viewport: unsafe {
+                    context
+                        .GetActiveView()
+                        .and_then(|view| view.GetScreenExt())
+                        .ok()
+                }
+                .filter(valid_panel_area),
             }
         }
     };
 
+    if shared_state.borrow().input_generation != input_generation {
+        return true;
+    }
     shared_state.borrow_mut().pending_window_update = Some(PendingWindowUpdate {
         context: context.clone(),
+        input_generation,
         ime_state,
         caret: probe,
         document_mgr,
@@ -1187,6 +1540,9 @@ fn reposition_ime_windows(
         reposition_only: true,
         key_started: None,
     });
+    // The synchronous TSF read session has returned. Let the deferred UI flush
+    // run now without carrying a document-lock guard into accessibility calls.
+    drop(_probe_session_guard);
     flush_pending_ime_ui(shared_state);
     true
 }
