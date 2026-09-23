@@ -102,14 +102,9 @@ Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 
 
 ## 用户目录和 shared data
 
-Android IME 用户目录是应用私有目录下的 `keytao`：
+Android IME 仅使用 `<getExternalFilesDir(null)>/keytao`，只缓存成功解析的路径；重启后目录暂不可用时显示准备中，在输入视图显示期间每秒重试、每次显示最多 30 次，恢复后在 engine 线程补做一次预热并启动输入。隐藏输入视图或销毁 service 时取消重试；仅 App 调用保留不缓存的 `<filesDir>/keytao` 兼容回退，IME 不将该回退目录用作数据目录。根目录恢复后，IME 会清理不含安装标记和任何用户词库的遗留 `<filesDir>/keytao`。
 
-```text
-<getExternalFilesDir(null)>/keytao      # 外部存储可用时（Android/data/ink.rea.keytao_app/files/keytao）
-<filesDir>/keytao                        # 外部存储不可用时
-```
-
-App 进程与 `:ime` 进程同 UID，共享这套目录，因此不需要任何存储权限。旧版本把数据放在共享存储根目录 `/storage/emulated/0/keytao`；`KeytaoAndroidPaths` 第一次解析新根目录时会尝试把旧目录整体拷过来并留下 `.keytao-migrated-from-shared-storage` 标记，但这是尽力而为——去掉 `MANAGE_EXTERNAL_STORAGE` 后旧目录多半已不可读，此时用户在 App 里重新安装一次方案即可。
+App 进程与 `:ime` 进程同 UID，共享这套目录，因此不需要任何存储权限。旧版本把数据放在共享存储根目录 `/storage/emulated/0/keytao`；根目录成功解析后的后台迁移会尝试把旧目录整体拷过来并留下 `.keytao-migrated-from-shared-storage` 标记，但这是尽力而为——去掉 `MANAGE_EXTERNAL_STORAGE` 后旧目录多半已不可读，此时用户在 App 里重新安装一次方案即可。
 
 其中常见文件：
 

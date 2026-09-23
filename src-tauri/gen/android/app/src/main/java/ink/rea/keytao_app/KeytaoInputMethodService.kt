@@ -142,6 +142,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var clipboardListenerRegistered = false
     private var availabilityRefreshPending = false
     private var lastReadiness: Readiness? = null
+    private var presentationLoadedWithoutRoot = false
+    private var inputViewShown = false
+    private var serviceDestroyed = false
+    private var storageRetryCount = 0
+    private val storageRetry = Runnable {
+        if (inputViewShown && lastReadiness == Readiness.STORAGE_NOT_READY && storageRetryCount < 30) {
+            if (!availabilityRefreshPending) storageRetryCount++
+            scheduleAvailabilityRefresh()
+        }
+    }
     private var editorUpdatePending = false
     private var editorUpdateGeneration = 0L
     private var rimeOptionsGeneration = 0L
@@ -161,6 +171,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDestroy() {
+        serviceDestroyed = true
+        inputViewShown = false
+        mainHandler.removeCallbacks(storageRetry)
         editorUpdateGeneration++
         rimeOptionsGeneration++
         unregisterClipboardListener()
@@ -186,6 +199,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 handleSystemBottomInsetChanged(insetPx)
             }
         }
+        markPresentationLoad()
         val view = KeytaoKeyboardView(this)
         view.listener = this
         host.addView(
@@ -196,11 +210,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ),
         )
-        view.updateTheme(KeytaoThemeResolver.resolve(this))
+        view.updateTheme(resolvePresentationTheme())
         view.updateState(currentState)
         keyboardHost = host
         keyboardView = view
-        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
+        applyKeyboardPresentation(loadPresentationConfig())
         view.updateSystemBottomInsetDp(systemBottomInsetDp)
         view.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
@@ -263,12 +277,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         val started = System.nanoTime()
         super.onStartInputView(info, restarting)
+        inputViewShown = true
+        storageRetryCount = 0
+        mainHandler.removeCallbacks(storageRetry)
         keyboardView?.beginRenderSession()
         applyEditorInfo(info, reloadIfNeeded = true)
         registerClipboardListener()
         offerCurrentClipboardSuggestionOnShow()
-        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
-        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
+        keyboardView?.updateTheme(resolvePresentationTheme())
+        applyKeyboardPresentation(loadPresentationConfig())
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         keyboardView?.updateState(currentState)
@@ -283,6 +300,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onFinishInputView(finishingInput: Boolean) {
         val started = System.nanoTime()
+        inputViewShown = false
+        mainHandler.removeCallbacks(storageRetry)
         unregisterClipboardListener()
         keyboardView?.clearRecentClipboardSuggestion()
         keyboardView?.resetClipboardClearConfirmation()
@@ -545,8 +564,23 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
-        applyKeyboardPresentation(KeytaoAndroidImeConfig.load(this))
+        keyboardView?.updateTheme(resolvePresentationTheme())
+        applyKeyboardPresentation(loadPresentationConfig())
+    }
+
+    private fun markPresentationLoad() {
+        // Main thread only. Check before loading: resolving the root is irreversible.
+        if (!KeytaoAndroidPaths.isUserRootResolved()) presentationLoadedWithoutRoot = true
+    }
+
+    private fun loadPresentationConfig(): KeytaoAndroidImeConfig {
+        markPresentationLoad()
+        return KeytaoAndroidImeConfig.load(this)
+    }
+
+    private fun resolvePresentationTheme(): KeytaoImeTheme {
+        markPresentationLoad()
+        return KeytaoThemeResolver.resolve(this)
     }
 
     private fun applyKeyboardPresentation(config: KeytaoAndroidImeConfig) {
@@ -574,7 +608,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 isLandscape = presentationIsLandscape,
             )
         }
-        val theme = KeytaoThemeResolver.resolve(this)
+        val theme = resolvePresentationTheme()
         keyboardHost?.updatePresentation(
             normalized,
             config.floating.marginDp,
@@ -615,7 +649,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun toggleFloatingKeyboard() {
-        val config = baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this)
+        val config = baseKeyboardConfig ?: loadPresentationConfig()
         val nextMode = if (keyboardLayoutState.mode == KeyboardLayoutMode.FLOATING) {
             KeyboardLayoutMode.FULL
         } else {
@@ -632,7 +666,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun toggleOneHandedKeyboard() {
         if (presentationIsLandscape) return
-        val config = baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this)
+        val config = baseKeyboardConfig ?: loadPresentationConfig()
         val nextMode = if (keyboardLayoutState.mode == KeyboardLayoutMode.ONE_HANDED) {
             KeyboardLayoutMode.FULL
         } else {
@@ -906,7 +940,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onSettingPreview(key: String, value: String) {
-        val next = applySettingToConfig(baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this), key, value)
+        val next = applySettingToConfig(baseKeyboardConfig ?: loadPresentationConfig(), key, value)
             ?: return
         baseKeyboardConfig = next
         applyKeyboardPresentation(next, keyboardLayoutState)
@@ -918,8 +952,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return
         }
         if (key == "reset") {
+            val themeFile = KeytaoAndroidPaths.themeFileOrNull(this) ?: run {
+                showUnavailableMessage()
+                return
+            }
             val patch = defaultPanelSettingsPatch()
-            var next = baseKeyboardConfig ?: KeytaoAndroidImeConfig.load(this)
+            var next = baseKeyboardConfig ?: loadPresentationConfig()
             patch.forEach { (settingKey, settingValue) ->
                 next = applySettingToConfig(next, settingKey, settingValue.toString()) ?: next
             }
@@ -927,12 +965,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             applyKeyboardPresentation(next, keyboardLayoutState)
             val configWritten = KeytaoAndroidImeConfig.persistSettings(this, patch)
             val themeWritten = KeytaoNativeBridge.writeThemeUi(
-                KeytaoAndroidPaths.themeFile(this).absolutePath,
+                themeFile.absolutePath,
                 "auto",
                 "",
             )
             KeytaoThemeResolver.invalidate()
-            keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
+            keyboardView?.updateTheme(resolvePresentationTheme())
             if (!configWritten || !themeWritten) keyboardView?.showMessage("键盘内设置恢复失败")
             return
         }
@@ -943,11 +981,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun persistThemeSetting(key: String, value: String) {
+        val themeFile = KeytaoAndroidPaths.themeFileOrNull(this) ?: run {
+            showUnavailableMessage()
+            return
+        }
         val currentScheme = keyboardView?.currentThemeColorScheme() ?: "auto"
         val colorScheme = if (key == "colorScheme") value else currentScheme
         val accent = if (key == "accentColor") value else null
         if (!KeytaoNativeBridge.writeThemeUi(
-                KeytaoAndroidPaths.themeFile(this).absolutePath,
+                themeFile.absolutePath,
                 colorScheme,
                 accent,
             )) {
@@ -955,7 +997,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             return
         }
         KeytaoThemeResolver.invalidate()
-        keyboardView?.updateTheme(KeytaoThemeResolver.resolve(this))
+        keyboardView?.updateTheme(resolvePresentationTheme())
     }
 
     private fun settingPatch(key: String, value: String): Any? = when (key) {
@@ -1843,7 +1885,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         rememberClipboardText(snapshot.text, suggest, timestamp)
     }
 
-    private fun clipboardDirectory(): File = File(KeytaoAndroidPaths.userRoot(this), "clipboard")
+    private fun clipboardDirectory(): File? = KeytaoAndroidPaths.userRootOrNull(this)?.let { File(it, "clipboard") }
 
     private fun clipboardEntries(): List<ClipboardEntry> {
         if (!privacyMode.allowsClipboard) return emptyList()
@@ -1923,7 +1965,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         stream: InputStream, id: String, extension: String, mime: String, name: String,
         timestamp: Long, generation: Long,
     ): ClipboardMedia? {
-        val file = File(clipboardDirectory(), "$id.$extension")
+        val directory = clipboardDirectory() ?: run {
+            runCatching { stream.close() }
+            return null
+        }
+        val file = File(directory, "$id.$extension")
         var retained = false
         try {
             stream.use { input ->
@@ -1988,7 +2034,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun wipeClipboardMedia() {
         synchronized(clipboardMediaFileLock) {
             clipboardMediaGeneration++
-            clipboardDirectory().deleteRecursively()
+            clipboardDirectory()?.deleteRecursively()
         }
         clipboardMediaStreams.values.forEach { runCatching { it.close() } }
         clipboardMediaStreams.clear()
@@ -2062,13 +2108,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun scheduleAvailabilityRefresh() {
-        if (!::engine.isInitialized || availabilityRefreshPending) return
+        if (serviceDestroyed || !::engine.isInitialized || availabilityRefreshPending) return
         availabilityRefreshPending = true
+        val reloadPresentation = presentationLoadedWithoutRoot
         engine.runInBackground {
             val readiness = engine.refreshReadiness()
+            val recovered = reloadPresentation && readiness != Readiness.STORAGE_NOT_READY
+            val config = if (recovered) runCatching { KeytaoAndroidImeConfig.load(this) }.getOrNull() else null
+            val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
             mainHandler.post {
                 availabilityRefreshPending = false
+                if (serviceDestroyed) return@post
+                config?.let { applyKeyboardPresentation(it) }
+                theme?.let { keyboardView?.updateTheme(it) }
+                if (config != null && theme != null) presentationLoadedWithoutRoot = false
                 applyReadiness(readiness)
+                // The first view may have loaded defaults after this refresh was scheduled.
+                if (!reloadPresentation && presentationLoadedWithoutRoot && readiness != Readiness.STORAGE_NOT_READY) {
+                    scheduleAvailabilityRefresh()
+                }
             }
         }
     }
@@ -2076,6 +2134,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun applyReadiness(readiness: Readiness) {
         lastReadiness = readiness
         val message = when (readiness) {
+            Readiness.STORAGE_NOT_READY -> preparingMessage
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
@@ -2083,13 +2142,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.READY -> ""
         }
         inputAvailable = message.isEmpty() && !editorUpdatePending
-        unavailableMessage = if (message.isEmpty() && editorUpdatePending) {
-            preparingMessage
-        } else {
-            message.ifEmpty { defaultUnavailableMessage }
-        }
+        unavailableMessage = message.ifEmpty { preparingMessage }
         keyboardView?.updateAvailability(inputAvailable, unavailableMessage)
         if (inputAvailable) refreshRimeOptions(inBackground = true)
+        mainHandler.removeCallbacks(storageRetry)
+        if (inputViewShown && readiness == Readiness.STORAGE_NOT_READY && storageRetryCount < 30) {
+            mainHandler.postDelayed(storageRetry, 1_000L)
+        }
     }
 
     private fun configuredEnglishMode(): String {

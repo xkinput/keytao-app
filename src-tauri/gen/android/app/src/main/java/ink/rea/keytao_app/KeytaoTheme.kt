@@ -223,7 +223,7 @@ object KeytaoThemeResolver {
      */
     @Synchronized
     fun resolve(context: Context): KeytaoImeTheme {
-        val userTheme = KeytaoAndroidPaths.themeFile(context)
+        val userTheme = KeytaoAndroidPaths.themeFileOrNull(context)
         val scheme = systemColorScheme(context)
         val signature = "${fileSignature(userTheme)}|$scheme"
         cachedTheme?.let { theme ->
@@ -232,7 +232,7 @@ object KeytaoThemeResolver {
         val theme = KeytaoImeTheme.fromJson(
             KeytaoNativeBridge.resolveThemeJson(
                 null,
-                userTheme.takeIf { it.isFile }?.absolutePath,
+                userTheme?.takeIf { it.isFile }?.absolutePath,
                 scheme,
             )
         )
@@ -253,6 +253,8 @@ object KeytaoThemeResolver {
     }
 }
 
-internal fun fileSignature(file: java.io.File): String {
-    return if (file.isFile) "${file.length()}:${file.lastModified()}" else "-"
+internal fun fileSignature(file: java.io.File?): String {
+    if (file == null) return "-"
+    val metadata = if (file.isFile) "${file.length()}:${file.lastModified()}" else "-"
+    return "${file.absolutePath}:$metadata"
 }

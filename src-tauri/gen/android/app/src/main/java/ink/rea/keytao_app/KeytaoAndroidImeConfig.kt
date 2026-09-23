@@ -251,8 +251,8 @@ data class KeytaoAndroidImeConfig(
          */
         @Synchronized
         fun load(context: Context): KeytaoAndroidImeConfig {
-            val userConfig = KeytaoAndroidPaths.imeConfigFile(context)
-            val userKeyboardFile = KeytaoAndroidPaths.keyboardFile(context)
+            val userConfig = KeytaoAndroidPaths.imeConfigFileOrNull(context)
+            val userKeyboardFile = KeytaoAndroidPaths.keyboardFileOrNull(context)
             val signature = "${fileSignature(userConfig)}|${fileSignature(userKeyboardFile)}"
             cachedConfig?.let { config ->
                 if (signature == cachedSignature) return config
@@ -261,8 +261,8 @@ data class KeytaoAndroidImeConfig(
                 .openRawResource(R.raw.keytao_android_ime)
                 .bufferedReader()
                 .use { it.readText() }
-            val userJson = userConfig.takeIf { it.isFile }?.readText()
-            val userKeyboard = resolvedUserKeyboard(context)
+            val userJson = userConfig?.takeIf { it.isFile }?.readText()
+            val userKeyboard = resolvedUserKeyboard(userKeyboardFile)
             val defaultRoot = JSONObject(defaultJson)
             val config = parseSources(userKeyboard, userJson, defaultRoot) { layer ->
                 KeytaoRuntimeLog.event("error", "config_rows_empty") { put("layer", layer) }
@@ -297,7 +297,7 @@ data class KeytaoAndroidImeConfig(
 
         @Synchronized
         fun persistToolbarCustomization(context: Context, order: List<String>, pinnedCount: Int): Boolean {
-            val file = KeytaoAndroidPaths.imeConfigFile(context)
+            val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
             return runCatching {
                 val root = file.takeIf { it.isFile }
                     ?.readText()
@@ -321,7 +321,7 @@ data class KeytaoAndroidImeConfig(
 
         @Synchronized
         fun persistSettings(context: Context, patch: Map<String, Any>): Boolean {
-            val file = KeytaoAndroidPaths.imeConfigFile(context)
+            val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
             return runCatching {
                 val root = file.takeIf { it.isFile }
                     ?.readText()
@@ -755,8 +755,8 @@ data class KeytaoAndroidImeConfig(
         }
 
         private fun ensureDefaultKeyboardConfig(context: Context) {
-            val file = KeytaoAndroidPaths.keyboardFile(context)
-            val seedFile = File(KeytaoAndroidPaths.userRoot(context), keyboardSeedFileName)
+            val file = KeytaoAndroidPaths.keyboardFileOrNull(context) ?: return
+            val seedFile = File(file.parentFile, keyboardSeedFileName)
             val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
             val bundledHash = sha256(yaml)
             if (file.isFile) {
@@ -803,10 +803,9 @@ data class KeytaoAndroidImeConfig(
          * `keyboard:` section from the shared theme model, so theme.yaml is no
          * longer consulted for key rows.
          */
-        private fun resolvedUserKeyboard(context: Context): JSONObject? {
+        private fun resolvedUserKeyboard(userKeyboard: File?): JSONObject? {
             return runCatching {
-                val userKeyboard = KeytaoAndroidPaths.keyboardFile(context)
-                if (!userKeyboard.isFile) return@runCatching null
+                if (userKeyboard == null || !userKeyboard.isFile) return@runCatching null
                 val json = KeytaoNativeBridge.resolveKeyboardJson(null, userKeyboard.absolutePath)
                     ?: return@runCatching null
                 JSONObject(json)

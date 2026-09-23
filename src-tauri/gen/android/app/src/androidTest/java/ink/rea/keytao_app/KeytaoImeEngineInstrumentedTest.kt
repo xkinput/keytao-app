@@ -41,7 +41,7 @@ class KeytaoImeEngineInstrumentedTest {
         val engine = KeytaoImeEngine(context)
         try {
             // Source-only means no build output, whatever an earlier case left behind.
-            assertTrue("build output should be removable", KeytaoAndroidPaths.invalidateDeployment(engine.userDir))
+            assertTrue("build output should be removable", KeytaoAndroidPaths.invalidateDeployment(requireNotNull(engine.userDir)))
             assertTrue("schema source should be installed in ${engine.userDir}", engine.hasInstalledSchema())
             assertFalse("schema should not be deployed before this check", engine.hasDeployedSchema())
             assertFalse("ensureReady must not run full deploy on IME hot path", engine.ensureReady())
@@ -83,7 +83,7 @@ class KeytaoImeEngineInstrumentedTest {
             for (schema in expectedDeployedSchemas) {
                 assertTrue(
                     "compiled schema should exist: $schema",
-                    engine.userDir.resolve("build/$schema.schema.yaml").isFile,
+                    requireNotNull(engine.userDir).resolve("build/$schema.schema.yaml").isFile,
                 )
             }
 
