@@ -14,7 +14,7 @@ enum KeyTaoMnemonicHints {
 
         var topText: String? {
             switch tone {
-            case .outer: return initial
+            case .outer: return initial ?? rootKey
             case .special: return rootKey
             case .brand: return nil
             }
@@ -50,7 +50,7 @@ enum KeyTaoMnemonicHints {
         "L": Hint(finals: ["o", "uo", "ü"]),
         ";": Hint(),
         "Z": Hint(finals: ["ao"]),
-        "X": Hint(finals: ["iang", "uang"], rootKey: "∅"),
+        "X": Hint(finals: ["iang", "uang"], rootKey: "~"),
         "C": Hint(finals: ["iao"]),
         "V": Hint(roots: ["木", "土o"], rootKey: "一", tone: .special),
         "B": Hint(finals: ["in", "ui"]),

@@ -14,7 +14,7 @@ internal object KeytaoMnemonicHints {
         val tone: Tone = Tone.OUTER,
     ) {
         val topText: String? = when (tone) {
-            Tone.OUTER -> initial
+            Tone.OUTER -> initial ?: rootKey
             Tone.SPECIAL -> rootKey
             Tone.BRAND -> null
         }
@@ -45,7 +45,7 @@ internal object KeytaoMnemonicHints {
         Hint("L", finals = listOf("o", "uo", "ü")),
         Hint(";"),
         Hint("Z", finals = listOf("ao")),
-        Hint("X", finals = listOf("iang", "uang"), rootKey = "∅"),
+        Hint("X", finals = listOf("iang", "uang"), rootKey = "~"),
         Hint("C", finals = listOf("iao")),
         Hint("V", roots = listOf("木", "土o"), rootKey = "一", tone = Tone.SPECIAL),
         Hint("B", finals = listOf("in", "ui")),
