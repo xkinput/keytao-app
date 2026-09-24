@@ -133,6 +133,7 @@ data class KeytaoAndroidImeConfig(
     val keySoundEnabled: Boolean,
     val keySoundVolume: Int,
     val keyHintVisible: Boolean,
+    val mnemonicHintsEnabled: Boolean,
     val flickKeysEnabled: Boolean,
     val numberRowEnabled: Boolean,
     val candidateFontScale: Float,
@@ -322,6 +323,11 @@ data class KeytaoAndroidImeConfig(
         @Synchronized
         fun persistSettings(context: Context, patch: Map<String, Any>): Boolean {
             val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
+            return persistSettings(file, patch)
+        }
+
+        @Synchronized
+        internal fun persistSettings(file: File, patch: Map<String, Any>): Boolean {
             return runCatching {
                 val root = file.takeIf { it.isFile }
                     ?.readText()
@@ -440,6 +446,7 @@ data class KeytaoAndroidImeConfig(
                 keySoundEnabled = mergedBoolean(root, fallbackRoot, "keySoundEnabled", true),
                 keySoundVolume = mergedInt(root, fallbackRoot, "keySoundVolume", 100).coerceIn(0, 100),
                 keyHintVisible = mergedBoolean(root, fallbackRoot, "keyHintVisible", true),
+                mnemonicHintsEnabled = mergedBoolean(root, fallbackRoot, "mnemonicHintsEnabled", false),
                 flickKeysEnabled = mergedBoolean(root, fallbackRoot, "flickKeysEnabled", true),
                 numberRowEnabled = mergedBoolean(root, fallbackRoot, "numberRowEnabled", false),
                 candidateFontScale = mergedDouble(root, fallbackRoot, "candidateFontScale", 1.0)
@@ -632,6 +639,11 @@ data class KeytaoAndroidImeConfig(
                     runtimeRoot.optBoolean("keyHintVisible", config.keyHintVisible)
                 } else {
                     config.keyHintVisible
+                },
+                mnemonicHintsEnabled = if (runtimeRoot.has("mnemonicHintsEnabled")) {
+                    runtimeRoot.optBoolean("mnemonicHintsEnabled", config.mnemonicHintsEnabled)
+                } else {
+                    config.mnemonicHintsEnabled
                 },
                 flickKeysEnabled = if (runtimeRoot.has("flickKeysEnabled")) {
                     runtimeRoot.optBoolean("flickKeysEnabled", config.flickKeysEnabled)

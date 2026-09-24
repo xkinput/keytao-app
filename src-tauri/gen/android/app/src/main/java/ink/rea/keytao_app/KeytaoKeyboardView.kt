@@ -272,6 +272,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var functionPanelActive = false
     private var functionPanelMode = FunctionPanelMode.RIME
     private var rimeOptionsState = KeytaoRimeOptionsState.EMPTY
+    private var currentRimeSchemaId: String? = null
     private val isEnglishMode: Boolean
         get() = rimeOptionsState.englishSchemaId
             ?.let { rimeOptionsState.currentSchema?.id == it }
@@ -511,6 +512,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     fun updateRimeOptions(next: KeytaoRimeOptionsState) {
         rimeOptionsState = next
+        currentRimeSchemaId = next.currentSchema?.id
         rimeOptionsLoading = false
         invalidateExpandedCandidateItemsCache()
         resetExpandedCandidateScroll()
@@ -2258,6 +2260,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             )
             add(slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8f, 1.4f, 0.1f, "%.1f×".format(settingsConfig.candidateFontScale)))
             add(toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible))
+            add(toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled))
             add(section("布局"))
             add(slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp.toFloat(), 160f, 420f, 2f, "${settingsConfig.keyboardHeightDp} dp"))
             add(slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp.toFloat(), 36f, 96f, 1f, "${settingsConfig.candidateBarHeightDp} dp"))
@@ -3682,6 +3685,15 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         drawShiftStateDecoration(canvas, key, keyRect)
 
         val label = displayLabel(key)
+        if (config.mnemonicHintsEnabled && keyboardLayer == "letters" &&
+            currentRimeSchemaId == "keytao" && !isEnglishMode && !state.asciiMode
+        ) {
+            val mnemonic = KeytaoMnemonicHints.forKey(key)
+            if (mnemonic != null && (mnemonic.topText != null || mnemonic.bottomLines.isNotEmpty())) {
+                drawMnemonicKeyContent(canvas, key, keyRect, label, mnemonic, selected, pressProgress)
+                return
+            }
+        }
         textPaint.textAlign = Paint.Align.CENTER
         var labelSize = sp(keyLabelSizeSp(label))
         textPaint.textSize = labelSize
@@ -3698,6 +3710,85 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             textPaint.textSize = sp(keyHintSizeSp(keyRect.height()))
             textPaint.color = theme.commentColor.toArgb()
             canvas.drawText(hint, keyRect.right - dp(7f), keyRect.top + dp(13f), textPaint)
+        }
+    }
+
+    private fun drawMnemonicKeyContent(
+        canvas: Canvas,
+        key: KeySpec,
+        rect: RectF,
+        label: String,
+        mnemonic: KeytaoMnemonicHints.Hint,
+        selected: Boolean,
+        pressProgress: Float,
+    ) {
+        val inset = min(dp(3f), min(rect.width(), rect.height()) * 0.1f)
+        val content = RectF(rect).apply { inset(inset, inset) }
+        val labelBottom = content.top + content.height() * 0.54f
+        val labelHeight = labelBottom - content.top
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.textSize = sp(keyLabelSizeSp(label))
+        val labelMetrics = textPaint.fontMetrics
+        val labelScale = minOf(
+            1f,
+            content.width() / textPaint.measureText(label).coerceAtLeast(1f),
+            labelHeight / (labelMetrics.bottom - labelMetrics.top).coerceAtLeast(1f),
+        )
+        textPaint.textSize *= labelScale
+        textPaint.color = keyForegroundColor(key, selected, pressProgress)
+        val fittedLabelMetrics = textPaint.fontMetrics
+        canvas.drawText(
+            label,
+            rect.centerX(),
+            (content.top + labelBottom - fittedLabelMetrics.top - fittedLabelMetrics.bottom) / 2f,
+            textPaint,
+        )
+
+        // Keep the main label fixed and fit the top slot beside its right edge.
+        val topSlotLeft = rect.centerX() + textPaint.measureText(label) / 2f + dp(1f)
+        mnemonic.topText?.let { topText ->
+            textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f))
+            textPaint.color = theme.commentColor.toArgb()
+            val topMetrics = textPaint.fontMetrics
+            val topHeight = min(labelHeight, topMetrics.bottom - topMetrics.top)
+            val topWidth = (content.right - topSlotLeft).coerceAtLeast(0f)
+            val topScale = minOf(
+                1f,
+                topWidth / textPaint.measureText(topText).coerceAtLeast(1f),
+                topHeight / (topMetrics.bottom - topMetrics.top).coerceAtLeast(1f),
+            )
+            textPaint.textSize *= topScale
+            val fittedTopMetrics = textPaint.fontMetrics
+            canvas.drawText(
+                topText,
+                (topSlotLeft + content.right) / 2f,
+                content.top + topHeight / 2f - (fittedTopMetrics.top + fittedTopMetrics.bottom) / 2f,
+                textPaint,
+            )
+        }
+
+        val bottomLines = mnemonic.bottomLines
+        if (bottomLines.isEmpty()) return
+        val hintsTop = labelBottom + dp(1f)
+        val lineHeight = ((content.bottom - hintsTop) / bottomLines.size).coerceAtLeast(0f)
+        textPaint.textSize = sp(min(keyHintSizeSp(rect.height()), 9f))
+        textPaint.color = theme.commentColor.toArgb()
+        val hintMetrics = textPaint.fontMetrics
+        val hintScale = minOf(
+            1f,
+            content.width() / bottomLines.maxOf { textPaint.measureText(it) }.coerceAtLeast(1f),
+            lineHeight / (hintMetrics.bottom - hintMetrics.top).coerceAtLeast(1f),
+        )
+        textPaint.textSize *= hintScale
+        val fittedHintMetrics = textPaint.fontMetrics
+        bottomLines.forEachIndexed { index, line ->
+            val centerY = hintsTop + lineHeight * (index + 0.5f)
+            canvas.drawText(
+                line,
+                rect.centerX(),
+                centerY - (fittedHintMetrics.top + fittedHintMetrics.bottom) / 2f,
+                textPaint,
+            )
         }
     }
 

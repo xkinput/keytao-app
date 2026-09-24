@@ -1004,7 +1004,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         "keyboardHeightDp", "candidateBarHeightDp", "haptics.intensity", "keySoundVolume" ->
             value.toFloatOrNull()?.roundToInt()
         "candidateFontScale" -> value.toFloatOrNull()
-        "keyHintVisible", "numberRowEnabled", "haptics.enabled", "keySoundEnabled", "keyPreviewEnabled" ->
+        "keyHintVisible", "mnemonicHintsEnabled", "numberRowEnabled", "haptics.enabled", "keySoundEnabled", "keyPreviewEnabled" ->
             value.toBooleanStrictOrNull()
         else -> null
     }
@@ -1019,6 +1019,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             "candidateBarHeightDp" -> current.copy(candidateBarHeightDp = value.toFloatOrNull()?.roundToInt()?.coerceIn(36, 96) ?: return null)
             "candidateFontScale" -> current.copy(candidateFontScale = value.toFloatOrNull()?.coerceIn(0.8f, 1.4f) ?: return null)
             "keyHintVisible" -> current.copy(keyHintVisible = value.toBooleanStrictOrNull() ?: return null)
+            "mnemonicHintsEnabled" -> current.copy(mnemonicHintsEnabled = value.toBooleanStrictOrNull() ?: return null)
             "numberRowEnabled" -> current.copy(numberRowEnabled = value.toBooleanStrictOrNull() ?: return null)
             "haptics.enabled" -> current.copy(hapticsEnabled = value.toBooleanStrictOrNull() ?: return null)
             "haptics.intensity" -> current.copy(hapticIntensity = value.toFloatOrNull()?.roundToInt()?.coerceIn(1, 100) ?: return null)
@@ -1032,6 +1033,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun defaultPanelSettingsPatch(): Map<String, Any> = linkedMapOf(
         "candidateFontScale" to 1.0f,
         "keyHintVisible" to true,
+        "mnemonicHintsEnabled" to false,
         "keyboardHeightDp" to 266,
         "candidateBarHeightDp" to 52,
         "numberRowEnabled" to false,

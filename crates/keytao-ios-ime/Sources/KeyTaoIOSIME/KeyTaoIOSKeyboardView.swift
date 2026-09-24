@@ -255,6 +255,8 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var functionPanelActive = false
     private var functionPanelMode: KeyTaoFunctionPanelMode = .rime
     private var rimeOptionsState = KeyTaoRimeOptionsState.empty
+    // Keep engine schema identity independent of transient panel state.
+    private var currentRimeSchemaID: String?
     private var isEnglishMode: Bool {
         rimeOptionsState.englishSchemaID.map { rimeOptionsState.currentSchema?.id == $0 }
             ?? state.asciiMode
@@ -506,6 +508,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     func update(rimeOptions: KeyTaoRimeOptionsState) {
         rimeOptionsState = rimeOptions
+        currentRimeSchemaID = rimeOptions.currentSchema?.id
         rimeOptionsLoading = false
         resetExpandedCandidateScroll()
         expandedCandidateItemsCacheSignature = ""
@@ -3504,6 +3507,15 @@ final class KeyTaoIOSKeyboardView: UIView {
         let baseSize = keyLabelSize(for: label)
         let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10)
         let color = keyForegroundColor(key, selected: selected, pressProgress: pressProgress)
+        if config.mnemonicHintsEnabled,
+           layerMode == .letters,
+           currentRimeSchemaID == "keytao",
+           !state.asciiMode,
+           let mnemonic = mnemonicHint(for: key),
+           mnemonic.topText != nil || !mnemonic.bottomLines.isEmpty {
+            drawMnemonicKeyLabel(label, mnemonic: mnemonic, rect: keyRect, color: color, font: font)
+            return
+        }
         drawText(label, in: keyRect, color: color, font: font, alignment: .center)
 
         if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
@@ -3517,6 +3529,55 @@ final class KeyTaoIOSKeyboardView: UIView {
                 at: CGPoint(x: keyRect.maxX - size.width - 7, y: keyRect.minY + 4),
                 withAttributes: attributes
             )
+        }
+    }
+
+    private func mnemonicHint(for key: KeyTaoKeySpec) -> KeyTaoMnemonicHints.Hint? {
+        let command = key.primaryCommand(asciiMode: false, shiftState: .off)
+        guard [KeyTaoCommandType.input, KeyTaoCommandType.directInput, KeyTaoCommandType.rimeInput]
+            .contains(command.type) else { return nil }
+        let value = command.value ?? key.label
+        return KeyTaoMnemonicHints.byKey[value.uppercased()]
+            ?? key.asciiValue.flatMap { KeyTaoMnemonicHints.byKey[$0.uppercased()] }
+    }
+
+    private func drawMnemonicKeyLabel(
+        _ label: String,
+        mnemonic: KeyTaoMnemonicHints.Hint,
+        rect: CGRect,
+        color: UIColor,
+        font: UIFont
+    ) {
+        let contentRect = rect.insetBy(dx: 3, dy: 3)
+        let hintFont = themedFont(size: min(10, keyHintSize(keyHeight: rect.height)), weight: .regular)
+        let bottomLines = mnemonic.bottomLines
+        let lineHeight = min(hintFont.lineHeight, contentRect.height * 0.22)
+        let bodyHeight = lineHeight * CGFloat(bottomLines.count)
+        let labelRect = CGRect(
+            x: contentRect.minX, y: contentRect.minY,
+            width: contentRect.width * (mnemonic.topText == nil ? 1 : 0.62),
+            height: contentRect.height - bodyHeight - 2
+        )
+        func fitting(_ text: String, font: UIFont, rect: CGRect) -> UIFont {
+            let size = text.size(withAttributes: [.font: font])
+            let scale = min(1, rect.width / max(1, size.width), rect.height / max(1, size.height))
+            return font.withSize(font.pointSize * max(0.01, scale))
+        }
+        drawText(label, in: labelRect, color: color, font: fitting(label, font: font, rect: labelRect), alignment: .center)
+        let hintColor = theme.candidate.commentColor.uiColor
+        if let topText = mnemonic.topText {
+            let topRect = CGRect(
+                x: labelRect.maxX + 1, y: labelRect.minY,
+                width: contentRect.maxX - labelRect.maxX - 1, height: min(lineHeight, labelRect.height)
+            )
+            drawText(topText, in: topRect, color: hintColor, font: fitting(topText, font: hintFont, rect: topRect), alignment: .center)
+        }
+        for (index, line) in bottomLines.enumerated() {
+            let lineRect = CGRect(
+                x: contentRect.minX, y: contentRect.maxY - bodyHeight + CGFloat(index) * lineHeight,
+                width: contentRect.width, height: lineHeight
+            )
+            drawText(line, in: lineRect, color: hintColor, font: fitting(line, font: hintFont, rect: lineRect), alignment: .center)
         }
     }
 
@@ -4859,6 +4920,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             ) },
             slider("候选字号", "candidateFontScale", settingsConfig.candidateFontScale, 0.8, 1.4, 0.1, String(format: "%.1f×", Double(settingsConfig.candidateFontScale))),
             toggle("键角提示", "keyHintVisible", settingsConfig.keyHintVisible),
+            toggle("键位助记", "mnemonicHintsEnabled", settingsConfig.mnemonicHintsEnabled),
             section("布局"),
             slider("键盘高度", "keyboardHeightDp", settingsConfig.keyboardHeightDp, 160, 420, 2, "\(Int(settingsConfig.keyboardHeightDp.rounded())) dp"),
             slider("候选栏高度", "candidateBarHeightDp", settingsConfig.candidateBarHeightDp, 36, 96, 1, "\(Int(settingsConfig.candidateBarHeightDp.rounded())) dp"),

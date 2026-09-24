@@ -751,7 +751,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return Double(value).map { Int($0.rounded()) }
         case "candidateFontScale":
             return Double(value)
-        case "keyHintVisible", "numberRowEnabled", "haptics.enabled", "keyPreviewEnabled":
+        case "keyHintVisible", "mnemonicHintsEnabled", "numberRowEnabled", "haptics.enabled", "keyPreviewEnabled":
             return Bool(value)
         default:
             return nil
@@ -777,6 +777,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case "keyHintVisible":
             guard let enabled = Bool(value) else { return nil }
             next.keyHintVisible = enabled
+        case "mnemonicHintsEnabled":
+            guard let enabled = Bool(value) else { return nil }
+            next.mnemonicHintsEnabled = enabled
         case "numberRowEnabled":
             guard let enabled = Bool(value) else { return nil }
             next.numberRowEnabled = enabled
@@ -816,6 +819,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         [
             "candidateFontScale": 1.0,
             "keyHintVisible": true,
+            "mnemonicHintsEnabled": false,
             "keyboardHeightDp": 266,
             "candidateBarHeightDp": 52,
             "numberRowEnabled": false,

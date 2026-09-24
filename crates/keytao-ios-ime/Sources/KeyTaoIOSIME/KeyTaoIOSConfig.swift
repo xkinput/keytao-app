@@ -249,6 +249,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var keySoundEnabled: Bool
     public var keySoundVolume: Int
     public var keyHintVisible: Bool
+    public var mnemonicHintsEnabled: Bool
     public var flickKeysEnabled: Bool
     public var numberRowEnabled: Bool
     public var candidateFontScale: CGFloat
@@ -303,6 +304,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case keySoundEnabled
         case keySoundVolume
         case keyHintVisible
+        case mnemonicHintsEnabled
         case flickKeysEnabled
         case numberRowEnabled
         case candidateFontScale
@@ -347,6 +349,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         keySoundEnabled: Bool = true,
         keySoundVolume: Int = 100,
         keyHintVisible: Bool = true,
+        mnemonicHintsEnabled: Bool = false,
         flickKeysEnabled: Bool = true,
         numberRowEnabled: Bool = false,
         candidateFontScale: CGFloat = 1,
@@ -386,6 +389,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.keySoundEnabled = keySoundEnabled
         self.keySoundVolume = Self.clampInt(keySoundVolume, min: 0, max: 100)
         self.keyHintVisible = keyHintVisible
+        self.mnemonicHintsEnabled = mnemonicHintsEnabled
         self.flickKeysEnabled = flickKeysEnabled
         self.numberRowEnabled = numberRowEnabled
         self.candidateFontScale = Self.clamp(candidateFontScale, min: 0.8, max: 1.4)
@@ -497,6 +501,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         )
         self.keyHintVisible = (try? container.decode(Bool.self, forKey: .keyHintVisible))
             ?? Self.fallback.keyHintVisible
+        self.mnemonicHintsEnabled = (try? container.decode(Bool.self, forKey: .mnemonicHintsEnabled))
+            ?? Self.fallback.mnemonicHintsEnabled
         self.flickKeysEnabled = (try? container.decode(Bool.self, forKey: .flickKeysEnabled))
             ?? Self.fallback.flickKeysEnabled
         self.numberRowEnabled = (try? container.decode(Bool.self, forKey: .numberRowEnabled))
@@ -605,6 +611,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(keySoundEnabled, forKey: .keySoundEnabled)
         try container.encode(keySoundVolume, forKey: .keySoundVolume)
         try container.encode(keyHintVisible, forKey: .keyHintVisible)
+        try container.encode(mnemonicHintsEnabled, forKey: .mnemonicHintsEnabled)
         try container.encode(flickKeysEnabled, forKey: .flickKeysEnabled)
         try container.encode(numberRowEnabled, forKey: .numberRowEnabled)
         try container.encode(candidateFontScale, forKey: .candidateFontScale)
@@ -653,6 +660,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             keySoundEnabled: Self.fallback.keySoundEnabled,
             keySoundVolume: Self.fallback.keySoundVolume,
             keyHintVisible: Self.fallback.keyHintVisible,
+            mnemonicHintsEnabled: Self.fallback.mnemonicHintsEnabled,
             flickKeysEnabled: Self.fallback.flickKeysEnabled,
             numberRowEnabled: Self.fallback.numberRowEnabled,
             candidateFontScale: Self.fallback.candidateFontScale,
@@ -754,6 +762,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         }
         if let keyHintVisible = runtime.keyHintVisible {
             next.keyHintVisible = keyHintVisible
+        }
+        if let mnemonicHintsEnabled = runtime.mnemonicHintsEnabled {
+            next.mnemonicHintsEnabled = mnemonicHintsEnabled
         }
         if let flickKeysEnabled = runtime.flickKeysEnabled {
             next.flickKeysEnabled = flickKeysEnabled
@@ -903,6 +914,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         keySoundEnabled: true,
         keySoundVolume: 100,
         keyHintVisible: true,
+        mnemonicHintsEnabled: false,
         flickKeysEnabled: true,
         numberRowEnabled: false,
         candidateFontScale: 1,
@@ -1039,6 +1051,7 @@ private struct KeyTaoIOSRuntimeSettings: Decodable {
     var keySoundEnabled: Bool?
     var keySoundVolume: Int?
     var keyHintVisible: Bool?
+    var mnemonicHintsEnabled: Bool?
     var flickKeysEnabled: Bool?
     var numberRowEnabled: Bool?
     var candidateFontScale: CGFloat?

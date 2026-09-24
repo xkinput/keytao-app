@@ -148,6 +148,32 @@ expectScale(
     "the interactive resize stays below the screen edge"
 )
 
+#if canImport(UIKit)
+// Include KeyTaoIOSConfig.swift and its dependencies when running on iOS.
+do {
+    let decoder = JSONDecoder()
+    let legacy = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("{}".utf8))
+    expect(!legacy.mnemonicHintsEnabled, "legacy config keeps mnemonic hints off")
+    expect(!KeyTaoIOSImeConfig.fallback.mnemonicHintsEnabled, "mnemonic hints default to off")
+    let configURL = FileManager.default.temporaryDirectory.appendingPathComponent("mnemonic-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: configURL) }
+    for enabled in [true, false] {
+        var config = legacy
+        config.mnemonicHintsEnabled = enabled
+        let data = try JSONEncoder().encode(config)
+        let decoded = try decoder.decode(KeyTaoIOSImeConfig.self, from: data)
+        expect(decoded.mnemonicHintsEnabled == enabled, "mnemonic hints survive a config round trip")
+        try data.write(to: configURL, options: .atomic)
+        let loaded = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: "{}", userConfigURL: configURL)
+        expect(loaded.mnemonicHintsEnabled == enabled, "runtime settings override the resolved layout default")
+    }
+} catch {
+    failures.append("mnemonic config round trip failed: \(error)")
+}
+#else
+print("mnemonic config round trip requires UIKit; skipped on the host")
+#endif
+
 if failures.isEmpty {
     print("floating layout decode tests passed")
 } else {

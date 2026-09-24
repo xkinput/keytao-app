@@ -3,9 +3,34 @@ package ink.rea.keytao_app
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
 
 class KeytaoAndroidImeConfigTest {
+    @Test
+    fun `mnemonic hints default off and persist runtime overrides in both directions`() {
+        val bundled = JSONObject("""{ "rows": [[{ "label": "q", "value": "q" }]] }""")
+        assertEquals(false, KeytaoAndroidImeConfig.parse(bundled.toString()).mnemonicHintsEnabled)
+        val directory = Files.createTempDirectory("keytao-mnemonic-settings").toFile()
+        try {
+            val file = directory.resolve("android_ime.json")
+            for (enabled in listOf(true, false)) {
+                assertTrue(KeytaoAndroidImeConfig.persistSettings(file, mapOf("mnemonicHintsEnabled" to enabled)))
+                assertEquals(enabled, KeytaoAndroidImeConfig.parse(file.readText()).mnemonicHintsEnabled)
+                val config = KeytaoAndroidImeConfig.parseSources(
+                    userKeyboard = JSONObject(bundled.toString()).put("mnemonicHintsEnabled", !enabled),
+                    userJson = file.readText(),
+                    defaultRoot = bundled,
+                )
+                assertEquals(enabled, config.mnemonicHintsEnabled)
+                assertEquals("q", config.rows.single().single().value)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     @Test
     fun `keyboard and runtime files retain bundled row fallback`() {
         val bundled = JSONObject(
