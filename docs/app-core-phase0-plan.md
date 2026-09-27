@@ -244,6 +244,7 @@ Kotlin 1.9.25 迁移到 AGP 9 内置 Kotlin 的步骤：
 | 0c 部署、输入法状态与设置 | 7f3f192 | Opus 等价评审 PASS |
 | 0d 账号、同步、日志 + 会话/引导状态 | 6c62bad | 两轮 Opus 评审，8 项修复后 PASS；78/1 测试 |
 | 0e Android JNI 导出并入核心 | （见 git log） | 67 个 Java_* 符号 diff 为空；Opus 评审 PASS |
+| 0f Flutter 桥接 + 冒烟 | 0bbbe98（骨架 e988769） | macOS release App 内 Dart→Rust 初始化成功；flutter test 通过；arm64 APK 含全部库且 16 KB 对齐 |
 
 编译门禁：`scripts/check-core-cross.sh`（核心 Linux/Windows）、`scripts/check-tauri-windows.sh`（外壳 Windows）、Android APK 构建、macOS 本机测试。
 
@@ -257,3 +258,10 @@ Kotlin 1.9.25 迁移到 AGP 9 内置 Kotlin 的步骤：
 - Windows 上 `data_dir` 与 `cache_dir` 同为 `%LOCALAPPDATA%\<id>`，清理缓存时不能整目录删除（凭据文件在内）；建议状态文件移到独立子目录。
 - 清理：Android/iOS 的 `rime_deploy_default` 包装里残留的 Windows 参数；核心 `time` 依赖多余的 `parsing` feature；`android_jni` 里多余的逐项 cfg。
 - 首次构建 release APK（LTO）时，重新比对 `libkeytao_app_lib.so` 的 67 个 `Java_*` 导出。
+
+### 0f 的经验（第 1 阶段直接沿用）
+- FRB 2.13.0 的 native-assets 后端可用，但要在 `flutter_app/hook/build.dart` 里补三件事：把 vendored Rime SDK（Android 还有由 C 编译器路径推出的 NDK 根目录）通过 `extraCargoEnvironmentVariables` 传给 Cargo（hook 环境被清空）；把 librime 注册为代码资源（macOS 先按架构 `lipo -thin`，Android 连同 Fcitx5 三个库和 `libc++_shared`）；**始终交给 Flutter 私有副本**——直接交 vendor 路径时，资源安装步骤删掉过 `vendor/librime/macos-universal/lib/librime.1.dylib`。
+- Flutter 会把 macOS 代码资源包装成 framework 并自动改写依赖路径（`@rpath/rime.1.framework/rime.1`），App 包内 FRB 默认加载器可用；`flutter test` 需显式 `ExternalLibrary.open(build/native_assets/<os>/…)`。
+- Xcode 27 下 `flutter build macos --debug` 报 "conflicting deployment targets"（Flutter 自身 `debug_macos_framework` 步骤），release 正常；需关注 Flutter 修复。
+- NDK 暂钉在已安装的 27.0（Flutter 默认 28.2、计划中的 r30 在当前网络下载需数小时）；有代理或镜像后升级。
+- iOS 还没构建过 Flutter 版：需先 `sudo xcodebuild -runFirstLaunch`，并在 Xcode 里配置签名。
