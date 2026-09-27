@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -7,7 +8,22 @@ use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 mod app_core;
-mod wanxiang;
+mod scheme_shell;
+use keytao_app_core::{Core, wanxiang};
+use std::sync::Arc;
+use scheme_shell::*;
+pub use keytao_app_core::scheme_types::*;
+use keytao_app_core::scheme_files::{write_file_atomic, yaml_child_mapping};
+#[cfg(target_os = "windows")]
+use keytao_app_core::scheme_files::parse_schema_list;
+use keytao_app_core::addon::deployed_english_schema_available;
+#[cfg(target_os = "windows")]
+use keytao_app_core::addon::{addon_schema_status_at, addon_schema_source_files, EASY_EN_ADDON_ID};
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use keytao_app_core::addon::{android_ime_config_path, read_android_ime_config};
+#[cfg(target_os = "android")]
+use keytao_app_core::install::install_result_from_value;
+use keytao_app_core::scheme::api_error_message;
 
 pub use keytao_app_core::events::{InstallProgress, WindowsImeStatus};
 #[cfg(target_os = "windows")]
@@ -36,51 +52,6 @@ mod rime;
 
 // Linux protocol frontends live in the keytao-ime daemon. The GUI only deploys
 // assets and starts the daemon when needed.
-
-#[derive(Serialize, Deserialize, Clone)]
-struct ReleaseCache {
-    etag: String,
-    cached_at: u64,
-    release: ReleaseInfo,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct DownloadUrls {
-    pub macos: Option<String>,
-    pub windows: Option<String>,
-    pub linux: Option<String>,
-    pub android: Option<String>,
-    pub ios: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PlatformRelease {
-    pub version: String,
-    pub download_urls: DownloadUrls,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ReleaseInfo {
-    pub version: String,
-    pub name: String,
-    pub published_at: String,
-    pub body: String,
-    pub github: Option<PlatformRelease>,
-    pub gitee: Option<PlatformRelease>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SchemeReleaseInfo {
-    pub scheme: String,
-    pub source_type: Option<String>,
-    pub label: String,
-    pub version: String,
-    pub name: String,
-    pub published_at: Option<String>,
-    pub download_url: String,
-    pub asset_name: String,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppAuthUser {
@@ -116,37 +87,7 @@ pub struct UserDictionarySyncResult {
     pub message: String,
 }
 
-#[derive(Serialize, Clone)]
-pub struct FileItem {
-    pub name: String,
-    pub is_dir: bool,
-}
-
-#[derive(Serialize, Clone)]
-pub struct VerifyEntry {
-    pub path: String,
-    pub ok: bool,
-    pub note: String,
-}
-
-#[derive(Serialize, Clone)]
-pub struct InstallResult {
-    pub merged_schemas: Vec<String>,
-    pub logs: Vec<String>,
-    pub verify: Vec<VerifyEntry>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct AddonSchemaStatus {
-    pub installed: bool,
-    pub deployed: bool,
-    pub version: String,
-    pub english_available: bool,
-}
-
 const API_BASE: &str = "https://keytao.rea.ink";
-const EASY_EN_ADDON_ID: &str = "easy_en";
-const EASY_EN_ADDON_VERSION: &str = "0.10.1";
 const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
 const DEBUG_LOG_MAX_LINES: usize = 20_000;
 #[cfg(target_os = "ios")]
@@ -172,14 +113,15 @@ fn default_user_data_dir_string() -> Option<String> {
 
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
 #[tauri::command]
-fn rime_get_data_dir() -> Option<String> {
-    default_user_data_dir_string()
+fn rime_get_data_dir(core: tauri::State<'_, Arc<Core>>) -> Option<String> {
+    keytao_app_core::scheme::rime_get_data_dir(&core).expect("data directory lookup is infallible")
 }
 
 #[cfg(target_os = "ios")]
 #[tauri::command]
 fn rime_get_data_dir<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Option<String> {
-    ios_keytao_root(&app).ok().map(path_string)
+    keytao_app_core::scheme::rime_get_data_dir(&app.state::<Arc<Core>>(), ios_keytao_root(&app).ok())
+        .expect("data directory lookup is infallible")
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -337,42 +279,6 @@ fn ime_ui_settings_with_message(message: String) -> Result<ImeUiSettings, String
     ime_ui_settings_from_paths(theme_path, reload_stamp_path, message)
 }
 
-/// Replace a file's contents in a single step so a concurrent reader never
-/// sees a half-written file. The input methods (notably the iOS keyboard
-/// extension, which shares these files through the App Group container) poll
-/// the shared configuration while the app rewrites it, and a plain
-/// `fs::write` truncates before it writes.
-///
-/// The temporary file is created in the destination directory, so the final
-/// `rename` stays inside one filesystem and is therefore atomic.
-fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("keytao");
-    let tmp = dir.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let outcome = std::fs::File::create(&tmp)
-        .and_then(|mut file| {
-            file.write_all(content)?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    outcome
-}
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn write_ime_ui_settings(
@@ -425,20 +331,6 @@ fn write_ime_embedded_composition(embedded: bool) -> Result<(), String> {
     let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
     write_file_atomic(&theme_path, content.as_bytes())
         .map_err(|e| format!("写入主题配置失败 {}: {e}", theme_path.display()))
-}
-
-fn yaml_child_mapping<'a>(
-    mapping: &'a mut serde_yaml::Mapping,
-    key: &str,
-    error: &str,
-) -> Result<&'a mut serde_yaml::Mapping, String> {
-    let value = mapping
-        .entry(serde_yaml::Value::String(key.into()))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !matches!(value, serde_yaml::Value::Mapping(_)) {
-        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    value.as_mapping_mut().ok_or_else(|| error.to_string())
 }
 
 fn color_to_hex(color: keytao_theme::RgbaColor) -> String {
@@ -2372,194 +2264,6 @@ fn launch_keytao_ime(app: &tauri::AppHandle, restart: bool) -> Result<LinuxImeSt
     ))
 }
 
-fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
-    let version = app.package_info().version.to_string();
-    reqwest::Client::builder()
-        .user_agent(format!("keytao-app/{version}"))
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-fn parse_download_urls(obj: &serde_json::Value) -> DownloadUrls {
-    let urls = &obj["downloadUrls"];
-    DownloadUrls {
-        macos: urls["macos"].as_str().map(|s| s.to_string()),
-        windows: urls["windows"].as_str().map(|s| s.to_string()),
-        linux: urls["linux"].as_str().map(|s| s.to_string()),
-        android: urls["android"].as_str().map(|s| s.to_string()),
-        ios: urls["ios"].as_str().map(|s| s.to_string()),
-    }
-}
-
-#[tauri::command]
-async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
-    let t0 = std::time::Instant::now();
-    tracing::info!("[fetch_latest_release] start");
-    let cache_path = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())
-        .map(|d| d.join("release_cache.json"))
-        .ok();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Check disk cache (5 min TTL, no ETag for our proxy API)
-    let cached: Option<ReleaseCache> = cache_path.as_ref().and_then(|p| {
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|s| serde_json::from_str::<ReleaseCache>(&s).ok())
-    });
-    if let Some(ref c) = cached {
-        if now.saturating_sub(c.cached_at) < 300 {
-            tracing::info!(
-                "[fetch_latest_release] cache hit, {}ms",
-                t0.elapsed().as_millis()
-            );
-            return Ok(c.release.clone());
-        }
-    }
-
-    let client = build_client(&app)?;
-    let url = format!("{API_BASE}/api/install/latest-release");
-
-    let response = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败: {e}"))?;
-
-    if !response.status().is_success() {
-        tracing::warn!(
-            "[fetch_latest_release] HTTP {} after {}ms",
-            response.status(),
-            t0.elapsed().as_millis()
-        );
-        if let Some(c) = cached {
-            return Ok(c.release);
-        }
-        return Err(format!("获取版本信息失败，HTTP {}", response.status()));
-    }
-
-    let data: serde_json::Value = response.json().await.map_err(|e| {
-        tracing::warn!(
-            "[fetch_latest_release] body parse failed after {}ms: {e}",
-            t0.elapsed().as_millis()
-        );
-        format!("解析响应失败: {e}")
-    })?;
-
-    let github_version = data["github"]["version"].as_str().unwrap_or("").to_string();
-    let github = if !github_version.is_empty() {
-        Some(PlatformRelease {
-            version: github_version.clone(),
-            download_urls: parse_download_urls(&data["github"]),
-        })
-    } else {
-        None
-    };
-
-    let gitee_version = data["gitee"]["version"].as_str().unwrap_or("").to_string();
-    let gitee = if !gitee_version.is_empty() {
-        Some(PlatformRelease {
-            version: gitee_version,
-            download_urls: parse_download_urls(&data["gitee"]),
-        })
-    } else {
-        None
-    };
-
-    let version = data["version"].as_str().unwrap_or("unknown").to_string();
-    let name = data["name"].as_str().unwrap_or("").to_string();
-    let published_at = data["publishedAt"].as_str().unwrap_or("").to_string();
-    let body = data["body"].as_str().unwrap_or("").to_string();
-
-    let info = ReleaseInfo {
-        version,
-        name,
-        published_at,
-        body,
-        github,
-        gitee,
-    };
-
-    if let Some(path) = cache_path {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
-        let cache = ReleaseCache {
-            etag: String::new(),
-            cached_at: now,
-            release: info.clone(),
-        };
-        serde_json::to_string(&cache)
-            .ok()
-            .and_then(|s| std::fs::write(&path, s).ok());
-    }
-
-    tracing::info!(
-        "[fetch_latest_release] done in {}ms",
-        t0.elapsed().as_millis()
-    );
-    Ok(info)
-}
-
-async fn api_error_message(response: reqwest::Response, fallback: &str) -> String {
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
-            return error.to_string();
-        }
-        if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
-            return message.to_string();
-        }
-    }
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        format!("{fallback}，HTTP {status}")
-    } else {
-        format!("{fallback}，HTTP {status}: {trimmed}")
-    }
-}
-
-fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
-    match scheme {
-        "keytao" => Ok("keytao"),
-        "xmjd" => Ok("xmjd"),
-        "txjx" => Ok("txjx"),
-        "keydo" => Ok("keydo"),
-        _ => Err("不支持的方案".into()),
-    }
-}
-
-#[tauri::command]
-async fn fetch_scheme_release(app: AppHandle, scheme: String) -> Result<SchemeReleaseInfo, String> {
-    let scheme = validate_scheme_key(scheme.trim())?;
-    let client = build_client(&app)?;
-    let url = format!("{API_BASE}/api/practice/scheme-release?scheme={scheme}");
-    let response = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(12))
-        .send()
-        .await
-        .map_err(|e| format!("获取方案版本失败: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "获取方案版本失败").await);
-    }
-
-    response
-        .json::<SchemeReleaseInfo>()
-        .await
-        .map_err(|e| format!("解析方案版本失败: {e}"))
-}
-
 #[tauri::command]
 async fn keytao_login(
     app: AppHandle,
@@ -2839,607 +2543,8 @@ async fn select_directory(
     }
 }
 
-#[tauri::command]
-fn list_dir(path: String) -> Result<Vec<FileItem>, String> {
-    let entries = std::fs::read_dir(&path).map_err(|e| format!("读取目录失败: {e}"))?;
-    let mut items: Vec<FileItem> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| FileItem {
-            name: e.file_name().to_string_lossy().into_owned(),
-            is_dir: e.file_type().map(|t| t.is_dir()).unwrap_or(false),
-        })
-        .collect();
-    items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
-    });
-    Ok(items)
-}
 
-#[tauri::command]
-fn read_local_schemas(path: String) -> Vec<String> {
-    let base = std::path::Path::new(&path);
-    let content = std::fs::read_to_string(base.join("default.custom.yaml"))
-        .or_else(|_| std::fs::read_to_string(base.join("default-custom.yaml")))
-        .unwrap_or_default();
-    parse_schema_list(&content)
-}
 
-fn is_default_custom(filename: &str) -> bool {
-    filename == "default.custom.yaml" || filename == "default-custom.yaml"
-}
-
-fn parse_schema_list(content: &str) -> Vec<String> {
-    let mut schemas = Vec::new();
-    let mut in_list = false;
-    for line in content.lines() {
-        let t = line.trim();
-        if t.contains("schema_list:") {
-            in_list = true;
-            continue;
-        }
-        if in_list {
-            if let Some(rest) = t.strip_prefix("- schema:") {
-                let s = clean_yaml_scalar(rest);
-                if !s.is_empty() {
-                    schemas.push(s);
-                }
-            } else if !t.is_empty() && !t.starts_with('#') && !t.starts_with('-') {
-                in_list = false;
-            }
-        }
-    }
-    schemas
-}
-
-fn clean_yaml_scalar(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.starts_with('"') || trimmed.starts_with('\'') {
-        let quote = trimmed.chars().next().unwrap();
-        return trimmed[1..]
-            .find(quote)
-            .map(|end| trimmed[1..1 + end].to_string())
-            .unwrap_or_else(|| trimmed[1..].to_string());
-    }
-    trimmed
-        .split_once('#')
-        .map_or(trimmed, |(head, _)| head)
-        .trim()
-        .to_string()
-}
-
-// Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
-// Conflicting user modules are renamed to "<name>_user" to avoid overwrite by zip's lua files.
-fn merge_rime_lua(
-    local_content: &str,
-    zip_content: &str,
-    zip_lua_filenames: &std::collections::HashSet<String>,
-) -> (String, Vec<(String, String)>) {
-    keytao_core::merge_rime_lua_content(Some(local_content), zip_content, zip_lua_filenames)
-}
-
-fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
-    keytao_core::merge_default_custom_content(existing, zip_content).unwrap_or_else(|_| {
-        let user: Vec<String> = existing
-            .map(|c| {
-                parse_schema_list(c)
-                    .into_iter()
-                    .filter(|s| {
-                        !["keytao", "txjx", "xmjd6", "keydo"]
-                            .iter()
-                            .any(|prefix| s.starts_with(prefix))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        (zip_content.to_string(), user)
-    })
-}
-
-/// After extraction, verify key files were written correctly.
-/// - default.custom.yaml / rime.lua: read back and compare byte-for-byte with expected content
-/// - dict / schema / lua files: just check existence
-fn verify_install(
-    dest: &std::path::Path,
-    expected_dc: Option<&str>,
-    expected_rl: Option<&str>,
-    zip_bytes: &[u8],
-) -> Vec<VerifyEntry> {
-    let mut entries: Vec<VerifyEntry> = Vec::new();
-
-    // Verify default.custom.yaml content matches what we wrote
-    if let Some(expected) = expected_dc {
-        let path = dest.join("default.custom.yaml");
-        let label = "default.custom.yaml".to_string();
-        match std::fs::read_to_string(&path) {
-            Ok(actual) if actual == expected => entries.push(VerifyEntry {
-                path: label,
-                ok: true,
-                note: "内容一致".into(),
-            }),
-            Ok(_) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: "内容与写入时不符，可能被其他程序修改或写入不完整".into(),
-            }),
-            Err(e) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: format!("读取失败: {e}"),
-            }),
-        }
-    }
-
-    // Verify rime.lua content matches what we wrote
-    if let Some(expected) = expected_rl {
-        let path = dest.join("rime.lua");
-        let label = "rime.lua".to_string();
-        match std::fs::read_to_string(&path) {
-            Ok(actual) if actual == expected => entries.push(VerifyEntry {
-                path: label,
-                ok: true,
-                note: "内容一致".into(),
-            }),
-            Ok(_) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: "内容与写入时不符，可能被其他程序修改或写入不完整".into(),
-            }),
-            Err(e) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: format!("读取失败: {e}"),
-            }),
-        }
-    }
-
-    // Check that every non-empty zip entry (excluding the two merge-handled files) was written to disk
-    if let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)) {
-        for i in 0..archive.len() {
-            if let Ok(file) = archive.by_index(i) {
-                let raw = file.name().to_string();
-                let relative = raw.trim_end_matches('/').to_string();
-                if relative.is_empty() || file.is_dir() {
-                    continue;
-                }
-                let filename = relative.rsplit('/').next().unwrap_or(&relative).to_string();
-                // Only spot-check key file types (schemas, dicts, lua, opencc)
-                let is_key = filename.ends_with(".schema.yaml")
-                    || filename.ends_with(".dict.yaml")
-                    || (filename.ends_with(".lua") && !relative.contains('/'))
-                    || relative.starts_with("lua/")
-                    || relative.starts_with("opencc/");
-                if !is_key {
-                    continue;
-                }
-                // Skip merge-handled files (already verified above)
-                if is_default_custom(&filename) || filename == "rime.lua" {
-                    continue;
-                }
-                let on_disk = dest.join(&relative);
-                if on_disk.exists() {
-                    entries.push(VerifyEntry {
-                        path: relative,
-                        ok: true,
-                        note: "文件存在".into(),
-                    });
-                } else {
-                    entries.push(VerifyEntry {
-                        path: relative,
-                        ok: false,
-                        note: "文件不存在".into(),
-                    });
-                }
-            }
-        }
-    }
-    entries
-}
-
-fn collect_rime_package_build_id(
-    relative: &str,
-    schema_ids: &mut HashSet<String>,
-    dictionary_ids: &mut HashSet<String>,
-) {
-    let filename = relative.rsplit('/').next().unwrap_or(relative);
-    if let Some(id) = filename.strip_suffix(".schema.yaml") {
-        if !id.is_empty() {
-            schema_ids.insert(id.to_string());
-        }
-    } else if let Some(id) = filename.strip_suffix(".dict.yaml") {
-        if !id.is_empty() {
-            dictionary_ids.insert(id.to_string());
-        }
-    }
-}
-
-fn rime_package_build_ids(zip_bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
-        .map_err(|error| format!("读取方案构建清单失败: {error}"))?;
-    let mut schema_ids = HashSet::new();
-    let mut dictionary_ids = HashSet::new();
-    for index in 0..archive.len() {
-        let file = archive.by_index(index).map_err(|error| error.to_string())?;
-        if !file.is_dir() {
-            collect_rime_package_build_id(file.name(), &mut schema_ids, &mut dictionary_ids);
-        }
-    }
-    let mut schema_ids: Vec<String> = schema_ids.into_iter().collect();
-    schema_ids.sort();
-    let mut dictionary_ids: Vec<String> = dictionary_ids.into_iter().collect();
-    dictionary_ids.sort();
-    Ok((schema_ids, dictionary_ids))
-}
-
-/// Writes `content` to `path`, forcibly overwriting even read-only files.
-/// On Linux, triggers a polkit (pkexec) root-auth dialog if the file is root-owned.
-/// Returns a tag for logging: "" (normal), " [forced]", or " [root]".
-fn write_file_force(path: &std::path::Path, content: &[u8]) -> Result<&'static str, String> {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p).ok();
-    }
-    if std::fs::write(path, content).is_ok() {
-        return Ok("");
-    }
-    // Try chmod before falling back to root — works when we own the file but it's read-only
-    #[cfg(unix)]
-    if path.exists() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
-        if std::fs::write(path, content).is_ok() {
-            return Ok(" [forced]");
-        }
-    }
-    write_file_privileged_fallback(path, content)
-}
-
-#[cfg(target_os = "linux")]
-fn write_file_privileged_fallback(
-    path: &std::path::Path,
-    content: &[u8],
-) -> Result<&'static str, String> {
-    let tmp = std::env::temp_dir().join("keytao_privileged_write");
-    std::fs::write(&tmp, content).map_err(|e| format!("临时文件写入失败: {e}"))?;
-    let result = std::process::Command::new("pkexec")
-        .arg("cp")
-        .arg("--")
-        .arg(&tmp)
-        .arg(path)
-        .output();
-    let _ = std::fs::remove_file(&tmp);
-    match result {
-        Ok(o) if o.status.success() => Ok(" [root]"),
-        Ok(o) => Err(format!(
-            "需要 root 权限写入 {}，认证失败或被取消: {}",
-            path.display(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Err(format!("无法启动 pkexec（请确认系统已安装 polkit）: {e}")),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn write_file_privileged_fallback(
-    path: &std::path::Path,
-    _content: &[u8],
-) -> Result<&'static str, String> {
-    Err(format!("写入失败（权限不足）：{}", path.display()))
-}
-
-#[tauri::command]
-async fn download_to_temp<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    url: String,
-) -> Result<String, String> {
-    let emit = |stage: &str, percent: u32, message: &str| {
-        let _ = app.emit(
-            "install-progress",
-            InstallProgress {
-                stage: stage.to_string(),
-                percent,
-                message: message.to_string(),
-            },
-        );
-    };
-
-    emit("downloading", 0, "正在下载...");
-
-    let client = build_client(&app)?;
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("下载失败: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("下载失败，HTTP {}", response.status()));
-    }
-
-    let total_size = response.content_length().unwrap_or(0);
-    let mut downloaded = 0u64;
-    let mut bytes: Vec<u8> = if total_size > 0 {
-        Vec::with_capacity(total_size as usize)
-    } else {
-        Vec::new()
-    };
-
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
-        downloaded += chunk.len() as u64;
-        bytes.extend_from_slice(&chunk);
-        if total_size > 0 {
-            let percent = (downloaded * 60 / total_size) as u32;
-            emit(
-                "downloading",
-                percent,
-                &format!(
-                    "正在下载... {:.1}MB / {:.1}MB",
-                    downloaded as f64 / 1_048_576.0,
-                    total_size as f64 / 1_048_576.0
-                ),
-            );
-        }
-    }
-
-    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
-    let temp_path = cache_dir.join("keytao_download.zip");
-    std::fs::write(&temp_path, &bytes).map_err(|e| format!("保存临时文件失败: {e}"))?;
-
-    emit("downloading", 60, "下载完成，准备解压...");
-    Ok(temp_path.to_string_lossy().into_owned())
-}
-
-#[tauri::command]
-async fn smart_install<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    zip_path: String,
-    dest_path: String,
-) -> Result<InstallResult, String> {
-    let emit = |stage: &str, percent: u32, message: &str| {
-        let _ = app.emit(
-            "install-progress",
-            InstallProgress {
-                stage: stage.to_string(),
-                percent,
-                message: message.to_string(),
-            },
-        );
-    };
-
-    emit("extracting", 61, "正在解压...");
-
-    let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
-    let dest = PathBuf::from(&dest_path);
-    let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
-
-    // First pass: collect zip metadata and merge candidates
-    let (
-        merged_dc_path,
-        merged_dc_content,
-        merged_schemas,
-        merged_rime_lua_path,
-        merged_rime_lua_content,
-        renamed_lua_files,
-    ) = {
-        use std::collections::HashSet;
-        use std::io::Read;
-
-        let cursor = std::io::Cursor::new(&zip_bytes);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
-
-        let mut zip_dc_path: Option<String> = None;
-        let mut zip_dc_content: Option<String> = None;
-        let mut zip_rime_lua_path: Option<String> = None;
-        let mut zip_rime_lua_content: Option<String> = None;
-        let mut zip_lua_filenames: HashSet<String> = HashSet::new();
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            let raw = file.name().to_string();
-            let relative = raw.trim_end_matches('/').to_string();
-            if relative.is_empty() || file.is_dir() {
-                continue;
-            }
-            let filename = relative.rsplit('/').next().unwrap_or(&relative).to_string();
-
-            if is_default_custom(&filename) && zip_dc_path.is_none() {
-                let mut buf = String::new();
-                file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-                zip_dc_path = Some(relative);
-                zip_dc_content = Some(buf);
-            } else if filename == "rime.lua"
-                && !relative.contains('/')
-                && zip_rime_lua_path.is_none()
-            {
-                let mut buf = String::new();
-                file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-                zip_rime_lua_path = Some(relative);
-                zip_rime_lua_content = Some(buf);
-            } else if relative.starts_with("lua/") && !relative[4..].contains('/') {
-                zip_lua_filenames.insert(filename);
-            }
-        }
-
-        // Merge default.custom.yaml
-        let (dc_path, dc_content, schemas) =
-            if let (Some(path), Some(content)) = (zip_dc_path, zip_dc_content) {
-                let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
-                    .ok()
-                    .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
-                let (merged, user) = merge_default_custom(existing.as_deref(), &content);
-                (Some(path), Some(merged), user)
-            } else {
-                (None, None, Vec::new())
-            };
-
-        // Merge rime.lua
-        let (rl_path, rl_content, renamed) =
-            if let (Some(path), Some(zip_rl)) = (zip_rime_lua_path, zip_rime_lua_content) {
-                if let Ok(local_rl) = std::fs::read_to_string(dest.join("rime.lua")) {
-                    let (merged, renames) = merge_rime_lua(&local_rl, &zip_rl, &zip_lua_filenames);
-                    // Read local lua files that need renaming before zip overwrites them
-                    let renamed_contents: Vec<(String, Vec<u8>)> = renames
-                        .iter()
-                        .filter_map(|(old, new)| {
-                            let local_file = dest.join("lua").join(format!("{}.lua", old));
-                            std::fs::read(&local_file)
-                                .ok()
-                                .map(|bytes| (new.clone(), bytes))
-                        })
-                        .collect();
-                    (Some(path), Some(merged), renamed_contents)
-                } else {
-                    (Some(path), Some(zip_rl), Vec::new())
-                }
-            } else {
-                (None, None, Vec::new())
-            };
-
-        (dc_path, dc_content, schemas, rl_path, rl_content, renamed)
-    };
-
-    // Second pass: smart extraction
-    let cursor = std::io::Cursor::new(&zip_bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
-    let total = archive.len();
-    let mut logs: Vec<String> = Vec::new();
-
-    for i in 0..total {
-        let (relative, is_dir, content) = {
-            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            let raw = file.name().to_string();
-            let relative = raw.trim_end_matches('/').to_string();
-            if relative.is_empty() {
-                continue;
-            }
-            let is_dir = file.is_dir();
-            let mut buf = Vec::new();
-            if !is_dir {
-                use std::io::Read;
-                file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-            }
-            (relative, is_dir, buf)
-        };
-
-        if is_dir {
-            if let Err(e) = std::fs::create_dir_all(dest.join(&relative)) {
-                logs.push(format!("[WARN] mkdir {relative}: {e}"));
-            }
-        } else if Some(&relative) == merged_dc_path.as_ref() {
-            if let Some(ref mc) = merged_dc_content {
-                let out = dest.join(&relative);
-                match write_file_force(&out, mc.as_bytes()) {
-                    Ok(tag) => logs.push(format!("[MERGED]{tag} {relative}")),
-                    Err(e) => {
-                        logs.push(format!("[ERROR] {relative}: {e}"));
-                        return Err(e);
-                    }
-                }
-            }
-        } else if Some(&relative) == merged_rime_lua_path.as_ref() {
-            if let Some(ref mc) = merged_rime_lua_content {
-                let out = dest.join(&relative);
-                match write_file_force(&out, mc.as_bytes()) {
-                    Ok(tag) => logs.push(format!("[MERGED]{tag} {relative}")),
-                    Err(e) => {
-                        logs.push(format!("[ERROR] {relative}: {e}"));
-                        return Err(e);
-                    }
-                }
-            }
-        } else {
-            let out = dest.join(&relative);
-            match write_file_force(&out, &content) {
-                Ok(tag) => logs.push(format!("[OK]{tag} {relative}")),
-                Err(e) => {
-                    logs.push(format!("[ERROR] {relative}: {e}"));
-                    return Err(e);
-                }
-            }
-        }
-
-        let percent = 61 + ((i + 1) * 39 / total) as u32;
-        let fname = relative.rsplit('/').next().unwrap_or(&relative);
-        emit(
-            "extracting",
-            percent,
-            &format!("正在安装... {}/{}: {}", i + 1, total, fname),
-        );
-    }
-
-    // Write renamed user lua files (saved before zip overwrote them)
-    for (new_module, bytes) in &renamed_lua_files {
-        let out = dest.join("lua").join(format!("{}.lua", new_module));
-        match write_file_force(&out, bytes) {
-            Ok(tag) => logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua")),
-            Err(e) => {
-                logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
-                return Err(e);
-            }
-        }
-    }
-
-    let invalidated = {
-        #[cfg(target_os = "windows")]
-        let _engine_guard = if !package_schema_ids.is_empty() || !package_dictionary_ids.is_empty()
-        {
-            Some(WindowsImeEngineInitGuard::acquire()?)
-        } else {
-            None
-        };
-        #[cfg(target_os = "windows")]
-        if _engine_guard.is_some() {
-            keytao_core::clear_windows_rime_build_repair_marker(&dest)?;
-            write_keytao_ime_reload_stamp()
-                .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
-        }
-        #[cfg(target_os = "windows")]
-        let profile_guard = if _engine_guard.is_some() {
-            Some(WindowsImeProfileDeploymentGuard::suspend()?)
-        } else {
-            None
-        };
-        let invalidated = keytao_core::invalidate_rime_build_artifacts(
-            &dest,
-            &package_schema_ids,
-            &package_dictionary_ids,
-        )?;
-        #[cfg(target_os = "windows")]
-        if let Some(profile_guard) = profile_guard {
-            profile_guard.resume()?;
-        }
-        invalidated
-    };
-    logs.extend(
-        invalidated
-            .into_iter()
-            .map(|path| format!("[INVALIDATED] {path}")),
-    );
-    #[cfg(target_os = "windows")]
-    if keytao_core::default_user_data_dir().as_ref() == Some(&dest) {
-        // Publish the original package, before any user customizations were merged.
-        windows_public_schemas::publish_package(&zip_bytes)?;
-        logs.push("[WINDOWS] 已更新系统搜索框使用的公共方案".into());
-    }
-    std::fs::remove_file(&zip_path).ok();
-    emit("done", 100, "安装完成！");
-
-    let verify = verify_install(
-        &dest,
-        merged_dc_content.as_deref(),
-        merged_rime_lua_content.as_deref(),
-        &zip_bytes,
-    );
-
-    Ok(InstallResult {
-        merged_schemas,
-        logs,
-        verify,
-    })
-}
 
 // ─── Android plugin ──────────────────────────────────────────────────────────
 
@@ -4939,27 +4044,6 @@ fn write_android_reload_stamp(root: &Path) -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn android_ime_config_path(root: &Path) -> PathBuf {
-    #[cfg(target_os = "ios")]
-    {
-        root.join("ios_ime.json")
-    }
-    #[cfg(target_os = "android")]
-    {
-        root.join("android_ime.json")
-    }
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn read_android_ime_config(path: &Path) -> serde_json::Map<String, serde_json::Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
 fn normalize_enter_key_behavior(value: Option<&str>) -> String {
     match value
         .unwrap_or_default()
@@ -5434,18 +4518,13 @@ async fn set_android_ime_input_settings<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn android_keytao_data_dir<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<Option<String>, String> {
-    #[cfg(target_os = "android")]
-    {
-        android_keytao_root(&app).map(|path| Some(path_string(path)))
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-        Ok(None)
-    }
+async fn android_keytao_data_dir<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<String>, String> {
+    keytao_app_core::scheme::android_keytao_data_dir(&app.state::<Arc<Core>>(), || {
+        #[cfg(target_os = "android")]
+        { android_keytao_root(&app) }
+        #[cfg(not(target_os = "android"))]
+        { unreachable!("Android root lookup is not called on other platforms") }
+    }).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5540,48 +4619,6 @@ async fn android_read_local_schemas<R: tauri::Runtime>(
     }
 }
 
-#[cfg(target_os = "android")]
-fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
-    let merged_schemas = result["mergedSchemas"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let logs = result["logs"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let verify = result["verify"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| {
-                    Some(VerifyEntry {
-                        path: v["path"].as_str()?.to_string(),
-                        ok: v["ok"].as_bool().unwrap_or(false),
-                        note: v["note"].as_str().unwrap_or("").to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    InstallResult {
-        merged_schemas,
-        logs,
-        verify,
-    }
-}
-
 #[tauri::command]
 async fn android_smart_extract<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -5659,46 +4696,6 @@ async fn android_smart_extract<R: tauri::Runtime>(
     }
 }
 
-#[derive(Serialize)]
-pub struct AppUpdateInfo {
-    pub current_version: String,
-    pub latest_version: String,
-    pub has_update: bool,
-    pub release_url: String,
-}
-
-#[tauri::command]
-async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
-    let t0 = std::time::Instant::now();
-    tracing::info!("[check_app_update] start");
-    let current = app.package_info().version.to_string();
-    let client = build_client(&app)?;
-    let resp = client
-        .get("https://api.github.com/repos/xkinput/keytao-app/releases/latest")
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                "[check_app_update] failed after {}ms: {e}",
-                t0.elapsed().as_millis()
-            );
-            e.to_string()
-        })?;
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    tracing::info!("[check_app_update] done in {}ms", t0.elapsed().as_millis());
-    let latest_tag = json["tag_name"].as_str().unwrap_or("").to_string();
-    let latest = latest_tag.trim_start_matches('v').to_string();
-    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
-    let has_update = !latest.is_empty() && latest != current;
-    Ok(AppUpdateInfo {
-        current_version: current,
-        latest_version: latest,
-        has_update,
-        release_url,
-    })
-}
-
 // ─── macOS system IME management ─────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -5767,14 +4764,6 @@ fn macos_ime_status(app: AppHandle) -> MacosImeStatus {
 }
 
 // ─── Local schema info ───────────────────────────────────────────────────────
-
-#[derive(Serialize, Clone)]
-pub struct LocalSchemaInfo {
-    pub installed: bool,
-    pub deployed: bool,
-    pub version: Option<String>,
-    pub schemas: Vec<String>,
-}
 
 #[derive(Serialize, Clone)]
 pub struct ComponentVersions {
@@ -6040,176 +5029,6 @@ fn get_component_versions(app: AppHandle) -> ComponentVersions {
     }
 }
 
-fn validate_addon_schema_id(id: &str) -> Result<&str, String> {
-    match id.trim() {
-        EASY_EN_ADDON_ID => Ok(EASY_EN_ADDON_ID),
-        _ => Err(format!("不支持的附加方案：{id}")),
-    }
-}
-
-fn addon_schema_source_files(id: &str) -> [(&'static str, String); 4] {
-    [
-        ("easy_en.schema.yaml", format!("{id}.schema.yaml")),
-        ("easy_en.dict.yaml", format!("{id}.dict.yaml")),
-        ("easy_en.custom.yaml", format!("{id}.custom.yaml")),
-        ("lua/easy_en.lua", format!("lua/{id}.lua")),
-    ]
-}
-
-fn deployed_english_schema_available(root: &Path) -> bool {
-    let schemas = ["default.custom.yaml", "default-custom.yaml", "default.yaml", "build/default.yaml"]
-        .into_iter()
-        .filter_map(|name| std::fs::read_to_string(root.join(name)).ok())
-        .map(|text| parse_schema_list(&text))
-        .find(|schemas| !schemas.is_empty())
-        .unwrap_or_default();
-    schemas.iter().filter(|id| !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')))
-        .any(|id| {
-            let path = root.join("build").join(format!("{id}.schema.yaml"));
-            let Some(schema) = std::fs::read(&path).ok()
-                .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok()) else { return false; };
-            let name = schema.get("schema").and_then(|v| v.get("name"))
-                .and_then(serde_yaml::Value::as_str).unwrap_or("");
-            keytao_core::english_mode::is_english_schema(id, name)
-        })
-}
-
-fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
-    let configured = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
-        .is_some_and(|content| {
-            parse_schema_list(&content)
-                .iter()
-                .any(|schema| schema == id)
-        });
-    let installed = configured
-        && addon_schema_source_files(id)
-            .iter()
-            .all(|(_, relative)| root.join(relative).is_file());
-    let deployed = installed
-        && root
-            .join("build")
-            .join(format!("{id}.schema.yaml"))
-            .is_file();
-    AddonSchemaStatus {
-        installed,
-        deployed,
-        version: EASY_EN_ADDON_VERSION.into(),
-        english_available: deployed_english_schema_available(root),
-    }
-}
-
-#[tauri::command]
-fn addon_schema_status<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    id: String,
-) -> Result<AddonSchemaStatus, String> {
-    let id = validate_addon_schema_id(&id)?;
-    let root = default_keytao_user_root(&app)?;
-    Ok(addon_schema_status_at(&root, id))
-}
-
-fn update_addon_schema_list_content(
-    existing: &str,
-    id: &str,
-    installed: bool,
-) -> Result<String, String> {
-    let mut value = serde_yaml::from_str::<serde_yaml::Value>(&existing)
-        .map_err(|error| format!("解析 default custom 配置失败: {error}"))?;
-    let mapping = value
-        .as_mapping_mut()
-        .ok_or("default custom 配置根节点必须是 YAML mapping")?;
-    let patch = yaml_child_mapping(mapping, "patch", "patch 必须是 YAML mapping")?;
-
-    let mut schemas = parse_schema_list(&existing);
-    schemas.retain(|schema| schema != id);
-    if installed {
-        schemas.push(id.to_string());
-    }
-    let schema_list = serde_yaml::Value::Sequence(
-        schemas
-            .into_iter()
-            .map(|schema| {
-                let mut entry = serde_yaml::Mapping::new();
-                entry.insert(
-                    serde_yaml::Value::String("schema".into()),
-                    serde_yaml::Value::String(schema),
-                );
-                serde_yaml::Value::Mapping(entry)
-            })
-            .collect(),
-    );
-    patch.insert(serde_yaml::Value::String("schema_list".into()), schema_list);
-
-    let mut content = serde_yaml::to_string(&value)
-        .map_err(|error| format!("序列化 default custom 配置失败: {error}"))?;
-    if let Some(stripped) = content.strip_prefix("---\n") {
-        content = stripped.to_string();
-    }
-    Ok(content)
-}
-
-fn write_addon_schema_list(root: &Path, id: &str, installed: bool) -> Result<(), String> {
-    let path = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-        .ok_or("请先安装键道方案")?;
-    let existing = std::fs::read_to_string(&path)
-        .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
-    let content = update_addon_schema_list_content(&existing, id, installed)?;
-    write_file_atomic(&path, content.as_bytes())
-        .map_err(|error| format!("写入附加方案列表失败: {error}"))
-}
-
-#[cfg(not(target_os = "android"))]
-fn bundled_addon_schema_dir<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.extend([
-            resource_dir.join("addon-schemas").join(id),
-            resource_dir
-                .join("resources")
-                .join("addon-schemas")
-                .join(id),
-        ]);
-    }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../resources/addon-schemas")
-            .join(id),
-    );
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.join("easy_en.schema.yaml").is_file())
-        .ok_or_else(|| format!("应用包中缺少附加方案资源：{id}"))
-}
-
-#[cfg(not(target_os = "android"))]
-fn install_addon_schema_files<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    root: &Path,
-    id: &str,
-) -> Result<(), String> {
-    let source = bundled_addon_schema_dir(app, id)?;
-    for (source_relative, destination_relative) in addon_schema_source_files(id) {
-        let bytes = std::fs::read(source.join(source_relative))
-            .map_err(|error| format!("读取附加方案资源 {source_relative} 失败: {error}"))?;
-        let destination = root.join(destination_relative);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
-        }
-        write_file_atomic(&destination, &bytes)
-            .map_err(|error| format!("写入 {} 失败: {error}", destination.display()))?;
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "android")]
 fn install_addon_schema_files<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -6226,23 +5045,9 @@ fn install_addon_schema_files<R: tauri::Runtime>(
         .map_err(|error| error.to_string())
 }
 
-fn remove_path_if_present(path: &Path) -> Result<(), String> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("读取 {} 失败: {error}", path.display())),
-    };
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    }
-    .map_err(|error| format!("删除 {} 失败: {error}", path.display()))
-}
-
 #[cfg(target_os = "windows")]
 fn publish_windows_english_addon(app: &AppHandle) -> Result<(), String> {
-    let source = bundled_addon_schema_dir(app, EASY_EN_ADDON_ID)?;
+    let source = keytao_app_core::addon::bundled_addon_schema_dir(&app.state::<Arc<Core>>(), EASY_EN_ADDON_ID)?;
     let files = addon_schema_source_files(EASY_EN_ADDON_ID).into_iter()
         .map(|(source_relative, destination)| {
             std::fs::read(source.join(source_relative))
@@ -6252,132 +5057,9 @@ fn publish_windows_english_addon(app: &AppHandle) -> Result<(), String> {
     windows_public_schemas::publish_files(&files)
 }
 
-fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
-    for (_, relative) in addon_schema_source_files(id) {
-        remove_path_if_present(&root.join(relative))?;
-    }
-    for dir in [root.to_path_buf(), root.join("build")] {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("读取 {} 失败: {error}", dir.display())),
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let remove = if dir == root {
-                name.starts_with(&format!("{id}.userdb"))
-            } else {
-                name.starts_with(&format!("{id}."))
-            };
-            if remove {
-                remove_path_if_present(&entry.path())?;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn reset_mobile_english_mode(root: &Path) -> Result<bool, String> {
-    let path = android_ime_config_path(root);
-    let mut config = read_android_ime_config(&path);
-    if config
-        .get("englishMode")
-        .and_then(serde_json::Value::as_str)
-        != Some("schema")
-    {
-        return Ok(false);
-    }
-    config.insert(
-        "englishMode".into(),
-        serde_json::Value::String("ascii".into()),
-    );
-    let content = serde_json::to_vec_pretty(&config)
-        .map_err(|error| format!("序列化移动端输入设置失败: {error}"))?;
-    write_file_atomic(&path, &content)
-        .map_err(|error| format!("写入 {} 失败: {error}", path.display()))?;
-    Ok(true)
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
-    use keytao_core::english_mode::{read_english_mode, write_english_mode, EnglishMode};
-    let changed = read_english_mode(_root) != EnglishMode::Ascii;
-    if changed {
-        write_english_mode(_root, EnglishMode::Ascii)?;
-    }
-    Ok(changed)
-}
-
 #[tauri::command]
 fn wanxiang_status(app: AppHandle) -> Result<wanxiang::Status, String> {
-    Ok(wanxiang::status_at(&default_keytao_user_root(&app)?))
-}
-
-#[tauri::command]
-async fn manage_wanxiang(app: AppHandle, installed: bool) -> Result<wanxiang::Status, String> {
-    let root = default_keytao_user_root(&app)?;
-    let config_path = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-        .ok_or("请先安装主方案")?;
-    let previous_config = std::fs::read(&config_path).map_err(|e| e.to_string())?;
-    let receipt = if installed {
-        let progress_app = app.clone();
-        wanxiang::install(&root, move |percent, message| {
-            let _ = progress_app.emit("install-progress", InstallProgress {
-                stage: "wanxiang-download".into(),
-                percent: u32::from(percent),
-                message: message.into(),
-            });
-        }).await?
-    } else {
-        wanxiang::uninstall(&root)?
-    };
-    let deploy_result = async {
-        write_addon_schema_list(&root, wanxiang::SCHEMA_ID, installed)?;
-        rime_deploy_default(app.clone()).await?;
-        if installed && !wanxiang::status_at(&root).deployed {
-            return Err("万象拼音部署产物缺失".to_string());
-        }
-        #[cfg(target_os = "windows")]
-        if installed {
-            windows_public_schemas::publish_source_files(&receipt.public_source_files())?;
-        } else {
-            windows_public_schemas::remove_schema(wanxiang::SCHEMA_ID, &[])?;
-        }
-        Ok(())
-    }.await;
-    if let Err(error) = deploy_result {
-        let rollback = receipt.rollback();
-        let restore = write_file_atomic(&config_path, &previous_config);
-        if let Err(rollback_error) = rollback {
-            return Err(format!("{error}；恢复词库失败：{rollback_error}"));
-        }
-        restore.map_err(|e| format!("{error}；恢复方案列表失败：{e}"))?;
-        if let Err(restore_error) = rime_deploy_default(app.clone()).await {
-            return Err(format!("{error}；已恢复文件，请重新部署：{restore_error}"));
-        }
-        return Err(error);
-    }
-    receipt.finish()?;
-    if !installed {
-        for extension in ["schema.yaml", "table.bin", "prism.bin", "reverse.bin"] {
-            let path = root.join("build").join(format!("wanxiang.{extension}"));
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::info!(%error, path = %path.display(), "unused Wanxiang build cache remains locked");
-                }
-            }
-        }
-    }
-    let _ = app.emit("install-progress", InstallProgress {
-        stage: "done".into(),
-        percent: 100,
-        message: if installed { "万象拼音基础词库已安装并部署" } else { "万象拼音已卸载，保留用户自定义和学习记录" }.into(),
-    });
-    Ok(wanxiang::status_at(&root))
+    wanxiang::wanxiang_status(&app.state::<Arc<Core>>(), &default_keytao_user_root(&app)?).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -6403,146 +5085,6 @@ async fn set_desktop_english_mode(
         write_default_reload_stamp(&app, &root)?;
         Ok(mode)
     }).await.map_err(|e| format!("保存英文模式失败：{e}"))?
-}
-
-#[tauri::command]
-async fn addon_schema_install(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
-    let id = validate_addon_schema_id(&id)?;
-    let root = default_keytao_user_root(&app)?;
-    let base = keytao_core::schema_install_state(&root);
-    if !base.installed {
-        return Err("请先安装键道方案".into());
-    }
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "addon-copy".into(),
-            percent: 20,
-            message: "正在复制附加方案 English...".into(),
-        },
-    );
-    install_addon_schema_files(&app, &root, id)?;
-    write_addon_schema_list(&root, id, true)?;
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "addon-deploy".into(),
-            percent: 55,
-            message: "正在部署键道方案与 English...".into(),
-        },
-    );
-    rime_deploy_default(app.clone()).await?;
-    let status = addon_schema_status_at(&root, id);
-    if !status.deployed {
-        return Err("附加方案文件已安装，但部署产物缺失".into());
-    }
-    #[cfg(target_os = "windows")]
-    publish_windows_english_addon(&app)?;
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: "附加方案 English 已安装并部署".into(),
-        },
-    );
-    Ok(status)
-}
-
-#[tauri::command]
-async fn addon_schema_uninstall(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
-    let id = validate_addon_schema_id(&id)?;
-    let root = default_keytao_user_root(&app)?;
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "addon-uninstall".into(),
-            percent: 20,
-            message: "正在卸载附加方案 English...".into(),
-        },
-    );
-    write_addon_schema_list(&root, id, false)?;
-    remove_addon_schema_files(&root, id)?;
-    let reset_english_mode = reset_mobile_english_mode(&root)?;
-    #[cfg(target_os = "windows")]
-    {
-        let files = addon_schema_source_files(id).into_iter()
-            .map(|(_, relative)| PathBuf::from(relative)).collect::<Vec<_>>();
-        windows_public_schemas::remove_schema(id, &files)?;
-        windows_public_schemas::publish_english_settings(false)?;
-    }
-    if keytao_core::schema_install_state(&root).installed {
-        rime_deploy_default(app.clone()).await?;
-    } else {
-        let _ = write_default_reload_stamp(&app, &root)?;
-    }
-    if reset_english_mode {
-        let _ = app.emit(
-            "install-progress",
-            InstallProgress {
-                stage: "addon-reset-mode".into(),
-                percent: 90,
-                message: "英文模式已切回 ASCII 模式".into(),
-            },
-        );
-    }
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: "附加方案 English 已卸载".into(),
-        },
-    );
-    Ok(addon_schema_status_at(&root, id))
-}
-
-#[tauri::command]
-fn check_local_schema<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    path: Option<String>,
-) -> LocalSchemaInfo {
-    let dir: Option<PathBuf> = path.map(PathBuf::from).or_else(|| {
-        #[cfg(target_os = "android")]
-        {
-            return android_keytao_root(&app).ok();
-        }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        {
-            return keytao_core::default_user_data_dir();
-        }
-        #[cfg(target_os = "ios")]
-        {
-            return ios_keytao_root(&app).ok();
-        }
-    });
-
-    let Some(dir) = dir else {
-        return LocalSchemaInfo {
-            installed: false,
-            deployed: false,
-            version: None,
-            schemas: vec![],
-        };
-    };
-
-    let state = keytao_core::schema_install_state(&dir);
-    let version = state
-        .installed
-        .then(|| {
-            std::fs::read_to_string(dir.join("version.txt"))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .flatten();
-
-    LocalSchemaInfo {
-        installed: state.installed,
-        deployed: state.deployed,
-        version,
-        schemas: state.schemas,
-    }
 }
 
 // ─── Deploy librime to default keytao data dir ────────────────────────────────
@@ -6861,12 +5403,9 @@ fn set_ime_ui_settings(
 #[tauri::command]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallResult, String> {
-    let dest =
-        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
-    let dest_str = dest.to_string_lossy().into_owned();
-    std::fs::create_dir_all(&dest).map_err(|e| format!("创建目录失败: {e}"))?;
-    let temp = download_to_temp(app.clone(), url).await?;
-    smart_install(app, temp, dest_str).await
+    keytao_app_core::install::rime_install_to_default(&app.state::<Arc<Core>>(), url,
+        #[cfg(target_os = "windows")] finish_windows_scheme_install,
+    ).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -6887,8 +5426,8 @@ async fn rime_install_to_default<R: tauri::Runtime>(
     }
 
     let root = android_keytao_root(&app)?;
-    std::fs::create_dir_all(&root).map_err(|e| format!("创建 Android 输入法目录失败: {e}"))?;
-    let temp = download_to_temp(app.clone(), url).await?;
+    let core = app.state::<Arc<Core>>();
+    let temp = keytao_app_core::install::prepare_android_install(&core, &root, url).await.map_err(|e| e.to_string())?;
     let result: serde_json::Value = app
         .state::<ScopedStorageHandle<R>>()
         .0
@@ -6897,25 +5436,14 @@ async fn rime_install_to_default<R: tauri::Runtime>(
             serde_json::json!({ "zipPath": temp }),
         )
         .map_err(|e| e.to_string())?;
-    let _ = app.emit(
-        "install-progress",
-        InstallProgress {
-            stage: "done".into(),
-            percent: 100,
-            message: "安装完成！".into(),
-        },
-    );
-    Ok(install_result_from_value(&result))
+    keytao_app_core::install::finish_android_install(&core, &result).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[cfg(target_os = "ios")]
 async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallResult, String> {
     let dest = ios_keytao_root(&app)?;
-    std::fs::create_dir_all(&dest).map_err(|e| format!("创建 iOS 输入法目录失败: {e}"))?;
-    let dest_str = dest.to_string_lossy().into_owned();
-    let temp = download_to_temp(app.clone(), url).await?;
-    smart_install(app, temp, dest_str).await
+    keytao_app_core::install::rime_install_to_default(&app.state::<Arc<Core>>(), url, dest).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -7556,25 +6084,137 @@ pub fn run() {
         });
 }
 
+fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
+    keytao_app_core::scheme::build_client(&app.state::<Arc<Core>>())
+}
+
+#[tauri::command]
+async fn fetch_latest_release(app: AppHandle) -> Result<ReleaseInfo, String> {
+    keytao_app_core::scheme::fetch_latest_release(&app.state::<Arc<Core>>())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn fetch_scheme_release(app: AppHandle, scheme: String) -> Result<SchemeReleaseInfo, String> {
+    keytao_app_core::scheme::fetch_scheme_release(&app.state::<Arc<Core>>(), scheme)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_dir(core: tauri::State<'_, Arc<Core>>, path: String) -> Result<Vec<FileItem>, String> {
+    keytao_app_core::scheme::list_dir(&core, path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_local_schemas(core: tauri::State<'_, Arc<Core>>, path: String) -> Vec<String> {
+    keytao_app_core::scheme::read_local_schemas(&core, path).expect("schema reads are infallible")
+}
+
+#[tauri::command]
+async fn download_to_temp(
+    core: tauri::State<'_, Arc<Core>>,
+    url: String,
+) -> Result<String, String> {
+    keytao_app_core::download::download_to_temp(&core, url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn smart_install(
+    core: tauri::State<'_, Arc<Core>>,
+    zip_path: String,
+    dest_path: String,
+) -> Result<InstallResult, String> {
+    keytao_app_core::install::smart_install(
+        &core,
+        zip_path,
+        dest_path,
+        #[cfg(target_os = "windows")]
+        finish_windows_scheme_install,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_app_update(core: tauri::State<'_, Arc<Core>>) -> Result<AppUpdateInfo, String> {
+    keytao_app_core::update::check_app_update(&core)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn addon_schema_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+) -> Result<AddonSchemaStatus, String> {
+    keytao_app_core::addon::addon_schema_status(
+        &app.state::<Arc<Core>>(),
+        || default_keytao_user_root(&app),
+        id,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn addon_schema_install(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
+    keytao_app_core::addon::addon_schema_install(
+        &app.state::<Arc<Core>>(),
+        id,
+        &ShellSchemeHost(&app),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn addon_schema_uninstall(app: AppHandle, id: String) -> Result<AddonSchemaStatus, String> {
+    keytao_app_core::addon::addon_schema_uninstall(
+        &app.state::<Arc<Core>>(),
+        id,
+        &ShellSchemeHost(&app),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn manage_wanxiang(app: AppHandle, installed: bool) -> Result<wanxiang::Status, String> {
+    wanxiang::manage_wanxiang(&app.state::<Arc<Core>>(), installed, &ShellSchemeHost(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_local_schema<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: Option<String>,
+) -> LocalSchemaInfo {
+    let dir: Option<PathBuf> = path.map(PathBuf::from).or_else(|| {
+        #[cfg(target_os = "android")]
+        {
+            return android_keytao_root(&app).ok();
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            return keytao_core::default_user_data_dir();
+        }
+        #[cfg(target_os = "ios")]
+        {
+            return ios_keytao_root(&app).ok();
+        }
+    });
+
+    keytao_app_core::scheme::check_local_schema(&app.state::<Arc<Core>>(), dir)
+        .expect("schema inspection is infallible")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn english_availability_includes_packaged_and_named_schemas_only_after_deploy() {
-        let root = std::env::temp_dir().join(format!("keytao-english-status-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("build")).unwrap();
-        std::fs::write(root.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: english\n").unwrap();
-        assert!(!deployed_english_schema_available(&root));
-        std::fs::write(root.join("build/english.schema.yaml"), "schema: {schema_id: english, name: English}\n").unwrap();
-        assert!(deployed_english_schema_available(&root));
-        std::fs::write(root.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: custom_english\n").unwrap();
-        assert!(!deployed_english_schema_available(&root));
-        std::fs::write(root.join("build/custom_english.schema.yaml"), "schema: {schema_id: custom_english, name: Easy English}\n").unwrap();
-        assert!(deployed_english_schema_available(&root));
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn test_write_ime_ui_settings_persists_candidate_font_size() {
@@ -7612,8 +6252,6 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // ── parse_rime_lua_requires ───────────────────────────────────────────────
-
     #[test]
     fn test_rime_filename_version() {
         assert_eq!(
@@ -7625,31 +6263,6 @@ mod tests {
             Some("1.17.0".to_owned())
         );
         assert_eq!(rime_filename_version("librime-lua.dylib"), None);
-    }
-
-    #[test]
-    fn test_collect_rime_package_build_ids() {
-        let mut schemas = HashSet::new();
-        let mut dictionaries = HashSet::new();
-        for path in [
-            "keydo.schema.yaml",
-            "nested/pinyin_simp.schema.yaml",
-            "keydo.dict.yaml",
-            "keydo.phrases.dict.yaml",
-            "default.custom.yaml",
-            "lua/keydo.lua",
-        ] {
-            collect_rime_package_build_id(path, &mut schemas, &mut dictionaries);
-        }
-
-        assert_eq!(
-            schemas,
-            HashSet::from(["keydo".to_string(), "pinyin_simp".to_string()])
-        );
-        assert_eq!(
-            dictionaries,
-            HashSet::from(["keydo".to_string(), "keydo.phrases".to_string()])
-        );
     }
 
     #[test]
@@ -7708,235 +6321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_requires_basic() {
-        let content = "keytao_filter = require(\"keytao_filter\")\nfoo = require('bar')\n";
-        let r = keytao_core::parse_rime_lua_requires(content);
-        assert_eq!(r, vec!["keytao_filter", "bar"]);
-    }
-
-    #[test]
-    fn test_parse_requires_skips_single_line_comments() {
-        let content = "-- foo = require(\"foo\")\nreal = require(\"real\")\n";
-        let r = keytao_core::parse_rime_lua_requires(content);
-        assert_eq!(r, vec!["real"]);
-    }
-
-    #[test]
-    fn test_parse_requires_skips_block_comment_content() {
-        let content = "--[[\n  foo = require(\"bar\")\n--]]\nreal = require(\"real\")\n";
-        let r = keytao_core::parse_rime_lua_requires(content);
-        assert_eq!(r, vec!["real"]);
-    }
-
-    // ── merge_rime_lua ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_merge_appends_unique_local_require() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(merged.contains("require(\"keytao_filter\")"));
-        assert!(merged.contains("require(\"my_mod\")"));
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_skips_require_already_in_zip() {
-        let local = "keytao_filter = require(\"keytao_filter\")\n";
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
-        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
-    }
-
-    #[test]
-    fn test_merge_renames_conflicting_module() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let zip = "keytao = require(\"keytao\")\n";
-        let filenames: HashSet<String> = ["my_mod.lua".to_string()].into();
-        let (merged, renames) = merge_rime_lua(local, zip, &filenames);
-        assert_eq!(
-            renames,
-            vec![("my_mod".to_string(), "my_mod_user".to_string())]
-        );
-        assert!(merged.contains("require(\"my_mod_user\")"));
-        assert!(!merged.contains("require(\"my_mod\")"));
-    }
-
-    #[test]
-    fn test_merge_ignores_block_comment_content() {
-        // Reproduces the Android bug: block comment lines such as ``` were
-        // appended verbatim to the merged output because the loop did not
-        // track --[[ ... --]] state.
-        let local = concat!(
-            "--[[\n",
-            "librime-lua 样例\n",
-            "```\n",
-            "  engine:\n",
-            "    translators:\n",
-            "```\n",
-            "--]]\n",
-            "--[[\n",
-            "各例可使用 `require` 引入。\n",
-            "```\n",
-            "  foo = require(\"bar\")\n",
-            "```\n",
-            "--]]\n",
-            "my_mod = require(\"my_mod\")\n",
-        );
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(!merged.contains("librime-lua"), "block comment line leaked");
-        assert!(!merged.contains("engine:"), "block comment line leaked");
-        assert!(!merged.contains("```"), "block comment backticks leaked");
-        assert!(
-            !merged.contains("require(\"bar\")"),
-            "in-comment require leaked"
-        );
-        assert!(merged.contains("require(\"my_mod\")"));
-        assert!(renames.is_empty());
-    }
-
-    // ── parse_schema_list ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_update_addon_schema_list_appends_after_package_schemas_and_preserves_patch() {
-        let existing = concat!(
-            "patch:\n",
-            "  schema_list:\n",
-            "    - schema: keytao\n",
-            "    - schema: keytao-dz\n",
-            "  switcher:\n",
-            "    hotkeys:\n",
-            "      - F4\n",
-            "  menu:\n",
-            "    page_size: 7\n",
-            "  ascii_composer:\n",
-            "    good_old_caps_lock: true\n",
-        );
-
-        let updated = update_addon_schema_list_content(existing, "easy_en", true)
-            .expect("append add-on schema");
-        assert_eq!(
-            parse_schema_list(&updated),
-            vec!["keytao", "keytao-dz", "easy_en"]
-        );
-
-        let value: serde_yaml::Value = serde_yaml::from_str(&updated).expect("parse updated yaml");
-        let patch = value
-            .get("patch")
-            .and_then(serde_yaml::Value::as_mapping)
-            .expect("patch mapping");
-        assert_eq!(
-            patch.get("switcher").and_then(|value| value.get("hotkeys")),
-            serde_yaml::from_str::<serde_yaml::Value>("[F4]")
-                .ok()
-                .as_ref()
-        );
-        assert_eq!(
-            patch
-                .get("menu")
-                .and_then(|value| value.get("page_size"))
-                .and_then(serde_yaml::Value::as_i64),
-            Some(7)
-        );
-        assert_eq!(
-            patch
-                .get("ascii_composer")
-                .and_then(|value| value.get("good_old_caps_lock"))
-                .and_then(serde_yaml::Value::as_bool),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn test_write_addon_schema_list_updates_the_existing_hyphenated_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "keytao-addon-schema-list-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("create add-on schema test dir");
-        let path = dir.join("default-custom.yaml");
-        std::fs::write(
-            &path,
-            "patch:\n  schema_list:\n    - schema: keytao\n    - schema: keytao-dz\n",
-        )
-        .expect("write hyphenated default custom");
-
-        write_addon_schema_list(&dir, "easy_en", true).expect("write add-on schema list");
-
-        assert_eq!(
-            parse_schema_list(&std::fs::read_to_string(&path).expect("read updated config")),
-            vec!["keytao", "keytao-dz", "easy_en"]
-        );
-        assert!(!dir.join("default.custom.yaml").exists());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn test_parse_schema_list_basic() {
-        let content = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
-        assert_eq!(parse_schema_list(content), vec!["keytao_b", "keytao_bg"]);
-    }
-
-    #[test]
-    fn test_parse_schema_list_strips_inline_comments() {
-        let content = "patch:\n  schema_list:\n    - schema: keydo # 键道·我流\n";
-        assert_eq!(parse_schema_list(content), vec!["keydo"]);
-    }
-
-    #[test]
-    fn test_parse_schema_list_stops_at_non_schema() {
-        let content = "patch:\n  schema_list:\n    - schema: foo\n  other_key: val\n";
-        assert_eq!(parse_schema_list(content), vec!["foo"]);
-    }
-
-    // ── merge_default_custom ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_merge_dc_preserves_user_schemas() {
-        let existing = "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: another\n";
-        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
-        let (merged, user) = merge_default_custom(Some(existing), zip);
-        assert!(merged.contains("- schema: my_schema"));
-        assert!(merged.contains("- schema: another"));
-        assert!(merged.contains("- schema: keytao_b"));
-        assert_eq!(user, vec!["my_schema", "another"]);
-    }
-
-    #[test]
-    fn test_merge_dc_excludes_user_keytao_schemas() {
-        let existing =
-            "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao_b\n    - schema: txjx\n";
-        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n    - schema: keytao_bg\n";
-        let (merged, user) = merge_default_custom(Some(existing), zip);
-        assert_eq!(user, vec!["my_schema"]);
-        assert!(merged.contains("- schema: keytao_b"));
-        assert!(merged.contains("- schema: keytao_bg"));
-        assert!(!merged.contains("- schema: txjx"));
-    }
-
-    #[test]
-    fn test_merge_dc_no_existing_file() {
-        let zip = "patch:\n  schema_list:\n    - schema: keytao_b\n";
-        let (merged, user) = merge_default_custom(None, zip);
-        assert!(user.is_empty());
-        assert!(merged.contains("- schema: keytao_b"));
-    }
-
-    #[test]
-    fn test_merge_dc_supports_non_keytao_scheme_package() {
-        let existing =
-            "patch:\n  schema_list:\n    - schema: my_schema\n    - schema: keytao\n    - schema: xmjd6\n";
-        let zip = "patch:\n  schema_list:\n    - schema: txjx\n";
-        let (merged, user) = merge_default_custom(Some(existing), zip);
-        assert_eq!(user, vec!["my_schema"]);
-        assert!(merged.contains("- schema: my_schema"));
-        assert!(merged.contains("- schema: txjx"));
-        assert!(!merged.contains("- schema: keytao"));
-        assert!(!merged.contains("- schema: xmjd6"));
-    }
-
-    #[test]
     fn test_user_dictionary_imports_only_patch_keytao_extended_dicts() {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -7963,203 +6347,6 @@ mod tests {
         assert!(!txjx.contains("- keytao.user"));
 
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    // ── real keytao rime.lua ──────────────────────────────────────────────────
-
-    const KEYTAO_RIME_LUA: &str = concat!(
-        "--[[\n",
-        "librime-lua 样例\n",
-        "```\n",
-        "  engine:\n",
-        "    translators:\n",
-        "      - lua_translator@lua_function3\n",
-        "      - lua_translator@lua_function4\n",
-        "    filters:\n",
-        "      - lua_filter@lua_function1\n",
-        "      - lua_filter@lua_function2\n",
-        "```\n",
-        "其中各 `lua_function` 为在本文件所定义变量名。\n",
-        "--]]\n",
-        "\n",
-        "--[[\n",
-        "本文件的后面是若干个例子，按照由简单到复杂的顺序示例了 librime-lua 的用法。\n",
-        "每个例子都被组织在 `lua` 目录下的单独文件中，打开对应文件可看到实现和注解。\n",
-        "\n",
-        "各例可使用 `require` 引入。\n",
-        "```\n",
-        "  foo = require(\"bar\")\n",
-        "```\n",
-        "可认为是载入 `lua/bar.lua` 中的例子，并起名为 `foo`。\n",
-        "配方文件中的引用方法为：`...@foo`。\n",
-        "--]]\n",
-        "\n",
-        "date_time_translator = require(\"date_time\")\n",
-        "\n",
-        "\n",
-        "-- single_char_filter: 候选项重排序，使单字优先\n",
-        "-- 详见 `lua/single_char.lua`\n",
-        "-- single_char_filter = require(\"single_char\")\n",
-        "\n",
-        "\n",
-        "-- keytao_filter: 单字模式 & 630 即 ss 词组提示\n",
-        "-- 详见 `lua/keytao_filter.lua`\n",
-        "keytao_filter = require(\"keytao_filter\")\n",
-        "\n",
-        "-- 顶功处理器\n",
-        "topup_processor = require(\"for_topup\")\n",
-        "\n",
-        "-- 声笔笔简码提示 | 顶功提示 | 补全处理\n",
-        "hint_filter = require(\"for_hint\")\n",
-        "\n",
-        "-- number_translator: 将 `=` + 阿拉伯数字 翻译为大小写汉字\n",
-        "number_translator = require(\"xnumber\")\n",
-        "\n",
-        "-- 用 ' 作为次选键\n",
-        "smart_2 = require(\"smart_2\")\n",
-    );
-
-    #[test]
-    fn test_parse_requires_keytao_rime_lua() {
-        // Block comment contains `foo = require("bar")` which must NOT be included.
-        let requires = keytao_core::parse_rime_lua_requires(KEYTAO_RIME_LUA);
-        assert_eq!(
-            requires,
-            vec![
-                "date_time",
-                "keytao_filter",
-                "for_topup",
-                "for_hint",
-                "xnumber",
-                "smart_2"
-            ]
-        );
-        assert!(
-            !requires.contains(&"bar".to_string()),
-            "in-comment require must not be parsed"
-        );
-    }
-
-    #[test]
-    fn test_merge_reinstall_no_duplicates() {
-        // Installing over an existing identical rime.lua should produce the same file.
-        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(renames.is_empty());
-        // Every require should appear exactly once.
-        for module in &[
-            "date_time",
-            "keytao_filter",
-            "for_topup",
-            "for_hint",
-            "xnumber",
-            "smart_2",
-        ] {
-            let needle = format!("require(\"{module}\")");
-            assert_eq!(
-                merged.matches(needle.as_str()).count(),
-                1,
-                "require(\"{module}\") duplicated after reinstall"
-            );
-        }
-    }
-
-    #[test]
-    fn test_merge_user_extra_module_appended() {
-        // User has the keytao rime.lua as local, plus one extra module.
-        let local = format!("{KEYTAO_RIME_LUA}my_custom = require(\"my_custom\")\n");
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(renames.is_empty());
-        assert!(merged.contains("require(\"my_custom\")"));
-        // Keytao requires still appear exactly once.
-        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
-    }
-
-    #[test]
-    fn test_merge_user_extra_module_conflict_renamed() {
-        // User has a custom `date_time.lua` that would be overwritten by zip.
-        let local = format!("{KEYTAO_RIME_LUA}my_dt = require(\"my_dt\")\n");
-        let filenames: HashSet<String> = ["my_dt.lua".to_string()].into();
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &filenames);
-        assert_eq!(
-            renames,
-            vec![("my_dt".to_string(), "my_dt_user".to_string())]
-        );
-        assert!(merged.contains("require(\"my_dt_user\")"));
-        assert!(!merged.contains("require(\"my_dt\")"));
-    }
-
-    // ── zip overwrites local keytao content ──────────────────────────────────
-
-    #[test]
-    fn test_merge_zip_is_base_local_keytao_no_duplicates() {
-        // Local already has the same keytao rime.lua; merged must equal zip exactly.
-        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
-        assert_eq!(merged, KEYTAO_RIME_LUA);
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_old_keytao_missing_module_zip_provides_it() {
-        // Local = older keytao rime.lua without smart_2.
-        // Zip = new keytao rime.lua with smart_2.
-        // smart_2 must appear exactly once in merged output.
-        let old_local: String = KEYTAO_RIME_LUA
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("smart_2"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (merged, renames) = merge_rime_lua(&old_local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert_eq!(merged.matches("require(\"smart_2\")").count(), 1);
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_user_extra_preserved_zip_overwrites_keytao_no_dups() {
-        // Local = keytao rime.lua + user-defined module.
-        // Zip = same keytao rime.lua (re-install / upgrade).
-        // merged must start with zip content; user module appended once;
-        // every keytao module appears exactly once.
-        let local = format!("{KEYTAO_RIME_LUA}user_plugin = require(\"user_plugin\")\n");
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(merged.starts_with(KEYTAO_RIME_LUA));
-        assert!(merged.contains("require(\"user_plugin\")"));
-        for module in &[
-            "date_time",
-            "keytao_filter",
-            "for_topup",
-            "for_hint",
-            "xnumber",
-            "smart_2",
-        ] {
-            assert_eq!(
-                merged.matches(&format!("require(\"{module}\")")).count(),
-                1,
-                "require(\"{module}\") must appear exactly once"
-            );
-        }
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_keytao_rime_lua_no_block_comment_leak() {
-        // Using actual keytao rime.lua as local; merged result must not contain
-        // any content from the --[[ ]] header blocks.
-        let local = KEYTAO_RIME_LUA;
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(
-            !merged.contains("librime-lua"),
-            "block comment header leaked"
-        );
-        assert!(!merged.contains("engine:"), "block comment content leaked");
-        assert!(
-            !merged.contains("```"),
-            "backticks from block comment leaked"
-        );
-        assert!(
-            !merged.contains("require(\"bar\")"),
-            "in-comment require leaked"
-        );
     }
 
     // ── JNI export manifest ───────────────────────────────────────────────────

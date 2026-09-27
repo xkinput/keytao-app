@@ -2,7 +2,7 @@
 //! All platform logic, IME state types, and librime calls live in `keytao-core`.
 
 use keytao_core::{
-    default_user_data_dir, ImeRuntime, ImeRuntimeSession,
+    ImeRuntime, ImeRuntimeSession,
 };
 use std::sync::{Mutex, MutexGuard};
 
@@ -57,6 +57,6 @@ impl RimeEngine {
 }
 
 #[tauri::command]
-pub fn rime_get_data_dir() -> Option<String> {
-    default_user_data_dir().map(|p| p.to_string_lossy().into_owned())
+pub fn rime_get_data_dir(core: tauri::State<'_, std::sync::Arc<keytao_app_core::Core>>) -> Option<String> {
+    keytao_app_core::scheme::rime_get_data_dir(&core).expect("data directory lookup is infallible")
 }

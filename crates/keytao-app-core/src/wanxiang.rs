@@ -445,7 +445,11 @@ async fn download(path: &Path, progress: &(impl Fn(u8, &str) + Send + Sync)) -> 
         }
     }
     output.flush().await.map_err(|e| e.to_string())?;
-    if downloaded != DOWNLOAD_BYTES || format!("{:x}", hash.finalize()) != DOWNLOAD_SHA256 {
+    verify_download(downloaded, &format!("{:x}", hash.finalize()))
+}
+
+fn verify_download(downloaded: u64, sha256: &str) -> Result<(), String> {
+    if downloaded != DOWNLOAD_BYTES || sha256 != DOWNLOAD_SHA256 {
         return Err("万象词库完整性校验失败，未修改已安装方案".into());
     }
     Ok(())
@@ -647,3 +651,84 @@ pub fn uninstall(root: &Path) -> Result<InstallReceipt, String> {
 #[cfg(test)]
 #[path = "wanxiang_tests.rs"]
 mod tests;
+
+use crate::{
+    Core, CoreError, CoreEvent, addon::write_addon_schema_list, events::InstallProgress,
+    scheme_files::write_file_atomic, scheme_host::SchemeHost,
+};
+
+pub async fn manage_wanxiang(
+    core: &std::sync::Arc<Core>,
+    installed: bool,
+    host: &impl SchemeHost,
+) -> Result<Status, CoreError> {
+    let result: Result<_, String> = async {
+    let root = host.user_root()?;
+    let config_path = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+        .ok_or("请先安装主方案")?;
+    let previous_config = std::fs::read(&config_path).map_err(|e| e.to_string())?;
+    let receipt = if installed {
+        let progress_core = core.clone();
+        install(&root, move |percent, message| {
+            progress_core.emit(CoreEvent::InstallProgress(InstallProgress {
+                stage: "wanxiang-download".into(),
+                percent: u32::from(percent),
+                message: message.into(),
+            }));
+        }).await?
+    } else {
+        uninstall(&root)?
+    };
+    let deploy_result = async {
+        write_addon_schema_list(&root, SCHEMA_ID, installed)?;
+        host.deploy().await?;
+        if installed && !status_at(&root).deployed {
+            return Err("万象拼音部署产物缺失".to_string());
+        }
+        #[cfg(target_os = "windows")]
+        if installed {
+            host.publish_wanxiang_sources(&receipt.public_source_files())?;
+        } else {
+            host.remove_public_schema(SCHEMA_ID, &[])?;
+        }
+        Ok(())
+    }.await;
+    if let Err(error) = deploy_result {
+        let rollback = receipt.rollback();
+        let restore = write_file_atomic(&config_path, &previous_config);
+        if let Err(rollback_error) = rollback {
+            return Err(format!("{error}；恢复词库失败：{rollback_error}"));
+        }
+        restore.map_err(|e| format!("{error}；恢复方案列表失败：{e}"))?;
+        if let Err(restore_error) = host.deploy().await {
+            return Err(format!("{error}；已恢复文件，请重新部署：{restore_error}"));
+        }
+        return Err(error);
+    }
+    receipt.finish()?;
+    if !installed {
+        for extension in ["schema.yaml", "table.bin", "prism.bin", "reverse.bin"] {
+            let path = root.join("build").join(format!("wanxiang.{extension}"));
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::info!(%error, path = %path.display(), "unused Wanxiang build cache remains locked");
+                }
+            }
+        }
+    }
+    core.emit(CoreEvent::InstallProgress(InstallProgress {
+        stage: "done".into(),
+        percent: 100,
+        message: if installed { "万象拼音基础词库已安装并部署" } else { "万象拼音已卸载，保留用户自定义和学习记录" }.into(),
+    }));
+    Ok(status_at(&root))
+    }.await;
+    result.map_err(CoreError::Other)
+}
+
+pub fn wanxiang_status(_core: &Core, root: &Path) -> Result<Status, CoreError> {
+    Ok(status_at(root))
+}

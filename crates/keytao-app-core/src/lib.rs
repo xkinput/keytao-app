@@ -1,3 +1,14 @@
+pub mod addon;
+pub mod download;
+pub mod install;
+pub mod scheme;
+pub mod scheme_files;
+pub mod scheme_host;
+pub mod scheme_types;
+pub mod update;
+pub mod wanxiang;
+pub use scheme_types::*;
+
 pub mod env;
 pub mod error;
 pub mod events;
@@ -109,3 +120,9 @@ impl Core {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scheme_tests;
+
+#[cfg(test)]
+mod install_tests;

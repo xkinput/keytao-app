@@ -7,6 +7,21 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 
 static SERIAL: StdMutex<()> = StdMutex::new(());
 
+#[test]
+fn download_integrity_requires_both_expected_size_and_sha256() {
+    assert!(verify_download(DOWNLOAD_BYTES, DOWNLOAD_SHA256).is_ok());
+    for (size, hash) in [
+        (DOWNLOAD_BYTES - 1, DOWNLOAD_SHA256.to_string()),
+        (DOWNLOAD_BYTES + 1, DOWNLOAD_SHA256.to_string()),
+        (DOWNLOAD_BYTES, "0".repeat(64)),
+    ] {
+        assert_eq!(
+            verify_download(size, &hash).unwrap_err(),
+            "万象词库完整性校验失败，未修改已安装方案"
+        );
+    }
+}
+
 struct TestRoot {
     path: PathBuf,
     cleanup: bool,
