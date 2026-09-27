@@ -1,4 +1,4 @@
-//! Platform operations whose implementations remain in the shell until batch 0c.
+//! Shell callbacks for scheme operations; deployment delegates to the core IME backend.
 //! Core controls their ordering, including Wanxiang deployment rollback.
 use std::{
     future::Future,

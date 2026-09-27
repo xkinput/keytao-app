@@ -2356,7 +2356,6 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
- "windows 0.58.0",
  "zip",
 ]
 
@@ -2366,14 +2365,17 @@ version = "1.2.1-alpha.42"
 dependencies = [
  "futures-util",
  "keytao-core",
+ "keytao-theme",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
+ "windows 0.58.0",
  "zip",
 ]
 

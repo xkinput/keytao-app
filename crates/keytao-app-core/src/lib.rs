@@ -1,4 +1,12 @@
 pub mod addon;
+#[cfg(target_os = "windows")]
+pub mod app_actions;
+pub mod component_versions;
+pub mod deploy;
+pub mod ime_host;
+pub mod ime_paths;
+pub mod ime_settings;
+pub mod ime_status;
 pub mod download;
 pub mod install;
 pub mod scheme;
