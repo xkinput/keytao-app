@@ -10,6 +10,74 @@ import org.junit.Test
 
 class KeytaoEditorPolicyTest {
     @Test
+    fun `null input class sends a delete key even with input flags`() {
+        for (inputType in listOf(InputType.TYPE_NULL, InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)) {
+            assertEquals(BackspaceDecision.SEND_DEL_KEY, backspace(inputType = inputType))
+        }
+    }
+
+    @Test
+    fun `unknown cursor sends a delete key in a text editor`() {
+        assertEquals(BackspaceDecision.SEND_DEL_KEY, backspace(hasKnownCursor = false))
+    }
+
+    @Test
+    fun `known cursor in a text editor keeps buffer deletion`() {
+        assertEquals(BackspaceDecision.DELETE_BEFORE_CURSOR, backspace())
+    }
+
+    @Test
+    fun `known selection in a text editor is deleted first`() {
+        assertEquals(BackspaceDecision.DELETE_SELECTION, backspace(hasSelection = true))
+    }
+
+    @Test
+    fun `bufferless editors send delete even if a selection is reported`() {
+        assertEquals(
+            BackspaceDecision.SEND_DEL_KEY,
+            backspace(inputType = InputType.TYPE_NULL, hasSelection = true),
+        )
+        assertEquals(
+            BackspaceDecision.SEND_DEL_KEY,
+            backspace(hasKnownCursor = false, hasSelection = true),
+        )
+    }
+
+    @Test
+    fun `composition keeps backspace in the engine before any host decision`() {
+        for (inputType in listOf(InputType.TYPE_NULL, InputType.TYPE_CLASS_TEXT)) {
+            for (hasKnownCursor in listOf(false, true)) {
+                for (hasSelection in listOf(false, true)) {
+                    assertEquals(
+                        BackspaceDecision.ENGINE,
+                        backspace(
+                            hasComposition = true,
+                            inputType = inputType,
+                            hasKnownCursor = hasKnownCursor,
+                            hasSelection = hasSelection,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `password editors follow cursor and selection availability`() {
+        val inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        assertEquals(BackspaceDecision.DELETE_BEFORE_CURSOR, backspace(inputType = inputType))
+        assertEquals(
+            BackspaceDecision.DELETE_SELECTION,
+            backspace(inputType = inputType, hasSelection = true),
+        )
+        assertEquals(
+            BackspaceDecision.SEND_DEL_KEY,
+            backspace(inputType = inputType, hasKnownCursor = false),
+        )
+        assertFalse(KeytaoEditorPolicy.resolvePrivacyMode(inputType, 0).allowsTextRecall)
+    }
+
+    @Test
     fun `composition confirmation wins over fixed newline`() {
         val decision = resolve(
             hasComposition = true,
@@ -330,6 +398,18 @@ class KeytaoEditorPolicyTest {
             )
         )
     }
+
+    private fun backspace(
+        hasComposition: Boolean = false,
+        inputType: Int = InputType.TYPE_CLASS_TEXT,
+        hasKnownCursor: Boolean = true,
+        hasSelection: Boolean = false,
+    ): BackspaceDecision = KeytaoEditorPolicy.resolveBackspaceDecision(
+        hasComposition = hasComposition,
+        inputType = inputType,
+        hasKnownCursor = hasKnownCursor,
+        hasSelection = hasSelection,
+    )
 
     private fun resolve(
         hasComposition: Boolean = false,

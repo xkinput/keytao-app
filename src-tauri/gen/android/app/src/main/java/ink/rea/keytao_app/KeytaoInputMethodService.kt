@@ -117,6 +117,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             if (!value) composingRegionStart = -1
         }
     private var selectionModeActive = false
+    private var hasKnownCursor = false
     private var shiftPressedWithoutKey = false
     private var pendingShiftKeyCode = 0
     private var inputAvailable = false
@@ -254,6 +255,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        hasKnownCursor = (attribute?.initialSelStart ?: -1) >= 0 &&
+            (attribute?.initialSelEnd ?: -1) >= 0
         backspaceSelectionSession = null
         // doStartInput() skips doFinishInput() when restarting, so the editor can
         // still hold a composing region from the previous round.
@@ -533,6 +536,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             candidatesStart,
             candidatesEnd,
         )
+        // A valid report makes buffer editing available for this input session.
+        if (newSelStart >= 0 && newSelEnd >= 0) hasKnownCursor = true
         selectionModeActive = newSelStart != newSelEnd
         composingRegionStart = if (candidatesStart >= 0 && candidatesEnd >= candidatesStart) {
             candidatesStart
@@ -1115,8 +1120,33 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
+    private fun resolveBackspaceDecision(
+        hasComposition: Boolean = composing || currentState.hasComposition,
+        hasSelection: Boolean = false,
+    ): BackspaceDecision = KeytaoEditorPolicy.resolveBackspaceDecision(
+        hasComposition = hasComposition,
+        inputType = currentInputEditorInfo?.inputType ?: InputType.TYPE_NULL,
+        hasKnownCursor = hasKnownCursor,
+        hasSelection = hasSelection,
+    )
+
+    private fun sendBackspaceKeyEvents(count: Int): Boolean {
+        backspaceRestoreStack.clear()
+        backspaceGestureRestoreStart = 0
+        restoreAllOnNextDirectionalRestore = false
+        backspaceSelectionSession = null
+        recentCommittedUnits.clear()
+        selectionModeActive = false
+        keyboardView?.showBackspaceDeletionPreview("")
+        if (currentInputConnection == null) return false
+        repeat(count.coerceIn(0, maxBackspaceGestureBatchCount)) {
+            sendKeyStroke(KeyEvent.KEYCODE_DEL)
+        }
+        return true
+    }
+
     private fun handleBackspace() {
-        if (!currentState.hasComposition && !composing) {
+        if (resolveBackspaceDecision() != BackspaceDecision.ENGINE) {
             deleteOneBeforeCursorForRestore()
             selectionModeActive = false
             return
@@ -1141,6 +1171,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ?.toIntOrNull()
             ?.coerceIn(1, maxBackspaceGestureBatchCount)
             ?: 1
+        if (resolveBackspaceDecision(hasComposition = false) == BackspaceDecision.SEND_DEL_KEY) {
+            // There is no buffer to preview or restore. Selection gestures carry
+            // their final count on release; delete-all is only one gesture step.
+            sendBackspaceKeyEvents(0)
+            if (action in setOf("delete", "deleteSegment", "deleteAll", "commitSelection")) {
+                repeat(count) { handleBackspace() }
+            }
+            return
+        }
         when (action) {
             "begin" -> backspaceGestureRestoreStart = backspaceRestoreStack.size
             "delete" -> deleteBeforeCursorForRestore(count)
@@ -1244,6 +1283,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun deleteTrailingSegmentBeforeCursorForRestore() {
+        if (resolveBackspaceDecision() == BackspaceDecision.SEND_DEL_KEY) {
+            sendBackspaceKeyEvents(1)
+            return
+        }
         val beforeCursor = currentInputConnection
             ?.getTextBeforeCursor(backspaceContextLimit, InputConnection.GET_TEXT_WITH_STYLES)
             ?.toString()
@@ -1265,6 +1308,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun deleteSelectionForRestore(connection: InputConnection): Boolean {
         val selected = runCatching { connection.getSelectedText(0) }.getOrNull()
         if (selected.isNullOrEmpty()) return false
+        if (resolveBackspaceDecision(hasComposition = false, hasSelection = true) !=
+            BackspaceDecision.DELETE_SELECTION
+        ) return false
         backspaceRestoreStack.clear()
         if (privacyMode.allowsTextRecall) {
             backspaceRestoreStack.addAll(textUnits(selected).asReversed())
@@ -1280,6 +1326,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val preeditUnits = if (resetComposition) textUnits(currentState.preedit) else emptyList()
         if (resetComposition) clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return false
+        // This helper is also the fallback after Rime declines Backspace. The
+        // engine result has already been flushed, so only the host policy applies.
+        if (resolveBackspaceDecision(hasComposition = false) == BackspaceDecision.SEND_DEL_KEY) {
+            return sendBackspaceKeyEvents(count)
+        }
         if (deleteSelectionForRestore(connection)) return true
         val unitCount = count.coerceAtLeast(1)
         restoreAllOnNextDirectionalRestore = false
@@ -1305,6 +1356,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val preeditUnits = textUnits(currentState.preedit)
         clearCompositionBeforeEdit()
         val connection = currentInputConnection ?: return
+        if (resolveBackspaceDecision(hasComposition = false) == BackspaceDecision.SEND_DEL_KEY) {
+            sendBackspaceKeyEvents(1)
+            return
+        }
         if (deleteSelectionForRestore(connection)) return
         backspaceRestoreStack.clear()
         rememberCommittedUnits(preeditUnits)

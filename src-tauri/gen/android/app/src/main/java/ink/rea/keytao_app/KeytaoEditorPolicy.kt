@@ -10,6 +10,13 @@ internal enum class EnterDecisionType {
     SEND_ENTER_KEY,
 }
 
+internal enum class BackspaceDecision {
+    ENGINE,
+    DELETE_SELECTION,
+    SEND_DEL_KEY,
+    DELETE_BEFORE_CURSOR,
+}
+
 internal data class EnterDecision(
     val type: EnterDecisionType,
     val actionId: Int = EditorInfo.IME_ACTION_UNSPECIFIED,
@@ -130,6 +137,20 @@ internal object KeytaoEditorPolicy {
             EditorInfo.IME_ACTION_PREVIOUS -> "上一项"
             else -> plainEnterLabel
         }
+    }
+
+    fun resolveBackspaceDecision(
+        hasComposition: Boolean,
+        inputType: Int,
+        hasKnownCursor: Boolean,
+        hasSelection: Boolean,
+    ): BackspaceDecision {
+        if (hasComposition) return BackspaceDecision.ENGINE
+        if (inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_NULL || !hasKnownCursor) {
+            return BackspaceDecision.SEND_DEL_KEY
+        }
+        if (hasSelection) return BackspaceDecision.DELETE_SELECTION
+        return BackspaceDecision.DELETE_BEFORE_CURSOR
     }
 
     fun resolveEnterDecision(
