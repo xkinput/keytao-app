@@ -1,5 +1,7 @@
 pub mod account;
 pub mod addon;
+#[cfg(target_os = "android")]
+pub mod android_jni;
 pub mod logs;
 #[cfg(target_os = "windows")]
 pub mod app_actions;

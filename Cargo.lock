@@ -2335,7 +2335,6 @@ dependencies = [
  "bzip2",
  "dirs 5.0.1",
  "futures-util",
- "jni",
  "keytao-app-core",
  "keytao-core",
  "keytao-theme",
@@ -2364,6 +2363,7 @@ version = "1.2.1-alpha.42"
 dependencies = [
  "dirs 5.0.1",
  "futures-util",
+ "jni",
  "keytao-core",
  "keytao-theme",
  "reqwest 0.12.28",
