@@ -1,3 +1,5 @@
 rust_input: crate::api
 rust_root: ../crates/keytao-app-bridge/
 dart_output: lib/src/rust
+auto_upgrade_dependency: false
+dart_fix: false

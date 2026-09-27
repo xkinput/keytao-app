@@ -3,7 +3,8 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api/simple.dart';
+import 'api/core.dart';
+import 'api/types.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -58,7 +59,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
   @override
   Future<void> executeRustInitializers() async {
-    await api.crateApiSimpleInitApp();
+    await api.crateApiCoreInitApp();
   }
 
   @override
@@ -69,21 +70,37 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1918914929;
+  int get rustContentHash => 536238737;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
         stem: 'keytao_app_bridge',
-        ioDirectory: 'rust/target/release/',
+        ioDirectory: '../crates/keytao-app-bridge/target/release/',
         webPrefix: 'pkg/',
         wasmBindgenName: 'wasm_bindgen',
       );
 }
 
 abstract class RustLibApi extends BaseApi {
-  String crateApiSimpleGreet({required String name});
+  Future<LocalSchemaDto> crateApiCoreCheckLocalSchema();
 
-  Future<void> crateApiSimpleInitApp();
+  Future<void> crateApiCoreCompleteOnboarding();
+
+  Stream<BridgeEvent> crateApiCoreCoreEvents();
+
+  Future<SchemeReleaseDto> crateApiCoreFetchSchemeRelease({
+    required String scheme,
+  });
+
+  Future<void> crateApiCoreInitApp();
+
+  Future<BridgeInfo> crateApiCoreInitCore({required BridgeConfig config});
+
+  Future<InstallResultDto> crateApiCoreInstallLatestScheme({
+    required String scheme,
+  });
+
+  Future<OnboardingDto> crateApiCoreOnboarding();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -95,30 +112,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
-  String crateApiSimpleGreet({required String name}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
+  Future<LocalSchemaDto> crateApiCoreCheckLocalSchema() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(name, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
+          decodeSuccessData: sse_decode_local_schema_dto,
+          decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiSimpleGreetConstMeta,
-        argValues: [name],
+        constMeta: kCrateApiCoreCheckLocalSchemaConstMeta,
+        argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSimpleGreetConstMeta =>
-      const TaskConstMeta(debugName: "greet", argNames: ["name"]);
+  TaskConstMeta get kCrateApiCoreCheckLocalSchemaConstMeta =>
+      const TaskConstMeta(debugName: "check_local_schema", argNames: []);
 
   @override
-  Future<void> crateApiSimpleInitApp() {
+  Future<void> crateApiCoreCompleteOnboarding() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -132,17 +153,211 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
+          decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiSimpleInitAppConstMeta,
+        constMeta: kCrateApiCoreCompleteOnboardingConstMeta,
         argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSimpleInitAppConstMeta =>
+  TaskConstMeta get kCrateApiCoreCompleteOnboardingConstMeta =>
+      const TaskConstMeta(debugName: "complete_onboarding", argNames: []);
+
+  @override
+  Stream<BridgeEvent> crateApiCoreCoreEvents() {
+    final sink = RustStreamSink<BridgeEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_StreamSink_bridge_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 3,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiCoreCoreEventsConstMeta,
+          argValues: [sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiCoreCoreEventsConstMeta =>
+      const TaskConstMeta(debugName: "core_events", argNames: ["sink"]);
+
+  @override
+  Future<SchemeReleaseDto> crateApiCoreFetchSchemeRelease({
+    required String scheme,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(scheme, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_scheme_release_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreFetchSchemeReleaseConstMeta,
+        argValues: [scheme],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreFetchSchemeReleaseConstMeta =>
+      const TaskConstMeta(
+        debugName: "fetch_scheme_release",
+        argNames: ["scheme"],
+      );
+
+  @override
+  Future<void> crateApiCoreInitApp() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiCoreInitAppConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreInitAppConstMeta =>
       const TaskConstMeta(debugName: "init_app", argNames: []);
+
+  @override
+  Future<BridgeInfo> crateApiCoreInitCore({required BridgeConfig config}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_config(config, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_info,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreInitCoreConstMeta,
+        argValues: [config],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreInitCoreConstMeta =>
+      const TaskConstMeta(debugName: "init_core", argNames: ["config"]);
+
+  @override
+  Future<InstallResultDto> crateApiCoreInstallLatestScheme({
+    required String scheme,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(scheme, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_install_result_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreInstallLatestSchemeConstMeta,
+        argValues: [scheme],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreInstallLatestSchemeConstMeta =>
+      const TaskConstMeta(
+        debugName: "install_latest_scheme",
+        argNames: ["scheme"],
+      );
+
+  @override
+  Future<OnboardingDto> crateApiCoreOnboarding() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_onboarding_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreOnboardingConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreOnboardingConstMeta =>
+      const TaskConstMeta(debugName: "onboarding", argNames: []);
+
+  @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
 
   @protected
   String dco_decode_String(dynamic raw) {
@@ -151,9 +366,209 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  bool dco_decode_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
+  }
+
+  @protected
+  BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_config(raw);
+  }
+
+  @protected
+  InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_install_progress_dto(raw);
+  }
+
+  @protected
+  WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_windows_ime_status_dto(raw);
+  }
+
+  @protected
+  BridgeConfig dco_decode_bridge_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return BridgeConfig(
+      dataDir: dco_decode_String(arr[0]),
+      cacheDir: dco_decode_String(arr[1]),
+      resourceDir: dco_decode_String(arr[2]),
+      appVersion: dco_decode_String(arr[3]),
+      platform: dco_decode_bridge_platform(arr[4]),
+      userRootOverride: dco_decode_opt_String(arr[5]),
+    );
+  }
+
+  @protected
+  BridgeEvent dco_decode_bridge_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return BridgeEvent(
+      kind: dco_decode_bridge_event_kind(arr[0]),
+      installProgress: dco_decode_opt_box_autoadd_install_progress_dto(arr[1]),
+      deployProgress: dco_decode_opt_String(arr[2]),
+      windowsImeStatus: dco_decode_opt_box_autoadd_windows_ime_status_dto(
+        arr[3],
+      ),
+    );
+  }
+
+  @protected
+  BridgeEventKind dco_decode_bridge_event_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return BridgeEventKind.values[raw as int];
+  }
+
+  @protected
+  BridgeInfo dco_decode_bridge_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return BridgeInfo(
+      platform: dco_decode_bridge_platform(arr[0]),
+      appVersion: dco_decode_String(arr[1]),
+      userRoot: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  BridgePlatform dco_decode_bridge_platform(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return BridgePlatform.values[raw as int];
+  }
+
+  @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  InstallProgressDto dco_decode_install_progress_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return InstallProgressDto(
+      stage: dco_decode_String(arr[0]),
+      percent: dco_decode_u_32(arr[1]),
+      message: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  InstallResultDto dco_decode_install_result_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return InstallResultDto(
+      mergedSchemas: dco_decode_list_String(arr[0]),
+      logs: dco_decode_list_String(arr[1]),
+      verify: dco_decode_list_verify_entry_dto(arr[2]),
+    );
+  }
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_verify_entry_dto).toList();
+  }
+
+  @protected
+  LocalSchemaDto dco_decode_local_schema_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return LocalSchemaDto(
+      installed: dco_decode_bool(arr[0]),
+      deployed: dco_decode_bool(arr[1]),
+      version: dco_decode_opt_String(arr[2]),
+      schemas: dco_decode_list_String(arr[3]),
+    );
+  }
+
+  @protected
+  OnboardingDto dco_decode_onboarding_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return OnboardingDto(completed: dco_decode_bool(arr[0]));
+  }
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_install_progress_dto(raw);
+  }
+
+  @protected
+  WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_windows_ime_status_dto(raw);
+  }
+
+  @protected
+  SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return SchemeReleaseDto(
+      scheme: dco_decode_String(arr[0]),
+      sourceType: dco_decode_opt_String(arr[1]),
+      label: dco_decode_String(arr[2]),
+      version: dco_decode_String(arr[3]),
+      name: dco_decode_String(arr[4]),
+      publishedAt: dco_decode_opt_String(arr[5]),
+      downloadUrl: dco_decode_String(arr[6]),
+      assetName: dco_decode_String(arr[7]),
+    );
+  }
+
+  @protected
+  int dco_decode_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -169,6 +584,62 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  VerifyEntryDto dco_decode_verify_entry_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return VerifyEntryDto(
+      path: dco_decode_String(arr[0]),
+      ok: dco_decode_bool(arr[1]),
+      note: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
+    return WindowsImeStatusDto(
+      supported: dco_decode_bool(arr[0]),
+      packaged: dco_decode_bool(arr[1]),
+      registered: dco_decode_bool(arr[2]),
+      registeredDll: dco_decode_bool(arr[3]),
+      profileEnabled: dco_decode_bool(arr[4]),
+      registrationBusy: dco_decode_bool(arr[5]),
+      registrationState: dco_decode_String(arr[6]),
+      registrationError: dco_decode_opt_String(arr[7]),
+      runtimeDir: dco_decode_opt_String(arr[8]),
+      dllPath: dco_decode_opt_String(arr[9]),
+      registeredPath: dco_decode_opt_String(arr[10]),
+      profileStatus: dco_decode_String(arr[11]),
+      userDataDir: dco_decode_opt_String(arr[12]),
+      sharedDataDir: dco_decode_opt_String(arr[13]),
+      sharedDataSource: dco_decode_String(arr[14]),
+      reloadStampPath: dco_decode_opt_String(arr[15]),
+      reloadStampSignature: dco_decode_opt_String(arr[16]),
+      message: dco_decode_String(arr[17]),
+    );
+  }
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<BridgeEvent> sse_decode_StreamSink_bridge_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -176,10 +647,252 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  bool sse_decode_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  BridgeConfig sse_decode_box_autoadd_bridge_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_config(deserializer));
+  }
+
+  @protected
+  InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_install_progress_dto(deserializer));
+  }
+
+  @protected
+  WindowsImeStatusDto sse_decode_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_windows_ime_status_dto(deserializer));
+  }
+
+  @protected
+  BridgeConfig sse_decode_bridge_config(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_dataDir = sse_decode_String(deserializer);
+    var var_cacheDir = sse_decode_String(deserializer);
+    var var_resourceDir = sse_decode_String(deserializer);
+    var var_appVersion = sse_decode_String(deserializer);
+    var var_platform = sse_decode_bridge_platform(deserializer);
+    var var_userRootOverride = sse_decode_opt_String(deserializer);
+    return BridgeConfig(
+      dataDir: var_dataDir,
+      cacheDir: var_cacheDir,
+      resourceDir: var_resourceDir,
+      appVersion: var_appVersion,
+      platform: var_platform,
+      userRootOverride: var_userRootOverride,
+    );
+  }
+
+  @protected
+  BridgeEvent sse_decode_bridge_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_bridge_event_kind(deserializer);
+    var var_installProgress = sse_decode_opt_box_autoadd_install_progress_dto(
+      deserializer,
+    );
+    var var_deployProgress = sse_decode_opt_String(deserializer);
+    var var_windowsImeStatus =
+        sse_decode_opt_box_autoadd_windows_ime_status_dto(deserializer);
+    return BridgeEvent(
+      kind: var_kind,
+      installProgress: var_installProgress,
+      deployProgress: var_deployProgress,
+      windowsImeStatus: var_windowsImeStatus,
+    );
+  }
+
+  @protected
+  BridgeEventKind sse_decode_bridge_event_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return BridgeEventKind.values[inner];
+  }
+
+  @protected
+  BridgeInfo sse_decode_bridge_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_platform = sse_decode_bridge_platform(deserializer);
+    var var_appVersion = sse_decode_String(deserializer);
+    var var_userRoot = sse_decode_String(deserializer);
+    return BridgeInfo(
+      platform: var_platform,
+      appVersion: var_appVersion,
+      userRoot: var_userRoot,
+    );
+  }
+
+  @protected
+  BridgePlatform sse_decode_bridge_platform(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return BridgePlatform.values[inner];
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  InstallProgressDto sse_decode_install_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_stage = sse_decode_String(deserializer);
+    var var_percent = sse_decode_u_32(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return InstallProgressDto(
+      stage: var_stage,
+      percent: var_percent,
+      message: var_message,
+    );
+  }
+
+  @protected
+  InstallResultDto sse_decode_install_result_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_mergedSchemas = sse_decode_list_String(deserializer);
+    var var_logs = sse_decode_list_String(deserializer);
+    var var_verify = sse_decode_list_verify_entry_dto(deserializer);
+    return InstallResultDto(
+      mergedSchemas: var_mergedSchemas,
+      logs: var_logs,
+      verify: var_verify,
+    );
+  }
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <VerifyEntryDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_verify_entry_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  LocalSchemaDto sse_decode_local_schema_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_installed = sse_decode_bool(deserializer);
+    var var_deployed = sse_decode_bool(deserializer);
+    var var_version = sse_decode_opt_String(deserializer);
+    var var_schemas = sse_decode_list_String(deserializer);
+    return LocalSchemaDto(
+      installed: var_installed,
+      deployed: var_deployed,
+      version: var_version,
+      schemas: var_schemas,
+    );
+  }
+
+  @protected
+  OnboardingDto sse_decode_onboarding_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_completed = sse_decode_bool(deserializer);
+    return OnboardingDto(completed: var_completed);
+  }
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_install_progress_dto(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_windows_ime_status_dto(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_scheme = sse_decode_String(deserializer);
+    var var_sourceType = sse_decode_opt_String(deserializer);
+    var var_label = sse_decode_String(deserializer);
+    var var_version = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_publishedAt = sse_decode_opt_String(deserializer);
+    var var_downloadUrl = sse_decode_String(deserializer);
+    var var_assetName = sse_decode_String(deserializer);
+    return SchemeReleaseDto(
+      scheme: var_scheme,
+      sourceType: var_sourceType,
+      label: var_label,
+      version: var_version,
+      name: var_name,
+      publishedAt: var_publishedAt,
+      downloadUrl: var_downloadUrl,
+      assetName: var_assetName,
+    );
+  }
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint32();
   }
 
   @protected
@@ -194,21 +907,211 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
+  VerifyEntryDto sse_decode_verify_entry_dto(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
+    var var_path = sse_decode_String(deserializer);
+    var var_ok = sse_decode_bool(deserializer);
+    var var_note = sse_decode_String(deserializer);
+    return VerifyEntryDto(path: var_path, ok: var_ok, note: var_note);
   }
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer) {
+  WindowsImeStatusDto sse_decode_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getUint8() != 0;
+    var var_supported = sse_decode_bool(deserializer);
+    var var_packaged = sse_decode_bool(deserializer);
+    var var_registered = sse_decode_bool(deserializer);
+    var var_registeredDll = sse_decode_bool(deserializer);
+    var var_profileEnabled = sse_decode_bool(deserializer);
+    var var_registrationBusy = sse_decode_bool(deserializer);
+    var var_registrationState = sse_decode_String(deserializer);
+    var var_registrationError = sse_decode_opt_String(deserializer);
+    var var_runtimeDir = sse_decode_opt_String(deserializer);
+    var var_dllPath = sse_decode_opt_String(deserializer);
+    var var_registeredPath = sse_decode_opt_String(deserializer);
+    var var_profileStatus = sse_decode_String(deserializer);
+    var var_userDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataSource = sse_decode_String(deserializer);
+    var var_reloadStampPath = sse_decode_opt_String(deserializer);
+    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return WindowsImeStatusDto(
+      supported: var_supported,
+      packaged: var_packaged,
+      registered: var_registered,
+      registeredDll: var_registeredDll,
+      profileEnabled: var_profileEnabled,
+      registrationBusy: var_registrationBusy,
+      registrationState: var_registrationState,
+      registrationError: var_registrationError,
+      runtimeDir: var_runtimeDir,
+      dllPath: var_dllPath,
+      registeredPath: var_registeredPath,
+      profileStatus: var_profileStatus,
+      userDataDir: var_userDataDir,
+      sharedDataDir: var_sharedDataDir,
+      sharedDataSource: var_sharedDataSource,
+      reloadStampPath: var_reloadStampPath,
+      reloadStampSignature: var_reloadStampSignature,
+      message: var_message,
+    );
+  }
+
+  @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_bridge_event_Sse(
+    RustStreamSink<BridgeEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
   }
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
+  }
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_bridge_config(
+    BridgeConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_config(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_install_progress_dto(
+    InstallProgressDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_install_progress_dto(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_windows_ime_status_dto(
+    WindowsImeStatusDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_windows_ime_status_dto(self, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_config(BridgeConfig self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.dataDir, serializer);
+    sse_encode_String(self.cacheDir, serializer);
+    sse_encode_String(self.resourceDir, serializer);
+    sse_encode_String(self.appVersion, serializer);
+    sse_encode_bridge_platform(self.platform, serializer);
+    sse_encode_opt_String(self.userRootOverride, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_event(BridgeEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_event_kind(self.kind, serializer);
+    sse_encode_opt_box_autoadd_install_progress_dto(
+      self.installProgress,
+      serializer,
+    );
+    sse_encode_opt_String(self.deployProgress, serializer);
+    sse_encode_opt_box_autoadd_windows_ime_status_dto(
+      self.windowsImeStatus,
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_bridge_event_kind(
+    BridgeEventKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_info(BridgeInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_platform(self.platform, serializer);
+    sse_encode_String(self.appVersion, serializer);
+    sse_encode_String(self.userRoot, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_platform(
+    BridgePlatform self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_install_progress_dto(
+    InstallProgressDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.stage, serializer);
+    sse_encode_u_32(self.percent, serializer);
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_install_result_dto(
+    InstallResultDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_String(self.mergedSchemas, serializer);
+    sse_encode_list_String(self.logs, serializer);
+    sse_encode_list_verify_entry_dto(self.verify, serializer);
+  }
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
   }
 
   @protected
@@ -219,6 +1122,94 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_list_verify_entry_dto(
+    List<VerifyEntryDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_verify_entry_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_local_schema_dto(
+    LocalSchemaDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.installed, serializer);
+    sse_encode_bool(self.deployed, serializer);
+    sse_encode_opt_String(self.version, serializer);
+    sse_encode_list_String(self.schemas, serializer);
+  }
+
+  @protected
+  void sse_encode_onboarding_dto(OnboardingDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.completed, serializer);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_install_progress_dto(
+    InstallProgressDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_install_progress_dto(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_windows_ime_status_dto(
+    WindowsImeStatusDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_windows_ime_status_dto(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_scheme_release_dto(
+    SchemeReleaseDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.scheme, serializer);
+    sse_encode_opt_String(self.sourceType, serializer);
+    sse_encode_String(self.label, serializer);
+    sse_encode_String(self.version, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_opt_String(self.publishedAt, serializer);
+    sse_encode_String(self.downloadUrl, serializer);
+    sse_encode_String(self.assetName, serializer);
+  }
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint32(self);
   }
 
   @protected
@@ -233,14 +1224,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
+  void sse_encode_verify_entry_dto(
+    VerifyEntryDto self,
+    SseSerializer serializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
+    sse_encode_String(self.path, serializer);
+    sse_encode_bool(self.ok, serializer);
+    sse_encode_String(self.note, serializer);
   }
 
   @protected
-  void sse_encode_bool(bool self, SseSerializer serializer) {
+  void sse_encode_windows_ime_status_dto(
+    WindowsImeStatusDto self,
+    SseSerializer serializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putUint8(self ? 1 : 0);
+    sse_encode_bool(self.supported, serializer);
+    sse_encode_bool(self.packaged, serializer);
+    sse_encode_bool(self.registered, serializer);
+    sse_encode_bool(self.registeredDll, serializer);
+    sse_encode_bool(self.profileEnabled, serializer);
+    sse_encode_bool(self.registrationBusy, serializer);
+    sse_encode_String(self.registrationState, serializer);
+    sse_encode_opt_String(self.registrationError, serializer);
+    sse_encode_opt_String(self.runtimeDir, serializer);
+    sse_encode_opt_String(self.dllPath, serializer);
+    sse_encode_opt_String(self.registeredPath, serializer);
+    sse_encode_String(self.profileStatus, serializer);
+    sse_encode_opt_String(self.userDataDir, serializer);
+    sse_encode_opt_String(self.sharedDataDir, serializer);
+    sse_encode_String(self.sharedDataSource, serializer);
+    sse_encode_opt_String(self.reloadStampPath, serializer);
+    sse_encode_opt_String(self.reloadStampSignature, serializer);
+    sse_encode_String(self.message, serializer);
   }
 }

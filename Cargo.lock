@@ -2646,6 +2646,11 @@ name = "keytao_app_bridge"
 version = "0.1.0"
 dependencies = [
  "flutter_rust_bridge",
+ "keytao-app-core",
+ "keytao-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -6,7 +6,8 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
-import 'api/simple.dart';
+import 'api/core.dart';
+import 'api/types.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -24,10 +25,87 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
+  bool dco_decode_bool(dynamic raw);
+
+  @protected
+  BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
+
+  @protected
+  InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
+
+  @protected
+  WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
+    dynamic raw,
+  );
+
+  @protected
+  BridgeConfig dco_decode_bridge_config(dynamic raw);
+
+  @protected
+  BridgeEvent dco_decode_bridge_event(dynamic raw);
+
+  @protected
+  BridgeEventKind dco_decode_bridge_event_kind(dynamic raw);
+
+  @protected
+  BridgeInfo dco_decode_bridge_info(dynamic raw);
+
+  @protected
+  BridgePlatform dco_decode_bridge_platform(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  InstallProgressDto dco_decode_install_progress_dto(dynamic raw);
+
+  @protected
+  InstallResultDto dco_decode_install_result_dto(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
+
+  @protected
+  LocalSchemaDto dco_decode_local_schema_dto(dynamic raw);
+
+  @protected
+  OnboardingDto dco_decode_onboarding_dto(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
+    dynamic raw,
+  );
+
+  @protected
+  WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
+    dynamic raw,
+  );
+
+  @protected
+  SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -36,10 +114,101 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  VerifyEntryDto dco_decode_verify_entry_dto(dynamic raw);
+
+  @protected
+  WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw);
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<BridgeEvent> sse_decode_StreamSink_bridge_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  BridgeConfig sse_decode_box_autoadd_bridge_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WindowsImeStatusDto sse_decode_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeConfig sse_decode_bridge_config(SseDeserializer deserializer);
+
+  @protected
+  BridgeEvent sse_decode_bridge_event(SseDeserializer deserializer);
+
+  @protected
+  BridgeEventKind sse_decode_bridge_event_kind(SseDeserializer deserializer);
+
+  @protected
+  BridgeInfo sse_decode_bridge_info(SseDeserializer deserializer);
+
+  @protected
+  BridgePlatform sse_decode_bridge_platform(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  InstallProgressDto sse_decode_install_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  InstallResultDto sse_decode_install_result_dto(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  LocalSchemaDto sse_decode_local_schema_dto(SseDeserializer deserializer);
+
+  @protected
+  OnboardingDto sse_decode_onboarding_dto(SseDeserializer deserializer);
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -48,13 +217,87 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
+  VerifyEntryDto sse_decode_verify_entry_dto(SseDeserializer deserializer);
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer);
+  WindowsImeStatusDto sse_decode_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_bridge_event_Sse(
+    RustStreamSink<BridgeEvent> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_bridge_config(
+    BridgeConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_install_progress_dto(
+    InstallProgressDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_windows_ime_status_dto(
+    WindowsImeStatusDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_config(BridgeConfig self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bridge_event(BridgeEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bridge_event_kind(
+    BridgeEventKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_info(BridgeInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bridge_platform(
+    BridgePlatform self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_install_progress_dto(
+    InstallProgressDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_install_result_dto(
+    InstallResultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -63,16 +306,61 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_verify_entry_dto(
+    List<VerifyEntryDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_local_schema_dto(
+    LocalSchemaDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_onboarding_dto(OnboardingDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_install_progress_dto(
+    InstallProgressDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_windows_ime_status_dto(
+    WindowsImeStatusDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_scheme_release_dto(
+    SchemeReleaseDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
+  void sse_encode_verify_entry_dto(
+    VerifyEntryDto self,
+    SseSerializer serializer,
+  );
 
   @protected
-  void sse_encode_bool(bool self, SseSerializer serializer);
+  void sse_encode_windows_ime_status_dto(
+    WindowsImeStatusDto self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class
