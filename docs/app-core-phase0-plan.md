@@ -243,6 +243,7 @@ Kotlin 1.9.25 迁移到 AGP 9 内置 Kotlin 的步骤：
 | 0b 方案获取与安装 | d94dcae（Windows 回归修复 a6d432a） | Opus 评审零发现；外壳 Windows 编译后补 |
 | 0c 部署、输入法状态与设置 | 7f3f192 | Opus 等价评审 PASS |
 | 0d 账号、同步、日志 + 会话/引导状态 | 6c62bad | 两轮 Opus 评审，8 项修复后 PASS；78/1 测试 |
+| 0e Android JNI 导出并入核心 | （见 git log） | 67 个 Java_* 符号 diff 为空；Opus 评审 PASS |
 
 编译门禁：`scripts/check-core-cross.sh`（核心 Linux/Windows）、`scripts/check-tauri-windows.sh`（外壳 Windows）、Android APK 构建、macOS 本机测试。
 
@@ -254,4 +255,5 @@ Kotlin 1.9.25 迁移到 AGP 9 内置 Kotlin 的步骤：
 - 核心成为会话唯一持有方时，删除 `src/App.tsx` 挂载时的 `app_state_clear_auth` 调用，否则每次启动都会登出。
 - 引导处于"待定"期间用户装好方案后，老用户规则会把新用户误判为已完成；由核心驱动引导界面前要收紧判定。
 - Windows 上 `data_dir` 与 `cache_dir` 同为 `%LOCALAPPDATA%\<id>`，清理缓存时不能整目录删除（凭据文件在内）；建议状态文件移到独立子目录。
-- 清理：Android/iOS 的 `rime_deploy_default` 包装里残留的 Windows 参数；核心 `time` 依赖多余的 `parsing` feature。
+- 清理：Android/iOS 的 `rime_deploy_default` 包装里残留的 Windows 参数；核心 `time` 依赖多余的 `parsing` feature；`android_jni` 里多余的逐项 cfg。
+- 首次构建 release APK（LTO）时，重新比对 `libkeytao_app_lib.so` 的 67 个 `Java_*` 导出。
