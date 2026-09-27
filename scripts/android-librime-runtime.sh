@@ -5,6 +5,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_RIME_ROOT="$PROJECT_DIR/vendor/librime/android"
 ANDROID_APP_DIR="$PROJECT_DIR/src-tauri/gen/android/app"
+ANDROID_ASSETS_DIR=""
 ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
 LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-1.17.0}"
 FCITX5_RIME_VERSION="${KEYTAO_ANDROID_FCITX5_RIME_VERSION:-latest}"
@@ -28,9 +29,10 @@ Commands:
       vendor/librime/macos-universal/include,
       then a cached rime/librime source-header download.
 
-  sync [--abi ABI|--all] [--allow-missing]
+  sync [--abi ABI|--all] [--allow-missing] [--assets-only]
       Copy vendor/librime/android/<abi>/lib/*.so into Android jniLibs and copy rime-data
       into src/main/assets/keytao-rime-data.
+      --assets-only copies assets without checking or writing native libraries.
 
   verify [--abi ABI|--all]
       Verify imported runtime layout.
@@ -40,6 +42,7 @@ Commands:
 
 Options:
   --android-app-dir DIR     Override Android app dir. Defaults to src-tauri/gen/android/app.
+  --assets-dir DIR          Override sync assets dir. Defaults to APP_DIR/src/main/assets.
   --runtime-root DIR        Override Android librime vendor root. Defaults to vendor/librime/android.
   -h, --help                Show this help.
 EOF
@@ -803,16 +806,29 @@ sync_one() {
 }
 
 sync_assets() {
+    local mode="${1:-all}"
+    local allow_missing="${2:-1}"
     local source_data=""
+    local abis=("${ABIS[@]}")
+    if [ "$mode" != "all" ]; then
+        is_abi "$mode" || die "unsupported Android ABI: $mode"
+        abis=("$mode")
+    fi
     local abi
-    for abi in "${ABIS[@]}"; do
+    for abi in "${abis[@]}"; do
         if [ -f "$(runtime_dir "$abi")/rime-data/default.yaml" ]; then
             source_data="$(runtime_dir "$abi")/rime-data"
             break
         fi
     done
-    [ -n "$source_data" ] || return 0
-    local assets_dir="$ANDROID_APP_DIR/src/main/assets"
+    if [ -z "$source_data" ]; then
+        if [ "$allow_missing" -eq 1 ]; then
+            echo "WARNING: no Android rime-data found under $ANDROID_RIME_ROOT" >&2
+            return 0
+        fi
+        die "no Android rime-data found under $ANDROID_RIME_ROOT"
+    fi
+    local assets_dir="${ANDROID_ASSETS_DIR:-$ANDROID_APP_DIR/src/main/assets}"
     mkdir -p "$assets_dir"
     rm -rf "$assets_dir/keytao-rime-data"
     copy_dir_contents "$source_data" "$assets_dir/keytao-rime-data"
@@ -833,15 +849,22 @@ EOF
 sync_runtime() {
     local mode=""
     local allow_missing=0
+    local assets_only=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --abi) mode="${2:?missing value for --abi}"; shift 2 ;;
             --all) mode="all"; shift ;;
             --allow-missing) allow_missing=1; shift ;;
+            --assets-only) assets_only=1; shift ;;
             *) die "unknown sync option: $1" ;;
         esac
     done
     [ -n "$mode" ] || mode="all"
+
+    if [ "$assets_only" -eq 1 ]; then
+        sync_assets "$mode" "$allow_missing"
+        return
+    fi
 
     local synced=0
     if [ "$mode" = "all" ]; then
@@ -924,6 +947,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --android-app-dir)
             ANDROID_APP_DIR="$(abs_path "${2:?missing value for --android-app-dir}")"
+            shift 2
+            ;;
+        --assets-dir)
+            ANDROID_ASSETS_DIR="$(abs_path "${2:?missing value for --assets-dir}")"
             shift 2
             ;;
         --runtime-root)

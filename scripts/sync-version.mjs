@@ -4,6 +4,7 @@ import fs from "node:fs"
 const workspaceCargoPath = "Cargo.toml"
 const packageJsonPath = "package.json"
 const tauriConfigPath = "src-tauri/tauri.conf.json"
+const flutterPubspecPath = "flutter_app/pubspec.yaml"
 
 const explicitVersion = process.argv[2] === "--set" ? process.argv[3] : null
 
@@ -43,6 +44,23 @@ function writeJsonVersion(path, version) {
   fs.writeFileSync(path, `${JSON.stringify(json, null, 2)}\n`)
 }
 
+function writeFlutterVersion(version) {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/)
+  if (!match) {
+    throw new Error(`Unsupported Flutter app version: ${version}`)
+  }
+  // Match Tauri's Android versionCode formula; prereleases share the base code.
+  const versionCode = Number(match[1]) * 1000000 + Number(match[2]) * 1000 + Number(match[3])
+  const pubspec = fs.readFileSync(flutterPubspecPath, "utf8")
+  if (!/^version:.*$/m.test(pubspec)) {
+    throw new Error("flutter_app/pubspec.yaml is missing version")
+  }
+  fs.writeFileSync(
+    flutterPubspecPath,
+    pubspec.replace(/^version:.*$/m, `version: ${version}+${versionCode}`)
+  )
+}
+
 if (explicitVersion) {
   writeWorkspaceVersion(explicitVersion)
 }
@@ -50,4 +68,5 @@ if (explicitVersion) {
 const version = readWorkspaceVersion()
 writeJsonVersion(packageJsonPath, version)
 writeJsonVersion(tauriConfigPath, version)
+writeFlutterVersion(version)
 console.log(`Synced version ${version}`)
