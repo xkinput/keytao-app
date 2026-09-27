@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
@@ -90,7 +91,12 @@ void main() {
 // libraries, where FRB's default loader (built for app bundles) does not look.
 ExternalLibrary _testBridgeLibrary() {
   final dir = '${Directory.current.path}/build/native_assets';
-  if (Platform.isMacOS) return ExternalLibrary.open('$dir/macos/libkeytao_app_bridge.dylib');
+  if (Platform.isMacOS) {
+    // The app bundle ships librime from the Runner build phase, not native
+    // assets; preload the vendored copy so @rpath/librime.1.dylib resolves.
+    DynamicLibrary.open('${Directory.current.path}/../vendor/librime/macos-universal/lib/librime.1.dylib');
+    return ExternalLibrary.open('$dir/macos/libkeytao_app_bridge.dylib');
+  }
   if (Platform.isLinux) return ExternalLibrary.open('$dir/linux/libkeytao_app_bridge.so');
   if (Platform.isWindows) return ExternalLibrary.open('$dir/windows/keytao_app_bridge.dll');
   throw UnsupportedError('No host test library for ${Platform.operatingSystem}');
