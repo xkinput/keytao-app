@@ -10,6 +10,108 @@ import org.junit.Test
 
 class KeytaoEditorPolicyTest {
     @Test
+    fun `only a complete non nested trailing bracket token delegates deletion`() {
+        for ((text, expected) in listOf(
+            "[微笑]" to TextUnitRange(0, 4),
+            "[OK]" to TextUnitRange(0, 4),
+            "abc[哭]" to TextUnitRange(3, 6),
+            "[微笑][哭]" to TextUnitRange(4, 7),
+            "[abcdefghijkl]" to TextUnitRange(0, 14),
+        )) {
+            assertEquals(text, expected, KeytaoEditorPolicy.trailingBracketTokenRange(text))
+        }
+        for (text in listOf(
+            "", "[]", "[a[b]", "[超过十二个字符的很长很长的名字]",
+            "[abcdefghijklm]", "[微笑]abc", "abc]", "[a\rb]", "[a\nb]",
+        )) {
+            assertNull(text, KeytaoEditorPolicy.trailingBracketTokenRange(text))
+        }
+    }
+
+    @Test
+    fun `host backspace recall requires a proven bounded backward cursor difference`() {
+        assertEquals("[微笑]", KeytaoEditorPolicy.reconcileHostBackspace("abc[微笑]", 7, 3, "abc", "", 1))
+        assertEquals("]", KeytaoEditorPolicy.reconcileHostBackspace("abc[微笑]", 7, 6, "abc[微笑", "", 1))
+        assertEquals("[微笑]", KeytaoEditorPolicy.reconcileHostBackspace("x[微笑]", 100, 96, "prefix", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("[微笑]", 100, 95, "prefix", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("abc[微笑]", 7, 7, "abc[微笑]", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("abc[微笑]", 7, 8, "abc[微笑]x", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("[微笑]", 3, -1, "", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("", 7, 6, "prefix", "", 1))
+    }
+
+    @Test
+    fun `ignored host delete followed by a cursor move must not create restore text`() {
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 4, "hell", "o[ok]", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 8, "hello[ok", "]", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 4, "hell", "o[ok]tail", 1))
+    }
+
+    @Test
+    fun `host deletion proof compares overlapping context windows`() {
+        assertEquals("[ok]", KeytaoEditorPolicy.reconcileHostBackspace("lo[ok]", 100, 96, "hello", "tail", 1))
+        assertEquals("[ok]", KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 100, 96, "lo", "tail", 1))
+    }
+
+    @Test
+    fun `host deletion proof rejects mismatched or stale context`() {
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, "other", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, "hello[ok]", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 8, "hello[oX", "", 1))
+    }
+
+    @Test
+    fun `host deletion proof requires readable context and overlap away from buffer start`() {
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, null, "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, "hello", null, 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, "", "", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("[ok]", 100, 96, "hello", "", 1))
+    }
+
+    @Test
+    fun `host can delete the whole token at buffer start`() {
+        assertEquals("[ok]", KeytaoEditorPolicy.reconcileHostBackspace("[ok]", 4, 0, "", "", 1))
+        assertEquals("[ok]", KeytaoEditorPolicy.reconcileHostBackspace("[ok]", 4, 0, "", "tail", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("[ok]", 4, 0, "", "[ok]", 1))
+    }
+
+    @Test
+    fun `only one outstanding host delete is eligible for reconciliation`() {
+        for (outstanding in listOf(-1, 0, 2, 3)) {
+            assertNull(KeytaoEditorPolicy.reconcileHostBackspace("ab[c]", 5, 4, "ab[c", "", outstanding))
+        }
+        assertEquals("]", KeytaoEditorPolicy.reconcileHostBackspace("ab[c]", 5, 4, "ab[c", "", 1))
+    }
+
+    @Test
+    fun `late repeat updates must not turn stale bracket snapshots into restore units`() {
+        val restoreStack = mutableListOf<String>()
+        // The second injected DEL invalidates recall for the whole outstanding
+        // burst, including coalesced callbacks and its final delayed update.
+        for ((oldCursor, newCursor, beforeCursor) in listOf(
+            Triple(5, 4, "ab[c"), Triple(4, 3, "ab["), Triple(3, 2, "ab"),
+        )) {
+            KeytaoEditorPolicy.reconcileHostBackspace(
+                "ab[c]", oldCursor, newCursor, beforeCursor, "", 2,
+            )?.let(restoreStack::add)
+        }
+        assertTrue(restoreStack.isEmpty())
+        assertEquals("ab", "ab" + restoreStack.asReversed().joinToString(""))
+    }
+
+    @Test
+    fun `repeated following text and truncated cursor move evidence remain ambiguous`() {
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 5, "hello", "[ok]", 1))
+        assertNull(KeytaoEditorPolicy.reconcileHostBackspace("hello[ok]", 9, 4, "hell", "o[", 1))
+    }
+
+    @Test
+    fun `host deletion proof uses UTF16 offsets with supplementary characters`() {
+        assertEquals("[微笑]", KeytaoEditorPolicy.reconcileHostBackspace("😀[微笑]", 6, 2, "😀", "", 1))
+        assertEquals("]", KeytaoEditorPolicy.reconcileHostBackspace("😀[微笑]", 6, 5, "😀[微笑", "", 1))
+    }
+
+    @Test
     fun `null input class sends a delete key even with input flags`() {
         for (inputType in listOf(InputType.TYPE_NULL, InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)) {
             assertEquals(BackspaceDecision.SEND_DEL_KEY, backspace(inputType = inputType))

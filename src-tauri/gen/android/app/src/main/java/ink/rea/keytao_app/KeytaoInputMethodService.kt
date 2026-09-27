@@ -126,6 +126,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     // having installed a schema.
     private var unavailableMessage = preparingMessage
     private val backspaceRestoreStack = mutableListOf<String>()
+    private data class HostBackspaceSnapshot(val selectionStart: Int, val beforeCursor: String)
+    private var pendingHostBackspace: HostBackspaceSnapshot? = null
+    private var outstandingHostBackspaces = 0
+    private var hostBackspaceGeneration = 0L
     private var backspaceGestureRestoreStart = 0
     private data class BackspaceSelectionSession(
         val anchor: Int,
@@ -172,6 +176,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDestroy() {
+        discardPendingHostBackspace(resetOutstanding = true)
         serviceDestroyed = true
         inputViewShown = false
         mainHandler.removeCallbacks(storageRetry)
@@ -255,6 +260,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        discardPendingHostBackspace(resetOutstanding = true)
         hasKnownCursor = (attribute?.initialSelStart ?: -1) >= 0 &&
             (attribute?.initialSelEnd ?: -1) >= 0
         backspaceSelectionSession = null
@@ -303,6 +309,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onFinishInputView(finishingInput: Boolean) {
         val started = System.nanoTime()
+        discardPendingHostBackspace(resetOutstanding = true)
         inputViewShown = false
         mainHandler.removeCallbacks(storageRetry)
         unregisterClipboardListener()
@@ -342,6 +349,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onWindowHidden() {
         val started = System.nanoTime()
+        discardPendingHostBackspace(resetOutstanding = true)
         super.onWindowHidden()
         KeytaoRuntimeLog.event("lifecycle", "window_hidden", KeytaoRuntimeLog.elapsedMs(started))
     }
@@ -429,6 +437,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 keyboardView?.clearRecentClipboardSuggestion()
             }
             if (!nextPrivacy.allowsTextRecall) {
+                discardPendingHostBackspace()
                 cancelBackspaceSelection()
                 backspaceRestoreStack.clear()
                 recentCommittedUnits.clear()
@@ -535,6 +544,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             newSelEnd,
             candidatesStart,
             candidatesEnd,
+        )
+        reconcilePendingHostBackspace(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd,
+            hasComposition = composing || currentState.hasComposition ||
+                candidatesStart >= 0 || candidatesEnd >= 0,
         )
         // A valid report makes buffer editing available for this input session.
         if (newSelStart >= 0 && newSelEnd >= 0) hasKnownCursor = true
@@ -699,6 +713,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onFinishInput() {
         val started = System.nanoTime()
+        discardPendingHostBackspace(resetOutstanding = true)
         editorUpdateGeneration++
         rimeOptionsGeneration++
         editorUpdatePending = false
@@ -724,6 +739,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onEvaluateFullscreenMode(): Boolean = false
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        discardPendingHostBackspace()
         inputCounts.record("key_down")
         if (isShiftKey(keyCode)) {
             shiftPressedWithoutKey = true
@@ -784,6 +800,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyCommand(command: KeyCommand) {
+        if (command.type != KeyCommandTypes.BACKSPACE) discardPendingHostBackspace()
         inputCounts.recordCommand(command.type)
         if (!inputAvailable && command.requiresInstalledSchema()) {
             showUnavailableMessage()
@@ -909,6 +926,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onCommitClipboardMedia(key: String) {
+        discardPendingHostBackspace()
         if (!privacyMode.allowsClipboard) return
         val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
         val uri = runCatching {
@@ -1145,7 +1163,121 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return true
     }
 
+    private fun discardPendingHostBackspace(resetOutstanding: Boolean = false) {
+        val hadOutstanding = outstandingHostBackspaces > 0
+        if (resetOutstanding) {
+            outstandingHostBackspaces = 0
+            hostBackspaceGeneration++
+        }
+        if (pendingHostBackspace == null && !hadOutstanding) return
+        pendingHostBackspace = null
+        backspaceRestoreStack.clear()
+        backspaceGestureRestoreStart = 0
+        restoreAllOnNextDirectionalRestore = false
+        recentCommittedUnits.clear()
+        keyboardView?.showBackspaceDeletionPreview("")
+    }
+
+    private fun sendTrackedHostBackspace() {
+        if (currentInputConnection == null) return
+        outstandingHostBackspaces++
+        val generation = ++hostBackspaceGeneration
+        mainHandler.postDelayed({
+            if (generation == hostBackspaceGeneration) {
+                discardPendingHostBackspace(resetOutstanding = true)
+            }
+        }, hostBackspaceTimeoutMs)
+        sendKeyStroke(KeyEvent.KEYCODE_DEL)
+    }
+
+    private fun reconcilePendingHostBackspace(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        hasComposition: Boolean,
+    ) {
+        // Overlapping or otherwise unprovable deletes remain outstanding until
+        // timeout. Selection callbacks can be coalesced and cannot safely drain
+        // a count one by one or identify which injected key they acknowledge.
+        if (outstandingHostBackspaces > 1) {
+            discardPendingHostBackspace()
+            return
+        }
+        val snapshot = pendingHostBackspace ?: return
+        if (hasComposition || newSelStart != newSelEnd ||
+            oldSelStart != snapshot.selectionStart || oldSelEnd != snapshot.selectionStart
+        ) {
+            discardPendingHostBackspace()
+            return
+        }
+        // An unchanged selection is not an acknowledgement of the delete key.
+        if (newSelStart == snapshot.selectionStart) return
+        if (!privacyMode.allowsTextRecall) {
+            discardPendingHostBackspace()
+            return
+        }
+        val connection = currentInputConnection
+        val deleted = KeytaoEditorPolicy.reconcileHostBackspace(
+            snapshot.beforeCursor, snapshot.selectionStart, newSelStart,
+            connection?.getTextBeforeCursor(hostBackspaceContextLimit, 0)?.toString(),
+            connection?.getTextAfterCursor(hostBackspaceContextLimit, 0)?.toString(),
+            outstandingHostBackspaces,
+        )
+        if (deleted == null) {
+            discardPendingHostBackspace()
+            return
+        }
+        pendingHostBackspace = null
+        outstandingHostBackspaces = 0
+        hostBackspaceGeneration++
+        backspaceRestoreStack.add(deleted)
+        discardRecentCommittedSuffix(textUnits(deleted))
+    }
+
+    private fun deleteTrailingBracketTokenWithHost(): Boolean {
+        val connection = currentInputConnection ?: return false
+        if (selectionModeActive || !connection.getSelectedText(0).isNullOrEmpty()) return false
+        val beforeCursor = connection.getTextBeforeCursor(hostBackspaceContextLimit, 0)
+            ?.toString() ?: return false
+        if (KeytaoEditorPolicy.trailingBracketTokenRange(beforeCursor) == null) return false
+        // Read text and caret together: a previous repeat tick may have changed
+        // the host between getTextBeforeCursor and this request.
+        val extracted = connection.getExtractedText(ExtractedTextRequest().apply {
+            hintMaxChars = hostBackspaceContextLimit
+            hintMaxLines = 1
+        }, 0)
+        if (extracted != null && extracted.selectionStart != extracted.selectionEnd) return false
+        val snapshotText = extracted?.text?.takeIf {
+            extracted.partialStartOffset < 0 && extracted.startOffset >= 0 &&
+                extracted.selectionStart in 0..it.length
+        }?.subSequence(0, extracted.selectionStart)?.takeLast(hostBackspaceContextLimit)?.toString()
+        if (snapshotText != null && KeytaoEditorPolicy.trailingBracketTokenRange(snapshotText) == null) {
+            return false
+        }
+        restoreAllOnNextDirectionalRestore = false
+        if (privacyMode.allowsTextRecall && snapshotText != null) {
+            pendingHostBackspace = HostBackspaceSnapshot(
+                extracted.startOffset + extracted.selectionStart, snapshotText,
+            )
+        } else {
+            backspaceRestoreStack.clear()
+            backspaceGestureRestoreStart = 0
+            recentCommittedUnits.clear()
+        }
+        sendTrackedHostBackspace()
+        return true
+    }
+
     private fun handleBackspace() {
+        if (outstandingHostBackspaces > 0) {
+            discardPendingHostBackspace()
+            sendTrackedHostBackspace()
+            return
+        }
+        if (resolveBackspaceDecision() == BackspaceDecision.DELETE_BEFORE_CURSOR &&
+            deleteTrailingBracketTokenWithHost()
+        ) return
         if (resolveBackspaceDecision() != BackspaceDecision.ENGINE) {
             deleteOneBeforeCursorForRestore()
             selectionModeActive = false
@@ -1857,6 +1989,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun clearCompositionBeforeEdit() {
+        discardPendingHostBackspace()
         if (!currentState.hasComposition && !composing) return
         currentInputConnection?.finishComposingText()
         composing = false
@@ -2244,6 +2377,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun commitDirect(text: String) {
+        discardPendingHostBackspace()
         inputCounts.record("commit_direct")
         val connection = currentInputConnection ?: return
         val hadComposition = composing || currentState.hasComposition
@@ -2267,6 +2401,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun applyState(state: KeytaoImeState) {
+        if (state.hasComposition || state.committed.isNotEmpty()) discardPendingHostBackspace()
         val started = applyStateDurations.start()
         try {
             val connection = currentInputConnection
@@ -2390,6 +2525,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         /** `EditorInfo.MEMORY_EFFICIENT_TEXT_LENGTH`: the budget AOSP recommends
          *  for surrounding-text requests, which cross a binder on every call. */
         private const val backspaceContextLimit = 2048
+        private const val hostBackspaceContextLimit = 64
+        private const val hostBackspaceTimeoutMs = 300L
         private const val maxBackspaceGestureBatchCount = 96
         private const val recentCommittedUnitLimit = 2048
         private const val defaultAndroidBottomInsetDp = 48

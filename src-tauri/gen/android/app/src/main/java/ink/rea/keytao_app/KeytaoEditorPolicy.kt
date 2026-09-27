@@ -153,6 +153,50 @@ internal object KeytaoEditorPolicy {
         return BackspaceDecision.DELETE_BEFORE_CURSOR
     }
 
+    /** A possible host-rendered token; this does not decide how much to delete. */
+    fun trailingBracketTokenRange(text: CharSequence): TextUnitRange? {
+        if (text.isEmpty() || text.last() != ']') return null
+        val prefix = text.subSequence(0, text.lastIndex)
+        val boundary = prefix.indexOfLast { it == ']' || it == '\r' || it == '\n' }
+        val start = text.indexOf('[', startIndex = boundary + 1)
+        if (start < 0 || text.length - start - 2 !in 1..12) return null
+        if ((start + 1 until text.lastIndex).any {
+                text[it] == '[' || text[it] == ']' || text[it] == '\r' || text[it] == '\n'
+            }
+        ) return null
+        return TextUnitRange(start, text.length)
+    }
+
+    /** Selection offsets and context lengths are all UTF-16 code units. */
+    fun reconcileHostBackspace(
+        beforeCursor: String,
+        oldSelStart: Int,
+        newSelStart: Int,
+        currentBeforeCursor: String?,
+        currentAfterCursor: String?,
+        outstandingDeletes: Int,
+    ): String? {
+        if (outstandingDeletes != 1 || newSelStart < 0 || oldSelStart <= newSelStart) return null
+        if (currentBeforeCursor == null || currentAfterCursor == null ||
+            beforeCursor.length > oldSelStart || currentBeforeCursor.length > newSelStart
+        ) return null
+        val deletedLength = oldSelStart - newSelStart
+        if (deletedLength > beforeCursor.length) return null
+        val remaining = beforeCursor.dropLast(deletedLength)
+        val overlap = minOf(remaining.length, currentBeforeCursor.length)
+        if (overlap == 0 && newSelStart != 0) return null
+        if (remaining.takeLast(overlap) != currentBeforeCursor.takeLast(overlap)) return null
+        val deleted = beforeCursor.takeLast(deletedLength)
+        // A cursor move has the same remaining prefix as a deletion. Reject it
+        // when the supposedly deleted suffix is still immediately after the caret.
+        // Repeated text is ambiguous, so prefer losing recall to duplicating text.
+        val afterOverlap = minOf(deleted.length, currentAfterCursor.length)
+        if (afterOverlap > 0 && deleted.take(afterOverlap) == currentAfterCursor.take(afterOverlap)) {
+            return null
+        }
+        return deleted
+    }
+
     fun resolveEnterDecision(
         hasComposition: Boolean,
         forceNewline: Boolean,
