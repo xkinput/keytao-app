@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+mod app_core;
 mod wanxiang;
+
+pub use keytao_app_core::events::{InstallProgress, WindowsImeStatus};
 #[cfg(target_os = "windows")]
 mod windows_app_actions;
 #[cfg(target_os = "windows")]
@@ -110,13 +113,6 @@ pub struct UserDictionarySyncResult {
     pub updated_at: String,
     pub import_table_patched: bool,
     pub reload_stamp_path: Option<String>,
-    pub message: String,
-}
-
-#[derive(Serialize, Clone)]
-pub struct InstallProgress {
-    pub stage: String,
-    pub percent: u32,
     pub message: String,
 }
 
@@ -392,17 +388,6 @@ fn write_ime_ui_settings(
         orientation,
         accent_color,
         font_size,
-    )
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn write_ime_ui_color_scheme(color_scheme: keytao_theme::UiColorScheme) -> Result<(), String> {
-    let current = ime_ui_settings_with_message(String::new())?;
-    write_ime_ui_settings(
-        color_scheme,
-        current.orientation,
-        current.accent_color,
-        current.font_size,
     )
 }
 
@@ -2385,108 +2370,6 @@ fn launch_keytao_ime(app: &tauri::AppHandle, restart: bool) -> Result<LinuxImeSt
         app,
         format!("已启动 keytao-ime pid={pid}"),
     ))
-}
-
-#[cfg(target_os = "linux")]
-fn desktop_exec_value(command: &str) -> String {
-    if command.contains(char::is_whitespace) {
-        format!(
-            "\"{}\"",
-            command
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('$', "\\$")
-                .replace('`', "\\`")
-        )
-    } else {
-        command.to_string()
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_kde_virtual_keyboard_desktop(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("无法确定 HOME 目录")?;
-    let applications_dir = std::path::Path::new(&home)
-        .join(".local")
-        .join("share")
-        .join("applications");
-    std::fs::create_dir_all(&applications_dir)
-        .map_err(|e| format!("创建 KDE desktop 目录失败: {e}"))?;
-
-    let (_, ime_display) = resolve_keytao_ime_command(app);
-    let desktop_file = applications_dir.join("keytao-wayland-launcher.desktop");
-    let content = format!(
-        "[Desktop Entry]\n\
-         Name=KeyTao Input Method (Wayland)\n\
-         Name[zh_CN]=键道输入法 (Wayland)\n\
-         GenericName=Input Method\n\
-         GenericName[zh_CN]=输入法\n\
-         Comment=KeyTao Chinese Input Method Engine (KDE Virtual Keyboard)\n\
-         Comment[zh_CN]=键道中文输入法引擎（KDE 虚拟键盘）\n\
-         Exec={}\n\
-         Icon=input-keyboard\n\
-         Terminal=false\n\
-         Type=Application\n\
-         Categories=System;Utility;\n\
-         StartupNotify=false\n\
-         NoDisplay=true\n\
-         OnlyShowIn=KDE\n\
-         X-KDE-StartupNotify=false\n\
-         X-KDE-Wayland-VirtualKeyboard=true\n",
-        desktop_exec_value(&ime_display)
-    );
-    std::fs::write(&desktop_file, content)
-        .map_err(|e| format!("写入 KDE desktop 文件失败 {}: {e}", desktop_file.display()))?;
-    Ok(desktop_file)
-}
-
-#[cfg(target_os = "linux")]
-fn run_first_available_command(commands: &[&str], args: &[&str]) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for command in commands {
-        match std::process::Command::new(command).args(args).output() {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => errors.push(format!(
-                "{command}: {} {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-            Err(e) => errors.push(format!("{command}: {e}")),
-        }
-    }
-    Err(errors.join("; "))
-}
-
-#[cfg(target_os = "linux")]
-fn configure_kde_virtual_keyboard(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
-    if !is_kde_session() {
-        return Err("当前不是 KDE 会话，无法配置 KDE 虚拟键盘输入法".into());
-    }
-
-    let desktop_file = ensure_kde_virtual_keyboard_desktop(app)?;
-    run_first_available_command(
-        &["kwriteconfig6", "kwriteconfig5"],
-        &[
-            "--file",
-            "kwinrc",
-            "--group",
-            "Wayland",
-            "--key",
-            "InputMethod",
-            "keytao-wayland-launcher.desktop",
-        ],
-    )
-    .map_err(|e| format!("写入 KDE 输入法配置失败: {e}"))?;
-
-    let _ = run_first_available_command(
-        &["qdbus6", "qdbus"],
-        &["org.kde.KWin", "/KWin", "reconfigure"],
-    );
-
-    Ok(vec![
-        format!("已写入 {}", desktop_file.display()),
-        "已设置 KWin Wayland/InputMethod=keytao-wayland-launcher.desktop".into(),
-    ])
 }
 
 fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
@@ -5566,28 +5449,6 @@ async fn android_keytao_data_dir<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn android_open_app<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    package_name: String,
-) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        app.state::<ScopedStorageHandle<R>>()
-            .0
-            .run_mobile_plugin(
-                "openApp",
-                serde_json::json!({ "packageName": package_name }),
-            )
-            .map(|_: serde_json::Value| ())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err("Not Android".into())
-    }
-}
-
-#[tauri::command]
 async fn android_pick_directory<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, String> {
@@ -5858,20 +5719,6 @@ fn macos_ime_app_path() -> PathBuf {
     PathBuf::from("/Library/Input Methods/KeyTao.app")
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn macos_install_script_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("KEYTAO_MACOS_IME_INSTALL_SCRIPT").map(PathBuf::from) {
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_dir = manifest_dir.parent()?;
-    let path = workspace_dir.join("crates/keytao-macos-ime/install.sh");
-    path.is_file().then_some(path)
-}
-
 #[cfg(target_os = "macos")]
 fn macos_ime_status_inner(app: &AppHandle) -> MacosImeStatus {
     let path = macos_ime_app_path();
@@ -5892,17 +5739,6 @@ fn macos_ime_status_inner(app: &AppHandle) -> MacosImeStatus {
         } else {
             "KeyTao macOS input method is not installed".into()
         },
-    }
-}
-
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn command_output_tail(output: &[u8]) -> String {
-    let text = String::from_utf8_lossy(output).trim().to_string();
-    let count = text.chars().count();
-    if count <= 4000 {
-        text
-    } else {
-        text.chars().skip(count - 4000).collect()
     }
 }
 
@@ -5927,102 +5763,6 @@ fn macos_ime_status(app: AppHandle) -> MacosImeStatus {
             log_dir: None,
             message: "macOS only".into(),
         }
-    }
-}
-
-/// Run the repository install script for local macOS IME testing.
-#[tauri::command]
-#[cfg(target_os = "macos")]
-async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
-    #[cfg(not(debug_assertions))]
-    {
-        return Err("macOS IME install script is only available in development builds".into());
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let script = macos_install_script_path().ok_or(
-        "macOS IME install script not found; build and install target/keytao-macos-pkg/KeyTao.pkg instead",
-    )?;
-        let workspace_dir = script
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .ok_or("Cannot determine workspace directory for install script")?;
-        let build_dir = workspace_dir.join("target/keytao-macos-ime");
-
-        let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("/bin/bash")
-                .arg(&script)
-                .arg("--release")
-                .current_dir(&workspace_dir)
-                .env("KEYTAO_MACOS_BUILD_DIR", build_dir)
-                .output()
-        })
-        .await
-        .map_err(|e| format!("install task failed: {e}"))?
-        .map_err(|e| format!("run install script: {e}"))?;
-
-        if !output.status.success() {
-            let stdout = command_output_tail(&output.stdout);
-            let stderr = command_output_tail(&output.stderr);
-            return Err(format!(
-                "install script failed with status {}\nstdout:\n{}\nstderr:\n{}",
-                output.status, stdout, stderr
-            ));
-        }
-
-        std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.keyboard?InputSources")
-            .output()
-            .map_err(|e| format!("open System Settings: {e}"))?;
-
-        Ok(macos_ime_status_inner(&_app))
-    }
-}
-
-#[tauri::command]
-#[cfg(not(target_os = "macos"))]
-async fn macos_install_ime(_app: AppHandle) -> Result<MacosImeStatus, String> {
-    Err("macOS only".into())
-}
-
-/// Remove KeyTao.app from /Library/Input Methods/.
-#[tauri::command]
-async fn macos_uninstall_ime() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        #[cfg(not(debug_assertions))]
-        {
-            return Err(
-                "macOS IME uninstall script is only available in development builds".into(),
-            );
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            let dst = macos_ime_app_path();
-            if dst.exists() {
-                let output = std::process::Command::new("sudo")
-                    .args(["rm", "-rf"])
-                    .arg(&dst)
-                    .output()
-                    .map_err(|e| format!("run sudo rm: {e}"))?;
-                if !output.status.success() {
-                    return Err(format!(
-                        "remove failed with status {}\n{}",
-                        output.status,
-                        command_output_tail(&output.stderr)
-                    ));
-                }
-            }
-            Ok(())
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("macOS only".into())
     }
 }
 
@@ -7025,19 +6765,6 @@ fn get_ime_ui_settings<R: tauri::Runtime>(
 
 #[tauri::command]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn set_ime_ui_color_scheme(
-    color_scheme: keytao_theme::UiColorScheme,
-) -> Result<ImeUiSettings, String> {
-    write_ime_ui_color_scheme(color_scheme)?;
-    let reload_message = match write_keytao_ime_reload_stamp() {
-        Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
-        Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
-    };
-    ime_ui_settings_with_message(reload_message)
-}
-
-#[tauri::command]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn set_ime_embedded_composition(embedded: bool) -> Result<ImeUiSettings, String> {
     write_ime_embedded_composition(embedded)?;
     let reload_message = match write_keytao_ime_reload_stamp() {
@@ -7061,74 +6788,6 @@ fn set_ime_ui_settings(
         Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
     };
     ime_ui_settings_with_message(reload_message)
-}
-
-#[tauri::command]
-#[cfg(target_os = "android")]
-fn set_ime_ui_color_scheme<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    color_scheme: keytao_theme::UiColorScheme,
-) -> Result<ImeUiSettings, String> {
-    let root = android_keytao_root(&app)?;
-    let theme_path = root.join("theme.yaml");
-    let current = ime_ui_settings_from_paths(
-        theme_path.clone(),
-        Some(android_reload_stamp_path(&root)),
-        String::new(),
-    )?;
-    keytao_theme::write_ime_ui_settings_to_path(
-        &theme_path,
-        color_scheme,
-        current.orientation,
-        current.accent_color,
-        current.font_size,
-    )?;
-    let reload_message = match write_android_reload_stamp(&root) {
-        Ok(path) => format!(
-            "已保存 Android 输入法 UI 配置并通知输入法重载：{}",
-            path.display()
-        ),
-        Err(e) => format!("已保存 Android 输入法 UI 配置，但输入法重载通知失败：{e}"),
-    };
-    ime_ui_settings_from_paths(
-        theme_path,
-        Some(android_reload_stamp_path(&root)),
-        reload_message,
-    )
-}
-
-#[tauri::command]
-#[cfg(target_os = "ios")]
-fn set_ime_ui_color_scheme(
-    app: tauri::AppHandle,
-    color_scheme: keytao_theme::UiColorScheme,
-) -> Result<ImeUiSettings, String> {
-    let root = ios_keytao_root(&app)?;
-    let theme_path = root.join("theme.yaml");
-    let current = ime_ui_settings_from_paths(
-        theme_path.clone(),
-        Some(ios_reload_stamp_path(&root)),
-        String::new(),
-    )?;
-    keytao_theme::write_ime_ui_settings_to_path(
-        &theme_path,
-        color_scheme,
-        current.orientation,
-        current.accent_color,
-        current.font_size,
-    )?;
-    let reload_message = match write_ios_reload_stamp(&root) {
-        Ok(path) => format!(
-            "已保存 iOS 输入法 UI 配置并通知输入法重载：{}",
-            path.display()
-        ),
-        Err(e) => format!("已保存 iOS 输入法 UI 配置，但输入法重载通知失败：{e}"),
-    };
-    ime_ui_settings_from_paths(
-        theme_path,
-        Some(ios_reload_stamp_path(&root)),
-        reload_message,
-    )
 }
 
 #[tauri::command]
@@ -7193,29 +6852,6 @@ fn set_ime_ui_settings(
         Some(ios_reload_stamp_path(&root)),
         reload_message,
     )
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Serialize, Clone)]
-pub struct WindowsImeStatus {
-    pub supported: bool,
-    pub packaged: bool,
-    pub registered: bool,
-    pub registered_dll: bool,
-    pub profile_enabled: bool,
-    pub registration_busy: bool,
-    pub registration_state: String,
-    pub registration_error: Option<String>,
-    pub runtime_dir: Option<String>,
-    pub dll_path: Option<String>,
-    pub registered_path: Option<String>,
-    pub profile_status: String,
-    pub user_data_dir: Option<String>,
-    pub shared_data_dir: Option<String>,
-    pub shared_data_source: String,
-    pub reload_stamp_path: Option<String>,
-    pub reload_stamp_signature: Option<String>,
-    pub message: String,
 }
 
 // ─── Install schemas to default keytao data dir ───────────────────────────────
@@ -7286,28 +6922,6 @@ async fn rime_install_to_default(app: AppHandle, url: String) -> Result<InstallR
 #[cfg(target_os = "linux")]
 fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
     linux_ime_status_with_message(&app, "已刷新 keytao-ime 状态".into())
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-fn linux_start_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
-    launch_keytao_ime(&app, false)
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-fn linux_restart_ime(app: AppHandle) -> Result<LinuxImeStatus, String> {
-    launch_keytao_ime(&app, true)
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-fn linux_enable_kde_support(app: AppHandle) -> Result<LinuxImeStatus, String> {
-    let mut messages = configure_kde_virtual_keyboard(&app)?;
-    let mut status = launch_keytao_ime(&app, false)?;
-    messages.push(status.message);
-    status.message = messages.join("；");
-    Ok(status)
 }
 
 #[derive(Serialize)]
@@ -7812,8 +7426,9 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(scoped_storage_plugin());
 
-    #[cfg(not(any(target_os = "linux", target_os = "ios")))]
+    #[cfg(not(target_os = "linux"))]
     let builder = builder.setup(|app| {
+        app_core::manage_core(app.handle())?;
         #[cfg(target_os = "windows")]
         windows_app_actions::show_main_window(app.handle());
         #[cfg(target_os = "android")]
@@ -7826,9 +7441,8 @@ pub fn run() {
                 }
             });
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
-            let _ = app;
             if let Some(root) = keytao_core::default_user_data_dir() {
                 keytao_core::runtime_log::init(&root, "desktop-app");
             }
@@ -7837,9 +7451,7 @@ pub fn run() {
     });
 
     #[cfg(target_os = "linux")]
-    let builder = builder
-        .plugin(tauri_plugin_global_shortcut::Builder::default().build())
-        .manage(rime::RimeEngine::default());
+    let builder = builder.manage(rime::RimeEngine::default());
 
     #[cfg(target_os = "linux")]
     let builder = builder.manage(ManagedImeHelper::default());
@@ -7853,37 +7465,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            app_core::manage_core(app.handle())?;
             if let Some(root) = keytao_core::default_user_data_dir() {
                 keytao_core::runtime_log::init(&root, "desktop-app");
-            }
-            use tauri_plugin_global_shortcut::{
-                Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-            };
-            let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-            let handle = app.handle().clone();
-            if let Err(e) =
-                app.handle()
-                    .global_shortcut()
-                    .on_shortcut(shortcut, move |_app, _sc, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            let pid = rime::get_frontmost_pid();
-                            rime::set_injection_target(pid);
-                            if let Some(w) = handle.get_webview_window("ime-overlay") {
-                                if w.is_visible().unwrap_or(false) {
-                                    let _ = w.hide();
-                                } else {
-                                    let _ = w.center();
-                                    let _ = w.show();
-                                    let _ = w.set_focus();
-                                }
-                            }
-                        }
-                    })
-            {
-                eprintln!(
-                    "Ctrl+Shift+Space global shortcut is already registered or unavailable; \
-                     continuing without the overlay hotkey: {e}"
-                );
             }
             // Linux tray is handled by keytao-ime daemon now.
 
@@ -7911,8 +7495,6 @@ pub fn run() {
             read_local_schemas,
             smart_install,
             macos_ime_status,
-            macos_install_ime,
-            macos_uninstall_ime,
             rime_install_to_default,
             android_ime_status,
             android_storage_permission_status,
@@ -7922,7 +7504,6 @@ pub fn run() {
             set_android_ime_input_settings,
             android_open_input_method_settings,
             android_show_input_method_picker,
-            android_open_app,
             android_pick_directory,
             android_list_files,
             android_read_local_schemas,
@@ -7937,7 +7518,6 @@ pub fn run() {
             addon_schema_uninstall,
             rime_deploy_default,
             get_ime_ui_settings,
-            set_ime_ui_color_scheme,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             set_ime_embedded_composition,
             set_ime_ui_settings,
@@ -7951,12 +7531,6 @@ pub fn run() {
             rime_get_data_dir,
             #[cfg(target_os = "linux")]
             linux_ime_status,
-            #[cfg(target_os = "linux")]
-            linux_start_ime,
-            #[cfg(target_os = "linux")]
-            linux_restart_ime,
-            #[cfg(target_os = "linux")]
-            linux_enable_kde_support,
             #[cfg(target_os = "windows")]
             windows_ime_status,
             #[cfg(target_os = "windows")]
@@ -7969,27 +7543,8 @@ pub fn run() {
             windows_app_actions::windows_dismiss_ime_action,
             #[cfg(target_os = "windows")]
             windows_app_actions::windows_redeploy_ime_action,
-            // ── IME engine commands (Linux only for now) ──
-            #[cfg(target_os = "linux")]
-            rime::rime_setup,
-            #[cfg(target_os = "linux")]
-            rime::rime_process_key,
-            #[cfg(target_os = "linux")]
-            rime::rime_select_candidate,
-            #[cfg(target_os = "linux")]
-            rime::rime_change_page,
-            #[cfg(target_os = "linux")]
-            rime::rime_reset,
-            #[cfg(target_os = "linux")]
-            rime::rime_is_ready,
-            #[cfg(target_os = "linux")]
-            rime::rime_memory_usage,
-            #[cfg(target_os = "linux")]
-            rime::rime_inject_text,
             #[cfg(target_os = "linux")]
             rime::rime_get_data_dir,
-            #[cfg(target_os = "linux")]
-            rime::rime_has_schemas,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
