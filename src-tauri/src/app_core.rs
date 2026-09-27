@@ -32,14 +32,18 @@ pub(crate) fn manage_core(app: &AppHandle) -> Result<(), Box<dyn std::error::Err
     let platform = Platform::Ios;
 
     let env = AppEnv {
-        // This contains credentials; never use the shared IME data directory.
-        data_dir: app.path().app_data_dir()?,
+        // Credentials belong in private local storage, never roaming or shared IME data.
+        data_dir: app.path().app_local_data_dir()?,
         cache_dir: app.path().app_cache_dir()?,
         resource_dir: app.path().resource_dir()?,
         app_version: app.package_info().version.to_string(),
         platform,
     };
     let core = Core::new(env, Arc::new(TauriEventSink(app.clone())))?;
+    #[cfg(not(target_os = "android"))]
+    if let Err(error) = core.initialize_onboarding(super::default_keytao_user_root(app).ok()) {
+        tracing::warn!(%error, "Failed to initialize onboarding");
+    }
     if let Some(path) = core.recovered_state_file() {
         tracing::warn!(
             quarantine_path = %path.display(),

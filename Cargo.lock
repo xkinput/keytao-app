@@ -2353,7 +2353,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-os",
  "tauri-plugin-single-instance",
- "time",
  "tokio",
  "tracing",
  "zip",
@@ -2363,6 +2362,7 @@ dependencies = [
 name = "keytao-app-core"
 version = "1.2.1-alpha.42"
 dependencies = [
+ "dirs 5.0.1",
  "futures-util",
  "keytao-core",
  "keytao-theme",

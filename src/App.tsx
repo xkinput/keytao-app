@@ -544,19 +544,46 @@ export default function App() {
     } catch {
       // Ignore storage cleanup failures.
     }
+    void invoke("app_state_clear_auth").catch((error) => {
+      console.warn("Failed to clear core auth state", error)
+    })
   }
 
   useEffect(() => {
+    let token: string | null = null
+    let user: AppAuthUser | null = null
+    let androidOnboardingCompleted = false
     try {
-      const token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)
+      token = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)
+      if (!token?.trim()) token = null
       const rawUser = window.localStorage.getItem(AUTH_USER_STORAGE_KEY)
       if (token) {
         setAuthToken(token)
-        if (rawUser) setAuthUser(JSON.parse(rawUser) as AppAuthUser)
+        if (rawUser) {
+          user = JSON.parse(rawUser) as AppAuthUser
+          setAuthUser(user)
+        }
       }
     } catch {
       // Ignore invalid persisted auth state.
     }
+    try {
+      androidOnboardingCompleted = window.localStorage.getItem(ANDROID_ONBOARDING_DONE_KEY) === "1"
+    } catch {
+      // Ignore unavailable legacy onboarding state.
+    }
+    void invoke("app_state_import_legacy", { token, user, androidOnboardingCompleted })
+      .catch((error) => {
+        console.warn("Failed to import legacy app state", error)
+      })
+      .then(() => {
+        // Import onboarding before clear_auth seals legacy migration.
+        if (!token) {
+          return invoke("app_state_clear_auth").catch((error) => {
+            console.warn("Failed to clear core auth state", error)
+          })
+        }
+      })
   }, [])
 
   useEffect(() => {
@@ -938,6 +965,9 @@ export default function App() {
 
     setAndroidOnboardingCompleted(true)
     window.localStorage.setItem(ANDROID_ONBOARDING_DONE_KEY, "1")
+    void invoke("app_state_complete_onboarding").catch((error) => {
+      console.warn("Failed to complete core onboarding", error)
+    })
   }, [
     osType,
     androidOnboardingCompleted,

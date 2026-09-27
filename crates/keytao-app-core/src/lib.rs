@@ -1,4 +1,6 @@
+pub mod account;
 pub mod addon;
+pub mod logs;
 #[cfg(target_os = "windows")]
 pub mod app_actions;
 pub mod component_versions;
@@ -90,6 +92,39 @@ impl Core {
         self.lock_state().clone()
     }
 
+    /// Classify fresh/recovered state once a local IME root can be resolved.
+    /// Keep unknown roots pending across both auth writes and restarts.
+    pub fn initialize_onboarding(&self, local_schema_dir: Option<PathBuf>) -> Result<(), CoreError> {
+        let mut state = self.lock_state();
+        let first_run = !state.onboarding_initialized;
+        if !first_run {
+            return Ok(());
+        }
+        let Some(local_schema_dir) = local_schema_dir else {
+            return Ok(());
+        };
+        let installed = scheme::check_local_schema(self, Some(local_schema_dir))?.installed;
+        let mut next = state.clone();
+        next.onboarding_completed |= state::should_complete_onboarding(first_run, installed);
+        next.onboarding_initialized = true;
+        // Persist even a fresh user's false value so later installs do not turn
+        // a subsequent startup into an old-user migration.
+        next.save(&self.env.data_dir)?;
+        *state = next;
+        Ok(())
+    }
+
+    pub fn onboarding(&self) -> state::OnboardingState {
+        state::OnboardingState { completed: self.lock_state().onboarding_completed }
+    }
+
+    pub fn complete_onboarding(&self) -> Result<(), CoreError> {
+        self.update_state(|state| {
+            state.onboarding_completed = true;
+            state.onboarding_initialized = true;
+        })
+    }
+
     /// Serialize updates within this Core. The callback must not re-enter Core.
     /// Publish the snapshot only after the atomic file replacement succeeds.
     pub fn update_state(&self, update: impl FnOnce(&mut AppState)) -> Result<(), CoreError> {
@@ -109,13 +144,26 @@ impl Core {
         user: Option<serde_json::Value>,
         onboarding_completed: bool,
     ) -> Result<(), CoreError> {
+        let auth_token = auth_token.filter(|token| !token.trim().is_empty());
+        let user = auth_token.as_ref().and(user);
         self.update_state(move |state| {
             if !state.legacy_imported {
-                state.auth_token = auth_token;
-                state.user = user;
-                state.onboarding_completed = onboarding_completed;
+                if state.auth_token.is_none() {
+                    state.auth_token = auth_token;
+                    state.user = user;
+                }
+                state.onboarding_completed |= onboarding_completed;
                 state.legacy_imported = true;
             }
+        })
+    }
+
+    pub fn clear_auth(&self) -> Result<(), CoreError> {
+        self.update_state(|state| {
+            state.auth_token = None;
+            state.user = None;
+            // A delayed WebView import must not resurrect a cleared session.
+            state.legacy_imported = true;
         })
     }
 

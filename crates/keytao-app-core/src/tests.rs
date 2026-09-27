@@ -29,6 +29,7 @@ fn state_round_trip() {
         auth_token: Some("test-token".into()),
         user: Some(json!({"id": 7, "name": "test"})),
         onboarding_completed: true,
+        onboarding_initialized: true,
         legacy_imported: true,
     };
     core.update_state(|state| *state = expected.clone())
@@ -156,6 +157,189 @@ fn legacy_import_is_idempotent_across_restart() {
 }
 
 #[test]
+fn fresh_onboarding_initialization_persists_false_without_shared_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("private");
+    let core = open_core(&data_dir).unwrap();
+    core.initialize_onboarding(Some(dir.path().join("ime"))).unwrap();
+    assert!(data_dir.join("app-state.json").is_file());
+    assert!(!open_core(&data_dir).unwrap().onboarding().completed);
+    assert!(!dir.path().join("ime/app-state.json").exists());
+}
+
+fn installed_schema(dir: &Path) -> PathBuf {
+    let root = dir.join("ime");
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: keytao\n",
+    ).unwrap();
+    fs::write(
+        root.join("keytao.schema.yaml"),
+        "schema:\n  schema_id: keytao\n",
+    ).unwrap();
+    root
+}
+
+#[test]
+fn recovered_state_reapplies_old_user_onboarding_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema_dir = installed_schema(dir.path());
+    let path = dir.path().join("app-state.json");
+    fs::write(&path, "{invalid").unwrap();
+    let core = open_core(dir.path()).unwrap();
+    let quarantine = core.recovered_state_file().unwrap();
+    core.initialize_onboarding(Some(schema_dir)).unwrap();
+    assert!(core.onboarding().completed);
+    assert!(open_core(dir.path()).unwrap().onboarding().completed);
+    assert_eq!(fs::read_to_string(quarantine).unwrap(), "{invalid");
+}
+
+#[test]
+fn unresolved_onboarding_root_is_not_persisted_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema_dir = installed_schema(dir.path());
+    let data_dir = dir.path().join("private");
+    let core = open_core(&data_dir).unwrap();
+    core.initialize_onboarding(None).unwrap();
+    assert!(!data_dir.exists());
+    assert!(!core.onboarding().completed);
+    core.initialize_onboarding(Some(schema_dir)).unwrap();
+    assert!(core.onboarding().completed);
+    assert!(open_core(&data_dir).unwrap().onboarding().completed);
+}
+
+#[test]
+fn unresolved_onboarding_survives_legacy_import_clear_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema_dir = installed_schema(dir.path());
+    let data_dir = dir.path().join("private");
+    let core = open_core(&data_dir).unwrap();
+    core.initialize_onboarding(None).unwrap();
+    core.import_legacy_state(None, None, false).unwrap();
+    core.clear_auth().unwrap();
+    let reopened = open_core(&data_dir).unwrap();
+    reopened.initialize_onboarding(None).unwrap();
+    assert!(!reopened.onboarding().completed);
+    reopened.initialize_onboarding(Some(schema_dir)).unwrap();
+    assert!(open_core(&data_dir).unwrap().onboarding().completed);
+}
+
+#[test]
+fn onboarding_storage_failure_preserves_state_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema_dir = installed_schema(dir.path());
+    let core = open_core(dir.path()).unwrap();
+    let before = core.state();
+    let path = dir.path().join("app-state.json");
+    fs::create_dir(&path).unwrap();
+    assert!(core.initialize_onboarding(Some(schema_dir.clone())).is_err());
+    assert!(core.state() == before);
+    fs::remove_dir(&path).unwrap();
+    core.initialize_onboarding(Some(schema_dir)).unwrap();
+    assert!(open_core(dir.path()).unwrap().onboarding().completed);
+}
+
+#[test]
+fn existing_state_without_onboarding_marker_keeps_its_decision() {
+    for completed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let schema_dir = installed_schema(dir.path());
+        fs::write(
+            dir.path().join("app-state.json"),
+            json!({
+                "auth_token": null, "user": null,
+                "onboarding_completed": completed, "legacy_imported": true,
+            }).to_string(),
+        ).unwrap();
+        let core = open_core(dir.path()).unwrap();
+        core.initialize_onboarding(Some(schema_dir)).unwrap();
+        assert_eq!(core.onboarding().completed, completed);
+    }
+}
+
+#[test]
+fn legacy_import_treats_blank_tokens_and_their_users_as_absent() {
+    for token in [Some(""), Some(" \t\n"), Some("\u{2003}"), None] {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path()).unwrap();
+        core.import_legacy_state(token.map(str::to_owned), Some(json!({"id":7})), true)
+            .unwrap();
+        let state = open_core(dir.path()).unwrap().state();
+        assert!(state.auth_token.is_none());
+        assert!(state.user.is_none());
+        assert!(state.onboarding_completed);
+        assert!(state.legacy_imported);
+    }
+}
+
+#[test]
+fn onboarding_initialization_only_classifies_the_first_run() {
+    for installed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let schema_dir = dir.path().join("ime");
+        fs::create_dir(&schema_dir).unwrap();
+        if installed {
+            fs::write(schema_dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: keytao\n").unwrap();
+            fs::write(schema_dir.join("keytao.schema.yaml"), "schema:\n  schema_id: keytao\n").unwrap();
+        }
+        let data_dir = dir.path().join("private");
+        let core = open_core(&data_dir).unwrap();
+        // Startup's schema lookup can finish after the WebView import.
+        core.import_legacy_state(None, None, false).unwrap();
+        core.initialize_onboarding(Some(schema_dir.clone())).unwrap();
+        assert_eq!(core.onboarding().completed, installed);
+        assert_eq!(open_core(&data_dir).unwrap().onboarding().completed, installed);
+        // Neither a later startup nor another initialization reclassifies users.
+        fs::write(schema_dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: keytao\n").unwrap();
+        fs::write(schema_dir.join("keytao.schema.yaml"), "schema:\n  schema_id: keytao\n").unwrap();
+        core.initialize_onboarding(Some(schema_dir.clone())).unwrap();
+        let reopened = open_core(&data_dir).unwrap();
+        reopened.initialize_onboarding(Some(schema_dir)).unwrap();
+        assert_eq!(reopened.onboarding().completed, installed);
+        core.complete_onboarding().unwrap();
+        assert!(open_core(&data_dir).unwrap().onboarding().completed);
+        assert_eq!(serde_json::to_value(core.onboarding()).unwrap(), json!({"completed":true}));
+    }
+}
+
+#[test]
+fn clear_auth_persists_and_blocks_delayed_legacy_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path()).unwrap();
+    core.update_state(|state| {
+        state.auth_token = Some("new-token".into());
+        state.user = Some(json!({"id": 9}));
+        state.onboarding_completed = true;
+    }).unwrap();
+    core.clear_auth().unwrap();
+    core.import_legacy_state(Some("old-token".into()), Some(json!({"id": 7})), false).unwrap();
+    let state = open_core(dir.path()).unwrap().state();
+    assert!(state.auth_token.is_none());
+    assert!(state.user.is_none());
+    assert!(state.onboarding_completed);
+    assert!(state.legacy_imported);
+}
+
+#[test]
+fn legacy_import_preserves_newer_login_and_completed_onboarding() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path()).unwrap();
+    core.update_state(|state| {
+        state.auth_token = Some("new-token".into());
+        state.user = Some(json!({"id": 9}));
+        state.onboarding_completed = true;
+    }).unwrap();
+    core.import_legacy_state(Some("old-token".into()), Some(json!({"id": 7})), false)
+        .unwrap();
+    let state = open_core(dir.path()).unwrap().state();
+    assert_eq!(state.auth_token.as_deref(), Some("new-token"));
+    assert_eq!(state.user, Some(json!({"id": 9})));
+    assert!(state.onboarding_completed);
+    assert!(state.legacy_imported);
+}
+
+#[test]
 fn failed_write_preserves_snapshot_and_cleans_temp_file() {
     let dir = tempfile::tempdir().unwrap();
     let core = open_core(dir.path()).unwrap();
@@ -228,4 +412,9 @@ fn persisted_credentials_are_private() {
         .unwrap()
         .permissions();
     assert_eq!(permissions.mode() & 0o777, 0o600);
+    // Replacements must remain private even if the old file was made public.
+    fs::set_permissions(dir.path().join("app-state.json"), fs::Permissions::from_mode(0o644)).unwrap();
+    core.complete_onboarding().unwrap();
+    core.clear_auth().unwrap();
+    assert_eq!(fs::metadata(dir.path().join("app-state.json")).unwrap().permissions().mode() & 0o777, 0o600);
 }

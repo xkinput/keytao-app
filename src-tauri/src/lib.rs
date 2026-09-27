@@ -1,13 +1,12 @@
 #[cfg(target_os = "windows")]
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
-use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 mod app_core;
+mod log_shell;
+pub use keytao_app_core::logs::{DebugLogFile, DebugLogs, RuntimeLogLevel, RuntimeLogSettings};
 mod scheme_shell;
 mod ime_shell;
 use ime_shell::*;
@@ -19,14 +18,12 @@ use keytao_app_core::{Core, wanxiang};
 use std::sync::Arc;
 use scheme_shell::*;
 pub use keytao_app_core::scheme_types::*;
-use keytao_app_core::scheme_files::write_file_atomic;
 #[cfg(target_os = "windows")]
 use keytao_app_core::scheme_files::parse_schema_list;
 #[cfg(target_os = "windows")]
 use keytao_app_core::addon::{addon_schema_status_at, addon_schema_source_files, EASY_EN_ADDON_ID};
 #[cfg(target_os = "android")]
 use keytao_app_core::install::install_result_from_value;
-use keytao_app_core::scheme::api_error_message;
 
 pub use keytao_app_core::events::{InstallProgress, WindowsImeStatus};
 #[cfg(target_os = "windows")]
@@ -54,43 +51,7 @@ mod rime;
 // Linux protocol frontends live in the keytao-ime daemon. The GUI only deploys
 // assets and starts the daemon when needed.
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct AppAuthUser {
-    pub id: i64,
-    pub name: Option<String>,
-    pub nickname: Option<String>,
-    pub email: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct AppAuthSession {
-    pub token: String,
-    pub user: AppAuthUser,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserDictionaryExportResponse {
-    file_name: String,
-    content: String,
-    count: usize,
-    updated_at: String,
-}
-
-#[derive(Serialize, Clone)]
-pub struct UserDictionarySyncResult {
-    pub file_name: String,
-    pub path: String,
-    pub count: usize,
-    pub updated_at: String,
-    pub import_table_patched: bool,
-    pub reload_stamp_path: Option<String>,
-    pub message: String,
-}
-
-const API_BASE: &str = "https://keytao.rea.ink";
-const DEBUG_LOG_RETENTION_DAYS: i64 = 3;
-const DEBUG_LOG_MAX_LINES: usize = 20_000;
+pub use keytao_app_core::account::{AppAuthSession, AppAuthUser, UserDictionarySyncResult};
 #[cfg(target_os = "ios")]
 const IOS_APP_GROUP_IDENTIFIER: &str = "group.ink.rea.keytao-app";
 
@@ -211,131 +172,42 @@ async fn windows_ime_ensure_registered(app: AppHandle) -> Result<WindowsImeStatu
 
 
 #[tauri::command]
-async fn keytao_login(
-    app: AppHandle,
-    name: String,
-    password: String,
-) -> Result<AppAuthSession, String> {
-    let name = name.trim();
-    if name.is_empty() || password.is_empty() {
-        return Err("用户名和密码不能为空".into());
-    }
-
-    let client = build_client(&app)?;
-    let response = client
-        .post(format!("{API_BASE}/api/auth/login"))
-        .json(&serde_json::json!({ "name": name, "password": password }))
-        .timeout(std::time::Duration::from_secs(12))
-        .send()
-        .await
-        .map_err(|e| format!("登录请求失败: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "登录失败").await);
-    }
-
-    response
-        .json::<AppAuthSession>()
-        .await
-        .map_err(|e| format!("解析登录响应失败: {e}"))
+async fn keytao_login(core: tauri::State<'_, Arc<Core>>, name: String, password: String) -> Result<AppAuthSession, String> {
+    keytao_app_core::account::keytao_login(&core, name, password).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn keytao_me(app: AppHandle, token: String) -> Result<AppAuthUser, String> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Err("未登录".into());
-    }
-
-    let client = build_client(&app)?;
-    let response = client
-        .get(format!("{API_BASE}/api/auth/me"))
-        .bearer_auth(token)
-        .timeout(std::time::Duration::from_secs(12))
-        .send()
-        .await
-        .map_err(|e| format!("校验登录状态失败: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "校验登录状态失败").await);
-    }
-
-    response
-        .json::<AppAuthUser>()
-        .await
-        .map_err(|e| format!("解析账号信息失败: {e}"))
+async fn keytao_me(core: tauri::State<'_, Arc<Core>>, token: String) -> Result<AppAuthUser, String> {
+    keytao_app_core::account::keytao_me(&core, token).await.map_err(|e| e.to_string())
 }
 
-fn active_import_exists(content: &str, import_name: &str) -> bool {
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        !trimmed.starts_with('#')
-            && trimmed
-                .strip_prefix("-")
-                .map(|rest| rest.trim().split_whitespace().next() == Some(import_name))
-                .unwrap_or(false)
-    })
+#[tauri::command]
+fn app_state_import_legacy(
+    core: tauri::State<'_, Arc<Core>>,
+    token: Option<String>,
+    user: Option<serde_json::Value>,
+    android_onboarding_completed: bool,
+) -> Result<(), String> {
+    core.import_legacy_state(token, user, android_onboarding_completed).map_err(|e| e.to_string())
 }
 
-fn ensure_import_table_entry(path: &Path, import_name: &str) -> Result<bool, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取词典导入表失败 {}: {e}", path.display()))?;
-    if active_import_exists(&content, import_name) {
-        return Ok(false);
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let Some(index) = lines
-        .iter()
-        .position(|line| line.trim_start().starts_with("import_tables:"))
-    else {
-        return Ok(false);
-    };
-
-    let indent = lines
-        .iter()
-        .skip(index + 1)
-        .find_map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("-") && !trimmed.starts_with("#") {
-                Some(line.len() - trimmed.len())
-            } else {
-                None
-            }
-        })
-        .unwrap_or(2);
-
-    let mut output = Vec::with_capacity(lines.len() + 1);
-    for (line_index, line) in lines.iter().enumerate() {
-        output.push((*line).to_string());
-        if line_index == index {
-            output.push(format!("{}- {import_name}", " ".repeat(indent)));
-        }
-    }
-
-    std::fs::write(path, format!("{}\n", output.join("\n")))
-        .map_err(|e| format!("写入词典导入表失败 {}: {e}", path.display()))?;
-    Ok(true)
+#[tauri::command]
+fn app_state_clear_auth(core: tauri::State<'_, Arc<Core>>) -> Result<(), String> {
+    core.clear_auth().map_err(|e| e.to_string())
 }
 
-fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
-    let mut patched = false;
-    let entries = std::fs::read_dir(root).map_err(|e| format!("读取输入法目录失败: {e}"))?;
-    for entry in entries.filter_map(|item| item.ok()) {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !(filename.starts_with("keytao") && filename.ends_with(".extended.dict.yaml")) {
-            continue;
-        }
+#[tauri::command]
+fn app_state_complete_onboarding(core: tauri::State<'_, Arc<Core>>) -> Result<(), String> {
+    core.complete_onboarding().map_err(|e| e.to_string())
+}
 
-        patched |= ensure_import_table_entry(&path, "keytao.user")?;
+#[tauri::command]
+async fn app_state_onboarding(app: AppHandle) -> keytao_app_core::state::OnboardingState {
+    let core = app.state::<Arc<Core>>();
+    if let Err(error) = core.initialize_onboarding(default_keytao_user_root(&app).ok()) {
+        tracing::warn!(%error, "Failed to initialize onboarding");
     }
-    Ok(patched)
+    core.onboarding()
 }
 
 fn default_keytao_user_root<R: tauri::Runtime>(
@@ -378,51 +250,8 @@ fn write_default_reload_stamp<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn sync_user_dictionary<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    token: String,
-) -> Result<UserDictionarySyncResult, String> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Err("请先登录 KeyTao 账号".into());
-    }
-
-    let client = build_client(&app)?;
-    let response = client
-        .get(format!("{API_BASE}/api/user/dictionary/export"))
-        .bearer_auth(token)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("同步用户词库失败: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "同步用户词库失败").await);
-    }
-
-    let export = response
-        .json::<UserDictionaryExportResponse>()
-        .await
-        .map_err(|e| format!("解析用户词库失败: {e}"))?;
-    let root = default_keytao_user_root(&app)?;
-    std::fs::create_dir_all(&root).map_err(|e| format!("创建输入法目录失败: {e}"))?;
-
-    let keytao_path = root.join("keytao.user.dict.yaml");
-    std::fs::write(&keytao_path, export.content.as_bytes())
-        .map_err(|e| format!("写入用户词库失败 {}: {e}", keytao_path.display()))?;
-
-    let import_table_patched = ensure_user_dictionary_imports(&root)?;
-    let reload_stamp_path = write_default_reload_stamp(&app, &root)?.map(path_string);
-
-    Ok(UserDictionarySyncResult {
-        file_name: export.file_name,
-        path: path_string(keytao_path),
-        count: export.count,
-        updated_at: export.updated_at,
-        import_table_patched,
-        reload_stamp_path,
-        message: format!("已同步 {} 条用户词条", export.count),
-    })
+async fn sync_user_dictionary<R: tauri::Runtime>(app: tauri::AppHandle<R>, token: String) -> Result<UserDictionarySyncResult, String> {
+    keytao_app_core::account::sync_user_dictionary(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone()), token).await.map_err(|e| e.to_string())
 }
 
 fn rime_default_path() -> Option<PathBuf> {
@@ -2398,493 +2227,34 @@ fn linux_ime_status(app: AppHandle) -> LinuxImeStatus {
     keytao_app_core::ime_status::linux::linux_ime_status(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone()))
 }
 
-#[derive(Serialize)]
-pub struct DebugLogFile {
-    pub lines: Vec<String>,
-    pub truncated: bool,
-}
-
-#[derive(Serialize)]
-pub struct DebugLogs {
-    pub ime: DebugLogFile,
-    pub app: DebugLogFile,
-    pub macos_ime: Option<DebugLogFile>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RuntimeLogLevel {
-    Info,
-    Verbose,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RuntimeLogConfig {
-    enabled: bool,
-    level: RuntimeLogLevel,
-}
-
-#[derive(Serialize)]
-struct RuntimeLogFileInfo {
-    name: String,
-    size: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeLogSettings {
-    #[serde(flatten)]
-    config: RuntimeLogConfig,
-    log_dir: String,
-    files: Vec<RuntimeLogFileInfo>,
-    file_count: usize,
-    total_bytes: u64,
-}
-
-fn runtime_log_directory(root: &Path) -> Result<PathBuf, String> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = root;
-        ime_state_log_dir().ok_or("Cannot determine runtime log directory".into())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(root.join("log"))
-    }
-}
-
-fn is_runtime_log_name(name: &str) -> bool {
-    let Some((tag, suffix)) = name
-        .strip_prefix("keytao-")
-        .and_then(|n| n.split_once(".log"))
-    else {
-        return false;
-    };
-    // The existing Linux daemon log is not a structured runtime log.
-    !tag.is_empty()
-        && tag != "ime"
-        && tag.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
-        && (suffix.is_empty()
-            || suffix.strip_prefix('.').is_some_and(|rotation| {
-                !rotation.is_empty() && rotation.bytes().all(|c| c.is_ascii_digit())
-            }))
-}
-
-fn runtime_log_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    // Surface permission failures instead of reporting a misleading empty list.
-    match std::fs::read_dir(dir) {
-        Ok(_) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("Cannot read runtime log directory: {e}")),
-    }
-    let mut paths = collect_dir_log_paths(dir)
-        .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(is_runtime_log_name)
-                && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
-        })
-        .collect::<Vec<_>>();
-    // Read older rotations first; a cross-process timestamp merge is deferred.
-    paths.sort_by_cached_key(|path| {
-        (
-            std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-            path.clone(),
-        )
-    });
-    Ok(paths)
+#[tauri::command]
+async fn get_runtime_log_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<RuntimeLogSettings, String> {
+    keytao_app_core::logs::get_runtime_log_settings(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone())).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn get_runtime_log_settings<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<RuntimeLogSettings, String> {
-    let root = default_keytao_user_root(&app)?;
-    let config = match std::fs::read(root.join("runtime-log.json")) {
-        Ok(bytes) => serde_json::from_slice::<RuntimeLogConfig>(&bytes)
-            .map_err(|e| format!("Cannot parse runtime log settings: {e}"))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeLogConfig {
-            enabled: true,
-            level: RuntimeLogLevel::Info,
-        },
-        Err(e) => return Err(format!("Cannot read runtime log settings: {e}")),
-    };
-    let dir = runtime_log_directory(&root)?;
-    let mut files = Vec::new();
-    for path in runtime_log_paths(&dir)? {
-        match path.metadata() {
-            Ok(metadata) => files.push(RuntimeLogFileInfo {
-                name: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                size: metadata.len(),
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(format!("Cannot inspect runtime log: {e}")),
-        }
-    }
-    Ok(RuntimeLogSettings {
-        config,
-        log_dir: path_string(dir),
-        file_count: files.len(),
-        total_bytes: files.iter().map(|file| file.size).sum(),
-        files,
-    })
+async fn set_runtime_log_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, enabled: bool, level: RuntimeLogLevel) -> Result<(), String> {
+    keytao_app_core::logs::set_runtime_log_settings(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone()), enabled, level).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn set_runtime_log_settings<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    enabled: bool,
-    level: RuntimeLogLevel,
-) -> Result<(), String> {
-    let root = default_keytao_user_root(&app)?;
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let bytes =
-        serde_json::to_vec(&RuntimeLogConfig { enabled, level }).map_err(|e| e.to_string())?;
-    write_file_atomic(&root.join("runtime-log.json"), &bytes).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn read_runtime_log<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    max_lines: Option<usize>,
-) -> Result<DebugLogFile, String> {
-    let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
-    let paths = runtime_log_paths(&dir)?;
-    if paths.is_empty() {
-        return Ok(DebugLogFile {
-            lines: Vec::new(),
-            truncated: false,
-        });
-    }
-    // Runtime logs are size-bounded. Do not prune, rewrite, or time-filter them.
-    let mut logs = read_log_paths(paths, "", OffsetDateTime::UNIX_EPOCH, None);
-    let limit = max_lines
-        .unwrap_or(DEBUG_LOG_MAX_LINES)
-        .min(DEBUG_LOG_MAX_LINES);
-    if logs.lines.len() > limit {
-        logs.lines.drain(..logs.lines.len() - limit);
-        logs.truncated = true;
-    }
-    Ok(logs)
+async fn read_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>, max_lines: Option<usize>) -> Result<DebugLogFile, String> {
+    keytao_app_core::logs::read_runtime_log(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone()), max_lines).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn clear_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
-    let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
-    for path in runtime_log_paths(&dir)? {
-        match std::fs::remove_file(path) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(format!("Cannot clear runtime log: {e}")),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "ios")]
-#[allow(deprecated)] // Foundation re-exports the UIKit-compatible main-thread token.
-fn present_runtime_log_share(paths: Vec<PathBuf>) -> Result<(), String> {
-    use objc2_foundation::{MainThreadMarker, NSArray, NSURL};
-    use objc2_ui_kit::{UIActivityViewController, UIApplication, UIWindowScene};
-
-    let mtm = MainThreadMarker::new().ok_or("Sharing must run on the main thread")?;
-    let application = UIApplication::sharedApplication(mtm);
-    let window = application
-        .connectedScenes()
-        .iter()
-        .filter_map(|scene| scene.downcast::<UIWindowScene>().ok())
-        .flat_map(|scene| scene.windows().to_vec())
-        .find(|window| window.isKeyWindow())
-        .or_else(|| application.keyWindow())
-        .ok_or("No active window is available for sharing")?;
-    let presenter = window
-        .rootViewController()
-        .ok_or("No root view controller is available")?;
-    if presenter.presentedViewController().is_some() {
-        return Err("Dismiss the current sheet before sharing logs".into());
-    }
-    let urls = paths
-        .iter()
-        .map(|path| NSURL::from_file_path(path).ok_or("Cannot create runtime log file URL"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let items = NSArray::from_retained_slice(&urls);
-    // UIKit accepts file NSURL items; erasing the array's generic type is safe.
-    let controller = unsafe {
-        UIActivityViewController::initWithActivityItems_applicationActivities(
-            mtm.alloc(),
-            items.cast_unchecked(),
-            None,
-        )
-    };
-    if let Some(popover) = controller.popoverPresentationController() {
-        let view = presenter.view().ok_or("No source view is available for sharing")?;
-        popover.setSourceView(Some(&view));
-        popover.setSourceRect(view.bounds());
-    }
-    presenter.presentViewController_animated_completion(&controller, true, None);
-    Ok(())
+    keytao_app_core::logs::clear_runtime_log(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone())).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn share_runtime_log<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<serde_json::Value, String> {
-    #[cfg(target_os = "android")]
-    {
-        app.state::<ScopedStorageHandle<R>>()
-            .0
-            .run_mobile_plugin("shareRuntimeLog", ())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let dir = runtime_log_directory(&ios_keytao_root(&app)?)?;
-        let paths = runtime_log_paths(&dir)?;
-        if paths.is_empty() {
-            return Err("No runtime logs to share".into());
-        }
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let _ = sender.send(present_runtime_log_share(paths));
-        })
-        .map_err(|e| e.to_string())?;
-        receiver
-            .await
-            .map_err(|e| e.to_string())?
-            .map(|()| serde_json::Value::Null)
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        use tauri_plugin_opener::OpenerExt;
-        let dir = runtime_log_directory(&default_keytao_user_root(&app)?)?;
-        app.opener()
-            .open_path(path_string(dir), None::<&str>)
-            .map(|()| serde_json::Value::Null)
-            .map_err(|e| e.to_string())
-    }
+async fn share_runtime_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<serde_json::Value, String> {
+    keytao_app_core::logs::share_runtime_log(&app.state::<Arc<Core>>(), &ShellImeHost(app.clone()), |request| log_shell::share(&app, request)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn read_debug_logs() -> Result<DebugLogs, String> {
-    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
-    let ime = read_ime_logs(cutoff);
-    let app = read_tmp_logs("keytao-app.log", "No keytao-app.log found", cutoff);
-    #[cfg(target_os = "macos")]
-    let macos_ime = Some(read_macos_ime_logs(cutoff));
-    #[cfg(not(target_os = "macos"))]
-    let macos_ime = None;
-    Ok(DebugLogs {
-        ime,
-        app,
-        macos_ime,
-    })
-}
-
-fn read_tmp_logs(prefix: &str, missing_message: &str, cutoff: OffsetDateTime) -> DebugLogFile {
-    let paths = collect_tmp_log_paths(prefix);
-    read_log_paths(paths, missing_message, cutoff, Some(prefix))
-}
-
-/// Where the keytao-ime daemon keeps its log, mirroring the daemon's own
-/// choice: the log is derived from what the user types, so on Linux it lives in
-/// the per-user state directory instead of a world-readable `/tmp`.  The other
-/// platforms simply have no such directory.
-fn ime_state_log_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
-    Some(base.join("keytao").join("log"))
-}
-
-/// Read the keytao-ime daemon log; `/tmp` is only consulted for logs older
-/// releases left behind.
-fn read_ime_logs(cutoff: OffsetDateTime) -> DebugLogFile {
-    const PREFIX: &str = "keytao-ime.log";
-    let mut paths = ime_state_log_dir()
-        .map(|dir| collect_dir_log_paths(&dir))
-        .unwrap_or_default();
-    paths.extend(collect_tmp_log_paths(PREFIX));
-    read_log_paths(paths, "No keytao-ime.log found", cutoff, Some(PREFIX))
-}
-
-#[cfg(target_os = "macos")]
-fn read_macos_ime_logs(cutoff: OffsetDateTime) -> DebugLogFile {
-    let Some(log_dir) = keytao_core::default_user_data_dir().map(|dir| dir.join("log")) else {
-        return DebugLogFile {
-            lines: vec!["Cannot determine ~/Library/keytao/log".into()],
-            truncated: false,
-        };
-    };
-    let paths = collect_dir_log_paths(&log_dir);
-    read_log_paths(
-        paths,
-        "No macOS librime logs found in ~/Library/keytao/log",
-        cutoff,
-        None,
-    )
-}
-
-fn read_log_paths(
-    paths: Vec<PathBuf>,
-    missing_message: &str,
-    cutoff: OffsetDateTime,
-    prune_plain_prefix: Option<&str>,
-) -> DebugLogFile {
-    if paths.is_empty() {
-        return DebugLogFile {
-            lines: vec![missing_message.to_string()],
-            truncated: false,
-        };
-    }
-
-    let mut lines = VecDeque::with_capacity(DEBUG_LOG_MAX_LINES);
-    let mut kept = 0usize;
-
-    for path in paths {
-        if prune_plain_prefix
-            .is_some_and(|prefix| path.file_name().is_some_and(|name| name == prefix))
-        {
-            let _ = prune_plain_log_file(&path, cutoff);
-        }
-        let Ok(file) = std::fs::File::open(&path) else {
-            continue;
-        };
-        let mut keep_following = true;
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let display_line = strip_ansi_codes(&line);
-            if let Some(timestamp) = parse_log_timestamp(&display_line) {
-                keep_following = timestamp >= cutoff;
-            }
-            if keep_following {
-                if lines.len() == DEBUG_LOG_MAX_LINES {
-                    lines.pop_front();
-                }
-                lines.push_back(display_line);
-                kept += 1;
-            }
-        }
-    }
-
-    DebugLogFile {
-        lines: lines.into_iter().collect(),
-        truncated: kept > DEBUG_LOG_MAX_LINES,
-    }
-}
-
-fn collect_dir_log_paths(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    paths
-}
-
-fn collect_tmp_log_paths(prefix: &str) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir("/tmp") else {
-        return Vec::new();
-    };
-    let rotated_prefix = format!("{prefix}.");
-    let mut seen = HashSet::new();
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == prefix || (name.starts_with(&rotated_prefix) && !name.ends_with(".tmp")) {
-                let path = entry.path();
-                let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                if seen.insert(identity) {
-                    Some((name, path))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    paths.sort_by(|(left, _), (right, _)| left.cmp(right));
-    paths.into_iter().map(|(_, path)| path).collect()
-}
-
-fn prune_plain_log_file(path: &Path, cutoff: OffsetDateTime) -> std::io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Ok(());
-    }
-
-    let input = std::fs::File::open(path)?;
-    let temp_path = path.with_extension("tmp");
-    let mut writer = BufWriter::new(std::fs::File::create(&temp_path)?);
-    let mut saw_timestamp = false;
-    let mut keep_following = true;
-
-    for line in BufReader::new(input).lines().map_while(Result::ok) {
-        if let Some(timestamp) = parse_log_timestamp(&strip_ansi_codes(&line)) {
-            saw_timestamp = true;
-            keep_following = timestamp >= cutoff;
-        }
-        if keep_following {
-            writeln!(writer, "{line}")?;
-        }
-    }
-    writer.flush()?;
-
-    if saw_timestamp {
-        std::fs::rename(temp_path, path)?;
-    } else {
-        let _ = std::fs::remove_file(temp_path);
-    }
-
-    Ok(())
-}
-
-fn parse_log_timestamp(line: &str) -> Option<OffsetDateTime> {
-    let bytes = line.as_bytes();
-    for index in 0..bytes.len().saturating_sub(20) {
-        if bytes[index].is_ascii_digit()
-            && bytes.get(index + 4) == Some(&b'-')
-            && bytes.get(index + 7) == Some(&b'-')
-            && bytes.get(index + 10) == Some(&b'T')
-        {
-            let end = line[index..]
-                .find(char::is_whitespace)
-                .map(|offset| index + offset)
-                .unwrap_or(line.len());
-            if let Ok(timestamp) = OffsetDateTime::parse(&line[index..end], &Rfc3339) {
-                return Some(timestamp);
-            }
-        }
-    }
-    None
-}
-
-fn strip_ansi_codes(line: &str) -> String {
-    let mut output = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for code in chars.by_ref() {
-                if code.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
+async fn read_debug_logs(core: tauri::State<'_, Arc<Core>>) -> Result<DebugLogs, String> {
+    keytao_app_core::logs::read_debug_logs(&core).await.map_err(|e| e.to_string())
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -2910,7 +2280,11 @@ pub fn run() {
             // The JNI engine initialization only covers the IME/deploy processes.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
-                if let Ok(root) = android_keytao_root(&handle) {
+                let root = android_keytao_root(&handle).ok();
+                if let Err(error) = handle.state::<Arc<Core>>().initialize_onboarding(root.clone()) {
+                    tracing::warn!("Failed to initialize onboarding: {error}");
+                }
+                if let Some(root) = root {
                     keytao_core::runtime_log::init(&root, "android-app");
                 }
             });
@@ -2961,6 +2335,10 @@ pub fn run() {
             fetch_scheme_release,
             keytao_login,
             keytao_me,
+            app_state_import_legacy,
+            app_state_clear_auth,
+            app_state_complete_onboarding,
+            app_state_onboarding,
             sync_user_dictionary,
             get_component_versions,
             select_directory,
@@ -3030,6 +2408,7 @@ pub fn run() {
         });
 }
 
+#[cfg(target_os = "windows")]
 fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
     keytao_app_core::scheme::build_client(&app.state::<Arc<Core>>())
 }
@@ -3163,35 +2542,6 @@ mod tests {
     use super::*;
 
 
-
-    #[test]
-    fn test_user_dictionary_imports_only_patch_keytao_extended_dicts() {
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("keytao-user-dict-import-test-{suffix}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("keytao.extended.dict.yaml"),
-            "name: keytao.extended\nimport_tables:\n  - keytao.phrase\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("txjx.extended.dict.yaml"),
-            "name: txjx.extended\nimport_tables:\n  - txjx.core\n",
-        )
-        .unwrap();
-
-        assert!(ensure_user_dictionary_imports(&dir).unwrap());
-        let keytao = std::fs::read_to_string(dir.join("keytao.extended.dict.yaml")).unwrap();
-        let txjx = std::fs::read_to_string(dir.join("txjx.extended.dict.yaml")).unwrap();
-        assert!(keytao.contains("- keytao.user"));
-        assert!(!txjx.contains("- user"));
-        assert!(!txjx.contains("- keytao.user"));
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
     // ── JNI export manifest ───────────────────────────────────────────────────
 

@@ -4,12 +4,42 @@ use std::{fs, io::ErrorKind, path::Path};
 
 const STATE_FILE: &str = "app-state.json";
 
+#[derive(Serialize)]
+pub struct OnboardingState {
+    pub completed: bool,
+}
+
+pub(crate) fn should_complete_onboarding(first_run: bool, local_scheme_installed: bool) -> bool {
+    first_run && local_scheme_installed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_user_rule_requires_first_run_and_installed_scheme() {
+        assert!(should_complete_onboarding(true, true));
+        assert!(!should_complete_onboarding(true, false));
+        assert!(!should_complete_onboarding(false, true));
+        assert!(!should_complete_onboarding(false, false));
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
     pub auth_token: Option<String>,
     pub user: Option<serde_json::Value>,
     pub onboarding_completed: bool,
+    // Existing files already finalized onboarding; fresh/recovered defaults have
+    // not. Persist this distinction when auth writes precede root resolution.
+    #[serde(default = "existing_onboarding_initialized")]
+    pub onboarding_initialized: bool,
     pub legacy_imported: bool,
+}
+
+fn existing_onboarding_initialized() -> bool {
+    true
 }
 
 impl AppState {
