@@ -2648,6 +2648,7 @@ dependencies = [
  "flutter_rust_bridge",
  "keytao-app-core",
  "keytao-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

@@ -9,6 +9,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
+// These functions are ignored because they are not marked as `pub`: `install_result_dto`
+
 /// Creates the process-wide Core. Every subsequent call returns an error,
 /// including calls with identical config. Restart the process to change roots.
 Future<BridgeInfo> initCore({required BridgeConfig config}) =>
@@ -35,3 +37,87 @@ Future<SchemeReleaseDto> fetchSchemeRelease({required String scheme}) =>
 /// downloads it, then installs into the host root. Does not deploy the IME.
 Future<InstallResultDto> installLatestScheme({required String scheme}) =>
     RustLib.instance.api.crateApiCoreInstallLatestScheme(scheme: scheme);
+
+Future<ReleaseInfoDto> fetchLatestRelease() =>
+    RustLib.instance.api.crateApiCoreFetchLatestRelease();
+
+/// Installs a selected GitHub/Gitee or scheme release URL without deploying.
+Future<InstallResultDto> installSchemeFromUrl({required String url}) =>
+    RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(url: url);
+
+/// Call only after the Android channel confirms storage permission. Dart must
+/// serialize prepare -> smartExtractZipToPrivate -> finish as one installation.
+Future<String> prepareAndroidInstall({required String url}) =>
+    RustLib.instance.api.crateApiCorePrepareAndroidInstall(url: url);
+
+/// Pass jsonEncode of the Android channel's smart-extract result unchanged.
+Future<InstallResultDto> finishAndroidInstall({required String resultJson}) =>
+    RustLib.instance.api.crateApiCoreFinishAndroidInstall(
+      resultJson: resultJson,
+    );
+
+/// Android deployment belongs to the deployImeData platform channel.
+Future<DeployResultDto> deployDefault() =>
+    RustLib.instance.api.crateApiCoreDeployDefault();
+
+Future<AndroidImeInputSettingsDto> getAndroidImeInputSettings() =>
+    RustLib.instance.api.crateApiCoreGetAndroidImeInputSettings();
+
+/// Saves all 23 writable fields; returned path/message fields are read-only.
+Future<AndroidImeInputSettingsDto> setAndroidImeInputSettings({
+  required AndroidImeInputSettingsDto settings,
+}) => RustLib.instance.api.crateApiCoreSetAndroidImeInputSettings(
+  settings: settings,
+);
+
+Future<ImeUiSettingsDto> getImeUiSettings() =>
+    RustLib.instance.api.crateApiCoreGetImeUiSettings();
+
+Future<ImeUiSettingsDto> setImeUiSettings({
+  required UiColorSchemeDto colorScheme,
+  required PanelOrientationDto orientation,
+  required String accentColor,
+  required double fontSize,
+}) => RustLib.instance.api.crateApiCoreSetImeUiSettings(
+  colorScheme: colorScheme,
+  orientation: orientation,
+  accentColor: accentColor,
+  fontSize: fontSize,
+);
+
+Future<ImeUiSettingsDto> setImeEmbeddedComposition({required bool embedded}) =>
+    RustLib.instance.api.crateApiCoreSetImeEmbeddedComposition(
+      embedded: embedded,
+    );
+
+Future<EnglishModeDto> getDesktopEnglishMode() =>
+    RustLib.instance.api.crateApiCoreGetDesktopEnglishMode();
+
+Future<EnglishModeDto> setDesktopEnglishMode({required EnglishModeDto mode}) =>
+    RustLib.instance.api.crateApiCoreSetDesktopEnglishMode(mode: mode);
+
+Future<AddonSchemaStatusDto> addonSchemaStatus({required String id}) =>
+    RustLib.instance.api.crateApiCoreAddonSchemaStatus(id: id);
+
+Future<MacosImeStatusDto> macosImeStatus() =>
+    RustLib.instance.api.crateApiCoreMacosImeStatus();
+
+Future<ComponentVersionsDto> getComponentVersions() =>
+    RustLib.instance.api.crateApiCoreGetComponentVersions();
+
+Future<RuntimeLogSettingsDto> getRuntimeLogSettings() =>
+    RustLib.instance.api.crateApiCoreGetRuntimeLogSettings();
+
+Future<void> setRuntimeLogSettings({
+  required bool enabled,
+  required RuntimeLogLevelDto level,
+}) => RustLib.instance.api.crateApiCoreSetRuntimeLogSettings(
+  enabled: enabled,
+  level: level,
+);
+
+Future<DebugLogFileDto> readRuntimeLog({int? maxLines}) =>
+    RustLib.instance.api.crateApiCoreReadRuntimeLog(maxLines: maxLines);
+
+Future<void> clearRuntimeLog() =>
+    RustLib.instance.api.crateApiCoreClearRuntimeLog();

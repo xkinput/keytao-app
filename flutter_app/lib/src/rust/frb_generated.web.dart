@@ -36,13 +36,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AddonSchemaStatusDto dco_decode_addon_schema_status_dto(dynamic raw);
+
+  @protected
+  AndroidImeInputSettingsDto dco_decode_android_ime_input_settings_dto(
+    dynamic raw,
+  );
+
+  @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AndroidImeInputSettingsDto
+  dco_decode_box_autoadd_android_ime_input_settings_dto(dynamic raw);
 
   @protected
   BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
 
   @protected
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
+
+  @protected
+  PlatformReleaseDto dco_decode_box_autoadd_platform_release_dto(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
   WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
@@ -65,7 +83,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgePlatform dco_decode_bridge_platform(dynamic raw);
 
   @protected
+  ComponentVersionsDto dco_decode_component_versions_dto(dynamic raw);
+
+  @protected
+  DebugLogFileDto dco_decode_debug_log_file_dto(dynamic raw);
+
+  @protected
+  DeployResultDto dco_decode_deploy_result_dto(dynamic raw);
+
+  @protected
+  DownloadUrlsDto dco_decode_download_urls_dto(dynamic raw);
+
+  @protected
+  EffectiveColorSchemeDto dco_decode_effective_color_scheme_dto(dynamic raw);
+
+  @protected
+  EnglishModeDto dco_decode_english_mode_dto(dynamic raw);
+
+  @protected
+  double dco_decode_f_32(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
+
+  @protected
+  ImeUiSettingsDto dco_decode_ime_ui_settings_dto(dynamic raw);
 
   @protected
   InstallProgressDto dco_decode_install_progress_dto(dynamic raw);
@@ -80,10 +122,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<RuntimeLogFileInfoDto> dco_decode_list_runtime_log_file_info_dto(
+    dynamic raw,
+  );
+
+  @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
 
   @protected
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw);
+
+  @protected
+  MacosImeStatusDto dco_decode_macos_ime_status_dto(dynamic raw);
 
   @protected
   OnboardingDto dco_decode_onboarding_dto(dynamic raw);
@@ -97,18 +147,53 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PlatformReleaseDto? dco_decode_opt_box_autoadd_platform_release_dto(
+    dynamic raw,
+  );
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
 
   @protected
+  PanelOrientationDto dco_decode_panel_orientation_dto(dynamic raw);
+
+  @protected
+  PlatformReleaseDto dco_decode_platform_release_dto(dynamic raw);
+
+  @protected
+  ReleaseInfoDto dco_decode_release_info_dto(dynamic raw);
+
+  @protected
+  RuntimeLogFileInfoDto dco_decode_runtime_log_file_info_dto(dynamic raw);
+
+  @protected
+  RuntimeLogLevelDto dco_decode_runtime_log_level_dto(dynamic raw);
+
+  @protected
+  RuntimeLogSettingsDto dco_decode_runtime_log_settings_dto(dynamic raw);
+
+  @protected
   SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw);
+
+  @protected
+  int dco_decode_u_16(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
+
+  @protected
+  UiColorSchemeDto dco_decode_ui_color_scheme_dto(dynamic raw);
 
   @protected
   void dco_decode_unit(dynamic raw);
@@ -131,7 +216,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AddonSchemaStatusDto sse_decode_addon_schema_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AndroidImeInputSettingsDto sse_decode_android_ime_input_settings_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AndroidImeInputSettingsDto
+  sse_decode_box_autoadd_android_ime_input_settings_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   BridgeConfig sse_decode_box_autoadd_bridge_config(
@@ -142,6 +243,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallProgressDto sse_decode_box_autoadd_install_progress_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PlatformReleaseDto sse_decode_box_autoadd_platform_release_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   WindowsImeStatusDto sse_decode_box_autoadd_windows_ime_status_dto(
@@ -164,7 +273,35 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgePlatform sse_decode_bridge_platform(SseDeserializer deserializer);
 
   @protected
+  ComponentVersionsDto sse_decode_component_versions_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DebugLogFileDto sse_decode_debug_log_file_dto(SseDeserializer deserializer);
+
+  @protected
+  DeployResultDto sse_decode_deploy_result_dto(SseDeserializer deserializer);
+
+  @protected
+  DownloadUrlsDto sse_decode_download_urls_dto(SseDeserializer deserializer);
+
+  @protected
+  EffectiveColorSchemeDto sse_decode_effective_color_scheme_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EnglishModeDto sse_decode_english_mode_dto(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_32(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  ImeUiSettingsDto sse_decode_ime_ui_settings_dto(SseDeserializer deserializer);
 
   @protected
   InstallProgressDto sse_decode_install_progress_dto(
@@ -181,12 +318,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<RuntimeLogFileInfoDto> sse_decode_list_runtime_log_file_info_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
     SseDeserializer deserializer,
   );
 
   @protected
   LocalSchemaDto sse_decode_local_schema_dto(SseDeserializer deserializer);
+
+  @protected
+  MacosImeStatusDto sse_decode_macos_ime_status_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   OnboardingDto sse_decode_onboarding_dto(SseDeserializer deserializer);
@@ -200,7 +347,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PlatformReleaseDto? sse_decode_opt_box_autoadd_platform_release_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PanelOrientationDto sse_decode_panel_orientation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PlatformReleaseDto sse_decode_platform_release_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ReleaseInfoDto sse_decode_release_info_dto(SseDeserializer deserializer);
+
+  @protected
+  RuntimeLogFileInfoDto sse_decode_runtime_log_file_info_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RuntimeLogLevelDto sse_decode_runtime_log_level_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RuntimeLogSettingsDto sse_decode_runtime_log_settings_dto(
     SseDeserializer deserializer,
   );
 
@@ -208,10 +391,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer);
 
   @protected
+  int sse_decode_u_16(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer);
+
+  @protected
+  UiColorSchemeDto sse_decode_ui_color_scheme_dto(SseDeserializer deserializer);
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
@@ -240,7 +432,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
+  void sse_encode_addon_schema_status_dto(
+    AddonSchemaStatusDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_android_ime_input_settings_dto(
+    AndroidImeInputSettingsDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_android_ime_input_settings_dto(
+    AndroidImeInputSettingsDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_bridge_config(
@@ -253,6 +463,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     InstallProgressDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_platform_release_dto(
+    PlatformReleaseDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_windows_ime_status_dto(
@@ -282,7 +501,52 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_component_versions_dto(
+    ComponentVersionsDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_debug_log_file_dto(
+    DebugLogFileDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_deploy_result_dto(
+    DeployResultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_download_urls_dto(
+    DownloadUrlsDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_effective_color_scheme_dto(
+    EffectiveColorSchemeDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_english_mode_dto(
+    EnglishModeDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ime_ui_settings_dto(
+    ImeUiSettingsDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_install_progress_dto(
@@ -306,6 +570,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_runtime_log_file_info_dto(
+    List<RuntimeLogFileInfoDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_verify_entry_dto(
     List<VerifyEntryDto> self,
     SseSerializer serializer,
@@ -314,6 +584,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_local_schema_dto(
     LocalSchemaDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_macos_ime_status_dto(
+    MacosImeStatusDto self,
     SseSerializer serializer,
   );
 
@@ -330,8 +606,53 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_platform_release_dto(
+    PlatformReleaseDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_panel_orientation_dto(
+    PanelOrientationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_platform_release_dto(
+    PlatformReleaseDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_release_info_dto(
+    ReleaseInfoDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_runtime_log_file_info_dto(
+    RuntimeLogFileInfoDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_runtime_log_level_dto(
+    RuntimeLogLevelDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_runtime_log_settings_dto(
+    RuntimeLogSettingsDto self,
     SseSerializer serializer,
   );
 
@@ -342,10 +663,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_u_16(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ui_color_scheme_dto(
+    UiColorSchemeDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);

@@ -4,12 +4,13 @@ use std::{
     sync::Arc,
 };
 
+#[derive(Clone)]
 pub(crate) struct BridgeHost {
     core: Arc<Core>,
-    // Resolved once: no host callback can fall back to the real root later.
+    // Resolve once, using the core's real desktop root unless explicitly overridden.
     root: PathBuf,
     #[cfg(target_os = "linux")]
-    helper: keytao_app_core::ime_status::linux::ManagedImeHelper,
+    helper: Arc<keytao_app_core::ime_status::linux::ManagedImeHelper>,
 }
 
 impl BridgeHost {
@@ -39,13 +40,34 @@ impl BridgeHost {
         keytao_core::ReloadStamp::write(&self.root).map(Some)
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn uses_default_root(&self) -> bool {
+        keytao_core::default_user_data_dir().as_ref() == Some(&self.root)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn require_default_theme_root(&self) -> Result<(), String> {
+        if self.uses_default_root() {
+            Ok(())
+        } else {
+            Err("Desktop theme settings require the default user root".into())
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios", test))]
     fn deploy_paths(&self) -> (PathBuf, PathBuf) {
-        let resources = self.core.env().resource_dir.join("rime-data");
-        let shared = if resources.join("default.yaml").is_file() {
-            resources
-        } else {
-            self.root.clone()
+        #[cfg(target_os = "macos")]
+        let shared = keytao_app_core::ime_status::macos::macos_app_shared_data_dir(&self.core)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(keytao_core::default_shared_data_dir()));
+        #[cfg(not(target_os = "macos"))]
+        let shared = {
+            let resources = self.core.env().resource_dir.join("rime-data");
+            if resources.join("default.yaml").is_file() {
+                resources
+            } else {
+                self.root.clone()
+            }
         };
         (self.root.clone(), shared)
     }
@@ -59,8 +81,15 @@ impl SchemeHost for BridgeHost {
     async fn deploy(&self) -> Result<(), String> {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
         {
-            // Core's desktop default deployment bypasses ImeHost::user_root.
-            // Use explicit directories and never notify/launch a system IME here.
+            // Preserve explicit overrides; the normal macOS path uses Core's
+            // default deployment, including system IME reload notifications.
+            #[cfg(target_os = "macos")]
+            if self.uses_default_root() {
+                return keytao_app_core::deploy::rime_deploy_default(&self.core, self.clone())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+            }
             let (user, shared) = self.deploy_paths();
             self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
                 "正在部署 librime...".into(),
@@ -165,7 +194,7 @@ mod tests {
         let host = BridgeHost::new(core, resolved);
         assert_eq!(SchemeHost::user_root(&host).unwrap(), root);
         assert_eq!(ImeHost::user_root(&host).unwrap(), root);
-        assert_eq!(host.deploy_paths(), (root.clone(), root.clone()));
+        assert_eq!(host.deploy_paths().0, root);
         let unrelated = temp.path().join("must-not-be-used");
         let expected = Some(keytao_core::ReloadStamp::path(&root));
         assert_eq!(
@@ -185,5 +214,43 @@ mod tests {
         for root in ["", "relative-rime"] {
             assert!(BridgeHost::resolve_root(Some(root)).is_err());
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_shared_data_candidates_follow_core_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        let root = temp.path().join("user");
+        let core = Core::new(
+            AppEnv {
+                data_dir: temp.path().join("state"),
+                cache_dir: temp.path().join("cache"),
+                resource_dir: resources.clone(),
+                app_version: "test".into(),
+                platform: Platform::MacOs,
+            },
+            Arc::new(crate::runtime::BridgeEvents::default()),
+        )
+        .unwrap();
+        let host = BridgeHost::new(core, root.clone());
+        let candidates = [
+            resources.join("rime-data"),
+            resources.join("SharedSupport"),
+            resources.join("KeyTao.app/Contents/Resources/rime-data"),
+            resources.join("KeyTao.app/Contents/SharedSupport"),
+        ];
+        for candidate in &candidates {
+            std::fs::create_dir_all(candidate).unwrap();
+            std::fs::write(candidate.join("default.yaml"), "config_version: '1.0'\n").unwrap();
+        }
+        for candidate in &candidates {
+            assert_eq!(host.deploy_paths(), (root.clone(), candidate.clone()));
+            std::fs::remove_file(candidate.join("default.yaml")).unwrap();
+        }
+        assert_eq!(
+            BridgeHost::resolve_root(None).unwrap(),
+            keytao_core::default_user_data_dir().unwrap(),
+        );
     }
 }

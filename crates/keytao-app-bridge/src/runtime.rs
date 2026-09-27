@@ -75,6 +75,14 @@ pub(crate) fn absolute_dir(value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+// Core exposes some response fields only through its serialization contract.
+pub(crate) fn dto<T: serde::de::DeserializeOwned>(
+    value: impl serde::Serialize,
+) -> Result<T, String> {
+    let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 #[derive(Default)]
 pub(crate) struct BridgeEvents(Mutex<Option<StreamSink<BridgeEvent>>>);
 

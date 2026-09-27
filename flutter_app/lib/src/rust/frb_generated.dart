@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 536238737;
+  int get rustContentHash => -715456266;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -82,15 +82,39 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaStatus({
+    required String id,
+  });
+
   Future<LocalSchemaDto> crateApiCoreCheckLocalSchema();
+
+  Future<void> crateApiCoreClearRuntimeLog();
 
   Future<void> crateApiCoreCompleteOnboarding();
 
   Stream<BridgeEvent> crateApiCoreCoreEvents();
 
+  Future<DeployResultDto> crateApiCoreDeployDefault();
+
+  Future<ReleaseInfoDto> crateApiCoreFetchLatestRelease();
+
   Future<SchemeReleaseDto> crateApiCoreFetchSchemeRelease({
     required String scheme,
   });
+
+  Future<InstallResultDto> crateApiCoreFinishAndroidInstall({
+    required String resultJson,
+  });
+
+  Future<AndroidImeInputSettingsDto> crateApiCoreGetAndroidImeInputSettings();
+
+  Future<ComponentVersionsDto> crateApiCoreGetComponentVersions();
+
+  Future<EnglishModeDto> crateApiCoreGetDesktopEnglishMode();
+
+  Future<ImeUiSettingsDto> crateApiCoreGetImeUiSettings();
+
+  Future<RuntimeLogSettingsDto> crateApiCoreGetRuntimeLogSettings();
 
   Future<void> crateApiCoreInitApp();
 
@@ -100,7 +124,41 @@ abstract class RustLibApi extends BaseApi {
     required String scheme,
   });
 
+  Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
+    required String url,
+  });
+
+  Future<MacosImeStatusDto> crateApiCoreMacosImeStatus();
+
   Future<OnboardingDto> crateApiCoreOnboarding();
+
+  Future<String> crateApiCorePrepareAndroidInstall({required String url});
+
+  Future<DebugLogFileDto> crateApiCoreReadRuntimeLog({int? maxLines});
+
+  Future<AndroidImeInputSettingsDto> crateApiCoreSetAndroidImeInputSettings({
+    required AndroidImeInputSettingsDto settings,
+  });
+
+  Future<EnglishModeDto> crateApiCoreSetDesktopEnglishMode({
+    required EnglishModeDto mode,
+  });
+
+  Future<ImeUiSettingsDto> crateApiCoreSetImeEmbeddedComposition({
+    required bool embedded,
+  });
+
+  Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
+    required UiColorSchemeDto colorScheme,
+    required PanelOrientationDto orientation,
+    required String accentColor,
+    required double fontSize,
+  });
+
+  Future<void> crateApiCoreSetRuntimeLogSettings({
+    required bool enabled,
+    required RuntimeLogLevelDto level,
+  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -112,6 +170,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaStatus({
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_addon_schema_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreAddonSchemaStatusConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreAddonSchemaStatusConstMeta =>
+      const TaskConstMeta(debugName: "addon_schema_status", argNames: ["id"]);
+
+  @override
   Future<LocalSchemaDto> crateApiCoreCheckLocalSchema() {
     return handler.executeNormal(
       NormalTask(
@@ -120,7 +208,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 2,
             port: port_,
           );
         },
@@ -139,6 +227,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "check_local_schema", argNames: []);
 
   @override
+  Future<void> crateApiCoreClearRuntimeLog() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreClearRuntimeLogConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreClearRuntimeLogConstMeta =>
+      const TaskConstMeta(debugName: "clear_runtime_log", argNames: []);
+
+  @override
   Future<void> crateApiCoreCompleteOnboarding() {
     return handler.executeNormal(
       NormalTask(
@@ -147,7 +262,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 4,
             port: port_,
           );
         },
@@ -177,7 +292,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 3,
+              funcId: 5,
               port: port_,
             );
           },
@@ -198,6 +313,60 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "core_events", argNames: ["sink"]);
 
   @override
+  Future<DeployResultDto> crateApiCoreDeployDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_deploy_result_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreDeployDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreDeployDefaultConstMeta =>
+      const TaskConstMeta(debugName: "deploy_default", argNames: []);
+
+  @override
+  Future<ReleaseInfoDto> crateApiCoreFetchLatestRelease() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_release_info_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreFetchLatestReleaseConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreFetchLatestReleaseConstMeta =>
+      const TaskConstMeta(debugName: "fetch_latest_release", argNames: []);
+
+  @override
   Future<SchemeReleaseDto> crateApiCoreFetchSchemeRelease({
     required String scheme,
   }) {
@@ -209,7 +378,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 8,
             port: port_,
           );
         },
@@ -231,6 +400,177 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<InstallResultDto> crateApiCoreFinishAndroidInstall({
+    required String resultJson,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(resultJson, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_install_result_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreFinishAndroidInstallConstMeta,
+        argValues: [resultJson],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreFinishAndroidInstallConstMeta =>
+      const TaskConstMeta(
+        debugName: "finish_android_install",
+        argNames: ["resultJson"],
+      );
+
+  @override
+  Future<AndroidImeInputSettingsDto> crateApiCoreGetAndroidImeInputSettings() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 10,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_android_ime_input_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreGetAndroidImeInputSettingsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreGetAndroidImeInputSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_android_ime_input_settings",
+        argNames: [],
+      );
+
+  @override
+  Future<ComponentVersionsDto> crateApiCoreGetComponentVersions() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_component_versions_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreGetComponentVersionsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreGetComponentVersionsConstMeta =>
+      const TaskConstMeta(debugName: "get_component_versions", argNames: []);
+
+  @override
+  Future<EnglishModeDto> crateApiCoreGetDesktopEnglishMode() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_english_mode_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreGetDesktopEnglishModeConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreGetDesktopEnglishModeConstMeta =>
+      const TaskConstMeta(debugName: "get_desktop_english_mode", argNames: []);
+
+  @override
+  Future<ImeUiSettingsDto> crateApiCoreGetImeUiSettings() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_ime_ui_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreGetImeUiSettingsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreGetImeUiSettingsConstMeta =>
+      const TaskConstMeta(debugName: "get_ime_ui_settings", argNames: []);
+
+  @override
+  Future<RuntimeLogSettingsDto> crateApiCoreGetRuntimeLogSettings() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_runtime_log_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreGetRuntimeLogSettingsConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreGetRuntimeLogSettingsConstMeta =>
+      const TaskConstMeta(debugName: "get_runtime_log_settings", argNames: []);
+
+  @override
   Future<void> crateApiCoreInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -239,7 +579,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 15,
             port: port_,
           );
         },
@@ -267,7 +607,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 16,
             port: port_,
           );
         },
@@ -297,7 +637,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 17,
             port: port_,
           );
         },
@@ -319,6 +659,66 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
+    required String url,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(url, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_install_result_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreInstallSchemeFromUrlConstMeta,
+        argValues: [url],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreInstallSchemeFromUrlConstMeta =>
+      const TaskConstMeta(
+        debugName: "install_scheme_from_url",
+        argNames: ["url"],
+      );
+
+  @override
+  Future<MacosImeStatusDto> crateApiCoreMacosImeStatus() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_macos_ime_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreMacosImeStatusConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreMacosImeStatusConstMeta =>
+      const TaskConstMeta(debugName: "macos_ime_status", argNames: []);
+
+  @override
   Future<OnboardingDto> crateApiCoreOnboarding() {
     return handler.executeNormal(
       NormalTask(
@@ -327,7 +727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 20,
             port: port_,
           );
         },
@@ -344,6 +744,243 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiCoreOnboardingConstMeta =>
       const TaskConstMeta(debugName: "onboarding", argNames: []);
+
+  @override
+  Future<String> crateApiCorePrepareAndroidInstall({required String url}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(url, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCorePrepareAndroidInstallConstMeta,
+        argValues: [url],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCorePrepareAndroidInstallConstMeta =>
+      const TaskConstMeta(
+        debugName: "prepare_android_install",
+        argNames: ["url"],
+      );
+
+  @override
+  Future<DebugLogFileDto> crateApiCoreReadRuntimeLog({int? maxLines}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_opt_box_autoadd_u_32(maxLines, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 22,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_debug_log_file_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreReadRuntimeLogConstMeta,
+        argValues: [maxLines],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreReadRuntimeLogConstMeta => const TaskConstMeta(
+    debugName: "read_runtime_log",
+    argNames: ["maxLines"],
+  );
+
+  @override
+  Future<AndroidImeInputSettingsDto> crateApiCoreSetAndroidImeInputSettings({
+    required AndroidImeInputSettingsDto settings,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_android_ime_input_settings_dto(
+            settings,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 23,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_android_ime_input_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetAndroidImeInputSettingsConstMeta,
+        argValues: [settings],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetAndroidImeInputSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_android_ime_input_settings",
+        argNames: ["settings"],
+      );
+
+  @override
+  Future<EnglishModeDto> crateApiCoreSetDesktopEnglishMode({
+    required EnglishModeDto mode,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_english_mode_dto(mode, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 24,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_english_mode_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetDesktopEnglishModeConstMeta,
+        argValues: [mode],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetDesktopEnglishModeConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_desktop_english_mode",
+        argNames: ["mode"],
+      );
+
+  @override
+  Future<ImeUiSettingsDto> crateApiCoreSetImeEmbeddedComposition({
+    required bool embedded,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(embedded, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_ime_ui_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetImeEmbeddedCompositionConstMeta,
+        argValues: [embedded],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetImeEmbeddedCompositionConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_ime_embedded_composition",
+        argNames: ["embedded"],
+      );
+
+  @override
+  Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
+    required UiColorSchemeDto colorScheme,
+    required PanelOrientationDto orientation,
+    required String accentColor,
+    required double fontSize,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_ui_color_scheme_dto(colorScheme, serializer);
+          sse_encode_panel_orientation_dto(orientation, serializer);
+          sse_encode_String(accentColor, serializer);
+          sse_encode_f_32(fontSize, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 26,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_ime_ui_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetImeUiSettingsConstMeta,
+        argValues: [colorScheme, orientation, accentColor, fontSize],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetImeUiSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_ime_ui_settings",
+        argNames: ["colorScheme", "orientation", "accentColor", "fontSize"],
+      );
+
+  @override
+  Future<void> crateApiCoreSetRuntimeLogSettings({
+    required bool enabled,
+    required RuntimeLogLevelDto level,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(enabled, serializer);
+          sse_encode_runtime_log_level_dto(level, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 27,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetRuntimeLogSettingsConstMeta,
+        argValues: [enabled, level],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetRuntimeLogSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_runtime_log_settings",
+        argNames: ["enabled", "level"],
+      );
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -366,9 +1003,68 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AddonSchemaStatusDto dco_decode_addon_schema_status_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return AddonSchemaStatusDto(
+      installed: dco_decode_bool(arr[0]),
+      deployed: dco_decode_bool(arr[1]),
+      version: dco_decode_String(arr[2]),
+      englishAvailable: dco_decode_bool(arr[3]),
+    );
+  }
+
+  @protected
+  AndroidImeInputSettingsDto dco_decode_android_ime_input_settings_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 26)
+      throw Exception('unexpected arr length: expect 26 but see ${arr.length}');
+    return AndroidImeInputSettingsDto(
+      hapticsEnabled: dco_decode_bool(arr[0]),
+      hapticIntensity: dco_decode_u_8(arr[1]),
+      enterKeyBehavior: dco_decode_String(arr[2]),
+      keyPreviewEnabled: dco_decode_bool(arr[3]),
+      longPressDelayMs: dco_decode_u_16(arr[4]),
+      keyboardHeightScale: dco_decode_u_8(arr[5]),
+      deleteSpeed: dco_decode_String(arr[6]),
+      englishMode: dco_decode_String(arr[7]),
+      backspaceGestureMode: dco_decode_String(arr[8]),
+      keyboardHeightDp: dco_decode_u_16(arr[9]),
+      candidateBarHeightDp: dco_decode_u_8(arr[10]),
+      swipeThresholdDp: dco_decode_f_32(arr[11]),
+      keySoundEnabled: dco_decode_bool(arr[12]),
+      keySoundVolume: dco_decode_u_8(arr[13]),
+      keyHintVisible: dco_decode_bool(arr[14]),
+      flickKeysEnabled: dco_decode_bool(arr[15]),
+      numberRowEnabled: dco_decode_bool(arr[16]),
+      candidateFontScale: dco_decode_f_32(arr[17]),
+      doubleSpacePeriodEnabled: dco_decode_bool(arr[18]),
+      floatingPortraitEnabled: dco_decode_bool(arr[19]),
+      floatingPortraitScale: dco_decode_u_8(arr[20]),
+      floatingLandscapeEnabled: dco_decode_bool(arr[21]),
+      floatingLandscapeScale: dco_decode_u_8(arr[22]),
+      configPath: dco_decode_opt_String(arr[23]),
+      reloadStampPath: dco_decode_opt_String(arr[24]),
+      message: dco_decode_String(arr[25]),
+    );
+  }
+
+  @protected
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  AndroidImeInputSettingsDto
+  dco_decode_box_autoadd_android_ime_input_settings_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_android_ime_input_settings_dto(raw);
   }
 
   @protected
@@ -381,6 +1077,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_install_progress_dto(raw);
+  }
+
+  @protected
+  PlatformReleaseDto dco_decode_box_autoadd_platform_release_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_platform_release_dto(raw);
+  }
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -449,9 +1157,101 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ComponentVersionsDto dco_decode_component_versions_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ComponentVersionsDto(
+      appVersion: dco_decode_String(arr[0]),
+      librimeVersion: dco_decode_opt_String(arr[1]),
+      openccVersion: dco_decode_opt_String(arr[2]),
+      dataDir: dco_decode_opt_String(arr[3]),
+    );
+  }
+
+  @protected
+  DebugLogFileDto dco_decode_debug_log_file_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DebugLogFileDto(
+      lines: dco_decode_list_String(arr[0]),
+      truncated: dco_decode_bool(arr[1]),
+    );
+  }
+
+  @protected
+  DeployResultDto dco_decode_deploy_result_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DeployResultDto(
+      success: dco_decode_bool(arr[0]),
+      message: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
+  DownloadUrlsDto dco_decode_download_urls_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return DownloadUrlsDto(
+      macos: dco_decode_opt_String(arr[0]),
+      windows: dco_decode_opt_String(arr[1]),
+      linux: dco_decode_opt_String(arr[2]),
+      android: dco_decode_opt_String(arr[3]),
+      ios: dco_decode_opt_String(arr[4]),
+    );
+  }
+
+  @protected
+  EffectiveColorSchemeDto dco_decode_effective_color_scheme_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return EffectiveColorSchemeDto.values[raw as int];
+  }
+
+  @protected
+  EnglishModeDto dco_decode_english_mode_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return EnglishModeDto.values[raw as int];
+  }
+
+  @protected
+  double dco_decode_f_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  ImeUiSettingsDto dco_decode_ime_ui_settings_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    return ImeUiSettingsDto(
+      colorScheme: dco_decode_ui_color_scheme_dto(arr[0]),
+      effectiveColorScheme: dco_decode_effective_color_scheme_dto(arr[1]),
+      orientation: dco_decode_panel_orientation_dto(arr[2]),
+      embeddedComposition: dco_decode_bool(arr[3]),
+      accentColor: dco_decode_String(arr[4]),
+      fontSize: dco_decode_f_32(arr[5]),
+      themePath: dco_decode_opt_String(arr[6]),
+      themeExists: dco_decode_bool(arr[7]),
+      reloadStampPath: dco_decode_opt_String(arr[8]),
+      reloadStampSignature: dco_decode_opt_String(arr[9]),
+      message: dco_decode_String(arr[10]),
+    );
   }
 
   @protected
@@ -493,6 +1293,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<RuntimeLogFileInfoDto> dco_decode_list_runtime_log_file_info_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_runtime_log_file_info_dto)
+        .toList();
+  }
+
+  @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_verify_entry_dto).toList();
@@ -509,6 +1319,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       deployed: dco_decode_bool(arr[1]),
       version: dco_decode_opt_String(arr[2]),
       schemas: dco_decode_list_String(arr[3]),
+    );
+  }
+
+  @protected
+  MacosImeStatusDto dco_decode_macos_ime_status_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return MacosImeStatusDto(
+      installed: dco_decode_bool(arr[0]),
+      appPath: dco_decode_opt_String(arr[1]),
+      userDataDir: dco_decode_opt_String(arr[2]),
+      sharedDataDir: dco_decode_opt_String(arr[3]),
+      sharedDataSource: dco_decode_String(arr[4]),
+      reloadStampPath: dco_decode_opt_String(arr[5]),
+      reloadStampSignature: dco_decode_opt_String(arr[6]),
+      logDir: dco_decode_opt_String(arr[7]),
+      message: dco_decode_String(arr[8]),
     );
   }
 
@@ -538,6 +1367,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformReleaseDto? dco_decode_opt_box_autoadd_platform_release_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_platform_release_dto(raw);
+  }
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   ) {
@@ -545,6 +1390,74 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return raw == null
         ? null
         : dco_decode_box_autoadd_windows_ime_status_dto(raw);
+  }
+
+  @protected
+  PanelOrientationDto dco_decode_panel_orientation_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return PanelOrientationDto.values[raw as int];
+  }
+
+  @protected
+  PlatformReleaseDto dco_decode_platform_release_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return PlatformReleaseDto(
+      version: dco_decode_String(arr[0]),
+      downloadUrls: dco_decode_download_urls_dto(arr[1]),
+    );
+  }
+
+  @protected
+  ReleaseInfoDto dco_decode_release_info_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return ReleaseInfoDto(
+      version: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      publishedAt: dco_decode_String(arr[2]),
+      body: dco_decode_String(arr[3]),
+      github: dco_decode_opt_box_autoadd_platform_release_dto(arr[4]),
+      gitee: dco_decode_opt_box_autoadd_platform_release_dto(arr[5]),
+    );
+  }
+
+  @protected
+  RuntimeLogFileInfoDto dco_decode_runtime_log_file_info_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return RuntimeLogFileInfoDto(
+      name: dco_decode_String(arr[0]),
+      size: dco_decode_u_64(arr[1]),
+    );
+  }
+
+  @protected
+  RuntimeLogLevelDto dco_decode_runtime_log_level_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return RuntimeLogLevelDto.values[raw as int];
+  }
+
+  @protected
+  RuntimeLogSettingsDto dco_decode_runtime_log_settings_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return RuntimeLogSettingsDto(
+      enabled: dco_decode_bool(arr[0]),
+      level: dco_decode_runtime_log_level_dto(arr[1]),
+      logDir: dco_decode_String(arr[2]),
+      files: dco_decode_list_runtime_log_file_info_dto(arr[3]),
+      fileCount: dco_decode_u_32(arr[4]),
+      totalBytes: dco_decode_u_64(arr[5]),
+    );
   }
 
   @protected
@@ -566,15 +1479,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int dco_decode_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   int dco_decode_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
   }
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
+  }
+
+  @protected
   int dco_decode_u_8(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  UiColorSchemeDto dco_decode_ui_color_scheme_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return UiColorSchemeDto.values[raw as int];
   }
 
   @protected
@@ -647,9 +1578,96 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AddonSchemaStatusDto sse_decode_addon_schema_status_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_installed = sse_decode_bool(deserializer);
+    var var_deployed = sse_decode_bool(deserializer);
+    var var_version = sse_decode_String(deserializer);
+    var var_englishAvailable = sse_decode_bool(deserializer);
+    return AddonSchemaStatusDto(
+      installed: var_installed,
+      deployed: var_deployed,
+      version: var_version,
+      englishAvailable: var_englishAvailable,
+    );
+  }
+
+  @protected
+  AndroidImeInputSettingsDto sse_decode_android_ime_input_settings_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_hapticsEnabled = sse_decode_bool(deserializer);
+    var var_hapticIntensity = sse_decode_u_8(deserializer);
+    var var_enterKeyBehavior = sse_decode_String(deserializer);
+    var var_keyPreviewEnabled = sse_decode_bool(deserializer);
+    var var_longPressDelayMs = sse_decode_u_16(deserializer);
+    var var_keyboardHeightScale = sse_decode_u_8(deserializer);
+    var var_deleteSpeed = sse_decode_String(deserializer);
+    var var_englishMode = sse_decode_String(deserializer);
+    var var_backspaceGestureMode = sse_decode_String(deserializer);
+    var var_keyboardHeightDp = sse_decode_u_16(deserializer);
+    var var_candidateBarHeightDp = sse_decode_u_8(deserializer);
+    var var_swipeThresholdDp = sse_decode_f_32(deserializer);
+    var var_keySoundEnabled = sse_decode_bool(deserializer);
+    var var_keySoundVolume = sse_decode_u_8(deserializer);
+    var var_keyHintVisible = sse_decode_bool(deserializer);
+    var var_flickKeysEnabled = sse_decode_bool(deserializer);
+    var var_numberRowEnabled = sse_decode_bool(deserializer);
+    var var_candidateFontScale = sse_decode_f_32(deserializer);
+    var var_doubleSpacePeriodEnabled = sse_decode_bool(deserializer);
+    var var_floatingPortraitEnabled = sse_decode_bool(deserializer);
+    var var_floatingPortraitScale = sse_decode_u_8(deserializer);
+    var var_floatingLandscapeEnabled = sse_decode_bool(deserializer);
+    var var_floatingLandscapeScale = sse_decode_u_8(deserializer);
+    var var_configPath = sse_decode_opt_String(deserializer);
+    var var_reloadStampPath = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return AndroidImeInputSettingsDto(
+      hapticsEnabled: var_hapticsEnabled,
+      hapticIntensity: var_hapticIntensity,
+      enterKeyBehavior: var_enterKeyBehavior,
+      keyPreviewEnabled: var_keyPreviewEnabled,
+      longPressDelayMs: var_longPressDelayMs,
+      keyboardHeightScale: var_keyboardHeightScale,
+      deleteSpeed: var_deleteSpeed,
+      englishMode: var_englishMode,
+      backspaceGestureMode: var_backspaceGestureMode,
+      keyboardHeightDp: var_keyboardHeightDp,
+      candidateBarHeightDp: var_candidateBarHeightDp,
+      swipeThresholdDp: var_swipeThresholdDp,
+      keySoundEnabled: var_keySoundEnabled,
+      keySoundVolume: var_keySoundVolume,
+      keyHintVisible: var_keyHintVisible,
+      flickKeysEnabled: var_flickKeysEnabled,
+      numberRowEnabled: var_numberRowEnabled,
+      candidateFontScale: var_candidateFontScale,
+      doubleSpacePeriodEnabled: var_doubleSpacePeriodEnabled,
+      floatingPortraitEnabled: var_floatingPortraitEnabled,
+      floatingPortraitScale: var_floatingPortraitScale,
+      floatingLandscapeEnabled: var_floatingLandscapeEnabled,
+      floatingLandscapeScale: var_floatingLandscapeScale,
+      configPath: var_configPath,
+      reloadStampPath: var_reloadStampPath,
+      message: var_message,
+    );
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  AndroidImeInputSettingsDto
+  sse_decode_box_autoadd_android_ime_input_settings_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_android_ime_input_settings_dto(deserializer));
   }
 
   @protected
@@ -666,6 +1684,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_install_progress_dto(deserializer));
+  }
+
+  @protected
+  PlatformReleaseDto sse_decode_box_autoadd_platform_release_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_platform_release_dto(deserializer));
+  }
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_32(deserializer));
   }
 
   @protected
@@ -741,9 +1773,114 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ComponentVersionsDto sse_decode_component_versions_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_appVersion = sse_decode_String(deserializer);
+    var var_librimeVersion = sse_decode_opt_String(deserializer);
+    var var_openccVersion = sse_decode_opt_String(deserializer);
+    var var_dataDir = sse_decode_opt_String(deserializer);
+    return ComponentVersionsDto(
+      appVersion: var_appVersion,
+      librimeVersion: var_librimeVersion,
+      openccVersion: var_openccVersion,
+      dataDir: var_dataDir,
+    );
+  }
+
+  @protected
+  DebugLogFileDto sse_decode_debug_log_file_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_lines = sse_decode_list_String(deserializer);
+    var var_truncated = sse_decode_bool(deserializer);
+    return DebugLogFileDto(lines: var_lines, truncated: var_truncated);
+  }
+
+  @protected
+  DeployResultDto sse_decode_deploy_result_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_success = sse_decode_bool(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return DeployResultDto(success: var_success, message: var_message);
+  }
+
+  @protected
+  DownloadUrlsDto sse_decode_download_urls_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_macos = sse_decode_opt_String(deserializer);
+    var var_windows = sse_decode_opt_String(deserializer);
+    var var_linux = sse_decode_opt_String(deserializer);
+    var var_android = sse_decode_opt_String(deserializer);
+    var var_ios = sse_decode_opt_String(deserializer);
+    return DownloadUrlsDto(
+      macos: var_macos,
+      windows: var_windows,
+      linux: var_linux,
+      android: var_android,
+      ios: var_ios,
+    );
+  }
+
+  @protected
+  EffectiveColorSchemeDto sse_decode_effective_color_scheme_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return EffectiveColorSchemeDto.values[inner];
+  }
+
+  @protected
+  EnglishModeDto sse_decode_english_mode_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return EnglishModeDto.values[inner];
+  }
+
+  @protected
+  double sse_decode_f_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat32();
+  }
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  ImeUiSettingsDto sse_decode_ime_ui_settings_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_colorScheme = sse_decode_ui_color_scheme_dto(deserializer);
+    var var_effectiveColorScheme = sse_decode_effective_color_scheme_dto(
+      deserializer,
+    );
+    var var_orientation = sse_decode_panel_orientation_dto(deserializer);
+    var var_embeddedComposition = sse_decode_bool(deserializer);
+    var var_accentColor = sse_decode_String(deserializer);
+    var var_fontSize = sse_decode_f_32(deserializer);
+    var var_themePath = sse_decode_opt_String(deserializer);
+    var var_themeExists = sse_decode_bool(deserializer);
+    var var_reloadStampPath = sse_decode_opt_String(deserializer);
+    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return ImeUiSettingsDto(
+      colorScheme: var_colorScheme,
+      effectiveColorScheme: var_effectiveColorScheme,
+      orientation: var_orientation,
+      embeddedComposition: var_embeddedComposition,
+      accentColor: var_accentColor,
+      fontSize: var_fontSize,
+      themePath: var_themePath,
+      themeExists: var_themeExists,
+      reloadStampPath: var_reloadStampPath,
+      reloadStampSignature: var_reloadStampSignature,
+      message: var_message,
+    );
   }
 
   @protected
@@ -794,6 +1931,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<RuntimeLogFileInfoDto> sse_decode_list_runtime_log_file_info_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <RuntimeLogFileInfoDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_runtime_log_file_info_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
     SseDeserializer deserializer,
   ) {
@@ -819,6 +1970,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       deployed: var_deployed,
       version: var_version,
       schemas: var_schemas,
+    );
+  }
+
+  @protected
+  MacosImeStatusDto sse_decode_macos_ime_status_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_installed = sse_decode_bool(deserializer);
+    var var_appPath = sse_decode_opt_String(deserializer);
+    var var_userDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataSource = sse_decode_String(deserializer);
+    var var_reloadStampPath = sse_decode_opt_String(deserializer);
+    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
+    var var_logDir = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return MacosImeStatusDto(
+      installed: var_installed,
+      appPath: var_appPath,
+      userDataDir: var_userDataDir,
+      sharedDataDir: var_sharedDataDir,
+      sharedDataSource: var_sharedDataSource,
+      reloadStampPath: var_reloadStampPath,
+      reloadStampSignature: var_reloadStampSignature,
+      logDir: var_logDir,
+      message: var_message,
     );
   }
 
@@ -854,6 +2032,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformReleaseDto? sse_decode_opt_box_autoadd_platform_release_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_platform_release_dto(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
     SseDeserializer deserializer,
   ) {
@@ -864,6 +2066,91 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  PanelOrientationDto sse_decode_panel_orientation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return PanelOrientationDto.values[inner];
+  }
+
+  @protected
+  PlatformReleaseDto sse_decode_platform_release_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_version = sse_decode_String(deserializer);
+    var var_downloadUrls = sse_decode_download_urls_dto(deserializer);
+    return PlatformReleaseDto(
+      version: var_version,
+      downloadUrls: var_downloadUrls,
+    );
+  }
+
+  @protected
+  ReleaseInfoDto sse_decode_release_info_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_version = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_publishedAt = sse_decode_String(deserializer);
+    var var_body = sse_decode_String(deserializer);
+    var var_github = sse_decode_opt_box_autoadd_platform_release_dto(
+      deserializer,
+    );
+    var var_gitee = sse_decode_opt_box_autoadd_platform_release_dto(
+      deserializer,
+    );
+    return ReleaseInfoDto(
+      version: var_version,
+      name: var_name,
+      publishedAt: var_publishedAt,
+      body: var_body,
+      github: var_github,
+      gitee: var_gitee,
+    );
+  }
+
+  @protected
+  RuntimeLogFileInfoDto sse_decode_runtime_log_file_info_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_String(deserializer);
+    var var_size = sse_decode_u_64(deserializer);
+    return RuntimeLogFileInfoDto(name: var_name, size: var_size);
+  }
+
+  @protected
+  RuntimeLogLevelDto sse_decode_runtime_log_level_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return RuntimeLogLevelDto.values[inner];
+  }
+
+  @protected
+  RuntimeLogSettingsDto sse_decode_runtime_log_settings_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_enabled = sse_decode_bool(deserializer);
+    var var_level = sse_decode_runtime_log_level_dto(deserializer);
+    var var_logDir = sse_decode_String(deserializer);
+    var var_files = sse_decode_list_runtime_log_file_info_dto(deserializer);
+    var var_fileCount = sse_decode_u_32(deserializer);
+    var var_totalBytes = sse_decode_u_64(deserializer);
+    return RuntimeLogSettingsDto(
+      enabled: var_enabled,
+      level: var_level,
+      logDir: var_logDir,
+      files: var_files,
+      fileCount: var_fileCount,
+      totalBytes: var_totalBytes,
+    );
   }
 
   @protected
@@ -890,15 +2177,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int sse_decode_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint16();
+  }
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint32();
   }
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getBigUint64();
+  }
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8();
+  }
+
+  @protected
+  UiColorSchemeDto sse_decode_ui_color_scheme_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return UiColorSchemeDto.values[inner];
   }
 
   @protected
@@ -993,9 +2301,64 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_addon_schema_status_dto(
+    AddonSchemaStatusDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.installed, serializer);
+    sse_encode_bool(self.deployed, serializer);
+    sse_encode_String(self.version, serializer);
+    sse_encode_bool(self.englishAvailable, serializer);
+  }
+
+  @protected
+  void sse_encode_android_ime_input_settings_dto(
+    AndroidImeInputSettingsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.hapticsEnabled, serializer);
+    sse_encode_u_8(self.hapticIntensity, serializer);
+    sse_encode_String(self.enterKeyBehavior, serializer);
+    sse_encode_bool(self.keyPreviewEnabled, serializer);
+    sse_encode_u_16(self.longPressDelayMs, serializer);
+    sse_encode_u_8(self.keyboardHeightScale, serializer);
+    sse_encode_String(self.deleteSpeed, serializer);
+    sse_encode_String(self.englishMode, serializer);
+    sse_encode_String(self.backspaceGestureMode, serializer);
+    sse_encode_u_16(self.keyboardHeightDp, serializer);
+    sse_encode_u_8(self.candidateBarHeightDp, serializer);
+    sse_encode_f_32(self.swipeThresholdDp, serializer);
+    sse_encode_bool(self.keySoundEnabled, serializer);
+    sse_encode_u_8(self.keySoundVolume, serializer);
+    sse_encode_bool(self.keyHintVisible, serializer);
+    sse_encode_bool(self.flickKeysEnabled, serializer);
+    sse_encode_bool(self.numberRowEnabled, serializer);
+    sse_encode_f_32(self.candidateFontScale, serializer);
+    sse_encode_bool(self.doubleSpacePeriodEnabled, serializer);
+    sse_encode_bool(self.floatingPortraitEnabled, serializer);
+    sse_encode_u_8(self.floatingPortraitScale, serializer);
+    sse_encode_bool(self.floatingLandscapeEnabled, serializer);
+    sse_encode_u_8(self.floatingLandscapeScale, serializer);
+    sse_encode_opt_String(self.configPath, serializer);
+    sse_encode_opt_String(self.reloadStampPath, serializer);
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_android_ime_input_settings_dto(
+    AndroidImeInputSettingsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_android_ime_input_settings_dto(self, serializer);
   }
 
   @protected
@@ -1014,6 +2377,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_install_progress_dto(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_platform_release_dto(
+    PlatformReleaseDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_platform_release_dto(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self, serializer);
   }
 
   @protected
@@ -1078,9 +2456,100 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_component_versions_dto(
+    ComponentVersionsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.appVersion, serializer);
+    sse_encode_opt_String(self.librimeVersion, serializer);
+    sse_encode_opt_String(self.openccVersion, serializer);
+    sse_encode_opt_String(self.dataDir, serializer);
+  }
+
+  @protected
+  void sse_encode_debug_log_file_dto(
+    DebugLogFileDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_String(self.lines, serializer);
+    sse_encode_bool(self.truncated, serializer);
+  }
+
+  @protected
+  void sse_encode_deploy_result_dto(
+    DeployResultDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.success, serializer);
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_download_urls_dto(
+    DownloadUrlsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.macos, serializer);
+    sse_encode_opt_String(self.windows, serializer);
+    sse_encode_opt_String(self.linux, serializer);
+    sse_encode_opt_String(self.android, serializer);
+    sse_encode_opt_String(self.ios, serializer);
+  }
+
+  @protected
+  void sse_encode_effective_color_scheme_dto(
+    EffectiveColorSchemeDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_english_mode_dto(
+    EnglishModeDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat32(self);
+  }
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_ime_ui_settings_dto(
+    ImeUiSettingsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_ui_color_scheme_dto(self.colorScheme, serializer);
+    sse_encode_effective_color_scheme_dto(
+      self.effectiveColorScheme,
+      serializer,
+    );
+    sse_encode_panel_orientation_dto(self.orientation, serializer);
+    sse_encode_bool(self.embeddedComposition, serializer);
+    sse_encode_String(self.accentColor, serializer);
+    sse_encode_f_32(self.fontSize, serializer);
+    sse_encode_opt_String(self.themePath, serializer);
+    sse_encode_bool(self.themeExists, serializer);
+    sse_encode_opt_String(self.reloadStampPath, serializer);
+    sse_encode_opt_String(self.reloadStampSignature, serializer);
+    sse_encode_String(self.message, serializer);
   }
 
   @protected
@@ -1125,6 +2594,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_runtime_log_file_info_dto(
+    List<RuntimeLogFileInfoDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_runtime_log_file_info_dto(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_verify_entry_dto(
     List<VerifyEntryDto> self,
     SseSerializer serializer,
@@ -1146,6 +2627,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.deployed, serializer);
     sse_encode_opt_String(self.version, serializer);
     sse_encode_list_String(self.schemas, serializer);
+  }
+
+  @protected
+  void sse_encode_macos_ime_status_dto(
+    MacosImeStatusDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.installed, serializer);
+    sse_encode_opt_String(self.appPath, serializer);
+    sse_encode_opt_String(self.userDataDir, serializer);
+    sse_encode_opt_String(self.sharedDataDir, serializer);
+    sse_encode_String(self.sharedDataSource, serializer);
+    sse_encode_opt_String(self.reloadStampPath, serializer);
+    sse_encode_opt_String(self.reloadStampSignature, serializer);
+    sse_encode_opt_String(self.logDir, serializer);
+    sse_encode_String(self.message, serializer);
   }
 
   @protected
@@ -1178,6 +2676,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_platform_release_dto(
+    PlatformReleaseDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_platform_release_dto(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_32(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
     SseSerializer serializer,
@@ -1188,6 +2709,72 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_box_autoadd_windows_ime_status_dto(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_panel_orientation_dto(
+    PanelOrientationDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_platform_release_dto(
+    PlatformReleaseDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.version, serializer);
+    sse_encode_download_urls_dto(self.downloadUrls, serializer);
+  }
+
+  @protected
+  void sse_encode_release_info_dto(
+    ReleaseInfoDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.version, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.publishedAt, serializer);
+    sse_encode_String(self.body, serializer);
+    sse_encode_opt_box_autoadd_platform_release_dto(self.github, serializer);
+    sse_encode_opt_box_autoadd_platform_release_dto(self.gitee, serializer);
+  }
+
+  @protected
+  void sse_encode_runtime_log_file_info_dto(
+    RuntimeLogFileInfoDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.name, serializer);
+    sse_encode_u_64(self.size, serializer);
+  }
+
+  @protected
+  void sse_encode_runtime_log_level_dto(
+    RuntimeLogLevelDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_runtime_log_settings_dto(
+    RuntimeLogSettingsDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.enabled, serializer);
+    sse_encode_runtime_log_level_dto(self.level, serializer);
+    sse_encode_String(self.logDir, serializer);
+    sse_encode_list_runtime_log_file_info_dto(self.files, serializer);
+    sse_encode_u_32(self.fileCount, serializer);
+    sse_encode_u_64(self.totalBytes, serializer);
   }
 
   @protected
@@ -1207,15 +2794,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_u_16(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint16(self);
+  }
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint32(self);
   }
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putBigUint64(self);
+  }
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self);
+  }
+
+  @protected
+  void sse_encode_ui_color_scheme_dto(
+    UiColorSchemeDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected

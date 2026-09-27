@@ -7,7 +7,157 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `eq`, `eq`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
+
+class AddonSchemaStatusDto {
+  final bool installed;
+  final bool deployed;
+  final String version;
+  final bool englishAvailable;
+
+  const AddonSchemaStatusDto({
+    required this.installed,
+    required this.deployed,
+    required this.version,
+    required this.englishAvailable,
+  });
+
+  @override
+  int get hashCode =>
+      installed.hashCode ^
+      deployed.hashCode ^
+      version.hashCode ^
+      englishAvailable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AddonSchemaStatusDto &&
+          runtimeType == other.runtimeType &&
+          installed == other.installed &&
+          deployed == other.deployed &&
+          version == other.version &&
+          englishAvailable == other.englishAvailable;
+}
+
+class AndroidImeInputSettingsDto {
+  final bool hapticsEnabled;
+  final int hapticIntensity;
+  final String enterKeyBehavior;
+  final bool keyPreviewEnabled;
+  final int longPressDelayMs;
+  final int keyboardHeightScale;
+  final String deleteSpeed;
+  final String englishMode;
+  final String backspaceGestureMode;
+  final int keyboardHeightDp;
+  final int candidateBarHeightDp;
+  final double swipeThresholdDp;
+  final bool keySoundEnabled;
+  final int keySoundVolume;
+  final bool keyHintVisible;
+  final bool flickKeysEnabled;
+  final bool numberRowEnabled;
+  final double candidateFontScale;
+  final bool doubleSpacePeriodEnabled;
+  final bool floatingPortraitEnabled;
+  final int floatingPortraitScale;
+  final bool floatingLandscapeEnabled;
+  final int floatingLandscapeScale;
+  final String? configPath;
+  final String? reloadStampPath;
+  final String message;
+
+  const AndroidImeInputSettingsDto({
+    required this.hapticsEnabled,
+    required this.hapticIntensity,
+    required this.enterKeyBehavior,
+    required this.keyPreviewEnabled,
+    required this.longPressDelayMs,
+    required this.keyboardHeightScale,
+    required this.deleteSpeed,
+    required this.englishMode,
+    required this.backspaceGestureMode,
+    required this.keyboardHeightDp,
+    required this.candidateBarHeightDp,
+    required this.swipeThresholdDp,
+    required this.keySoundEnabled,
+    required this.keySoundVolume,
+    required this.keyHintVisible,
+    required this.flickKeysEnabled,
+    required this.numberRowEnabled,
+    required this.candidateFontScale,
+    required this.doubleSpacePeriodEnabled,
+    required this.floatingPortraitEnabled,
+    required this.floatingPortraitScale,
+    required this.floatingLandscapeEnabled,
+    required this.floatingLandscapeScale,
+    this.configPath,
+    this.reloadStampPath,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      hapticsEnabled.hashCode ^
+      hapticIntensity.hashCode ^
+      enterKeyBehavior.hashCode ^
+      keyPreviewEnabled.hashCode ^
+      longPressDelayMs.hashCode ^
+      keyboardHeightScale.hashCode ^
+      deleteSpeed.hashCode ^
+      englishMode.hashCode ^
+      backspaceGestureMode.hashCode ^
+      keyboardHeightDp.hashCode ^
+      candidateBarHeightDp.hashCode ^
+      swipeThresholdDp.hashCode ^
+      keySoundEnabled.hashCode ^
+      keySoundVolume.hashCode ^
+      keyHintVisible.hashCode ^
+      flickKeysEnabled.hashCode ^
+      numberRowEnabled.hashCode ^
+      candidateFontScale.hashCode ^
+      doubleSpacePeriodEnabled.hashCode ^
+      floatingPortraitEnabled.hashCode ^
+      floatingPortraitScale.hashCode ^
+      floatingLandscapeEnabled.hashCode ^
+      floatingLandscapeScale.hashCode ^
+      configPath.hashCode ^
+      reloadStampPath.hashCode ^
+      message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AndroidImeInputSettingsDto &&
+          runtimeType == other.runtimeType &&
+          hapticsEnabled == other.hapticsEnabled &&
+          hapticIntensity == other.hapticIntensity &&
+          enterKeyBehavior == other.enterKeyBehavior &&
+          keyPreviewEnabled == other.keyPreviewEnabled &&
+          longPressDelayMs == other.longPressDelayMs &&
+          keyboardHeightScale == other.keyboardHeightScale &&
+          deleteSpeed == other.deleteSpeed &&
+          englishMode == other.englishMode &&
+          backspaceGestureMode == other.backspaceGestureMode &&
+          keyboardHeightDp == other.keyboardHeightDp &&
+          candidateBarHeightDp == other.candidateBarHeightDp &&
+          swipeThresholdDp == other.swipeThresholdDp &&
+          keySoundEnabled == other.keySoundEnabled &&
+          keySoundVolume == other.keySoundVolume &&
+          keyHintVisible == other.keyHintVisible &&
+          flickKeysEnabled == other.flickKeysEnabled &&
+          numberRowEnabled == other.numberRowEnabled &&
+          candidateFontScale == other.candidateFontScale &&
+          doubleSpacePeriodEnabled == other.doubleSpacePeriodEnabled &&
+          floatingPortraitEnabled == other.floatingPortraitEnabled &&
+          floatingPortraitScale == other.floatingPortraitScale &&
+          floatingLandscapeEnabled == other.floatingLandscapeEnabled &&
+          floatingLandscapeScale == other.floatingLandscapeScale &&
+          configPath == other.configPath &&
+          reloadStampPath == other.reloadStampPath &&
+          message == other.message;
+}
 
 class BridgeConfig {
   final String dataDir;
@@ -119,6 +269,171 @@ class BridgeInfo {
 
 enum BridgePlatform { windows, macOs, linux, android, ios }
 
+class ComponentVersionsDto {
+  final String appVersion;
+  final String? librimeVersion;
+  final String? openccVersion;
+  final String? dataDir;
+
+  const ComponentVersionsDto({
+    required this.appVersion,
+    this.librimeVersion,
+    this.openccVersion,
+    this.dataDir,
+  });
+
+  @override
+  int get hashCode =>
+      appVersion.hashCode ^
+      librimeVersion.hashCode ^
+      openccVersion.hashCode ^
+      dataDir.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ComponentVersionsDto &&
+          runtimeType == other.runtimeType &&
+          appVersion == other.appVersion &&
+          librimeVersion == other.librimeVersion &&
+          openccVersion == other.openccVersion &&
+          dataDir == other.dataDir;
+}
+
+class DebugLogFileDto {
+  final List<String> lines;
+  final bool truncated;
+
+  const DebugLogFileDto({required this.lines, required this.truncated});
+
+  @override
+  int get hashCode => lines.hashCode ^ truncated.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DebugLogFileDto &&
+          runtimeType == other.runtimeType &&
+          lines == other.lines &&
+          truncated == other.truncated;
+}
+
+class DeployResultDto {
+  final bool success;
+  final String message;
+
+  const DeployResultDto({required this.success, required this.message});
+
+  @override
+  int get hashCode => success.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeployResultDto &&
+          runtimeType == other.runtimeType &&
+          success == other.success &&
+          message == other.message;
+}
+
+class DownloadUrlsDto {
+  final String? macos;
+  final String? windows;
+  final String? linux;
+  final String? android;
+  final String? ios;
+
+  const DownloadUrlsDto({
+    this.macos,
+    this.windows,
+    this.linux,
+    this.android,
+    this.ios,
+  });
+
+  @override
+  int get hashCode =>
+      macos.hashCode ^
+      windows.hashCode ^
+      linux.hashCode ^
+      android.hashCode ^
+      ios.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DownloadUrlsDto &&
+          runtimeType == other.runtimeType &&
+          macos == other.macos &&
+          windows == other.windows &&
+          linux == other.linux &&
+          android == other.android &&
+          ios == other.ios;
+}
+
+enum EffectiveColorSchemeDto { light, dark }
+
+enum EnglishModeDto { ascii, schema }
+
+class ImeUiSettingsDto {
+  final UiColorSchemeDto colorScheme;
+  final EffectiveColorSchemeDto effectiveColorScheme;
+  final PanelOrientationDto orientation;
+  final bool embeddedComposition;
+  final String accentColor;
+  final double fontSize;
+  final String? themePath;
+  final bool themeExists;
+  final String? reloadStampPath;
+  final String? reloadStampSignature;
+  final String message;
+
+  const ImeUiSettingsDto({
+    required this.colorScheme,
+    required this.effectiveColorScheme,
+    required this.orientation,
+    required this.embeddedComposition,
+    required this.accentColor,
+    required this.fontSize,
+    this.themePath,
+    required this.themeExists,
+    this.reloadStampPath,
+    this.reloadStampSignature,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      colorScheme.hashCode ^
+      effectiveColorScheme.hashCode ^
+      orientation.hashCode ^
+      embeddedComposition.hashCode ^
+      accentColor.hashCode ^
+      fontSize.hashCode ^
+      themePath.hashCode ^
+      themeExists.hashCode ^
+      reloadStampPath.hashCode ^
+      reloadStampSignature.hashCode ^
+      message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ImeUiSettingsDto &&
+          runtimeType == other.runtimeType &&
+          colorScheme == other.colorScheme &&
+          effectiveColorScheme == other.effectiveColorScheme &&
+          orientation == other.orientation &&
+          embeddedComposition == other.embeddedComposition &&
+          accentColor == other.accentColor &&
+          fontSize == other.fontSize &&
+          themePath == other.themePath &&
+          themeExists == other.themeExists &&
+          reloadStampPath == other.reloadStampPath &&
+          reloadStampSignature == other.reloadStampSignature &&
+          message == other.message;
+}
+
 class InstallProgressDto {
   final String stage;
   final int percent;
@@ -198,6 +513,57 @@ class LocalSchemaDto {
           schemas == other.schemas;
 }
 
+class MacosImeStatusDto {
+  final bool installed;
+  final String? appPath;
+  final String? userDataDir;
+  final String? sharedDataDir;
+  final String sharedDataSource;
+  final String? reloadStampPath;
+  final String? reloadStampSignature;
+  final String? logDir;
+  final String message;
+
+  const MacosImeStatusDto({
+    required this.installed,
+    this.appPath,
+    this.userDataDir,
+    this.sharedDataDir,
+    required this.sharedDataSource,
+    this.reloadStampPath,
+    this.reloadStampSignature,
+    this.logDir,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      installed.hashCode ^
+      appPath.hashCode ^
+      userDataDir.hashCode ^
+      sharedDataDir.hashCode ^
+      sharedDataSource.hashCode ^
+      reloadStampPath.hashCode ^
+      reloadStampSignature.hashCode ^
+      logDir.hashCode ^
+      message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MacosImeStatusDto &&
+          runtimeType == other.runtimeType &&
+          installed == other.installed &&
+          appPath == other.appPath &&
+          userDataDir == other.userDataDir &&
+          sharedDataDir == other.sharedDataDir &&
+          sharedDataSource == other.sharedDataSource &&
+          reloadStampPath == other.reloadStampPath &&
+          reloadStampSignature == other.reloadStampSignature &&
+          logDir == other.logDir &&
+          message == other.message;
+}
+
 class OnboardingDto {
   final bool completed;
 
@@ -212,6 +578,124 @@ class OnboardingDto {
       other is OnboardingDto &&
           runtimeType == other.runtimeType &&
           completed == other.completed;
+}
+
+enum PanelOrientationDto { horizontal, vertical }
+
+class PlatformReleaseDto {
+  final String version;
+  final DownloadUrlsDto downloadUrls;
+
+  const PlatformReleaseDto({required this.version, required this.downloadUrls});
+
+  @override
+  int get hashCode => version.hashCode ^ downloadUrls.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PlatformReleaseDto &&
+          runtimeType == other.runtimeType &&
+          version == other.version &&
+          downloadUrls == other.downloadUrls;
+}
+
+class ReleaseInfoDto {
+  final String version;
+  final String name;
+  final String publishedAt;
+  final String body;
+  final PlatformReleaseDto? github;
+  final PlatformReleaseDto? gitee;
+
+  const ReleaseInfoDto({
+    required this.version,
+    required this.name,
+    required this.publishedAt,
+    required this.body,
+    this.github,
+    this.gitee,
+  });
+
+  @override
+  int get hashCode =>
+      version.hashCode ^
+      name.hashCode ^
+      publishedAt.hashCode ^
+      body.hashCode ^
+      github.hashCode ^
+      gitee.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReleaseInfoDto &&
+          runtimeType == other.runtimeType &&
+          version == other.version &&
+          name == other.name &&
+          publishedAt == other.publishedAt &&
+          body == other.body &&
+          github == other.github &&
+          gitee == other.gitee;
+}
+
+class RuntimeLogFileInfoDto {
+  final String name;
+  final BigInt size;
+
+  const RuntimeLogFileInfoDto({required this.name, required this.size});
+
+  @override
+  int get hashCode => name.hashCode ^ size.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RuntimeLogFileInfoDto &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          size == other.size;
+}
+
+enum RuntimeLogLevelDto { info, verbose }
+
+class RuntimeLogSettingsDto {
+  final bool enabled;
+  final RuntimeLogLevelDto level;
+  final String logDir;
+  final List<RuntimeLogFileInfoDto> files;
+  final int fileCount;
+  final BigInt totalBytes;
+
+  const RuntimeLogSettingsDto({
+    required this.enabled,
+    required this.level,
+    required this.logDir,
+    required this.files,
+    required this.fileCount,
+    required this.totalBytes,
+  });
+
+  @override
+  int get hashCode =>
+      enabled.hashCode ^
+      level.hashCode ^
+      logDir.hashCode ^
+      files.hashCode ^
+      fileCount.hashCode ^
+      totalBytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RuntimeLogSettingsDto &&
+          runtimeType == other.runtimeType &&
+          enabled == other.enabled &&
+          level == other.level &&
+          logDir == other.logDir &&
+          files == other.files &&
+          fileCount == other.fileCount &&
+          totalBytes == other.totalBytes;
 }
 
 class SchemeReleaseDto {
@@ -260,6 +744,8 @@ class SchemeReleaseDto {
           downloadUrl == other.downloadUrl &&
           assetName == other.assetName;
 }
+
+enum UiColorSchemeDto { auto, light, dark }
 
 class VerifyEntryDto {
   final String path;
