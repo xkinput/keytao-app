@@ -5,7 +5,8 @@ import 'package:flutter_rust_bridge_hooks/flutter_rust_bridge_hooks.dart';
 
 // The bridge links keytao-app-core -> keytao-core -> librime. Hooks run with a
 // scrubbed environment, so the vendored Rime SDK is passed to Cargo explicitly,
-// and on platforms where librime is a shared library it is bundled as a code asset.
+// and Android shared libraries are bundled as code assets. The macOS Runner
+// build phase bundles librime and its plugins directly in Contents/Frameworks.
 void main(List<String> args) async {
   await build(args, (input, output) async {
     final vendor = Directory.fromUri(input.packageRoot.resolve('../vendor/librime/'));
@@ -29,7 +30,7 @@ void main(List<String> args) async {
           package: input.packageName,
           name: file.substring(0, file.indexOf('.')),
           linkMode: DynamicLoadingBundled(),
-          file: await _thinForTarget(library, input),
+          file: await _copyForBundle(library, input),
         ),
       );
     }
@@ -53,7 +54,7 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
   switch (os) {
     case OS.macOS:
       final root = '${vendor}macos-universal';
-      return _Rime(sdk(root), ['$root/lib/librime.1.dylib']);
+      return _Rime(sdk(root));
     case OS.iOS:
       return _Rime({'KEYTAO_IOS_RIME_ROOT': '${vendor}ios'});
     case OS.android:
@@ -81,23 +82,8 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
 
 // Always hand Flutter a private copy: installing a code asset can delete or
 // rewrite the file it was given, which once removed the vendored librime.1.dylib.
-// On macOS Flutter also builds each architecture separately and lipo-merges the
-// assets, so the universal dylib is reduced to the architecture being built.
-Future<Uri> _thinForTarget(String library, BuildInput input) async {
-  if (input.config.code.targetOS != OS.macOS) {
-    final copy = input.outputDirectory.resolve(Uri.file(library).pathSegments.last);
-    await File(library).copy(copy.toFilePath());
-    return copy;
-  }
-  final arch = switch (input.config.code.targetArchitecture) {
-    Architecture.arm64 => 'arm64',
-    Architecture.x64 => 'x86_64',
-    final other => throw UnsupportedError('librime has no $other slice'),
-  };
-  final thin = input.outputDirectory.resolve('librime.1.dylib');
-  final result = await Process.run('lipo', [library, '-thin', arch, '-output', thin.toFilePath()]);
-  if (result.exitCode != 0) {
-    throw StateError('lipo -thin $arch failed: ${result.stderr}');
-  }
-  return thin;
+Future<Uri> _copyForBundle(String library, BuildInput input) async {
+  final copy = input.outputDirectory.resolve(Uri.file(library).pathSegments.last);
+  await File(library).copy(copy.toFilePath());
+  return copy;
 }
