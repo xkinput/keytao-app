@@ -260,7 +260,7 @@ fn publish_at(
                 .get(Path::new("default.custom.yaml"))
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
             let new = std::str::from_utf8(content).map_err(|error| error.to_string())?;
-            let (merged, _) = super::merge_default_custom(old, new);
+            let (merged, _) = keytao_app_core::install::merge_default_custom(old, new);
             files.insert(PathBuf::from("default.custom.yaml"), merged.into_bytes());
         } else {
             if !has_schema_list
@@ -340,12 +340,12 @@ fn store_snapshot(
     for (path, content) in files {
         let output = snapshot.join(path);
         std::fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
-        super::write_file_atomic(&output, content).map_err(|error| error.to_string())?;
+        keytao_app_core::scheme_files::write_file_atomic(&output, content).map_err(|error| error.to_string())?;
     }
     if grant_access {
         grant_appcontainer_read(root)?;
     }
-    super::write_file_atomic(&root.join("current.txt"), generation.as_bytes())
+    keytao_app_core::scheme_files::write_file_atomic(&root.join("current.txt"), generation.as_bytes())
         .map_err(|error| error.to_string())
 }
 

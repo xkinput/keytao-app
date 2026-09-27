@@ -20,7 +20,7 @@ pub(crate) fn merge_rime_lua(
     keytao_core::merge_rime_lua_content(Some(local_content), zip_content, zip_lua_filenames)
 }
 
-pub(crate) fn merge_default_custom(
+pub fn merge_default_custom(
     existing: Option<&str>,
     zip_content: &str,
 ) -> (String, Vec<String>) {
