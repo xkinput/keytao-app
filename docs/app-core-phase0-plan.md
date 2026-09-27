@@ -233,3 +233,25 @@ Kotlin 1.9.25 迁移到 AGP 9 内置 Kotlin 的步骤：
 | 1 | FRB 集成后端 | A：native assets（最新，带 build hooks 和 @RecordUse）。B：Cargokit（FRB 默认，成熟） | Phase 0 先在 spike 分支跑通 A，包括预编译库的注册，以及 IME 和扩展的加载路径。跑不通就用 B，以后再迁 |
 | 2 | Android 版本基线和迁移时机 | 版本 A：全用最新（AGP 9.4.0、Gradle 9.7.x、NDK r30、Kotlin 2.4.20），超出了 Flutter 3.47 验证过的范围。版本 B：Flutter 验证过的组合（AGP 9.1–9.2、Gradle 9.3.1、NDK 28.2.13676358、KGP 2.4.0）。迁移时机：现有 IME 工程在 Phase 0 同步迁到内置 Kotlin，或者 Flutter UI 先单独建一个 Gradle 工程 | 选 A，哪一项不兼容就单独回落到 B 的对应版本。IME 工程在 Phase 0 一起迁，因为 Kotlin 1.9.25 本身已经是硬错误 |
 | 3 | macOS 最低版本和架构 | 最低版本：12（Flutter 下限）或 13（IMK 现值）。架构：Universal 或仅 arm64。Flutter 正在淘汰 x64，目前只给警告；macOS 27 只支持 Apple silicon | 统一到 13。先保留 Universal，等 Flutter 把 x64 警告改成报错时再切到仅 arm64 |
+---
+
+## 8. 进度与遗留事项（2026-09-28 更新）
+
+| 批 | 提交 | 验收 |
+|---|---|---|
+| 0a 骨架 + 删除 16 个死命令 | e6b12ad | 44/1 测试不变 |
+| 0b 方案获取与安装 | d94dcae（Windows 回归修复 a6d432a） | Opus 评审零发现；外壳 Windows 编译后补 |
+| 0c 部署、输入法状态与设置 | 7f3f192 | Opus 等价评审 PASS |
+| 0d 账号、同步、日志 + 会话/引导状态 | 6c62bad | 两轮 Opus 评审，8 项修复后 PASS；78/1 测试 |
+
+编译门禁：`scripts/check-core-cross.sh`（核心 Linux/Windows）、`scripts/check-tauri-windows.sh`（外壳 Windows）、Android APK 构建、macOS 本机测试。
+
+尚未覆盖的编译盲区：
+- iOS 外壳：Tauri 构建脚本在本机混用 macOS SDK，暂无法 `cargo check --target aarch64-apple-ios`；cfg(ios) 代码目前只靠审读，第 2 阶段真机兜底。
+- Linux 外壳：需要目标平台 GTK/WebKit，本机不做；请在 Linux 机器上 `cargo check -p keytao-app` 一次。
+
+第 1 阶段（Flutter 接管后）必须处理：
+- 核心成为会话唯一持有方时，删除 `src/App.tsx` 挂载时的 `app_state_clear_auth` 调用，否则每次启动都会登出。
+- 引导处于"待定"期间用户装好方案后，老用户规则会把新用户误判为已完成；由核心驱动引导界面前要收紧判定。
+- Windows 上 `data_dir` 与 `cache_dir` 同为 `%LOCALAPPDATA%\<id>`，清理缓存时不能整目录删除（凭据文件在内）；建议状态文件移到独立子目录。
+- 清理：Android/iOS 的 `rime_deploy_default` 包装里残留的 Windows 参数；核心 `time` 依赖多余的 `parsing` feature。
