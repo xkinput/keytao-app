@@ -42,6 +42,12 @@ object KeytaoSchemaFixture {
     private const val fixtureArgument = "schemaFixture"
     private const val fixtureAsset = "keytao-schema-fixture.zip"
 
+    fun useIsolatedRoot(context: Context): File {
+        val root = File(context.cacheDir, "keytao-storage-tests")
+        KeytaoAndroidPaths.setUserRootForTests(context, root)
+        return KeytaoAndroidPaths.userRoot(context)
+    }
+
     /** Must start with `keytao` — [isManagedSchema] is what makes it count as installed. */
     private const val syntheticSchemaId = "keytao_fixture"
 
@@ -51,7 +57,7 @@ object KeytaoSchemaFixture {
      * want the source-only state or a compiled one.
      */
     fun install(context: Context, allowSynthetic: Boolean = false): Source {
-        val root = KeytaoAndroidPaths.userRoot(context)
+        val root = useIsolatedRoot(context)
         if (KeytaoAndroidPaths.hasInstalledSchema(root)) return Source.EXISTING
 
         stagedFixtureDir()?.let { staged ->

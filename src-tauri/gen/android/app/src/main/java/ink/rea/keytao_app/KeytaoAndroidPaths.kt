@@ -1,22 +1,29 @@
 package ink.rea.keytao_app
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Environment
+import android.os.UserManager
 import java.io.File
-import java.nio.file.Files
+
+enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSING, MIGRATION_PENDING }
 
 /**
  * Where the IME keeps schemas, deployment output and its YAML configuration.
  *
- * The app process and the `:ime` process share a UID, so app-specific storage is
- * enough for both and no storage permission is involved. Everything lives under
- * `getExternalFilesDir(null)/keytao`, visible to the user for hand-editing
- * theme.yaml. The IME waits for this directory after unlock, without a fallback.
+ * The app, `:ime` and `:rime_deployer` independently resolve the single editable
+ * root: Environment.getExternalStorageDirectory()/keytao (/sdcard/keytao).
+ * Unlock, mounted storage, file access and a readable/writable directory are
+ * required. Only success is cached; failures retry after 500 ms. There is no
+ * private root, fallback, mirroring or IME-side migration. Slow calls never run
+ * under the paths monitor. App-process migration gates consumers until complete.
  */
 object KeytaoAndroidPaths {
     private const val rootDirectoryName = "keytao"
     private const val reloadStampFileName = "keytao-ime.reload"
-    private const val legacyMigrationMarkerName = ".keytao-migrated-from-shared-storage"
     private const val failedRootRetryNs = 500_000_000L
 
     @Volatile
@@ -24,39 +31,82 @@ object KeytaoAndroidPaths {
     private var lastFailedRootAttemptNs: Long? = null
     private var storageNotReadyStartedNs: Long? = null
     private var storageNotReadyLogged = false
+    @Volatile
+    internal var lastStatus = StorageStatus.NOT_UNLOCKED_OR_NOT_MOUNTED
+        private set
+    @Volatile
+    internal var testRootOverride: File? = null
+        private set
 
-    /** App-process compatibility only; the `:ime` process must use [userRootOrNull]. */
-    fun userRoot(context: Context): File {
-        // ponytail: Devices without shared storage need a persisted root choice if one shows up.
-        return (userRootOrNull(context) ?: File(context.applicationContext.filesDir, rootDirectoryName))
-            .apply { mkdirs() }
+    /** Throw at command boundaries; background IME consumers use [userRootOrNull]. */
+    fun userRoot(context: Context): File = userRootOrNull(context)
+        ?: throw IllegalStateException(when (lastStatus) {
+            StorageStatus.PERMISSION_MISSING -> "需要文件访问权限"
+            StorageStatus.MIGRATION_PENDING -> "请打开 KeyTao App 完成数据迁移"
+            else -> "存储尚未就绪"
+        })
+
+    @Suppress("DEPRECATION")
+    internal fun sharedRoot(): File = File(Environment.getExternalStorageDirectory(), rootDirectoryName)
+
+    fun hasStorageAccess(context: Context): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    }
+
+    internal fun isUnlockedAndMounted(context: Context): Boolean =
+        (Build.VERSION.SDK_INT < Build.VERSION_CODES.N ||
+            context.getSystemService(UserManager::class.java)?.isUserUnlocked == true) &&
+            Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED
+
+    fun status(context: Context): StorageStatus {
+        userRootOrNull(context)
+        return lastStatus
     }
 
     fun userRootOrNull(context: Context): File? {
         cachedRoot?.let { return it }
-        resolveUserRoot { context.applicationContext.getExternalFilesDir(null) }
-        synchronized(this) {
+        val appContext = context.applicationContext
+        val override = testRootOverride
+        resolveUserRoot(
+            unlockedAndMounted = { override != null || isUnlockedAndMounted(appContext) },
+            hasAccess = { override != null || hasStorageAccess(appContext) },
+            migrationPending = { override == null && KeytaoStorageMigration.blocksRoot(appContext, it) },
+            rootProvider = { override ?: sharedRoot() },
+        )
+        val events = mutableListOf<Pair<String, Double>>()
+        val result = synchronized(this) {
             val root = cachedRoot
             if (!storageNotReadyLogged && storageNotReadyStartedNs != null) {
                 storageNotReadyLogged = true
-                KeytaoRuntimeLog.event("lifecycle", "storage_not_ready")
+                events.add("storage_not_ready" to Double.NaN)
             }
             if (root != null) {
                 storageNotReadyStartedNs?.let { started ->
-                    KeytaoRuntimeLog.event("lifecycle", "storage_ready", KeytaoRuntimeLog.elapsedMs(started))
+                    events.add("storage_ready" to KeytaoRuntimeLog.elapsedMs(started))
                 }
                 storageNotReadyStartedNs = null
                 lastFailedRootAttemptNs = null
             }
-            return root
+            root
         }
+        events.forEach { (event, elapsed) -> KeytaoRuntimeLog.event("lifecycle", event, elapsed) }
+        return result
     }
 
     fun isUserRootResolved(): Boolean = cachedRoot != null
 
+    @Synchronized
+    internal fun retryResolution() { lastFailedRootAttemptNs = null }
+
     internal fun resolveUserRoot(
         nowNs: () -> Long = System::nanoTime,
-        externalFilesDir: () -> File?,
+        unlockedAndMounted: () -> Boolean = { true },
+        hasAccess: () -> Boolean = { true },
+        usable: (File) -> Boolean = ::isWritable,
+        migrationPending: (File) -> Boolean = { false },
+        rootProvider: () -> File?,
     ): File? {
         cachedRoot?.let { return it }
         synchronized(this) {
@@ -66,16 +116,29 @@ object KeytaoAndroidPaths {
             }
         }
         // StorageManager may block here; never hold the paths monitor across it.
-        val external = runCatching { externalFilesDir() }.getOrNull()
+        var status = StorageStatus.NOT_UNLOCKED_OR_NOT_MOUNTED
+        val root = runCatching {
+            when {
+                !unlockedAndMounted() -> null
+                !hasAccess() -> { status = StorageStatus.PERMISSION_MISSING; null }
+                else -> rootProvider()?.takeIf {
+                    if (migrationPending(it)) {
+                        status = StorageStatus.MIGRATION_PENDING
+                        false
+                    } else usable(it)
+                }
+            }
+        }.getOrNull()
         synchronized(this) {
             cachedRoot?.let { return it }
-            if (external == null) {
+            if (root == null) {
+                lastStatus = status
                 lastFailedRootAttemptNs = nowNs()
                 if (storageNotReadyStartedNs == null) storageNotReadyStartedNs = lastFailedRootAttemptNs
                 return null
             }
-            val root = File(external, rootDirectoryName)
             cachedRoot = root
+            lastStatus = StorageStatus.READY
             return root
         }
     }
@@ -86,17 +149,19 @@ object KeytaoAndroidPaths {
         lastFailedRootAttemptNs = null
         storageNotReadyStartedNs = null
         storageNotReadyLogged = false
+        lastStatus = StorageStatus.NOT_UNLOCKED_OR_NOT_MOUNTED
     }
 
-    internal fun isStaleInternalRoot(dir: File, resolvedRoot: File): Boolean = runCatching {
-        dir.isDirectory && dir.canonicalPath != resolvedRoot.canonicalPath &&
-            !File(dir, "default.custom.yaml").exists() &&
-            !File(dir, "default-custom.yaml").exists() &&
-            dir.walkTopDown().onFail { _, error -> throw error }.none {
-                Files.isSymbolicLink(it.toPath()) ||
-                    it.name.endsWith(".userdb") || it.name.endsWith(".userdb.txt")
-            }
-    }.getOrDefault(false)
+    /** Debug instrumentation only; also validated in the remote deploy process. */
+    internal fun setUserRootForTests(context: Context, root: File?) {
+        check(context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
+        if (root != null) {
+            val allowed = File(context.cacheDir, "keytao-storage-tests").canonicalFile
+            require(root.canonicalFile == allowed) { "Test root must be isolated in the app cache" }
+        }
+        testRootOverride = root
+        resetUserRootCacheForTests()
+    }
 
     fun themeFile(context: Context): File = File(userRoot(context), "theme.yaml")
 
@@ -154,43 +219,17 @@ object KeytaoAndroidPaths {
             if (!root.exists() && !root.mkdirs()) {
                 return false
             }
-            val probe = File(root, ".keytao-write-test")
-            probe.writeText("ok")
-            probe.delete()
-            true
+            if (!root.isDirectory || !root.canRead() || !root.canWrite()) return false
+            val probe = File.createTempFile(".keytao-write-", ".tmp", root)
+            try {
+                probe.writeText("ok")
+                probe.readText() == "ok"
+            } finally {
+                check(probe.delete())
+            }
         } catch (_: Throwable) {
             false
         }
     }
 
-    /**
-     * Pull an install made by an older build out of shared storage exactly once.
-     *
-     * Best effort by design: without MANAGE_EXTERNAL_STORAGE the old directory is
-     * usually unreadable, in which case the user simply reinstalls the schema
-     * from the app. Blocking — call it from a background thread.
-     */
-    fun migrateLegacyRootIfNeeded(context: Context) {
-        val root = userRootOrNull(context) ?: return
-        migrateLegacyRoot(root)
-    }
-
-    private fun migrateLegacyRoot(root: File) {
-        root.mkdirs()
-        val marker = File(root, legacyMigrationMarkerName)
-        if (marker.exists()) return
-        runCatching {
-            @Suppress("DEPRECATION")
-            val legacy = File(Environment.getExternalStorageDirectory(), rootDirectoryName)
-            if (legacy.isDirectory && legacy.canRead() && legacy.absolutePath != root.absolutePath) {
-                legacy.listFiles()?.forEach { child ->
-                    val target = File(root, child.name)
-                    if (!target.exists()) {
-                        child.copyRecursively(target, overwrite = false)
-                    }
-                }
-            }
-        }
-        runCatching { marker.writeText("1") }
-    }
 }

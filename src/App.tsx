@@ -74,7 +74,12 @@ const CROSS_PLATFORM_IME_ACCENT_PRESETS = ["#3B73D9", "#0F9F8F", "#D87A32", "#8B
 const DEFAULT_IME_FONT_SIZE = 20
 const MIN_IME_FONT_SIZE = 10
 const MAX_IME_FONT_SIZE = 36
-const ANDROID_STORAGE_PERMISSION_MESSAGE = "请授予 KeyTao 文件访问权限后安装键道方案"
+const ANDROID_STORAGE_PERMISSION_MESSAGE = "需要文件访问权限"
+
+type AndroidStorageStatus = AndroidStoragePermissionStatus & {
+  migrationError?: string | null
+  deployError?: string | null
+}
 const AUTH_TOKEN_STORAGE_KEY = "keytao.auth.token"
 const AUTH_USER_STORAGE_KEY = "keytao.auth.user"
 const ANDROID_ONBOARDING_DONE_KEY = "keytao.android.onboardingCompleted"
@@ -441,7 +446,7 @@ export default function App() {
   const [androidOnboardingCompleted, setAndroidOnboardingCompleted] = useState<boolean>(
     () => window.localStorage.getItem(ANDROID_ONBOARDING_DONE_KEY) === "1",
   )
-  const [androidStoragePermission, setAndroidStoragePermission] = useState<AndroidStoragePermissionStatus | null>(null)
+  const [androidStoragePermission, setAndroidStoragePermission] = useState<AndroidStorageStatus | null>(null)
   const [androidStoragePermissionError, setAndroidStoragePermissionError] = useState<string | null>(null)
   const [isCheckingAndroidStoragePermission, setIsCheckingAndroidStoragePermission] = useState(false)
   const [imeUiSettings, setImeUiSettings] = useState<ImeUiSettings | null>(null)
@@ -485,6 +490,7 @@ export default function App() {
   const [isDeploying, setIsDeploying] = useState(false)
   const [deploySteps, setDeploySteps] = useState<DeployStep[]>([])
   const deployInFlightRef = useRef(false)
+  const reportedMigrationDeployErrorRef = useRef<string | null>(null)
   const windowsActionInFlightRef = useRef(false)
   const windowsActionEligibleRef = useRef(false)
   const [windowsActionsListening, setWindowsActionsListening] = useState(false)
@@ -995,9 +1001,16 @@ export default function App() {
   async function refreshAndroidStoragePermission() {
     setIsCheckingAndroidStoragePermission(true)
     try {
-      const status = await invoke<AndroidStoragePermissionStatus>("android_storage_permission_status")
+      const status = await invoke<AndroidStorageStatus>("android_storage_permission_status")
       setAndroidStoragePermission(status)
-      setAndroidStoragePermissionError(null)
+      setAndroidStoragePermissionError(status.migrationError || null)
+      if (status.deployError && status.deployError !== reportedMigrationDeployErrorRef.current && !deployInFlightRef.current) {
+        setDeploySteps([{ msg: status.deployError, error: true }])
+        addLogs([`[DEPLOY ERROR] ${status.deployError}`])
+        reportedMigrationDeployErrorRef.current = status.deployError
+      } else if (!status.deployError) {
+        reportedMigrationDeployErrorRef.current = null
+      }
       return status
     } catch (e) {
       const message = String(e)
@@ -1030,7 +1043,7 @@ export default function App() {
     try {
       await invoke("android_open_storage_permission_settings")
       window.setTimeout(() => {
-        void refreshAndroidStoragePermission()
+        void refreshAndroidSetupStatus()
       }, 800)
     } catch (e) {
       setAndroidStoragePermissionError(String(e))
@@ -1681,6 +1694,11 @@ export default function App() {
     setExtError(null)
     setExtProgress(null)
     try {
+      if (osType === "android") {
+        const permission = await refreshAndroidStoragePermission()
+        if (!permission?.granted) throw new Error(ANDROID_STORAGE_PERMISSION_MESSAGE)
+        if (permission.migrationError) throw new Error(permission.migrationError)
+      }
       const tempPath = await invoke<string>("download_to_temp", { url: selectedSchemeDownloadUrl })
       let result: InstallResult
       if (osType === "android" && safUri) {
@@ -1748,6 +1766,19 @@ export default function App() {
   )
 
   if (shouldShowAndroidImeOnboarding) {
+    if (!androidStorageGranted || androidStoragePermission?.migrationError) {
+      return (
+        <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+          <div className="space-y-4">
+            <code>/sdcard/keytao</code>
+            <Button onClick={handleOpenAndroidStoragePermissionSettings} disabled={isCheckingAndroidStoragePermission}>
+              {androidStorageGranted ? "重试数据迁移" : "开启文件访问权限"}
+            </Button>
+            {androidStoragePermissionError && <p className="text-sm text-destructive">{androidStoragePermissionError}</p>}
+          </div>
+        </div>
+      )
+    }
     return (
       <AndroidImeOnboarding
         status={androidImeStatus}
@@ -1757,7 +1788,7 @@ export default function App() {
         loading={androidSetupLoading}
         error={androidImeError}
         storageError={androidStoragePermissionError}
-        installError={installError}
+        installError={installError || deploySteps.find((step) => step.error)?.msg || null}
         installingSchema={isInstalling}
         deployingSchema={isDeploying}
         canInstallSchema={Boolean(selectedSchemeDownloadUrl)}
@@ -2579,38 +2610,25 @@ export default function App() {
                       {selectedSchemeAsset ? ` · ${selectedSchemeAsset}` : ""}
                     </span>
                   </div>
-                  {defaultDir && (
+                  {(osType === "android" || defaultDir) && (
                     <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
                       <Info className="h-3.5 w-3.5 shrink-0" />
                       <span className="shrink-0">目录：</span>
-                      <code className="font-mono truncate min-w-0">{defaultDir}</code>
+                      <code className="font-mono truncate min-w-0">{osType === "android" ? "/sdcard/keytao" : defaultDir}</code>
                     </div>
                   )}
-                  {osType === "android" && androidStoragePermission && (
-                    <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${androidStoragePermission.granted
-                      ? "bg-green-500/10 border-green-500/30 text-green-400"
-                      : "bg-yellow-500/10 border-yellow-500/30 text-yellow-500"
-                      }`}>
-                      {androidStoragePermission.granted
-                        ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                        : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                      }
-                      <span className="min-w-0 flex-1">
-                        {androidStoragePermission.message}
-                      </span>
-                      {!androidStoragePermission.granted && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleOpenAndroidStoragePermissionSettings}
-                          disabled={isCheckingAndroidStoragePermission || !androidStoragePermission.canOpenSettings}
-                          className="h-7 shrink-0 gap-1.5"
-                        >
-                          <Settings className="h-3.5 w-3.5" />
-                          去授权
-                        </Button>
-                      )}
-                    </div>
+                  {osType === "android" && androidStoragePermission &&
+                    (!androidStoragePermission.granted || androidStoragePermission.migrationError) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleOpenAndroidStoragePermissionSettings}
+                      disabled={isCheckingAndroidStoragePermission || !androidStoragePermission.canOpenSettings}
+                      className="h-7 shrink-0 gap-1.5"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                      {androidStoragePermission.granted ? "重试数据迁移" : "开启文件访问权限"}
+                    </Button>
                   )}
                   {osType === "android" && androidStoragePermissionError && (
                     <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">

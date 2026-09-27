@@ -30,6 +30,10 @@ object KeytaoRimeDeployClient {
         callback: (Result) -> Unit,
     ) {
         val handler = Handler(Looper.getMainLooper())
+        val root = runCatching { KeytaoAndroidPaths.userRoot(context) }.getOrElse { error ->
+            handler.post { callback(Result(success = false, error = error.message ?: "存储尚未就绪")) }
+            return
+        }
         if (!deploymentRunning.compareAndSet(false, true)) {
             handler.post {
                 callback(Result(success = false, error = "Android RIME deployment is already running"))
@@ -39,6 +43,7 @@ object KeytaoRimeDeployClient {
 
         Deployment(
             context = context.applicationContext,
+            userRoot = root,
             handler = handler,
             timeoutMs = timeoutMs.coerceAtLeast(minimumTimeoutMs),
             callback = callback,
@@ -47,6 +52,7 @@ object KeytaoRimeDeployClient {
 
     private class Deployment(
         private val context: Context,
+        private val userRoot: File,
         private val handler: Handler,
         private val timeoutMs: Long,
         private val callback: (Result) -> Unit,
@@ -96,6 +102,9 @@ object KeytaoRimeDeployClient {
                 val intent = Intent(context, KeytaoRimeDeployService::class.java).apply {
                     putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
                     schema?.let { putExtra(KeytaoRimeDeployContract.extraSchemaId, it.id) }
+                    KeytaoAndroidPaths.testRootOverride?.let {
+                        putExtra(KeytaoRimeDeployContract.extraTestRoot, it.absolutePath)
+                    }
                 }
                 if (context.startService(intent) == null) {
                     throw IllegalStateException("Android RIME deployment service is unavailable")
@@ -140,7 +149,7 @@ object KeytaoRimeDeployClient {
             while (pending.isNotEmpty()) {
                 val schema = pending.removeFirst()
                 if (!processed.add(schema.id)) continue
-                val source = File(KeytaoAndroidPaths.userRoot(context), "${schema.id}.schema.yaml")
+                val source = File(userRoot, "${schema.id}.schema.yaml")
                 if (!source.isFile) {
                     if (schema.required) {
                         finish(Result(success = false, error = "缺少方案文件：${source.name}"))
@@ -155,7 +164,6 @@ object KeytaoRimeDeployClient {
         }
 
         private fun completeDeployment() {
-            val userRoot = KeytaoAndroidPaths.userRoot(context)
             if (!KeytaoAndroidPaths.hasDeployedSchema(userRoot)) {
                 finish(Result(success = false, error = "Android RIME 部署未生成方案产物"))
                 return
@@ -221,6 +229,7 @@ object KeytaoRimeDeployClient {
 }
 
 internal object KeytaoRimeDeployContract {
+    const val extraTestRoot = "ink.rea.keytao_app.extra.TEST_ROOT"
     const val extraReceiver = "ink.rea.keytao_app.extra.RIME_DEPLOY_RECEIVER"
     const val extraSchemaId = "ink.rea.keytao_app.extra.RIME_DEPLOY_SCHEMA_ID"
     const val keySuccess = "success"

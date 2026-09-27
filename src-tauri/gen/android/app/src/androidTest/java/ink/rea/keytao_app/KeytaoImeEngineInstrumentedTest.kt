@@ -10,6 +10,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.FixMethodOrder
+import org.junit.AfterClass
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.MethodSorters
@@ -121,7 +122,7 @@ class KeytaoImeEngineInstrumentedTest {
         assumeTrue("fixtureRoot argument is required", fixtureRootPath.isNotBlank())
 
         val fixtureRoot = File(fixtureRootPath)
-        val userRoot = KeytaoAndroidPaths.userRoot(ApplicationProvider.getApplicationContext<Context>())
+        val userRoot = KeytaoSchemaFixture.useIsolatedRoot(ApplicationProvider.getApplicationContext<Context>())
         assertTrue("fixture root should exist: $fixtureRoot", fixtureRoot.isDirectory)
         userRoot.listFiles().orEmpty().forEach(File::deleteRecursively)
 
@@ -204,5 +205,10 @@ class KeytaoImeEngineInstrumentedTest {
 
     companion object {
         private const val tag = "KeytaoImeSmoke"
+
+        @JvmStatic @AfterClass
+        fun clearRootOverride() {
+            KeytaoAndroidPaths.setUserRootForTests(ApplicationProvider.getApplicationContext<Context>(), null)
+        }
     }
 }

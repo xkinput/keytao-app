@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.Process
 import android.os.ResultReceiver
 import android.util.Log
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 class KeytaoRimeDeployService : Service() {
@@ -22,6 +23,15 @@ class KeytaoRimeDeployService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val receiver = intent?.resultReceiver()
         if (receiver == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        try {
+            intent.getStringExtra(KeytaoRimeDeployContract.extraTestRoot)?.let {
+                KeytaoAndroidPaths.setUserRootForTests(this, File(it))
+            }
+        } catch (error: Exception) {
+            sendResult(receiver, DeploymentResult(error = error.message ?: "Invalid test root"))
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -119,6 +129,7 @@ class KeytaoRimeDeployService : Service() {
         var engine: KeytaoImeEngine? = null
         return try {
             Log.i(tag, "Starting deployment step: ${schemaId ?: "default"}")
+            KeytaoAndroidPaths.userRoot(applicationContext)
             engine = KeytaoImeEngine(applicationContext)
             if (!engine.hasInstalledSchema()) {
                 return DeploymentResult(error = "请先安装键道方案")

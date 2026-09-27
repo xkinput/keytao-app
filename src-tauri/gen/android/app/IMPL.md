@@ -6,11 +6,11 @@
 
 ## 代码地图
 
-- `src/main/AndroidManifest.xml`：注册主 App activity、`KeytaoInputMethodService`、部署前台服务和 FileProvider；不声明任何存储权限。
+- `src/main/AndroidManifest.xml`：注册主 App activity、`KeytaoInputMethodService`、部署前台服务和 FileProvider；声明共享根目录所需的文件访问权限。
 - `src/main/res/xml/keytao_input_method.xml`：Android input-method metadata，声明 `zh_CN` keyboard subtype 和设置页入口。
 - `src/main/res/raw/keytao_android_ime.json`：内置移动端键盘布局、键位 hint、上下滑动作、数字/符号页和高度配置。
 - `src/main/java/ink/rea/keytao_app/KeytaoInputMethodService.kt`：Android `InputMethodService` 前端，负责系统生命周期、硬键/软键分发、`InputConnection` 提交和打开 App 页面。
-- `src/main/java/ink/rea/keytao_app/KeytaoImeEngine.kt`：Android 侧 engine facade，解析私有用户目录、shared data 目录、reload stamp，并通过 JNI 调用通用 runtime。
+- `src/main/java/ink/rea/keytao_app/KeytaoImeEngine.kt`：Android 侧 engine facade，解析共享用户目录、shared data 目录、reload stamp，并通过 JNI 调用通用 runtime。
 - `src/main/java/ink/rea/keytao_app/KeytaoNativeBridge.kt`：加载 `keytao_app_lib` 并包装 native JNI 方法。
 - `src/main/java/ink/rea/keytao_app/AndroidKeyMapper.kt`：把 Android `KeyEvent` 转为 X11 keysym + Rime modifier mask。
 - `src/main/java/ink/rea/keytao_app/KeytaoImeState.kt`：解析 Rust 返回的 `ImeState` JSON、通用 `CandidatePanelModel` 和 `ModeHintModel`。
@@ -20,7 +20,7 @@
 - `src/main/java/ink/rea/keytao_app/KeytaoAndroidImeConfig.kt`：加载用户目录下的 `keyboard.yaml` / `android_ime.json`，失败时 fallback 到内置 raw 配置；结果按文件签名缓存。
 - `src/main/java/ink/rea/keytao_app/KeytaoEditorPolicy.kt`：解析 `EditorInfo`，产出 Enter 决策、Enter 键帽文案、初始键盘层和隐私模式（密码 / 免学习 / 免建议）。
 - `src/main/java/ink/rea/keytao_app/KeytaoRimeInput.kt`：被拒按键与多字符 `rimeInput` 的结果保序规则，抽成 `KeytaoRimeKeySink` 便于单测。
-- `src/main/java/ink/rea/keytao_app/ScopedStoragePlugin.kt`：Android 文件安装 adapter；默认把方案、主题和 reload stamp 写到应用私有目录，SAF 只用于用户选择的导入导出目录。
+- `src/main/java/ink/rea/keytao_app/ScopedStoragePlugin.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责权限请求与 App 后台迁移门禁。
 - `src-tauri/src/lib.rs`：Android JNI bridge，直接创建 `keytao_core::ImeRuntime` / `ImeRuntimeSession`，并调用 `keytao-theme` 生成主题和 UI model JSON。
 - `scripts/android-librime-runtime.sh`：Android ABI runtime 管理脚本，导入/校验 `librime.so` 闭包，并同步到 Gradle `jniLibs` 和 assets。
 - `crates/librime-sys/build.rs`：本地 patched `librime-sys`，Android target 会按 ABI 自动查找 `vendor/librime/android/<abi>`，并要求 Android NDK sysroot。
@@ -68,7 +68,7 @@ Android 系统输入法必须通过 framework 注册和运行：
 - `supportsSwitchingToNextInputMethod="true"`。这是对 framework 的承诺，因此键盘必须自带出口：功能面板首页在 `shouldOfferSwitchingToNextInputMethod()` 为真时显示「切换输入法」（`switchToNextInputMethod(false)`），并常驻「输入法列表」（`showInputMethodPicker()`）；字母层 `123` 键长按也直接切到下一个输入法。
 - subtype 使用 `zh_CN` / `keyboard`，声明 `isAsciiCapable=true`，并固定 `subtypeId="0x0a01b2c3"`，避免以后改 label/locale 时哈希出的 id 变化把用户已启用的 subtype 设置重置。
 
-Manifest 不再声明 `MANAGE_EXTERNAL_STORAGE` / `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE` 和 `requestLegacyExternalStorage`；输入法数据全部在应用私有目录里。部署服务 `KeytaoRimeDeployService` 声明 `foregroundServiceType="dataSync"`，配套 `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC` 权限。
+Manifest 声明 `MANAGE_EXTERNAL_STORAGE`、`WRITE_EXTERNAL_STORAGE`（maxSdkVersion 29）、`READ_EXTERNAL_STORAGE`（maxSdkVersion 32）及 `requestLegacyExternalStorage="true"`。API 30+ 检查 `Environment.isExternalStorageManager()`，App 打开本包所有文件访问设置，无法打开时进入通用页面；API 24–29 检查并运行时申请 WRITE 权限。部署服务 `KeytaoRimeDeployService` 声明 `foregroundServiceType="dataSync"`，配套 `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC` 权限。
 
 Android 不需要像 macOS TIS 或 Windows TSF 那样写系统注册表/输入源数据库；安装 APK 后，用户仍需要在系统输入法设置里启用 KeyTao 输入法。
 
@@ -80,7 +80,7 @@ Android 不需要像 macOS TIS 或 Windows TSF 那样写系统注册表/输入�
 
 1. Android 系统按需创建 `KeytaoInputMethodService`。
 2. `onCreate()` 创建 `KeytaoImeEngine(applicationContext)`。
-3. `KeytaoImeEngine` 的 `userDir` 是 lazy 的，第一次访问才通过 `KeytaoAndroidPaths.userRoot(context)` 建目录并做一次性旧目录迁移；这一步和后面的磁盘动作都在 engine 自己的单线程 executor 上，不占 IME 主线程。
+3. `KeytaoImeEngine.userDir` 通过 `KeytaoAndroidPaths.userRootOrNull(context)` 在后台解析唯一共享目录；未解锁、未挂载、缺权限或 App 迁移未完成时等待。迁移只在 App 进程执行，IME 不执行迁移或部署。
 4. 如果 APK assets 中存在 `keytao-rime-data/default.yaml`，先解包到用户目录下的 `rime-data`。
 5. 查找 shared data 目录，要求目录中至少有 `default.yaml`。
 6. `KeytaoNativeBridge.engineAvailable()` 确认 native library 已加载。
@@ -102,9 +102,13 @@ Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 
 
 ## 用户目录和 shared data
 
-Android IME 仅使用 `<getExternalFilesDir(null)>/keytao`，只缓存成功解析的路径；重启后目录暂不可用时显示准备中，在输入视图显示期间每秒重试、每次显示最多 30 次，恢复后在 engine 线程补做一次预热并启动输入。隐藏输入视图或销毁 service 时取消重试；仅 App 调用保留不缓存的 `<filesDir>/keytao` 兼容回退，IME 不将该回退目录用作数据目录。根目录恢复后，IME 会清理不含安装标记和任何用户词库的遗留 `<filesDir>/keytao`。
+2026-09-27 owner decision：Android 唯一数据根目录为 `Environment.getExternalStorageDirectory()/keytao`（通常显示为 `/sdcard/keytao`），让用户就地编辑全部文件；App、`:ime`、`:rime_deployer` 同 UID、分别解析同一路径。方案、custom YAML、theme.yaml、keyboard.yaml、android_ime.json、rime-data、build、用户词库、reload stamp、clipboard 和 log 全部在此目录，无应用目录回退、复制或同步。
 
-App 进程与 `:ime` 进程同 UID，共享这套目录，因此不需要任何存储权限。旧版本把数据放在共享存储根目录 `/storage/emulated/0/keytao`；根目录成功解析后的后台迁移会尝试把旧目录整体拷过来并留下 `.keytao-migrated-from-shared-storage` 标记，但这是尽力而为——去掉 `MANAGE_EXTERNAL_STORAGE` 后旧目录多半已不可读，此时用户在 App 里重新安装一次方案即可。
+解析要求用户已解锁、外部存储已挂载、权限已授予、目录存在或可创建且可读写。只缓存成功；失败探测节流 500 ms，慢调用不持有路径锁。`NOT_UNLOCKED_OR_NOT_MOUNTED` 对应 IME 准备中文案，输入视图显示时每秒重试、每次最多 30 次，隐藏/销毁取消；恢复后重新加载布局与主题。`PERMISSION_MISSING` 显示「请在 KeyTao App 中开启文件访问权限」，只在再次显示输入视图时探测，不消耗定时重试预算。App 安装/部署缺权限时返回「需要文件访问权限」。
+
+App 启动及授权返回后在后台迁移旧 `<getExternalFilesDir(null)>/keytao`、`<filesDir>/keytao`：进程内互斥加稳定的共享根目录同级 `.keytao-migration.lock` 文件锁，先用 ActivityManager 枚举本 UID 的 `:ime` / `:rime_deployer`，killProcess 并等待退出。按内容的最新修改时间选一个旧根；已有共享内容先重命名为 `keytao-old-yyyyMMdd-HHmmss`（重名加序号，永不删除）。在同级临时目录复制全部内容但排除 build 和旧迁移元数据，递归核验每个文件大小，再重命名发布到唯一根目录，随后删除两个旧根。核验失败删除临时文件、保留旧根和备份并向 UI 报错。清理标记保证发布后中断只续做清理，不重选已部分删除的源。仅共享根有内容时原样使用；没有旧用户文件/用户词库时不迁移。成功迁移写 reload stamp，仅存在已安装方案时通过现有 deploy client 部署；待部署标记支持重启后继续。
+
+代价：需要所有文件访问权限，数据对持有同类权限的其他 App 可见，并承担共享存储 FUSE 开销。FileProvider 通过 `external-path path="keytao/clipboard/"` 分享媒体。
 
 其中常见文件：
 
@@ -113,15 +117,7 @@ App 进程与 `:ime` 进程同 UID，共享这套目录，因此不需要任何�
 - `android_ime.json`：移动端键盘布局和手势配置。
 - `keytao-ime.reload`：App 部署后写入的 reload stamp。
 
-`KeytaoImeEngine.findSharedDataDir()` 目前按顺序查找：
-
-1. 用户目录本身
-2. 用户目录下的 `rime-data`
-3. 用户目录下的 `shared`
-4. `filesDir/rime-data`
-5. `noBackupFilesDir/keytao/rime-data`
-
-这些目录至少要包含 `default.yaml`。如果 APK 内置了 `src/main/assets/keytao-rime-data`，`KeytaoImeEngine` 会在后台初始化时复制到用户目录的 `rime-data`，所以 release 包可以自带基础 shared data。若 native runtime 或 shared data 不可用，`nativeReady=false`，Android 软键会提示运行库未就绪，硬键交还系统，不在 Kotlin 层伪造 Rime 状态。
+`KeytaoImeEngine.findSharedDataDir()` 只使用 `<root>/rime-data`，要求其中存在 `default.yaml`。如果 APK 内置了 `src/main/assets/keytao-rime-data`，`KeytaoImeEngine` 会在后台初始化时解包到此处。若 native runtime 或 shared data 不可用，`nativeReady=false`，Android 软键会提示运行库未就绪，硬键交还系统，不在 Kotlin 层伪造 Rime 状态。
 
 ## Android ABI runtime 闭包
 
@@ -455,7 +451,7 @@ IME 侧在 `onStartInputView()` 调用 `engine.reloadIfNeeded()`：
 
 ## 方案安装合并
 
-`ScopedStoragePlugin.smartExtractZipToPrivate()` 复用已有 Android 安装合并规则，目标目录是应用私有用户目录：
+`ScopedStoragePlugin.smartExtractZipToPrivate()` 保留兼容命令名，复用已有 Android 安装合并规则，目标目录仅为 `/sdcard/keytao`：
 
 1. 打开传入 zip。
 2. 查找 `default.custom.yaml` / `default-custom.yaml`，和用户目录已有配置合并。
@@ -470,7 +466,8 @@ IME 侧在 `onStartInputView()` 调用 `engine.reloadIfNeeded()`：
 
 Tauri 主 App 相关命令：
 
-- `android_smart_extract`：安装方案到 Android 应用私有用户目录，以及用户通过 SAF 选择的外部目录。
+- `rime_install_to_default`：安装方案到唯一根目录 `/sdcard/keytao`。
+- `android_smart_extract`：仅向用户明确选择的 SAF 目录导出安装包，不再额外向 KeyTao 根目录写一份。
 - `rime_deploy_default`：在短命部署进程中按 dependency graph 编译方案，全部成功后写 reload stamp，让 IME 下次激活时无部署重载。
 - `openPage` 软键动作：启动 `MainActivity`，通过 `keytao_page` extra 指定页面，例如 `settings` 或 `theme`。
 
@@ -486,7 +483,7 @@ Tauri 主 App 相关命令：
 | UI | Android 自绘 `View`，键盘和候选同屏 | SHM/X11 overlay 或系统 lookup table | AppKit `NSPanel` | Win32 layered window |
 | 主题 | JNI resolved theme + common UI model + Canvas | common UI model + BGRA renderer | resolved theme JSON + AppKit DTO | common UI model + BGRA renderer |
 | reload | input view 启动时比较 stamp，finalize 后无部署重载 | daemon watcher | 激活/按键前比较 stamp | focus/key event 前比较 stamp |
-| 安装 | APK + 用户启用输入法；方案写应用私有目录，无存储权限 | deb/rpm 安装 daemon/runtime | pkg 安装 App + IME bundle | installer 注册 TSF DLL |
+| 安装 | APK + 用户启用输入法；申请文件访问权限，方案写 /sdcard/keytao | deb/rpm 安装 daemon/runtime | pkg 安装 App + IME bundle | installer 注册 TSF DLL |
 
 Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页面动作。这些属于移动端 adapter 能力，不应塞进 `ImeState` 或通用 `theme.yaml`。
 
@@ -511,7 +508,7 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 自绘键盘的无障碍虚拟节点（`ExploreByTouchHelper`）：键帽、候选、展开候选、工具栏都可被 TalkBack 触摸探索并双击激活。
 - 输入法切换出口：功能面板「切换输入法」/「输入法列表」，字母层 `123` 键长按切下一个输入法。
 - 剪贴板监听只在输入会话期间注册，并尊重 `ClipDescription.EXTRA_IS_SENSITIVE`。
-- 应用私有数据目录 + 旧共享存储目录一次性迁移，Manifest 无任何存储权限。
+- 唯一共享数据目录 `/sdcard/keytao` + App 后台迁入旧应用目录，Manifest 声明所需文件访问权限。
 - 部署服务以 `dataSync` 前台服务承载长耗时词库编译。
 - 生命周期回调不做 librime 初始化：目录探测、`nativeInit`、reload 检测在后台线程，配置与主题按签名缓存；剪贴板媒体的有界目录清理是隐私擦除所需的同步磁盘操作，媒体复制与解码仍在后台。
 - 硬键 solo Shift release 中英切换和 fallback。
@@ -573,7 +570,7 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
     `onEvaluateFullscreenMode()` 无条件返回 `false`。偏离原因：现代第三方输入法普遍不使用 extract 视图，启用后需要额外维护 `onCreateExtractTextView()` 的视觉一致性，且与悬浮/单手布局冲突。影响范围：横屏矮屏设备上，键盘（默认 246dp 键盘 + 52dp 候选栏 + 系统底部避让）可能遮挡大部分编辑区，而没有 extract 视图兜底。后续收敛方式：按 `orientation` 下调横屏键盘高度，或引导用户使用悬浮键盘模式，而不是恢复 extract 模式。
 
 13. Direct Boot 未支持（暂缓）
-    IME service 没有声明 `android:directBootAware="true"`，首次解锁前系统会回退到自带输入法。要真正落地必须同时把启动必需数据搬到 `createDeviceProtectedStorageContext()` 的目录，并让 engine 在 `UserManager.isUserUnlocked()==false` 时降级为纯 ASCII 直通——否则只会得到一个不可用的锁屏键盘。当前用户目录在 credential-encrypted 存储里，改造范围涉及部署、迁移与双目录 shared data 查找，收益（仅锁屏输密码场景）小于风险，暂缓。
+    IME service 没有声明 `android:directBootAware="true"`，首次解锁前系统会回退到自带输入法。要真正落地必须同时把启动必需数据搬到 `createDeviceProtectedStorageContext()` 的目录，并让 engine 在 `UserManager.isUserUnlocked()==false` 时降级为纯 ASCII 直通——否则只会得到一个不可用的锁屏键盘。当前共享用户目录在首次解锁前不可用，改造范围涉及部署、迁移与 shared data 查找，收益（仅锁屏输密码场景）小于风险，暂缓。
 
 ## 仪器化测试
 
@@ -592,7 +589,7 @@ cd src-tauri/gen/android
 - **必须 `-x :app:rustBuildArm64Debug`**：Tauri 注入的 rustBuild 任务默认假设有 dev-server，没有它时这个任务必挂，测试根本跑不到。JNI 库改用 `scripts/android-librime-runtime.sh` 的产物 + `jniLibs/<abi>/libkeytao_app_lib.so` 就位（可以是指向 `target/aarch64-linux-android/debug/` 的符号链接）。
 - 方法执行顺序由 `@FixMethodOrder(NAME_ASCENDING)` 固定：三个用例共用同一个用户目录，先跑安装+部署的 `selectedSchemeComposesCandidates`，再跑把 build 产物删掉的 `sourceOnlyInstallDoesNotDeployOnEnsureReady`。
 - `switchingInstalledSchemesReloadsInOneProcess` 仍然需要 `-Pandroid.testInstrumentationRunnerArguments.fixtureRoot=<设备上放着 keytao/xmjd/txjx/keydo 四份方案的目录>`，不传就 `assumeTrue` 跳过。
-- AGP 在 `connectedAndroidTest` 结束后会卸载 App 和 test APK，应用私有目录随之清空，所以每次运行都是从「全新安装」开始，不能指望上一轮留下的方案或 build 产物。
+- 仪器化测试显式覆盖根目录为 App cache 下的 `keytao-storage-tests`，仅 debuggable 构建接受此固定位置；测试 deploy client 通过 Intent 将覆盖传给部署子进程，子进程再次校验。清空/部署 fixture 不触及用户真实 `/sdcard/keytao`，测试卸载也不依赖删除共享用户数据。
 
 ### 方案源从哪来（种子化）
 
@@ -600,8 +597,8 @@ cd src-tauri/gen/android
 
 所以仪器化测试必须自己重建「装完方案」的状态，这件事收在 `androidTest/java/.../KeytaoSchemaFixture.kt`，按下面顺序取源：
 
-1. 用户目录里已经装好的方案（同一轮里前一个用例装的，或人工装过的设备）。
-2. `-Pandroid.testInstrumentationRunnerArguments.schemaFixture=<设备目录>`：想用更新的方案包又不想重新打测试 APK 时用。该目录必须是 App UID 能读的位置（应用私有目录），`/sdcard/*` 和 `/data/local/tmp` 都读不到。
+1. 隔离测试目录里已经装好的方案（同一轮里前一个用例装的）。
+2. `-Pandroid.testInstrumentationRunnerArguments.schemaFixture=<设备目录>`：想用更新的方案包又不想重新打测试 APK 时用。该目录必须是测试 App UID 能读的位置；fixture 只复制到隔离测试目录。
 3. test APK 资源 `src/androidTest/assets/keytao-schema-fixture.zip`：一份钉住版本的键道方案包（`default.custom.yaml`、`keytao*.schema.yaml`、`keytao*.dict.yaml`、`rime.lua`、`lua/`、`symbols.yaml`，约 1.1 MB），钉住版本才能让候选断言（`ba` → `不能`）稳定。它只在测试 APK 里，不进产物 APK。
    刷新方式（例如换新版键道）：把一份 release 安装后的目录打包覆盖过去即可，
    `cd <方案目录> && zip -qrX <repo>/src-tauri/gen/android/app/src/androidTest/assets/keytao-schema-fixture.zip default.custom.yaml keytao*.yaml rime.lua symbols.yaml lua`。
@@ -653,7 +650,7 @@ Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtL
 | `onWindowShown` / `onWindowHidden` | `window_shown` / `window_hidden` 耗时；shown 附带 mode、host_h、child_h、view_w、view_h、key_rects、toolbar_rects、layer、schema_ready、panel_expanded 的主线程内存快照 |
 | `onTrimMemory` / `onLowMemory` | `mem_trim` 含系统 level；`mem_low` 只记录回调。内存快照只在 `onStartInputView`、`onFinishInputView`、`onTrimMemory` 采集 native heap、Java 已用 heap、`ActivityManager.MemoryInfo`；没有内存定时器 |
 | 输入与宿主 IPC | 硬键 down/up、软键 command.type、退格手势、direct commit、剪贴板读取/写入仅累计次数；`applyState` 仅记录本地耗时直方图 |
-| engine | `engine_warmup` 总耗时及 migration/bundled data/defaults/config/theme 五个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；`stableSchemaState` 按 schema ID 缓存显示名，deploy/reload/select_schema 失效，`schema_name_resolve` 仅在实际解析时进入本地直方图 |
+| engine | `engine_warmup` 总耗时及 bundled data/defaults/config/theme 四个 `runCatching` 是否抛错；`engine_init` 含 deploy/reinitialize/success；`create_session`、`schema_switch` 耗时及成功标志；`stableSchemaState` 按 schema ID 缓存显示名，deploy/reload/select_schema 失效，`schema_name_resolve` 仅在实际解析时进入本地直方图 |
 | 部署 | client `start` → `finish` 的 `deploy` 总耗时、每次 `startStep` → `handleStepResult` 的 `deploy_step`（含失败/超时收尾）；service `runDeployment` 的 `deploy_step` 含 success/config_step/schema_count，不记录方案名或错误对象 |
 | 绘制与触摸 | `onDraw` 的 11 桶本地直方图；`ACTION_DOWN` 的 `rebuildInteractiveRects` 记录为本地 `touch_down_rebuild` 直方图；不增加 Choreographer |
 | 界面 | 面板打开/关闭、键盘层切换、完成的内容过渡分别记录 `panel_open` / `panel_close` / `layer_switch` / `content_transition` 耗时 |
@@ -672,7 +669,7 @@ App 的异步 setup 若晚于 `onCreate` / `onResume`，或日志当时为 Off�
 
 当前可查：
 
-- 用户目录：`adb shell run-as ink.rea.keytao_app ls -la files/keytao`，或外部存储形态 `adb shell ls -la /sdcard/Android/data/ink.rea.keytao_app/files/keytao`
+- 用户目录：`adb shell ls -la /sdcard/keytao`
 - reload stamp：用户目录下的 `keytao-ime.reload`
 - 主题文件：用户目录下的 `theme.yaml`
 - 移动端键盘配置：用户目录下的 `keyboard.yaml` / `android_ime.json`

@@ -12,10 +12,7 @@ class MainActivity : TauriActivity() {
     PluginManager.onActivityCreate(this)
     window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     enableEdgeToEdge()
-    // Upgrades from a build that kept its data in shared storage: pull the old
-    // install into app-specific storage once, off the UI thread.
-    val context = applicationContext
-    Thread({ runCatching { KeytaoAndroidPaths.migrateLegacyRootIfNeeded(context) } }, "KeyTao-Migrate").start()
+    KeytaoStorageMigration.start(applicationContext)
     super.onCreate(savedInstanceState)
     KeytaoRuntimeLog.event("lifecycle", "app_create", KeytaoRuntimeLog.elapsedMs(started))
     KeytaoRuntimeLog.adoptAppLoggerIfEnabled()
@@ -25,6 +22,9 @@ class MainActivity : TauriActivity() {
 
   override fun onResume() {
     super.onResume()
+    // Also runs when returning from the all-files-access settings page.
+    KeytaoAndroidPaths.retryResolution()
+    KeytaoStorageMigration.start(applicationContext)
     KeytaoRuntimeLog.adoptAppLoggerIfEnabled()
   }
 }

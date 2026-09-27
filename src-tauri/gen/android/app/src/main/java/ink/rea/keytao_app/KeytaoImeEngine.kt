@@ -7,6 +7,8 @@ import java.util.concurrent.Executors
 /** Why the IME cannot compose right now, or [Readiness.READY] when it can. */
 enum class Readiness {
     STORAGE_NOT_READY,
+    PERMISSION_MISSING,
+    MIGRATION_PENDING,
     UNWRITABLE,
     NOT_INSTALLED,
     NOT_DEPLOYED,
@@ -64,27 +66,20 @@ class KeytaoImeEngine(context: Context) {
     @Synchronized
     private fun warmUpIfStorageReady() {
         if (warmupComplete) return
-        val root = userDir ?: return
+        userDir ?: return
         warmupComplete = true
         val started = System.nanoTime()
-        val migrationOk = runCatching { KeytaoAndroidPaths.migrateLegacyRootIfNeeded(appContext) }.isSuccess
         val bundledDataOk = runCatching { ensureBundledSharedData(appContext) }.isSuccess
         // Materialise keyboard.yaml and warm the configuration and theme caches
         // off the main thread, including when storage first appears on a retry.
         val defaultsOk = runCatching { KeytaoAndroidImeConfig.ensureDefaults(appContext) }.isSuccess
         val configOk = runCatching { KeytaoAndroidImeConfig.load(appContext) }.isSuccess
         val themeOk = runCatching { KeytaoThemeResolver.resolve(appContext) }.isSuccess
-        val staleInternalRootRemoved = runCatching {
-            val internalRoot = File(appContext.filesDir, "keytao")
-            KeytaoAndroidPaths.isStaleInternalRoot(internalRoot, root) && internalRoot.deleteRecursively()
-        }.getOrDefault(false)
         KeytaoRuntimeLog.event("rime", "engine_warmup", KeytaoRuntimeLog.elapsedMs(started)) {
-            put("migration_ok", migrationOk)
             put("bundled_data_ok", bundledDataOk)
             put("defaults_ok", defaultsOk)
             put("config_ok", configOk)
             put("theme_ok", themeOk)
-            put("stale_internal_root_removed", staleInternalRootRemoved)
         }
     }
 
@@ -108,7 +103,11 @@ class KeytaoImeEngine(context: Context) {
      */
     @Synchronized
     fun refreshReadiness(): Readiness {
-        val root = userDir ?: return Readiness.STORAGE_NOT_READY
+        val root = userDir ?: return when (KeytaoAndroidPaths.lastStatus) {
+            StorageStatus.PERMISSION_MISSING -> Readiness.PERMISSION_MISSING
+            StorageStatus.MIGRATION_PENDING -> Readiness.MIGRATION_PENDING
+            else -> Readiness.STORAGE_NOT_READY
+        }
         warmUpIfStorageReady()
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         if (!hasInstalledSchema()) return Readiness.NOT_INSTALLED
@@ -288,10 +287,11 @@ class KeytaoImeEngine(context: Context) {
         invalidateSchemaNameCache()
         try {
             ensureBundledSharedData(appContext)
-            val sharedDir = findSharedDataDir(appContext)
+            val sharedDir = findSharedDataDir()
+                ?: return KeytaoRimeDeployStepResult(error = "Missing rime-data/default.yaml")
             return KeytaoNativeBridge.deployStep(
                 root.absolutePath,
-                sharedDir?.absolutePath,
+                sharedDir.absolutePath,
                 schemaId,
             )
         } finally {
@@ -375,16 +375,16 @@ class KeytaoImeEngine(context: Context) {
             if (!hasInstalledSchema()) return false
             if (!deploy && !hasDeployedSchema()) return false
             ensureBundledSharedData(appContext)
-            val sharedDir = findSharedDataDir(appContext)
+            val sharedDir = findSharedDataDir() ?: return false
             sharedDataDir = sharedDir
             if (session != 0L) {
                 KeytaoNativeBridge.destroySession(session)
                 session = 0L
             }
             val initialized = if (reinitialize) {
-                KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDir?.absolutePath)
+                KeytaoNativeBridge.reinitialize(root.absolutePath, sharedDir.absolutePath)
             } else {
-                KeytaoNativeBridge.init(root.absolutePath, sharedDir?.absolutePath, deploy)
+                KeytaoNativeBridge.init(root.absolutePath, sharedDir.absolutePath, deploy)
             }
             nativeReady = KeytaoNativeBridge.engineAvailable() && initialized
             if (!nativeReady) {
@@ -457,15 +457,9 @@ class KeytaoImeEngine(context: Context) {
         schemaNameDurations.drain("rime", "schema_name_resolve")
     }
 
-    private fun findSharedDataDir(context: Context): File? {
+    private fun findSharedDataDir(): File? {
         val root = userDir ?: return null
-        return listOf(
-            root,
-            File(root, "rime-data"),
-            File(root, "shared"),
-            File(context.filesDir, "rime-data"),
-            File(context.noBackupFilesDir, "keytao/rime-data"),
-        ).firstOrNull { File(it, "default.yaml").isFile }
+        return File(root, "rime-data").takeIf { File(it, "default.yaml").isFile }
     }
 
     private fun ensureBundledSharedData(context: Context) {

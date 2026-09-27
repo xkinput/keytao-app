@@ -2,6 +2,7 @@ package ink.rea.keytao_app
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ContentUris
 import android.content.ContentValues
@@ -44,7 +45,7 @@ import java.util.zip.ZipOutputStream
 
 @TauriPlugin(permissions = [Permission(
     strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE],
-    alias = "legacyLogExport",
+    alias = "storage",
 )])
 class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -80,17 +81,19 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun keytaoRoot(invoke: Invoke) {
-        try {
-            val root = KeytaoAndroidPaths.userRoot(activity)
-            invoke.resolve(JSObject().apply {
-                put("path", root.absolutePath)
-                put("themePath", KeytaoAndroidPaths.themeFile(activity).absolutePath)
-                put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile(activity).absolutePath)
-                put("writable", KeytaoAndroidPaths.isWritable(root))
-            })
-        } catch (ex: Exception) {
-            invoke.reject(ex.message ?: "Failed to resolve KeyTao data directory")
-        }
+        Thread {
+            try {
+                val root = KeytaoStorageMigration.requireRoot(activity)
+                invoke.resolve(JSObject().apply {
+                    put("path", root.absolutePath)
+                    put("themePath", KeytaoAndroidPaths.themeFile(activity).absolutePath)
+                    put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile(activity).absolutePath)
+                    put("writable", KeytaoAndroidPaths.isWritable(root))
+                })
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Failed to resolve KeyTao data directory")
+            }
+        }.start()
     }
 
     @Command
@@ -98,7 +101,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissionForAlias("legacyLogExport", invoke, "handleLogExportPermission")
+            requestPermissionForAlias("storage", invoke, "handleLogExportPermission")
             return
         }
         prepareRuntimeLogShare(invoke)
@@ -117,7 +120,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         Thread {
             try {
                 cleanOldRuntimeLogExports()
-                val logDir = File(KeytaoAndroidPaths.userRoot(activity), "log")
+                val logDir = File(KeytaoStorageMigration.requireRoot(activity), "log")
                 val logFiles = logDir.listFiles()
                     ?.filter { it.isFile && it.name.matches(Regex("""keytao-.*\.log.*""")) }
                     ?.sortedBy { it.name }
@@ -274,17 +277,59 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun storagePermissionStatus(invoke: Invoke) {
-        try {
-            invoke.resolve(resolveStoragePermissionStatus())
-        } catch (ex: Exception) {
-            invoke.reject(ex.message ?: "Failed to read Android storage permission status")
-        }
+        Thread {
+            try {
+                KeytaoStorageMigration.prepare(activity)
+                invoke.resolve(resolveStoragePermissionStatus())
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Failed to read Android storage permission status")
+            }
+        }.start()
     }
 
     @Command
     fun openStoragePermissionSettings(invoke: Invoke) {
         try {
+            if (KeytaoAndroidPaths.hasStorageAccess(activity)) {
+                Thread {
+                    try {
+                        KeytaoAndroidPaths.retryResolution()
+                        KeytaoStorageMigration.prepare(activity, retryFailure = true)
+                        invoke.resolve()
+                    } catch (ex: Exception) {
+                        invoke.reject(ex.message ?: "Failed to retry storage migration")
+                    }
+                }.start()
+                return
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                val preferences = activity.getSharedPreferences("keytao-storage-permission", Context.MODE_PRIVATE)
+                if (preferences.getBoolean("requested", false) &&
+                    !activity.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                    openApplicationDetailsSettings()
+                    invoke.resolve()
+                    return
+                }
+                preferences.edit().putBoolean("requested", true).apply()
+                requestPermissionForAlias("storage", invoke, "handleStoragePermission")
+                return
+            }
             openStoragePermissionSettings()
+            invoke.resolve()
+        } catch (ex: Exception) {
+            invoke.reject(ex.message ?: "Failed to open Android storage permission settings")
+        }
+    }
+
+    @PermissionCallback
+    private fun handleStoragePermission(invoke: Invoke) {
+        try {
+            if (KeytaoAndroidPaths.hasStorageAccess(activity)) {
+                KeytaoAndroidPaths.retryResolution()
+                KeytaoStorageMigration.start(activity.applicationContext)
+            } else if (!activity.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                openApplicationDetailsSettings()
+            }
             invoke.resolve()
         } catch (ex: Exception) {
             invoke.reject(ex.message ?: "Failed to open Android storage permission settings")
@@ -683,7 +728,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
         Thread {
             try {
-                val root = KeytaoAndroidPaths.userRoot(activity)
+                val root = KeytaoStorageMigration.requireRoot(activity)
                 if (!KeytaoAndroidPaths.isWritable(root)) {
                     return@Thread invoke.reject("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
                 }
@@ -805,7 +850,7 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
         Thread {
             try {
-                val root = KeytaoAndroidPaths.userRoot(activity)
+                val root = KeytaoStorageMigration.requireRoot(activity)
                 if (!KeytaoAndroidPaths.isWritable(root)) {
                     return@Thread invoke.reject("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
                 }
@@ -843,29 +888,36 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun deployImeData(invoke: Invoke) {
-        val root = KeytaoAndroidPaths.userRoot(activity)
-        if (!KeytaoAndroidPaths.hasInstalledSchema(root)) {
-            return invoke.reject("请先安装键道方案")
-        }
-        val configuredSchemas = runCatching {
-            val content = readPrivateText(root, "default.custom.yaml")
-                ?: readPrivateText(root, "default-custom.yaml")
-            content?.let(::parseSchemas).orEmpty()
-        }.getOrDefault(emptyList())
-        KeytaoRimeDeployClient.deploy(
-            activity,
-            timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas),
-        ) { result ->
-            if (result.success) {
-                invoke.resolve(JSObject().apply {
-                    put("path", result.path)
-                    put("schemaName", result.schemaName)
-                    put("deployed", result.deployed)
-                })
-            } else {
-                invoke.reject(result.error.ifBlank { "Android RIME 部署失败" })
+        Thread {
+            try {
+                val root = KeytaoStorageMigration.requireRoot(activity)
+                if (!KeytaoAndroidPaths.hasInstalledSchema(root)) {
+                    return@Thread invoke.reject("请先安装键道方案")
+                }
+                val configuredSchemas = runCatching {
+                    val content = readPrivateText(root, "default.custom.yaml")
+                        ?: readPrivateText(root, "default-custom.yaml")
+                    content?.let(::parseSchemas).orEmpty()
+                }.getOrDefault(emptyList())
+                KeytaoRimeDeployClient.deploy(
+                    activity,
+                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(configuredSchemas),
+                ) { result ->
+                    if (result.success) {
+                        KeytaoStorageMigration.deploymentSucceeded(root)
+                        invoke.resolve(JSObject().apply {
+                            put("path", result.path)
+                            put("schemaName", result.schemaName)
+                            put("deployed", result.deployed)
+                        })
+                    } else {
+                        invoke.reject(result.error.ifBlank { "Android RIME 部署失败" })
+                    }
+                }
+            } catch (ex: Exception) {
+                invoke.reject(ex.message ?: "Android RIME 部署失败")
             }
-        }
+        }.start()
     }
 
     @Command
@@ -955,39 +1007,38 @@ class ScopedStoragePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /**
-     * KeyTao data lives in app-specific storage, which needs no runtime
-     * permission at all. The command is kept so the onboarding UI keeps working;
-     * it now only reports whether the directory is usable, and
-     * `requiresManageAllFiles` is permanently false.
-     */
     private fun resolveStoragePermissionStatus(): JSObject {
-        val root = KeytaoAndroidPaths.userRoot(activity)
-        val writable = KeytaoAndroidPaths.isWritable(root)
-        val message = if (writable) {
-            "KeyTao 数据目录可用：${root.absolutePath}"
-        } else {
-            "无法写入 ${root.absolutePath}，请检查设备存储空间"
-        }
+        val granted = KeytaoAndroidPaths.hasStorageAccess(activity)
+        val writable = KeytaoAndroidPaths.userRootOrNull(activity) != null
         return JSObject().apply {
-            put("path", root.absolutePath)
-            put("granted", writable)
+            put("path", "/sdcard/keytao")
+            put("granted", granted)
             put("writable", writable)
-            put("requiresManageAllFiles", false)
+            put("requiresManageAllFiles", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
             put("canOpenSettings", true)
-            put("message", message)
+            put("message", if (granted) "" else "需要文件访问权限")
+            put("migrationError", KeytaoStorageMigration.error)
+            put("deployError", KeytaoStorageMigration.deployError)
         }
     }
 
     private fun openStoragePermissionSettings() {
         val packageUri = Uri.parse("package:${activity.packageName}")
-        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri)
         try {
             activity.startActivity(intent)
-        } catch (ex: Throwable) {
-            throw Exception(ex.message ?: "No Android application settings activity found")
+        } catch (_: ActivityNotFoundException) {
+            try {
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            } catch (_: ActivityNotFoundException) {
+                openApplicationDetailsSettings()
+            }
         }
+    }
+
+    private fun openApplicationDetailsSettings() {
+        activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${activity.packageName}")))
     }
 
     private fun writeFileBytes(root: DocumentFile, relativePath: String, content: ByteArray, logs: MutableList<String>, merged: Boolean = false) {

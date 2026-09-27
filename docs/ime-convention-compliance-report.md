@@ -194,6 +194,7 @@ deferred：
 代表性条目：
 
 - **android-1（Scoped Storage）**：`userRoot()` 改为 `getExternalFilesDir(null)/keytao`（不可用时 `filesDir/keytao`），Manifest 删掉 `MANAGE_EXTERNAL_STORAGE` / `READ_`/`WRITE_EXTERNAL_STORAGE` 与 `requestLegacyExternalStorage`，`ScopedStoragePlugin` 删掉「所有文件访问」引导，新增 `migrateLegacyRootIfNeeded()` 一次性后台迁移。
+  - **2026-09-27 owner decision：已撤销 android-1（a2a427c）**。为支持用户就地编辑全部文件，Android 唯一根目录恢复为 `/sdcard/keytao`，无私有目录回退、同步或镜像；旧 App 目录经 App 后台停进程、复制核验后迁入并删除。保留重启解锁前等待与成功缓存机制。代价明确接受：所有文件访问权限、数据对持有同类权限的其他 App 可见、共享存储 FUSE 开销。
 - **android-3 + D9（密码框/隐私）**：新增 `resolvePrivacyMode(inputType, imeOptions)`，password 变体 → `setInputPolicy(composing=false, learning=false)` 走 JNI 直通，同时清空并禁用 `clipboardHistory`/`recentCommittedUnits`/`backspaceRestoreStack`。
 - **android-5（生命周期回调不阻塞）**：`KeytaoImeEngine` 新增单线程 `backgroundExecutor`，目录探针 + `nativeInit` + `reloadIfNeeded` 全部投后台再 post 回主线程；`KeytaoThemeResolver` / `KeytaoAndroidImeConfig` 按 `(length, mtime[, 深浅色])` 签名缓存。
 - **android-13（无障碍）**：用 androidx.customview 的 `ExploreByTouchHelper` 给自绘键盘补虚拟节点（复用触摸命中的 `keyRects`/`candidateRects` 等），每个节点给 `contentDescription`/bounds/`ACTION_CLICK`，激活时走与触摸相同的路径；未新增 Gradle 依赖。

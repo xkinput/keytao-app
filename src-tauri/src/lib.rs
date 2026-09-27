@@ -3912,6 +3912,10 @@ pub struct AndroidStoragePermissionStatus {
     pub requires_manage_all_files: bool,
     pub can_open_settings: bool,
     pub message: String,
+    #[serde(default)]
+    pub migration_error: Option<String>,
+    #[serde(default)]
+    pub deploy_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -4185,7 +4189,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployS
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    shared_dir: JString<'_>,
+    _shared_dir: JString<'_>,
     schema_id: JString<'_>,
 ) -> jstring {
     android_jni_guard("nativeDeployStep", std::ptr::null_mut(), || {
@@ -4195,9 +4199,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployS
                 r#"{"success":false,"error":"missing user directory"}"#,
             );
         };
-        let shared_dir = optional_jni_path(&mut env, shared_dir)
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
         let schema_id = optional_jni_text(&mut env, schema_id);
         let result = match schema_id {
             Some(schema_id) => keytao_core::deploy_android_schema(
@@ -4224,7 +4226,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    shared_dir: JString<'_>,
+    _shared_dir: JString<'_>,
     deploy: jboolean,
 ) -> jboolean {
     android_jni_guard("nativeInit", 0, || {
@@ -4232,9 +4234,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
             return 0;
         };
         let user_theme_path = user_dir.join("theme.yaml");
-        let shared_dir = optional_jni_path(&mut env, shared_dir)
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
 
         let runtime = keytao_core::ImeRuntime::with_dirs(user_dir.clone(), shared_dir.clone());
         let init_result = if deploy != 0 {
@@ -4257,16 +4257,14 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
     user_dir: JString<'_>,
-    shared_dir: JString<'_>,
+    _shared_dir: JString<'_>,
 ) -> jboolean {
     android_jni_guard("nativeReinitialize", 0, || {
         let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
             return 0;
         };
         let user_theme_path = user_dir.join("theme.yaml");
-        let shared_dir = optional_jni_path(&mut env, shared_dir)
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
 
         // The runtime knows every session it handed out, so reloading through it
         // drops their engines before librime is finalized. Going around it would
@@ -5040,7 +5038,10 @@ fn android_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<P
         .get("path")
         .and_then(|value| value.as_str())
         .ok_or("Android KeyTao data directory is unavailable")?;
-    Ok(PathBuf::from(path))
+    let root = PathBuf::from(path);
+    // Setup may have run before file access was granted. Init is idempotent.
+    keytao_core::runtime_log::init(&root, "android-app");
+    Ok(root)
 }
 
 #[cfg(target_os = "android")]
@@ -5769,15 +5770,8 @@ async fn android_smart_extract<R: tauri::Runtime>(
                 Ok(())
             });
 
-        let _private_result: serde_json::Value = app
-            .state::<ScopedStorageHandle<R>>()
-            .0
-            .run_mobile_plugin(
-                "smartExtractZipToPrivate",
-                serde_json::json!({ "zipPath": zip_path.clone() }),
-            )
-            .map_err(|e| e.to_string())?;
-
+        // Explicit SAF export does not mirror another copy into KeyTao's live root.
+        android_keytao_root(&app)?;
         let result: serde_json::Value = app
             .state::<ScopedStorageHandle<R>>()
             .0
@@ -7253,7 +7247,7 @@ async fn rime_install_to_default<R: tauri::Runtime>(
     let permission: AndroidStoragePermissionStatus =
         serde_json::from_value(permission_value).map_err(|e| e.to_string())?;
     if !permission.granted {
-        return Err(permission.message);
+        return Err("需要文件访问权限".into());
     }
 
     let root = android_keytao_root(&app)?;

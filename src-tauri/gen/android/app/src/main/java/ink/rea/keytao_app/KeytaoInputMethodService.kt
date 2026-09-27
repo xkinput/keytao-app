@@ -2303,7 +2303,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val reloadPresentation = presentationLoadedWithoutRoot
         engine.runInBackground {
             val readiness = engine.refreshReadiness()
-            val recovered = reloadPresentation && readiness != Readiness.STORAGE_NOT_READY
+            val rootAvailable = readiness != Readiness.STORAGE_NOT_READY &&
+                readiness != Readiness.PERMISSION_MISSING && readiness != Readiness.MIGRATION_PENDING
+            val recovered = reloadPresentation && rootAvailable
             val config = if (recovered) runCatching { KeytaoAndroidImeConfig.load(this) }.getOrNull() else null
             val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
             mainHandler.post {
@@ -2314,7 +2316,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 if (config != null && theme != null) presentationLoadedWithoutRoot = false
                 applyReadiness(readiness)
                 // The first view may have loaded defaults after this refresh was scheduled.
-                if (!reloadPresentation && presentationLoadedWithoutRoot && readiness != Readiness.STORAGE_NOT_READY) {
+                if (!reloadPresentation && presentationLoadedWithoutRoot && rootAvailable) {
                     scheduleAvailabilityRefresh()
                 }
             }
@@ -2325,6 +2327,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         lastReadiness = readiness
         val message = when (readiness) {
             Readiness.STORAGE_NOT_READY -> preparingMessage
+            Readiness.PERMISSION_MISSING -> "请在 KeyTao App 中开启文件访问权限"
+            Readiness.MIGRATION_PENDING -> "请打开 KeyTao App 完成数据迁移"
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
