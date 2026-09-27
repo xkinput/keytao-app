@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "src-tauri",
   "crates/keytao-app-core",
+  "crates/keytao-app-bridge",
   "crates/keytao-core",
   "crates/keytao-core-ffi",
   "crates/keytao-theme",
