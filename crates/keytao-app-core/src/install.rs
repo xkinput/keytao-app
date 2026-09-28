@@ -235,6 +235,61 @@ fn write_file_privileged_fallback(
 pub type WindowsInstallFinish =
     fn(&Path, &[String], &[String], &[u8]) -> Result<Vec<String>, String>;
 
+#[cfg(target_os = "windows")]
+pub fn finish_windows_scheme_install(
+    dest: &Path,
+    package_schema_ids: &[String],
+    package_dictionary_ids: &[String],
+    zip_bytes: &[u8],
+) -> Result<Vec<String>, String> {
+    use crate::{
+        ime_paths::write_keytao_ime_reload_stamp,
+        ime_status::windows::{WindowsImeEngineInitGuard, WindowsImeProfileDeploymentGuard},
+        windows_public_schemas,
+    };
+
+    let mut logs = Vec::new();
+    let invalidated = {
+        let _engine_guard = if !package_schema_ids.is_empty() || !package_dictionary_ids.is_empty()
+        {
+            Some(WindowsImeEngineInitGuard::acquire()?)
+        } else {
+            None
+        };
+        if _engine_guard.is_some() {
+            keytao_core::clear_windows_rime_build_repair_marker(&dest)?;
+            write_keytao_ime_reload_stamp()
+                .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+        }
+        let profile_guard = if _engine_guard.is_some() {
+            Some(WindowsImeProfileDeploymentGuard::suspend()?)
+        } else {
+            None
+        };
+        let invalidated = keytao_core::invalidate_rime_build_artifacts(
+            &dest,
+            &package_schema_ids,
+            &package_dictionary_ids,
+        )?;
+        if let Some(profile_guard) = profile_guard {
+            profile_guard.resume()?;
+        }
+        invalidated
+    };
+    logs.extend(
+        invalidated
+            .into_iter()
+            .map(|path| format!("[INVALIDATED] {path}")),
+    );
+    if keytao_core::default_user_data_dir().as_ref() == Some(&dest.to_path_buf()) {
+        // Publish the original package, before any user customizations were merged.
+        windows_public_schemas::publish_package(&zip_bytes)?;
+        logs.push("[WINDOWS] 已更新系统搜索框使用的公共方案".into());
+    }
+
+    Ok(logs)
+}
+
 pub async fn smart_install(
     core: &Core,
     zip_path: String,

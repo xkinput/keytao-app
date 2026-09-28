@@ -1,6 +1,16 @@
 //! Public Rime packages for sandboxed Windows text hosts. Never source these
 //! files from the user's Rime directory: it contains private learned words.
 
+use crate::{
+    Core, CoreEvent,
+    addon::{
+        EASY_EN_ADDON_ID, addon_schema_source_files, addon_schema_status_at,
+        bundled_addon_schema_dir,
+    },
+    events::InstallProgress,
+    scheme::{build_client, fetch_scheme_release},
+};
+use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -11,6 +21,91 @@ use std::{
 
 static PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
+    static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = PREPARING.lock().await;
+    if has_schemas() {
+        return Ok(());
+    }
+    let root =
+        keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    let installed = keytao_core::schema_install_state(&root);
+    if !installed.installed {
+        return Ok(());
+    }
+    // Infer the public distribution from schema IDs only. Personal source and
+    // learned dictionaries must never be copied into the sandbox-readable seed.
+    let scheme = installed
+        .schemas
+        .iter()
+        .find_map(|id| {
+            if id.starts_with("xmjd6") {
+                Some("xmjd")
+            } else if id.starts_with("txjx") {
+                Some("txjx")
+            } else if id.starts_with("keydo") {
+                Some("keydo")
+            } else if id.starts_with("keytao") {
+                Some("keytao")
+            } else {
+                None
+            }
+        })
+        .ok_or("无法识别公共方案来源，请在方案页重新安装主方案以启用系统搜索框输入")?;
+    core.emit(CoreEvent::InstallProgress(InstallProgress {
+        stage: "windows-search".into(),
+        percent: 0,
+        message: "正在准备 Windows 系统搜索框使用的公共方案…".into(),
+    }));
+    let release = fetch_scheme_release(core, scheme.into())
+        .await
+        .map_err(|e| e.to_string())?;
+    let response = build_client(core)?
+        .get(&release.download_url)
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| format!("下载搜索框公共方案失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > 128 * 1024 * 1024 {
+            return Err("搜索框公共方案压缩包过大".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    publish_package(&bytes)?;
+    if addon_schema_status_at(&root, EASY_EN_ADDON_ID).installed {
+        publish_english_addon(core)?;
+    }
+    publish_english_settings(
+        keytao_core::english_mode::read_english_mode(&root)
+            == keytao_core::english_mode::EnglishMode::Schema,
+    )?;
+    core.emit(CoreEvent::InstallProgress(InstallProgress {
+        stage: "done".into(),
+        percent: 100,
+        message: "Windows 系统搜索框公共方案已就绪".into(),
+    }));
+    Ok(())
+}
+
+pub fn publish_english_addon(core: &Core) -> Result<(), String> {
+    let source = bundled_addon_schema_dir(core, EASY_EN_ADDON_ID)?;
+    let files = addon_schema_source_files(EASY_EN_ADDON_ID)
+        .into_iter()
+        .map(|(source_relative, destination)| {
+            std::fs::read(source.join(source_relative))
+                .map(|bytes| (PathBuf::from(destination), bytes))
+                .map_err(|e| e.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    publish_files(&files)
+}
 
 fn public_root() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
@@ -134,13 +229,15 @@ pub fn has_schemas() -> bool {
     let Ok(config) = std::fs::read_to_string(snapshot.join("default.custom.yaml")) else {
         return false;
     };
-    super::parse_schema_list(&config).iter().any(|schema| {
-        ["keytao", "xmjd", "txjx", "keydo"]
-            .iter()
-            .any(|prefix| schema.starts_with(prefix))
-            && !schema.contains(['/', '\\', ':'])
-            && snapshot.join(format!("{schema}.schema.yaml")).is_file()
-    })
+    crate::scheme_files::parse_schema_list(&config)
+        .iter()
+        .any(|schema| {
+            ["keytao", "xmjd", "txjx", "keydo"]
+                .iter()
+                .any(|prefix| schema.starts_with(prefix))
+                && !schema.contains(['/', '\\', ':'])
+                && snapshot.join(format!("{schema}.schema.yaml")).is_file()
+        })
 }
 
 pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), String> {
@@ -260,7 +357,7 @@ fn publish_at(
                 .get(Path::new("default.custom.yaml"))
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
             let new = std::str::from_utf8(content).map_err(|error| error.to_string())?;
-            let (merged, _) = keytao_app_core::install::merge_default_custom(old, new);
+            let (merged, _) = crate::install::merge_default_custom(old, new);
             files.insert(PathBuf::from("default.custom.yaml"), merged.into_bytes());
         } else {
             if !has_schema_list
@@ -340,12 +437,13 @@ fn store_snapshot(
     for (path, content) in files {
         let output = snapshot.join(path);
         std::fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
-        keytao_app_core::scheme_files::write_file_atomic(&output, content).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&output, content)
+            .map_err(|error| error.to_string())?;
     }
     if grant_access {
         grant_appcontainer_read(root)?;
     }
-    keytao_app_core::scheme_files::write_file_atomic(&root.join("current.txt"), generation.as_bytes())
+    crate::scheme_files::write_file_atomic(&root.join("current.txt"), generation.as_bytes())
         .map_err(|error| error.to_string())
 }
 

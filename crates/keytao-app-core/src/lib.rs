@@ -19,6 +19,8 @@ pub mod scheme_host;
 pub mod scheme_types;
 pub mod update;
 pub mod wanxiang;
+#[cfg(target_os = "windows")]
+pub mod windows_public_schemas;
 pub use scheme_types::*;
 
 pub mod env;

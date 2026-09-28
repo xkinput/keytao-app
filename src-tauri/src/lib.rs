@@ -1,5 +1,3 @@
-#[cfg(target_os = "windows")]
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
@@ -18,10 +16,6 @@ use keytao_app_core::{Core, wanxiang};
 use std::sync::Arc;
 use scheme_shell::*;
 pub use keytao_app_core::scheme_types::*;
-#[cfg(target_os = "windows")]
-use keytao_app_core::scheme_files::parse_schema_list;
-#[cfg(target_os = "windows")]
-use keytao_app_core::addon::{addon_schema_status_at, addon_schema_source_files, EASY_EN_ADDON_ID};
 #[cfg(target_os = "android")]
 use keytao_app_core::install::install_result_from_value;
 
@@ -29,7 +23,7 @@ pub use keytao_app_core::events::{InstallProgress, WindowsImeStatus};
 #[cfg(target_os = "windows")]
 mod windows_app_actions;
 #[cfg(target_os = "windows")]
-mod windows_public_schemas;
+use keytao_app_core::windows_public_schemas;
 
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -91,9 +85,6 @@ fn ios_keytao_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathB
         .map_err(|e| format!("Cannot determine iOS KeyTao data directory: {e}"))
 }
 
-#[cfg(target_os = "windows")]
-use keytao_app_core::ime_status::windows::{WindowsImeEngineInitGuard, WindowsImeProfileDeploymentGuard};
-
 #[tauri::command]
 #[cfg(target_os = "windows")]
 async fn windows_ime_status(app: AppHandle) -> Result<WindowsImeStatus, String> {
@@ -103,55 +94,7 @@ async fn windows_ime_status(app: AppHandle) -> Result<WindowsImeStatus, String> 
 #[tauri::command]
 #[cfg(target_os = "windows")]
 async fn windows_prepare_search_schemas(app: AppHandle) -> Result<(), String> {
-    static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _guard = PREPARING.lock().await;
-    if windows_public_schemas::has_schemas() {
-        return Ok(());
-    }
-    let root = default_keytao_user_root(&app)?;
-    let installed = keytao_core::schema_install_state(&root);
-    if !installed.installed {
-        return Ok(());
-    }
-    // Infer the public distribution from schema IDs only. Personal source and
-    // learned dictionaries must never be copied into the sandbox-readable seed.
-    let scheme = installed.schemas.iter().find_map(|id| {
-        if id.starts_with("xmjd6") { Some("xmjd") }
-        else if id.starts_with("txjx") { Some("txjx") }
-        else if id.starts_with("keydo") { Some("keydo") }
-        else if id.starts_with("keytao") { Some("keytao") }
-        else { None }
-    }).ok_or("无法识别公共方案来源，请在方案页重新安装主方案以启用系统搜索框输入")?;
-    let _ = app.emit("install-progress", InstallProgress {
-        stage: "windows-search".into(), percent: 0,
-        message: "正在准备 Windows 系统搜索框使用的公共方案…".into(),
-    });
-    let release = fetch_scheme_release(app.clone(), scheme.into()).await?;
-    let response = build_client(&app)?.get(&release.download_url)
-        .timeout(std::time::Duration::from_secs(180)).send().await
-        .map_err(|e| format!("下载搜索框公共方案失败：{e}"))?
-        .error_for_status().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        if bytes.len().saturating_add(chunk.len()) > 128 * 1024 * 1024 {
-            return Err("搜索框公共方案压缩包过大".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    windows_public_schemas::publish_package(&bytes)?;
-    if addon_schema_status_at(&root, EASY_EN_ADDON_ID).installed {
-        publish_windows_english_addon(&app)?;
-    }
-    windows_public_schemas::publish_english_settings(
-        keytao_core::english_mode::read_english_mode(&root) == keytao_core::english_mode::EnglishMode::Schema,
-    )?;
-    let _ = app.emit("install-progress", InstallProgress {
-        stage: "done".into(), percent: 100,
-        message: "Windows 系统搜索框公共方案已就绪".into(),
-    });
-    Ok(())
+    windows_public_schemas::prepare_search_schemas(&app.state::<Arc<Core>>()).await
 }
 
 #[tauri::command]
@@ -688,14 +631,7 @@ fn install_addon_schema_files<R: tauri::Runtime>(
 
 #[cfg(target_os = "windows")]
 fn publish_windows_english_addon(app: &AppHandle) -> Result<(), String> {
-    let source = keytao_app_core::addon::bundled_addon_schema_dir(&app.state::<Arc<Core>>(), EASY_EN_ADDON_ID)?;
-    let files = addon_schema_source_files(EASY_EN_ADDON_ID).into_iter()
-        .map(|(source_relative, destination)| {
-            std::fs::read(source.join(source_relative))
-                .map(|bytes| (PathBuf::from(destination), bytes))
-                .map_err(|e| e.to_string())
-        }).collect::<Result<Vec<_>, _>>()?;
-    windows_public_schemas::publish_files(&files)
+    windows_public_schemas::publish_english_addon(&app.state::<Arc<Core>>())
 }
 
 #[tauri::command]
@@ -1102,11 +1038,6 @@ pub fn run() {
                 stop_managed_ime_helper(app);
             }
         });
-}
-
-#[cfg(target_os = "windows")]
-fn build_client<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<reqwest::Client, String> {
-    keytao_app_core::scheme::build_client(&app.state::<Arc<Core>>())
 }
 
 #[tauri::command]
