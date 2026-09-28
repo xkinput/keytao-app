@@ -1,9 +1,6 @@
-// Verbatim copy from App.tsx, AndroidImeOnboarding.tsx, DebugTab.tsx and
-// docs/ios-install.md (Enable KeyTao keyboard).
 // Keep dynamic copy here so both platform layouts share the same wording.
 abstract final class AppStrings {
   static const title = 'KeyTao 键道';
-  static const windowTitle = '键道';
   static const tagline = '键道，基于 librime 的跨平台原生输入法';
   static const boot = '键道正在启动...';
   static const appUpdate = 'KeyTao 有新版本可用';
@@ -108,7 +105,6 @@ abstract final class AppStrings {
   static const embedded = '嵌入模式';
   static const embeddedDescription =
       '开启后在输入框内直接显示拼写字母；关闭时仅在候选窗口显示，完成后整体上屏（默认关闭）';
-  static const toggleEmbedded = '切换嵌入模式';
   static const on = '开启';
   static const off = '关闭';
   static const englishMode = '英文模式';
@@ -141,7 +137,6 @@ abstract final class AppStrings {
   static const immediateDelete = '即时删除';
   static const flickKeys = '下拉输入角标符号';
   static const flickKeysHint = '与常驻数字行功能部分重叠';
-  static const toggleFlickKeys = '切换 Flick keys';
   static const doubleSpacePeriod = '双击空格输入句号';
   static const doubleSpaceHint = '1100ms 内连按两次';
   static const swipeThreshold = '滑动判定阈值';

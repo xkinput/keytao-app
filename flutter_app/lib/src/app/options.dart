@@ -79,18 +79,11 @@ enum AppPage {
   );
 
   const AppPage(this.id, this.title, this.cupertinoIcon, this.materialIcon);
-  // Retain AppPage.input for existing views; new layouts can use AppPage.ime.
-  static const ime = input;
   final String id;
   final String title;
   final IconData cupertinoIcon;
   final IconData materialIcon;
   int get shortcutDigit => index + 1;
-  String get shortcutLabel => '⌘$shortcutDigit';
-
-  void onSelected(AppController controller) {
-    controller.selectPage(this);
-  }
 }
 
 enum SetupStep {
@@ -120,8 +113,6 @@ enum SetupStep {
     select => c.ime?['selected'] == true,
     finish => c.setupReady,
   };
-
-  bool canContinue(AppController c) => !c.busy && isComplete(c);
 
   Future<void> advance(
     AppController c, {
@@ -175,16 +166,7 @@ extension AppViewOptions on AppController {
   bool get canOpenTheme =>
       !busy && uiSettings?.themeExists == true && uiSettings?.themePath != null;
   bool get canEditLogs => !busy && logSettings != null;
-  bool get canLoadInitialLogs => !busy && !logsLoading;
-  bool get hasOperationLog =>
-      operationLogs.isNotEmpty || verification.isNotEmpty;
   String get installButtonTitle => installButtonLabel;
-  String get localStatus =>
-      local == null ? AppStrings.checking : localStatusLine!;
-  List<String> get logLines => runtimeLog?.lines ?? const [];
-  String? get logLineCount => runtimeLog?.truncated == true
-      ? AppStrings.recentLines(logLines.length)
-      : null;
   Map<String, String> get aboutValues => {
     'KeyTao': versions?.appVersion ?? info.appVersion,
     'Flutter': flutterVersion,

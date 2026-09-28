@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESOURCES_DIR="$SCRIPT_DIR/Resources"
-SOURCE_ICON="$WORKSPACE_DIR/src-tauri/icons/icon.png"
+SOURCE_ICON="$WORKSPACE_DIR/packaging/icons/icon.png"
 MENU_PNG="$RESOURCES_DIR/keytao-menu-icon.png"
 MENU_PDF="$RESOURCES_DIR/keytao-menu-icon.pdf"
 INPUT_ICNS="$RESOURCES_DIR/KeyTaoInputSource.icns"

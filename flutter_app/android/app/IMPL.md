@@ -1,31 +1,31 @@
 # Android IME 实现说明
 
-本文只记录 `src-tauri/gen/android/app` 里的 Android 系统输入法前端实现，并按当前代码同步。
+本文只记录 `flutter_app/android/app` 里的 Android 系统输入法前端实现，并按当前代码同步。
 
-跨平台通用契约见 [输入法通用层实现规范](../../../../docs/ime-common-layer.md)；本文只补充 Android `InputMethodService`、`InputConnection`、移动端键盘配置和 JNI bridge 的平台差异。
+跨平台通用契约见 [输入法通用层实现规范](../../../docs/ime-common-layer.md)；本文只补充 Android `InputMethodService`、`InputConnection`、移动端键盘配置和 JNI bridge 的平台差异。
 
 ## 代码地图
 
 - `src/main/AndroidManifest.xml`：注册主 App activity、`KeytaoInputMethodService`、部署前台服务和 FileProvider；声明共享根目录所需的文件访问权限。
 - `src/main/res/xml/keytao_input_method.xml`：Android input-method metadata，声明 `zh_CN` keyboard subtype 和设置页入口。
 - `src/main/res/raw/keytao_android_ime.json`：内置移动端键盘布局、键位 hint、上下滑动作、数字/符号页和高度配置。
-- `src/main/java/ink/rea/keytao_app/KeytaoInputMethodService.kt`：Android `InputMethodService` 前端，负责系统生命周期、硬键/软键分发、`InputConnection` 提交和打开 App 页面。
-- `src/main/java/ink/rea/keytao_app/KeytaoImeEngine.kt`：Android 侧 engine facade，解析共享用户目录、shared data 目录、reload stamp，并通过 JNI 调用通用 runtime。
-- `src/main/java/ink/rea/keytao_app/KeytaoNativeBridge.kt`：加载 `keytao_app_lib` 并包装 native JNI 方法。
-- `src/main/java/ink/rea/keytao_app/AndroidKeyMapper.kt`：把 Android `KeyEvent` 转为 X11 keysym + Rime modifier mask。
-- `src/main/java/ink/rea/keytao_app/KeytaoImeState.kt`：解析 Rust 返回的 `ImeState` JSON、通用 `CandidatePanelModel` 和 `ModeHintModel`。
-- `src/main/java/ink/rea/keytao_app/KeytaoKeyboardView.kt`：自绘移动端键盘和候选栏，只消费 state、theme、panel model 和移动端键盘配置。
-- `src/main/java/ink/rea/keytao_app/KeytaoTheme.kt`：把 `keytao-theme` 的 resolved JSON 映射到 Android `Paint` 需要的颜色、字号和尺寸。
-- `src/main/java/ink/rea/keytao_app/KeytaoAndroidPaths.kt`：统一 Android 用户目录、主题、移动端配置和 reload stamp 路径。
-- `src/main/java/ink/rea/keytao_app/KeytaoAndroidImeConfig.kt`：加载用户目录下的 `keyboard.yaml` / `android_ime.json`，失败时 fallback 到内置 raw 配置；结果按文件签名缓存。
-- `src/main/java/ink/rea/keytao_app/KeytaoEditorPolicy.kt`：解析 `EditorInfo`，产出 Enter 决策、Enter 键帽文案、初始键盘层和隐私模式（密码 / 免学习 / 免建议）。
-- `src/main/java/ink/rea/keytao_app/KeytaoRimeInput.kt`：被拒按键与多字符 `rimeInput` 的结果保序规则，抽成 `KeytaoRimeKeySink` 便于单测。
-- `src/main/java/ink/rea/keytao_app/ScopedStoragePlugin.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责权限请求与 App 后台迁移门禁。
-- `src-tauri/src/lib.rs`：Android JNI bridge，直接创建 `keytao_core::ImeRuntime` / `ImeRuntimeSession`，并调用 `keytao-theme` 生成主题和 UI model JSON。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoInputMethodService.kt`：Android `InputMethodService` 前端，负责系统生命周期、硬键/软键分发、`InputConnection` 提交和打开 App 页面。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoImeEngine.kt`：Android 侧 engine facade，解析共享用户目录、shared data 目录、reload stamp，并通过 JNI 调用通用 runtime。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoNativeBridge.kt`：加载 `keytao_app_bridge` 并包装 native JNI 方法。
+- `src/main/kotlin/ink/rea/keytao_app/AndroidKeyMapper.kt`：把 Android `KeyEvent` 转为 X11 keysym + Rime modifier mask。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoImeState.kt`：解析 Rust 返回的 `ImeState` JSON、通用 `CandidatePanelModel` 和 `ModeHintModel`。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoKeyboardView.kt`：自绘移动端键盘和候选栏，只消费 state、theme、panel model 和移动端键盘配置。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoTheme.kt`：把 `keytao-theme` 的 resolved JSON 映射到 Android `Paint` 需要的颜色、字号和尺寸。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidPaths.kt`：统一 Android 用户目录、主题、移动端配置和 reload stamp 路径。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidImeConfig.kt`：加载用户目录下的 `keyboard.yaml` / `android_ime.json`，失败时 fallback 到内置 raw 配置；结果按文件签名缓存。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoEditorPolicy.kt`：解析 `EditorInfo`，产出 Enter 决策、Enter 键帽文案、初始键盘层和隐私模式（密码 / 免学习 / 免建议）。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoRimeInput.kt`：被拒按键与多字符 `rimeInput` 的结果保序规则，抽成 `KeytaoRimeKeySink` 便于单测。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidChannel.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责权限请求与 App 后台迁移门禁。
+- `crates/keytao-app-core/src/android_jni/mod.rs`：Android JNI bridge，直接创建 `keytao_core::ImeRuntime` / `ImeRuntimeSession`，并调用 `keytao-theme` 生成主题和 UI model JSON。
 - `scripts/android-librime-runtime.sh`：Android ABI runtime 管理脚本，导入/校验 `librime.so` 闭包，并同步到 Gradle `jniLibs` 和 assets。
 - `crates/librime-sys/build.rs`：本地 patched `librime-sys`，Android target 会按 ABI 自动查找 `vendor/librime/android/<abi>`，并要求 Android NDK sysroot。
 
-Tauri 主 App 不处理 Android 输入法按键热路径。它负责下载安装方案、触发部署/reload stamp、展示状态和打开配置页面；系统输入由 Android `InputMethodService` 负责。
+Flutter 主 App 不处理 Android 输入法按键热路径。它负责下载安装方案、触发部署/reload stamp、展示状态和打开配置页面；系统输入由 Android `InputMethodService` 负责。
 
 ## Android 官方契约对齐点
 
@@ -72,7 +72,7 @@ Manifest 声明 `MANAGE_EXTERNAL_STORAGE`、`WRITE_EXTERNAL_STORAGE`（maxSdkVer
 
 Android 不需要像 macOS TIS 或 Windows TSF 那样写系统注册表/输入源数据库；安装 APK 后，用户仍需要在系统输入法设置里启用 KeyTao 输入法。
 
-主 App 的 `MainActivity` 声明 `android:windowSoftInputMode="adjustResize"`，并在 `onCreate()` 设置 `SOFT_INPUT_ADJUST_RESIZE`。Tauri WebView 侧还用 `visualViewport` 维护 `--android-ime-inset-bottom`，在 Android 软键盘显示时给页面底部增加滚动留白并把当前输入控件滚到可见区域。这个避让属于宿主 App 对 IME inset 的响应；IME service 本身只提供标准 input view 高度，不在输入法层伪造 App 布局。
+主 App 的 `MainActivity` 使用 `adjustResize`，Flutter 页面通过系统窗口 inset 响应软键盘。这个避让属于宿主 App；IME service 本身只提供标准 input view 高度，不在输入法层伪造 App 布局。
 
 ## 初始化和进程模型
 
@@ -131,13 +131,12 @@ vendor/librime/android/<abi>/
   rime-data/default.yaml
 ```
 
-支持 ABI：
+发布 APK 支持三个 ABI（runtime 导入脚本另保留 x86 SDK 支持）：
 
 | Android ABI | Rust target |
 | --- | --- |
 | `arm64-v8a` | `aarch64-linux-android` |
 | `armeabi-v7a` | `armv7-linux-androideabi` |
-| `x86` | `i686-linux-android` |
 | `x86_64` | `x86_64-linux-android` |
 
 脚本入口：
@@ -156,9 +155,8 @@ scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a --version 
 # 同步到 Android 工程：jniLibs/<abi> 和 assets/keytao-rime-data
 scripts/android-librime-runtime.sh sync --all
 
-# Tauri 生成 Android glue 后构建 APK
-pnpm tauri android init --ci --skip-targets-install
-pnpm build:android
+# Build split Flutter APKs for the three release ABIs.
+(cd flutter_app && flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64)
 
 # 打印单 ABI Rust 构建环境
 source <(scripts/android-librime-runtime.sh env --abi arm64-v8a)
@@ -168,20 +166,20 @@ cargo check -p keytao-core --target aarch64-linux-android
 Gradle `preBuild` 会自动执行：
 
 ```text
-scripts/android-librime-runtime.sh sync --all --allow-missing
+scripts/android-librime-runtime.sh sync --all --assets-only --android-app-dir flutter_app/android/app --assets-dir flutter_app/build/app/generated/keytao/assets
 ```
 
-如果没有导入 runtime，它只打印 warning，方便普通 Kotlin/Gradle 配置阶段继续；真正构建 Android Rust target 时，本地 patched `librime-sys` 会强制要求：
+Gradle 只同步 shared data assets；native libraries 由 `flutter_app/hook/build.dart` 打包。构建 Android Rust target 时，本地 patched `librime-sys` 会强制要求：
 
 - matching ABI 的 `vendor/librime/android/<abi>/include/rime_api.h`
 - matching ABI 的 `vendor/librime/android/<abi>/lib/librime.so`
 - Android NDK sysroot：`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT` 或 `NDK_HOME`
 
-CI release job 会先显式执行 `import-fcitx5-rime`、`verify --all`、`sync --all`，然后在 APK 构建阶段设置 `KEYTAO_ANDROID_SKIP_RUNTIME_SYNC=1` 跳过 Gradle 的重复同步。这样发布链路只有一个负责导入/校验 Android ABI 闭包的步骤，避免 Tauri/Gradle 构建期间二次同步再次读取临时环境造成不一致；本地构建不设置该变量时仍保留自动同步。
+CI release job 先为三个发布 ABI 导入并校验 runtime，再通过 Flutter 构建 split APK；Gradle 同步 assets，native-assets hook 为每个目标 ABI 准备 Rust bridge 与 librime 闭包。
 
 ## 通用 runtime 接入
 
-Android 直接在 `src-tauri/src/lib.rs` 暴露 JNI，不经过 `keytao-core-ffi` C ABI。原因是 Android 主库本身已经是 Rust/Tauri native library，JNI 可以直接调用 Rust crate。
+Android 直接在 `crates/keytao-app-core/src/android_jni/mod.rs` 暴露 JNI，不经过 `keytao-core-ffi` C ABI。原因是 Android 主库本身已经是 Rust bridge library，JNI 可以直接调用 Rust crate。
 
 JNI 方法和通用层映射：
 
@@ -428,9 +426,9 @@ Android 目前不复用 Linux/Windows 的 BGRA renderer，因为 Android 输入�
 
 Android 只在部署全部成功后写入该文件。安装解压阶段只更新 source/config，不提前通知 IME，避免输入法读到新 source 与旧 build 混合的中间状态。
 
-`rime_deploy_default` 调用 `ScopedStoragePlugin.deployImeData()`，实际部署过程如下：
+Flutter platform channel 调用 `KeytaoAndroidChannel.deployImeData()`，实际部署过程如下：
 
-1. App 主进程立即返回 UI 控制权并显示部署状态，不在 WebView/UI 线程运行 librime。
+1. App 主进程立即返回 UI 控制权并显示部署状态，不在 UI 线程运行 librime。
 2. `KeytaoRimeDeployClient` 先部署 `default.yaml`，再读取选中 schema 和编译后的 dependency graph。
 3. 每个 schema 都由 Manifest 中的 `:rime_deployer` Service 进程单独编译；该服务在 `onStartCommand` 立刻 `startForeground(dataSync)` 并显示「正在编译词库」通知，避免用户切走后被系统回收成一次假超时。结果通过 `ResultReceiver` 回到 App，进程随后退出。
 
@@ -445,13 +443,13 @@ IME 侧在 `onStartInputView()` 调用 `engine.reloadIfNeeded()`：
 3. Rust 侧执行 `RimeFinalize()` 后按现有 build 重新初始化 librime/librime-lua；这会清除跨方案残留的 Lua module cache，但不会在 IME 热路径重新编译词库。
 4. Android 创建新 session、读取 state，并 post 回主线程刷新键盘 view、主题和键盘配置；用户正在组字时不打断当前 composition。
 
-`KeytaoInputMethodService` 运行在独立 `:ime` 进程，和 Tauri/WebView App 进程、短命部署进程彼此隔离。输入按键路径只加载已经生成的 build 产物。
+`KeytaoInputMethodService` 运行在独立 `:ime` 进程，和 Flutter App 进程、短命部署进程彼此隔离。输入按键路径只加载已经生成的 build 产物。
 
 当前 reload 检测只在 input view 启动时进行；如果输入法已经打开且 App 同时部署，用户可能需要切换输入焦点或重新拉起键盘才会触发刷新。后续可在软键动作或定时轻量检查中补一次，但不能在 draw/touch 热路径里执行 deploy。
 
 ## 方案安装合并
 
-`ScopedStoragePlugin.smartExtractZipToPrivate()` 保留兼容命令名，复用已有 Android 安装合并规则，目标目录仅为 `/sdcard/keytao`：
+`KeytaoAndroidChannel.smartExtractZipToPrivate()` 保留兼容命令名，复用已有 Android 安装合并规则，目标目录仅为 `/sdcard/keytao`：
 
 1. 打开传入 zip。
 2. 查找 `default.custom.yaml` / `default-custom.yaml`，和用户目录已有配置合并。
@@ -464,14 +462,14 @@ IME 侧在 `onStartInputView()` 调用 `engine.reloadIfNeeded()`：
 
 ## App 对接点
 
-Tauri 主 App 相关命令：
+Flutter 主 App 相关命令：
 
-- `rime_install_to_default`：安装方案到唯一根目录 `/sdcard/keytao`。
-- `android_smart_extract`：仅向用户明确选择的 SAF 目录导出安装包，不再额外向 KeyTao 根目录写一份。
-- `rime_deploy_default`：在短命部署进程中按 dependency graph 编译方案，全部成功后写 reload stamp，让 IME 下次激活时无部署重载。
+- `smartExtractZipToPrivate`：安装方案到唯一根目录 `/sdcard/keytao`。
+- `smartExtractZip`：仅向用户明确选择的 SAF 目录导出安装包，不再额外向 KeyTao 根目录写一份。
+- `deployImeData`：在短命部署进程中按 dependency graph 编译方案，全部成功后写 reload stamp，让 IME 下次激活时无部署重载。
 - `openPage` 软键动作：启动 `MainActivity`，通过 `keytao_page` extra 指定页面，例如 `settings` 或 `theme`。
 
-正式 Android UI 不应该把系统输入法热路径搬进 React 页面。React 可以做方案管理、主题编辑、键盘配置编辑、诊断和引导用户打开系统输入法设置。
+正式 Android UI 不应该把系统输入法热路径搬进 Flutter 页面。Flutter 可以做方案管理、主题编辑、键盘配置编辑、诊断和引导用户打开系统输入法设置。
 
 ## 与其它平台的关键差异
 
@@ -527,20 +525,20 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 方案 zip 写入 Android 用户目录并兼容外部 SAF 目录。
 - Android ABI runtime 导入/校验/同步脚本。
 - APK assets 内置 `keytao-rime-data` 到用户目录的解包路径。
-- Tauri command 查询 Android 输入法启用/当前选中状态，打开系统输入法设置，并弹出系统输入法选择器。
-- React Android 首启引导：未启用或未选中 KeyTao 时停在配置页，返回 App 后自动重新检测，满足条件后进入主界面。
-- Release CI Android job：安装 NDK，导入四个 ABI 的 runtime，构建 split APK，并上传到 GitHub Release。
+- Flutter platform channel 查询 Android 输入法启用/当前选中状态，打开系统输入法设置，并弹出系统输入法选择器。
+- Flutter Android 首启引导：未启用或未选中 KeyTao 时停在配置页，返回 App 后自动重新检测，满足条件后进入主界面。
+- Release CI Android job：安装 NDK，导入三个发布 ABI 的 runtime，构建 split APK，并上传到 GitHub Release。
 
 ## 未实现或待补齐
 
 1. Android ABI `librime` 发行源仍需产品化
-   CI 当前使用 Fcitx5 Android Rime 插件里的纯 `librime.so` bootstrap 四个 ABI，并通过脚本拒绝 `librime_jni.so`、`JNI_OnLoad` 和第三方输入法 Java wrapper 符号。这个路径可解决当前 APK 闭包和启动闪退问题；正式长期方案建议换成可复现的自建 Android librime/OpenCC/rime-plugins SDK，并记录源码版本、patch、构建参数和产物校验。
+   CI 当前使用 Fcitx5 Android Rime 插件里的纯 `librime.so` bootstrap 三个发布 ABI，并通过脚本拒绝 `librime_jni.so`、`JNI_OnLoad` 和第三方输入法 Java wrapper 符号。这个路径可解决当前 APK 闭包和启动闪退问题；正式长期方案建议换成可复现的自建 Android librime/OpenCC/rime-plugins SDK，并记录源码版本、patch、构建参数和产物校验。
 
 2. Android NDK 未安装时不能完成 Rust target 检查
    `cargo check -p keytao-core --target aarch64-linux-android` 需要 NDK sysroot，并会明确提示设置 `ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT` 或 `NDK_HOME`。Release CI 已安装 `ndk;27.0.12077973`；本地仍需自行安装并导出环境变量。
 
-3. 原始 Gradle 入口仍依赖 Tauri 生成文件
-   `tauri.settings.gradle` 是 Tauri 生成物且未提交，直接 `./gradlew :app:testDebugUnitTest` 仍会被生成文件缺失挡住。当前正式入口是 `pnpm tauri android init --ci --skip-targets-install` 后再走 Tauri/Gradle；后续可补一个测试专用 Gradle include 入口。
+3. Gradle 测试需要完整的 Flutter/Android 构建环境
+   入口为 `flutter_app/android/gradlew`；先在 `flutter_app` 准备依赖和本地 SDK 配置。JNI 仪器化测试还需要设备或模拟器、对应 ABI 的 runtime 和真实方案 fixture。
 
 4. preedit 内部选区还没有视觉呈现
    `ImeState.cursor` 已经通过 `composingRegionStart` + `nativeUtf16OffsetFromChars()` + `setSelection()` 精确落点（见「Composition 与提交」），但编辑器不上报 `candidatesStart` 时仍退回末尾光标，需要逐个宿主实测。`sel_start` / `sel_end`（librime 的当前未转换段）只解析进 `KeytaoImeState`，还没有做成 composing 文本上的 span。
@@ -577,8 +575,8 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 `src/androidTest` 下的 `KeytaoImeEngineInstrumentedTest` 是唯一需要真机/模拟器的一组测试，跑法：
 
 ```bash
-cd src-tauri/gen/android
-./gradlew :app:connectedArm64DebugAndroidTest -x :app:rustBuildArm64Debug \
+cd flutter_app/android
+./gradlew :app:connectedDebugAndroidTest \
   "-Pandroid.testInstrumentationRunnerArguments.expectedSchemaName=键道6" \
   "-Pandroid.testInstrumentationRunnerArguments.input=ba" \
   "-Pandroid.testInstrumentationRunnerArguments.expectedCandidate=不能" \
@@ -586,14 +584,14 @@ cd src-tauri/gen/android
   "-Pandroid.testInstrumentationRunnerArguments.expectedDeployedSchemas=keytao,keytao-dz,keytao-bj,keytao-cx"
 ```
 
-- **必须 `-x :app:rustBuildArm64Debug`**：Tauri 注入的 rustBuild 任务默认假设有 dev-server，没有它时这个任务必挂，测试根本跑不到。JNI 库改用 `scripts/android-librime-runtime.sh` 的产物 + `jniLibs/<abi>/libkeytao_app_lib.so` 就位（可以是指向 `target/aarch64-linux-android/debug/` 的符号链接）。
+- 测试 APK 通过 Flutter native-assets hook 打包 `libkeytao_app_bridge.so` 和设备 ABI 对应的 librime 闭包；先准备 `vendor/librime/android/<abi>`，不需要额外的 Rust Gradle 任务排除参数。
 - 方法执行顺序由 `@FixMethodOrder(NAME_ASCENDING)` 固定：三个用例共用同一个用户目录，先跑安装+部署的 `selectedSchemeComposesCandidates`，再跑把 build 产物删掉的 `sourceOnlyInstallDoesNotDeployOnEnsureReady`。
 - `switchingInstalledSchemesReloadsInOneProcess` 仍然需要 `-Pandroid.testInstrumentationRunnerArguments.fixtureRoot=<设备上放着 keytao/xmjd/txjx/keydo 四份方案的目录>`，不传就 `assumeTrue` 跳过。
 - 仪器化测试显式覆盖根目录为 App cache 下的 `keytao-storage-tests`，仅 debuggable 构建接受此固定位置；测试 deploy client 通过 Intent 将覆盖传给部署子进程，子进程再次校验。清空/部署 fixture 不触及用户真实 `/sdcard/keytao`，测试卸载也不依赖删除共享用户数据。
 
 ### 方案源从哪来（种子化）
 
-生产代码在全新安装时**不会**种子化方案源，这是设计而不是 bug：Android 上方案由用户在 App 里安装（下载 release zip → `ScopedStoragePlugin.smartExtractZipToPrivate()` 合并进用户目录）。APK 里的 `assets/keytao-rime-data` 只是 librime 的 **shared data**（`default.yaml`、`essay.txt`、`opencc/`、luna_pinyin 等），`KeytaoImeEngine.ensureBundledSharedData()` 把它复制到 `<userRoot>/rime-data` 当 shared data 用，它不含 `default.custom.yaml` 和 `keytao*.schema.yaml`，因此 `KeytaoAndroidPaths.hasInstalledSchema()` 依然是 false。
+生产代码在全新安装时**不会**种子化方案源，这是设计而不是 bug：Android 上方案由用户在 App 里安装（下载 release zip → `KeytaoAndroidChannel.smartExtractZipToPrivate()` 合并进用户目录）。APK 里的 `assets/keytao-rime-data` 只是 librime 的 **shared data**（`default.yaml`、`essay.txt`、`opencc/`、luna_pinyin 等），`KeytaoImeEngine.ensureBundledSharedData()` 把它复制到 `<userRoot>/rime-data` 当 shared data 用，它不含 `default.custom.yaml` 和 `keytao*.schema.yaml`，因此 `KeytaoAndroidPaths.hasInstalledSchema()` 依然是 false。
 
 所以仪器化测试必须自己重建「装完方案」的状态，这件事收在 `androidTest/java/.../KeytaoSchemaFixture.kt`，按下面顺序取源：
 
@@ -601,13 +599,13 @@ cd src-tauri/gen/android
 2. `-Pandroid.testInstrumentationRunnerArguments.schemaFixture=<设备目录>`：想用更新的方案包又不想重新打测试 APK 时用。该目录必须是测试 App UID 能读的位置；fixture 只复制到隔离测试目录。
 3. test APK 资源 `src/androidTest/assets/keytao-schema-fixture.zip`：一份钉住版本的键道方案包（`default.custom.yaml`、`keytao*.schema.yaml`、`keytao*.dict.yaml`、`rime.lua`、`lua/`、`symbols.yaml`，约 1.1 MB），钉住版本才能让候选断言（`ba` → `不能`）稳定。它只在测试 APK 里，不进产物 APK。
    刷新方式（例如换新版键道）：把一份 release 安装后的目录打包覆盖过去即可，
-   `cd <方案目录> && zip -qrX <repo>/src-tauri/gen/android/app/src/androidTest/assets/keytao-schema-fixture.zip default.custom.yaml keytao*.yaml rime.lua symbols.yaml lua`。
+   `cd <方案目录> && zip -qrX <repo>/flutter_app/android/app/src/androidTest/assets/keytao-schema-fixture.zip default.custom.yaml keytao*.yaml rime.lua symbols.yaml lua`。
    当前这份取自 `vendor/librime/ios/iphoneos-arm64/rime-data`（iOS 端打进 App bundle 的同一套键道 6 包，schema version 2.2）。
 4. 合成的最小方案（`keytao_fixture`）：只有 `sourceOnlyInstallDoesNotDeployOnEnsureReady` 允许退到这一步——它只验证「装了方案但没部署时 `ensureReady()` 不许部署」这条门禁，不需要真实词库；思路和 `crates/keytao-core/tests/support/smoke_fixture.rs` 一致。
 
 `selectedSchemeComposesCandidates` 不接受合成方案：没有第 2/3 步的真实方案包时它 `assumeTrue` 跳过，并在消息里给出补方案包的办法。
 
-如果不想把 1.1 MB 的方案包收进版本库，把 `/src/androidTest/assets/` 加进 `src-tauri/gen/android/app/.gitignore`（和 `jniLibs/**/*.so`、`assets/keytao-rime-data/` 同类），本地按上面的 zip 命令生成即可；文件不在时测试会跳过而不是误报通过。
+如果不想把 1.1 MB 的方案包收进版本库，把 `/src/androidTest/assets/` 加进 `flutter_app/android/app/.gitignore`（和 `jniLibs/**/*.so`、`assets/keytao-rime-data/` 同类），本地按上面的 zip 命令生成即可；文件不在时测试会跳过而不是误报通过。
 
 ## 复用审计
 
@@ -641,7 +639,7 @@ cd src-tauri/gen/android
 - Android 分享将 `keytao-runtime-log-<yyyyMMdd-HHmm>.zip` 保存到公共 `Download/KeyTao`：API 29+ 使用 MediaStore Downloads 的 pending 握手，API 24–28 在用户授予旧版存储权限后写入并扫描；仅 MediaStore 插入失败时回退 FileProvider，每次分享清理本应用超过 7 天的导出，App 显示实际保存路径供手动附加。
 - 日志页已移除“复制最近 200 行”及大文本复制调用；保留分享、清空、刷新、开关与级别，桌面保留打开目录/复制路径，iOS 保留系统分享面板。
 
-Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtLog` → `nativeLogEnabled` / `nativeLogEvent` 写入公共 NDJSON 日志。已有 `nativeInit` / `nativeReinitialize` 通过 core 的 `init_for_engine()` 初始化日志，进程命令行中的 `:ime` 映射为 `android-ime`；已有 `nativeDeployStep` 的 config/schema 部署入口显式使用 `android-deploy`。当前工作区另一个并行改动已在 Rust Tauri setup 中通过 `spawn_blocking` 异步执行 `runtime_log::init(root, "android-app")`；本批 Kotlin 只采用该现成日志实例，不为写日志额外初始化或部署 Rime。
+Android 粗粒度事件经 `KeytaoRuntimeLog` → `KeytaoNativeBridge.rtLog` → `nativeLogEnabled` / `nativeLogEvent` 写入公共 NDJSON 日志。已有 `nativeInit` / `nativeReinitialize` 通过 core 的 `init_for_engine()` 初始化日志，进程命令行中的 `:ime` 映射为 `android-ime`；已有 `nativeDeployStep` 的 config/schema 部署入口显式使用 `android-deploy`。Flutter 初始化 Rust bridge 后通过 `adoptAppLogger` 让 Kotlin 使用现成日志实例，不为写日志额外初始化或部署 Rime。
 
 | 挂点 | 事件与数据 |
 | --- | --- |
@@ -666,6 +664,17 @@ Android 粗粒度事件经 `KeytaoRuntimeLog` → B1 的 `KeytaoNativeBridge.rtL
 App 的异步 setup 若晚于 `onCreate` / `onResume`，或日志当时为 Off，单一 `nativeLogEnabled` 不能区分“尚未初始化”和“已关闭”；Kotlin 会继续保留最多 32 条待发送事件，等下一个 App 粗粒度生命周期检查成功再重放，不加计时器、不触发 Rime 初始化、也不在 IME 初次 `onCreate` 提前加载原生库。因此早期 `app_create` 写入仍受 setup 与生命周期时序影响；三进程日志文件及实际落盘需要设备验证，不能从 Kotlin 构建通过推断。
 
 ## 排查入口
+
+### Flutter 桥接与迁移经验
+
+- FRB native-assets hook 会清理环境；`flutter_app/hook/build.dart` 通过 `extraCargoEnvironmentVariables` 显式传入 vendored Rime SDK 和从 C 编译器路径推导的 Android NDK 根目录。
+- librime 必须注册为代码资源：macOS 按架构 `lipo -thin`，Android 包含 Fcitx5 依赖和 `libc++_shared`。始终把私有副本交给 Flutter，直接传 vendor 文件曾导致资源安装步骤删除原始 dylib。
+- Flutter 在 macOS 将代码资源包装为 framework 并改写依赖路径；`flutter test` 使用 `ExternalLibrary.open(build/native_assets/<os>/…)` 加载测试库。
+- 迁移时 NDK 固定为已安装的 `27.0.12077973`；升级需同时验证 hook、JNI 导出和 APK 闭包。首次 release/LTO 构建后应核对 bridge 的 `Java_*` 导出。
+- Windows 的 data/cache 根目录可能重合并包含凭据；清缓存不能删除整个应用数据目录。凭据迁到独立子目录仍需单独处理。
+- 账号会话由核心持有，界面启动不能清除认证；引导不能仅凭方案已安装就判为完成。
+- 历史构建经验：Xcode 27 曾使 macOS debug 构建报 conflicting deployment targets，而 release 可用；iOS 构建需完成 Xcode 首次初始化并配置签名。这些属于环境排查线索，需按当前 SDK 复核。
+- 遗留优化项需另行核对：移动端部署包装中的 Windows 参数、`time` 的 `parsing` feature，以及 JNI 内重复的逐项 cfg。
 
 当前可查：
 

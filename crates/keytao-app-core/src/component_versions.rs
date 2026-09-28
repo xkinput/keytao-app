@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 #[derive(Serialize, Clone)]
 pub struct ComponentVersions {
     pub app_version: String,
-    pub tauri_version: String,
     pub librime_version: Option<String>,
     pub opencc_version: Option<String>,
     pub data_dir: Option<String>,
@@ -258,7 +257,6 @@ fn opencc_version(core: &Core, embedded_version: Option<&str>) -> Option<String>
 pub fn get_component_versions(
     core: &Core,
     host: &impl ImeHost,
-    tauri_version: &str,
     rime_version: Option<&str>,
     opencc_version_hint: Option<&str>,
 ) -> ComponentVersions {
@@ -271,7 +269,6 @@ pub fn get_component_versions(
 
     ComponentVersions {
         app_version: core.env().app_version.clone(),
-        tauri_version: tauri_version.to_string(),
         librime_version: librime_version(&core, rime_version),
         opencc_version: opencc_version(&core, opencc_version_hint),
         data_dir,

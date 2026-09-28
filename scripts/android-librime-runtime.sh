@@ -4,7 +4,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_RIME_ROOT="$PROJECT_DIR/vendor/librime/android"
-ANDROID_APP_DIR="$PROJECT_DIR/src-tauri/gen/android/app"
+ANDROID_APP_DIR="$PROJECT_DIR/flutter_app/android/app"
 ANDROID_ASSETS_DIR=""
 ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
 LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-1.17.0}"
@@ -41,7 +41,7 @@ Commands:
       Print shell exports for building Rust against one Android ABI.
 
 Options:
-  --android-app-dir DIR     Override Android app dir. Defaults to src-tauri/gen/android/app.
+  --android-app-dir DIR     Override Android app dir. Defaults to flutter_app/android/app.
   --assets-dir DIR          Override sync assets dir. Defaults to APP_DIR/src/main/assets.
   --runtime-root DIR        Override Android librime vendor root. Defaults to vendor/librime/android.
   -h, --help                Show this help.

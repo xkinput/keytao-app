@@ -94,7 +94,6 @@ fi
 echo "==> Building macOS IME runtime..."
 export KEYTAO_RIME_SHARED_DATA_DIR="$RIME_DATA_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \
-    KEYTAO_VERSION="$PACKAGE_VERSION" \
     "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg
 
 echo "==> Building KeyTao Flutter macOS app bundle..."

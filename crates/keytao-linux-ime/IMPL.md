@@ -21,9 +21,9 @@
 - `keytao.xml`：IBus component 描述，安装到 `/usr/share/ibus/component/keytao.xml`。
 - `keytao-wayland-launcher.desktop`：KDE Virtual Keyboard 入口。
 
-Tauri 主 App 不直接处理 Linux 系统输入法按键。它负责安装方案、部署方案、状态展示，并在部署后写 `keytao-ime.reload` 通知 daemon 重载；Linux 启动阶段可以尝试拉起 fallback `keytao-ime`，但正式 UI 不再提供系统输入法启动/重启按钮。
+Flutter 主 App 不直接处理 Linux 系统输入法按键。它负责安装方案、部署方案、状态展示，并在部署后写 `keytao-ime.reload` 通知 daemon 重载；Linux 启动阶段可以尝试拉起 fallback `keytao-ime`，但正式 UI 不再提供系统输入法启动/重启按钮。
 
-当前系统输入法维护边界以 `crates/keytao-linux-ime` 为准。旧的 `src-tauri/src/ime/linux.rs` 内嵌 Wayland IME/overlay 路径已清理，Tauri 主 App 不再保留 Linux 系统输入法前端实现。
+当前系统输入法维护边界以 `crates/keytao-linux-ime` 为准。Flutter 主 App 不包含 Linux 系统输入法前端实现。
 
 ## 跨平台前端契约
 
@@ -101,7 +101,7 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
 
 发行包里的共享数据目录优先来自包内 runtime：
 
-- deb/rpm：Tauri resource 中的 `runtime/rime-data`。
+- deb/rpm：`/usr/lib/KeyTao/runtime/rime-data`。
 - fallback：显式环境变量、Nix/system profile、`/usr/local/share/rime-data`、`/usr/share/rime-data`。
 
 `CoreEngine` 是 `keytao_core::ImeRuntime` 的 Linux 侧别名，真实 runtime 行为在 `crates/keytao-core/src/lib.rs`：
@@ -282,7 +282,7 @@ GNOME/mutter 不提供 `zwp_input_method_manager_v2`，所以 KeyTao 作为 IBus
 
 `crates/keytao-linux-ime/keytao.xml` 描述 component 和 `keytao` engine，安装位置：
 
-- deb/rpm：`src-tauri/tauri.linux.conf.json` 的 `bundle.linux.deb.files` / `rpm.files` → `/usr/share/ibus/component/keytao.xml`。
+- deb/rpm：`packaging/linux/build-packages.sh` → `/usr/share/ibus/component/keytao.xml`。
 - Nix：`flake.nix` 的 `keytaoLinuxIme.postInstall` → `$out/share/ibus/component/keytao.xml`，并把 `<exec>` 替换成绝对路径。
 
 只靠运行时 `RegisterComponent` 是不够的：那份注册随调用进程存活，ibus-daemon 重启或重新登录后 KeyTao 会从输入源列表里消失，daemon 也无法按 `<exec>` 拉起引擎。
@@ -402,14 +402,12 @@ Linux 的复杂度主要来自桌面协议分裂，不应该让这些差异泄�
 
 ## App 对接点
 
-Tauri 主 App 的 Linux 相关命令在 `src-tauri/src/lib.rs`：
+Flutter 主 App 的 Linux 相关 API 在 `crates/keytao-app-bridge/src/api/core.rs`：
 
 - `linux_ime_status`
-- `linux_start_ime`
-- `linux_restart_ime`
-- `linux_enable_kde_support`
+- `linux_start_ime(restart)`
 
-正式 App UI 只展示 `linux_ime_status` 的结果，不再提供启动、重启或 KDE 配置按钮。`linux_start_ime`、`linux_restart_ime`、`linux_enable_kde_support` 保留为开发/诊断和迁移接口，避免普通用户在 App 内直接操作系统输入法组件。
+正式 App UI 只展示 `linux_ime_status` 的结果，不再提供启动、重启或 KDE 配置按钮。`linux_start_ime(restart)` 用于启动/诊断接口，避免普通用户在 App 内直接操作系统输入法组件。
 
 App 启动时会尝试启动 fallback `keytao-ime`。KDE 原生 Wayland 配置仍由系统包、桌面配置或开发接口写入：
 
@@ -423,12 +421,12 @@ kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 ## 构建
 
 - `scripts/build-linux.sh` 通过 Docker builder 生成 Linux 包。
-- `scripts/container-build.sh` 在容器里构建 Tauri 包和 `keytao-ime`。
+- `scripts/container-build.sh` 在容器里构建 Flutter App 和 `keytao-ime`。
 - Linux 发行目标只包含 `deb` 和 `rpm`，不构建 AppImage 或 tarball。
-- deb/rpm 通过 Tauri resource 打入 `target/keytao-linux-runtime`，并同时包含 `keytao-app`、`keytao-ime` 和 runtime。
-- deb/rpm 还通过 `bundle.linux.deb.files` / `rpm.files` 安装 `/usr/share/ibus/component/keytao.xml`；`scripts/verify-linux-bundles.sh` 会校验它在两种包里都存在。
+- deb/rpm 通过 `packaging/linux/build-packages.sh` 打入 `target/keytao-linux-runtime`，并同时包含 `keytao-app`、`keytao-ime` 和 runtime。
+- deb/rpm 还通过打包脚本安装 `/usr/share/ibus/component/keytao.xml`；`scripts/verify-linux-bundles.sh` 会校验它在两种包里都存在。
 - runtime 必须包含 `librime.so.*`、OpenCC 数据、`rime-plugins`、基础 `rime-data`，以及 librime/OpenCC 需要的非系统依赖。
-- `keytao-app` 和 `keytao-ime` 构建时写入 RUNPATH，覆盖 `$ORIGIN/runtime/lib`、Tauri resource runtime、deb/rpm 的 `/usr/lib/keytao-app/...` 布局。
+- 打包时设置 RUNPATH：App 使用 `$ORIGIN/lib`，IME 使用 `$ORIGIN/runtime/lib`，Flutter native library 使用 `$ORIGIN:$ORIGIN/../runtime/lib`；安装目录为 `/usr/lib/KeyTao`。
 - 构建镜像安装 `librime-dev` 只作为编译来源；打包阶段会把构建镜像里的 librime runtime 闭包复制进 KeyTao runtime。用户安装 deb/rpm 后不应再依赖系统预装 `librime` 或 `opencc` 才能运行 KeyTao 输入法。
 - 开发时也可以直接运行 `cargo build -p keytao-linux-ime --release`。
 

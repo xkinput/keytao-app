@@ -55,12 +55,12 @@ Apple 的免费 Personal Team 只适合在自己的设备上测试，不是公�
 
 ### 1. 准备环境
 
-需要 macOS、最新版稳定版 Xcode、Node.js、pnpm 和 Rust。先连接 iPhone 或 iPad，并在 Xcode 中登录 Apple ID。
+需要 macOS、Xcode、Flutter SDK 和 Rust。先连接 iPhone 或 iPad，并在 Xcode 中登录 Apple ID。
 
 ```bash
 git clone https://github.com/xkinput/keytao-app.git
 cd keytao-app
-pnpm install
+(cd flutter_app && flutter pub get)
 rustup target add aarch64-apple-ios
 ```
 
@@ -76,36 +76,30 @@ group.com.example.keytao
 
 需要一致修改以下位置：
 
-- `src-tauri/tauri.conf.json` 中的 App identifier。
-- `src-tauri/src/lib.rs` 中的 iOS App Group identifier。
+- `flutter_app/ios/Flutter/KeyTao.xcconfig` 中的主 App Bundle ID 和 Team。
+- `flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboard.xcconfig` 中的键盘 Bundle ID 和 Team。
+- `flutter_app/ios/Runner/AppDelegate.swift` 中的 App Group identifier。
 - `crates/keytao-ios-ime/Sources/KeyTaoIOSIME/KeyTaoIOSEngine.swift` 中的 App Group identifier。
-- `crates/keytao-ios-ime/Resources/KeyTaoApp.entitlements` 中的 App Group。
-- `crates/keytao-ios-ime/Resources/KeyTaoKeyboard.entitlements` 中的 App Group。
+- `flutter_app/ios/Runner/Runner.entitlements` 中的 App Group。
+- `flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboard.entitlements` 中的 App Group。
 
-生成 iOS 工程时再提供键盘 Bundle ID、App Group 和 Team ID：
-
-```bash
-export KEYTAO_IOS_KEYBOARD_BUNDLE_ID="com.example.keytao.keyboard"
-export KEYTAO_IOS_APP_GROUP="group.com.example.keytao"
-export KEYTAO_IOS_DEVELOPMENT_TEAM="YOUR_TEAM_ID"
-pnpm init:ios
-```
-
-`KEYTAO_IOS_APP_GROUP` 会更新生成工程中的主 App entitlement，但键盘运行时和源码 entitlement 仍需要按上面的文件列表同步修改。
+iOS 工程已保存在 `flutter_app/ios`。使用自定义 Bundle ID 时，还需同步 `scripts/build-flutter-ios.sh` 中的两个标识校验；构建脚本不会自动改写标识或 App Group。
 
 ### 3. 构建运行库并打开 Xcode
 
+先导入带 Lua 的 iOS librime SDK 到 `vendor/librime/ios/iphoneos-arm64`。脚本会构建键盘 FFI、Flutter App 和未签名 IPA，不会自动下载 librime。
+
 ```bash
-pnpm build:ios -- --no-sign --ci
-open src-tauri/gen/apple/keytao-app.xcodeproj
+scripts/build-flutter-ios.sh
+open flutter_app/ios/Runner.xcworkspace
 ```
 
 在 Xcode 中完成以下设置：
 
-1. 选择 `keytao-app_iOS` target，在 **Signing & Capabilities** 中开启 **Automatically manage signing**，选择自己的 Team。
+1. 选择 `Runner` target，在 **Signing & Capabilities** 中开启 **Automatically manage signing**，选择自己的 Team。
 2. 选择 `KeyTaoKeyboard` target，使用同一个 Team，并开启自动签名。
 3. 付费团队需要确认两个 target 都包含 **App Groups** capability，并勾选同一个 App Group。
-4. 选择已连接的 iPhone 或 iPad，运行 `keytao-app_iOS` scheme。
+4. 选择已连接的 iPhone 或 iPad，运行 `Runner` scheme。
 
 如果使用免费 Personal Team，而 Xcode 提示 profile 不支持 App Groups，需要从两个 target 移除 App Groups capability 和对应 entitlement。这样只能测试键盘包内自带的 Rime 数据，主 App 与键盘扩展之间的方案、主题和部署状态共享不会完整工作。
 

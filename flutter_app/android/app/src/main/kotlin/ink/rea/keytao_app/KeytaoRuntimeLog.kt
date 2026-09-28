@@ -44,7 +44,7 @@ internal object KeytaoRuntimeLog {
         events.forEach { it() }
     }
 
-    /** App lifecycle only, after Tauri has loaded the library; never called by IME startup. */
+    /** App lifecycle only, after Flutter has loaded the bridge; never called by IME startup. */
     fun adoptAppLoggerIfEnabled() {
         if (initialized) {
             refreshEnabled()

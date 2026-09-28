@@ -66,7 +66,7 @@ App installs schema/dict/lua/opencc files
   -> ImeRuntimeSession refreshes internal Engine lazily
 ```
 
-附加方案走同一条部署链路。内置英文 add-on id 是 `easy_en`：Tauri 将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
+附加方案走同一条部署链路。内置英文 add-on id 是 `easy_en`：Flutter 各平台打包链将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
 
 `easy_en` 的 14,566,541 B 词典在 macOS Apple Silicon 上增量部署实测为 4,328 ms，生成 28,216,820 B（table 15,784,108 B、prism 6,320,444 B、reverse 6,112,268 B）编译产物。中低端 Android 可能慢一个数量级以上；含 `easy_en` 的 staged deploy 总预算因此由 180 s 提高到 300 s，未含 add-on 的部署仍保持 180 s。以上不是 Android 真机耗时证据，合并前仍需在目标中低端真机记录完整 staged deploy 用时。
 
@@ -117,8 +117,8 @@ librime 的 C API 没有线程安全承诺：`Service`、`ConfigComponent`、`Di
 | --- | --- | --- | --- |
 | IME runtime + Rime wrapper | `crates/keytao-core` | librime setup/deploy/session、`ImeRuntime`、reload generation、modifier mask、`ImeState` 抽取、用户目录/共享目录、配置合并工具 | 平台协议、窗口绘制、系统安装 |
 | C FFI | `crates/keytao-core-ffi` | 给 Swift/C/其它语言提供 per-session C ABI，并复用 `ImeRuntimeSession` | 平台策略、UI 样式、按键猜测 |
-| Platform frontend | `crates/keytao-linux-ime`、`crates/keytao-macos-ime`、`crates/keytao-windows-ime`、`src-tauri/gen/android/app` | 系统输入法协议、按键转换、提交文本、更新 preedit、候选窗/候选服务、日志诊断 | Rime 业务状态、配置合并、跨平台视觉语义 |
-| App integration | `src-tauri/src/lib.rs` 和 React UI | 下载安装方案、触发部署、状态展示、通过 `keytao_core::ReloadStamp::write()` 写 reload stamp、种子写入用户可编辑的 `theme.yaml` / `keyboard.yaml`；Linux 可在启动时拉起 fallback daemon | 直接接管系统按键热路径、自己拼 reload stamp 签名、在正式 UI 暴露系统输入法安装/卸载/重启按钮 |
+| Platform frontend | `crates/keytao-linux-ime`、`crates/keytao-macos-ime`、`crates/keytao-windows-ime`、`flutter_app/android/app`、`crates/keytao-ios-ime` | 系统输入法协议、按键转换、提交文本、更新 preedit、候选窗/候选服务、日志诊断 | Rime 业务状态、配置合并、跨平台视觉语义 |
+| App integration | `crates/keytao-app-core`、`crates/keytao-app-bridge` 和 Flutter UI | 下载安装方案、触发部署、状态展示、通过 `keytao_core::ReloadStamp::write()` 写 reload stamp、种子写入用户可编辑的 `theme.yaml` / `keyboard.yaml`；Linux 可在启动时拉起 fallback daemon | 直接接管系统按键热路径、自己拼 reload stamp 签名、在正式 UI 暴露系统输入法安装/卸载/重启按钮 |
 
 平台前端之间可以使用完全不同的系统协议，但必须共享同一套输入输出语义：
 
@@ -158,7 +158,7 @@ native key event
 
 候选、翻页、清空、提交一律调用 librime 官方 API（`RimeSelectCandidateOnCurrentPage`、`RimeHighlightCandidateOnCurrentPage`、`RimeDeleteCandidateOnCurrentPage`、`RimeChangePage`、`RimeCommitComposition`、`RimeClearComposition`、`RimeGetInput`），不再合成按键；只有旧 ABI 缺对应函数指针时才退回合成按键。这意味着通用层不再依赖 `default.yaml` 里 `-`/`=` 的 `key_binder` 绑定、也不依赖 Escape 绑定或 `select_keys` 的长度。
 
-**iOS 的 vendored librime 降级路径**：`vendor/librime/ios` 目前从 librime 1.8.5（源码 commit `08dd95f5`）构建，其 `RimeApi` 结构体尚无 `change_page` 与 `highlight_candidate_on_current_page`（二者是 librime 1.9 才加入的成员）——这在 iOS target 上是**编译期**字段缺失，不是运行期函数指针判空。因此 `keytao-core` 对这两处做 `#[cfg(target_os = "ios")]` 门控降级：`highlight_candidate_on_page` 在 iOS 上是 no-op，`change_page` 在 iOS 上退回合成 `-`/`=` 翻页键；其余平台（macOS/Windows/Linux/Android 用 librime 1.17.x）一律走官方 API。这意味着 D4「走官方 API 而非合成按键」在 iOS runtime 升级到 1.9+ 之前无法在 iOS 上真正生效。升级 `vendor/librime/ios` 到 1.17.x 后应移除该门控（见《当前已知差异与收敛点》与 `docs/ime-convention-compliance-report.md` 的遗留事项）。
+**iOS 的 vendored librime 降级路径**：`vendor/librime/ios` 目前从 librime 1.8.5（源码 commit `08dd95f5`）构建，其 `RimeApi` 结构体尚无 `change_page` 与 `highlight_candidate_on_current_page`（二者是 librime 1.9 才加入的成员）——这在 iOS target 上是**编译期**字段缺失，不是运行期函数指针判空。因此 `keytao-core` 对这两处做 `#[cfg(target_os = "ios")]` 门控降级：`highlight_candidate_on_page` 在 iOS 上是 no-op，`change_page` 在 iOS 上退回合成 `-`/`=` 翻页键；其余平台（macOS/Windows/Linux/Android 用 librime 1.17.x）一律走官方 API。这意味着 D4「走官方 API 而非合成按键」在 iOS runtime 升级到 1.9+ 之前无法在 iOS 上真正生效。升级 `vendor/librime/ios` 到 1.17.x 后应移除该门控（见本文《当前已知差异与收敛点》和 `crates/keytao-ios-ime/IMPL.md`）。
 
 平台前端不应直接访问 librime context/menu/status，也不应绕过 core 自己解析候选。
 
@@ -201,11 +201,11 @@ native key event
 
 ## FFI 契约
 
-非 Rust 平台前端应优先使用 `keytao-core-ffi` 的 per-session API。FFI per-session 已经复用 `ImeRuntimeSession`，所以 Swift/C 层不需要直接管理 librime session。Android 的 Kotlin 侧走 `src-tauri` 里对称的 `Java_..._KeytaoNativeBridge_native*` JNI 导出，语义与同名 C 入口一致。
+非 Rust 平台前端应优先使用 `keytao-core-ffi` 的 per-session API。FFI per-session 已经复用 `ImeRuntimeSession`，所以 Swift/C 层不需要直接管理 librime session。Android 的 Kotlin 侧走 `crates/keytao-app-core/src/android_jni/mod.rs` 里对称的 `Java_..._KeytaoNativeBridge_native*` JNI 导出，语义与同名 C 入口一致。
 
 ### panic 边界
 
-- `keytao-core-ffi` 的**全部** `extern "C"` 导出（含 `keytao_free_string` / `keytao_free_state`）与 `src-tauri` 的**全部** `Java_*` JNI 导出都在 `catch_unwind(AssertUnwindSafe(..))` 内。
+- `keytao-core-ffi` 的**全部** `extern "C"` 导出（含 `keytao_free_string` / `keytao_free_state`）与 `keytao-app-core::android_jni` 的**全部** `Java_*` JNI 导出都在 `catch_unwind(AssertUnwindSafe(..))` 内。
 - panic 时返回 null / false / 0，并记一条 error 日志：C 侧写 stderr，Android 侧写 logcat（TAG=`KeytaoNative`）。日志只含 panic 消息，不含按键与提交内容。
 - **不变量**：平台拿到 null / false 必须按“本次操作没有发生”处理，保留上一次的 UI 状态，不能当成崩溃或据此销毁 session。
 
@@ -505,11 +505,11 @@ App 的方案安装只写文件；部署才调用 `keytao_core::deploy()`。任�
 平台约束：
 
 - macOS 只构建 pkg。pkg 同时安装主 App 和 `/Library/Input Methods/KeyTao.app`，并要求安装后注销、重新登录当前用户会话；不构建 dmg，因为 dmg 拖拽安装无法可靠完成系统输入法注册。
-- Linux 只构建 deb 和 rpm，不构建 AppImage 或 tarball。deb/rpm 通过 Tauri resource 放入 `runtime/`，并同时包含主 App、系统 IME 和完整 runtime。
+- Linux 只构建 deb 和 rpm，不构建 AppImage 或 tarball。deb/rpm 通过 `packaging/linux/build-packages.sh` 放入 `runtime/`，并同时包含主 App、系统 IME 和完整 runtime。
 - Windows 继续使用 installer 方式，并应保持 `resources/rime-data` 和 runtime DLL 闭包完整。
 - Android 通过 `scripts/android-librime-runtime.sh` 导入 ABI 对应的 `librime.so` 闭包，Gradle 同步到 `jniLibs/<abi>`，基础 `rime-data` 同步到 APK assets 后由 `InputMethodService` 解包到用户目录下的 `rime-data`。
 
-macOS release CI 必须执行 `pnpm build:macos` 和 `scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg`，再上传 `keytao-app-<version>-macos-<arch>.pkg`。当前脚本按 runner 架构构建，例如 `macos-arm64` 或 `macos-x86_64`；不要让 Tauri 的 `dmg` bundle 重新进入 macOS 发行流程。
+macOS release CI 必须执行 `scripts/build-macos.sh` 和 `scripts/verify-macos-pkg.sh`，再上传一个 `keytao-app-<version>-macos.pkg`，主 App、IME 与 FFI 均为 x86_64 + arm64 universal。
 
 `keytao-core` 不关心打包格式；它只要求传入可靠的 shared data dir。平台 App/IME 启动代码必须优先选择包内 runtime，再 fallback 到环境变量或系统目录。
 
@@ -728,7 +728,7 @@ KeyTao App 的理想操作方式：
 
 ## 当前已知差异与收敛点
 
-本轮跨平台规范符合度整改后的现状（逐区处置明细见 `docs/ime-convention-compliance-report.md`）。
+跨平台规范符合度整改后的现状；平台细节见各 IMPL.md。
 
 已收敛：
 
@@ -737,7 +737,7 @@ KeyTao App 的理想操作方式：
 - macOS `commitComposition` 与普通 Return 路径都使用 `XK_Return`/`0xff0d`；五端 Enter 只有 `ImeRuntimeSession::process_enter()` 一个实现。候选/翻页/清空/提交走 librime 官方 API；数字/选择键不再本地拦截；失焦收尾只有 `commit_composition()` / `clear_composition()`，不再伪造 Enter/Escape。
 - macOS 消费 FFI 的 `CandidatePanelModel` / `ModeHintModel`（cross-9），删除 Swift 侧重写的 label/高亮/分页逻辑；theme 层的移动端软键盘布局已从共享 `ResolvedImeTheme` 分家到 `keytao-theme::mobile_layout`（`keyboard.yaml`）。
 - Linux daemon 日志已从 `/tmp/keytao-ime.log` 固定路径移到 `$XDG_STATE_HOME/keytao/log`（目录 0700，启动时清理旧 `/tmp` 日志）；全平台 release 默认级别不打按键、preedit 全文与 keysym 明细。
-- Linux 旧的 `src-tauri/src/ime/linux.rs` 内嵌 Wayland IME 代码已清理；系统输入法维护以 `crates/keytao-linux-ime` daemon 为准。
+- Linux 系统输入法维护以 `crates/keytao-linux-ime` daemon 为准，Flutter 主 App 不接管系统按键。
 
 仍存在的平台差异与遗留：
 
@@ -746,7 +746,6 @@ KeyTao App 的理想操作方式：
 - Linux GNOME/IBus/Kimpanel 视觉不能完整受 `theme.yaml` 控制；文档和 UI 设置页需要明确“结构生效，视觉受系统限制”。
 - **Linux 自绘候选面板（wlroots / X11 overlay）的鼠标点选候选与翻页按钮仍未实现**，属遗留（Windows 本轮已补齐点选）。
 - Windows TSF 已接入 reload stamp、solo Shift release、候选点选、Enter direct commit、密码框直通与 CapsLock 归一；`context→session` 映射按已登记偏离暂缓，仍需真实 Windows 桌面回归测试。
-- `src-tauri/src/rime.rs` 与 App 进程内仍有不受 reload 保护的裸 `Engine`（App overlay 输入通道，非 JNI/FFI），建议后续迁到 `ImeRuntime`。
 
 ## 文档维护规则
 

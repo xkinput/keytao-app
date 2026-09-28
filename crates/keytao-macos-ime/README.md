@@ -36,7 +36,7 @@ macOS IMK 层只是 AppKit/InputMethodKit adapter：Swift 通过 FFI 创建 sess
 
 ```mermaid
 flowchart TD
-    App["Tauri App<br/>src-tauri/src/lib.rs"]
+    App["Flutter App<br/>crates/keytao-app-bridge/src/api/core.rs"]
     Stamp["reload stamp<br/>~/Library/keytao/keytao-ime.reload"]
     Main["IMK app entry<br/>Sources/KeyTaoIME/main.swift"]
     TIS["Input source registration<br/>InputSourceInstaller.swift"]
@@ -134,20 +134,19 @@ font:
 完整 macOS 发行包从仓库根目录构建：
 
 ```sh
-pnpm install
-pnpm build:macos
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
+scripts/build-macos.sh
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg
 ```
 
 产物：
 
-- `target/keytao-macos-pkg/KeyTao.pkg`
-- GitHub Release 中会重命名为 `keytao-app-<version>-macos-<arch>.pkg`，例如 `macos-arm64` 或 `macos-x86_64`
+- `target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg`
+- GitHub Release 发布一个 `keytao-app-<version>-macos.pkg`，包含 x86_64 + arm64。
 
 测试安装：
 
 ```sh
-sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
+sudo installer -pkg target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg -target /
 ```
 
 安装器会提示注销；重新登录 macOS 后，再打开 KeyTao 手动安装方案并点击“部署”。随后可继续检查：

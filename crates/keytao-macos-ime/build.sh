@@ -41,25 +41,16 @@ APP="$BUILD_DIR/KeyTao.app"
 VENDOR_DIR="$WORKSPACE_DIR/vendor/librime/macos-universal"
 VENDOR_ENV="$VENDOR_DIR/env.sh"
 
-# The single source of truth for the version is the workspace; package.json is
-# kept in sync with it by scripts/sync-version.mjs.
+# The workspace manifest is the single source of truth for the version.
 resolve_package_version() {
-    if [ -n "${KEYTAO_VERSION:-}" ]; then
-        printf '%s\n' "$KEYTAO_VERSION"
-        return 0
-    fi
-    local version=""
-    if command -v node >/dev/null 2>&1 && [ -f "$WORKSPACE_DIR/package.json" ]; then
-        version="$(node -p "JSON.parse(require('fs').readFileSync('$WORKSPACE_DIR/package.json', 'utf8')).version" 2>/dev/null || true)"
-    fi
-    if [ -z "$version" ]; then
-        version="$(awk '
-            /^\[workspace\.package\]/ { section = 1; next }
-            /^\[/ { section = 0 }
-            section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
-        ' "$WORKSPACE_DIR/Cargo.toml")"
-    fi
-    printf '%s\n' "${version:-0.0.0}"
+    local version
+    version="$(awk '
+        /^\[workspace\.package\]/ { section = 1; next }
+        /^\[/ { section = 0 }
+        section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
+    ' "$WORKSPACE_DIR/Cargo.toml")"
+    [ -n "$version" ] || { echo "Missing workspace.package.version" >&2; return 1; }
+    printf '%s\n' "$version"
 }
 
 # CFBundleVersion must stay numeric for the Installer's version comparison, so

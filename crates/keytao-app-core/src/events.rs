@@ -36,17 +36,6 @@ pub enum CoreEvent {
     WindowsImeAction(()),
 }
 
-impl CoreEvent {
-    pub fn tauri_name(&self) -> &'static str {
-        match self {
-            Self::InstallProgress(_) => "install-progress",
-            Self::DeployProgress(_) => "deploy-progress",
-            Self::WindowsImeStatus(_) => "windows-ime-status",
-            Self::WindowsImeAction(()) => "windows-ime-action",
-        }
-    }
-}
-
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: CoreEvent);
 }

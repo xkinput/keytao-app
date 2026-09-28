@@ -35,7 +35,7 @@ Windows 输入法实现为 TSF TIP DLL：
 
 x64 安装包同时携带 `current` x64、`x86` 和 `arm64x` runtime。ARM64X runtime 由 ARM64X forwarder、原生 ARM64 TIP + `rime-arm64.dll`、x64 TIP + `rime.dll` 组成；Windows on ARM 的原生和模拟进程会经同一个 COM 路径加载匹配目标。NSIS 先把完整 runtime 复制到 `%ProgramData%\KeyTao\keytao-windows-ime-runtime\<version>\<unique>`，再先注册 x86、最后注册 native/ARM64X。每次安装使用新目录，避免 `ctfmon`、浏览器或 WebView 已加载旧 TIP 时覆盖 DLL 失败。活动目录写入 `HKLM\Software\KeyTao`，卸载时反注册后用 `/REBOOTOK` 清理已加载旧文件。
 
-Tauri 主 App 在启动后会先完成 `windows-ime-status` 事件监听并渲染界面，再通过后台任务检查 TSF 状态。若 COM DLL 已完整注册但当前 profile 未启用，App 会在未提权的当前用户进程先调用 `InstallLayoutOrTip`、再调用 `EnableLanguageProfile` 并验证最终状态；这也覆盖标准用户用另一管理员账户确认 UAC、导致安装器无法修改原用户输入列表的情况。只有 COM/runtime 不完整时才异步触发提升权限 PowerShell 流程。该流程把 native/ARM64X 与 x86 runtime 一起复制到新的 `%ProgramData%` 版本目录，再按位数注册；状态通过 `windows-ime-status` 事件回传到界面。界面只保留刷新入口，不提供手动重装 TSF 或卸载按钮，避免注册流程阻塞首屏显示。
+Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染界面，再通过后台任务检查 TSF 状态。若 COM DLL 已完整注册但当前 profile 未启用，App 会在未提权的当前用户进程先调用 `InstallLayoutOrTip`、再调用 `EnableLanguageProfile` 并验证最终状态；这也覆盖标准用户用另一管理员账户确认 UAC、导致安装器无法修改原用户输入列表的情况。只有 COM/runtime 不完整时才异步触发提升权限 PowerShell 流程。该流程把 native/ARM64X 与 x86 runtime 一起复制到新的 `%ProgramData%` 版本目录，再按位数注册；状态通过 Rust bridge 状态事件回传到界面。界面只保留刷新入口，不提供手动重装 TSF 或卸载按钮，避免注册流程阻塞首屏显示。
 主 App 状态检查通过 Unicode Registry API 和显式 `KEY_WOW64_32KEY` / `KEY_WOW64_64KEY` 分开读取 x64/x86 COM view，再核对 DLL path 和 TSF profile enabled 状态：`registered=true` 必须同时满足两套已打包 DLL 路径匹配注册表，并且 TSF profile 已启用。这样既不会受 `reg.exe` 输出代码页影响，也不会把“某一个 COM DLL 注册表存在”误报成“输入法在所有应用中可切换”。
 
 ## TSF 官方契约对齐点

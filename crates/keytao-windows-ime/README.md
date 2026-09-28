@@ -24,15 +24,9 @@ Then build the IME:
 .\scripts\build-windows-ime.ps1
 ```
 
-Or through pnpm:
-
-```powershell
-pnpm build:windows-ime
-```
-
 `build-windows-ime.ps1` creates the selected architecture directory. The full
-`build-windows.ps1 -Arch x64` installer build creates both architecture
-directories and points `current` at x64:
+`build-windows-flutter.ps1 -Arch x64` installer build creates x86, x64, ARM64
+and ARM64X runtime directories and points `current` at x64:
 
 ```text
 target\keytao-windows-ime-runtime\x64

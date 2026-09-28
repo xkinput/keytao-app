@@ -31,7 +31,7 @@ Linux 后端只是系统协议 adapter：它们把 Wayland/XIM/IBus/KDE/GNOME �
 
 ```mermaid
 flowchart TD
-    App["Tauri App<br/>src-tauri/src/lib.rs"]
+    App["Flutter App<br/>crates/keytao-app-bridge/src/api/core.rs"]
     Stamp["reload stamp<br/>~/.local/share/keytao/keytao-ime.reload"]
     Main["Linux daemon entry<br/>crates/keytao-linux-ime/src/main.rs"]
     CoreEngine["CoreEngine / ImeSession aliases<br/>crates/keytao-linux-ime/src/engine.rs"]

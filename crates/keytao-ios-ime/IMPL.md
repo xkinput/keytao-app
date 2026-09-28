@@ -6,8 +6,8 @@
 
 ## 代码地图
 
-- `Package.swift`：SwiftPM 源码包，供 Tauri 生成的 iOS Xcode 工程或手工 extension target 引入。
-- `Resources/Info.plist`：iOS custom keyboard extension 的 Info.plist 模板，声明 `com.apple.keyboard-service`、`RequestsOpenAccess`、`PrimaryLanguage=zh-Hans` 和 `IsASCIICapable=true`。
+- `Package.swift`：SwiftPM 源码包，由 `flutter_app/ios/Runner.xcodeproj` 的键盘 extension target 引入。
+- `flutter_app/ios/KeyTaoKeyboard/Info.plist`：iOS custom keyboard extension 的 Info.plist，声明 `com.apple.keyboard-service`、`RequestsOpenAccess`、`PrimaryLanguage=zh-Hans` 和 `IsASCIICapable=true`。
 - `Sources/CKeytaoCore/module.modulemap`：把 `keytao-core-ffi/include/keytao_core.h` 暴露给 Swift。
 - `Sources/KeyTaoIOSIME/KeyTaoKeyboardViewController.swift`：`UIInputViewController` 前端，负责 extension 生命周期、`UITextDocumentProxy` 提交/删除、候选选择和键盘切换。
 - `Sources/KeyTaoIOSIME/KeyTaoIOSEngine.swift`：iOS engine facade，解析 App Group 用户目录、shared data、theme/config、reload stamp，并通过 C FFI 调用通用 runtime。
@@ -45,12 +45,12 @@ iOS 系统键盘必须作为 containing app 内的 custom keyboard extension 发
 
 ## 系统注册与工程接入
 
-稳定源码放在 `crates/keytao-ios-ime`，不是 `src-tauri/gen/apple`。原因是 Tauri Apple 工程属于生成物，当前 `.gitignore` 已忽略 `src-tauri/gen/apple/`；iOS extension target 应在生成 Xcode 工程后引用这里的 SwiftPM product 或复制这些源码。
+SwiftPM 源码保存在 `crates/keytao-ios-ime`；Flutter containing app 和键盘 target 保存在 `flutter_app/ios`。通过 `Runner.xcworkspace` 打开已跟踪的 Xcode 工程。
 
 extension target 需要：
 
-1. 以 `Resources/Info.plist` 为模板创建 custom keyboard extension target。
-2. 把 principal class 设成 Objective-C 可见的 `KeyTaoKeyboardPrincipalViewController`；Tauri 生成工程会自动生成这个薄子类，并继承 SwiftPM product 中的 `KeyTaoIOSIME.KeyTaoKeyboardViewController`。
+1. 使用 `flutter_app/ios/KeyTaoKeyboard/Info.plist` 配置 custom keyboard extension target。
+2. 把 principal class 设成 Objective-C 可见的 `KeyTaoKeyboardPrincipalViewController`；`flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboardPrincipalViewController.swift` 定义这个薄子类，并继承 SwiftPM product 中的 `KeyTaoIOSIME.KeyTaoKeyboardViewController`。
 3. containing app 与 keyboard extension 同时开启 App Group，例如 `group.ink.rea.keytao-app`。
 4. extension entitlement 必须允许 App Group；否则只能使用 extension 自己的容器，无法读取主 App 安装的方案。
 5. extension 需要链接 iOS 目标的 `libkeytao_core_ffi` 及其 iOS librime/OpenCC/rime-plugins runtime 闭包。
@@ -70,16 +70,16 @@ vendor/librime/ios/iphonesimulator-x86_64
 
 ### Simulator 签名规则
 
-真机和 TestFlight/App Store 构建必须保留 App Group entitlement，并由匹配的 provisioning profile 证明 `group.ink.rea.keytao-app`。iOS Simulator 则不同：Tauri/Xcode 的 simulator 包通常是 ad-hoc 签名，如果 `.appex` 带有 `com.apple.security.application-groups` 或自动注入的 `application-identifier`，CoreSimulator 的 AMFI 会拒绝加载键盘，表现为系统键盘切换菜单能看到 “KeyTao 输入法”，但点击后仍停留在 Emoji 或系统键盘。
+真机和 TestFlight/App Store 构建必须保留 App Group entitlement，并由匹配的 provisioning profile 证明 `group.ink.rea.keytao-app`。iOS Simulator 则不同：Xcode 的 simulator 包通常是 ad-hoc 签名，如果 `.appex` 带有 `com.apple.security.application-groups` 或自动注入的 `application-identifier`，CoreSimulator 的 AMFI 会拒绝加载键盘，表现为系统键盘切换菜单能看到 “KeyTao 输入法”，但点击后仍停留在 Emoji 或系统键盘。
 
-`scripts/setup-ios-ime-xcode.rb` 因此对 simulator 做了专门分流：
+`flutter_app/ios/Flutter/KeyTao.xcconfig`、`flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboard.xcconfig` 和 `flutter_app/ios/scripts/sign-keyboard.sh` 对 simulator 做专门分流：
 
-- app 和 extension 都生成空的 simulator entitlement plist。
+- app 和 extension 各自使用已跟踪的空 simulator entitlement plist。
 - `CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=iphonesimulator*] = NO`，避免 Xcode 自动注入 `application-identifier`。
 - `CODE_SIGN_STYLE[sdk=iphonesimulator*] = Manual`、`CODE_SIGN_IDENTITY[sdk=iphonesimulator*] = -`、`DEVELOPMENT_TEAM[sdk=iphonesimulator*] = ""`。
 - embedded `KeyTaoKeyboard.appex` 在 containing app 构建阶段重新签名；`iphonesimulator` 下不复用 `.xcent`。
 
-这个分流只影响 simulator smoke 验证。真机仍使用 `Resources/KeyTaoKeyboard.entitlements` 和主 App entitlement 中的 App Group。
+这个分流只影响 simulator smoke 验证。真机仍使用 `flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboard.entitlements` 和主 App entitlement 中的 App Group。
 
 ## 用户目录和 shared data
 
@@ -92,7 +92,7 @@ group.ink.rea.keytao-app/keytao
 常见文件：
 
 - `keytao.schema.yaml`、`default.custom.yaml`、`*.dict.yaml`、`lua/`、`opencc/`：用户方案和运行时数据。
-- `easy_en.schema.yaml`、`easy_en.dict.yaml`、`easy_en.custom.yaml`、`lua/easy_en.lua`：可选 Easy English 附加方案。资源由 Tauri 放进 containing app 的 `assets/addon-schemas/easy_en`，主 App 的 `addon_schema_install` 再复制到 App Group；键盘扩展只读取已部署的 App Group 数据，不直接修改 bundle。
+- `easy_en.schema.yaml`、`easy_en.dict.yaml`、`easy_en.custom.yaml`、`lua/easy_en.lua`：可选 Easy English 附加方案。资源由 Flutter iOS 打包脚本放进 containing app 的 `addon-schemas/easy_en`，主 App 的 `addon_schema_install` 再复制到 App Group；键盘扩展只读取已部署的 App Group 数据，不直接修改 bundle。
 - `rime-data/default.yaml`：基础 shared data fallback。
 - `theme.yaml`：用户主题，交给 `keytao-theme` 解析。
 - `ios_ime.json`：iOS 移动端键盘布局和动作配置。
@@ -119,7 +119,7 @@ iOS 不走 Android JNI，而是复用 `keytao-core-ffi` per-session C ABI。
 - `keytao-core` 的 librime runtime cfg 扩展到 `target_os = "ios"`。
 - `keytao-theme::default_user_theme_path()` 增加 iOS fallback。
 - `keytao-core-ffi` 不再排除 iOS。
-- `src-tauri/src/lib.rs` 增加 iOS App Group adapter：`rime_get_data_dir`、`check_local_schema`、`get_component_versions`、`rime_install_to_default`、`rime_deploy_default` 和输入法 UI 主题设置都读写 `group.ink.rea.keytao-app/keytao`。
+- `flutter_app/ios/Runner/AppDelegate.swift` 通过 `keytao/ios` channel 提供 App Group 路径；Flutter 将其传给 Rust bridge 的 host override，方案安装、部署、状态和主题设置都读写 `group.ink.rea.keytao-app/keytao`。
 - 主 App 会在 App Group 中种子写入默认 `ios_ime.json`，主题保存和方案部署后写 `keytao-ime.reload`。
 - 新增 JSON FFI：
   - `keytao_set_theme_paths`
@@ -358,10 +358,10 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 
 主 App 的 iOS 命令已经按 Android 的安装/部署路径接入：
 
-- `rime_get_data_dir`：返回 App Group 下的 `keytao` 用户目录。
+- `getPaths`：由 iOS channel 返回 App Group 下的 `keytao` 用户目录。
 - `check_local_schema` / `get_component_versions`：读取同一 App Group 目录。
-- `rime_install_to_default`：下载方案 zip，复用通用 `smart_install()` 合并 `default.custom.yaml` 和 `rime.lua`，落盘到 App Group。
-- `rime_deploy_default`：调用 `keytao_core::deploy(user, shared)`，shared data 优先查 App Group、`rime-data`、`shared` 和 bundle runtime。
+- `install_scheme_from_url`：下载方案 zip，复用通用 `smart_install()` 合并 `default.custom.yaml` 和 `rime.lua`，落盘到 App Group。
+- `deploy_default`：调用 `keytao_core::deploy(user, shared)`，shared data 优先查 App Group、`rime-data`、`shared` 和 bundle runtime。
 - `get_ime_ui_settings` / `set_ime_ui_settings`：读写 `theme.yaml`，并写 reload stamp。
 - 首次安装/部署/保存 UI 时，如果 App Group 中没有 `ios_ime.json`，主 App 会写入与 Swift bundle fallback 同源的默认移动端布局。
 
@@ -393,19 +393,19 @@ iOS extension 在 `viewWillAppear()` / `textDidChange()` 等轻量生命周期�
 - App Group 用户目录和 reload stamp 约定。
 - 主 App iOS App Group 安装、部署、schema 检查、版本信息和主题调度命令。
 - iOS target 的 `librime-sys` runtime 查找与 bindgen SDK 参数。
-- `src-tauri/Info.ios.plist` 声明 `keytao://` URL scheme，`openPage` 可以从键盘 extension 打开 containing app。
-- `KeyTaoApp.entitlements` / `KeyTaoKeyboard.entitlements` 声明同一个 App Group。
-- Tauri 生成工程中的 `KeyTaoKeyboardPrincipalViewController` principal subclass。
+- `flutter_app/ios/Runner/Info.plist` 声明 `keytao://` URL scheme，`openPage` 可以从键盘 extension 打开 containing app。
+- `Runner/Runner.entitlements` / `KeyTaoKeyboard/KeyTaoKeyboard.entitlements` 声明同一个 App Group。
+- Flutter iOS 工程中的 `KeyTaoKeyboardPrincipalViewController` principal subclass。
 - 主 App 与 keyboard extension 的 AppIcon 资源进入各自 bundle。
 - simulator 空 entitlement 分流与 embedded `.appex` 无 entitlement 重签名。
 - 键位、候选和 toolbar accessibility identifier，供 UI test 定位 `keytao-key-q`、`keytao-candidate-0` 等控件。
 - `scripts/ios-librime-runtime.sh` 导入、校验和 staged iOS librime runtime。
 - `scripts/build-ios-ffi.sh` 构建并 staged iOS `libkeytao_core_ffi.a`。
 - `scripts/build-ios-simulator-smoke-runtime.sh` 生成仅用于本机模拟器 smoke 验证的 mock runtime。
-- `scripts/setup-ios-ime-xcode.rb` patch Tauri 生成的 XcodeGen `project.yml`，嵌入 `KeyTaoKeyboard` extension target。
-- `scripts/verify-ios-ime.sh` / `pnpm check:ios-ime` 源码级校验。
+- `flutter_app/ios/Runner.xcodeproj` 包含 `KeyTaoKeyboard` extension target；`scripts/build-flutter-ios.sh` 构建 containing app 和 unsigned IPA。
+- `scripts/verify-ios-ime.sh` 源码级校验。
 
-  该脚本只做源码级检查，**不编译 Swift**。在 macOS 上真正编译 iOS 代码要指定模拟器 SDK 与 target，
+  该脚本执行 Swift typecheck 和三个 host 测试，不构建完整 App。在 macOS 上构建 iOS Swift 包要指定模拟器 SDK 与 target，
   否则 `swift build` 会按 macOS 目标编译并直接失败于 `no such module 'UIKit'`：
 
   ```bash
@@ -431,39 +431,30 @@ iOS 键盘扩展按 static runtime 链接，Lua 能力需要通过 `scripts/buil
 
 ```bash
 scripts/ios-librime-runtime.sh import-sdk --target aarch64-apple-ios --source /path/to/ios-librime-sdk
-scripts/build-ios-ffi.sh --target aarch64-apple-ios
-pnpm init:ios
-pnpm build:ios
+scripts/build-flutter-ios.sh
 ```
 
 本机模拟器 smoke runtime 只用于验证 Xcode target、extension bundle、FFI 符号和按键提交路径，不替代真实 librime。它会生成 simulator `libkeytao_core_ffi.a` 和 `librime.a` mock，并把基础 `rime-data` staged 到 `target/keytao-ios-runtime/iphonesimulator-*`：
 
 ```bash
-pnpm build:ios-simulator-smoke-runtime
-pnpm init:ios
+scripts/build-ios-simulator-smoke-runtime.sh
 xcodebuild \
-  -project src-tauri/gen/apple/keytao-app.xcodeproj \
+  -project flutter_app/ios/Runner.xcodeproj \
   -target KeyTaoKeyboard \
-  -configuration debug \
+  -configuration Debug \
   -sdk iphonesimulator \
   -arch arm64 \
   CODE_SIGNING_ALLOWED=NO \
   build
 ```
 
-`scripts/setup-ios-ime-xcode.rb` 会在 Tauri 生成的 `project.yml` 中做这些事：
+Flutter iOS 工程直接维护这些接线：
 
-- 引入本地 SwiftPM package `KeyTaoIOSIME`。
-- 增加 `KeyTaoKeyboard` custom keyboard extension target。
-- 为 extension 生成 `KeyTaoKeyboardPrincipalViewController.swift`，并把 `NSExtensionPrincipalClass` 指向这个 Objective-C 可见类。
-- 真机构建中 containing app 和 extension 共享 `group.ink.rea.keytao-app` App Group。
-- simulator 构建中关闭基础 entitlement 注入，并对 embedded `.appex` 做无 entitlement 重签名。
-- 为主 App 和 keyboard extension 设置 `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` 与 `CFBundleIcons`。
-- `KeyTaoKeyboard` extension target 设置 `SKIP_INSTALL=YES`，只作为 `KeyTao.app/PlugIns/KeyTaoKeyboard.appex` 随主 App 安装，不应在桌面出现独立 `KeyTaoKeyboard` 图标。
-- 按 `iphoneos` / `iphonesimulator` / `arch` 解析 `KEYTAO_IOS_RUNTIME_DIR`。
-- 给 app 和 extension 都注入 `HEADER_SEARCH_PATHS`、`LIBRARY_SEARCH_PATHS` 和必要 linker flags。
-- 在 extension 构建产物根目录复制默认 `keytao_ios_ime.json`，并复制 runtime `rime-data`。
-- 包裹 Tauri 的 `pnpm tauri ios xcode-script`，让主 App Rust 构建同样使用 iOS runtime 环境。
+- 本地 SwiftPM package `KeyTaoIOSIME`、键盘 target 和 principal subclass。
+- 真机 App Group、模拟器空 entitlement 与 `sign-keyboard.sh` 重签规则。
+- `KeyTaoKeyboard.xcconfig` 按 SDK 和架构选择 `KEYTAO_IOS_RUNTIME_DIR`，链接 staged FFI 与依赖。
+- `bundle-rime.sh` 把默认键盘配置与 runtime 数据复制进 extension；主 App 的 native assets 由 Flutter hook 构建。
+- 键盘设置 `SKIP_INSTALL=YES`，只随 `KeyTao.app/PlugIns/KeyTaoKeyboard.appex` 安装。
 
 如果模拟器桌面已经出现 `KeyTaoKeyboard` 或 `KeyTaoUITestHost`，它们是旧构建或 UI test 残留，不是用户安装形态。清理命令：
 
@@ -477,8 +468,8 @@ xcrun simctl uninstall booted ink.rea.keytao-app.keyboard || true
 1. iOS 版 librime SDK
    仓库不提交生产二进制 SDK。需要用 `scripts/build-ios-librime.sh --target <rust-target>` 构建并导入带 merged `librime-lua` 的 SDK，或用 `scripts/ios-librime-runtime.sh import-sdk --target <rust-target> --source <sdk>` 导入已经静态合入 Lua 的外部 SDK。支持的 target 是 `aarch64-apple-ios`、`aarch64-apple-ios-sim` 和 `x86_64-apple-ios`；脚本会映射到 `iphoneos-arm64`、`iphonesimulator-arm64` 和 `iphonesimulator-x86_64` runtime 目录。导入后 `scripts/build-ios-ffi.sh` 会把 runtime 与 `libkeytao_core_ffi.a` staged 到 `target/keytao-ios-runtime/<runtime>`。模拟器 smoke runtime 只覆盖安装/启动/基础提交路径验证，不能用于真实输入效果验收。
 
-2. XcodeGen / Apple 签名环境
-   `src-tauri/gen/apple` 是 Tauri 生成物，不提交到仓库。执行 `pnpm init:ios` 后，`scripts/setup-ios-ime-xcode.rb` 会自动 patch `project.yml` 并重新生成 Xcode 工程。脚本会优先使用 `.cache/bin/xcodegen`，否则使用系统 `xcodegen`。真实设备和 TestFlight/App Store 构建仍需要有效 Apple Team、bundle id 和 App Group provisioning profile；simulator 构建则必须保持无 restricted entitlement，否则键盘扩展会出现在切换菜单但无法加载。
+2. Xcode / Apple 签名环境
+   工程已跟踪在 `flutter_app/ios`。真实设备构建需要有效 Apple Team、Bundle ID 和 App Group provisioning profile；simulator 必须保持无 restricted entitlement，否则键盘扩展会出现在切换菜单但无法加载。
 
 3. 宿主 marked text 兼容性实测
    `setMarkedText` / `unmarkText` 已接入，但各类宿主（原生 UITextField/UITextView、WKWebView 输入框、Flutter/RN 文本框）对 proxy marked text 的实现质量不一，需要在真机上按宿主类型实测；出问题的宿主可用 `ios_ime.json` 的 `hostMarkedText: false` 降级为「仅候选栏 preedit」。
@@ -507,37 +498,14 @@ xcrun simctl uninstall booted ink.rea.keytao-app.keyboard || true
 ```bash
 source vendor/librime/macos-universal/env.sh
 cargo check -p keytao-core -p keytao-core-ffi
-pnpm check:ios-ime
+scripts/verify-ios-ime.sh
 ```
 
-Swift 源码类型检查通过。`pnpm check:ios-ime` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并运行 rollover、interaction policy、floating layout 三个 host 测试脚本；在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target，没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。keytao-core 加上 ABI 能力探测后，最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.8.5 runtime 上也已通过（原先报 `E0609`）。
+Swift 源码类型检查通过。`scripts/verify-ios-ime.sh` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并运行 rollover、interaction policy、floating layout 三个 host 测试脚本；在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target，没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。keytao-core 加上 ABI 能力探测后，最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.8.5 runtime 上也已通过（原先报 `E0609`）。
 
 `test-touch-rollover.sh`、`test-interaction-policy.sh` 与 `test-floating-layout.sh` 均由 `scripts/verify-ios-ime.sh` 调用。
 
-2026-06-24 本机模拟器 smoke 验证：
-
-```bash
-pnpm build:ios-simulator-smoke-runtime
-pnpm init:ios
-KEYTAO_IOS_DEVELOPMENT_TEAM=2G395DH7KX PATH="$PWD/.cache/bin:$PATH" scripts/setup-ios-ime-xcode.rb
-xcodebuild -list -project src-tauri/gen/apple/keytao-app.xcodeproj
-KEYTAO_IOS_DEVELOPMENT_TEAM=2G395DH7KX PATH="$PWD/.cache/bin:$PATH" pnpm tauri ios dev 'KeyTao iPhone 17 Pro Clean 26.5' --no-watch --exit-on-panic
-xcodebuild test -project .cache/keytao-ios-uitest/KeyTaoKeyboardUITest.xcodeproj -scheme KeyTaoKeyboardUITests -destination 'id=B4F3F4C8-D8DA-4E09-99B3-B6D552855F5E' -configuration Debug -sdk iphonesimulator -only-testing:KeyTaoKeyboardUITests/KeyTaoKeyboardSettingsUITests/testTypeWithKeyTaoKeyboardInHost
-```
-
-已确认：
-
-- 本地 `.cache/bin/xcodegen` 可用，版本为 2.45.4。
-- `target/keytao-ios-runtime/iphonesimulator-arm64` 和 `iphonesimulator-x86_64` 已生成 smoke runtime。
-- Xcode 工程包含 `keytao-app_iOS`、`KeyTaoKeyboard` 和 `KeyTaoIOSIME` target/scheme。
-- `KeyTaoKeyboard` target 可为 iOS Simulator arm64 构建成功，containing app 可安装到 `KeyTao iPhone 17 Pro Clean 26.5`。
-- 生成的 `.appex` 是 arm64 Mach-O，`Info.plist` 声明 `com.apple.keyboard-service`、`KeyTaoKeyboardPrincipalViewController`、`RequestsOpenAccess=true`、`PrimaryLanguage=zh-Hans`。
-- `.appex` 已链接 `_keytao_session_process_key_json` 等 C FFI 符号，并复制根目录 `keytao_ios_ime.json` 与 `rime-data/default.yaml`。
-- 安装后的 `KeyTao.app` entitlements 是空字典，`KeyTaoKeyboard.appex` 无 entitlement 输出；`codesign --verify --deep --strict` 通过。
-- 安装后的 `KeyTao.app` 和 `KeyTaoKeyboard.appex` 均包含 `CFBundleIcons`、`Assets.car` 和 AppIcon PNG 资源。
-- simulator 全局 `AppleKeyboards` 包含 `ink.rea.keytao-app.keyboard`。
-- UI test 成功从 Emoji 键盘切到 “KeyTao 输入法 - KeyTao”，出现 `keytao-key-q`，点击 `q`、`e`、`y` 后宿主输入框 echo 为 `qey`。
-- `cargo build -p keytao-app --target aarch64-apple-ios-sim --features custom-protocol` 可在 simulator smoke runtime 下完成，生成 `libkeytao_app_lib.a`。
+2026-06-24 的旧外壳模拟器 smoke 曾验证键盘扩展安装、切换和 `qey` 提交；这是迁移前的历史记录，不证明当前 Flutter App 的设备行为。当前构建入口见上面的 Flutter iOS 工程说明。
 
 此前切换失败的根因是 simulator `.appex` 在 ad-hoc 签名下仍包含 restricted entitlement。系统日志中的关键错误为：
 

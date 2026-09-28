@@ -216,7 +216,7 @@ pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, St
         let archive = keytao_app_core::download::download_to_temp(&state.core, url)
             .await
             .map_err(|error| error.to_string())?;
-        // Mirror rime_install_to_default while preserving an explicit host override.
+        // Install into the explicit host directory.
         let result = keytao_app_core::install::smart_install(
             &state.core,
             archive.clone(),
@@ -644,7 +644,6 @@ pub fn get_component_versions() -> Result<ComponentVersionsDto, String> {
         runtime::dto(keytao_app_core::component_versions::get_component_versions(
             &state.core,
             &state.host,
-            "",
             option_env!("RIME_VERSION"),
             option_env!("OPENCC_VERSION"),
         ))?;

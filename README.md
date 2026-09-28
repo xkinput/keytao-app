@@ -1,6 +1,6 @@
 # 键道
 
-键道输入方案与配套工具，基于 Tauri 构建。主 App 负责下载、安装、合并和部署 Rime 方案；系统输入法前端负责把系统按键送进同一套 librime 核心，并用平台原生接口提交文本、显示预编辑和候选。
+键道输入方案与配套工具，主 App 基于 Flutter 和 Rust 构建，负责下载、安装、合并和部署 Rime 方案；系统输入法前端负责把系统按键送进同一套 librime 核心，并用平台原生接口提交文本、显示预编辑和候选。
 
 各平台系统输入法的具体实现分别见：
 
@@ -8,7 +8,7 @@
 - [Linux IME](crates/keytao-linux-ime/IMPL.md)
 - [macOS IME](crates/keytao-macos-ime/IMPL.md)
 - [Windows IME](crates/keytao-windows-ime/IMPL.md)
-- [Android IME](src-tauri/gen/android/app/IMPL.md)
+- [Android IME](flutter_app/android/app/IMPL.md)
 - [iOS IME](crates/keytao-ios-ime/IMPL.md)
 
 ## 工作逻辑
@@ -81,19 +81,23 @@ KeyTao 是系统输入法，不按普通桌面小工具的分发方式处理：
 
 - macOS 只构建 `pkg`。pkg 同时安装 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`，安装完成后要求注销并重新登录，不构建 dmg。
 - Linux 只构建 `deb` 和 `rpm`，不构建 AppImage 或 tarball。deb/rpm 同时安装图形 App、`keytao-ime` 和包内 runtime，保证可以作为系统输入法安装。
-- Windows release 只构建 x64 NSIS `.exe` 安装包，并把 TSF 输入法 DLL 与 librime runtime 放进稳定的 `keytao-windows-ime-runtime/current` 资源目录。官方 librime Windows 发布包目前没有 ARM64 SDK，Windows ARM64 包需要另做实验性源码构建链路后再开启。
+- Windows release 提供 x64 Flutter App 的 NSIS `.exe` 安装包，包含 `current`、`x86` 和 `arm64x` TSF runtime；ARM64/ARM64X 输入法由源码构建链路生成。
 - macOS、Linux、Windows、Android 和 iOS 发行包都应自带完整 Rime runtime：`librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。主 App 与系统 IME 使用同一套包内 runtime，避免 Lua 方案在 App 部署时可用、到 IME 进程里不可用。iOS Release 上传 unsigned IPA，安装前需要按 [iOS / iPadOS 签名与安装指南](docs/ios-install.md) 完成签名。
 
 ### 通用准备
 
 ```bash
-pnpm install
+cd flutter_app
+flutter pub get
+cd ..
 ```
 
-如需同步版本号，先改 `package.json` 的版本，再执行：
+版本唯一来源是根目录 `Cargo.toml` 的 `[workspace.package].version`。修改后同步 Flutter 版本：
 
 ```bash
-pnpm sync-version
+node scripts/sync-version.mjs
+# Or update Cargo.toml and pubspec.yaml together:
+node scripts/sync-version.mjs --set 1.2.1-alpha.89
 ```
 
 ### macOS
@@ -101,20 +105,20 @@ pnpm sync-version
 完整发行包从仓库根目录构建：
 
 ```bash
-pnpm build:macos
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
+scripts/build-macos.sh
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg
 ```
 
-`pnpm build:macos` 构建当前机器的原生 macOS 架构。librime 直接获取官方 `macOS-universal` SDK；Release CI 分别在 Intel 和 Apple Silicon runner 上构建 `macos-x86_64` 与 `macos-arm64` 两个 pkg。
+`scripts/build-macos.sh` 构建 Flutter 主 App 和 IMK 输入法，使用 `macOS-universal` librime SDK。Release CI 发布一个 `-macos.pkg`。
 
 产物：
 
-- `target/keytao-macos-pkg/KeyTao.pkg`
+- `target/keytao-macos-pkg/keytao-app-<version>-macos.pkg`
 
 本机安装测试需要管理员权限，安装动作单独执行：
 
 ```bash
-sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
+sudo installer -pkg target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg -target /
 ```
 
 安装后先注销并重新登录 macOS，让当前用户会话重新发现 `/Library/Input Methods/KeyTao.app`。打开 KeyTao 后仍需手动安装方案并点击“部署”，完成前 App 会保持“未安装”或“待部署”状态。
@@ -133,10 +137,10 @@ open -a KeyTao
 Linux 发行包通过 Docker builder 构建，需要本机可运行 Docker：
 
 ```bash
-pnpm build:linux
+scripts/build-linux.sh
 ```
 
-`pnpm build:linux` 构建当前 Docker builder 的原生 Linux 架构。当前 Linux 路径不从 librime GitHub release 获取预编译 SDK；builder 镜像安装发行版提供的 `librime-dev`、`librime-plugin-lua` 等 native 包，再把 `librime*.so*`、插件、OpenCC 数据和基础 `rime-data` staged 到包内 runtime。Release CI 分别构建 `linux-x64` 和 `linux-arm64` 包。
+`scripts/build-linux.sh` 构建当前 Docker builder 的原生 Linux 架构。builder 安装发行版提供的 `librime-dev`、`librime-plugin-lua` 等 native 包，再把 `librime*.so*`、插件、OpenCC 数据和基础 `rime-data` 放入包内 runtime。Release CI 分别构建 `linux-x64` 和 `linux-arm64` 包。
 
 产物在 `target/release/bundle/` 下，包含：
 
@@ -145,25 +149,16 @@ pnpm build:linux
 
 ### Windows
 
-Windows 需要在 Windows 开发环境中执行，推荐从 PowerShell 运行。构建机需要 MSVC Rust target、LLVM/libclang 和可用的 `pnpm`；脚本会按需下载官方 librime Windows SDK。
+Windows 需要 Flutter、Visual Studio C++ 工具、MSVC Rust target、LLVM/libclang 和 NSIS 3，推荐从 PowerShell 运行：
 
 ```powershell
-pnpm install
-pnpm build:windows
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-flutter.ps1 -Arch x64
 ```
 
-`pnpm build:windows` 构建当前机器的原生 Windows 架构，但只在官方 librime SDK 支持的架构上继续执行。目前正式支持 x64 release；脚本也保留 x86 SDK 获取能力。Windows ARM64 会早期失败并提示需要先补一条实验性源码构建 librime ARM64 的链路。Release CI 只发布 `windows-x64` 安装包。
-
-如果在 Windows ARM64 机器上只想构建可通过系统 x64 兼容层运行的 x64 安装包，可以直接调用底层脚本：
+脚本依次构建 x86、x64、ARM64 和 ARM64X 输入法 runtime，再构建 Flutter App 与 NSIS 安装包。只构建某个输入法 runtime 时使用：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch x64
-```
-
-该命令会先构建 Windows TSF 输入法 runtime，再构建 Tauri NSIS 安装包。只构建输入法 runtime 时使用：
-
-```powershell
-pnpm build:windows-ime
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-ime.ps1 -Arch x64
 ```
 
 产物通常位于：
@@ -174,30 +169,30 @@ pnpm build:windows-ime
 
 ### Android
 
-Android 系统输入法走 Tauri Android 工程和 `InputMethodService`。构建 native engine 前需要先为目标 ABI 导入 Android 版 librime runtime，并确保安装 Android NDK：
+Android 使用 `flutter_app/android` 和 `InputMethodService`。发布支持 `arm64-v8a`、`armeabi-v7a`、`x86_64` 三个 ABI；构建前为目标 ABI 导入 librime runtime，并安装 Android NDK：
 
 ```bash
-# 自编 SDK 导入
+# Import an SDK for each target ABI.
 scripts/android-librime-runtime.sh import-sdk --abi arm64-v8a --source /path/to/android-librime-sdk
 
-# 或用 Fcitx5 Android Rime 插件里的纯 librime.so bootstrap native runtime
+# Or bootstrap from the Fcitx5 Android Rime plugin.
 scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a --version 0.1.2
 
-# 同步到 src-tauri/gen/android/app/src/main/jniLibs 和 assets
-scripts/android-librime-runtime.sh sync --all
+# Build split APKs; Gradle syncs assets and the hook packages native libraries.
+(cd flutter_app && flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64)
 
-# 生成 Tauri Android glue 并构建 split APK
-pnpm tauri android init --ci --skip-targets-install
-pnpm build:android
-
-# 单 ABI Rust 检查
+# Check one Rust target.
 source <(scripts/android-librime-runtime.sh env --abi arm64-v8a)
 cargo check -p keytao-core --target aarch64-linux-android
 ```
 
-Release CI 会安装 Android NDK、导入 `arm64-v8a` / `armeabi-v7a` / `x86` / `x86_64` 四个 ABI 的 librime runtime，执行 `tauri android build --apk --split-per-abi`，并把生成的 APK 上传到 GitHub Release。用户首次打开 Android 版 App 时，会先进入系统输入法启用/切换引导，KeyTao 已启用并选中后再进入主界面。
+Release CI 导入上述三个 ABI 的 runtime，构建 split APK 并上传到 GitHub Release。用户首次打开 Android 版 App 时，会先进入系统输入法启用/切换引导，KeyTao 已启用并选中后再进入主界面。
 
-Gradle `preBuild` 会自动执行 `scripts/android-librime-runtime.sh sync --all --allow-missing`。如果没有导入 runtime，会给出 warning；真正编译 Android Rust target 时，本地 patched `librime-sys` 会要求匹配 ABI 的 `vendor/librime/android/<abi>` 和可用 NDK sysroot。
+Gradle `preBuild` 通过 `scripts/android-librime-runtime.sh sync --all --assets-only` 同步 shared data；Flutter native-assets hook 打包 bridge 和依赖库。Rust 编译要求匹配 ABI 的 `vendor/librime/android/<abi>` 和可用 NDK sysroot。
+
+### iOS / iPadOS
+
+使用 `scripts/build-flutter-ios.sh` 构建 unsigned IPA。签名、App Group 和真机安装说明见 [iOS 安装指南](docs/ios-install.md)。
 
 ## 开发
 
@@ -210,14 +205,15 @@ direnv allow
 进入仓库目录后安装依赖并启动开发环境：
 
 ```bash
-pnpm install
-pnpm tauri dev
+cd flutter_app
+flutter pub get
+flutter run
 ```
 
 构建：
 
 ```bash
-pnpm build
+flutter build macos --release
 ```
 
 发行包构建命令见上面的“发行打包”。

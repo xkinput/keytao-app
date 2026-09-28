@@ -16,10 +16,8 @@ if ($version -notmatch '^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.
     throw "Invalid workspace version: $version"
 }
 $numericVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
-$config = Get-Content -LiteralPath (Join-Path $repoRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
-if ($config.version -ne $version -or $config.productName -ne "KeyTao" -or $config.identifier -ne "ink.rea.keytao-app") {
-    throw "Workspace version or legacy Windows identity is out of sync"
-}
+$productName = "KeyTao"
+$identifier = "ink.rea.keytao-app"
 $releaseDir = Join-Path $repoRoot "flutter_app\build\windows\x64\runner\Release"
 $workDir = Join-Path $repoRoot "target\keytao-windows-flutter"
 $bundleDir = Join-Path $workDir "bundle"
@@ -27,7 +25,7 @@ $uninstallFiles = Join-Path $workDir "uninstall-files.nsh"
 $installer = Join-Path $repoRoot "target\release\bundle\nsis\keytao-app-$version-windows-$Arch-setup.exe"
 
 if ($DryRun) {
-    Write-Host "Version: $version ($numericVersion); perMachine; HKLM uninstall key: KeyTao"
+    Write-Host "$productName ($identifier): $version ($numericVersion); perMachine; HKLM uninstall key: $productName"
     Write-Host "IME: x86 -> x64 -> arm64 -> arm64x (scripts/build-windows-ime.ps1 + build-windows-arm64x.ps1)"
     Write-Host "flutter build windows --release --build-name $version --build-number 0"
     Write-Host "Bundle: $bundleDir"

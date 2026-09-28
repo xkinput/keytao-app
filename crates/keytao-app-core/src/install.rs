@@ -516,36 +516,6 @@ pub async fn smart_install(
     result.map_err(CoreError::Other)
 }
 
-#[cfg(not(target_os = "android"))]
-pub async fn rime_install_to_default(
-    core: &Core,
-    url: String,
-    #[cfg(target_os = "ios")] dest: PathBuf,
-    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
-) -> Result<InstallResult, CoreError> {
-    #[cfg(not(target_os = "ios"))]
-    let dest = keytao_core::default_user_data_dir()
-        .ok_or_else(|| CoreError::Other("Cannot determine keytao data directory".into()))?;
-    #[cfg(not(target_os = "ios"))]
-    let dest_str = dest.to_string_lossy().into_owned();
-    #[cfg(not(target_os = "ios"))]
-    std::fs::create_dir_all(&dest).map_err(|e| CoreError::Other(format!("创建目录失败: {e}")))?;
-    #[cfg(target_os = "ios")]
-    std::fs::create_dir_all(&dest)
-        .map_err(|e| CoreError::Other(format!("创建 iOS 输入法目录失败: {e}")))?;
-    #[cfg(target_os = "ios")]
-    let dest_str = dest.to_string_lossy().into_owned();
-    let temp = crate::download::download_to_temp(core, url).await?;
-    smart_install(
-        core,
-        temp,
-        dest_str,
-        #[cfg(target_os = "windows")]
-        finish_windows,
-    )
-    .await
-}
-
 #[cfg(target_os = "android")]
 pub async fn prepare_android_install(
     core: &Core,
@@ -571,7 +541,7 @@ pub fn finish_android_install(
 }
 
 #[cfg(target_os = "android")]
-pub fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
+fn install_result_from_value(result: &serde_json::Value) -> InstallResult {
     let merged_schemas = result["mergedSchemas"]
         .as_array()
         .map(|arr| {

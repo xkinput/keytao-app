@@ -262,35 +262,6 @@ pub fn check_local_schema(
     })
 }
 
-pub fn rime_get_data_dir(
-    _core: &Core,
-    #[cfg(target_os = "ios")] root: Option<PathBuf>,
-) -> Result<Option<String>, CoreError> {
-    #[cfg(target_os = "ios")]
-    {
-        return Ok(root.map(|path| path.to_string_lossy().into_owned()));
-    }
-    #[cfg(not(target_os = "ios"))]
-    Ok(keytao_core::default_user_data_dir().map(|path| path.to_string_lossy().into_owned()))
-}
-
-pub fn android_keytao_data_dir(
-    _core: &Core,
-    root: impl FnOnce() -> Result<PathBuf, String>,
-) -> Result<Option<String>, CoreError> {
-    #[cfg(target_os = "android")]
-    {
-        root()
-            .map(|path| Some(path.to_string_lossy().into_owned()))
-            .map_err(CoreError::Other)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = root;
-        Ok(None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

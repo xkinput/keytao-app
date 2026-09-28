@@ -84,8 +84,7 @@ set(PROJECT_BUILD_DIR "${KEYTAO_ROOT}/fixture-engine/" PARENT_SCOPE)
     run(install_command, work / "missing-x86.log", expect_success=False)
     (root / "Cargo.toml").write_text('[workspace.package]\nname = "fixture"\n')
     run(configure, work / "missing-version.log", expect_success=False)
-    assert (REPO / "packaging/windows/nsis-hooks.nsh").read_bytes() == (REPO / "src-tauri/windows/nsis-hooks.nsh").read_bytes()
-    print("PASS: workspace version, installed resources/dependencies, missing staging/version failures, unchanged TSF hooks")
+    print("PASS: workspace version, installed resources/dependencies, missing staging/version failures")
     print(f"Evidence: {work}")
 
 

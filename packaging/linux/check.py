@@ -2,7 +2,6 @@
 """Offline packaging fixtures and the extracted-package layout contract."""
 import configparser
 import hashlib
-import json
 import os
 from pathlib import Path
 import struct
@@ -63,15 +62,14 @@ def check_layout(root):
     component = root / 'usr/share/ibus/component/keytao.xml'
     assert component.read_bytes() == (PROJECT / 'crates/keytao-linux-ime/keytao.xml').read_bytes()
     assert ET.parse(component).findtext('exec') == 'keytao-ime --ibus-engine'
-    icons = json.loads((PROJECT / 'src-tauri/tauri.conf.json').read_text())['bundle']['icon']
-    for name in icons:
-        if name.endswith('.png'):
-            source = PROJECT / 'src-tauri' / name
-            width, height = struct.unpack('>II', source.read_bytes()[16:24])
-            assert width == height
-            installed = root / f'usr/share/icons/hicolor/{width}x{height}/apps/keytao-app.png'
-            assert installed.is_file(), installed
-            assert struct.unpack('>II', installed.read_bytes()[16:24]) == (width, height)
+    icons = sorted((PROJECT / 'packaging/icons').rglob('*.png'))
+    assert icons, 'Missing packaging icons'
+    for source in icons:
+        width, height = struct.unpack('>II', source.read_bytes()[16:24])
+        assert width == height
+        installed = root / f'usr/share/icons/hicolor/{width}x{height}/apps/keytao-app.png'
+        assert installed.is_file(), installed
+        assert struct.unpack('>II', installed.read_bytes()[16:24]) == (width, height)
     # No packaged symlink may escape the extracted installation tree.
     for path in root.rglob('*'):
         if path.is_symlink():

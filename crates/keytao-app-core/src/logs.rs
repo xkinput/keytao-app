@@ -215,48 +215,6 @@ pub async fn clear_runtime_log(_core: &Core, host: &impl ImeHost) -> Result<(), 
     result.map_err(CoreError::Other)
 }
 
-pub enum RuntimeLogShare {
-    #[cfg(target_os = "android")]
-    Android,
-    #[cfg(target_os = "ios")]
-    Ios(Vec<PathBuf>),
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    Directory(String),
-}
-
-pub async fn share_runtime_log<F, Fut>(
-    _core: &Core,
-    host: &impl ImeHost,
-    share: F,
-) -> Result<serde_json::Value, CoreError>
-where
-    F: FnOnce(RuntimeLogShare) -> Fut,
-    Fut: std::future::Future<Output = Result<serde_json::Value, String>>,
-{
-    let result: Result<_, String> = async {
-        #[cfg(target_os = "android")]
-        let request = {
-            let _ = host;
-            RuntimeLogShare::Android
-        };
-        #[cfg(target_os = "ios")]
-        let request = {
-            let dir = runtime_log_directory(&host.user_root()?)?;
-            let paths = runtime_log_paths(&dir)?;
-            if paths.is_empty() {
-                return Err("No runtime logs to share".into());
-            }
-            RuntimeLogShare::Ios(paths)
-        };
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let request =
-            RuntimeLogShare::Directory(path_string(runtime_log_directory(&host.user_root()?)?));
-        share(request).await
-    }
-    .await;
-    result.map_err(CoreError::Other)
-}
-
 pub async fn read_debug_logs(_core: &Core) -> Result<DebugLogs, CoreError> {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(DEBUG_LOG_RETENTION_DAYS);
     let ime = read_ime_logs(cutoff);

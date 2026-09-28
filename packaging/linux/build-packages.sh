@@ -38,15 +38,11 @@ install -m 644 "$PROJECT_DIR/packaging/linux/KeyTao.desktop" "$ROOT/usr/share/ap
 install -m 644 "$PROJECT_DIR/packaging/linux/keytao-ime.desktop" "$ROOT/etc/xdg/autostart/keytao-ime.desktop"
 install -m 644 "$PROJECT_DIR/crates/keytao-linux-ime/keytao-wayland-launcher.desktop" "$ROOT/usr/share/applications/"
 install -m 644 "$PROJECT_DIR/crates/keytao-linux-ime/keytao.xml" "$ROOT/usr/share/ibus/component/"
-# Reuse every square PNG icon listed in the old Tauri configuration, at its real size.
+# Install the packaging PNG icons at their real sizes.
 python3 - "$PROJECT_DIR" "$ROOT" <<'PY'
-import json, pathlib, shutil, struct, sys
+import pathlib, shutil, struct, sys
 project, root = map(pathlib.Path, sys.argv[1:])
-config = json.loads((project / 'src-tauri/tauri.conf.json').read_text())
-for name in config['bundle']['icon']:
-    if not name.endswith('.png'):
-        continue
-    source = project / 'src-tauri' / name
+for source in sorted((project / 'packaging/icons').rglob('*.png')):
     header = source.read_bytes()[:24]
     assert header[:8] == b'\x89PNG\r\n\x1a\n', source
     width, height = struct.unpack('>II', header[16:24])

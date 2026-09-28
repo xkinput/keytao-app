@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "src-tauri",
   "crates/keytao-app-core",
   "crates/keytao-app-bridge",
   "crates/keytao-core",
@@ -9,7 +8,6 @@ members = [
   "crates/keytao-theme",
   "crates/keytao-linux-ime",
   "crates/keytao-windows-ime",
-  "print_globals",
 ]
 
 [workspace.package]

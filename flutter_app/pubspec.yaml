@@ -1,5 +1,5 @@
 name: keytao
-description: "A new Flutter project."
+description: "KeyTao cross-platform input method and scheme manager."
 publish_to: 'none'
 version: 1.2.1-alpha.89+1002001
 

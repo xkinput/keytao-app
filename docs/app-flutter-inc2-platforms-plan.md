@@ -1,29 +1,29 @@
 # 键道 Win/Linux/iOS 迁移到 Flutter 与 alpha 发版计划（2026-09-28）
 
-路径默认相对 `keytao-app/`，`keytao-next/` 开头的是网站仓库。标注"已复核"的是本次重新跑过命令确认的。
+本文保留 alpha.89 迁移计划和项目方决定。第 1、2 节为实施前快照，不代表当前状态；alpha.89 已发布，当前构建入口见根 README 和各平台打包文档。路径默认相对 `keytao-app/`。
 
-## 1 现状结论
+## 1 迁移前快照（历史）
 
 - **Windows**
   - core 已经有 TSF 状态、注册和部署：`crates/keytao-app-core/src/ime_status/windows.rs:970-1139`、`deploy.rs:58-102`。
-  - 公共方案发布（`windows_public_schemas.rs`）和 `finish_windows_scheme_install` 还只在 src-tauri 里：`src-tauri/src/scheme_shell.rs:39-89`。
+  - 公共方案发布和 `finish_windows_scheme_install` 当时只在旧外壳里；现已迁到 `crates/keytao-app-core/src/windows_public_schemas.rs` 和 `install.rs`。
   - bridge 的 Windows 回调全部返回 unsupported（`crates/keytao-app-bridge/src/host.rs:149,178-205`），也没有 Windows IME API 和 AppActions API（`api/core.rs:506`）。
   - Flutter 侧：bootstrap 直接抛 UnsupportedError（`flutter_app/lib/src/app/bootstrap.dart:45-64`）；build hook 没有 Windows 分支（`flutter_app/hook/build.dart:77-79`，已复核）；runner 还是模板，没有单实例，也不处理 keytao:// 参数（`windows/runner/main.cpp:28-30`）。
-  - 安装器完全靠 Tauri NSIS 加 `src-tauri/windows/nsis-hooks.nsh:18-215`。TSF DLL 的构建可以原样复用（`scripts/build-windows-ime.ps1:332-386`）。
+  - 安装器当时依赖旧外壳的 NSIS hooks；现由 `packaging/windows/nsis-hooks.nsh` 维护。TSF DLL 的构建可以原样复用（`scripts/build-windows-ime.ps1:332-386`）。
 - **Linux**
   - 输入法是自研 daemon keytao-ime（`crates/keytao-linux-ime/README.md:3`），core 已有状态查询和启动（`ime_status/linux.rs:496-534`）。
   - bridge 没把 Linux API 暴露给 Dart（`api/core.rs:506`）。
   - bridge 部署用的 shared 目录是 `resource_dir/rime-data`，daemon 用的是 `runtime/rime-data`，两边对不上（`host.rs:124-139`）。这是一个真 bug。
   - Dart 没有 Linux 分支（`controller.dart:476-486`）。runner 是模板，APPLICATION_ID 为 ink.rea.keytao（`flutter_app/linux/CMakeLists.txt:7,10`）。
-  - 打包仍是 Tauri 出 deb/rpm（`src-tauri/tauri.linux.conf.json:1-26`、`scripts/container-build.sh:173,183`）。包里没有 autostart，也没有 KDE launcher。
+  - 当时由旧外壳打包 deb/rpm；现入口是 `scripts/container-build.sh` 和 `packaging/linux/build-packages.sh`。包里没有 autostart，也没有 KDE launcher。
 - **iOS**
-  - 旧工程 `src-tauri/gen/apple` 是被 gitignore 的生成物（`.gitignore:47`）。键盘扩展源码在 `crates/keytao-ios-ime`（SwiftPM）。
+  - 当时的 Apple 工程是未跟踪生成物；现工程保存在 `flutter_app/ios`。键盘扩展源码在 `crates/keytao-ios-ime`（SwiftPM）。
   - Rust 和 build hook 已就绪：`hook/build.dart` 的 iOS 分支、`crates/librime-sys/build.rs:35-45`。
   - Flutter Runner 还是模板：bundle id 是 ink.rea.keytao（`ios/Runner.xcodeproj/project.pbxproj:387`），没有 entitlements、没有键盘扩展，也不拷贝 rime-data。
   - bridge 在 iOS 上必须传 `user_root_override`（`host.rs:88-90`），但 Runner 还没有原生 channel。UI 的移动端分支只认 isAndroid（`controller.dart:81`）。
   - 本机：没有模拟器 runtime（`xcrun simctl list runtimes` 为空），没连设备，provisioning profile 为 0。调查时 simctl 自动把 CoreSimulator 从 1051.55 升到了 1171.7，这是一个副作用。
 - **Android / macOS**
-  - Flutter 版已验收，但 CI 发的还是 Tauri 包，F1/F2 还没做（`docs/app-flutter-inc1-plan.md:65-77`）。
+  - 当时 Flutter 版已验收，Android/macOS 发布链尚未迁移；alpha.89 已统一切换 Flutter。
   - F2 有一处一定会失败：Flutter macOS 产物是 universal，IME 只编本机架构，`scripts/verify-macos-pkg.sh:145-161` 的架构比对会不通过。该脚本里 exe 名硬编码了 3 处（`:98,:132,:145`），plan 只写了 `:98`。
 - **发布管线**
   - 只有一个 `.github/workflows/release.yml`，推 v* tag 触发（`:3-6`）；tag 含 alpha 就标为 prerelease（`:12-32`）。
@@ -43,7 +43,7 @@ B3 和 B4i 共用 iOS 的 channel 契约。主会话要在两批开工前定死�
 
 | # | 批次 | 文件范围 | 依赖 | 并行 | 本机可验 | 规模 |
 |---|---|---|---|---|---|---|
-| B1 | Windows 纯重构：公共方案发布、finish_install、prepare_search_schemas 下沉到 core，Tauri 改为调用 core | keytao-app-core、src-tauri | — | 与 B4*/D* 并行 | cargo test + check-core-cross.sh | M |
+| B1 | Windows 纯重构：公共方案发布、finish_install、prepare_search_schemas 下沉到 core，Tauri 改为调用 core | keytao-app-core、旧应用外壳 | — | 与 B4*/D* 并行 | cargo test + check-core-cross.sh | M |
 | B2 | bridge 三平台：Windows 宿主、Windows API 和 receive_app_args；Linux 的 status/start/stop，并修 deploy_paths；iOS userRootOverride；check-core-cross 加 bridge；重新生成 frb | crates/keytao-app-bridge、flutter_app/lib/src/rust/**、scripts/check-core-cross.sh | B1 | 与 B4*/D* 并行 | 交叉 cargo check + test | M |
 | B3 | Dart 平台分支：bootstrap/controller、WindowsImeCard、Linux 状态卡、iOS 移动端引导、ios_host.dart | flutter_app/lib/**、test/** | B2 | 与 B4*/D* 并行 | dart analyze + flutter test | L |
 | B4h | build.dart 的 Windows 和 Linux librime 分支 | flutter_app/hook/build.dart | — | 是 | Linux 可在 colima 验；Windows 只能 CI | S |
@@ -66,14 +66,14 @@ keytao-next 工作区里还有别人未提交的改动（BatchPRList、Navbar、
 
 ## 3 发版步骤（v1.2.1-alpha.89）
 
-1. 本地执行 `node scripts/sync-version.mjs --set 1.2.1-alpha.89` 并 commit。它会写 Cargo.toml、package.json、tauri.conf.json 和 pubspec.yaml（`scripts/sync-version.mjs:47-71`）。
+1. 本地执行 `node scripts/sync-version.mjs --set 1.2.1-alpha.89` 并 commit。当前脚本只写 `Cargo.toml` 和 `flutter_app/pubspec.yaml`。
 2. **【需 owner 确认】** `git push origin main`，包含 40 个旧提交和本轮所有批次。
 3. **【需 owner 确认】** `gh workflow run release.yml --ref main` 做预跑（依赖 B5 加的 workflow_dispatch），用 `gh run watch` 跟进，约 25 分钟。失败不自动重跑，停下来报告。
 4. 在 Rea 的 Windows 机上做验收 V。
 5. **【需 owner 确认】** `git tag -a v1.2.1-alpha.89 -m "Release v1.2.1-alpha.89"`，然后 `git push origin v1.2.1-alpha.89`。CI 会自动建 prerelease（`release.yml:12-32`）。
-6. 用 `gh release view v1.2.1-alpha.89 --json assets` 核对产物，应为 11 个。x86 APK 已按 owner 决定去掉（`docs/app-flutter-inc1-plan.md:98-102`）：
+6. 用 `gh release view v1.2.1-alpha.89 --json assets` 核对产物，按第 4 节最终决定应为 10 个，Android 不发布 x86 APK：
    - Android：3 个 APK（arm / arm64 / x86_64），release keystore 签名。
-   - macOS：2 个 pkg（arm64 / x86_64），ad-hoc 签名。如果 Q3 选 universal，就是 1 个。
+   - macOS：1 个 universal pkg（arm64 + x86_64），ad-hoc 签名。
    - Windows：1 个 x64 setup.exe，未签名。
    - Linux：x64 和 arm64 各一个 deb、一个 rpm，共 4 个。
    - iOS：1 个 arm64 未签名 IPA。
@@ -91,3 +91,5 @@ keytao-next 工作区里还有别人未提交的改动（BatchPRList、Navbar、
 3. **macOS 出一个 universal pkg**：IME 与 FFI 编成 universal，Flutter app 保持 universal；删掉 macos-15-intel CI leg；verify-macos-pkg.sh 改为校验 universal（x86_64 + arm64）。
 4. **Linux**：deb/rpm 自带 /etc/xdg/autostart/keytao-ime.desktop（NotShowIn=GNOME）和 KDE 的 keytao-wayland-launcher.desktop，app 退出不再停 keytao-ime；教程以网站 /install 为主写全（分桌面启用、环境变量写在哪、启动与使用、避坑），docs/linux-install.md 同步；ibus-rime 手动方式作为备选；未实测的 Flatpak / SDL / kitty 不写。
 5. **提醒**：CI 出的 Android 包为 release 签名，项目方手机上的本机 debug 版需先卸载一次（/sdcard/keytao 保留）。
+
+6. **Android 发行 ABI**：只发布 armeabi-v7a、arm64-v8a 和 x86_64 三个 APK，不发布 x86 APK。

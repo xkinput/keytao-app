@@ -52,13 +52,13 @@ macOS IME 不默认读取 `~/Library/Rime`。那个目录属于鼠须管，KeyTa
 9. 对 dylib 和 bundle 签名。
 10. 默认生成只安装 IME bundle 的 pkg（`pkgbuild --version` 同样用 workspace 版本）；`--skip-pkg` 可跳过。
 
-版本来源优先级：`KEYTAO_VERSION` 环境变量 → `package.json`（node 可用时）→ `Cargo.toml` 的 `[workspace.package].version`。`CFBundleShortVersionString` 用完整版本串（如 `1.2.1-alpha.42`）；`CFBundleVersion` 必须能被 Installer 比较，所以剥掉非数字字符变成 `1.2.1.42`。pkg component plist 的 `BundleIsVersionChecked=true` 依赖这个键判断是否替换已安装 bundle，写死 `1` 会让升级留下旧 IME bundle 与旧 FFI dylib。
+版本只读取 `Cargo.toml` 的 `[workspace.package].version`。`CFBundleShortVersionString` 用完整版本串（如 `1.2.1-alpha.42`）；`CFBundleVersion` 必须能被 Installer 比较，所以剥掉非数字字符变成 `1.2.1.42`。pkg component plist 的 `BundleIsVersionChecked=true` 依赖这个键判断是否替换已安装 bundle，写死 `1` 会让升级留下旧 IME bundle 与旧 FFI dylib。
 
 `scripts/build-macos.sh` 做完整发行 pkg：
 
 1. 构建 IME runtime。
-2. 准备主 App runtime，把 `rime-data`、`librime.1.dylib`、OpenCC 数据和 `rime-plugins` 放进 Tauri 资源/Frameworks 目录。
-3. 构建 Tauri 主 App。
+2. 准备主 App runtime，把 `rime-data`、`librime.1.dylib`、OpenCC 数据和 `rime-plugins` 放进 Flutter 资源/Frameworks 目录。
+3. 构建 Flutter 主 App。
 4. 确认主 App bundle id 是 `ink.rea.keytao-app`，IME bundle id 是 `ink.rea.inputmethod.keytao`。
 5. 在签名前把 `rime-plugins` 和插件依赖补进主 App `Contents/Frameworks`，保证主 App 部署 Lua 方案和 IME 运行时使用同等能力。
 6. 重签主 App 及 dylib。
@@ -71,15 +71,14 @@ macOS IME 不默认读取 `~/Library/Rime`。那个目录属于鼠须管，KeyTa
 本地完整打包和离线验证命令：
 
 ```sh
-pnpm install
-pnpm build:macos
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
+scripts/build-macos.sh
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg
 ```
 
 测试安装命令：
 
 ```sh
-sudo installer -pkg target/keytao-macos-pkg/KeyTao.pkg -target /
+sudo installer -pkg target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg -target /
 ```
 
 改动按键/候选/主题路径后，建议先跑一次 FFI 契约冒烟（会组字并提交，请指向用户目录的副本）：
@@ -99,7 +98,7 @@ test -x "/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME"
 open -a KeyTao
 ```
 
-Release CI 的 macOS 分支必须走 `pnpm build:macos`，然后执行 `scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg`，最后上传 `keytao-app-<version>-macos-<arch>.pkg`。当前脚本按 runner 架构构建，例如 `macos-arm64` 或 `macos-x86_64`；不要用 Tauri 的 dmg bundle 作为 macOS 发行产物。
+Release CI 的 macOS 分支执行 `scripts/build-macos.sh` 和 `scripts/verify-macos-pkg.sh`，发布一个 `keytao-app-<version>-macos.pkg`；主 App、IME 和 FFI 都包含 x86_64 + arm64。
 
 macOS 发行包只构建 pkg，不构建 dmg。原因是 KeyTao 同时包含普通 App 和系统输入法 bundle，必须把输入法稳定安装到 `/Library/Input Methods` 并执行 TIS/LaunchServices 注册；dmg 拖拽安装无法可靠表达这个系统输入法安装流程。
 
@@ -159,11 +158,11 @@ IME 进程的 `resolveSharedDataDir()` 规则：
    - `/usr/local/share/rime-data`
 4. 找不到时返回空字符串，`keytao_init()` 会失败并写 `NSLog`。
 
-主 App 的 `macos_app_shared_data_dir()` 还会优先查找 Tauri resource 中的 `rime-data`/`SharedSupport`，然后才 fallback 到输入法 bundle。
+主 App 的 core/bridge 宿主还会优先查找包内资源中的 `rime-data`/`SharedSupport`，然后才 fallback 到输入法 bundle。
 
 ## App 部署后的重载
 
-主 App 完成 `rime_deploy_default` 后，会写入：
+主 App 完成 `deploy_default` 后，会写入：
 
 ```text
 ~/Library/keytao/keytao-ime.reload
@@ -315,14 +314,12 @@ Rime 自身的 schema / options 菜单不由 `InputController.menu()` 重新实�
 
 正常用户路径里，macOS 输入法 bundle 应随主 App 的 pkg 一起安装、升级和移除；用户不应该在 App 内再看到“安装输入法 / 卸载输入法”这类系统组件管理按钮。App 只应该承担状态展示、方案安装/部署、reload 通知和必要诊断，降低用户理解负担。
 
-Tauri 主 App 当前已有 macOS 相关命令：
+Flutter 主 App 通过 `crates/keytao-app-bridge/src/api/core.rs` 接入：
 
 - `macos_ime_status`：只检查 `/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME` 是否存在。
-- `macos_install_ime`：仅 debug build 可运行仓库内 `crates/keytao-macos-ime/install.sh --release`，release build 会拒绝该开发接口。
-- `macos_uninstall_ime`：仅 debug build 可执行 `/Library/Input Methods/KeyTao.app` 移除，release build 会拒绝该开发接口。
-- `rime_deploy_default`：部署后写 `~/Library/keytao/keytao-ime.reload`。
+- `deploy_default`：部署后写 `~/Library/keytao/keytao-ime.reload`。
 
-React 页面只在初始化时调用 `macos_ime_status` 做状态展示；正式 UI 不提供刷新、安装或卸载 macOS 输入法 bundle 的按钮，避免形成 App 内重复安装入口。
+Flutter 页面只在初始化时调用 `macos_ime_status` 做状态展示；正式 UI 不提供刷新、安装或卸载 macOS 输入法 bundle 的按钮，避免形成 App 内重复安装入口。
 
 ## 跨平台前端契约
 
@@ -456,7 +453,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
     候选窗/模式提示没有声明 `canJoinAllSpaces` / `fullScreenAuxiliary`。Squirrel 同样没有设置，Apple 也无硬性要求，需要在跨 Space、全屏场景实测确认确实失效后再加。
 
 11. `macos_ime_status` 未返回 IME bundle 版本  
-    bundle 版本现在随 workspace 版本写入 Info.plist，但 App 侧的 `macos_ime_status_inner`（`src-tauri/src/lib.rs`）仍只检查可执行文件是否存在，无法用它发现主 App 与 IME bundle 的版本偏斜。该文件不在本 crate 的所有权范围内。
+    bundle 版本现在随 workspace 版本写入 Info.plist，但 App 侧的 `macos_ime_status`（`crates/keytao-app-core/src/ime_status/macos.rs`）仍只检查可执行文件是否存在，无法用它发现主 App 与 IME bundle 的版本偏斜。该文件不在本 crate 的所有权范围内。
 
 12. 敏感输入策略未接  
     macOS 上系统 secure event input 会在密码框里屏蔽第三方输入法，因此 `InputContextPolicy` 没有接。已确认 IMK 层的 `NSLog` 不输出按键内容、keysym 或提交文本。

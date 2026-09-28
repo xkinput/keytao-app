@@ -4,10 +4,10 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IOS_IME_DIR="$PROJECT_DIR/crates/keytao-ios-ime"
 HEADER="$PROJECT_DIR/crates/keytao-core-ffi/include/keytao_core.h"
-IOS_INFO_PLIST="$PROJECT_DIR/src-tauri/Info.ios.plist"
-KEYBOARD_INFO_PLIST="$IOS_IME_DIR/Resources/Info.plist"
-APP_ENTITLEMENTS="$IOS_IME_DIR/Resources/KeyTaoApp.entitlements"
-KEYBOARD_ENTITLEMENTS="$IOS_IME_DIR/Resources/KeyTaoKeyboard.entitlements"
+IOS_INFO_PLIST="$PROJECT_DIR/flutter_app/ios/Runner/Info.plist"
+KEYBOARD_INFO_PLIST="$PROJECT_DIR/flutter_app/ios/KeyTaoKeyboard/Info.plist"
+APP_ENTITLEMENTS="$PROJECT_DIR/flutter_app/ios/Runner/Runner.entitlements"
+KEYBOARD_ENTITLEMENTS="$PROJECT_DIR/flutter_app/ios/KeyTaoKeyboard/KeyTaoKeyboard.entitlements"
 SDK="${KEYTAO_IOS_SDK:-iphonesimulator}"
 HOST_ARCH="$(uname -m)"
 if [ "$HOST_ARCH" = "arm64" ]; then
@@ -36,12 +36,6 @@ SDKROOT="$(xcrun --sdk "$SDK" --show-sdk-path)"
 if command -v plutil >/dev/null 2>&1; then
     plutil -lint "$IOS_INFO_PLIST" "$KEYBOARD_INFO_PLIST" "$APP_ENTITLEMENTS" "$KEYBOARD_ENTITLEMENTS" >/dev/null
 fi
-
-if command -v ruby >/dev/null 2>&1; then
-    ruby -c "$PROJECT_DIR/scripts/setup-ios-ime-xcode.rb" >/dev/null
-fi
-
-node -e "const fs=require('fs'); const c=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')); if(!c.bundle || !c.bundle.iOS || c.bundle.iOS.infoPlist !== 'Info.ios.plist') { throw new Error('missing bundle.iOS.infoPlist'); }" >/dev/null
 
 echo "Checking Swift iOS keyboard sources"
 (

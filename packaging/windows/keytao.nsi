@@ -40,8 +40,8 @@ SetCompressor /SOLID lzma
 SetOverwrite on
 ShowInstDetails show
 ShowUninstDetails show
-!define MUI_ICON "${REPO_ROOT}\src-tauri\icons\icon.ico"
-!define MUI_UNICON "${REPO_ROOT}\src-tauri\icons\icon.ico"
+!define MUI_ICON "${REPO_ROOT}\packaging\icons\icon.ico"
+!define MUI_UNICON "${REPO_ROOT}\packaging\icons\icon.ico"
 VIProductVersion "${VERSION_NUMERIC}"
 VIAddVersionKey "ProductName" "KeyTao"
 VIAddVersionKey "CompanyName" "rea"
