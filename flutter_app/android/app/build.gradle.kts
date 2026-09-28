@@ -37,6 +37,7 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -89,6 +90,8 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    androidTestImplementation("androidx.test.ext:junit:1.1.4")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
 }
 
 tasks.register<Exec>("syncKeytaoAndroidAssets") {
