@@ -6,8 +6,8 @@ class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
     let windowController = MacOSWindowUtilsViewController()
     self.contentViewController = windowController
-    self.setContentSize(NSSize(width: 760, height: 620))
-    self.contentMinSize = NSSize(width: 640, height: 480)
+    self.setContentSize(NSSize(width: 900, height: 680))
+    self.contentMinSize = NSSize(width: 720, height: 520)
     self.center()
 
     MainFlutterWindowManipulator.start(mainFlutterWindow: self)

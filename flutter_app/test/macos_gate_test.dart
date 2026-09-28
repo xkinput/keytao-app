@@ -3,13 +3,32 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/app/shell.dart';
 import 'package:keytao/src/macos/onboarding.dart';
-import 'package:keytao/src/macos/app.dart';
 import 'package:keytao/src/macos/shell.dart';
 import 'package:keytao/src/onboarding/onboarding_page.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:macos_ui/macos_ui.dart';
+
+class _MacosController extends AppController {
+  _MacosController()
+    : super(
+        info: const BridgeInfo(
+          platform: BridgePlatform.macOs,
+          appVersion: 'test',
+          userRoot: '/test/keytao',
+        ),
+      );
+
+  int logRefreshes = 0;
+
+  @override
+  Future<bool> refreshLogs() async {
+    logRefreshes++;
+    return true;
+  }
+}
 
 void main() {
   testWidgets(
@@ -50,13 +69,7 @@ void main() {
         messenger.setMockMethodCallHandler(titleChannel, null);
       });
       await const MacosWindowUtilsConfig().apply();
-      final controller = AppController(
-        info: const BridgeInfo(
-          platform: BridgePlatform.macOs,
-          appVersion: 'test',
-          userRoot: '/test/keytao',
-        ),
-      );
+      final controller = _MacosController();
       controller.uiSettings = const ImeUiSettingsDto(
         colorScheme: UiColorSchemeDto.auto,
         effectiveColorScheme: EffectiveColorSchemeDto.light,
@@ -79,12 +92,51 @@ void main() {
         lines: ['offline test log'],
         truncated: true,
       );
+      controller.appUpdate = const AppUpdateDto(
+        hasUpdate: true,
+        latestVersion: '1.2.1-alpha.42',
+        currentVersion: 'test',
+        releaseUrl: 'https://example.invalid/release',
+      );
+      const release = PlatformReleaseDto(
+        version: '1.2.1-alpha.42',
+        downloadUrls: DownloadUrlsDto(macos: 'offline'),
+      );
+      controller.latestRelease = const ReleaseInfoDto(
+        version: '1.2.1-alpha.42',
+        name: 'KeyTao',
+        publishedAt: '',
+        body: 'Offline changelog',
+        github: release,
+        gitee: release,
+      );
+      controller.selectedDirectory = '/test/custom/keytao';
+      controller.customSchemas = const LocalSchemasDto(
+        hasDefaultCustom: false,
+        schemas: ['keytao', 'english'],
+      );
+      controller.customFiles = const [
+        FileItemDto(name: 'keytao.schema.yaml', isDir: false),
+      ];
+      controller.customResult = const InstallResultDto(
+        mergedSchemas: ['keytao'],
+        logs: ['[MERGED] keytao'],
+        verify: [],
+      );
+      controller.addOperationLogs(['[DEPLOY] Offline deployment']);
+      controller.deploySteps.add(
+        const DeployStep('Offline deployment', DeployStepState.ok),
+      );
+      controller.systemLogs = const DebugLogsDto(
+        ime: DebugLogFileDto(lines: ['Offline IME log'], truncated: true),
+        app: DebugLogFileDto(lines: ['Offline app log'], truncated: true),
+      );
       addTearDown(controller.dispose);
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
       tester.view.devicePixelRatio = 1;
-      for (final size in [const Size(640, 480), const Size(760, 620)]) {
+      for (final size in [const Size(720, 520), const Size(900, 680)]) {
         tester.view.physicalSize = size;
         for (final completed in [false, true]) {
           await tester.pumpWidget(
@@ -107,25 +159,75 @@ void main() {
           expect(find.byType(AppShell), findsNothing);
           expect(find.byType(PlatformMenuBar), findsOneWidget);
           if (completed) {
-            expect(find.byType(MacosTextField), findsOneWidget);
+            expect(find.byType(SidebarItems), findsOneWidget);
+            expect(
+              tester.widget<MacosWindow>(find.byType(MacosWindow)).sidebar,
+              isNotNull,
+            );
             expect(find.byType(MacosSlider), findsOneWidget);
-            expect(find.byType(MacosPopupButton<String>), findsNWidgets(2));
-            for (final title in ['关于', '调试', '输入法']) {
-              await tester.tap(find.widgetWithText(MacosIconButton, title));
+            final sidebar = tester.widget<SidebarItems>(
+              find.byType(SidebarItems),
+            );
+            expect(sidebar.items, hasLength(AppPage.values.length));
+            final refreshes = controller.logRefreshes;
+            for (final page in [...AppPage.values.skip(1), AppPage.input]) {
+              await tester.tap(
+                find.descendant(
+                  of: find.byType(SidebarItems),
+                  matching: find.text(page.title),
+                ),
+              );
               await tester.pumpAndSettle();
+              expect(controller.activePage, page);
               expect(
                 tester
-                    .widget<MacosWindowTitle>(find.byType(MacosWindowTitle))
-                    .title,
-                title,
+                    .widget<SidebarItems>(find.byType(SidebarItems))
+                    .currentIndex,
+                page.index,
               );
-              expect(nativeTitle, title);
+              expect(nativeTitle, page.title);
               expect(
                 tester.widget<ToolBar>(find.byType(ToolBar)).title,
-                isA<Text>().having((text) => text.data, 'title', title),
+                isA<Text>().having((text) => text.data, 'title', page.title),
+              );
+              expect(tester.takeException(), isNull);
+            }
+            expect(controller.logRefreshes, refreshes + 1);
+            final viewMenu = tester
+                .widget<PlatformMenuBar>(find.byType(PlatformMenuBar))
+                .menus
+                .whereType<PlatformMenu>()
+                .singleWhere((menu) => menu.label == '显示');
+            expect(viewMenu.menus, hasLength(AppPage.values.length));
+            for (final page in AppPage.values) {
+              final item = viewMenu.menus[page.index];
+              expect(item.label, page.title);
+              expect(
+                item.shortcut,
+                isA<CharacterActivator>()
+                    .having(
+                      (value) => value.character,
+                      'character',
+                      '${page.shortcutDigit}',
+                    )
+                    .having((value) => value.meta, 'meta', true),
+              );
+              item.onSelected!();
+              await tester.pumpAndSettle();
+              expect(controller.activePage, page);
+              expect(nativeTitle, page.title);
+              expect(
+                tester
+                    .widget<SidebarItems>(find.byType(SidebarItems))
+                    .currentIndex,
+                page.index,
               );
             }
+            expect(controller.logRefreshes, refreshes + 2);
+            controller.selectPage(AppPage.input);
+            await tester.pumpAndSettle();
           } else {
+            expect(find.byType(SidebarItems), findsNothing);
             expect(find.text('输入法组件'), findsWidgets);
             final next = tester.widget<PushButton>(
               find.widgetWithText(PushButton, '继续'),

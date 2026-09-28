@@ -37,6 +37,7 @@ class _MacosOnboardingState extends State<MacosOnboarding> {
     final steps = c.setupSteps;
     final step = steps[_index];
     return MacosWindowTitle(
+      controller: c,
       title: step.title,
       child: MacosWindow(
         child: MacosScaffold(
@@ -53,10 +54,18 @@ class _MacosOnboardingState extends State<MacosOnboarding> {
                     padding: const EdgeInsets.fromLTRB(32, 24, 32, 8),
                     child: Row(
                       children: [
+                        Image.asset(logoAsset, width: 44, height: 44),
+                        const SizedBox(width: 12),
                         Expanded(
-                          child: Text(
-                            step.title,
-                            style: MacosTheme.of(context).typography.title1,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(AppStrings.title),
+                              Text(
+                                step.title,
+                                style: MacosTheme.of(context).typography.title1,
+                              ),
+                            ],
                           ),
                         ),
                         Text('${_index + 1} / ${steps.length}'),

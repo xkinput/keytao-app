@@ -4,50 +4,12 @@ import 'package:macos_ui/macos_ui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'color_picker.dart';
 import 'widgets.dart';
 
-class MacosSchemeSelection extends StatelessWidget {
-  const MacosSchemeSelection({super.key, required this.controller});
-  final AppController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = controller;
-    return MacosRows(
-      children: [
-        MacosChoice(
-          label: '方案',
-          value: c.scheme,
-          options: schemes,
-          onChanged: c.busy ? null : c.selectScheme,
-        ),
-        if (c.scheme == 'keytao')
-          MacosChoice(
-            label: '下载来源',
-            value: c.source,
-            options: downloadSources,
-            onChanged: c.busy ? null : c.selectSource,
-          ),
-        MacosSettingRow(
-          '最新版本',
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(c.releaseVersion ?? '—'),
-              const SizedBox(width: 12),
-              PushButton(
-                controlSize: ControlSize.regular,
-                secondary: true,
-                onPressed: c.busy ? null : c.refreshRelease,
-                child: const Text('刷新版本'),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
+export 'debug.dart';
+export 'extension.dart';
+export 'scheme.dart';
 
 class MacosInputPage extends StatelessWidget {
   const MacosInputPage({
@@ -64,57 +26,31 @@ class MacosInputPage extends StatelessWidget {
     return MacosForm(
       scrollController: scrollController,
       children: [
+        MacosUpdateBanner(controller: c),
         MacosGroup(
-          title: '输入方案',
+          title: AppStrings.macosIme,
+          icon: CupertinoIcons.keyboard,
+          trailing: MacosBadge(
+            c.macosImeBadgeText,
+            color: c.macosImeBadge == ImeBadgeState.ready
+                ? MacosColors.systemGreenColor
+                : null,
+          ),
           children: [
-            MacosSchemeSelection(controller: c),
-            MacosValueRow('KeyTao 目录', c.info.userRoot),
-            MacosValueRow('本地状态', c.localStatus),
-            MacosValueRow('本地版本', c.local?.version ?? '—'),
-            if (c.local?.schemas.isNotEmpty == true)
-              MacosValueRow('本地方案', c.local!.schemas.join('、')),
-            MacosActionRow(
-              children: [
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  secondary: true,
-                  onPressed: c.busy ? null : () => c.open(c.info.userRoot),
-                  child: const Text('打开目录'),
-                ),
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  secondary: true,
-                  onPressed: c.busy ? null : c.refreshState,
-                  child: const Text('检查本地'),
-                ),
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  secondary: true,
-                  onPressed: c.canDeploy ? c.deploy : null,
-                  child: const Text('部署'),
-                ),
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  onPressed: c.busy ? null : c.install,
-                  child: const Text('安装方案'),
-                ),
-              ],
-            ),
-            if (c.busy || c.progress.isNotEmpty || c.hasOperationLog)
-              MacosOperationProgress(controller: c),
-          ],
-        ),
-        MacosGroup(
-          title: '输入测试',
-          children: const [
-            Padding(
-              padding: EdgeInsets.all(12),
-              child: MacosTextField(
-                placeholder: '输入测试',
-                minLines: 2,
-                maxLines: 5,
+            if (c.macosIme?.installed == true)
+              const MacosMessage(
+                AppStrings.macosLoginWarning,
+                color: MacosColors.systemOrangeColor,
+                icon: CupertinoIcons.exclamationmark_triangle,
               ),
-            ),
+            if (c.macosIme?.appPath case final path?)
+              MacosValueRow(AppStrings.systemLocation, path),
+            if (c.macosImeError case final error?)
+              MacosMessage(
+                error,
+                color: MacosColors.systemRedColor,
+                icon: CupertinoIcons.exclamationmark_triangle,
+              ),
           ],
         ),
         MacosSettings(controller: c),
@@ -133,65 +69,87 @@ class MacosSettings extends StatelessWidget {
     final s = c.uiSettings;
     return MacosGroup(
       title: '候选窗设置',
+      icon: CupertinoIcons.paintbrush,
       children: [
         if (s == null)
           MacosSettingRow(
-            '设置未读取',
+            AppStrings.checking,
             child: PushButton(
               controlSize: ControlSize.regular,
               secondary: true,
               onPressed: c.busy ? null : c.refreshState,
-              child: const Text('重新读取'),
+              child: const Text(AppStrings.recheck),
             ),
           )
         else ...[
           MacosChoice<UiColorSchemeDto>(
-            label: '配色方案',
+            label: '配色',
             value: s.colorScheme,
             options: colorSchemes,
+            icons: const {
+              UiColorSchemeDto.auto: CupertinoIcons.desktopcomputer,
+              UiColorSchemeDto.light: CupertinoIcons.sun_max,
+              UiColorSchemeDto.dark: CupertinoIcons.moon,
+            },
             onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
           ),
           MacosChoice<PanelOrientationDto>(
-            label: '候选排列',
+            label: '排列',
             value: s.orientation,
             options: orientations,
+            icons: const {
+              PanelOrientationDto.horizontal:
+                  CupertinoIcons.rectangle_split_3x1,
+              PanelOrientationDto.vertical: CupertinoIcons.line_horizontal_3,
+            },
             onChanged: c.busy ? null : (value) => c.saveUi(orientation: value),
           ),
           MacosChoice(
-            label: '英文模式',
+            label: AppStrings.englishMode,
             value: c.desktopEnglishMode,
             options: c.englishModes,
             disabled: c.disabledEnglishModes,
             onChanged: c.busy ? null : c.saveDesktopEnglish,
           ),
+          if (c.englishModeHint case final hint?) MacosMessage(hint),
           MacosSettingRow(
-            '嵌入模式',
-            child: MacosSwitch(
-              value: s.embeddedComposition,
-              size: ControlSize.regular,
-              onChanged: c.busy ? null : c.saveEmbedded,
+            AppStrings.embedded,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(s.embeddedComposition ? AppStrings.on : AppStrings.off),
+                const SizedBox(width: 8),
+                MacosSwitch(
+                  value: s.embeddedComposition,
+                  size: ControlSize.regular,
+                  onChanged: c.busy ? null : c.saveEmbedded,
+                ),
+              ],
             ),
           ),
+          const MacosMessage(AppStrings.embeddedDescription),
           MacosFontSlider(
             value: s.fontSize,
             onChanged: c.busy ? null : (value) => c.saveUi(fontSize: value),
           ),
-          MacosChoice<String>(
-            label: '主题色',
-            value: s.accentColor.toUpperCase(),
-            options: themeAccents,
-            onChanged: c.busy ? null : (value) => c.saveUi(accentColor: value),
-          ),
-          MacosActionRow(
-            children: [
-              PushButton(
-                controlSize: ControlSize.regular,
-                secondary: true,
-                onPressed: c.canOpenTheme ? () => c.open(s.themePath!) : null,
-                child: const Text('打开主题文件'),
+          MacosAccentPicker(controller: c),
+          if (s.themePath case final path?)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(child: Text('${AppStrings.theme}$path')),
+                  MacosTooltip(
+                    message: AppStrings.openTheme,
+                    child: MacosIconButton(
+                      semanticLabel: AppStrings.openTheme,
+                      icon: const MacosIcon(CupertinoIcons.folder_open),
+                      onPressed: c.canOpenTheme ? c.openTheme : null,
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
         ],
       ],
     );
@@ -211,93 +169,49 @@ class MacosAboutPage extends StatelessWidget {
   Widget build(BuildContext context) => MacosForm(
     scrollController: scrollController,
     children: [
+      MacosUpdateBanner(controller: controller),
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Column(
+          children: [
+            Image.asset(logoAsset, width: 80, height: 80),
+            const SizedBox(height: 12),
+            Text(
+              AppStrings.title,
+              style: MacosTheme.of(context).typography.title1,
+            ),
+            const SizedBox(height: 6),
+            Text('v${controller.info.appVersion}'),
+            const SizedBox(height: 12),
+            const Text(AppStrings.tagline, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
       MacosGroup(
-        title: '关于 KeyTao',
+        title: AppStrings.about,
+        icon: CupertinoIcons.info_circle,
         children: [
           for (final entry in controller.aboutValues.entries)
-            MacosValueRow(entry.key, entry.value),
-          MacosActionRow(
-            children: [
-              PushButton(
-                controlSize: ControlSize.regular,
-                secondary: true,
-                onPressed: controller.busy
-                    ? null
-                    : () => controller.open(repositoryUrl),
-                child: const Text('GitHub'),
-              ),
-            ],
+            MacosValueRow(switch (entry.key) {
+              'KeyTao' => AppStrings.keytaoVersion,
+              'librime' => AppStrings.librimeVersion,
+              'OpenCC' => AppStrings.openccVersion,
+              'KeyTao 目录' => AppStrings.keytaoDirectory,
+              _ => entry.key,
+            }, entry.value),
+          MacosSettingRow(
+            'GitHub',
+            child: PushButton(
+              controlSize: ControlSize.regular,
+              secondary: true,
+              onPressed: controller.busy
+                  ? null
+                  : () => controller.open(repositoryUrl),
+              child: Text(Uri.parse(repositoryUrl).path.substring(1)),
+            ),
           ),
         ],
       ),
     ],
   );
-}
-
-class MacosDebugPage extends StatelessWidget {
-  const MacosDebugPage({
-    super.key,
-    required this.controller,
-    this.scrollController,
-  });
-  final AppController controller;
-  final ScrollController? scrollController;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = controller;
-    final settings = c.logSettings;
-    return MacosForm(
-      scrollController: scrollController,
-      children: [
-        MacosGroup(
-          title: '运行日志',
-          children: [
-            MacosSettingRow(
-              '记录运行日志',
-              child: MacosSwitch(
-                size: ControlSize.regular,
-                value: settings?.enabled ?? false,
-                onChanged: c.canEditLogs
-                    ? (value) => c.saveLogSettings(value, settings!.level)
-                    : null,
-              ),
-            ),
-            MacosChoice<RuntimeLogLevelDto>(
-              label: '日志级别',
-              value: settings?.level ?? RuntimeLogLevelDto.info,
-              options: logLevels,
-              onChanged: c.canEditLogs
-                  ? (value) => c.saveLogSettings(settings!.enabled, value)
-                  : null,
-            ),
-            MacosActionRow(
-              children: [
-                if (c.busy) const ProgressCircle(radius: 8),
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  secondary: true,
-                  onPressed: c.busy ? null : c.clearLogs,
-                  child: const Text('清空'),
-                ),
-                PushButton(
-                  controlSize: ControlSize.regular,
-                  onPressed: c.busy ? null : c.refreshLogs,
-                  child: const Text('刷新'),
-                ),
-              ],
-            ),
-            if (c.logLineCount case final count?) MacosValueRow('日志', count),
-            SizedBox(
-              height: 300,
-              child: MacosLogView(
-                key: const PageStorageKey('runtimeLogs'),
-                lines: c.logLines,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
 }

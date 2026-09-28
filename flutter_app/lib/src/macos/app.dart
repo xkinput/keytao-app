@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../app/controller.dart';
+import '../app/options.dart';
 
 class KeyTaoMacosApp extends StatelessWidget {
   const KeyTaoMacosApp({super.key, required this.home});
@@ -28,7 +29,7 @@ class KeyTaoMacosApp extends StatelessWidget {
         ),
         builder: (context, child) => DefaultTextStyle(
           style: MacosTheme.of(context).typography.body,
-          child: _MacosMenus(child: child!),
+          child: child!,
         ),
         home: home,
       ),
@@ -36,9 +37,10 @@ class KeyTaoMacosApp extends StatelessWidget {
   );
 }
 
-class _MacosMenus extends StatelessWidget {
-  const _MacosMenus({required this.child});
+class MacosMenus extends StatelessWidget {
+  const MacosMenus({super.key, required this.child, this.controller});
   final Widget child;
+  final AppController? controller;
 
   @override
   Widget build(BuildContext context) => PlatformMenuBar(
@@ -78,6 +80,19 @@ class _MacosMenus extends StatelessWidget {
         ],
       ),
       PlatformMenu(
+        label: '显示',
+        menus: [
+          for (final page in AppPage.values)
+            PlatformMenuItem(
+              label: page.title,
+              shortcut: CharacterActivator('${page.shortcutDigit}', meta: true),
+              onSelected: controller == null
+                  ? null
+                  : () => controller!.selectPage(page),
+            ),
+        ],
+      ),
+      PlatformMenu(
         label: '窗口',
         menus: [
           for (final type in const [
@@ -95,7 +110,13 @@ class _MacosMenus extends StatelessWidget {
 }
 
 class MacosWindowTitle extends StatefulWidget {
-  const MacosWindowTitle({super.key, required this.title, required this.child});
+  const MacosWindowTitle({
+    super.key,
+    required this.controller,
+    required this.title,
+    required this.child,
+  });
+  final AppController controller;
   final String title;
   final Widget child;
 
@@ -104,8 +125,6 @@ class MacosWindowTitle extends StatefulWidget {
 }
 
 class _MacosWindowTitleState extends State<MacosWindowTitle> {
-  static const _channel = MethodChannel('ink.rea.keytao/window');
-
   @override
   void initState() {
     super.initState();
@@ -118,7 +137,7 @@ class _MacosWindowTitleState extends State<MacosWindowTitle> {
     if (widget.title != oldWidget.title) _updateTitle();
   }
 
-  void _updateTitle() => _channel.invokeMethod<void>('setTitle', widget.title);
+  void _updateTitle() => widget.controller.setWindowTitle(widget.title);
 
   @override
   Widget build(BuildContext context) => widget.child;
@@ -168,7 +187,10 @@ class _MacosErrorPresenterState extends State<MacosErrorPresenter> {
         await showMacosAlertDialog<void>(
           context: context,
           builder: (context) => MacosAlertDialog(
-            appIcon: const MacosIcon(CupertinoIcons.exclamationmark_triangle, size: 48),
+            appIcon: const MacosIcon(
+              CupertinoIcons.exclamationmark_triangle,
+              size: 48,
+            ),
             title: const Text('操作失败'),
             message: ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 180),
@@ -194,7 +216,9 @@ class _MacosErrorPresenterState extends State<MacosErrorPresenter> {
   }
 
   @override
-  Widget build(BuildContext context) => widget.child;
+  // Keep one menu bar above the onboarding/shell AnimatedSwitcher.
+  Widget build(BuildContext context) =>
+      MacosMenus(controller: widget.controller, child: widget.child);
 }
 
 class MacosStartup extends StatelessWidget {
@@ -203,30 +227,39 @@ class MacosStartup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => KeyTaoMacosApp(
-    home: MacosWindow(
-      child: MacosScaffold(
-        toolBar: const ToolBar(title: Text('KeyTao')),
-        children: [
-          ContentArea(
-            builder: (context, _) => Center(
-              child: error == null
-                  ? const ProgressCircle()
-                  : MacosAlertDialog(
-                      appIcon: const MacosIcon(
-                        CupertinoIcons.exclamationmark_triangle,
-                        size: 48,
+    home: MacosMenus(
+      child: MacosWindow(
+        child: MacosScaffold(
+          toolBar: const ToolBar(title: Text('KeyTao')),
+          children: [
+            ContentArea(
+              builder: (context, _) => Center(
+                child: error == null
+                    ? const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ProgressCircle(),
+                          SizedBox(height: 16),
+                          Text(AppStrings.boot),
+                        ],
+                      )
+                    : MacosAlertDialog(
+                        appIcon: const MacosIcon(
+                          CupertinoIcons.exclamationmark_triangle,
+                          size: 48,
+                        ),
+                        title: const Text('启动失败'),
+                        message: SelectableText(error!),
+                        primaryButton: PushButton(
+                          controlSize: ControlSize.regular,
+                          onPressed: () => WindowManipulator.closeWindow(),
+                          child: const Text('关闭'),
+                        ),
                       ),
-                      title: const Text('启动失败'),
-                      message: SelectableText(error!),
-                      primaryButton: PushButton(
-                        controlSize: ControlSize.regular,
-                        onPressed: () => WindowManipulator.closeWindow(),
-                        child: const Text('关闭'),
-                      ),
-                    ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     ),
   );
