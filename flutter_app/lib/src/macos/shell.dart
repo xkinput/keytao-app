@@ -1,4 +1,3 @@
-import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/widgets.dart';
 import 'package:macos_ui/macos_ui.dart';
 
@@ -64,11 +63,7 @@ class _MacosShellState extends State<MacosShell> {
                     icon: Column(
                       children: [
                         MacosIcon(
-                          switch (page) {
-                            AppPage.input => CupertinoIcons.keyboard,
-                            AppPage.about => CupertinoIcons.info_circle,
-                            AppPage.debug => CupertinoIcons.ant,
-                          },
+                          page.cupertinoIcon,
                           size: 22,
                           color: page == _page
                               ? MacosTheme.of(context).primaryColor
@@ -103,6 +98,9 @@ class _MacosShellState extends State<MacosShell> {
                   controller: widget.controller,
                   scrollController: _scrollControllers[AppPage.input],
                 ),
+                // Platform view batches will fill the new page slots.
+                const SizedBox.shrink(),
+                const SizedBox.shrink(),
                 MacosAboutPage(
                   controller: widget.controller,
                   scrollController: _scrollControllers[AppPage.about],

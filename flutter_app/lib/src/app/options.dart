@@ -1,6 +1,11 @@
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
+import 'package:flutter/material.dart' show IconData, Icons;
+
 import '../rust/api/types.dart';
 import 'bootstrap.dart' show flutterVersion;
 import 'controller.dart';
+import 'strings.dart';
+export 'strings.dart';
 
 const schemes = {
   'keytao': '键道6',
@@ -8,12 +13,20 @@ const schemes = {
   'txjx': '天行键',
   'keydo': '键道·我流',
 };
+const logoAsset = 'assets/logo.png';
+const schemeAssets = {
+  'keytao': 'keytao-linux',
+  'xmjd': 'xmjd6.zip',
+  'txjx': 'txjx.zip',
+  'keydo': 'nightly zip',
+};
+const defaultDownloadSource = 'gitee';
 const repositoryUrl = 'https://github.com/xkinput/keytao-app';
 const downloadSources = {'github': 'GitHub', 'gitee': 'Gitee'};
 const colorSchemes = {
-  UiColorSchemeDto.auto: '跟随系统',
-  UiColorSchemeDto.light: '浅色',
-  UiColorSchemeDto.dark: '深色',
+  UiColorSchemeDto.auto: AppStrings.auto,
+  UiColorSchemeDto.light: AppStrings.light,
+  UiColorSchemeDto.dark: AppStrings.dark,
 };
 const orientations = {
   PanelOrientationDto.horizontal: '横排',
@@ -26,25 +39,57 @@ const themeAccents = {
   '#8B5CF6': '紫',
 };
 const logLevels = {
-  RuntimeLogLevelDto.info: '常规',
-  RuntimeLogLevelDto.verbose: '详细',
+  RuntimeLogLevelDto.info: 'info',
+  RuntimeLogLevelDto.verbose: 'verbose',
 };
 const candidateFontMin = 10.0;
 const candidateFontMax = 36.0;
 const candidateFontDivisions = 26;
 
 enum AppPage {
-  input('输入法'),
-  about('关于'),
-  debug('调试');
+  input(
+    'ime',
+    AppStrings.ime,
+    CupertinoIcons.keyboard,
+    Icons.keyboard_outlined,
+  ),
+  scheme(
+    'scheme',
+    AppStrings.scheme,
+    CupertinoIcons.arrow_down_circle,
+    Icons.download_outlined,
+  ),
+  extension(
+    'extension',
+    AppStrings.extension,
+    CupertinoIcons.settings,
+    Icons.settings_outlined,
+  ),
+  about(
+    'about',
+    AppStrings.about,
+    CupertinoIcons.info_circle,
+    Icons.info_outline,
+  ),
+  debug(
+    'debug',
+    AppStrings.debug,
+    CupertinoIcons.doc_text,
+    Icons.receipt_long_outlined,
+  );
 
-  const AppPage(this.title);
+  const AppPage(this.id, this.title, this.cupertinoIcon, this.materialIcon);
+  // Retain AppPage.input for existing views; new layouts can use AppPage.ime.
+  static const ime = input;
+  final String id;
   final String title;
+  final IconData cupertinoIcon;
+  final IconData materialIcon;
+  int get shortcutDigit => index + 1;
+  String get shortcutLabel => '⌘$shortcutDigit';
 
   void onSelected(AppController controller) {
-    if (this == debug && controller.canLoadInitialLogs) {
-      controller.refreshLogs();
-    }
+    controller.selectPage(this);
   }
 }
 
@@ -101,9 +146,9 @@ extension AppViewOptions on AppController {
     SetupStep.finish,
   ];
 
-  String get englishSchemaLabel => englishReady ? '英文方案' : '英文方案（未就绪）';
+  String get englishSchemaLabel => AppStrings.englishSchema;
   Map<EnglishModeDto, String> get englishModes => {
-    EnglishModeDto.ascii: 'ASCII',
+    EnglishModeDto.ascii: AppStrings.englishAscii,
     EnglishModeDto.schema: englishSchemaLabel,
   };
   Map<String, String> get androidEnglishModes => {
@@ -114,21 +159,21 @@ extension AppViewOptions on AppController {
   Set<String> get disabledAndroidEnglishModes => {
     for (final mode in disabledEnglishModes) mode.name,
   };
-  bool get canInstallDuringSetup => !busy && (!isAndroid || migrationReady);
+  bool get canInstallDuringSetup => canInstall;
   bool get canDeploy => !busy && local?.installed == true;
   bool get canOpenTheme =>
       !busy && uiSettings?.themeExists == true && uiSettings?.themePath != null;
   bool get canEditLogs => !busy && logSettings != null;
-  bool get canLoadInitialLogs => !busy && logSettings == null;
+  bool get canLoadInitialLogs => !busy && !logsLoading;
   bool get hasOperationLog =>
       operationLogs.isNotEmpty || verification.isNotEmpty;
-  String get installButtonTitle => local?.installed == true ? '重新安装' : '安装方案';
-  String get localStatus => local == null
-      ? '未读取'
-      : '${local!.installed ? '已安装' : '未安装'} · ${local!.deployed ? '已部署' : '未部署'}';
+  String get installButtonTitle => installButtonLabel;
+  String get localStatus =>
+      local == null ? AppStrings.checking : localStatusLine!;
   List<String> get logLines => runtimeLog?.lines ?? const [];
-  String? get logLineCount =>
-      runtimeLog?.truncated == true ? '最近 ${logLines.length} 行' : null;
+  String? get logLineCount => runtimeLog?.truncated == true
+      ? AppStrings.recentLines(logLines.length)
+      : null;
   Map<String, String> get aboutValues => {
     'KeyTao': versions?.appVersion ?? info.appVersion,
     'Flutter': flutterVersion,

@@ -96,6 +96,9 @@ class _AppShellState extends State<AppShell>
                       ),
                     ),
                   ),
+                  // Platform view batches will fill the new page slots.
+                  const SizedBox.shrink(),
+                  const SizedBox.shrink(),
                   AboutPage(controller: c),
                   DebugPage(controller: c),
                 ],

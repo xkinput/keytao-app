@@ -11,10 +11,10 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        val channel = KeytaoAndroidChannel(this)
+        val methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "keytao/android")
+        val channel = KeytaoAndroidChannel(this, methodChannel)
         androidChannel = channel
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "keytao/android")
-            .setMethodCallHandler(channel)
+        methodChannel.setMethodCallHandler(channel)
     }
 
     override fun onRequestPermissionsResult(

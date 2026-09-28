@@ -36,7 +36,10 @@ import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.MethodCallHandler {
+class KeytaoAndroidChannel(
+    private val activity: Activity,
+    private val channel: MethodChannel,
+) : MethodChannel.MethodCallHandler {
     private val mainHandler = Handler(Looper.getMainLooper())
     // Both legacy permission flows share one dialog without losing pending replies.
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
@@ -598,6 +601,21 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
 
                 JZipFile(zipFile).use { zip ->
                     val allEntries = zip.entries().toList()
+                    val totalFiles = allEntries.count { !it.isDirectory }
+                    var processed = 0
+                    val emitProgress: (String) -> Unit = { fname ->
+                        if (totalFiles > 0) {
+                            val pct = (61 + processed * 38 / totalFiles).coerceAtMost(99)
+                            val payload = mapOf(
+                                "stage" to "extracting",
+                                "percent" to pct,
+                                "message" to "正在安装... $processed/$totalFiles: $fname",
+                            )
+                            mainHandler.post {
+                                channel.invokeMethod("installProgress", payload)
+                            }
+                        }
+                    }
                     val zipLuaFilenames = mutableSetOf<String>()
                     var dcEntry: java.util.zip.ZipEntry? = null
                     var rimeLuaEntry: java.util.zip.ZipEntry? = null
@@ -648,11 +666,13 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, dcMergeResult.mergedContent.toByteArray(), relative, merged = true) }
                                 catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                                processed++; emitProgress(filename)
                             }
                             filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, rimeLuaMergeResult.mergedContent.toByteArray(), relative, merged = true) }
                                 catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                                processed++; emitProgress(filename)
                             }
                             else -> {
                                 val dir = try { getOrCreateDir(dirPart) } catch (e: Exception) {
@@ -665,6 +685,7 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
                                 if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
                                 pfd.use { FileOutputStream(it.fileDescriptor).buffered(65536).use { out -> zip.getInputStream(entry).copyTo(out, 65536) } }
                                 logs.add("[OK] $relative")
+                                processed++; emitProgress(filename)
                             }
                         }
                     }
