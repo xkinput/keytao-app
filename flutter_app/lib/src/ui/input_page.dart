@@ -45,12 +45,6 @@ class MacosImeCard extends StatelessWidget {
       ),
     ),
     children: [
-      if (controller.macosIme?.installed == true)
-        StatusMessage(
-          AppStrings.macosLoginWarning,
-          color: warningColor(context),
-          icon: FLucideIcons.triangleAlert,
-        ),
       if (controller.macosIme?.appPath case final path?)
         ValueRow(AppStrings.systemLocation, path),
       if (controller.macosImeError case final error?) ErrorMessage(error),

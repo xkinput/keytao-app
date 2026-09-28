@@ -56,8 +56,6 @@ abstract final class AppStrings {
   static const schemeMissing = '未安装方案';
   static const pendingDeploy = '待部署';
   static const usable = '可使用';
-  static const macosLoginWarning =
-      '首次安装或更新 KeyTao 后，请注销并重新登录 macOS，再到系统设置中添加 KeyTao 输入法。';
   static const systemLocation = '系统位置：';
   static const directory = '目录：';
   static const selection = '选择：';
