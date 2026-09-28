@@ -614,7 +614,7 @@ void main() {
   });
 
   test(
-    'permission redirect precedes any download and migration error logs once',
+    'storage gates downloads and permits deployment once granted and writable',
     () async {
       controller.latestRelease = release;
       android.permission = {'granted': false, 'writable': false, 'message': ''};
@@ -625,27 +625,26 @@ void main() {
         controller.operationLogs.first,
         contains('[ANDROID PERMISSION] 需要文件访问权限'),
       );
-      android.permission = {
-        'granted': true,
-        'writable': true,
-        'migrationError': 'migration failed',
-        'deployError': 'migration deploy failed',
-      };
-      await controller.install();
-      await controller.install();
+      android.permission = {'granted': true, 'writable': false};
+      core.calls.clear();
+      expect(await controller.install(), isFalse);
+      expect(core.calls, ['permission', 'permissionSettings']);
+      expect(SetupStep.storage.isComplete(controller), isFalse);
+
+      android.permission = {'granted': true, 'writable': true};
+      controller.local = installedLocal;
+      core.local = deployedLocal;
+      core.calls.clear();
+      expect(await controller.deploy(), isTrue);
       expect(
-        controller.deploySteps
-            .where((step) => step.message == 'migration deploy failed')
-            .length,
-        lessThanOrEqualTo(1),
+        core.calls,
+        containsAllInOrder(['permission', 'deployImeData']),
       );
+      expect(SetupStep.storage.isComplete(controller), isTrue);
+      expect(controller.setupReady, isTrue);
       expect(
-        controller.operationLogs
-            .where(
-              (line) => line.contains('[DEPLOY ERROR] migration deploy failed'),
-            )
-            .length,
-        1,
+        controller.deploySteps.any((step) => step.state == DeployStepState.failed),
+        isFalse,
       );
     },
   );

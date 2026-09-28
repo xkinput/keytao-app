@@ -34,10 +34,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
           SetupStep.deploy,
         ]
       : widget.controller.setupSteps;
-  bool _done(SetupStep step) =>
-      step == SetupStep.storage && widget.controller.isAndroid
-      ? widget.controller.migrationReady
-      : step.isComplete(widget.controller);
+  bool _done(SetupStep step) => step.isComplete(widget.controller);
   int get _firstIncomplete => _steps.indexWhere((step) => !_done(step));
   int get _initialIndex {
     if (widget.controller.isIos) return _index;
@@ -168,7 +165,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       SetupStep.fullAccess =>
         '${AppStrings.iosEnableFullAccess}\n${AppStrings.iosFullAccessDescription}',
       SetupStep.select => AppStrings.selectDescription,
-      SetupStep.storage || SetupStep.migration => c.permissionDescription,
+      SetupStep.storage => c.permissionDescription,
       SetupStep.install =>
         c.isIos ? AppStrings.iosInstallDeploy : AppStrings.installDescription,
       SetupStep.deploy =>
@@ -182,11 +179,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
     final errors = <String>{
       if (c.isAndroid) ...[
         if (c.error?.isNotEmpty == true) c.error!,
-        if (c.migrationError?.isNotEmpty == true) c.migrationError!,
         if (c.installError?.isNotEmpty == true) c.installError!,
         if (c.releaseError?.isNotEmpty == true) c.releaseError!,
-        if ((c.storage?['deployError'] as String?)?.isNotEmpty == true)
-          c.storage!['deployError'] as String,
       ] else ...[
         if (step == SetupStep.component && c.macosImeError != null)
           c.macosImeError!,
@@ -201,7 +195,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       progress = 1;
     } else if (c.local?.installed == true) {
       progress = .9;
-    } else if (c.migrationReady) {
+    } else if (c.storageReady) {
       progress = .72;
     } else if (c.ime?['selected'] == true) {
       progress = .55;
@@ -386,9 +380,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                               ActionRow(
                                 children: [
                                   ActionButton(
-                                    c.storage?['granted'] == true
-                                        ? AppStrings.retryMigration
-                                        : AppStrings.authorizeStorage,
+                                    AppStrings.authorizeStorage,
                                     primary: true,
                                     onPress: c.canOpenStorageSettings
                                         ? c.openStoragePermissionSettings

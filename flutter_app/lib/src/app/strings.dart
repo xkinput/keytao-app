@@ -150,7 +150,6 @@ abstract final class AppStrings {
   static const resetMobileKeyboard = '恢复移动端键盘默认设置';
   static const storagePermission = '需要文件访问权限';
   static const openStoragePermission = '开启文件访问权限';
-  static const retryMigration = '重试数据迁移';
   static const androidOnboarding = '启用 Android 输入法';
   static const ready = '已就绪';
   static const needsSetup = '待配置';

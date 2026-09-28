@@ -88,7 +88,6 @@ enum AppPage {
 
 enum SetupStep {
   storage('文件访问权限'),
-  migration('数据迁移'),
   component('输入法组件'),
   install(AppStrings.installScheme),
   deploy(AppStrings.deployScheme),
@@ -102,7 +101,6 @@ enum SetupStep {
 
   bool isComplete(AppController c) => switch (this) {
     storage => c.storageReady,
-    migration => c.migrationReady,
     component => c.macosIme?.installed == true,
     install => c.local?.installed == true,
     deploy => c.local?.deployed == true,
@@ -136,10 +134,9 @@ extension AppViewOptions on AppController {
       SetupStep.install,
       SetupStep.deploy,
     ] else ...[
-      if (isAndroid) ...[
-        SetupStep.storage,
-        SetupStep.migration,
-      ] else
+      if (isAndroid)
+        SetupStep.storage
+      else
         SetupStep.component,
       SetupStep.install,
       SetupStep.deploy,

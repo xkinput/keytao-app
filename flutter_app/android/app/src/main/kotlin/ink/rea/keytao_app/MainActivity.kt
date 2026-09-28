@@ -32,7 +32,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        KeytaoStorageMigration.start(applicationContext)
+        KeytaoAndroidPaths.retryResolution()
         super.onCreate(savedInstanceState)
         KeytaoRuntimeLog.adoptAppLoggerIfEnabled()
     }
@@ -40,7 +40,6 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         KeytaoAndroidPaths.retryResolution()
-        KeytaoStorageMigration.start(applicationContext)
         KeytaoRuntimeLog.adoptAppLoggerIfEnabled()
     }
 }

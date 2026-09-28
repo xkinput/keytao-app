@@ -20,7 +20,7 @@
 - `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidImeConfig.kt`：加载用户目录下的 `keyboard.yaml` / `android_ime.json`，失败时 fallback 到内置 raw 配置；结果按文件签名缓存。
 - `src/main/kotlin/ink/rea/keytao_app/KeytaoEditorPolicy.kt`：解析 `EditorInfo`，产出 Enter 决策、Enter 键帽文案、初始键盘层和隐私模式（密码 / 免学习 / 免建议）。
 - `src/main/kotlin/ink/rea/keytao_app/KeytaoRimeInput.kt`：被拒按键与多字符 `rimeInput` 的结果保序规则，抽成 `KeytaoRimeKeySink` 便于单测。
-- `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidChannel.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责权限请求与 App 后台迁移门禁。
+- `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidChannel.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责文件访问权限请求，不执行数据迁移。
 - `crates/keytao-app-core/src/android_jni/mod.rs`：Android JNI bridge，直接创建 `keytao_core::ImeRuntime` / `ImeRuntimeSession`，并调用 `keytao-theme` 生成主题和 UI model JSON。
 - `scripts/android-librime-runtime.sh`：Android ABI runtime 管理脚本，导入/校验 `librime.so` 闭包，并同步到 Gradle `jniLibs` 和 assets。
 - `crates/librime-sys/build.rs`：本地 patched `librime-sys`，Android target 会按 ABI 自动查找 `vendor/librime/android/<abi>`，并要求 Android NDK sysroot。
@@ -80,7 +80,7 @@ Android 不需要像 macOS TIS 或 Windows TSF 那样写系统注册表/输入�
 
 1. Android 系统按需创建 `KeytaoInputMethodService`。
 2. `onCreate()` 创建 `KeytaoImeEngine(applicationContext)`。
-3. `KeytaoImeEngine.userDir` 通过 `KeytaoAndroidPaths.userRootOrNull(context)` 在后台解析唯一共享目录；未解锁、未挂载、缺权限或 App 迁移未完成时等待。迁移只在 App 进程执行，IME 不执行迁移或部署。
+3. `KeytaoImeEngine.userDir` 通过 `KeytaoAndroidPaths.userRootOrNull(context)` 在后台解析唯一共享目录；未解锁、未挂载、缺权限或目录不可读写时等待。所有进程均不执行数据迁移，IME 不执行部署。
 4. 如果 APK assets 中存在 `keytao-rime-data/default.yaml`，先解包到用户目录下的 `rime-data`。
 5. 查找 shared data 目录，要求目录中至少有 `default.yaml`。
 6. `KeytaoNativeBridge.engineAvailable()` 确认 native library 已加载。
@@ -106,7 +106,7 @@ Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 
 
 解析要求用户已解锁、外部存储已挂载、权限已授予、目录存在或可创建且可读写。只缓存成功；失败探测节流 500 ms，慢调用不持有路径锁。`NOT_UNLOCKED_OR_NOT_MOUNTED` 对应 IME 准备中文案，输入视图显示时每秒重试、每次最多 30 次，隐藏/销毁取消；恢复后重新加载布局与主题。`PERMISSION_MISSING` 显示「请在 KeyTao App 中开启文件访问权限」，只在再次显示输入视图时探测，不消耗定时重试预算。App 安装/部署缺权限时返回「需要文件访问权限」。
 
-App 启动及授权返回后在后台迁移旧 `<getExternalFilesDir(null)>/keytao`、`<filesDir>/keytao`：进程内互斥加稳定的共享根目录同级 `.keytao-migration.lock` 文件锁，先用 ActivityManager 枚举本 UID 的 `:ime` / `:rime_deployer`，killProcess 并等待退出。按内容的最新修改时间选一个旧根；已有共享内容先重命名为 `keytao-old-yyyyMMdd-HHmmss`（重名加序号，永不删除）。在同级临时目录复制全部内容但排除 build 和旧迁移元数据，递归核验每个文件大小，再重命名发布到唯一根目录，随后删除两个旧根。核验失败删除临时文件、保留旧根和备份并向 UI 报错。清理标记保证发布后中断只续做清理，不重选已部分删除的源。仅共享根有内容时原样使用；没有旧用户文件/用户词库时不迁移。成功迁移写 reload stamp，仅存在已安装方案时通过现有 deploy client 部署；待部署标记支持重启后继续。
+2026-09-28 owner decision：不进行数据迁移，直接使用 `/sdcard/keytao`，唯一授权门槛是文件访问权限。旧 `<getExternalFilesDir(null)>/keytao`、`<filesDir>/keytao` 不读取、复制、清理或删除，也不影响共享目录解析。App 启动、恢复及授权返回后仅重置失败解析的重试节流，不触发自动部署。Android 11+ 使用所有文件访问权限设置，旧版请求 `WRITE_EXTERNAL_STORAGE`；引导中的文件访问权限步骤只检查 `granted && writable`。安装和手动部署继续使用同一共享目录。
 
 代价：需要所有文件访问权限，数据对持有同类权限的其他 App 可见，并承担共享存储 FUSE 开销。FileProvider 通过 `external-path path="keytao/clipboard/"` 分享媒体。
 

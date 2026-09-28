@@ -8,7 +8,6 @@ import java.util.concurrent.Executors
 enum class Readiness {
     STORAGE_NOT_READY,
     PERMISSION_MISSING,
-    MIGRATION_PENDING,
     UNWRITABLE,
     NOT_INSTALLED,
     NOT_DEPLOYED,
@@ -105,7 +104,6 @@ class KeytaoImeEngine(context: Context) {
     fun refreshReadiness(): Readiness {
         val root = userDir ?: return when (KeytaoAndroidPaths.lastStatus) {
             StorageStatus.PERMISSION_MISSING -> Readiness.PERMISSION_MISSING
-            StorageStatus.MIGRATION_PENDING -> Readiness.MIGRATION_PENDING
             else -> Readiness.STORAGE_NOT_READY
         }
         warmUpIfStorageReady()

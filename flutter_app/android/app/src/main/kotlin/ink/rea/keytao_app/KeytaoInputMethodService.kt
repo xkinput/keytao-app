@@ -2304,7 +2304,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         engine.runInBackground {
             val readiness = engine.refreshReadiness()
             val rootAvailable = readiness != Readiness.STORAGE_NOT_READY &&
-                readiness != Readiness.PERMISSION_MISSING && readiness != Readiness.MIGRATION_PENDING
+                readiness != Readiness.PERMISSION_MISSING
             val recovered = reloadPresentation && rootAvailable
             val config = if (recovered) runCatching { KeytaoAndroidImeConfig.load(this) }.getOrNull() else null
             val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
@@ -2328,7 +2328,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val message = when (readiness) {
             Readiness.STORAGE_NOT_READY -> preparingMessage
             Readiness.PERMISSION_MISSING -> "请在 KeyTao App 中开启文件访问权限"
-            Readiness.MIGRATION_PENDING -> "请打开 KeyTao App 完成数据迁移"
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"

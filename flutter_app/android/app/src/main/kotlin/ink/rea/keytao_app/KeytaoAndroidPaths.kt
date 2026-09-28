@@ -9,7 +9,7 @@ import android.os.Environment
 import android.os.UserManager
 import java.io.File
 
-enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSING, MIGRATION_PENDING }
+enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSING }
 
 /**
  * Where the IME keeps schemas, deployment output and its YAML configuration.
@@ -18,8 +18,8 @@ enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSIN
  * root: Environment.getExternalStorageDirectory()/keytao (/sdcard/keytao).
  * Unlock, mounted storage, file access and a readable/writable directory are
  * required. Only success is cached; failures retry after 500 ms. There is no
- * private root, fallback, mirroring or IME-side migration. Slow calls never run
- * under the paths monitor. App-process migration gates consumers until complete.
+ * private root, fallback, mirroring or migration. Slow calls never run under
+ * the paths monitor.
  */
 object KeytaoAndroidPaths {
     private const val rootDirectoryName = "keytao"
@@ -42,9 +42,13 @@ object KeytaoAndroidPaths {
     fun userRoot(context: Context): File = userRootOrNull(context)
         ?: throw IllegalStateException(when (lastStatus) {
             StorageStatus.PERMISSION_MISSING -> "需要文件访问权限"
-            StorageStatus.MIGRATION_PENDING -> "请打开 KeyTao App 完成数据迁移"
             else -> "存储尚未就绪"
         })
+
+    fun requireRoot(context: Context): File {
+        check(hasStorageAccess(context)) { "需要文件访问权限" }
+        return userRoot(context)
+    }
 
     @Suppress("DEPRECATION")
     internal fun sharedRoot(): File = File(Environment.getExternalStorageDirectory(), rootDirectoryName)
@@ -72,7 +76,6 @@ object KeytaoAndroidPaths {
         resolveUserRoot(
             unlockedAndMounted = { override != null || isUnlockedAndMounted(appContext) },
             hasAccess = { override != null || hasStorageAccess(appContext) },
-            migrationPending = { override == null && KeytaoStorageMigration.blocksRoot(appContext, it) },
             rootProvider = { override ?: sharedRoot() },
         )
         val events = mutableListOf<Pair<String, Double>>()
@@ -105,7 +108,6 @@ object KeytaoAndroidPaths {
         unlockedAndMounted: () -> Boolean = { true },
         hasAccess: () -> Boolean = { true },
         usable: (File) -> Boolean = ::isWritable,
-        migrationPending: (File) -> Boolean = { false },
         rootProvider: () -> File?,
     ): File? {
         cachedRoot?.let { return it }
@@ -121,12 +123,7 @@ object KeytaoAndroidPaths {
             when {
                 !unlockedAndMounted() -> null
                 !hasAccess() -> { status = StorageStatus.PERMISSION_MISSING; null }
-                else -> rootProvider()?.takeIf {
-                    if (migrationPending(it)) {
-                        status = StorageStatus.MIGRATION_PENDING
-                        false
-                    } else usable(it)
-                }
+                else -> rootProvider()?.takeIf(usable)
             }
         }.getOrNull()
         synchronized(this) {

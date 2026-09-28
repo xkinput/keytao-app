@@ -146,7 +146,7 @@ pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallRe
     ))
 }
 
-/// Android SAF sequence: confirm storage permission/migration, pickDirectory,
+/// Android SAF sequence: confirm storage permission, pickDirectory,
 /// then listFiles/readLocalSchemas through the platform channel. Download here,
 /// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
 /// jsonEncode(result) to finish_android_install for the DTO and done event.

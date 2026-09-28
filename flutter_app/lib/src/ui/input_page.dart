@@ -258,13 +258,11 @@ class AndroidImeCard extends StatelessWidget {
       icon: FLucideIcons.keyboard,
       children: [
         ValueRow(AppStrings.directory, c.defaultDir),
-        if (c.storage != null &&
-            (c.storage!['granted'] != true ||
-                c.migrationError?.isNotEmpty == true))
+        if (c.storage != null && c.storage!['granted'] != true)
           ActionRow(
             children: [
               ActionButton(
-                c.storageActionLabel,
+                AppStrings.openStoragePermission,
                 icon: FLucideIcons.folderOpen,
                 onPress: c.canOpenStorageSettings
                     ? c.openStoragePermissionSettings
@@ -272,7 +270,6 @@ class AndroidImeCard extends StatelessWidget {
               ),
             ],
           ),
-        if (c.migrationError case final error?) ErrorMessage(error),
         status(AppStrings.enableKeytao, c.ime?['enabled'] == true),
         status(AppStrings.selectKeytao, c.ime?['selected'] == true),
         if (c.imeMessage?.isNotEmpty == true) StatusMessage(c.imeMessage!),

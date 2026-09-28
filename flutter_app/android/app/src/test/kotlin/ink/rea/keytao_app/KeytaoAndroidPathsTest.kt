@@ -92,18 +92,15 @@ class KeytaoAndroidPathsTest {
         assertEquals(temporary, KeytaoAndroidPaths.resolveUserRoot({ 1L }) { temporary })
     }
 
-    @Test fun `pending migration has a distinct status without probing or caching the root`() {
-        val root = temporary.resolve("keytao")
-        assertNull(KeytaoAndroidPaths.resolveUserRoot(
-            migrationPending = { true },
-            usable = { error("Pending migration must not create or probe the root") },
-        ) { root })
-        assertEquals(StorageStatus.MIGRATION_PENDING, KeytaoAndroidPaths.lastStatus)
-        assertFalse(KeytaoAndroidPaths.isUserRootResolved())
-        assertFalse(root.exists())
-        KeytaoAndroidPaths.retryResolution()
-        assertEquals(root, KeytaoAndroidPaths.resolveUserRoot(migrationPending = { false }) { root })
+    @Test fun `shared root is usable with existing data and a dangling log symlink`() {
+        val root = temporary.resolve("keytao").apply { mkdirs() }
+        val theme = root.resolve("theme.yaml").apply { writeText("existing theme") }
+        val log = root.resolve("log").apply { mkdirs() }.resolve("current")
+        Files.createSymbolicLink(log.toPath(), root.resolve("missing.log").toPath())
+        assertEquals(root, KeytaoAndroidPaths.resolveUserRoot { root })
         assertEquals(StorageStatus.READY, KeytaoAndroidPaths.lastStatus)
+        assertEquals("existing theme", theme.readText())
+        assertTrue(Files.isSymbolicLink(log.toPath()))
     }
 
     @Test fun `slow filesystem probe holds no monitor and first success wins`() {

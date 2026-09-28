@@ -101,7 +101,6 @@ class AppController extends ChangeNotifier {
   bool _startupStarted = false;
   bool _logsWhenIdle = false;
   int _releaseRequest = 0;
-  String? _reportedMigrationDeployError;
   AppPage activePage = AppPage.input;
   OperationKind? operation;
   bool checkingStorage = false;
@@ -304,10 +303,6 @@ class AppController extends ChangeNotifier {
       ? AppStrings.englishSchema
       : AppStrings.englishAscii;
   String? get englishModeHint => englishReady ? null : AppStrings.englishHint;
-  String? get migrationError => storage?['migrationError'] as String?;
-  String get storageActionLabel => storage?['granted'] == true
-      ? AppStrings.retryMigration
-      : AppStrings.openStoragePermission;
   bool get canOpenStorageSettings =>
       !busy && storage?['canOpenSettings'] != false;
   String get permissionDescription =>
@@ -337,16 +332,12 @@ class AppController extends ChangeNotifier {
     linuxImeError,
     imeUiError,
     debugError,
-    migrationError,
     ...deploySteps.map((step) => step.message),
   ].contains(message);
   String? get unhandledError => _isInlineError(error) ? null : error;
 
   bool get storageReady =>
       storage?['granted'] == true && storage?['writable'] == true;
-  bool get migrationReady =>
-      storageReady &&
-      (storage?['migrationError'] as String?)?.isNotEmpty != true;
   bool get englishReady =>
       addon?.englishAvailable == true ||
       (addon?.installed == true && addon?.deployed == true) ||
@@ -354,9 +345,7 @@ class AppController extends ChangeNotifier {
   bool get setupReady {
     if (local?.installed != true || local?.deployed != true) return false;
     if (isAndroid) {
-      return migrationReady &&
-          ime?['enabled'] == true &&
-          ime?['selected'] == true;
+      return storageReady && ime?['enabled'] == true && ime?['selected'] == true;
     }
     return isIos || !hasOnboarding || macosIme?.installed == true;
   }
@@ -790,18 +779,6 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readStorage() async {
     storage = await android.storagePermissionStatus();
-    final failure = storage?['deployError'] as String?;
-    if (failure != null &&
-        failure.isNotEmpty &&
-        failure != _reportedMigrationDeployError &&
-        !isDeploying) {
-      deploySteps.clear();
-      _deployStep(failure, DeployStepState.failed);
-      addOperationLogs(['[DEPLOY ERROR] $failure']);
-      _reportedMigrationDeployError = failure;
-    } else if (failure == null || failure.isEmpty) {
-      _reportedMigrationDeployError = null;
-    }
   }
 
   Future<void> _requireStorage({
@@ -829,9 +806,6 @@ class AppController extends ChangeNotifier {
           }
         }
         throw StateError(failure);
-      }
-      if (migrationError?.isNotEmpty == true) {
-        throw StateError(storage!['migrationError'] as String);
       }
     } finally {
       checkingStorage = false;

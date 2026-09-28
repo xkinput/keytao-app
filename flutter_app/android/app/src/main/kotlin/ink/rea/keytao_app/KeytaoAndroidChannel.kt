@@ -159,7 +159,7 @@ class KeytaoAndroidChannel(
     private fun keytaoRoot(reply: Reply) {
         Thread {
             try {
-                val root = KeytaoStorageMigration.requireRoot(activity)
+                val root = KeytaoAndroidPaths.requireRoot(activity)
                 reply.success(mutableMapOf<String, Any?>().apply {
                     put("path", root.absolutePath)
                     put("themePath", KeytaoAndroidPaths.themeFile(activity).absolutePath)
@@ -194,7 +194,7 @@ class KeytaoAndroidChannel(
         Thread {
             try {
                 cleanOldRuntimeLogExports()
-                val logDir = File(KeytaoStorageMigration.requireRoot(activity), "log")
+                val logDir = File(KeytaoAndroidPaths.requireRoot(activity), "log")
                 val logFiles = logDir.listFiles()
                     ?.filter { it.isFile && it.name.matches(Regex("""keytao-.*\.log.*""")) }
                     ?.sortedBy { it.name }
@@ -352,7 +352,6 @@ class KeytaoAndroidChannel(
     private fun storagePermissionStatus(reply: Reply) {
         Thread {
             try {
-                KeytaoStorageMigration.prepare(activity)
                 reply.success(resolveStoragePermissionStatus())
             } catch (ex: Exception) {
                 reply.error(ex.message ?: "Failed to read Android storage permission status")
@@ -363,15 +362,8 @@ class KeytaoAndroidChannel(
     private fun openStoragePermissionSettings(reply: Reply) {
         try {
             if (KeytaoAndroidPaths.hasStorageAccess(activity)) {
-                Thread {
-                    try {
-                        KeytaoAndroidPaths.retryResolution()
-                        KeytaoStorageMigration.prepare(activity, retryFailure = true)
-                        reply.success()
-                    } catch (ex: Exception) {
-                        reply.error(ex.message ?: "Failed to retry storage migration")
-                    }
-                }.start()
+                KeytaoAndroidPaths.retryResolution()
+                reply.success()
                 return
             }
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -397,7 +389,6 @@ class KeytaoAndroidChannel(
         try {
             if (KeytaoAndroidPaths.hasStorageAccess(activity)) {
                 KeytaoAndroidPaths.retryResolution()
-                KeytaoStorageMigration.start(activity.applicationContext)
             } else if (!activity.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
                 openApplicationDetailsSettings()
             }
@@ -774,7 +765,7 @@ class KeytaoAndroidChannel(
 
         Thread {
             try {
-                val root = KeytaoStorageMigration.requireRoot(activity)
+                val root = KeytaoAndroidPaths.requireRoot(activity)
                 if (!KeytaoAndroidPaths.isWritable(root)) {
                     return@Thread reply.error("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
                 }
@@ -890,7 +881,7 @@ class KeytaoAndroidChannel(
 
         Thread {
             try {
-                val root = KeytaoStorageMigration.requireRoot(activity)
+                val root = KeytaoAndroidPaths.requireRoot(activity)
                 if (!KeytaoAndroidPaths.isWritable(root)) {
                     return@Thread reply.error("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
                 }
@@ -929,7 +920,7 @@ class KeytaoAndroidChannel(
     private fun deployImeData(reply: Reply) {
         Thread {
             try {
-                val root = KeytaoStorageMigration.requireRoot(activity)
+                val root = KeytaoAndroidPaths.requireRoot(activity)
                 if (!KeytaoAndroidPaths.hasInstalledSchema(root)) {
                     return@Thread reply.error("请先安装键道方案")
                 }
@@ -944,7 +935,6 @@ class KeytaoAndroidChannel(
                 ) { result ->
                     try {
                         if (result.success) {
-                            KeytaoStorageMigration.deploymentSucceeded(root)
                             reply.success(mutableMapOf<String, Any?>().apply {
                                 put("path", result.path)
                                 put("schemaName", result.schemaName)
@@ -1038,8 +1028,6 @@ class KeytaoAndroidChannel(
             put("requiresManageAllFiles", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
             put("canOpenSettings", true)
             put("message", if (granted) "" else "需要文件访问权限")
-            KeytaoStorageMigration.error?.let { put("migrationError", it) }
-            KeytaoStorageMigration.deployError?.let { put("deployError", it) }
         }
     }
 

@@ -60,7 +60,7 @@ Future<InstallResultDto> installSchemeToDir({
   required String dir,
 }) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(url: url, dir: dir);
 
-/// Android SAF sequence: confirm storage permission/migration, pickDirectory,
+/// Android SAF sequence: confirm storage permission, pickDirectory,
 /// then listFiles/readLocalSchemas through the platform channel. Download here,
 /// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
 /// jsonEncode(result) to finish_android_install for the DTO and done event.
