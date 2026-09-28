@@ -1,40 +1,15 @@
-import 'dart:io';
-
-import 'package:flutter/material.dart';
-import 'package:macos_ui/macos_ui.dart';
+import 'package:flutter/widgets.dart';
 
 import 'src/app/app.dart';
 import 'src/app/bootstrap.dart';
 import 'src/app/controller.dart';
-import 'src/app/strings.dart';
-import 'src/app/theme.dart';
-import 'src/macos/app.dart';
+import 'src/ui/startup.dart';
 
 export 'src/app/bootstrap.dart' show hostPlatform;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  if (Platform.isMacOS) {
-    await const MacosWindowUtilsConfig().apply();
-  }
-  runApp(
-    Platform.isMacOS
-        ? const MacosStartup()
-        : const MaterialApp(
-            home: Scaffold(
-              body: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
-                    Text(AppStrings.boot),
-                  ],
-                ),
-              ),
-            ),
-          ),
-  );
+  runApp(AppStartup(platform: hostPlatform()));
   try {
     final session = await bootstrap();
     runApp(
@@ -44,22 +19,6 @@ Future<void> main() async {
       ),
     );
   } catch (error) {
-    runApp(
-      Platform.isMacOS
-          ? MacosStartup(error: errorText(error))
-          : MaterialApp(
-              theme: keytaoTheme(Brightness.light),
-              darkTheme: keytaoTheme(Brightness.dark),
-              home: Scaffold(
-                appBar: AppBar(title: const Text('KeyTao')),
-                body: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: SelectableText('启动失败：${errorText(error)}'),
-                  ),
-                ),
-              ),
-            ),
-    );
+    runApp(AppStartup(platform: hostPlatform(), error: errorText(error)));
   }
 }

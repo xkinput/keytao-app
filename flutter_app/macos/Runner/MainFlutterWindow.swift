@@ -1,21 +1,19 @@
 import Cocoa
 import FlutterMacOS
-import macos_window_utils
 
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
-    let windowController = MacOSWindowUtilsViewController()
+    let windowController = FlutterViewController()
     self.contentViewController = windowController
     self.setContentSize(NSSize(width: 900, height: 680))
     self.contentMinSize = NSSize(width: 720, height: 520)
     self.center()
 
-    MainFlutterWindowManipulator.start(mainFlutterWindow: self)
-    RegisterGeneratedPlugins(registry: windowController.flutterViewController)
+    RegisterGeneratedPlugins(registry: windowController)
 
     let channel = FlutterMethodChannel(
       name: "ink.rea.keytao/window",
-      binaryMessenger: windowController.flutterViewController.engine.binaryMessenger
+      binaryMessenger: windowController.engine.binaryMessenger
     )
     channel.setMethodCallHandler { [weak self] call, result in
       if call.method == "pickDirectory" {

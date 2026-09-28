@@ -1,0 +1,173 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart';
+import 'package:keytao/src/app/app.dart';
+import 'package:keytao/src/app/options.dart';
+import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/onboarding.dart';
+import 'package:keytao/src/ui/shell.dart';
+
+import 'view_fixture.dart';
+
+void unifiedGateCases(BridgePlatform platform) {
+  final target = platform == BridgePlatform.macOs
+      ? TargetPlatform.macOS
+      : TargetPlatform.android;
+  for (final width in [400.0, 1000.0]) {
+    for (final completed in [false, true]) {
+      testWidgets(
+        '${platform.name} $width completed=$completed gates unified navigation',
+        (tester) async {
+          final c = ViewController(platform);
+          addTearDown(c.dispose);
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = Size(width, 860);
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(
+            tester.platformDispatcher.clearPlatformBrightnessTestValue,
+          );
+          final titleCalls = <String>[];
+          const channel = MethodChannel('ink.rea.keytao/window');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            (call) async {
+              expect(call.method, 'setTitle');
+              titleCalls.add(call.arguments as String);
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(channel, null),
+          );
+          await tester.pumpWidget(
+            KeyTaoApp(
+              controller: c,
+              initialOnboarding: OnboardingDto(completed: completed),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byType(OnboardingPage),
+            completed ? findsNothing : findsOneWidget,
+          );
+          expect(
+            find.byType(AppShell),
+            completed ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byType(FSidebar),
+            completed && width >= 720 ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byType(FBottomNavigationBar),
+            completed && width < 720 ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byType(PlatformMenuBar),
+            platform == BridgePlatform.macOs ? findsOneWidget : findsNothing,
+          );
+          if (completed) {
+            final input = find.byKey(const PageStorageKey('ime'));
+            await tester.drag(input, const Offset(0, -300));
+            await tester.pumpAndSettle();
+            final scroll = tester.state<ScrollableState>(
+              find
+                  .descendant(of: input, matching: find.byType(Scrollable))
+                  .first,
+            );
+            final offset = scroll.position.pixels;
+            if (platform == BridgePlatform.android) {
+              expect(offset, greaterThan(0));
+            }
+            for (final page in [...AppPage.values.skip(1), AppPage.input]) {
+              await tester.tap(find.byKey(ValueKey('nav-${page.id}')));
+              await tester.pumpAndSettle();
+              expect(c.activePage, page);
+              if (platform == BridgePlatform.macOs) {
+                expect(titleCalls.last, page.title);
+              }
+              expect(find.text(AppStrings.appUpdate), findsOneWidget);
+              expect(tester.takeException(), isNull);
+            }
+            expect(scroll.position.pixels, offset);
+            expect(c.logRefreshes, 1);
+            if (platform == BridgePlatform.macOs) {
+              final viewMenu = tester
+                  .widget<PlatformMenuBar>(find.byType(PlatformMenuBar))
+                  .menus
+                  .whereType<PlatformMenu>()
+                  .singleWhere((menu) => menu.label == '显示');
+              expect(viewMenu.menus.length, AppPage.values.length);
+              for (final page in AppPage.values) {
+                final item = viewMenu.menus[page.index];
+                expect(
+                  (item.shortcut as CharacterActivator).character,
+                  '${page.shortcutDigit}',
+                );
+                expect((item.shortcut as CharacterActivator).meta, isTrue);
+                item.onSelected!();
+                await tester.pumpAndSettle();
+                expect(c.activePage, page);
+                expect(titleCalls.last, page.title);
+              }
+            }
+          }
+          tester.platformDispatcher.platformBrightnessTestValue =
+              Brightness.dark;
+          await tester.pumpAndSettle();
+          final colors = FTheme.of(tester.element(find.byType(FScaffold)))
+              .colors;
+          expect(colors.brightness, Brightness.dark);
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        },
+        variant: TargetPlatformVariant.only(target),
+      );
+    }
+    testWidgets(
+      '${platform.name} $width onboarding install error stays inline',
+      (tester) async {
+        final c = ViewController(platform)
+          ..installError = AppStrings.installFailed;
+        addTearDown(c.dispose);
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = Size(width, 860);
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        const channel = MethodChannel('ink.rea.keytao/window');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (_) async => null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          KeyTaoApp(
+            controller: c,
+            initialOnboarding: const OnboardingDto(completed: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+        for (var i = 0; i < (c.isAndroid ? 3 : 1); i++) {
+          await tester.tap(find.text('继续'));
+          await tester.pumpAndSettle();
+        }
+        expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
+        expect(find.text(AppStrings.installFailed), findsOneWidget);
+        expect(find.byType(FDialog), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(target),
+    );
+  }
+}

@@ -1,121 +1,105 @@
 import 'package:flutter/material.dart';
+import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
-import '../app/widgets.dart';
-import '../scheme/operation_progress.dart';
-import '../scheme/version_picker.dart';
+import 'progress.dart';
+import 'scheme_page.dart';
+import 'widgets.dart';
 
 class ExtensionPage extends StatelessWidget {
   const ExtensionPage({super.key, required this.controller});
   final AppController controller;
-
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final schemas = c.customSchemas;
     return AppPageBody(
       controller: c,
       page: AppPage.extension,
       children: [
-        SectionCard(
+        Section(
           title: AppStrings.customDirectory,
-          icon: Icons.folder_open,
+          icon: FLucideIcons.folderOpen,
           children: [
             const Text(AppStrings.customDirectoryDescription),
-            const SizedBox(height: 16),
             VersionPicker(controller: c),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            ActionRow(
               children: [
-                OutlinedButton.icon(
-                  onPressed: c.busy ? null : c.pickCustomDirectory,
-                  icon: const Icon(Icons.folder_open),
-                  label: Text(
-                    c.selectedDirectory == null
-                        ? AppStrings.selectDirectory
-                        : AppStrings.reselectDirectory,
-                  ),
+                ActionButton(
+                  c.selectedDirectory == null
+                      ? AppStrings.selectDirectory
+                      : AppStrings.reselectDirectory,
+                  icon: FLucideIcons.folderOpen,
+                  onPress: c.busy ? null : c.pickCustomDirectory,
                 ),
                 if (c.selectedDirectory != null) ...[
-                  OutlinedButton.icon(
-                    onPressed: c.isOpeningCustomDirectory
+                  ActionButton(
+                    c.isOpeningCustomDirectory
+                        ? AppStrings.opening
+                        : AppStrings.openDirectory,
+                    icon: FLucideIcons.externalLink,
+                    onPress: c.isOpeningCustomDirectory
                         ? null
                         : c.openCustomDirectory,
-                    icon: const Icon(Icons.open_in_new),
-                    label: Text(
-                      c.isOpeningCustomDirectory
-                          ? AppStrings.opening
-                          : AppStrings.openDirectory,
-                    ),
                   ),
                   if (c.downloadUrl?.isNotEmpty == true)
-                    FilledButton.icon(
-                      onPressed: c.canInstallCustom
+                    ActionButton(
+                      c.isInstallingCustom
+                          ? AppStrings.installing
+                          : AppStrings.installNow,
+                      primary: true,
+                      icon: FLucideIcons.download,
+                      onPress: c.canInstallCustom
                           ? c.installCustomDirectory
                           : null,
-                      icon: const Icon(Icons.download_outlined),
-                      label: Text(
-                        c.isInstallingCustom
-                            ? AppStrings.installing
-                            : AppStrings.installNow,
-                      ),
                     ),
                 ],
               ],
             ),
-            if (c.selectedDirectory != null) ...[
-              const SizedBox(height: 12),
+            if (c.selectedDirectory case final directory?) ...[
               StatusMessage(
-                c.selectedDirectory!,
-                icon: Icons.check_circle_outline,
-                color: successColor(context),
+                directory,
+                icon: FLucideIcons.folder,
+                color: c.isAndroid ? successColor(context) : null,
               ),
-              if (schemas != null) ...[
+              if (c.customSchemas case final schemas?) ...[
                 if (schemas.schemas.isEmpty)
                   const StatusMessage(AppStrings.noDefaultCustom),
-                if (schemas.schemas.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  const Text(AppStrings.detectedSchemas),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
+                if (schemas.schemas.isNotEmpty)
+                  ActionRow(
                     children: [
+                      const Text(AppStrings.detectedSchemas),
                       for (final schema in schemas.schemas)
-                        Chip(label: Text(schema)),
+                        FBadge(child: Text(schema)),
                     ],
                   ),
-                ],
               ],
               CustomFileList(controller: c),
             ],
-            InstallProgressView(
-              active: c.isInstallingCustom,
-              progress: c.customProgress,
-            ),
-            ErrorMessage(c.customError),
+            if (c.isInstallingCustom)
+              InstallProgressView(active: true, progress: c.customProgress),
+            if (c.customError case final error?) ErrorMessage(error),
             if (c.customResult case final result?) ...[
               StatusMessage(
                 AppStrings.customInstallDone,
-                icon: Icons.check_circle_outline,
+                icon: FLucideIcons.circleCheck,
                 color: successColor(context),
               ),
               if (c.customVerifyFailureCount > 0)
                 ErrorMessage(
                   AppStrings.verifyFailures(c.customVerifyFailureCount),
                 ),
-              ExpansionTile(
+              FAccordion(
                 key: const PageStorageKey('customInstallLogs'),
-                tilePadding: EdgeInsets.zero,
-                title: Text(AppStrings.installLogCount(result.logs.length)),
                 children: [
-                  LogLines(
-                    lines: result.logs,
-                    storageKey: 'customLogs',
-                    height: 192,
-                    colorCoded: true,
+                  FAccordionItem(
+                    title: Text(AppStrings.installLogCount(result.logs.length)),
+                    child: LogLines(
+                      lines: result.logs,
+                      storageKey: 'customLogs',
+                      height: 192,
+                      colorCoded: true,
+                    ),
                   ),
                 ],
               ),
@@ -130,7 +114,6 @@ class ExtensionPage extends StatelessWidget {
 class CustomFileList extends StatelessWidget {
   const CustomFileList({super.key, required this.controller});
   final AppController controller;
-
   @override
   Widget build(BuildContext context) {
     final c = controller;
@@ -140,15 +123,16 @@ class CustomFileList extends StatelessWidget {
         Row(
           children: [
             Expanded(child: Text(AppStrings.itemCount(c.customFiles.length))),
-            TextButton.icon(
-              onPressed: c.busy || c.filesLoading
+            ActionButton(
+              AppStrings.refresh,
+              icon: FLucideIcons.refreshCw,
+              onPress: c.busy || c.filesLoading
                   ? null
                   : c.refreshCustomDirectory,
-              icon: const Icon(Icons.refresh),
-              label: const Text(AppStrings.refresh),
             ),
           ],
         ),
+        const SizedBox(height: 10),
         if (c.filesLoading)
           const StatusMessage(AppStrings.reading)
         else if (c.customFiles.isEmpty)
@@ -163,15 +147,11 @@ class CustomFileList extends StatelessWidget {
               itemCount: c.customFiles.length,
               itemBuilder: (context, index) {
                 final file = c.customFiles[index];
-                return ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    file.isDir
-                        ? Icons.folder_outlined
-                        : Icons.description_outlined,
+                return FTile(
+                  prefix: Icon(
+                    file.isDir ? FLucideIcons.folder : FLucideIcons.fileText,
                   ),
-                  title: Text(file.name),
+                  title: SelectableText(file.name),
                 );
               },
             ),

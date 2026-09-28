@@ -9,15 +9,12 @@ environment:
 dependencies:
   code_assets: ^1.2.1
   cupertino_icons: ^1.0.9
-  dynamic_color: 1.9.0
   flutter:
     sdk: flutter
   flutter_rust_bridge: 2.13.0
   flutter_rust_bridge_hooks: 2.13.0
   forui: 0.27.2
   hooks: ^2.0.2
-  macos_ui: ^2.2.2
-  macos_window_utils: ^1.9.1
 
 dev_dependencies:
   flutter_test:

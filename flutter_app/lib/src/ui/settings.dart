@@ -1,36 +1,109 @@
 import 'package:flutter/material.dart';
+import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
-import '../app/widgets.dart';
 import '../rust/api/types.dart';
+import 'color_picker.dart';
+import 'widgets.dart';
 
 class SettingsCard extends StatelessWidget {
   const SettingsCard({super.key, required this.controller});
   final AppController controller;
-
   @override
   Widget build(BuildContext context) =>
       controller.isAndroid ? _android(context) : _desktop(context);
 
-  Widget _unavailable(String title) => SectionCard(
-    title: title,
-    children: [
-      const Text('设置未读取'),
-      const SizedBox(height: 16),
-      OutlinedButton(
-        onPressed: controller.busy ? null : controller.refreshState,
-        child: const Text('重新读取'),
-      ),
-    ],
-  );
+  Widget _desktop(BuildContext context) {
+    final c = controller;
+    final s = c.uiSettings;
+    return Section(
+      title: AppStrings.imeSettings,
+      icon: FLucideIcons.palette,
+      children: [
+        if (s == null)
+          SettingRow(
+            AppStrings.checking,
+            child: ActionButton(
+              AppStrings.recheck,
+              onPress: c.busy ? null : c.refreshState,
+            ),
+          )
+        else ...[
+          ChoiceSetting<UiColorSchemeDto>(
+            label: '配色方案',
+            value: s.colorScheme,
+            options: colorSchemes,
+            icons: const {
+              UiColorSchemeDto.auto: FLucideIcons.monitor,
+              UiColorSchemeDto.light: FLucideIcons.sun,
+              UiColorSchemeDto.dark: FLucideIcons.moon,
+            },
+            onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
+          ),
+          ChoiceSetting<PanelOrientationDto>(
+            label: '候选排列',
+            value: s.orientation,
+            options: orientations,
+            icons: const {
+              PanelOrientationDto.horizontal: FLucideIcons.columns3,
+              PanelOrientationDto.vertical: FLucideIcons.rows3,
+            },
+            onChanged: c.busy ? null : (value) => c.saveUi(orientation: value),
+          ),
+          ChoiceSetting<EnglishModeDto>(
+            label: AppStrings.englishMode,
+            value: c.desktopEnglishMode,
+            options: c.englishModes,
+            disabled: c.disabledEnglishModes,
+            hint: c.englishModeHint,
+            onChanged: c.busy ? null : c.saveDesktopEnglish,
+          ),
+          SwitchSetting(
+            AppStrings.embedded,
+            value: s.embeddedComposition,
+            stateLabel: s.embeddedComposition ? AppStrings.on : AppStrings.off,
+            hint: AppStrings.embeddedDescription,
+            onChanged: c.busy ? null : c.saveEmbedded,
+          ),
+          SliderSetting(
+            label: AppStrings.candidateFontSize,
+            value: s.fontSize,
+            min: candidateFontMin,
+            max: candidateFontMax,
+            divisions: candidateFontDivisions,
+            icon: FLucideIcons.type,
+            onChanged: c.busy ? null : (value) => c.saveUi(fontSize: value),
+          ),
+          AccentPicker(controller: c),
+          if (s.themePath case final path?)
+            Row(
+              children: [
+                Expanded(child: SelectableText('${AppStrings.theme}$path')),
+                const SizedBox(width: 8),
+                FTooltip(
+                  tipBuilder: (_, _) => const Text(AppStrings.openTheme),
+                  child: FButton.icon(
+                    onPress: c.canOpenTheme ? c.openTheme : null,
+                    variant: FButtonVariant.ghost,
+                    child: const Icon(
+                      FLucideIcons.folderOpen,
+                      semanticLabel: AppStrings.openTheme,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ],
+    );
+  }
 
   Widget _android(BuildContext context) {
     final c = controller;
     final s = c.androidSettings;
     final enabled = !c.busy && s != null;
-    void save(String key, Object value) => c.saveAndroid({key: value});
-
+    void save(String field, Object value) => c.saveAndroid({field: value});
     Widget slider(
       String label,
       String field,
@@ -52,36 +125,29 @@ class SettingsCard extends StatelessWidget {
       onChanged: enabled && available ? (value) => save(field, value) : null,
     );
     Widget toggle(String label, String field, bool value, {String? hint}) =>
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(label),
-          subtitle: hint == null ? null : Text(hint),
+        SwitchSetting(
+          label,
           value: value,
+          hint: hint,
           onChanged: enabled ? (value) => save(field, value) : null,
         );
     Widget choice(
       String label,
       String field,
       String value,
-      Map<String, String> options, {
-      IconData? icon,
-    }) => ChoiceSetting<String>(
+      Map<String, String> options,
+    ) => ChoiceSetting<String>(
       label: label,
       value: value,
       options: options,
       currentLabel: options[value],
-      icon: icon,
       onChanged: enabled ? (value) => save(field, value) : null,
     );
-    return SectionCard(
+    return Section(
       title: AppStrings.mobileKeyboard,
-      icon: Icons.keyboard_outlined,
+      icon: FLucideIcons.keyboard,
       children: [
-        Text(
-          AppStrings.gestures,
-          style: Theme.of(context).textTheme.titleSmall,
-        ),
-        const SizedBox(height: 16),
+        const Text(AppStrings.gestures),
         slider(
           AppStrings.longPressDelay,
           'longPressDelayMs',
@@ -118,7 +184,6 @@ class SettingsCard extends StatelessWidget {
             'standard': AppStrings.standard,
             'fast': AppStrings.fast,
           },
-          icon: Icons.tune,
         ),
         choice(
           AppStrings.backspaceGesture,
@@ -141,7 +206,6 @@ class SettingsCard extends StatelessWidget {
           s?.doubleSpacePeriodEnabled ?? true,
           hint: AppStrings.doubleSpaceHint,
         ),
-        const SizedBox(height: 16),
         slider(
           AppStrings.swipeThreshold,
           'swipeThresholdDp',
@@ -151,9 +215,7 @@ class SettingsCard extends StatelessWidget {
           84,
           'dp',
         ),
-        const Divider(),
-        Text(AppStrings.layout, style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
+        const Text(AppStrings.layout),
         toggle(
           AppStrings.floatingPortrait,
           'floatingPortraitEnabled',
@@ -194,86 +256,16 @@ class SettingsCard extends StatelessWidget {
             'system': AppStrings.smartEnter,
             'newline': AppStrings.newline,
           },
-          icon: Icons.keyboard_return,
         ),
         if (s?.configPath?.isNotEmpty == true)
           ValueRow(AppStrings.config, s!.configPath!),
-        const SizedBox(height: 8),
-        OutlinedButton(
-          onPressed: enabled ? c.resetAndroidSettings : null,
-          child: const Text(AppStrings.resetMobileKeyboard),
-        ),
-      ],
-    );
-  }
-
-  Widget _desktop(BuildContext context) {
-    final c = controller;
-    final s = c.uiSettings;
-    if (s == null) return _unavailable('候选窗设置');
-    return SectionCard(
-      title: '候选窗设置',
-      children: [
-        ChoiceSetting<UiColorSchemeDto>(
-          label: '配色方案',
-          value: s.colorScheme,
-          options: colorSchemes,
-          onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
-        ),
-        ChoiceSetting<PanelOrientationDto>(
-          label: '候选排列',
-          value: s.orientation,
-          options: orientations,
-          onChanged: c.busy ? null : (value) => c.saveUi(orientation: value),
-        ),
-        ChoiceSetting<EnglishModeDto>(
-          label: '英文模式',
-          value: c.desktopEnglishMode,
-          options: c.englishModes,
-          disabled: c.disabledEnglishModes,
-          onChanged: c.busy ? null : c.saveDesktopEnglish,
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('嵌入模式'),
-          value: s.embeddedComposition,
-          onChanged: c.busy ? null : c.saveEmbedded,
-        ),
-        const SizedBox(height: 16),
-        SliderSetting(
-          label: '候选字号',
-          value: s.fontSize,
-          min: candidateFontMin,
-          max: candidateFontMax,
-          divisions: candidateFontDivisions,
-          onChanged: c.busy ? null : (value) => c.saveUi(fontSize: value),
-        ),
-        Text('主题色', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
+        ActionRow(
           children: [
-            for (final entry in themeAccents.entries)
-              ChoiceChip(
-                label: Text(entry.value),
-                avatar: CircleAvatar(
-                  backgroundColor: Color(
-                    int.parse('FF${entry.key.substring(1)}', radix: 16),
-                  ),
-                ),
-                selected: s.accentColor.toUpperCase() == entry.key,
-                onSelected: c.busy
-                    ? null
-                    : (_) => c.saveUi(accentColor: entry.key),
-              ),
+            ActionButton(
+              AppStrings.resetMobileKeyboard,
+              onPress: enabled ? c.resetAndroidSettings : null,
+            ),
           ],
-        ),
-        const SizedBox(height: 24),
-        OutlinedButton.icon(
-          onPressed: c.canOpenTheme ? () => c.open(s.themePath!) : null,
-          icon: const Icon(Icons.description_outlined),
-          label: const Text('打开主题文件'),
         ),
       ],
     );
