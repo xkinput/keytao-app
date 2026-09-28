@@ -50,7 +50,7 @@ test -f "$PROJECT_DIR/target/keytao-ios-runtime/iphoneos-arm64/lib/libkeytao_cor
     cd "$PROJECT_DIR/flutter_app"
     "$FLUTTER_BIN" build ios --release --no-codesign \
         --build-name "${VERSION%%-*}" --build-number "$BUILD_NUMBER" \
-        "--dart-define=FLUTTER_BUILD_NAME=$VERSION"
+        "--dart-define=KEYTAO_VERSION=$VERSION"
 )
 
 APP="$PROJECT_DIR/flutter_app/build/ios/iphoneos/KeyTao.app"

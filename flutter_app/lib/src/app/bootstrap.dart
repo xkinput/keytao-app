@@ -6,9 +6,10 @@ import '../rust/api/types.dart';
 import '../rust/frb_generated.dart';
 import 'controller.dart';
 
+// iOS build names must be numeric, so its build passes the full version here.
 const appVersion = String.fromEnvironment(
-  'FLUTTER_BUILD_NAME',
-  defaultValue: '1.2.1-alpha.42',
+  'KEYTAO_VERSION',
+  defaultValue: String.fromEnvironment('FLUTTER_BUILD_NAME'),
 );
 const flutterVersion = String.fromEnvironment(
   'FLUTTER_VERSION',
