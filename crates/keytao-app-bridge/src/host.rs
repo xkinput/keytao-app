@@ -10,6 +10,8 @@ pub(crate) struct BridgeHost {
     core: Arc<Core>,
     // Resolve once, using the core's real desktop root unless explicitly overridden.
     root: PathBuf,
+    #[cfg(target_os = "windows")]
+    pub(crate) actions: keytao_app_core::app_actions::AppActions,
     #[cfg(target_os = "linux")]
     helper: Arc<keytao_app_core::ime_status::linux::ManagedImeHelper>,
 }
@@ -98,6 +100,8 @@ impl BridgeHost {
         Self {
             core,
             root,
+            #[cfg(target_os = "windows")]
+            actions: Default::default(),
             #[cfg(target_os = "linux")]
             helper: Default::default(),
         }
@@ -121,13 +125,17 @@ impl BridgeHost {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios", test))]
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn deploy_paths(&self) -> (PathBuf, PathBuf) {
         #[cfg(target_os = "macos")]
         let shared = keytao_app_core::ime_status::macos::macos_app_shared_data_dir(&self.core)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(keytao_core::default_shared_data_dir()));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let shared = keytao_app_core::ime_status::linux::linux_app_shared_data_dir(&self.core)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(keytao_core::default_shared_data_dir()));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let shared = {
             let resources = self.core.env().resource_dir.join("rime-data");
             if resources.join("default.yaml").is_file() {
@@ -138,23 +146,31 @@ impl BridgeHost {
         };
         (self.root.clone(), shared)
     }
-}
-
-impl SchemeHost for BridgeHost {
-    fn user_root(&self) -> Result<PathBuf, String> {
-        Ok(self.root.clone())
-    }
-
-    async fn deploy(&self) -> Result<(), String> {
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+    pub(crate) async fn deploy_default(
+        &self,
+    ) -> Result<keytao_app_core::deploy::DeployResult, String> {
+        #[cfg(target_os = "windows")]
         {
-            // Preserve explicit overrides; the normal macOS path uses Core's
-            // default deployment, including system IME reload notifications.
-            #[cfg(target_os = "macos")]
+            self.require_default_windows_root()?;
+            keytao_app_core::deploy::rime_deploy_default(&self.core, self.clone(), &self.actions)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(target_os = "ios")]
+        {
+            // Core deploys into the App Group override and writes the stamp
+            // consumed by the keyboard extension, just like the Tauri host.
+            keytao_app_core::deploy::rime_deploy_default(&self.core, self.clone())
+                .await
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            // Core's desktop default path also reloads/starts the system IME.
+            // Keep custom roots isolated from that default-root lifecycle.
             if self.uses_default_root() {
                 return keytao_app_core::deploy::rime_deploy_default(&self.core, self.clone())
                     .await
-                    .map(|_| ())
                     .map_err(|error| error.to_string());
             }
             let (user, shared) = self.deploy_paths();
@@ -173,10 +189,37 @@ impl SchemeHost for BridgeHost {
             self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
                 "部署完成".into(),
             ));
-            Ok(())
+            Ok(keytao_app_core::deploy::DeployResult {
+                success: true,
+                message: "部署成功".into(),
+            })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "ios")))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "windows"
+        )))]
         Err("Platform IME deployment is unsupported in bridge".into())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn require_default_windows_root(&self) -> Result<(), String> {
+        if self.uses_default_root() {
+            Ok(())
+        } else {
+            Err("Windows IME deployment requires the default user root".into())
+        }
+    }
+}
+
+impl SchemeHost for BridgeHost {
+    fn user_root(&self) -> Result<PathBuf, String> {
+        Ok(self.root.clone())
+    }
+
+    async fn deploy(&self) -> Result<(), String> {
+        self.deploy_default().await.map(|_| ())
     }
 
     fn write_reload_stamp(&self, _root: &Path) -> Result<Option<PathBuf>, String> {
@@ -189,19 +232,19 @@ impl SchemeHost for BridgeHost {
     }
     #[cfg(target_os = "windows")]
     fn publish_english_addon(&self) -> Result<(), String> {
-        Err("Windows addon publishing is unsupported in bridge".into())
+        keytao_app_core::windows_public_schemas::publish_english_addon(&self.core)
     }
     #[cfg(target_os = "windows")]
-    fn remove_public_schema(&self, _id: &str, _files: &[PathBuf]) -> Result<(), String> {
-        Err("Windows public schema removal is unsupported in bridge".into())
+    fn remove_public_schema(&self, id: &str, files: &[PathBuf]) -> Result<(), String> {
+        keytao_app_core::windows_public_schemas::remove_schema(id, files)
     }
     #[cfg(target_os = "windows")]
-    fn publish_english_settings(&self, _enabled: bool) -> Result<(), String> {
-        Err("Windows settings publishing is unsupported in bridge".into())
+    fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
+        keytao_app_core::windows_public_schemas::publish_english_settings(enabled)
     }
     #[cfg(target_os = "windows")]
-    fn publish_wanxiang_sources(&self, _files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
-        Err("Windows source publishing is unsupported in bridge".into())
+    fn publish_wanxiang_sources(&self, files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+        keytao_app_core::windows_public_schemas::publish_source_files(files)
     }
 }
 
@@ -215,8 +258,8 @@ impl ImeHost for BridgeHost {
     }
 
     #[cfg(target_os = "windows")]
-    fn publish_english_settings(&self, _enabled: bool) -> Result<(), String> {
-        Err("Windows settings publishing is unsupported in bridge".into())
+    fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
+        SchemeHost::publish_english_settings(self, enabled)
     }
     #[cfg(target_os = "android")]
     fn deploy_ime_data(&self) -> Result<serde_json::Value, String> {
@@ -311,6 +354,38 @@ mod tests {
         for root in ["", "relative-rime"] {
             assert!(BridgeHost::resolve_root(Some(root)).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_deploy_paths_use_daemon_runtime_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        let shared = resources.join("runtime/rime-data");
+        let root = temp.path().join("user");
+        for dir in [&shared, &resources.join("rime-data")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("default.yaml"), "config_version: '1.0'\n").unwrap();
+        }
+        let core = Core::new(
+            AppEnv {
+                data_dir: temp.path().join("state"),
+                cache_dir: temp.path().join("cache"),
+                resource_dir: resources,
+                app_version: "test".into(),
+                platform: Platform::Linux,
+            },
+            Arc::new(crate::runtime::BridgeEvents::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            keytao_app_core::ime_status::linux::linux_app_shared_data_dir(&core),
+            Some(shared.to_string_lossy().into_owned()),
+        );
+        assert_eq!(
+            BridgeHost::new(core, root.clone()).deploy_paths(),
+            (root, shared)
+        );
     }
 
     #[cfg(target_os = "macos")]

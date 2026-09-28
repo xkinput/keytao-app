@@ -176,6 +176,37 @@ Future<WanxiangStatusDto> manageWanxiang({
 Future<MacosImeStatusDto> macosImeStatus() =>
     RustLib.instance.api.crateApiCoreMacosImeStatus();
 
+Future<WindowsImeStatusDto> windowsImeStatus() =>
+    RustLib.instance.api.crateApiCoreWindowsImeStatus();
+
+Future<WindowsImeStatusDto> windowsImeEnsureRegistered() =>
+    RustLib.instance.api.crateApiCoreWindowsImeEnsureRegistered();
+
+Future<void> windowsPrepareSearchSchemas() =>
+    RustLib.instance.api.crateApiCoreWindowsPrepareSearchSchemas();
+
+/// Forward initial and single-instance arguments after init_core. Core retains
+/// redeploy requests until acknowledged; the event wakes the Dart UI for open
+/// and redeploy URLs. The native shell remains responsible for window focus.
+Future<void> handleAppArgs({required List<String> args}) =>
+    RustLib.instance.api.crateApiCoreHandleAppArgs(args: args);
+
+Future<int?> windowsPendingImeAction() =>
+    RustLib.instance.api.crateApiCoreWindowsPendingImeAction();
+
+Future<void> windowsDismissImeAction({required int id}) =>
+    RustLib.instance.api.crateApiCoreWindowsDismissImeAction(id: id);
+
+Future<DeployResultDto> windowsRedeployImeAction({required int id}) =>
+    RustLib.instance.api.crateApiCoreWindowsRedeployImeAction(id: id);
+
+Future<LinuxImeStatusDto> linuxImeStatus() =>
+    RustLib.instance.api.crateApiCoreLinuxImeStatus();
+
+/// The daemon outlives the app; there is intentionally no stop-on-exit hook.
+Future<LinuxImeStatusDto> linuxStartIme({required bool restart}) =>
+    RustLib.instance.api.crateApiCoreLinuxStartIme(restart: restart);
+
 Future<ComponentVersionsDto> getComponentVersions() =>
     RustLib.instance.api.crateApiCoreGetComponentVersions();
 

@@ -1,7 +1,7 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime};
 use flutter_rust_bridge::DartFnFuture;
 use keytao_app_core::scheme_host::SchemeHost;
-#[cfg(not(any(target_os = "android", target_os = "windows")))]
+#[cfg(not(target_os = "android"))]
 use keytao_app_core::{events::InstallProgress, CoreEvent};
 
 #[flutter_rust_bridge::frb(init)]
@@ -66,12 +66,12 @@ pub async fn fetch_scheme_release(scheme: String) -> Result<SchemeReleaseDto, St
 /// Fetches the latest release for the same scheme key accepted by Core,
 /// downloads it, then installs into the host root. Does not deploy the IME.
 pub async fn install_latest_scheme(scheme: String) -> Result<InstallResultDto, String> {
-    #[cfg(any(target_os = "android", target_os = "windows"))]
+    #[cfg(target_os = "android")]
     {
         let _ = scheme;
-        return Err("Use the platform installation flow on Android and Windows".into());
+        return Err("Use the platform installation flow on Android".into());
     }
-    #[cfg(not(any(target_os = "android", target_os = "windows")))]
+    #[cfg(not(target_os = "android"))]
     {
         let state = runtime::state()?;
         state.core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -136,16 +136,8 @@ pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallRe
         &state.core,
         archive.clone(),
         dir,
-        // Custom exports invalidate only the selected directory's build cache.
         #[cfg(target_os = "windows")]
-        |root, schemas, dictionaries, _archive| {
-            keytao_core::invalidate_rime_build_artifacts(root, schemas, dictionaries).map(|paths| {
-                paths
-                    .into_iter()
-                    .map(|path| format!("[INVALIDATED] {path}"))
-                    .collect()
-            })
-        },
+        keytao_app_core::install::finish_windows_scheme_install,
     )
     .await;
     let _ = std::fs::remove_file(archive);
@@ -209,12 +201,12 @@ pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
 pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, String> {
-    #[cfg(any(target_os = "android", target_os = "windows"))]
+    #[cfg(target_os = "android")]
     {
         let _ = url;
-        Err("Use the platform installation flow on Android and Windows".into())
+        Err("Use the platform installation flow on Android".into())
     }
-    #[cfg(not(any(target_os = "android", target_os = "windows")))]
+    #[cfg(not(target_os = "android"))]
     {
         let state = runtime::state()?;
         // Core's downloader uses a fixed cache filename; serialize installations.
@@ -229,6 +221,8 @@ pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, St
             &state.core,
             archive.clone(),
             root.to_string_lossy().into_owned(),
+            #[cfg(target_os = "windows")]
+            keytao_app_core::install::finish_windows_scheme_install,
         )
         .await;
         // Core removes the archive on success; also remove failed downloads here.
@@ -298,25 +292,24 @@ pub fn finish_android_install(result_json: String) -> Result<InstallResultDto, S
 
 /// Android deployment belongs to the deployImeData platform channel.
 pub async fn deploy_default() -> Result<DeployResultDto, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios"
+    ))]
     {
         let state = runtime::state()?;
         let _guard = state.install_lock.lock().await;
-        if state.host.uses_default_root() {
-            return runtime::dto(
-                keytao_app_core::deploy::rime_deploy_default(&state.core, state.host.clone())
-                    .await
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        state.host.deploy().await?;
-        Ok(DeployResultDto {
-            success: true,
-            message: "部署成功".into(),
-        })
+        runtime::dto(state.host.deploy_default().await?)
     }
-    #[cfg(not(target_os = "macos"))]
-    Err("Bridge deployment is macOS only; use deployImeData on Android".into())
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios"
+    )))]
+    Err("Use deployImeData on Android; deployment is unavailable on this platform".into())
 }
 
 pub async fn get_android_ime_input_settings() -> Result<AndroidImeInputSettingsDto, String> {
@@ -507,6 +500,142 @@ pub fn macos_ime_status() -> Result<MacosImeStatusDto, String> {
     runtime::dto(keytao_app_core::ime_status::macos::macos_ime_status(
         &runtime::state()?.core,
     ))
+}
+
+pub async fn windows_ime_status() -> Result<WindowsImeStatusDto, String> {
+    #[cfg(target_os = "windows")]
+    {
+        runtime::dto(
+            keytao_app_core::ime_status::windows::windows_ime_status(
+                runtime::state()?.core.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Windows IME is only available on Windows".into())
+}
+
+pub async fn windows_ime_ensure_registered() -> Result<WindowsImeStatusDto, String> {
+    #[cfg(target_os = "windows")]
+    {
+        runtime::dto(
+            keytao_app_core::ime_status::windows::windows_ime_ensure_registered(
+                runtime::state()?.core.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Windows IME is only available on Windows".into())
+}
+
+pub async fn windows_prepare_search_schemas() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let state = runtime::state()?;
+        let _guard = state.install_lock.lock().await;
+        keytao_app_core::windows_public_schemas::prepare_search_schemas(&state.core).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Windows IME is only available on Windows".into())
+}
+
+/// Forward initial and single-instance arguments after init_core. Core retains
+/// redeploy requests until acknowledged; the event wakes the Dart UI for open
+/// and redeploy URLs. The native shell remains responsible for window focus.
+pub fn handle_app_args(args: Vec<String>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let state = runtime::state()?;
+        state.host.actions.receive_args(args);
+        state.core.emit(CoreEvent::WindowsImeAction(()));
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Err("App URL actions are only available on Windows".into())
+    }
+}
+
+pub fn windows_pending_ime_action() -> Result<Option<u32>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(runtime::state()?.host.actions.pending())
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Windows IME is only available on Windows".into())
+}
+
+pub fn windows_dismiss_ime_action(id: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        runtime::state()?.host.actions.dismiss(id);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = id;
+        Err("Windows IME is only available on Windows".into())
+    }
+}
+
+pub async fn windows_redeploy_ime_action(id: u32) -> Result<DeployResultDto, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let state = runtime::state()?;
+        let _guard = state.install_lock.lock().await;
+        state.host.require_default_windows_root()?;
+        runtime::dto(
+            keytao_app_core::app_actions::windows_redeploy_ime_action(
+                &state.core,
+                state.host.clone(),
+                &state.host.actions,
+                id,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = id;
+        Err("Windows IME is only available on Windows".into())
+    }
+}
+
+pub fn linux_ime_status() -> Result<LinuxImeStatusDto, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let state = runtime::state()?;
+        runtime::dto(keytao_app_core::ime_status::linux::linux_ime_status(
+            &state.core,
+            &state.host,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("Linux IME is only available on Linux".into())
+}
+
+/// The daemon outlives the app; there is intentionally no stop-on-exit hook.
+pub fn linux_start_ime(restart: bool) -> Result<LinuxImeStatusDto, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let state = runtime::state()?;
+        runtime::dto(keytao_app_core::ime_status::linux::launch_keytao_ime(
+            &state.core,
+            &state.host,
+            restart,
+        )?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = restart;
+        Err("Linux IME is only available on Linux".into())
+    }
 }
 
 pub fn get_component_versions() -> Result<ComponentVersionsDto, String> {

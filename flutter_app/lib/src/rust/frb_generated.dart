@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1175619557;
+  int get rustContentHash => 1691770938;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -130,6 +130,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<RuntimeLogSettingsDto> crateApiCoreGetRuntimeLogSettings();
 
+  Future<void> crateApiCoreHandleAppArgs({required List<String> args});
+
   Future<void> crateApiCoreInitApp();
 
   Future<BridgeInfo> crateApiCoreInitCore({required BridgeConfig config});
@@ -146,6 +148,10 @@ abstract class RustLibApi extends BaseApi {
     required String url,
     required String dir,
   });
+
+  Future<LinuxImeStatusDto> crateApiCoreLinuxImeStatus();
+
+  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme({required bool restart});
 
   Future<List<FileItemDto>> crateApiCoreListDir({required String dir});
 
@@ -193,6 +199,20 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<WanxiangStatusDto> crateApiCoreWanxiangStatus();
+
+  Future<void> crateApiCoreWindowsDismissImeAction({required int id});
+
+  Future<WindowsImeStatusDto> crateApiCoreWindowsImeEnsureRegistered();
+
+  Future<WindowsImeStatusDto> crateApiCoreWindowsImeStatus();
+
+  Future<int?> crateApiCoreWindowsPendingImeAction();
+
+  Future<void> crateApiCoreWindowsPrepareSearchSchemas();
+
+  Future<DeployResultDto> crateApiCoreWindowsRedeployImeAction({
+    required int id,
+  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -739,6 +759,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "get_runtime_log_settings", argNames: []);
 
   @override
+  Future<void> crateApiCoreHandleAppArgs({required List<String> args}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_String(args, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreHandleAppArgsConstMeta,
+        argValues: [args],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreHandleAppArgsConstMeta =>
+      const TaskConstMeta(debugName: "handle_app_args", argNames: ["args"]);
+
+  @override
   Future<void> crateApiCoreInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -747,7 +795,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -775,7 +823,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -805,7 +853,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -838,7 +886,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -873,7 +921,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -895,6 +943,61 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<LinuxImeStatusDto> crateApiCoreLinuxImeStatus() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_linux_ime_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreLinuxImeStatusConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreLinuxImeStatusConstMeta =>
+      const TaskConstMeta(debugName: "linux_ime_status", argNames: []);
+
+  @override
+  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme({required bool restart}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(restart, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 26,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_linux_ime_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreLinuxStartImeConstMeta,
+        argValues: [restart],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreLinuxStartImeConstMeta =>
+      const TaskConstMeta(debugName: "linux_start_ime", argNames: ["restart"]);
+
+  @override
   Future<List<FileItemDto>> crateApiCoreListDir({required String dir}) {
     return handler.executeNormal(
       NormalTask(
@@ -904,7 +1007,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 27,
             port: port_,
           );
         },
@@ -931,7 +1034,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 28,
             port: port_,
           );
         },
@@ -966,7 +1069,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 29,
             port: port_,
           );
         },
@@ -995,7 +1098,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1023,7 +1126,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1053,7 +1156,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1081,7 +1184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 33,
             port: port_,
           );
         },
@@ -1109,7 +1212,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1139,7 +1242,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1175,7 +1278,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1208,7 +1311,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1241,7 +1344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1280,7 +1383,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1315,7 +1418,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1345,7 +1448,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1362,6 +1465,187 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiCoreWanxiangStatusConstMeta =>
       const TaskConstMeta(debugName: "wanxiang_status", argNames: []);
+
+  @override
+  Future<void> crateApiCoreWindowsDismissImeAction({required int id}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 42,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsDismissImeActionConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsDismissImeActionConstMeta =>
+      const TaskConstMeta(
+        debugName: "windows_dismiss_ime_action",
+        argNames: ["id"],
+      );
+
+  @override
+  Future<WindowsImeStatusDto> crateApiCoreWindowsImeEnsureRegistered() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 43,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_windows_ime_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsImeEnsureRegisteredConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsImeEnsureRegisteredConstMeta =>
+      const TaskConstMeta(
+        debugName: "windows_ime_ensure_registered",
+        argNames: [],
+      );
+
+  @override
+  Future<WindowsImeStatusDto> crateApiCoreWindowsImeStatus() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 44,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_windows_ime_status_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsImeStatusConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsImeStatusConstMeta =>
+      const TaskConstMeta(debugName: "windows_ime_status", argNames: []);
+
+  @override
+  Future<int?> crateApiCoreWindowsPendingImeAction() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 45,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_u_32,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsPendingImeActionConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsPendingImeActionConstMeta =>
+      const TaskConstMeta(
+        debugName: "windows_pending_ime_action",
+        argNames: [],
+      );
+
+  @override
+  Future<void> crateApiCoreWindowsPrepareSearchSchemas() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 46,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsPrepareSearchSchemasConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsPrepareSearchSchemasConstMeta =>
+      const TaskConstMeta(
+        debugName: "windows_prepare_search_schemas",
+        argNames: [],
+      );
+
+  @override
+  Future<DeployResultDto> crateApiCoreWindowsRedeployImeAction({
+    required int id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 47,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_deploy_result_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreWindowsRedeployImeActionConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreWindowsRedeployImeActionConstMeta =>
+      const TaskConstMeta(
+        debugName: "windows_redeploy_ime_action",
+        argNames: ["id"],
+      );
 
   Future<void> Function(int)
   encode_DartFn_Inputs__Output_String_AnyhowException(
@@ -1756,6 +2040,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 dco_decode_isize(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dcoDecodeI64(raw);
+  }
+
+  @protected
+  LinuxImeStatusDto dco_decode_linux_ime_status_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    return LinuxImeStatusDto(
+      supported: dco_decode_bool(arr[0]),
+      kdeSession: dco_decode_bool(arr[1]),
+      kdeConfigured: dco_decode_bool(arr[2]),
+      running: dco_decode_bool(arr[3]),
+      managedPid: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      daemonOwnerPid: dco_decode_opt_box_autoadd_u_32(arr[5]),
+      command: dco_decode_String(arr[6]),
+      processes: dco_decode_list_String(arr[7]),
+      kdeNativeProcesses: dco_decode_u_32(arr[8]),
+      fallbackProcesses: dco_decode_u_32(arr[9]),
+      userDataDir: dco_decode_opt_String(arr[10]),
+      sharedDataDir: dco_decode_opt_String(arr[11]),
+      sharedDataSource: dco_decode_String(arr[12]),
+      reloadStampPath: dco_decode_opt_String(arr[13]),
+      reloadStampSignature: dco_decode_opt_String(arr[14]),
+      message: dco_decode_String(arr[15]),
+      error: dco_decode_opt_String(arr[16]),
+    );
   }
 
   @protected
@@ -2485,6 +2796,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 sse_decode_isize(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  LinuxImeStatusDto sse_decode_linux_ime_status_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_supported = sse_decode_bool(deserializer);
+    var var_kdeSession = sse_decode_bool(deserializer);
+    var var_kdeConfigured = sse_decode_bool(deserializer);
+    var var_running = sse_decode_bool(deserializer);
+    var var_managedPid = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_daemonOwnerPid = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_command = sse_decode_String(deserializer);
+    var var_processes = sse_decode_list_String(deserializer);
+    var var_kdeNativeProcesses = sse_decode_u_32(deserializer);
+    var var_fallbackProcesses = sse_decode_u_32(deserializer);
+    var var_userDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataDir = sse_decode_opt_String(deserializer);
+    var var_sharedDataSource = sse_decode_String(deserializer);
+    var var_reloadStampPath = sse_decode_opt_String(deserializer);
+    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    var var_error = sse_decode_opt_String(deserializer);
+    return LinuxImeStatusDto(
+      supported: var_supported,
+      kdeSession: var_kdeSession,
+      kdeConfigured: var_kdeConfigured,
+      running: var_running,
+      managedPid: var_managedPid,
+      daemonOwnerPid: var_daemonOwnerPid,
+      command: var_command,
+      processes: var_processes,
+      kdeNativeProcesses: var_kdeNativeProcesses,
+      fallbackProcesses: var_fallbackProcesses,
+      userDataDir: var_userDataDir,
+      sharedDataDir: var_sharedDataDir,
+      sharedDataSource: var_sharedDataSource,
+      reloadStampPath: var_reloadStampPath,
+      reloadStampSignature: var_reloadStampSignature,
+      message: var_message,
+      error: var_error,
+    );
   }
 
   @protected
@@ -3273,6 +3627,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_isize(PlatformInt64 self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_linux_ime_status_dto(
+    LinuxImeStatusDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.supported, serializer);
+    sse_encode_bool(self.kdeSession, serializer);
+    sse_encode_bool(self.kdeConfigured, serializer);
+    sse_encode_bool(self.running, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.managedPid, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.daemonOwnerPid, serializer);
+    sse_encode_String(self.command, serializer);
+    sse_encode_list_String(self.processes, serializer);
+    sse_encode_u_32(self.kdeNativeProcesses, serializer);
+    sse_encode_u_32(self.fallbackProcesses, serializer);
+    sse_encode_opt_String(self.userDataDir, serializer);
+    sse_encode_opt_String(self.sharedDataDir, serializer);
+    sse_encode_String(self.sharedDataSource, serializer);
+    sse_encode_opt_String(self.reloadStampPath, serializer);
+    sse_encode_opt_String(self.reloadStampSignature, serializer);
+    sse_encode_String(self.message, serializer);
+    sse_encode_opt_String(self.error, serializer);
   }
 
   @protected

@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1175619557;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1691770938;
 
 // Section: executor
 
@@ -673,6 +673,39 @@ fn wire__crate__api__core__get_runtime_log_settings_impl(
         },
     )
 }
+fn wire__crate__api__core__handle_app_args_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "handle_app_args",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_args = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::handle_app_args(api_args)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__init_app_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -846,6 +879,71 @@ fn wire__crate__api__core__install_scheme_to_dir_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__linux_ime_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "linux_ime_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::linux_ime_status()?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__linux_start_ime_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "linux_start_ime",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_restart = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::linux_start_ime(api_restart)?;
+                    std::result::Result::Ok(output_ok)
+                })())
             }
         },
     )
@@ -1387,6 +1485,213 @@ fn wire__crate__api__core__wanxiang_status_impl(
         },
     )
 }
+fn wire__crate__api__core__windows_dismiss_ime_action_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_dismiss_ime_action",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::windows_dismiss_ime_action(api_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__windows_ime_ensure_registered_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_ime_ensure_registered",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::core::windows_ime_ensure_registered().await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__windows_ime_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_ime_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::core::windows_ime_status().await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__windows_pending_ime_action_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_pending_ime_action",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::windows_pending_ime_action()?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__windows_prepare_search_schemas_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_prepare_search_schemas",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::core::windows_prepare_search_schemas().await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__windows_redeploy_ime_action_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "windows_redeploy_ime_action",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::core::windows_redeploy_ime_action(api_id).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 
 // Section: related_funcs
 
@@ -1824,6 +2129,48 @@ impl SseDecode for isize {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i64::<NativeEndian>().unwrap() as _
+    }
+}
+
+impl SseDecode for crate::api::types::LinuxImeStatusDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_supported = <bool>::sse_decode(deserializer);
+        let mut var_kdeSession = <bool>::sse_decode(deserializer);
+        let mut var_kdeConfigured = <bool>::sse_decode(deserializer);
+        let mut var_running = <bool>::sse_decode(deserializer);
+        let mut var_managedPid = <Option<u32>>::sse_decode(deserializer);
+        let mut var_daemonOwnerPid = <Option<u32>>::sse_decode(deserializer);
+        let mut var_command = <String>::sse_decode(deserializer);
+        let mut var_processes = <Vec<String>>::sse_decode(deserializer);
+        let mut var_kdeNativeProcesses = <u32>::sse_decode(deserializer);
+        let mut var_fallbackProcesses = <u32>::sse_decode(deserializer);
+        let mut var_userDataDir = <Option<String>>::sse_decode(deserializer);
+        let mut var_sharedDataDir = <Option<String>>::sse_decode(deserializer);
+        let mut var_sharedDataSource = <String>::sse_decode(deserializer);
+        let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
+        let mut var_reloadStampSignature = <Option<String>>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        let mut var_error = <Option<String>>::sse_decode(deserializer);
+        return crate::api::types::LinuxImeStatusDto {
+            supported: var_supported,
+            kde_session: var_kdeSession,
+            kde_configured: var_kdeConfigured,
+            running: var_running,
+            managed_pid: var_managedPid,
+            daemon_owner_pid: var_daemonOwnerPid,
+            command: var_command,
+            processes: var_processes,
+            kde_native_processes: var_kdeNativeProcesses,
+            fallback_processes: var_fallbackProcesses,
+            user_data_dir: var_userDataDir,
+            shared_data_dir: var_sharedDataDir,
+            shared_data_source: var_sharedDataSource,
+            reload_stamp_path: var_reloadStampPath,
+            reload_stamp_signature: var_reloadStampSignature,
+            message: var_message,
+            error: var_error,
+        };
     }
 }
 
@@ -2311,49 +2658,83 @@ fn pde_ffi_dispatcher_primary_impl(
         18 => {
             wire__crate__api__core__get_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        19 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
-        22 => {
+        19 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
+        23 => {
             wire__crate__api__core__install_scheme_from_url_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        24 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__core__prepare_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__core__remove_downloaded_archive_impl(
+        32 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        36 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => {
+        37 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        35 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        38 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        39 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        40 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        43 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        44 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__core__windows_pending_ime_action_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        46 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        47 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
         _ => unreachable!(),
     }
 }
@@ -2825,6 +3206,42 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::InstallResultDto>
     for crate::api::types::InstallResultDto
 {
     fn into_into_dart(self) -> crate::api::types::InstallResultDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::LinuxImeStatusDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.supported.into_into_dart().into_dart(),
+            self.kde_session.into_into_dart().into_dart(),
+            self.kde_configured.into_into_dart().into_dart(),
+            self.running.into_into_dart().into_dart(),
+            self.managed_pid.into_into_dart().into_dart(),
+            self.daemon_owner_pid.into_into_dart().into_dart(),
+            self.command.into_into_dart().into_dart(),
+            self.processes.into_into_dart().into_dart(),
+            self.kde_native_processes.into_into_dart().into_dart(),
+            self.fallback_processes.into_into_dart().into_dart(),
+            self.user_data_dir.into_into_dart().into_dart(),
+            self.shared_data_dir.into_into_dart().into_dart(),
+            self.shared_data_source.into_into_dart().into_dart(),
+            self.reload_stamp_path.into_into_dart().into_dart(),
+            self.reload_stamp_signature.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::LinuxImeStatusDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::LinuxImeStatusDto>
+    for crate::api::types::LinuxImeStatusDto
+{
+    fn into_into_dart(self) -> crate::api::types::LinuxImeStatusDto {
         self
     }
 }
@@ -3491,6 +3908,29 @@ impl SseEncode for isize {
             .cursor
             .write_i64::<NativeEndian>(self as _)
             .unwrap();
+    }
+}
+
+impl SseEncode for crate::api::types::LinuxImeStatusDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.supported, serializer);
+        <bool>::sse_encode(self.kde_session, serializer);
+        <bool>::sse_encode(self.kde_configured, serializer);
+        <bool>::sse_encode(self.running, serializer);
+        <Option<u32>>::sse_encode(self.managed_pid, serializer);
+        <Option<u32>>::sse_encode(self.daemon_owner_pid, serializer);
+        <String>::sse_encode(self.command, serializer);
+        <Vec<String>>::sse_encode(self.processes, serializer);
+        <u32>::sse_encode(self.kde_native_processes, serializer);
+        <u32>::sse_encode(self.fallback_processes, serializer);
+        <Option<String>>::sse_encode(self.user_data_dir, serializer);
+        <Option<String>>::sse_encode(self.shared_data_dir, serializer);
+        <String>::sse_encode(self.shared_data_source, serializer);
+        <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
+        <Option<String>>::sse_encode(self.reload_stamp_signature, serializer);
+        <String>::sse_encode(self.message, serializer);
+        <Option<String>>::sse_encode(self.error, serializer);
     }
 }
 

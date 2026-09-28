@@ -551,6 +551,91 @@ class InstallResultDto {
           verify == other.verify;
 }
 
+class LinuxImeStatusDto {
+  final bool supported;
+  final bool kdeSession;
+  final bool kdeConfigured;
+  final bool running;
+  final int? managedPid;
+  final int? daemonOwnerPid;
+  final String command;
+  final List<String> processes;
+  final int kdeNativeProcesses;
+  final int fallbackProcesses;
+  final String? userDataDir;
+  final String? sharedDataDir;
+  final String sharedDataSource;
+  final String? reloadStampPath;
+  final String? reloadStampSignature;
+  final String message;
+
+  /// Core reports operation failures through Result, as the old Linux card did.
+  final String? error;
+
+  const LinuxImeStatusDto({
+    required this.supported,
+    required this.kdeSession,
+    required this.kdeConfigured,
+    required this.running,
+    this.managedPid,
+    this.daemonOwnerPid,
+    required this.command,
+    required this.processes,
+    required this.kdeNativeProcesses,
+    required this.fallbackProcesses,
+    this.userDataDir,
+    this.sharedDataDir,
+    required this.sharedDataSource,
+    this.reloadStampPath,
+    this.reloadStampSignature,
+    required this.message,
+    this.error,
+  });
+
+  @override
+  int get hashCode =>
+      supported.hashCode ^
+      kdeSession.hashCode ^
+      kdeConfigured.hashCode ^
+      running.hashCode ^
+      managedPid.hashCode ^
+      daemonOwnerPid.hashCode ^
+      command.hashCode ^
+      processes.hashCode ^
+      kdeNativeProcesses.hashCode ^
+      fallbackProcesses.hashCode ^
+      userDataDir.hashCode ^
+      sharedDataDir.hashCode ^
+      sharedDataSource.hashCode ^
+      reloadStampPath.hashCode ^
+      reloadStampSignature.hashCode ^
+      message.hashCode ^
+      error.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LinuxImeStatusDto &&
+          runtimeType == other.runtimeType &&
+          supported == other.supported &&
+          kdeSession == other.kdeSession &&
+          kdeConfigured == other.kdeConfigured &&
+          running == other.running &&
+          managedPid == other.managedPid &&
+          daemonOwnerPid == other.daemonOwnerPid &&
+          command == other.command &&
+          processes == other.processes &&
+          kdeNativeProcesses == other.kdeNativeProcesses &&
+          fallbackProcesses == other.fallbackProcesses &&
+          userDataDir == other.userDataDir &&
+          sharedDataDir == other.sharedDataDir &&
+          sharedDataSource == other.sharedDataSource &&
+          reloadStampPath == other.reloadStampPath &&
+          reloadStampSignature == other.reloadStampSignature &&
+          message == other.message &&
+          error == other.error;
+}
+
 class LocalSchemaDto {
   final bool installed;
   final bool deployed;
