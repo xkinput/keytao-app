@@ -393,6 +393,7 @@ class AppController extends ChangeNotifier {
   void selectPage(AppPage page) {
     if (activePage == page) return;
     activePage = page;
+    if (info.platform == BridgePlatform.macOs) unawaited(setWindowTitle());
     if (page == AppPage.debug) {
       if (busy) {
         _logsWhenIdle = true;
@@ -1059,10 +1060,13 @@ class AppController extends ChangeNotifier {
       : open(uiSettings!.themePath!);
   Future<bool> openAppUpdate() =>
       appUpdate == null ? Future.value(false) : open(appUpdate!.releaseUrl);
-  Future<bool> setWindowTitle() => run(() async {
-    await const MethodChannel('ink.rea.keytao/window')
-        .invokeMethod<void>('setTitle', AppStrings.windowTitle);
-  });
+  // A title change must not toggle `busy`; a missing macOS channel is ignored.
+  Future<void> setWindowTitle([String? title]) async {
+    try {
+      await const MethodChannel('ink.rea.keytao/window')
+          .invokeMethod<void>('setTitle', title ?? activePage.title);
+    } on Object catch (_) {}
+  }
   Future<bool> openStoragePermissionSettings() => run(() async {
     await android.openStoragePermissionSettings();
     await _readStorage();
