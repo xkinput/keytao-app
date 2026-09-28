@@ -39,8 +39,11 @@ RPM_VERSION="${VERSION//-/_}"
 requires="$(rpm -qp --requires "$RPM")"
 [[ "$requires" == *gtk3* && "$requires" != *webkit* ]] || fail 'Wrong rpm dependencies'
 [[ -z $(rpm -qp --scripts "$RPM") ]] || fail 'Unexpected rpm scriptlets'
-[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '$VERSION'))}") == 0 ]] || fail 'RPM version normalization changed ordering'
-[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '1.2.1-alpha.88'))}") == 1 ]] || fail 'RPM does not upgrade alpha.88'
+# rpm.vercmp parses '-' as the version-release separator; the old Tauri rpm
+# stored '1.2.1-alpha.88' as the plain Version tag, which rpm compares segment
+# by segment, so compare plain versions with '-' written as '.'.
+[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '${VERSION//-/.}'))}") == 0 ]] || fail 'RPM version normalization changed ordering'
+[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '1.2.1.alpha.88'))}") == 1 ]] || fail 'RPM does not upgrade alpha.88'
 dpkg --compare-versions "$VERSION" gt 1.2.1-alpha.88 || fail 'deb does not upgrade alpha.88'
 
 WORK_DIR="$(mktemp -d)"

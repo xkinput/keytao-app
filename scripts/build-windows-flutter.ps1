@@ -29,7 +29,7 @@ $installer = Join-Path $repoRoot "target\release\bundle\nsis\keytao-app-$version
 if ($DryRun) {
     Write-Host "Version: $version ($numericVersion); perMachine; HKLM uninstall key: KeyTao"
     Write-Host "IME: x86 -> x64 -> arm64 -> arm64x (scripts/build-windows-ime.ps1 + build-windows-arm64x.ps1)"
-    Write-Host "flutter build windows --release --target-platform windows-x64 --build-name $version --build-number 0"
+    Write-Host "flutter build windows --release --build-name $version --build-number 0"
     Write-Host "Bundle: $bundleDir"
     Write-Host "makensis: packaging/windows/keytao.nsi -> $installer"
     return
@@ -83,7 +83,7 @@ try {
     if (Test-Path -LiteralPath $releaseDir) { Remove-Item -LiteralPath $releaseDir -Recurse -Force }
     Push-Location (Join-Path $repoRoot "flutter_app")
     try {
-        Invoke-Checked $flutter @("build", "windows", "--release", "--target-platform", "windows-x64", "--build-name", $version, "--build-number", "0")
+        Invoke-Checked $flutter @("build", "windows", "--release", "--build-name", $version, "--build-number", "0")
     } finally { Pop-Location }
 
     if (Test-Path -LiteralPath $bundleDir) { Remove-Item -LiteralPath $bundleDir -Recurse -Force }
