@@ -26,6 +26,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  FutureOr<String> Function()
+  dco_decode_DartFn_Inputs__Output_String_AnyhowException(dynamic raw);
+
+  @protected
+  Object dco_decode_DartOpaque(dynamic raw);
+
+  @protected
   RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
     dynamic raw,
   );
@@ -42,6 +49,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AppUpdateDto dco_decode_app_update_dto(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -50,6 +60,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
+
+  @protected
+  DebugLogFileDto dco_decode_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
   InstallProgressDto dco_decode_box_autoadd_install_progress_dto(dynamic raw);
@@ -87,6 +100,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogFileDto dco_decode_debug_log_file_dto(dynamic raw);
 
   @protected
+  DebugLogsDto dco_decode_debug_logs_dto(dynamic raw);
+
+  @protected
   DeployResultDto dco_decode_deploy_result_dto(dynamic raw);
 
   @protected
@@ -102,6 +118,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_32(dynamic raw);
 
   @protected
+  FileItemDto dco_decode_file_item_dto(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -114,7 +133,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallResultDto dco_decode_install_result_dto(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_isize(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<FileItemDto> dco_decode_list_file_item_dto(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -131,6 +156,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LocalSchemaDto dco_decode_local_schema_dto(dynamic raw);
 
   @protected
+  LocalSchemasDto dco_decode_local_schemas_dto(dynamic raw);
+
+  @protected
   MacosImeStatusDto dco_decode_macos_ime_status_dto(dynamic raw);
 
   @protected
@@ -138,6 +166,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
   InstallProgressDto? dco_decode_opt_box_autoadd_install_progress_dto(
@@ -197,13 +228,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  BigInt dco_decode_usize(dynamic raw);
+
+  @protected
   VerifyEntryDto dco_decode_verify_entry_dto(dynamic raw);
+
+  @protected
+  WanxiangStatusDto dco_decode_wanxiang_status_dto(dynamic raw);
 
   @protected
   WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  Object sse_decode_DartOpaque(SseDeserializer deserializer);
 
   @protected
   RustStreamSink<BridgeEvent> sse_decode_StreamSink_bridge_event_Sse(
@@ -224,6 +264,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AppUpdateDto sse_decode_app_update_dto(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -234,6 +277,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeConfig sse_decode_box_autoadd_bridge_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DebugLogFileDto sse_decode_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
 
@@ -279,6 +327,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DebugLogFileDto sse_decode_debug_log_file_dto(SseDeserializer deserializer);
 
   @protected
+  DebugLogsDto sse_decode_debug_logs_dto(SseDeserializer deserializer);
+
+  @protected
   DeployResultDto sse_decode_deploy_result_dto(SseDeserializer deserializer);
 
   @protected
@@ -296,6 +347,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
+  FileItemDto sse_decode_file_item_dto(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -310,7 +364,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallResultDto sse_decode_install_result_dto(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_isize(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<FileItemDto> sse_decode_list_file_item_dto(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -329,6 +389,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LocalSchemaDto sse_decode_local_schema_dto(SseDeserializer deserializer);
 
   @protected
+  LocalSchemasDto sse_decode_local_schemas_dto(SseDeserializer deserializer);
+
+  @protected
   MacosImeStatusDto sse_decode_macos_ime_status_dto(
     SseDeserializer deserializer,
   );
@@ -338,6 +401,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   InstallProgressDto? sse_decode_opt_box_autoadd_install_progress_dto(
@@ -407,7 +475,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_usize(SseDeserializer deserializer);
+
+  @protected
   VerifyEntryDto sse_decode_verify_entry_dto(SseDeserializer deserializer);
+
+  @protected
+  WanxiangStatusDto sse_decode_wanxiang_status_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   WindowsImeStatusDto sse_decode_windows_ime_status_dto(
@@ -419,6 +495,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AnyhowException self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
+    FutureOr<String> Function() self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_DartOpaque(Object self, SseSerializer serializer);
 
   @protected
   void sse_encode_StreamSink_bridge_event_Sse(
@@ -442,6 +527,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_app_update_dto(AppUpdateDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -453,6 +541,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_bridge_config(
     BridgeConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_debug_log_file_dto(
+    DebugLogFileDto self,
     SseSerializer serializer,
   );
 
@@ -511,6 +605,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_debug_logs_dto(DebugLogsDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_deploy_result_dto(
     DeployResultDto self,
     SseSerializer serializer,
@@ -538,6 +635,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_file_item_dto(FileItemDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -559,7 +659,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_isize(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_file_item_dto(
+    List<FileItemDto> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -586,6 +695,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_local_schemas_dto(
+    LocalSchemasDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_macos_ime_status_dto(
     MacosImeStatusDto self,
     SseSerializer serializer,
@@ -596,6 +711,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_debug_log_file_dto(
+    DebugLogFileDto? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_install_progress_dto(
@@ -682,8 +803,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
+  void sse_encode_usize(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_verify_entry_dto(
     VerifyEntryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_wanxiang_status_dto(
+    WanxiangStatusDto self,
     SseSerializer serializer,
   );
 

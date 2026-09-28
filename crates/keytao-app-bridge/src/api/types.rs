@@ -30,6 +30,25 @@ pub struct LocalSchemaDto {
     pub schemas: Vec<String>,
 }
 
+pub struct LocalSchemasDto {
+    pub has_default_custom: bool,
+    pub schemas: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileItemDto {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AppUpdateDto {
+    pub has_update: bool,
+    pub latest_version: String,
+    pub current_version: String,
+    pub release_url: String,
+}
+
 pub struct OnboardingDto {
     pub completed: bool,
 }
@@ -219,6 +238,13 @@ pub struct AddonSchemaStatusDto {
 }
 
 #[derive(serde::Deserialize)]
+pub struct WanxiangStatusDto {
+    pub installed: bool,
+    pub deployed: bool,
+    pub version: String,
+}
+
+#[derive(serde::Deserialize)]
 pub struct MacosImeStatusDto {
     pub installed: bool,
     pub app_path: Option<String>,
@@ -267,6 +293,13 @@ pub struct RuntimeLogSettingsDto {
 pub struct DebugLogFileDto {
     pub lines: Vec<String>,
     pub truncated: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct DebugLogsDto {
+    pub ime: DebugLogFileDto,
+    pub app: DebugLogFileDto,
+    pub macos_ime: Option<DebugLogFileDto>,
 }
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]

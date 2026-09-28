@@ -1,5 +1,6 @@
 use keytao_app_core::{ime_host::ImeHost, scheme_host::SchemeHost, Core};
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -11,6 +12,72 @@ pub(crate) struct BridgeHost {
     root: PathBuf,
     #[cfg(target_os = "linux")]
     helper: Arc<keytao_app_core::ime_status::linux::ManagedImeHelper>,
+}
+
+/// A per-operation host; Core retains ownership of installation and rollback.
+pub(crate) struct InstallHost<F> {
+    host: BridgeHost,
+    android_deploy: Option<F>,
+}
+
+impl<F> InstallHost<F> {
+    pub(crate) fn new(host: BridgeHost, android_deploy: F) -> Self {
+        Self {
+            host,
+            android_deploy: cfg!(target_os = "android").then_some(android_deploy),
+        }
+    }
+}
+
+impl<F, Fut> SchemeHost for InstallHost<F>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: Future<Output = String> + Send,
+{
+    fn user_root(&self) -> Result<PathBuf, String> {
+        SchemeHost::user_root(&self.host)
+    }
+
+    async fn deploy(&self) -> Result<(), String> {
+        if let Some(deploy) = &self.android_deploy {
+            let error = deploy().await;
+            if error.is_empty() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        } else {
+            SchemeHost::deploy(&self.host).await
+        }
+    }
+
+    fn write_reload_stamp(&self, root: &Path) -> Result<Option<PathBuf>, String> {
+        SchemeHost::write_reload_stamp(&self.host, root)
+    }
+
+    /// Dart copies bundled assets through copyAddonSchemaAssets before calling
+    /// addon_schema_install; Core then updates the schema list and deploys.
+    #[cfg(target_os = "android")]
+    fn copy_addon_assets(&self, _id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn publish_english_addon(&self) -> Result<(), String> {
+        self.host.publish_english_addon()
+    }
+    #[cfg(target_os = "windows")]
+    fn remove_public_schema(&self, id: &str, files: &[PathBuf]) -> Result<(), String> {
+        self.host.remove_public_schema(id, files)
+    }
+    #[cfg(target_os = "windows")]
+    fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
+        SchemeHost::publish_english_settings(&self.host, enabled)
+    }
+    #[cfg(target_os = "windows")]
+    fn publish_wanxiang_sources(&self, files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+        self.host.publish_wanxiang_sources(files)
+    }
 }
 
 impl BridgeHost {
@@ -174,6 +241,36 @@ impl ImeHost for BridgeHost {
 mod tests {
     use super::*;
     use keytao_app_core::{AppEnv, Platform};
+
+    #[tokio::test]
+    async fn install_host_deploy_maps_delegate_error_and_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::new(
+            AppEnv {
+                data_dir: temp.path().join("state"),
+                cache_dir: temp.path().join("cache"),
+                resource_dir: temp.path().join("resources"),
+                app_version: "test".into(),
+                platform: Platform::Android,
+            },
+            Arc::new(crate::runtime::BridgeEvents::default()),
+        )
+        .unwrap();
+        let host = BridgeHost::new(core, temp.path().join("user"));
+        for message in ["platform deploy failed", ""] {
+            // Select the Android delegate on host builds without invoking an IME.
+            let wrapper = InstallHost {
+                host: host.clone(),
+                android_deploy: Some(|| std::future::ready(message.to_string())),
+            };
+            let expected = if message.is_empty() {
+                Ok(())
+            } else {
+                Err(message.to_string())
+            };
+            assert_eq!(wrapper.deploy().await, expected);
+        }
+    }
 
     #[test]
     fn every_host_root_and_reload_stamp_uses_override() {

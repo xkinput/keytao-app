@@ -159,6 +159,37 @@ class AndroidImeInputSettingsDto {
           message == other.message;
 }
 
+class AppUpdateDto {
+  final bool hasUpdate;
+  final String latestVersion;
+  final String currentVersion;
+  final String releaseUrl;
+
+  const AppUpdateDto({
+    required this.hasUpdate,
+    required this.latestVersion,
+    required this.currentVersion,
+    required this.releaseUrl,
+  });
+
+  @override
+  int get hashCode =>
+      hasUpdate.hashCode ^
+      latestVersion.hashCode ^
+      currentVersion.hashCode ^
+      releaseUrl.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AppUpdateDto &&
+          runtimeType == other.runtimeType &&
+          hasUpdate == other.hasUpdate &&
+          latestVersion == other.latestVersion &&
+          currentVersion == other.currentVersion &&
+          releaseUrl == other.releaseUrl;
+}
+
 class BridgeConfig {
   final String dataDir;
   final String cacheDir;
@@ -318,6 +349,26 @@ class DebugLogFileDto {
           truncated == other.truncated;
 }
 
+class DebugLogsDto {
+  final DebugLogFileDto ime;
+  final DebugLogFileDto app;
+  final DebugLogFileDto? macosIme;
+
+  const DebugLogsDto({required this.ime, required this.app, this.macosIme});
+
+  @override
+  int get hashCode => ime.hashCode ^ app.hashCode ^ macosIme.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DebugLogsDto &&
+          runtimeType == other.runtimeType &&
+          ime == other.ime &&
+          app == other.app &&
+          macosIme == other.macosIme;
+}
+
 class DeployResultDto {
   final bool success;
   final String message;
@@ -374,6 +425,24 @@ class DownloadUrlsDto {
 enum EffectiveColorSchemeDto { light, dark }
 
 enum EnglishModeDto { ascii, schema }
+
+class FileItemDto {
+  final String name;
+  final bool isDir;
+
+  const FileItemDto({required this.name, required this.isDir});
+
+  @override
+  int get hashCode => name.hashCode ^ isDir.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FileItemDto &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          isDir == other.isDir;
+}
 
 class ImeUiSettingsDto {
   final UiColorSchemeDto colorScheme;
@@ -510,6 +579,27 @@ class LocalSchemaDto {
           installed == other.installed &&
           deployed == other.deployed &&
           version == other.version &&
+          schemas == other.schemas;
+}
+
+class LocalSchemasDto {
+  final bool hasDefaultCustom;
+  final List<String> schemas;
+
+  const LocalSchemasDto({
+    required this.hasDefaultCustom,
+    required this.schemas,
+  });
+
+  @override
+  int get hashCode => hasDefaultCustom.hashCode ^ schemas.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LocalSchemasDto &&
+          runtimeType == other.runtimeType &&
+          hasDefaultCustom == other.hasDefaultCustom &&
           schemas == other.schemas;
 }
 
@@ -769,6 +859,30 @@ class VerifyEntryDto {
           path == other.path &&
           ok == other.ok &&
           note == other.note;
+}
+
+class WanxiangStatusDto {
+  final bool installed;
+  final bool deployed;
+  final String version;
+
+  const WanxiangStatusDto({
+    required this.installed,
+    required this.deployed,
+    required this.version,
+  });
+
+  @override
+  int get hashCode => installed.hashCode ^ deployed.hashCode ^ version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WanxiangStatusDto &&
+          runtimeType == other.runtimeType &&
+          installed == other.installed &&
+          deployed == other.deployed &&
+          version == other.version;
 }
 
 class WindowsImeStatusDto {

@@ -1,4 +1,5 @@
-use crate::{api::types::*, frb_generated::StreamSink, runtime};
+use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime};
+use flutter_rust_bridge::DartFnFuture;
 use keytao_app_core::scheme_host::SchemeHost;
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
 use keytao_app_core::{events::InstallProgress, CoreEvent};
@@ -89,6 +90,121 @@ pub async fn fetch_latest_release() -> Result<ReleaseInfoDto, String> {
             .await
             .map_err(|error| error.to_string())?,
     )
+}
+
+pub async fn check_app_update() -> Result<AppUpdateDto, String> {
+    runtime::dto(
+        keytao_app_core::update::check_app_update(&runtime::state()?.core)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
+/// platform channel instead. Both Core-supported custom-config filenames count.
+pub fn read_local_schemas(dir: String) -> Result<LocalSchemasDto, String> {
+    let root = std::path::Path::new(&dir);
+    let has_default_custom = ["default.custom.yaml", "default-custom.yaml"]
+        .iter()
+        .any(|name| root.join(name).is_file());
+    Ok(LocalSchemasDto {
+        has_default_custom,
+        schemas: keytao_app_core::scheme::read_local_schemas(&runtime::state()?.core, dir)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+/// Returns Core's directory-first, name-sorted entries. SAF uses listFiles.
+pub fn list_dir(dir: String) -> Result<Vec<FileItemDto>, String> {
+    runtime::dto(
+        keytao_app_core::scheme::list_dir(&runtime::state()?.core, dir)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Downloads and smart-installs into the selected filesystem directory without
+/// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
+pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallResultDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = runtime::absolute_dir(&dir)?;
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let archive = keytao_app_core::download::download_to_temp(&state.core, url)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = keytao_app_core::install::smart_install(
+        &state.core,
+        archive.clone(),
+        dir,
+        // Custom exports invalidate only the selected directory's build cache.
+        #[cfg(target_os = "windows")]
+        |root, schemas, dictionaries, _archive| {
+            keytao_core::invalidate_rime_build_artifacts(root, schemas, dictionaries).map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| format!("[INVALIDATED] {path}"))
+                    .collect()
+            })
+        },
+    )
+    .await;
+    let _ = std::fs::remove_file(archive);
+    Ok(install_result_dto(
+        result.map_err(|error| error.to_string())?,
+    ))
+}
+
+/// Android SAF sequence: confirm storage permission/migration, pickDirectory,
+/// then listFiles/readLocalSchemas through the platform channel. Download here,
+/// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
+/// jsonEncode(result) to finish_android_install for the DTO and done event.
+/// Always call remove_downloaded_archive in Dart's finally block. Do not deploy
+/// or copy into the private/live root. Download progress uses core_events.
+/// Dart must serialize this entire sequence with all other installations:
+/// Core's fixed cache filename is protected only during each Rust call.
+pub async fn download_scheme_archive(url: String) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::download::download_to_temp(&state.core, url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
+/// files are already clean (Kotlin removes the zip on success). Resolves parent
+/// directories and rejects symlink files before deleting inside the cache.
+pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let path = runtime::absolute_dir(&path)?;
+    let cache = state
+        .core
+        .env()
+        .cache_dir
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or("Downloaded archive must have a parent directory")?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let archive = parent.join(
+        path.file_name()
+            .ok_or("Downloaded archive must have a filename")?,
+    );
+    if !parent.starts_with(&cache) {
+        return Err("Downloaded archive must be a file inside the bridge cache directory".into());
+    }
+    match std::fs::symlink_metadata(&archive) {
+        Ok(metadata) if metadata.is_file() => match std::fs::remove_file(archive) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
+        Ok(_) => Err("Downloaded archive must be a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
@@ -326,6 +442,67 @@ pub fn addon_schema_status(id: String) -> Result<AddonSchemaStatusDto, String> {
     )
 }
 
+/// Android: await copyAddonSchemaAssets(id) through the platform channel first;
+/// this call's host treats copy_addon_assets as already complete. android_deploy
+/// must await deployImeData and return "" on success or error text on failure,
+/// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
+/// the callback: the install lock is held. macOS ignores the callback and uses
+/// the existing bridge deploy. InstallProgress continues through core_events.
+pub async fn addon_schema_install(
+    id: String,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<AddonSchemaStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::addon::addon_schema_install(&state.core, id, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Uses the same per-call deploy contract as addon_schema_install; no asset copy
+/// is needed. Core owns schema removal, English-mode reset and progress events.
+pub async fn addon_schema_uninstall(
+    id: String,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<AddonSchemaStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::addon::addon_schema_uninstall(&state.core, id, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn wanxiang_status() -> Result<WanxiangStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::wanxiang::wanxiang_status(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Uses addon_schema_install's deploy contract. Core keeps its receipt/rollback
+/// flow unchanged and may call android_deploy again after restoring files.
+/// The install lock covers the whole operation, including rollback/deployment.
+pub async fn manage_wanxiang(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<WanxiangStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::wanxiang::manage_wanxiang(&state.core, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
 pub fn macos_ime_status() -> Result<MacosImeStatusDto, String> {
     runtime::dto(keytao_app_core::ime_status::macos::macos_ime_status(
         &runtime::state()?.core,
@@ -380,6 +557,14 @@ pub async fn read_runtime_log(max_lines: Option<u32>) -> Result<DebugLogFileDto,
         )
         .await
         .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn read_debug_logs() -> Result<DebugLogsDto, String> {
+    runtime::dto(
+        keytao_app_core::logs::read_debug_logs(&runtime::state()?.core)
+            .await
+            .map_err(|error| error.to_string())?,
     )
 }
 

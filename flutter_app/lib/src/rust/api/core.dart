@@ -41,6 +41,42 @@ Future<InstallResultDto> installLatestScheme({required String scheme}) =>
 Future<ReleaseInfoDto> fetchLatestRelease() =>
     RustLib.instance.api.crateApiCoreFetchLatestRelease();
 
+Future<AppUpdateDto> checkAppUpdate() =>
+    RustLib.instance.api.crateApiCoreCheckAppUpdate();
+
+/// Reads a filesystem directory. Android SAF tree URIs use the readLocalSchemas
+/// platform channel instead. Both Core-supported custom-config filenames count.
+Future<LocalSchemasDto> readLocalSchemas({required String dir}) =>
+    RustLib.instance.api.crateApiCoreReadLocalSchemas(dir: dir);
+
+/// Returns Core's directory-first, name-sorted entries. SAF uses listFiles.
+Future<List<FileItemDto>> listDir({required String dir}) =>
+    RustLib.instance.api.crateApiCoreListDir(dir: dir);
+
+/// Downloads and smart-installs into the selected filesystem directory without
+/// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
+Future<InstallResultDto> installSchemeToDir({
+  required String url,
+  required String dir,
+}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(url: url, dir: dir);
+
+/// Android SAF sequence: confirm storage permission/migration, pickDirectory,
+/// then listFiles/readLocalSchemas through the platform channel. Download here,
+/// call smartExtractZip(zipPath, treeUri) with its progress handler, and pass
+/// jsonEncode(result) to finish_android_install for the DTO and done event.
+/// Always call remove_downloaded_archive in Dart's finally block. Do not deploy
+/// or copy into the private/live root. Download progress uses core_events.
+/// Dart must serialize this entire sequence with all other installations:
+/// Core's fixed cache filename is protected only during each Rust call.
+Future<String> downloadSchemeArchive({required String url}) =>
+    RustLib.instance.api.crateApiCoreDownloadSchemeArchive(url: url);
+
+/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
+/// files are already clean (Kotlin removes the zip on success). Resolves parent
+/// directories and rejects symlink files before deleting inside the cache.
+Future<void> removeDownloadedArchive({required String path}) =>
+    RustLib.instance.api.crateApiCoreRemoveDownloadedArchive(path: path);
+
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
 Future<InstallResultDto> installSchemeFromUrl({required String url}) =>
     RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(url: url);
@@ -99,6 +135,44 @@ Future<EnglishModeDto> setDesktopEnglishMode({required EnglishModeDto mode}) =>
 Future<AddonSchemaStatusDto> addonSchemaStatus({required String id}) =>
     RustLib.instance.api.crateApiCoreAddonSchemaStatus(id: id);
 
+/// Android: await copyAddonSchemaAssets(id) through the platform channel first;
+/// this call's host treats copy_addon_assets as already complete. android_deploy
+/// must await deployImeData and return "" on success or error text on failure,
+/// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
+/// the callback: the install lock is held. macOS ignores the callback and uses
+/// the existing bridge deploy. InstallProgress continues through core_events.
+Future<AddonSchemaStatusDto> addonSchemaInstall({
+  required String id,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreAddonSchemaInstall(
+  id: id,
+  androidDeploy: androidDeploy,
+);
+
+/// Uses the same per-call deploy contract as addon_schema_install; no asset copy
+/// is needed. Core owns schema removal, English-mode reset and progress events.
+Future<AddonSchemaStatusDto> addonSchemaUninstall({
+  required String id,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreAddonSchemaUninstall(
+  id: id,
+  androidDeploy: androidDeploy,
+);
+
+Future<WanxiangStatusDto> wanxiangStatus() =>
+    RustLib.instance.api.crateApiCoreWanxiangStatus();
+
+/// Uses addon_schema_install's deploy contract. Core keeps its receipt/rollback
+/// flow unchanged and may call android_deploy again after restoring files.
+/// The install lock covers the whole operation, including rollback/deployment.
+Future<WanxiangStatusDto> manageWanxiang({
+  required bool installed,
+  required FutureOr<String> Function() androidDeploy,
+}) => RustLib.instance.api.crateApiCoreManageWanxiang(
+  installed: installed,
+  androidDeploy: androidDeploy,
+);
+
 Future<MacosImeStatusDto> macosImeStatus() =>
     RustLib.instance.api.crateApiCoreMacosImeStatus();
 
@@ -118,6 +192,9 @@ Future<void> setRuntimeLogSettings({
 
 Future<DebugLogFileDto> readRuntimeLog({int? maxLines}) =>
     RustLib.instance.api.crateApiCoreReadRuntimeLog(maxLines: maxLines);
+
+Future<DebugLogsDto> readDebugLogs() =>
+    RustLib.instance.api.crateApiCoreReadDebugLogs();
 
 Future<void> clearRuntimeLog() =>
     RustLib.instance.api.crateApiCoreClearRuntimeLog();
