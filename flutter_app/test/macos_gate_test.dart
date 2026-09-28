@@ -31,6 +31,73 @@ class _MacosController extends AppController {
 }
 
 void main() {
+  var windowConfigured = false;
+  Future<void> configureWindow() async {
+    if (windowConfigured) return;
+    await const MacosWindowUtilsConfig().apply();
+    windowConfigured = true;
+  }
+
+  testWidgets(
+    'macOS onboarding install step renders its inline install error',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const windowChannel = MethodChannel(
+        'macos_window_utils/window_manipulator',
+      );
+      const colorChannel = MethodChannel('appkit_ui_element_colors');
+      const titleChannel = MethodChannel('ink.rea.keytao/window');
+      var viewId = 0;
+      messenger.setMockMethodCallHandler(
+        windowChannel,
+        (call) async => switch (call.method) {
+          'isMainWindow' ||
+          'addFullScreenPresentationOption' ||
+          'removeFullScreenPresentationOptions' => true,
+          'addVisualEffectSubview' => ++viewId,
+          _ => null,
+        },
+      );
+      messenger.setMockMethodCallHandler(
+        colorChannel,
+        (call) async => {'hueComponent': 0.29428158007138466},
+      );
+      messenger.setMockMethodCallHandler(titleChannel, (call) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(windowChannel, null);
+        messenger.setMockMethodCallHandler(colorChannel, null);
+        messenger.setMockMethodCallHandler(titleChannel, null);
+      });
+      await configureWindow();
+      final controller = _MacosController()
+        ..macosIme = const MacosImeStatusDto(
+          installed: true,
+          sharedDataSource: '',
+          message: '',
+        )
+        ..installError = AppStrings.installFailed;
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        KeyTaoApp(
+          controller: controller,
+          initialOnboarding: const OnboardingDto(completed: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(PushButton, '继续'));
+      await tester.pumpAndSettle();
+
+      expect(find.text(SetupStep.install.title), findsWidgets);
+      expect(find.text(controller.installError!), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(Duration.zero);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
   testWidgets(
     'macOS completion selects native onboarding or shell without the bridge',
     (tester) async {
@@ -68,7 +135,7 @@ void main() {
         messenger.setMockMethodCallHandler(colorChannel, null);
         messenger.setMockMethodCallHandler(titleChannel, null);
       });
-      await const MacosWindowUtilsConfig().apply();
+      await configureWindow();
       final controller = _MacosController();
       controller.uiSettings = const ImeUiSettingsDto(
         colorScheme: UiColorSchemeDto.auto,

@@ -690,6 +690,7 @@ class AppController extends ChangeNotifier {
       } catch (failure) {
         progress = AppStrings.installFailed;
         installError = errorText(failure);
+        addOperationLogs(['[ERROR] $installError']);
         rethrow;
       } finally {
         operation = null;

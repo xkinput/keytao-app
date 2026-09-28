@@ -1,4 +1,4 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:macos_ui/macos_ui.dart';
 
 import '../app/controller.dart';
@@ -90,6 +90,13 @@ class _MacosOnboardingState extends State<MacosOnboarding> {
                             ),
                             ...switch (step) {
                               SetupStep.component => [
+                                if (c.macosImeError case final error?)
+                                  MacosMessage(
+                                    error,
+                                    color: MacosColors.systemRedColor,
+                                    icon:
+                                        CupertinoIcons.exclamationmark_triangle,
+                                  ),
                                 if (!step.isComplete(c)) ...[
                                   MacosValueRow(
                                     '输入法组件',
@@ -123,6 +130,13 @@ class _MacosOnboardingState extends State<MacosOnboarding> {
                                     ),
                                   ],
                                 ),
+                                if (c.installError case final error?)
+                                  MacosMessage(
+                                    error,
+                                    color: MacosColors.systemRedColor,
+                                    icon:
+                                        CupertinoIcons.exclamationmark_triangle,
+                                  ),
                                 MacosOperationProgress(controller: c),
                               ],
                               SetupStep.deploy => [
