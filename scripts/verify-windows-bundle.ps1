@@ -1,18 +1,21 @@
 param(
-    [ValidateSet("x64", "x86")]
+    [ValidateSet("x64")]
     [string]$Arch = "x64",
     [string]$ReleaseDir,
-    [string]$BundleDir
+    [string]$BundleDir,
+    [string]$InstallerPath,
+    [switch]$SkipInstaller,
+    [switch]$LayoutOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSCommandPath) ".."))
 if (-not $ReleaseDir) {
-    $ReleaseDir = Join-Path $repoRoot "target\release"
+    $ReleaseDir = Join-Path $repoRoot "flutter_app\build\windows\x64\runner\Release"
 }
 if (-not $BundleDir) {
-    $BundleDir = Join-Path $ReleaseDir "bundle"
+    $BundleDir = Join-Path $repoRoot "target\release\bundle"
 }
 
 function Require-File([string]$Path, [string]$Message) {
@@ -23,12 +26,6 @@ function Require-File([string]$Path, [string]$Message) {
 
 function Require-Directory([string]$Path, [string]$Message) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        throw $Message
-    }
-}
-
-function Require-Pattern([string]$Path, [string]$Pattern, [string]$Message) {
-    if (-not (Select-String -Path $Path -Pattern $Pattern -Quiet)) {
         throw $Message
     }
 }
@@ -145,34 +142,6 @@ function Require-PeMachine([string]$Path, [UInt16]$ExpectedMachine, [string]$Exp
     }
 }
 
-function Require-IcoFrames([string]$Path, [int[]]$RequiredSizes) {
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    if ($bytes.Length -lt 6 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0 -or [BitConverter]::ToUInt16($bytes, 2) -ne 1) {
-        throw "$Path is not a valid ICO file"
-    }
-    $count = [BitConverter]::ToUInt16($bytes, 4)
-    if ($bytes.Length -lt (6 + 16 * $count)) {
-        throw "$Path has a truncated ICO directory"
-    }
-
-    $frames = @{}
-    for ($index = 0; $index -lt $count; $index++) {
-        $offset = 6 + 16 * $index
-        $width = if ($bytes[$offset] -eq 0) { 256 } else { [int]$bytes[$offset] }
-        $height = if ($bytes[$offset + 1] -eq 0) { 256 } else { [int]$bytes[$offset + 1] }
-        $bitCount = [BitConverter]::ToUInt16($bytes, $offset + 6)
-        if ($width -eq $height -and $bitCount -eq 32) {
-            $frames[$width] = $true
-        }
-    }
-
-    foreach ($size in $RequiredSizes) {
-        if (-not $frames.ContainsKey($size)) {
-            throw "$Path must contain a ${size}x${size} 32-bit icon frame"
-        }
-    }
-}
-
 function Require-EmbeddedIcon([string]$Dll, [int]$ResourceId) {
     if (-not ("KeyTaoResourceProbe" -as [type])) {
         Add-Type -TypeDefinition @"
@@ -238,239 +207,129 @@ function Verify-AuthenticodeSignature([string]$Path) {
     Write-Warning "$message. Set KEYTAO_REQUIRE_WINDOWS_SIGNATURE=1 for production release enforcement."
 }
 
-Require-Directory $ReleaseDir "Missing Windows release directory: $ReleaseDir"
-Require-Directory $BundleDir "Missing Windows bundle directory: $BundleDir"
-
-$nsisDir = Join-Path $BundleDir "nsis"
-Require-Directory $nsisDir "Missing Windows NSIS bundle directory: $nsisDir"
-
-$configPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
-$config = Get-Content $configPath -Raw | ConvertFrom-Json
-$expectedInstallerName = "$($config.productName)_$($config.version)_$Arch-setup.exe"
-$expectedInstallerPath = Join-Path $nsisDir $expectedInstallerName
-Require-File $expectedInstallerPath "Missing current Windows NSIS installer: $expectedInstallerPath"
-$installer = Get-Item -LiteralPath $expectedInstallerPath
-$unexpectedExeInstallers = Get-ChildItem -Path $nsisDir -Filter "*.exe" -File |
-    Where-Object { $_.FullName -ne $installer.FullName }
-if ($unexpectedExeInstallers) {
-    throw "Windows NSIS directory contains stale installers: $($unexpectedExeInstallers.FullName -join ', ')"
+Require-Directory $ReleaseDir "Missing Windows Flutter release directory: $ReleaseDir"
+$manifest = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw
+if ($manifest -notmatch '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(?<version>[^"\r\n]+)"') {
+    throw "Missing workspace.package.version"
 }
-
-$forbiddenInstallers = Get-ChildItem -Path $BundleDir -Recurse -File |
-    Where-Object { $_.Extension -in @(".msi", ".zip", ".appx", ".msix", ".msixbundle") }
-if ($forbiddenInstallers) {
-    throw "Windows build must only produce the NSIS .exe installer. Unexpected artifacts: $($forbiddenInstallers.FullName -join ', ')"
+$version = $Matches.version
+if (-not $InstallerPath) {
+    $InstallerPath = Join-Path $BundleDir "nsis\keytao-app-$version-windows-$Arch-setup.exe"
 }
 
 $appExe = Join-Path $ReleaseDir "keytao-app.exe"
-$imeRuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\current"
-$imeDll = Join-Path $imeRuntimeDir "keytao_windows_ime.dll"
-$imeRimeDll = Join-Path $imeRuntimeDir "rime.dll"
-$imeRimeData = Join-Path $imeRuntimeDir "rime-data\default.yaml"
-$imeDefaultTheme = Join-Path $imeRuntimeDir "default-theme.yaml"
-$imeLibrimeFeatures = Join-Path $imeRuntimeDir "librime-features.txt"
-$imeVcRuntime = Join-Path $imeRuntimeDir "vcruntime140.dll"
-$imeX86RuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\x86"
-$imeX86Dll = Join-Path $imeX86RuntimeDir "keytao_windows_ime.dll"
-$imeX86RimeDll = Join-Path $imeX86RuntimeDir "rime.dll"
-$imeX86RimeData = Join-Path $imeX86RuntimeDir "rime-data\default.yaml"
-$imeX86DefaultTheme = Join-Path $imeX86RuntimeDir "default-theme.yaml"
-$imeX86LibrimeFeatures = Join-Path $imeX86RuntimeDir "librime-features.txt"
-$imeX86VcRuntime = Join-Path $imeX86RuntimeDir "vcruntime140.dll"
-$imeArm64XRuntimeDir = Join-Path $ReleaseDir "keytao-windows-ime-runtime\arm64x"
-$imeArm64XForwarder = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime.dll"
-$imeArm64X64Target = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime_x64.dll"
-$imeArm64Target = Join-Path $imeArm64XRuntimeDir "keytao_windows_ime_arm64.dll"
-$imeArm64XRimeX64 = Join-Path $imeArm64XRuntimeDir "rime.dll"
-$imeArm64XRimeArm64 = Join-Path $imeArm64XRuntimeDir "rime-arm64.dll"
-$imeArm64XRimeData = Join-Path $imeArm64XRuntimeDir "rime-data\default.yaml"
-$imeArm64XDefaultTheme = Join-Path $imeArm64XRuntimeDir "default-theme.yaml"
-$imeArm64XLibrimeFeatures = Join-Path $imeArm64XRuntimeDir "librime-features.txt"
-$imeArm64LibrimeFeatures = Join-Path $imeArm64XRuntimeDir "librime-arm64-features.txt"
-$appRimeDll = Join-Path $ReleaseDir "rime.dll"
-$hookFile = Join-Path $repoRoot "src-tauri\windows\nsis-hooks.nsh"
-$appSource = Join-Path $repoRoot "src-tauri\src\lib.rs"
-$coreSource = Join-Path $repoRoot "crates\keytao-core\src\lib.rs"
-$registrationSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\registration.rs"
-$globalsSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\globals.rs"
-$languageBarSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\language_bar.rs"
-$imeLibSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\lib.rs"
-$imeStateSource = Join-Path $repoRoot "crates\keytao-windows-ime\src\state.rs"
-$themeSource = Join-Path $repoRoot "crates\keytao-theme\src\lib.rs"
-$imeBrandIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\ime-brand.ico"
-$imeBrandSvgSource = Join-Path $repoRoot "crates\keytao-windows-ime\ime-brand.svg"
-$imeChineseModeIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\mode-zh.ico"
-$imeEnglishModeIconSource = Join-Path $repoRoot "crates\keytao-windows-ime\mode-en.ico"
+foreach ($file in @("keytao-app.exe", "flutter_windows.dll", "rime.dll", "vcruntime140.dll",
+        "vcruntime140_1.dll", "msvcp140.dll", "data\icudtl.dat", "data\app.so", "rime-data\default.yaml")) {
+    Require-File (Join-Path $ReleaseDir $file) "Missing Flutter bundle file: $file"
+}
+Require-Directory (Join-Path $ReleaseDir "data\flutter_assets") "Missing Flutter assets"
+$bridgeDlls = @(Get-ChildItem -LiteralPath $ReleaseDir -Filter "*keytao_app_bridge*.dll" -File)
+if ($bridgeDlls.Count -ne 1) { throw "Expected exactly one KeyTao Rust bridge DLL next to the executable" }
+if (Test-Path -LiteralPath (Join-Path $ReleaseDir "keytao.exe")) { throw "Stale template keytao.exe in bundle" }
+Require-PeMachine $appExe ([UInt16]0x8664) "x64 application"
+foreach ($dll in Get-ChildItem -LiteralPath $ReleaseDir -Filter "*.dll" -File) {
+    Require-PeMachine $dll.FullName ([UInt16]0x8664) "x64 app dependency"
+}
+Require-AsciiMarkers (Join-Path $ReleaseDir "rime.dll") @("lua_translator", "lua_filter", "lua_processor")
 
-Require-File $appExe "Windows release payload is missing keytao-app.exe"
-Require-File $imeDll "Windows release payload is missing keytao_windows_ime.dll"
-Require-File $imeRimeDll "Windows IME runtime is missing rime.dll"
-Require-File $imeRimeData "Windows IME runtime is missing rime-data\default.yaml"
-Require-File $imeDefaultTheme "Windows IME runtime is missing default-theme.yaml"
-Require-File $imeVcRuntime "Windows IME runtime is missing vcruntime140.dll"
-Require-File $appRimeDll "Windows app payload is missing rime.dll next to keytao-app.exe"
-Require-File $imeBrandSvgSource "Windows IME branding source is missing ime-brand.svg"
-Require-MergedLuaManifest $imeLibrimeFeatures
-Require-AsciiMarkers $imeRimeDll @("lua_translator", "lua_filter", "lua_processor")
-Require-AsciiMarkers $appRimeDll @("lua_translator", "lua_filter", "lua_processor")
-$nativeMachine = if ($Arch -eq "x64") { [UInt16]0x8664 } else { [UInt16]0x014C }
-Require-PeMachine $appExe $nativeMachine "$Arch application"
-Require-PeMachine $imeDll $nativeMachine $Arch
-Require-PeMachine $imeRimeDll $nativeMachine $Arch
-Require-PeMachine $imeVcRuntime $nativeMachine $Arch
-Require-DelayLoadedDependency $imeDll "rime.dll"
-Require-NoCrtDependency $imeDll
-Require-EmbeddedIcon $imeDll 1
-Require-EmbeddedIcon $imeDll 2
-Require-EmbeddedIcon $imeDll 3
-Verify-AuthenticodeSignature $imeDll
-& (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeDll
-if ($Arch -eq "x64") {
-    Require-File $imeX86Dll "Windows x64 packages must include the x86 TSF DLL for 32-bit applications"
-    Require-File $imeX86RimeDll "Windows x86 IME runtime is missing rime.dll"
-    Require-File $imeX86RimeData "Windows x86 IME runtime is missing rime-data\default.yaml"
-    Require-File $imeX86DefaultTheme "Windows x86 IME runtime is missing default-theme.yaml"
-    Require-File $imeX86VcRuntime "Windows x86 IME runtime is missing vcruntime140.dll"
-    Require-MergedLuaManifest $imeX86LibrimeFeatures
-    Require-AsciiMarkers $imeX86RimeDll @("lua_translator", "lua_filter", "lua_processor")
-    Require-PeMachine $imeX86Dll ([UInt16]0x014C) "x86"
-    Require-PeMachine $imeX86RimeDll ([UInt16]0x014C) "x86"
-    Require-PeMachine $imeX86VcRuntime ([UInt16]0x014C) "x86"
-    Require-DelayLoadedDependency $imeX86Dll "rime.dll"
-    Require-NoCrtDependency $imeX86Dll
-    Require-EmbeddedIcon $imeX86Dll 1
-    Require-EmbeddedIcon $imeX86Dll 2
-    Require-EmbeddedIcon $imeX86Dll 3
-    Verify-AuthenticodeSignature $imeX86Dll
-    & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath $imeX86Dll
-
-    Require-File $imeArm64XForwarder "Windows x64 packages must include the ARM64X TSF forwarder"
-    Require-File $imeArm64X64Target "Windows ARM64X runtime is missing its x64 TSF target"
-    Require-File $imeArm64Target "Windows ARM64X runtime is missing its native ARM64 TSF target"
-    Require-File $imeArm64XRimeX64 "Windows ARM64X runtime is missing x64 rime.dll"
-    Require-File $imeArm64XRimeArm64 "Windows ARM64X runtime is missing native rime-arm64.dll"
-    Require-File $imeArm64XRimeData "Windows ARM64X runtime is missing rime-data\default.yaml"
-    Require-File $imeArm64XDefaultTheme "Windows ARM64X runtime is missing default-theme.yaml"
-    Require-MergedLuaManifest $imeArm64XLibrimeFeatures
-    Require-MergedLuaManifest $imeArm64LibrimeFeatures
-    Require-AsciiMarkers $imeArm64XRimeX64 @("lua_translator", "lua_filter", "lua_processor")
-    Require-AsciiMarkers $imeArm64XRimeArm64 @("lua_translator", "lua_filter", "lua_processor")
-    Require-PeMachine $imeArm64XForwarder ([UInt16]0xAA64) "ARM64X"
-    Require-PeMachine $imeArm64X64Target ([UInt16]0x8664) "x64"
-    Require-PeMachine $imeArm64Target ([UInt16]0xAA64) "ARM64"
-    Require-PeMachine $imeArm64XRimeX64 ([UInt16]0x8664) "x64"
-    Require-PeMachine $imeArm64XRimeArm64 ([UInt16]0xAA64) "ARM64"
-    Require-Arm64X $imeArm64XForwarder
-    Require-Exports $imeArm64XForwarder @("DllCanUnloadNow", "DllGetClassObject", "DllRegisterServer", "DllUnregisterServer")
-    Require-DelayLoadedDependency $imeArm64X64Target "rime.dll"
-    Require-DelayLoadedDependency $imeArm64Target "rime-arm64.dll"
-    Require-NoCrtDependency $imeArm64X64Target
-    Require-NoCrtDependency $imeArm64Target
-    foreach ($targetDll in @($imeArm64X64Target, $imeArm64Target)) {
-        Require-EmbeddedIcon $targetDll 1
-        Require-EmbeddedIcon $targetDll 2
-        Require-EmbeddedIcon $targetDll 3
-        Verify-AuthenticodeSignature $targetDll
+function Require-MatchingTree([string]$Source, [string]$Destination) {
+    Require-Directory $Source "Missing packaging input: $Source"
+    foreach ($file in Get-ChildItem -LiteralPath $Source -File -Recurse) {
+        $relative = $file.FullName.Substring($Source.Length + 1)
+        $copy = Join-Path $Destination $relative
+        Require-File $copy "Missing bundled resource: $copy"
+        if ((Get-FileHash -LiteralPath $file.FullName).Hash -ne (Get-FileHash -LiteralPath $copy).Hash) {
+            throw "Bundled resource differs from its packaging input: $copy"
+        }
     }
-    Verify-AuthenticodeSignature $imeArm64XForwarder
-}
-Require-File $hookFile "Missing NSIS installer hook file: $hookFile"
-Require-File $appSource "Missing Tauri application source: $appSource"
-Require-File $coreSource "Missing KeyTao core source: $coreSource"
-Require-File $registrationSource "Missing Windows TSF registration source: $registrationSource"
-Require-File $globalsSource "Missing Windows TSF lifecycle source: $globalsSource"
-Require-File $languageBarSource "Missing Windows TSF language bar source: $languageBarSource"
-Require-File $imeLibSource "Missing Windows TSF library source: $imeLibSource"
-Require-File $imeStateSource "Missing Windows TSF state source: $imeStateSource"
-Require-File $themeSource "Missing shared IME theme source: $themeSource"
-Require-File $imeBrandIconSource "Missing dedicated Windows IME branding icon: $imeBrandIconSource"
-Require-File $imeChineseModeIconSource "Missing Windows IME Chinese mode icon: $imeChineseModeIconSource"
-Require-File $imeEnglishModeIconSource "Missing Windows IME English mode icon: $imeEnglishModeIconSource"
-Require-IcoFrames $imeBrandIconSource @(16, 20, 24, 32, 40, 48)
-Require-IcoFrames $imeChineseModeIconSource @(16, 20, 24, 32, 40, 48, 64)
-Require-IcoFrames $imeEnglishModeIconSource @(16, 20, 24, 32, 40, 48, 64)
-
-Require-Pattern $hookFile 'NSIS_HOOK_POSTINSTALL' "NSIS hook file does not define NSIS_HOOK_POSTINSTALL"
-Require-Pattern $hookFile 'NSIS_HOOK_PREUNINSTALL' "NSIS hook file does not define NSIS_HOOK_PREUNINSTALL"
-Require-Pattern $hookFile 'regsvr32\.exe' "NSIS hook file does not invoke regsvr32.exe"
-Require-Pattern $hookFile 'ExecWait.*regsvr32\.exe' "NSIS hook must wait for regsvr32.exe so TSF registration is complete before install finishes"
-Require-Pattern $hookFile 'SysWOW64\\regsvr32\.exe' "NSIS hook does not register the x86 TSF DLL"
-Require-Pattern $hookFile 'IsNativeARM64' "NSIS hook must select the ARM64X runtime on native ARM64 Windows"
-Require-Pattern $hookFile 'ReadEnvStr.*ProgramData' "NSIS hook must resolve the system ProgramData directory"
-Require-Pattern $hookFile '\$R6\\KeyTao\\keytao-windows-ime-runtime' "NSIS hook must stage the text service outside the replaceable app directory"
-Require-Pattern $hookFile 'GetTempFileName' "NSIS hook must allocate a unique runtime directory so loaded TIP DLLs are never overwritten"
-Require-Pattern $hookFile 'WindowsImeRuntimeDir' "NSIS hook must persist the active versioned runtime for uninstall"
-Require-Pattern $hookFile 'robocopy\.exe' "NSIS hook must copy complete native and x86 runtimes before registration"
-Require-Pattern $appSource 'SourceDirectory' "The elevated app registration flow must track the x86 runtime source directory"
-Require-Pattern $appSource 'Copy-Item -Destination' "The elevated app registration flow must stage the complete x86 runtime before regsvr32"
-Require-Pattern $appSource 'windows_ime_versioned_runtime_root' "The app registration repair must use a unique versioned runtime directory"
-Require-Pattern $registrationSource 'InstallLayoutOrTip' "Windows TSF registration must call InstallLayoutOrTip so the profile is added to the current user's input methods"
-Require-Pattern $registrationSource 'PROFILE_ICON_INDEX' "Windows TSF registration must use the embedded branding icon resource"
-Require-Pattern $imeLibSource 'PROFILE_ICON_INDEX:\s*u32\s*=\s*0' "Windows TSF profile icon index must be zero-based"
-Require-Pattern $imeBrandSvgSource 'id="keytao-star"' "Windows TSF profile icon must use the KeyTao star identity"
-if ((Get-Content -Raw -LiteralPath $imeBrandSvgSource) -match '<text(?:\s|>)') {
-    throw "Windows TSF profile icon must not fall back to a text glyph"
-}
-Require-Pattern $globalsSource 'GET_MODULE_HANDLE_EX_FLAG_PIN' "The in-process TSF module must remain loaded while background engine work can execute"
-Require-Pattern $languageBarSource 'ITfLangBarItemButton' "Windows TSF must expose a standard Chinese/English language bar item"
-Require-Pattern $imeLibSource 'GUID_LBI_INPUTMODE' "Windows TSF mode button must use the system GUID recognized by the Input Indicator"
-Require-Pattern $languageBarSource 'GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION' "Windows TSF must publish its input mode through the standard conversion compartment"
-Require-Pattern $coreSource 'KeyTao\.WindowsIme\.EngineInit' "Windows IME engine mutex name must be shared by the app and TSF"
-Require-Pattern $coreSource 'Some\(5 \| 32 \| 33 \| 1224\)' "Windows RIME build invalidation must retry mapped or shared files"
-Require-Pattern $imeStateSource 'WINDOWS_IME_ENGINE_INIT_MUTEX_NAME' "Windows TSF must use the shared cross-process engine mutex"
-Require-Pattern $imeStateSource 'self\.session = None' "Windows TSF reload must release the old RIME session before rebuilding"
-Require-Pattern $appSource 'WindowsImeEngineInitGuard::acquire' "The Windows app must serialize deployment with TSF engine initialization"
-Require-Pattern $appSource 'DeactivateProfile' "The Windows app must deactivate the active TSF profile before replacing mapped RIME builds"
-Require-Pattern $appSource 'ReleaseInputProcessor' "The Windows app must release TSF input processor instances before deployment"
-Require-Pattern $appSource 'TF_IPPMF_FORSESSION' "Windows TSF profile deployment changes must apply to the current desktop session"
-Require-Pattern $appSource 'WindowsTsfProfileManager::open\("after deployment"\)' "Windows TSF profile restoration must use a fresh profile manager after ReleaseInputProcessor"
-Require-Pattern $appSource 'KeyTao TSF profile did not become active after deployment' "Windows TSF profile restoration must verify the active profile"
-Require-Pattern $imeStateSource 'session_reset_pending' "Windows TSF focus callbacks must defer librime session reset"
-Require-Pattern $themeSource 'RegGetValueW' "Windows candidate rendering must read the system theme without spawning a child process"
-
-$windowsConfig = Get-Content (Join-Path $repoRoot "src-tauri\tauri.windows.conf.json") -Raw | ConvertFrom-Json
-$resourceKeys = @($windowsConfig.bundle.resources.PSObject.Properties.Name)
-if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/current") {
-    throw "Windows resources must include the IME runtime directory"
-}
-if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/x86") {
-    throw "Windows resources must include the x86 IME runtime directory"
-}
-if ($resourceKeys -notcontains "../target/keytao-windows-ime-runtime/arm64x") {
-    throw "Windows resources must include the ARM64X IME runtime directory"
-}
-if ($resourceKeys -notcontains "../target/keytao-windows-app-runtime/*.dll") {
-    throw "Windows resources must include all app runtime DLLs at the installer root"
-}
-if ($windowsConfig.bundle.resources.PSObject.Properties["../target/keytao-windows-app-runtime/*.dll"].Value -ne "") {
-    throw "Windows app runtime DLLs must be installed next to keytao-app.exe"
-}
-if ($windowsConfig.bundle.windows.nsis.installMode -ne "perMachine") {
-    throw "Windows NSIS installer must use perMachine install mode for TSF registration"
-}
-if ($windowsConfig.bundle.windows.nsis.installerHooks -ne "windows/nsis-hooks.nsh") {
-    throw "Windows NSIS installerHooks must point to windows/nsis-hooks.nsh"
 }
 
-$installerScript = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "installer.nsi" -File |
-    Select-Object -First 1
-if (-not $installerScript) {
-    throw "Missing generated NSIS installer script"
+Require-MatchingTree (Join-Path $repoRoot "resources\addon-schemas") (Join-Path $ReleaseDir "addon-schemas")
+Require-MatchingTree (Join-Path $repoRoot "target\keytao-windows-ime-runtime\current\rime-data") (Join-Path $ReleaseDir "rime-data")
+foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $repoRoot "target\keytao-windows-app-runtime") -Filter "*.dll" -File) {
+    $copy = Join-Path $ReleaseDir $dll.Name
+    Require-File $copy "Missing app runtime dependency: $($dll.Name)"
+    if ((Get-FileHash -LiteralPath $dll.FullName).Hash -ne (Get-FileHash -LiteralPath $copy).Hash) {
+        throw "App runtime dependency differs from the built x64 runtime: $copy"
+    }
+}
+foreach ($runtime in @("current", "x86", "arm64x")) {
+    $root = Join-Path $ReleaseDir "keytao-windows-ime-runtime\$runtime"
+    Require-MatchingTree (Join-Path $repoRoot "target\keytao-windows-ime-runtime\$runtime") $root
+    foreach ($file in @("keytao_windows_ime.dll", "rime.dll", "rime-data\default.yaml", "default-theme.yaml", "msvcp140.dll", "vcruntime140.dll")) {
+        Require-File (Join-Path $root $file) "Missing $runtime TSF payload: $file"
+    }
+    Require-MergedLuaManifest (Join-Path $root "librime-features.txt")
+    Require-AsciiMarkers (Join-Path $root "rime.dll") @("lua_translator", "lua_filter", "lua_processor")
+    $machine = switch ($runtime) { "current" { 0x8664 }; "x86" { 0x014C }; "arm64x" { 0xAA64 } }
+    Require-PeMachine (Join-Path $root "keytao_windows_ime.dll") ([UInt16]$machine) "$runtime TSF"
+    if ($runtime -ne "arm64x") {
+        foreach ($dll in Get-ChildItem -LiteralPath $root -Filter "*.dll" -File) {
+            Require-PeMachine $dll.FullName ([UInt16]$machine) "$runtime dependency"
+        }
+    } else {
+        foreach ($file in @("keytao_windows_ime_x64.dll", "keytao_windows_ime_arm64.dll", "rime-arm64.dll", "librime-arm64-features.txt")) {
+            Require-File (Join-Path $root $file) "Missing ARM64X payload: $file"
+        }
+        Require-PeMachine (Join-Path $root "keytao_windows_ime_x64.dll") ([UInt16]0x8664) "x64 TSF target"
+        Require-PeMachine (Join-Path $root "keytao_windows_ime_arm64.dll") ([UInt16]0xAA64) "ARM64 TSF target"
+        Require-PeMachine (Join-Path $root "rime.dll") ([UInt16]0x8664) "x64 librime"
+        Require-PeMachine (Join-Path $root "rime-arm64.dll") ([UInt16]0xAA64) "ARM64 librime"
+        Require-MergedLuaManifest (Join-Path $root "librime-arm64-features.txt")
+        Require-AsciiMarkers (Join-Path $root "rime-arm64.dll") @("lua_translator", "lua_filter", "lua_processor")
+    }
 }
 
-Require-Pattern $installerScript.FullName 'nsis-hooks\.nsh' "Generated Windows installer script does not include the KeyTao NSIS hook file"
-Require-Pattern $installerScript.FullName 'keytao_windows_ime\.dll' "Generated Windows installer script does not install keytao_windows_ime.dll"
-Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime' "Generated Windows installer script does not install the IME runtime directory"
-Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime\\x86' "Generated Windows installer script does not install the x86 IME runtime"
-Require-Pattern $installerScript.FullName 'keytao-windows-ime-runtime\\arm64x' "Generated Windows installer script does not install the ARM64X IME runtime"
-Require-Pattern $installerScript.FullName 'default-theme\.yaml' "Generated Windows installer script does not install the shared default theme"
-Require-Pattern $installerScript.FullName 'librime-features\.txt' "Generated Windows installer script does not install the librime feature manifest"
-Require-Pattern $installerScript.FullName 'librime-arm64-features\.txt' "Generated Windows installer script does not install the native ARM64 librime feature manifest"
-Require-Pattern $installerScript.FullName '/oname=.*rime\.dll' "Generated Windows installer script does not install rime.dll next to keytao-app.exe"
-
-Verify-AuthenticodeSignature $installer.FullName
-
-Write-Host "Windows bundle verification passed"
-Write-Host "  Installer: $($installer.FullName)"
+if (-not $LayoutOnly) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw "Native bundle verification requires Windows; -LayoutOnly checks files and PE headers only"
+    }
+    if (-not (Find-OnPath "dumpbin.exe")) { throw "dumpbin.exe is required; run from a Visual Studio developer shell" }
+    # Resolve all app DLL imports against the payload or the operating system.
+    foreach ($binary in @($appExe) + @(Get-ChildItem -LiteralPath $ReleaseDir -Filter "*.dll" -File | ForEach-Object FullName)) {
+        $imports = & dumpbin.exe /dependents $binary | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed: $binary" }
+        foreach ($match in [regex]::Matches($imports, '(?im)^\s*([a-z0-9_.-]+\.dll)\s*$')) {
+            $name = $match.Groups[1].Value
+            if ($name -match '^(api-ms-|ext-ms-)') { continue }
+            if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir $name)) -and
+                -not (Test-Path -LiteralPath (Join-Path $env:WINDIR "System32\$name"))) {
+                throw "Unresolved app dependency $name imported by $binary"
+            }
+        }
+    }
+    $tsfRoot = Join-Path $ReleaseDir "keytao-windows-ime-runtime"
+    foreach ($relative in @("current\keytao_windows_ime.dll", "x86\keytao_windows_ime.dll",
+            "arm64x\keytao_windows_ime_x64.dll", "arm64x\keytao_windows_ime_arm64.dll")) {
+        $dll = Join-Path $tsfRoot $relative
+        $dependency = if ($relative -like "*_arm64.dll") { "rime-arm64.dll" } else { "rime.dll" }
+        Require-DelayLoadedDependency $dll $dependency
+        Require-NoCrtDependency $dll
+        Require-Exports $dll @("DllCanUnloadNow", "DllGetClassObject", "DllRegisterServer", "DllUnregisterServer")
+        foreach ($id in @(1, 2, 3)) { Require-EmbeddedIcon $dll $id }
+        Verify-AuthenticodeSignature $dll
+    }
+    $forwarder = Join-Path $tsfRoot "arm64x\keytao_windows_ime.dll"
+    Require-Arm64X $forwarder
+    Require-Exports $forwarder @("DllCanUnloadNow", "DllGetClassObject", "DllRegisterServer", "DllUnregisterServer")
+    Verify-AuthenticodeSignature $forwarder
+    foreach ($runtime in @("current", "x86")) {
+        & (Join-Path $PSScriptRoot "test-windows-ime-load.ps1") -DllPath (Join-Path $tsfRoot "$runtime\keytao_windows_ime.dll")
+    }
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe)
+    if ($info.ProductName -ne "KeyTao" -or $info.CompanyName -ne "rea" -or $info.ProductVersion -ne $version) {
+        throw "Executable product/company/version resources do not match the workspace"
+    }
+    Verify-AuthenticodeSignature $appExe
+}
+if (-not $SkipInstaller) {
+    Require-File $InstallerPath "Missing Windows NSIS installer: $InstallerPath"
+    if ((Split-Path -Leaf $InstallerPath) -ne "keytao-app-$version-windows-$Arch-setup.exe") {
+        throw "Installer name must match the release.yml Windows artifact name"
+    }
+    Require-PeMachine $InstallerPath ([UInt16]0x014C) "NSIS installer"
+    if (-not $LayoutOnly) { Verify-AuthenticodeSignature $InstallerPath }
+}
+Write-Host "Windows Flutter bundle verification passed (LayoutOnly=$LayoutOnly, SkipInstaller=$SkipInstaller)"
 Write-Host "  App: $appExe"
-Write-Host "  IME runtime: $imeRuntimeDir ($Arch)"
+if (-not $SkipInstaller) { Write-Host "  Installer: $InstallerPath" }

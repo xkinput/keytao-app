@@ -4,7 +4,21 @@ project(keytao LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "keytao")
+set(BINARY_NAME "keytao-app")
+get_filename_component(KEYTAO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+# Cargo is the version authority, including prerelease labels.
+file(READ "${KEYTAO_ROOT}/Cargo.toml" KEYTAO_MANIFEST)
+string(REGEX MATCH "\\[workspace.package\\][^[]*version[ \t]*=[ \t]*\"([^\"]+)\""
+  KEYTAO_VERSION_MATCH "${KEYTAO_MANIFEST}")
+if(NOT KEYTAO_VERSION_MATCH)
+  message(FATAL_ERROR "Missing workspace.package.version")
+endif()
+set(KEYTAO_VERSION "${CMAKE_MATCH_1}")
+string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" KEYTAO_VERSION_NUMBERS "${KEYTAO_VERSION}")
+set(KEYTAO_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(KEYTAO_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(KEYTAO_VERSION_PATCH "${CMAKE_MATCH_3}")
+configure_file(runner/version.h.in "${CMAKE_CURRENT_BINARY_DIR}/version.h" @ONLY)
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -106,3 +120,20 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# resource_dir is the executable directory. Keep the Tauri TSF layout as well
+# as a root shared-data copy for the Flutter host.
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_GENERATOR_PLATFORM MATCHES "^[Aa][Rr][Mm]64$")
+  message(FATAL_ERROR "The Windows package currently supports the x64 app only")
+endif()
+set(KEYTAO_RUNTIME "${KEYTAO_ROOT}/target/keytao-windows-ime-runtime")
+foreach(ARCH current x86 arm64x)
+  install(DIRECTORY "${KEYTAO_RUNTIME}/${ARCH}"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/keytao-windows-ime-runtime" COMPONENT Runtime)
+endforeach()
+install(DIRECTORY "${KEYTAO_RUNTIME}/current/rime-data"
+  "${KEYTAO_ROOT}/resources/addon-schemas"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+install(DIRECTORY "${KEYTAO_ROOT}/target/keytao-windows-app-runtime/"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime
+  FILES_MATCHING PATTERN "*.dll")
