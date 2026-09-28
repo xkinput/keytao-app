@@ -30,7 +30,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 CARGO_PROFILE="$( [[ "$PROFILE" == "release" ]] && echo "release" || echo "debug" )"
-CARGO_FLAGS="$( [[ "$PROFILE" == "release" ]] && echo "--release" || echo "" )"
+CARGO_FLAGS=(--profile dev)
+SWIFT_FLAGS=(-g)
+if [ "$PROFILE" == "release" ]; then
+    CARGO_FLAGS=(--release)
+    SWIFT_FLAGS=(-O)
+fi
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
 APP="$BUILD_DIR/KeyTao.app"
 VENDOR_DIR="$WORKSPACE_DIR/vendor/librime/macos-universal"
 VENDOR_ENV="$VENDOR_DIR/env.sh"
@@ -84,7 +90,7 @@ bundle_dylib_deps() {
             bundle_dylib_deps "$dest"
         fi
         install_name_tool -change "$dep" "@rpath/$base" "$binary"
-    done < <(otool -L "$binary" | awk 'NR > 1 { print $1 }')
+    done < <(otool -L "$binary" | awk '/^[[:space:]]/ { print $1 }' | sort -u)
 }
 
 bundle_rime_plugins() {
@@ -104,7 +110,7 @@ bundle_rime_plugins() {
         cp "$plugin" "$dest"
         chmod u+w "$dest"
         install_name_tool -id "@rpath/rime-plugins/$base" "$dest"
-        if otool -L "$dest" | awk 'NR > 1 { print $1 }' | grep -qx '@rpath/librime.1.dylib'; then
+        if otool -L "$dest" | awk '/^[[:space:]]/ { print $1 }' | grep -qx '@rpath/librime.1.dylib'; then
             install_name_tool \
                 -change "@rpath/librime.1.dylib" "@rpath/$RIME_DYLIB_BASENAME" \
                 "$dest"
@@ -221,17 +227,16 @@ fi
 echo "==> Generating input source icons..."
 "$SCRIPT_DIR/generate-icons.sh"
 
-echo "==> Building keytao-core-ffi ($CARGO_PROFILE)..."
-cargo build $CARGO_FLAGS \
-    --manifest-path "$WORKSPACE_DIR/Cargo.toml" \
-    -p keytao-core-ffi \
-    --target-dir "$WORKSPACE_DIR/target"
-
-DYLIB_SRC="$WORKSPACE_DIR/target/$CARGO_PROFILE/libkeytao_core_ffi.dylib"
-if [ ! -f "$DYLIB_SRC" ]; then
-    echo "ERROR: dylib not found at $DYLIB_SRC" >&2
-    exit 1
-fi
+echo "==> Building universal keytao-core-ffi ($CARGO_PROFILE)..."
+DYLIB_SLICES=()
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build "${CARGO_FLAGS[@]}" \
+        --manifest-path "$WORKSPACE_DIR/Cargo.toml" \
+        -p keytao-core-ffi \
+        --target "$target" \
+        --target-dir "$WORKSPACE_DIR/target"
+    DYLIB_SLICES+=("$WORKSPACE_DIR/target/$target/$CARGO_PROFILE/libkeytao_core_ffi.dylib")
+done
 
 echo "==> Creating app bundle skeleton..."
 if [ -e "$APP" ]; then
@@ -290,7 +295,7 @@ write_info_plist_strings \
     "鍵道" \
     "鍵道開發者"
 
-cp "$DYLIB_SRC" "$APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
+lipo -create "${DYLIB_SLICES[@]}" -output "$APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
 install_name_tool \
     -id "@rpath/libkeytao_core_ffi.dylib" \
     "$APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
@@ -326,19 +331,28 @@ module CKeytaoCore [system] {
 }
 MMEOF
 
-echo "==> Building Swift IME executable..."
-swiftc \
-    "$SCRIPT_DIR/Sources/KeyTaoIME/"*.swift \
-    -module-name KeyTaoIME \
-    -disable-bridging-pch \
-    -framework Cocoa \
-    -framework InputMethodKit \
-    -framework Carbon \
-    -I "$HEADER_DIR" \
-    -L "$APP/Contents/Frameworks" -lkeytao_core_ffi \
-    -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-    $( [[ "$PROFILE" == "release" ]] && echo "-O" || echo "-g" ) \
-    -o "$APP/Contents/MacOS/KeyTaoIME"
+echo "==> Building universal Swift IME executable..."
+SWIFT_SLICES=()
+for arch in arm64 x86_64; do
+    swiftc \
+        "$SCRIPT_DIR/Sources/KeyTaoIME/"*.swift \
+        -target "$arch-apple-macosx$MACOSX_DEPLOYMENT_TARGET" \
+        -module-name KeyTaoIME \
+        -disable-bridging-pch \
+        -framework Cocoa \
+        -framework InputMethodKit \
+        -framework Carbon \
+        -I "$HEADER_DIR" \
+        -L "$APP/Contents/Frameworks" -lkeytao_core_ffi \
+        -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
+        "${SWIFT_FLAGS[@]}" \
+        -o "$BUILD_DIR/KeyTaoIME-$arch"
+    SWIFT_SLICES+=("$BUILD_DIR/KeyTaoIME-$arch")
+done
+lipo -create "${SWIFT_SLICES[@]}" -output "$APP/Contents/MacOS/KeyTaoIME"
+for arch in x86_64 arm64; do
+    lipo "$APP/Contents/MacOS/KeyTaoIME" -verify_arch "$arch"
+done
 
 echo "==> Signing macOS IME bundle..."
 ENTITLEMENTS="$SCRIPT_DIR/dev.entitlements.plist"
@@ -354,7 +368,7 @@ ENTEOF
 APPLE_DEV_CERT=""
 if [ "${CI:-}" != "true" ]; then
     APPLE_DEV_CERT=$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
+        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
 fi
 if [ -n "${KEYTAO_CODESIGN_IDENTITY:-}" ]; then
     SIGN_ID="$KEYTAO_CODESIGN_IDENTITY"
@@ -366,6 +380,9 @@ fi
 echo "    Using signing identity: $SIGN_ID"
 
 while IFS= read -r -d '' dylib; do
+    for arch in x86_64 arm64; do
+        lipo "$dylib" -verify_arch "$arch"
+    done
     codesign --force --sign "$SIGN_ID" --options runtime \
         --entitlements "$ENTITLEMENTS" \
         "$dylib"

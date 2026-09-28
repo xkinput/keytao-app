@@ -5,11 +5,22 @@ export COPYFILE_DISABLE=1
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IME_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-ime"
-APP_RUNTIME_DIR="$PROJECT_DIR/target/keytao-macos-app-runtime"
-APP_FRAMEWORKS_DIR="$APP_RUNTIME_DIR/Frameworks"
+FLUTTER_DIR="$PROJECT_DIR/flutter_app"
+MAIN_APP="$FLUTTER_DIR/build/macos/Build/Products/Release/KeyTao.app"
 PKG_BUILD_DIR="$PROJECT_DIR/target/keytao-macos-pkg"
 VENDOR_DIR="$PROJECT_DIR/vendor/librime/macos-universal"
 VENDOR_ENV="$VENDOR_DIR/env.sh"
+PACKAGE_VERSION="$(awk '
+    /^\[workspace\.package\]/ { section = 1; next }
+    /^\[/ { section = 0 }
+    section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
+' "$PROJECT_DIR/Cargo.toml")"
+if [ -z "$PACKAGE_VERSION" ]; then
+    echo "ERROR: workspace package version was not found." >&2
+    exit 1
+fi
+# Match the IME's numeric Installer version (e.g. 1.2.1-alpha.89 -> 1.2.1.89).
+BUNDLE_VERSION="$(printf '%s' "$PACKAGE_VERSION" | sed -E 's/[^0-9.]+/./g; s/\.+/./g; s/^\.//; s/\.$//')"
 
 if { [ -z "${RIME_INCLUDE_DIR:-}" ] || [ -z "${RIME_LIB_DIR:-}" ]; } &&
     { [ ! -f "$VENDOR_ENV" ] ||
@@ -51,7 +62,6 @@ find_rime_data_dir() {
         "${RIME_DATA_DIR:-}" \
         "$VENDOR_DIR/rime-data" \
         "$PROJECT_DIR/vendor/rime-data" \
-        "$PROJECT_DIR/target/keytao-macos-app-runtime/rime-data" \
         "/Library/Input Methods/Squirrel.app/Contents/SharedSupport" \
         "/opt/homebrew/share/rime-data" \
         "/usr/local/share/rime-data"; do
@@ -84,67 +94,29 @@ fi
 echo "==> Building macOS IME runtime..."
 export KEYTAO_RIME_SHARED_DATA_DIR="$RIME_DATA_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \
+    KEYTAO_VERSION="$PACKAGE_VERSION" \
     "$PROJECT_DIR/crates/keytao-macos-ime/build.sh" --release --skip-pkg
 
-echo "==> Preparing macOS app runtime..."
-rm -rf "$APP_RUNTIME_DIR"
-mkdir -p "$APP_FRAMEWORKS_DIR"
-ditto "$RIME_DATA_DIR" "$APP_RUNTIME_DIR/rime-data"
-
-RIME_RUNTIME_DYLIB="$(find "$RIME_LIB_DIR" -maxdepth 1 \( -type f -o -type l \) -name 'librime.1.dylib' | sort | head -1)"
-if [ -z "$RIME_RUNTIME_DYLIB" ]; then
-    RIME_RUNTIME_DYLIB="$(find "$RIME_LIB_DIR" -maxdepth 1 \( -type f -o -type l \) -name 'librime.*.dylib' | sort | head -1)"
-fi
-if [ -z "$RIME_RUNTIME_DYLIB" ]; then
-    echo "ERROR: no librime runtime dylib found in $RIME_LIB_DIR" >&2
-    exit 1
-fi
-cp -L "$RIME_RUNTIME_DYLIB" "$APP_FRAMEWORKS_DIR/librime.1.dylib"
-chmod u+w "$APP_FRAMEWORKS_DIR/librime.1.dylib"
-install_name_tool -id "@rpath/librime.1.dylib" "$APP_FRAMEWORKS_DIR/librime.1.dylib"
-
-if [ -d "$RIME_LIB_DIR/rime-plugins" ]; then
-    mkdir -p "$APP_FRAMEWORKS_DIR/rime-plugins"
-    while IFS= read -r -d '' plugin; do
-        base="$(basename "$plugin")"
-        cp "$plugin" "$APP_FRAMEWORKS_DIR/rime-plugins/$base"
-        chmod u+w "$APP_FRAMEWORKS_DIR/rime-plugins/$base"
-        install_name_tool \
-            -id "@rpath/rime-plugins/$base" \
-            "$APP_FRAMEWORKS_DIR/rime-plugins/$base"
-    done < <(find "$RIME_LIB_DIR/rime-plugins" -maxdepth 1 -type f -name '*.dylib' -print0)
-else
-    echo "WARNING: no rime plugins found at $RIME_LIB_DIR/rime-plugins"
-fi
-
-while IFS= read -r -d '' dylib; do
-    base="$(basename "$dylib")"
-    [ "$base" = "libkeytao_core_ffi.dylib" ] && continue
-    [[ "$base" == librime* ]] && continue
-    cp "$dylib" "$APP_FRAMEWORKS_DIR/$base"
-done < <(find "$IME_BUILD_DIR/KeyTao.app/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' -print0)
-
-echo "==> Building KeyTao macOS app bundle..."
-cd "$PROJECT_DIR"
-rm -rf \
-    "$PROJECT_DIR/target/release/KeyTao.app" \
-    "$PROJECT_DIR/target/release/bundle/macos/KeyTao.app" \
-    "$PROJECT_DIR/target/release/bundle/dmg"
-pnpm tauri build --bundles app --config src-tauri/tauri.macos.conf.json
-
-MAIN_APP="$PROJECT_DIR/target/release/bundle/macos/KeyTao.app"
-if [ ! -d "$MAIN_APP" ]; then
-    MAIN_APP="$PROJECT_DIR/target/release/KeyTao.app"
-fi
+echo "==> Building KeyTao Flutter macOS app bundle..."
+# Incremental builds can retain an invalid outer seal. Remove only the app,
+# preserving Flutter's build cache and the other products in this directory.
+rm -rf "$MAIN_APP"
+(
+    cd "$FLUTTER_DIR"
+    flutter build macos --release --build-name "$PACKAGE_VERSION"
+)
 IME_APP="$IME_BUILD_DIR/KeyTao.app"
 if [ ! -d "$MAIN_APP" ]; then
-    echo "ERROR: Tauri main app bundle was not produced." >&2
+    echo "ERROR: Flutter main app bundle was not produced." >&2
     exit 1
 fi
 if [ ! -d "$IME_APP" ]; then
     echo "ERROR: macOS IME bundle was not produced." >&2
     exit 1
 fi
+
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $PACKAGE_VERSION" "$MAIN_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUNDLE_VERSION" "$MAIN_APP/Contents/Info.plist"
 
 MAIN_BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$MAIN_APP/Contents/Info.plist" 2>/dev/null || true)"
 IME_BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$IME_APP/Contents/Info.plist" 2>/dev/null || true)"
@@ -161,21 +133,9 @@ if [ "$IME_BUNDLE_ID" != "ink.rea.inputmethod.keytao" ]; then
     exit 1
 fi
 
-echo "==> Completing KeyTao macOS app runtime..."
+# Flutter's bundle-rime.sh already copies the runtime and resources.
 MAIN_FRAMEWORKS_DIR="$MAIN_APP/Contents/Frameworks"
-mkdir -p "$MAIN_FRAMEWORKS_DIR"
-while IFS= read -r -d '' dylib; do
-    base="$(basename "$dylib")"
-    cp -f "$dylib" "$MAIN_FRAMEWORKS_DIR/$base"
-    chmod u+w "$MAIN_FRAMEWORKS_DIR/$base"
-done < <(find "$APP_FRAMEWORKS_DIR" -maxdepth 1 -type f -name '*.dylib' -print0)
-if [ -d "$APP_FRAMEWORKS_DIR/rime-plugins" ]; then
-    rm -rf "$MAIN_FRAMEWORKS_DIR/rime-plugins"
-    ditto "$APP_FRAMEWORKS_DIR/rime-plugins" "$MAIN_FRAMEWORKS_DIR/rime-plugins"
-    find "$MAIN_FRAMEWORKS_DIR/rime-plugins" \( -name '._*' -o -name '.DS_Store' \) -delete
-    xattr -cr "$MAIN_FRAMEWORKS_DIR/rime-plugins" 2>/dev/null || true
-fi
-if [ -d "$RIME_LIB_DIR/rime-plugins" ] && [ ! -f "$MAIN_FRAMEWORKS_DIR/rime-plugins/librime-lua.dylib" ]; then
+if [ ! -f "$MAIN_FRAMEWORKS_DIR/rime-plugins/librime-lua.dylib" ]; then
     echo "ERROR: macOS main app bundle is missing rime-plugins/librime-lua.dylib" >&2
     exit 1
 fi
@@ -195,7 +155,7 @@ ENTEOF
 APPLE_DEV_CERT=""
 if [ "${CI:-}" != "true" ]; then
     APPLE_DEV_CERT="$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+        | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)"
 fi
 if [ -n "${KEYTAO_CODESIGN_IDENTITY:-}" ]; then
     SIGN_ID="$KEYTAO_CODESIGN_IDENTITY"
@@ -205,14 +165,26 @@ else
     SIGN_ID="-"
 fi
 echo "    Using signing identity: $SIGN_ID"
+# Sign from the inside out: plugins, other dylibs, nested frameworks, app.
+while IFS= read -r -d '' plugin; do
+    codesign --force --sign "$SIGN_ID" --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        "$plugin"
+done < <(find "$MAIN_FRAMEWORKS_DIR/rime-plugins" -type f -name '*.dylib' -print0)
 while IFS= read -r -d '' dylib; do
     codesign --force --sign "$SIGN_ID" --options runtime \
         --entitlements "$ENTITLEMENTS" \
         "$dylib"
-done < <(find "$MAIN_APP/Contents/Frameworks" -type f -name '*.dylib' -print0)
+done < <(find "$MAIN_FRAMEWORKS_DIR" -type f -name '*.dylib' ! -path '*/rime-plugins/*' -print0)
+while IFS= read -r -d '' framework; do
+    codesign --force --sign "$SIGN_ID" --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        "$framework"
+done < <(find "$MAIN_FRAMEWORKS_DIR" -depth -type d -name '*.framework' -print0)
 codesign --force --sign "$SIGN_ID" --options runtime \
     --entitlements "$ENTITLEMENTS" \
     "$MAIN_APP"
+codesign --verify --deep --strict --verbose=2 "$MAIN_APP"
 
 echo "==> Building KeyTao installer pkg..."
 PKG_PAYLOAD="$PKG_BUILD_DIR/payload"
@@ -288,7 +260,7 @@ exit 0
 SCRIPTEOF
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-PACKAGE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+PKG_OUTPUT="$PKG_BUILD_DIR/keytao-app-${PACKAGE_VERSION}-macos.pkg"
 COPYFILE_DISABLE=1 pkgbuild \
     --root "$PKG_PAYLOAD" \
     --component-plist "$PKG_COMPONENTS" \
@@ -296,9 +268,8 @@ COPYFILE_DISABLE=1 pkgbuild \
     --identifier "ink.rea.keytao-app.pkg" \
     --version "$PACKAGE_VERSION" \
     --install-location "/" \
-    "$PKG_BUILD_DIR/KeyTao.pkg"
+    "$PKG_OUTPUT"
 
-PKG_OUTPUT="$PKG_BUILD_DIR/KeyTao.pkg"
 PKG_REPACK_DIR="$PKG_BUILD_DIR/repack"
 PKG_EXPANDED_DIR="$PKG_REPACK_DIR/expanded"
 PKG_FLAT_DIR="$PKG_REPACK_DIR/flat"

@@ -2,7 +2,13 @@
 # Verify the macOS release pkg without installing it.
 set -euo pipefail
 
-PKG_PATH="${1:-target/keytao-macos-pkg/KeyTao.pkg}"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE_VERSION="$(awk '
+    /^\[workspace\.package\]/ { section = 1; next }
+    /^\[/ { section = 0 }
+    section && /^version[[:space:]]*=/ { gsub(/["]/, "", $3); print $3; exit }
+' "$PROJECT_DIR/Cargo.toml")"
+PKG_PATH="${1:-$PROJECT_DIR/target/keytao-macos-pkg/keytao-app-${WORKSPACE_VERSION}-macos.pkg}"
 
 require_command() {
     local command_name="$1"
@@ -51,6 +57,19 @@ plist_value() {
     plutil -extract "$key" raw -o - "$plist"
 }
 
+require_universal() {
+    local binary="$1"
+    local arch
+    require_file "$binary"
+    echo "Architectures ($binary): $(lipo -archs "$binary")"
+    for arch in x86_64 arm64; do
+        if ! lipo "$binary" -verify_arch "$arch"; then
+            echo "ERROR: release binary must contain x86_64 and arm64: $binary" >&2
+            exit 1
+        fi
+    done
+}
+
 check_external_links() {
     local bundle="$1"
     local label="$2"
@@ -95,7 +114,7 @@ ls -lh "$PKG_PATH"
 
 PAYLOAD_FILES="$(pkgutil --payload-files "$PKG_PATH")"
 payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app"
-payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app/Contents/MacOS/keytao-app"
+payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app/Contents/MacOS/KeyTao"
 payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app/Contents/Resources/rime-data/default.yaml"
 payload_contains "$PAYLOAD_FILES" "./Applications/KeyTao.app/Contents/Frameworks/rime-plugins/librime-lua.dylib"
 payload_contains "$PAYLOAD_FILES" "./Library/Input Methods/KeyTao.app"
@@ -129,7 +148,7 @@ require_dir "$MAIN_APP"
 require_dir "$IME_APP"
 require_file "$POSTINSTALL"
 require_file "$PACKAGE_INFO"
-require_file "$MAIN_APP/Contents/MacOS/keytao-app"
+require_file "$MAIN_APP/Contents/MacOS/KeyTao"
 require_file "$MAIN_APP/Contents/Info.plist"
 require_file "$MAIN_APP/Contents/Resources/rime-data/default.yaml"
 require_glob "$MAIN_APP/Contents/Frameworks/librime*.dylib"
@@ -142,33 +161,19 @@ require_glob "$IME_APP/Contents/Frameworks/librime*.dylib"
 require_file "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
 require_file "$IME_APP/Contents/Frameworks/rime-plugins/librime-lua.dylib"
 
-MAIN_ARCHS="$(lipo -archs "$MAIN_APP/Contents/MacOS/keytao-app")"
-IME_ARCHS="$(lipo -archs "$IME_APP/Contents/MacOS/KeyTaoIME")"
-FFI_ARCHS="$(lipo -archs "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib")"
-MAIN_RIME_DYLIB="$(find "$MAIN_APP/Contents/Frameworks" -maxdepth 1 -type f -name 'librime*.dylib' -print -quit)"
-IME_RIME_DYLIB="$(find "$IME_APP/Contents/Frameworks" -maxdepth 1 -type f -name 'librime*.dylib' -print -quit)"
-MAIN_RIME_ARCHS="$(lipo -archs "$MAIN_RIME_DYLIB")"
-IME_RIME_ARCHS="$(lipo -archs "$IME_RIME_DYLIB")"
-
-echo "Main app archs: $MAIN_ARCHS"
-echo "IME app archs: $IME_ARCHS"
-echo "Core FFI archs: $FFI_ARCHS"
-echo "Main librime archs: $MAIN_RIME_ARCHS"
-echo "IME librime archs: $IME_RIME_ARCHS"
-
-if [ "$MAIN_ARCHS" != "$IME_ARCHS" ] || [ "$MAIN_ARCHS" != "$FFI_ARCHS" ]; then
-    echo "ERROR: main app, IME app, and FFI dylib must use the same release arch set" >&2
-    exit 1
-fi
-for arch in $MAIN_ARCHS; do
-    if ! grep -Eq "(^| )$arch( |$)" <<<"$MAIN_RIME_ARCHS"; then
-        echo "ERROR: main app librime does not contain $arch" >&2
-        exit 1
-    fi
-    if ! grep -Eq "(^| )$arch( |$)" <<<"$IME_RIME_ARCHS"; then
-        echo "ERROR: IME librime does not contain $arch" >&2
-        exit 1
-    fi
+require_universal "$MAIN_APP/Contents/MacOS/KeyTao"
+require_universal "$MAIN_APP/Contents/Frameworks/keytao_app_bridge.framework/keytao_app_bridge"
+require_universal "$IME_APP/Contents/MacOS/KeyTaoIME"
+require_universal "$IME_APP/Contents/Frameworks/libkeytao_core_ffi.dylib"
+for bundle in "$MAIN_APP" "$IME_APP"; do
+    for dylib in "$bundle/Contents/Frameworks/"librime*.dylib; do
+        require_universal "$dylib"
+    done
+    while IFS= read -r -d '' binary; do
+        if file "$binary" | grep -q 'Mach-O'; then
+            require_universal "$binary"
+        fi
+    done < <(find "$bundle/Contents/Frameworks" -type f -print0)
 done
 
 MAIN_BUNDLE_ID="$(plist_value "$MAIN_APP/Contents/Info.plist" CFBundleIdentifier)"
@@ -183,13 +188,17 @@ if [ "$IME_BUNDLE_ID" != "ink.rea.inputmethod.keytao" ]; then
 fi
 
 PKG_VERSION="$(sed -n 's/.*<pkg-info[^>]*[[:space:]]version="\([^"]*\)".*/\1/p' "$PACKAGE_INFO" | head -1)"
-IME_APP_VERSION="$(plist_value "$IME_APP/Contents/Info.plist" CFBundleShortVersionString)"
 echo "pkg version: $PKG_VERSION"
-echo "IME bundle version: $IME_APP_VERSION"
-if [ "$IME_APP_VERSION" != "$PKG_VERSION" ]; then
-    echo "ERROR: IME bundle version $IME_APP_VERSION does not match pkg version $PKG_VERSION" >&2
-    exit 1
-fi
+EXPECTED_BUNDLE_VERSION="$(printf '%s' "$PKG_VERSION" | sed -E 's/[^0-9.]+/./g; s/\.+/./g; s/^\.//; s/\.$//')"
+for bundle in "$MAIN_APP" "$IME_APP"; do
+    APP_VERSION="$(plist_value "$bundle/Contents/Info.plist" CFBundleShortVersionString)"
+    BUNDLE_VERSION="$(plist_value "$bundle/Contents/Info.plist" CFBundleVersion)"
+    echo "Bundle version ($bundle): $APP_VERSION ($BUNDLE_VERSION)"
+    if [ "$APP_VERSION" != "$PKG_VERSION" ] || [ "$BUNDLE_VERSION" != "$EXPECTED_BUNDLE_VERSION" ]; then
+        echo "ERROR: bundle version does not match pkg version $PKG_VERSION: $bundle" >&2
+        exit 1
+    fi
+done
 
 # cfprefsd owns preference writes for every process on the machine; an installer
 # has no business terminating it.
