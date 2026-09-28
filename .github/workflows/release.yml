@@ -1,39 +1,54 @@
 name: Release
 
-on:
+'on':
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (empty = workspace.package.version)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  create-release:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
-      release-id: ${{ steps.create.outputs.result }}
+      version: ${{ steps.metadata.outputs.version }}
+      rust-toolchain: ${{ steps.metadata.outputs.rust-toolchain }}
     steps:
       - uses: actions/checkout@v4
-      - id: create
+      - name: Resolve version and Rust toolchain
+        id: metadata
         uses: actions/github-script@v7
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         with:
           script: |
-            const tag = context.ref.replace('refs/tags/', '')
-            const { data } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              name: tag,
-              generate_release_notes: true,
-              draft: false,
-              prerelease: tag.includes('alpha'),
-            })
-            return data.id
+            const fs = require('node:fs')
+            const cargo = fs.readFileSync('Cargo.toml', 'utf8')
+            const workspaceVersion = cargo.match(/^\[workspace\.package\]\s*\n(?:(?!^\[)[\s\S])*?^version\s*=\s*"([^"]+)"/m)?.[1]
+            const version = context.eventName === 'workflow_dispatch'
+              ? process.env.REQUESTED_VERSION.trim() || workspaceVersion
+              : context.ref.replace(/^refs\/tags\/v/, '')
+            if (!version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+              throw new Error('Expected a version such as 1.2.1-alpha.89 (without v)')
+            }
+            const rust = fs.readFileSync('rust-toolchain.toml', 'utf8').match(/^channel\s*=\s*"([^"]+)"/m)?.[1]
+            if (!rust) throw new Error('Missing Rust toolchain pin')
+            core.setOutput('version', version)
+            core.setOutput('rust-toolchain', rust)
 
   build-desktop:
-    needs: create-release
+    needs: prepare
     env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
@@ -42,66 +57,57 @@ jobs:
           - platform: ubuntu-22.04
             os_name: linux
             package_arch: x64
+            artifacts: |
+              dist/keytao-app-${{ needs.prepare.outputs.version }}-linux-x64.deb
+              dist/keytao-app-${{ needs.prepare.outputs.version }}-linux-x64.rpm
           - platform: ubuntu-24.04-arm
             os_name: linux
             package_arch: arm64
-          - platform: macos-15-intel
-            os_name: macos
-            package_arch: x86_64
+            artifacts: |
+              dist/keytao-app-${{ needs.prepare.outputs.version }}-linux-arm64.deb
+              dist/keytao-app-${{ needs.prepare.outputs.version }}-linux-arm64.rpm
           - platform: macos-15
             os_name: macos
-            package_arch: arm64
+            package_arch: universal
+            artifacts: target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos.pkg
           - platform: windows-latest
             os_name: windows
             package_arch: x64
-            windows_arch: x64
+            artifacts: target/release/bundle/nsis/keytao-app-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
       - uses: actions/setup-node@v4
-        if: matrix.os_name == 'linux'
         with:
           node-version: 22
 
-      - uses: actions/setup-node@v4
+      # Linux installs the same Flutter pin inside Dockerfile.linux-builder.
+      - uses: subosito/flutter-action@v2
         if: matrix.os_name != 'linux'
         with:
-          node-version: 22
-          cache: pnpm
+          flutter-version: '3.47.5'
+          channel: stable
+          cache: true
 
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.os_name == 'macos'
+      - uses: dtolnay/rust-toolchain@master
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.os_name == 'windows'
+          toolchain: ${{ needs.prepare.outputs.rust-toolchain }}
+          targets: ${{ matrix.os_name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.os_name == 'windows' && 'x86_64-pc-windows-msvc,i686-pc-windows-msvc,aarch64-pc-windows-msvc' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         if: matrix.os_name != 'linux'
         with:
-          workspaces: src-tauri
-
-      - name: Install Linux verification deps
-        if: matrix.os_name == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            dpkg-dev patchelf rpm
+          key: ${{ matrix.os_name }}-${{ matrix.package_arch }}
 
       - name: Install Windows system deps
-        if: startsWith(matrix.platform, 'windows')
+        if: matrix.os_name == 'windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          choco install 7zip -y --no-progress
-          choco install llvm -y --no-progress
+          choco install 7zip llvm nsis -y --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Windows dependency installation failed" }
           $llvmBin = "C:\Program Files\LLVM\bin"
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -124,127 +130,75 @@ jobs:
             }
           }
 
-      - if: matrix.os_name != 'linux'
-        run: pnpm install --frozen-lockfile
-
-      - name: Set version from tag
+      - name: Set build version
         shell: bash
         run: |
-          node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
+          node scripts/sync-version.mjs --set "$VERSION"
+          # Keep --locked builds valid when the requested version differs.
+          cargo update --workspace
 
       - name: Build Linux packages
         if: matrix.os_name == 'linux'
         shell: bash
-        run: |
-          set -euo pipefail
-          scripts/build-linux.sh
-
-      - name: Build Windows installer
-        if: startsWith(matrix.platform, 'windows')
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Arch ${{ matrix.windows_arch }}
-
-      - name: Build macOS pkg
-        if: matrix.os_name == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm build:macos
-
-      - name: Verify macOS pkg
-        if: matrix.os_name == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/verify-macos-pkg.sh target/keytao-macos-pkg/KeyTao.pkg
-
-      - name: Upload macOS pkg to release
-        if: matrix.os_name == 'macos'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          pkg="target/keytao-macos-pkg/KeyTao.pkg"
-          renamed="target/keytao-macos-pkg/keytao-app-${VERSION}-macos-${{ matrix.package_arch }}.pkg"
-          test -f "$pkg"
-          cp "$pkg" "$renamed"
-          gh release upload ${{ github.ref_name }} "$renamed" --clobber
-
-      - name: Upload Windows installer to release
-        if: startsWith(matrix.platform, 'windows')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $installer = Get-ChildItem -Path "target\release\bundle\nsis" -Filter "*.exe" -File | Select-Object -First 1
-          if (-not $installer) {
-            throw "Missing Windows NSIS installer"
-          }
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          $renamed = Join-Path $installer.DirectoryName "keytao-app-$version-windows-${{ matrix.windows_arch }}-setup.exe"
-          Copy-Item -Force -LiteralPath $installer.FullName -Destination $renamed
-          gh release upload $env:GITHUB_REF_NAME $renamed --clobber
+        run: scripts/build-linux.sh
 
       - name: Verify Linux bundles
         if: matrix.os_name == 'linux'
         shell: bash
-        run: |
-          set -euo pipefail
-          scripts/verify-linux-bundles.sh target/release/bundle
+        run: scripts/verify-linux-bundles.sh target/release/bundle "$VERSION"
 
-      - name: Upload Linux artifacts to release
-        if: matrix.os_name == 'linux'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The entrypoint runs verify-windows-bundle.ps1 with the MSVC environment.
+      - name: Build and verify Windows installer
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: ./scripts/build-windows-flutter.ps1 -Arch x64
+
+      - name: Build macOS universal pkg
+        if: matrix.os_name == 'macos'
         shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p dist/release-upload
-          rm -f dist/release-upload/*
-          while IFS= read -r artifact; do
-            ext="${artifact##*.}"
-            renamed="dist/release-upload/keytao-app-${VERSION}-linux-${{ matrix.package_arch }}.${ext}"
-            cp "$artifact" "$renamed"
-          done < <(find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
-          mapfile -t artifacts < <(find dist/release-upload -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) | sort)
-          if [[ "${#artifacts[@]}" -eq 0 ]]; then
-            echo "::error::No Linux artifacts found in dist"
-            find target/release/bundle -maxdepth 4 -type f -print 2>/dev/null | sort || true
-            exit 1
-          fi
-          gh release upload ${{ github.ref_name }} "${artifacts[@]}" --clobber
+        run: scripts/build-macos.sh
+
+      - name: Verify macOS universal pkg
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: scripts/verify-macos-pkg.sh "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.pkg"
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os_name }}-${{ matrix.package_arch }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
 
   build-android:
-    needs: create-release
+    needs: prepare
     runs-on: ubuntu-latest
     env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION: "1.17.0"
+      KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION: '1.17.0'
     steps:
       - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: subosito/flutter-action@v2
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          flutter-version: '3.47.5'
+          channel: stable
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust-toolchain }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          key: android
 
       - uses: actions/setup-java@v4
         with:
@@ -255,19 +209,16 @@ jobs:
         with:
           packages: platform-tools
 
-      - run: sdkmanager "ndk;27.0.12077973"
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Set version from tag
+      - name: Install Android SDK and NDK
         run: |
-          node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
+          sdkmanager "ndk;27.0.12077973" "platforms;android-36" "build-tools;36.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
-      - name: Init Android project
+      - name: Set build version
         run: |
-          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          export ANDROID_NDK_HOME="$NDK_HOME"
-          pnpm tauri android init --ci --skip-targets-install
+          node scripts/sync-version.mjs --set "$VERSION"
+          cargo update --workspace
 
       - name: Setup Android signing
         env:
@@ -280,7 +231,7 @@ jobs:
             echo "::error::ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD are required for release APK signing"
             exit 1
           fi
-          cd src-tauri/gen/android
+          cd flutter_app/android
           echo "$ANDROID_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/keystore_orig.jks"
           keytool -importkeystore \
             -srckeystore "$RUNNER_TEMP/keystore_orig.jks" \
@@ -293,95 +244,121 @@ jobs:
           echo "password=$ANDROID_KEY_PASSWORD" >> keystore.properties
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
-      - name: Import Android librime runtime
+      - name: Import and verify Android librime runtime
         run: |
           set -euo pipefail
-          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          export ANDROID_NDK_HOME="$NDK_HOME"
-          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+          for abi in armeabi-v7a arm64-v8a x86_64; do
             scripts/android-librime-runtime.sh import-fcitx5-rime --abi "$abi"
+            scripts/android-librime-runtime.sh verify --abi "$abi"
           done
-          scripts/android-librime-runtime.sh verify --all
-          scripts/android-librime-runtime.sh sync --all
 
-      - name: Build Android APK
+      - name: Build Android APKs
+        working-directory: flutter_app
         run: |
-          set -euo pipefail
-          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          export ANDROID_NDK_HOME="$NDK_HOME"
-          export KEYTAO_ANDROID_SKIP_RUNTIME_SYNC=1
           unset BZIP2_LIB_DIR BZIP2_INCLUDE_DIR
-          pnpm tauri android build --ci --apk --split-per-abi --target aarch64 armv7 i686 x86_64
+          flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64
 
-      - name: Upload APKs to release
+      - name: Verify and name Android APKs
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist/release-upload
-          rm -f dist/release-upload/*.apk
-          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*.apk" | grep -v "/androidTest/" | sort)
-          if [[ "${#apks[@]}" -eq 0 ]]; then
-            echo "::error::No Android APKs found"
-            find src-tauri/gen/android -maxdepth 6 -type f -name "*.apk" -print 2>/dev/null | sort || true
-            exit 1
-          fi
-          artifacts=()
-          for apk in "${apks[@]}"; do
-            base="$(basename "$apk" .apk)"
-            base="${base#app-}"
-            renamed="dist/release-upload/keytao-app-${VERSION}-android-${base}.apk"
-            cp "$apk" "$renamed"
-            artifacts+=("$renamed")
+          for pair in armeabi-v7a:arm arm64-v8a:arm64 x86_64:x86_64; do
+            abi="${pair%%:*}"
+            arch="${pair#*:}"
+            apk="flutter_app/build/app/outputs/flutter-apk/app-${abi}-release.apk"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+            cp "$apk" "dist/release-upload/keytao-app-${VERSION}-android-${arch}-release.apk"
           done
-          gh release upload ${{ github.ref_name }} "${artifacts[@]}" --clobber
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            dist/release-upload/keytao-app-${{ needs.prepare.outputs.version }}-android-arm-release.apk
+            dist/release-upload/keytao-app-${{ needs.prepare.outputs.version }}-android-arm64-release.apk
+            dist/release-upload/keytao-app-${{ needs.prepare.outputs.version }}-android-x86_64-release.apk
+          if-no-files-found: error
 
   build-ios:
-    needs: create-release
+    needs: prepare
     runs-on: macos-15
     env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: subosito/flutter-action@v2
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          flutter-version: '3.47.5'
+          channel: stable
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust-toolchain }}
+          targets: aarch64-apple-ios
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          key: ios
 
-      - run: pnpm install --frozen-lockfile
-
-      - name: Set version from tag
+      - name: Set build version
         run: |
-          node scripts/sync-version.mjs --set "${GITHUB_REF_NAME#v}"
+          node scripts/sync-version.mjs --set "$VERSION"
+          cargo update --workspace
 
-      - name: Build unsigned iOS package
-        run: |
-          set -euo pipefail
-          pnpm build:ios -- --no-sign --ci
+      - name: Build and import iOS librime runtime
+        run: scripts/build-ios-librime.sh --target aarch64-apple-ios
 
-      - name: Upload unsigned iOS IPA to release
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          ipa="src-tauri/gen/apple/build/arm64/KeyTao.ipa"
-          manifest="$RUNNER_TEMP/keytao-ios-ipa-files.txt"
-          renamed="src-tauri/gen/apple/build/arm64/keytao-app-${VERSION}-ios-arm64-unsigned.ipa"
-          test -f "$ipa"
-          unzip -t "$ipa" >/dev/null
-          unzip -Z1 "$ipa" > "$manifest"
-          grep -Fx 'Payload/KeyTao.app/KeyTao' "$manifest" >/dev/null
-          grep -Fx 'Payload/KeyTao.app/PlugIns/KeyTaoKeyboard.appex/KeyTaoKeyboard' "$manifest" >/dev/null
-          cp "$ipa" "$renamed"
-          gh release upload "${GITHUB_REF_NAME}" "$renamed" --clobber
+      - name: Build and verify unsigned iOS IPA
+        run: scripts/build-flutter-ios.sh
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: flutter_app/build/ios/ipa/keytao-app-${{ needs.prepare.outputs.version }}-ios-arm64-unsigned.ipa
+          if-no-files-found: error
+
+  create-release:
+    needs: [prepare, build-desktop, build-android, build-ios]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release-upload
+          merge-multiple: true
+
+      - id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '')
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              generate_release_notes: true,
+              draft: false,
+              prerelease: tag.includes('alpha'),
+            })
+            return data.id
+
+      - name: Upload all assets to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/release-upload/* --clobber
