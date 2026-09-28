@@ -17,7 +17,7 @@ enum OperationKind { install, deploy, addon, wanxiang, customDirectory }
 
 enum LogLineKind { normal, error, warning, deploy, merged }
 
-enum DeployStepState { running, ok, failed }
+enum DeployStepState { neutral, ok, failed }
 
 enum ImeBadgeState {
   checking,
@@ -93,6 +93,7 @@ class AppController extends ChangeNotifier {
   bool releaseLoading = false;
   bool logsLoading = false;
   bool filesLoading = false;
+  bool isOpeningCustomDirectory = false;
   bool onboardingCompleted = false;
   AppUpdateDto? appUpdate;
   String? releaseError;
@@ -282,6 +283,18 @@ class AppController extends ChangeNotifier {
   ];
   String? get sharedLogResultText =>
       sharedLogPath == null ? null : AppStrings.savedLog(sharedLogPath!);
+  bool _isInlineError(String? message) => [
+    releaseError,
+    installError,
+    addonError,
+    wanxiangError,
+    customError,
+    macosImeError,
+    debugError,
+    migrationError,
+    ...deploySteps.map((step) => step.message),
+  ].contains(message);
+  String? get unhandledError => _isInlineError(error) ? null : error;
 
   bool get storageReady =>
       storage?['granted'] == true && storage?['writable'] == true;
@@ -331,11 +344,11 @@ class AppController extends ChangeNotifier {
         }
         if (event.installProgress case final value?) {
           _receiveInstallProgress(value);
+          return;
         }
-        if (event.deployProgress case final value?) {
+        if (event.deployProgress case final value? when isDeploying) {
           progress = value;
-          _deployStep(value, DeployStepState.running);
-          addOperationLogs(['[DEPLOY] $value']);
+          _deployStep(value, DeployStepState.neutral);
         }
         _changed();
       },
@@ -355,7 +368,7 @@ class AppController extends ChangeNotifier {
     if (isInstallingCustom) customProgress = value;
     if (isManagingAddon) addonProgress = value;
     if (isManagingWanxiang) wanxiangProgress = value;
-    addOperationLogs([value.message]);
+    _changed();
   }
 
   void addOperationLogs(Iterable<String> lines) {
@@ -376,16 +389,6 @@ class AppController extends ChangeNotifier {
   }
 
   void _deployStep(String message, DeployStepState state) {
-    for (var i = 0; i < deploySteps.length; i++) {
-      if (deploySteps[i].state == DeployStepState.running) {
-        deploySteps[i] = DeployStep(
-          deploySteps[i].message,
-          state == DeployStepState.failed
-              ? DeployStepState.failed
-              : DeployStepState.ok,
-        );
-      }
-    }
     deploySteps.add(DeployStep(message, state));
     _changed();
   }
@@ -395,6 +398,7 @@ class AppController extends ChangeNotifier {
     activePage = page;
     if (info.platform == BridgePlatform.macOs) unawaited(setWindowTitle());
     if (page == AppPage.debug) {
+      sharedLogPath = null;
       if (busy) {
         _logsWhenIdle = true;
       } else {
@@ -413,7 +417,8 @@ class AppController extends ChangeNotifier {
       await action();
       return true;
     } catch (failure) {
-      error = errorText(failure);
+      final message = errorText(failure);
+      error = _isInlineError(message) ? null : message;
       return false;
     } finally {
       busy = false;
@@ -557,11 +562,11 @@ class AppController extends ChangeNotifier {
   }
 
   void selectSource(String value) {
-    if (busy || value == source || (value != 'github' && value != 'gitee')) {
+    if (value == source || (value != 'github' && value != 'gitee')) {
       return;
     }
     source = value;
-    unawaited(refreshRelease());
+    _changed();
   }
 
   Future<bool> refreshRelease() async {
@@ -602,6 +607,7 @@ class AppController extends ChangeNotifier {
         failure.isNotEmpty &&
         failure != _reportedMigrationDeployError &&
         !isDeploying) {
+      deploySteps.clear();
       _deployStep(failure, DeployStepState.failed);
       addOperationLogs(['[DEPLOY ERROR] $failure']);
       _reportedMigrationDeployError = failure;
@@ -610,14 +616,17 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _requireStorage({bool redirect = false}) async {
+  Future<void> _requireStorage({
+    bool redirect = false,
+    bool customDirectory = false,
+  }) async {
     checkingStorage = true;
     _changed();
     try {
       await _readStorage();
-      if (!storageReady) {
+      if (storage?['granted'] != true || (!customDirectory && !storageReady)) {
         final message = storage?['message'] as String?;
-        final failure = message == null || message.isEmpty
+        final failure = customDirectory || message == null || message.isEmpty
             ? AppStrings.storagePermission
             : message;
         if (redirect) {
@@ -633,7 +642,7 @@ class AppController extends ChangeNotifier {
         }
         throw StateError(failure);
       }
-      if (!migrationReady) {
+      if (migrationError?.isNotEmpty == true) {
         throw StateError(storage!['migrationError'] as String);
       }
     } finally {
@@ -681,7 +690,6 @@ class AppController extends ChangeNotifier {
       } catch (failure) {
         progress = AppStrings.installFailed;
         installError = errorText(failure);
-        addOperationLogs(['[ERROR] $installError']);
         rethrow;
       } finally {
         operation = null;
@@ -705,7 +713,7 @@ class AppController extends ChangeNotifier {
       if (local?.installed != true) {
         throw StateError(AppStrings.noSchemeForDeploy);
       }
-      _deployStep(AppStrings.deployingLibrime, DeployStepState.running);
+      _deployStep(AppStrings.deployingLibrime, DeployStepState.neutral);
       final String message;
       if (isAndroid) {
         await _requireStorage();
@@ -839,7 +847,6 @@ class AppController extends ChangeNotifier {
   Future<bool> pickCustomDirectory() => run(() async {
     customError = null;
     try {
-      if (isAndroid) await _requireStorage(redirect: true);
       final selected = isAndroid
           ? await android.pickDirectory()
           : await const MethodChannel('ink.rea.keytao/window')
@@ -954,9 +961,16 @@ class AppController extends ChangeNotifier {
       customError = null;
       try {
         if (isAndroid) {
-          await _requireStorage();
+          await _requireStorage(customDirectory: true);
           final archive = await core.downloadSchemeArchive(url: url);
           try {
+            _receiveInstallProgress(
+              const InstallProgressDto(
+                stage: 'extracting',
+                percent: 61,
+                message: '正在解压...',
+              ),
+            );
             final result = await android.smartExtractZip(
               archive,
               selectedTreeUri!,
@@ -973,12 +987,11 @@ class AppController extends ChangeNotifier {
             dir: selectedDirectory!,
           );
         }
-        _recordInstallResult(customResult!);
+        addOperationLogs(customResult!.logs);
         progress = AppStrings.customInstallDone;
         await _readCustomDirectory();
       } catch (failure) {
         customError = errorText(failure);
-        addOperationLogs(['[ERROR] $customError']);
         rethrow;
       } finally {
         operation = null;
@@ -1045,21 +1058,53 @@ class AppController extends ChangeNotifier {
     } else {
       final result = await Process.run('open', [value]);
       if (result.exitCode != 0) {
-        throw StateError('${AppStrings.cannotOpen}${result.stderr}');
+        throw StateError('${result.stderr}');
       }
     }
   }
 
-  Future<bool> openDictionaryManager() => open(dictionaryManagerUrl);
+  Future<bool> openDictionaryManager() async {
+    if (!canOpenDictionaryManager) return false;
+    try {
+      await _open(dictionaryManagerUrl);
+      return true;
+    } catch (failure) {
+      addOperationLogs(['[OPEN RIME DICT ERROR] ${errorText(failure)}']);
+      return false;
+    }
+  }
+
   Future<bool> openDefaultDirectory() => open(defaultDir);
-  Future<bool> openCustomDirectory() => selectedDirectory == null
-      ? Future.value(false)
-      : open(selectedTreeUri ?? selectedDirectory!);
+  Future<bool> openCustomDirectory() async {
+    if (selectedDirectory == null || isOpeningCustomDirectory) return false;
+    isOpeningCustomDirectory = true;
+    _changed();
+    try {
+      await _open(selectedTreeUri ?? selectedDirectory!);
+      return true;
+    } catch (failure) {
+      addOperationLogs(['[OPEN DIR ERROR] ${errorText(failure)}']);
+      return false;
+    } finally {
+      isOpeningCustomDirectory = false;
+      _changed();
+    }
+  }
+
   Future<bool> openTheme() => uiSettings?.themePath == null
       ? Future.value(false)
       : open(uiSettings!.themePath!);
-  Future<bool> openAppUpdate() =>
-      appUpdate == null ? Future.value(false) : open(appUpdate!.releaseUrl);
+  Future<bool> openAppUpdate() async {
+    if (appUpdate == null) return false;
+    try {
+      await _open(appUpdate!.releaseUrl);
+      return true;
+    } catch (_) {
+      // The old release banner was a plain link with no app-level error state.
+      return false;
+    }
+  }
+
   // A title change must not toggle `busy`; a missing macOS channel is ignored.
   Future<void> setWindowTitle([String? title]) async {
     try {
@@ -1067,6 +1112,7 @@ class AppController extends ChangeNotifier {
           .invokeMethod<void>('setTitle', title ?? activePage.title);
     } on Object catch (_) {}
   }
+
   Future<bool> openStoragePermissionSettings() => run(() async {
     await android.openStoragePermissionSettings();
     await _readStorage();
@@ -1111,7 +1157,11 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<bool> refreshLogs() => run(_readLogs);
+  Future<bool> refreshLogs() async {
+    if (_disposed || logsLoading) return false;
+    await _readLogs();
+    return true;
+  }
 
   Future<bool> _logAction(
     String failurePrefix,
@@ -1122,7 +1172,7 @@ class AppController extends ChangeNotifier {
     debugNotice = null;
     try {
       await action();
-      if (debugError == null) debugNotice = notice;
+      debugNotice = notice;
     } catch (failure) {
       debugError = AppStrings.failure(failurePrefix, errorText(failure));
       throw StateError(debugError!);

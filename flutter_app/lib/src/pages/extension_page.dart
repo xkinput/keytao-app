@@ -41,21 +41,28 @@ class ExtensionPage extends StatelessWidget {
                 ),
                 if (c.selectedDirectory != null) ...[
                   OutlinedButton.icon(
-                    onPressed: c.busy ? null : c.openCustomDirectory,
+                    onPressed: c.isOpeningCustomDirectory
+                        ? null
+                        : c.openCustomDirectory,
                     icon: const Icon(Icons.open_in_new),
-                    label: const Text(AppStrings.openDirectory),
-                  ),
-                  FilledButton.icon(
-                    onPressed: c.canInstallCustom
-                        ? c.installCustomDirectory
-                        : null,
-                    icon: const Icon(Icons.download_outlined),
                     label: Text(
-                      c.isInstallingCustom
-                          ? AppStrings.installing
-                          : AppStrings.installNow,
+                      c.isOpeningCustomDirectory
+                          ? AppStrings.opening
+                          : AppStrings.openDirectory,
                     ),
                   ),
+                  if (c.downloadUrl?.isNotEmpty == true)
+                    FilledButton.icon(
+                      onPressed: c.canInstallCustom
+                          ? c.installCustomDirectory
+                          : null,
+                      icon: const Icon(Icons.download_outlined),
+                      label: Text(
+                        c.isInstallingCustom
+                            ? AppStrings.installing
+                            : AppStrings.installNow,
+                      ),
+                    ),
                 ],
               ],
             ),
@@ -67,7 +74,7 @@ class ExtensionPage extends StatelessWidget {
                 color: successColor(context),
               ),
               if (schemas != null) ...[
-                if (!schemas.hasDefaultCustom)
+                if (schemas.schemas.isEmpty)
                   const StatusMessage(AppStrings.noDefaultCustom),
                 if (schemas.schemas.isNotEmpty) ...[
                   const SizedBox(height: 8),

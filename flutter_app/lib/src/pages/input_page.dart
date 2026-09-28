@@ -28,12 +28,13 @@ class StorageStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final deployError = c.storage?['deployError'] as String?;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ValueRow(AppStrings.directory, c.defaultDir),
-        if (!c.storageReady || c.migrationError?.isNotEmpty == true)
+        if (c.storage != null &&
+            (c.storage!['granted'] != true ||
+                c.migrationError?.isNotEmpty == true))
           Align(
             alignment: Alignment.centerLeft,
             child: OutlinedButton.icon(
@@ -45,7 +46,6 @@ class StorageStatus extends StatelessWidget {
             ),
           ),
         ErrorMessage(c.migrationError),
-        ErrorMessage(deployError),
       ],
     );
   }

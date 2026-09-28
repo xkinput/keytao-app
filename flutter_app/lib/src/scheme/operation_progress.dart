@@ -46,20 +46,30 @@ class DeploySteps extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (step.state == DeployStepState.running)
+              if (step.state == DeployStepState.neutral &&
+                  controller.isDeploying &&
+                  identical(step, controller.deploySteps.last))
                 const SizedBox.square(
                   dimension: 20,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               else
                 Icon(
-                  step.state == DeployStepState.ok
-                      ? Icons.check_circle_outline
-                      : Icons.cancel_outlined,
+                  switch (step.state) {
+                    DeployStepState.ok => Icons.check_circle_outline,
+                    DeployStepState.failed => Icons.cancel_outlined,
+                    DeployStepState.neutral => Icons.sync,
+                  },
                   size: 20,
-                  color: step.state == DeployStepState.ok
-                      ? successColor(context)
-                      : Theme.of(context).colorScheme.error,
+                  color: switch (step.state) {
+                    DeployStepState.ok => successColor(context),
+                    DeployStepState.failed => Theme.of(
+                      context,
+                    ).colorScheme.error,
+                    DeployStepState.neutral => Theme.of(
+                      context,
+                    ).colorScheme.onSurfaceVariant,
+                  },
                 ),
               const SizedBox(width: 8),
               Expanded(
@@ -71,7 +81,9 @@ class DeploySteps extends StatelessWidget {
                       DeployStepState.failed => Theme.of(
                         context,
                       ).colorScheme.error,
-                      DeployStepState.running => null,
+                      DeployStepState.neutral => Theme.of(
+                        context,
+                      ).colorScheme.onSurfaceVariant,
                     },
                   ),
                 ),

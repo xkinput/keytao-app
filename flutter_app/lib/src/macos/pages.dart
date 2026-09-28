@@ -68,7 +68,7 @@ class MacosSettings extends StatelessWidget {
     final c = controller;
     final s = c.uiSettings;
     return MacosGroup(
-      title: '候选窗设置',
+      title: AppStrings.imeSettings,
       icon: CupertinoIcons.paintbrush,
       children: [
         if (s == null)
@@ -83,7 +83,6 @@ class MacosSettings extends StatelessWidget {
           )
         else ...[
           MacosChoice<UiColorSchemeDto>(
-            label: '配色',
             value: s.colorScheme,
             options: colorSchemes,
             icons: const {
@@ -94,7 +93,6 @@ class MacosSettings extends StatelessWidget {
             onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
           ),
           MacosChoice<PanelOrientationDto>(
-            label: '排列',
             value: s.orientation,
             options: orientations,
             icons: const {

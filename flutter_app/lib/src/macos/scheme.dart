@@ -127,7 +127,7 @@ class MacosVersionPicker extends StatelessWidget {
               for (final entry in sources.entries)
                 entry.key: '${downloadSources[entry.key]} ${entry.value}',
             },
-            onChanged: c.busy || c.releaseLoading ? null : c.selectSource,
+            onChanged: c.selectSource,
           ),
         MacosSettingRow(
           '最新版本',
@@ -138,11 +138,13 @@ class MacosVersionPicker extends StatelessWidget {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               if (c.releaseLoading) const ProgressCircle(radius: 7),
-              if (c.scheme == 'keytao' && sources.length == 1)
+              if (c.scheme == 'keytao' &&
+                  sources.length == 1 &&
+                  sources.containsKey('github'))
                 MacosIconButton(
-                  onPressed: c.busy || c.releaseLoading
-                      ? null
-                      : () => c.selectSource(sources.keys.single),
+                  onPressed: () => c.selectSource(sources.keys.single),
+                  boxConstraints: const BoxConstraints(minHeight: 20),
+                  padding: EdgeInsets.zero,
                   icon: MacosBadge(
                     '${downloadSources[sources.keys.single]} ${sources.values.single}',
                   ),
@@ -151,23 +153,36 @@ class MacosVersionPicker extends StatelessWidget {
                 MacosBadge(
                   c.scheme != 'keytao' && c.releaseVersion != null
                       ? '${c.releaseVersion} · ${c.selectedSchemeAsset}'
+                      : c.latestRelease?.github == null
+                      ? c.latestRelease?.version ?? '—'
                       : c.releaseVersion ?? '—',
                 ),
-              PushButton(
-                controlSize: ControlSize.regular,
-                secondary: true,
-                onPressed: c.busy || c.releaseLoading ? null : c.refreshRelease,
-                child: const Text(AppStrings.refresh),
+              MacosTooltip(
+                message: AppStrings.checkUpdate,
+                child: MacosIconButton(
+                  semanticLabel: AppStrings.checkUpdate,
+                  onPressed: c.busy || c.releaseLoading
+                      ? null
+                      : c.refreshRelease,
+                  icon: const MacosIcon(CupertinoIcons.refresh),
+                ),
               ),
               if (c.changelogBody != null)
                 MacosTooltip(
                   message: AppStrings.changelog,
                   child: MacosIconButton(
                     semanticLabel: AppStrings.changelog,
+                    boxConstraints: const BoxConstraints(minHeight: 20),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 2,
+                    ),
+                    mouseCursor: SystemMouseCursors.click,
                     onPressed: () => _showChangelog(context),
                     icon: Text(
                       AppStrings.changelog,
                       style: TextStyle(
+                        fontSize: 13,
                         color: MacosTheme.of(context).primaryColor,
                       ),
                     ),
@@ -209,17 +224,18 @@ class MacosSchemePage extends StatelessWidget {
           children: [
             MacosSchemeSelection(controller: c),
             MacosValueRow(AppStrings.directory, c.defaultDir),
-            MacosMessage(
-              '${c.localStatus}${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
-              color: c.local?.deployed == true
-                  ? MacosColors.systemGreenColor
-                  : c.local?.installed == true
-                  ? MacosColors.systemOrangeColor
-                  : null,
-              icon: c.local?.deployed == true
-                  ? CupertinoIcons.checkmark_circle
-                  : CupertinoIcons.info_circle,
-            ),
+            if (c.local != null)
+              MacosMessage(
+                '${c.localStatus}${c.localSchemaIds == null ? '' : ' ${c.localSchemaIds}'}',
+                color: c.local?.deployed == true
+                    ? MacosColors.systemGreenColor
+                    : c.local?.installed == true
+                    ? MacosColors.systemOrangeColor
+                    : null,
+                icon: c.local?.deployed == true
+                    ? CupertinoIcons.checkmark_circle
+                    : CupertinoIcons.info_circle,
+              ),
             MacosActionRow(
               children: [
                 PushButton(

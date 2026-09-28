@@ -123,7 +123,7 @@ class MacosSettingRow extends StatelessWidget {
     this.icon,
     this.stacked = false,
   });
-  final String label;
+  final String? label;
   final Widget child;
   final IconData? icon;
   final bool stacked;
@@ -135,14 +135,16 @@ class MacosSettingRow extends StatelessWidget {
         MacosIcon(icon, size: 16),
         const SizedBox(width: 8),
       ],
-      Flexible(child: Text(label)),
+      Flexible(child: Text(label!)),
     ],
   );
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-    child: stacked
+    child: label == null
+        ? child
+        : stacked
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [_label, const SizedBox(height: 8), child],
@@ -191,14 +193,14 @@ class MacosActionRow extends StatelessWidget {
 class MacosChoice<T> extends StatefulWidget {
   const MacosChoice({
     super.key,
-    required this.label,
+    this.label,
     required this.value,
     required this.options,
     this.disabled = const {},
     this.onChanged,
     this.icons = const {},
   });
-  final String label;
+  final String? label;
   final T value;
   final Map<T, String> options;
   final Set<T> disabled;
@@ -512,7 +514,7 @@ class MacosOperationProgress extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final active = c.isInstalling || c.isDeploying || c.checkingStorage;
+    final active = c.isInstalling || c.checkingStorage;
     if (!active && c.deploySteps.isEmpty && c.operationLogCount == 0) {
       return const SizedBox.shrink();
     }
@@ -526,23 +528,42 @@ class MacosOperationProgress extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(
                 children: [
-                  if (step.state == DeployStepState.running)
+                  if (step.state == DeployStepState.neutral &&
+                      c.isDeploying &&
+                      identical(step, c.deploySteps.last))
                     const ProgressCircle(radius: 7)
                   else
                     MacosIcon(
-                      step.state == DeployStepState.ok
-                          ? CupertinoIcons.checkmark_circle_fill
-                          : CupertinoIcons.xmark_circle_fill,
+                      switch (step.state) {
+                        DeployStepState.ok =>
+                          CupertinoIcons.checkmark_circle_fill,
+                        DeployStepState.failed =>
+                          CupertinoIcons.xmark_circle_fill,
+                        DeployStepState.neutral =>
+                          CupertinoIcons.arrow_2_circlepath,
+                      },
                       size: 16,
-                      color: MacosDynamicColor.resolve(
-                        step.state == DeployStepState.ok
-                            ? MacosColors.systemGreenColor
-                            : MacosColors.systemRedColor,
-                        context,
-                      ),
+                      color: MacosDynamicColor.resolve(switch (step.state) {
+                        DeployStepState.ok => MacosColors.systemGreenColor,
+                        DeployStepState.failed => MacosColors.systemRedColor,
+                        DeployStepState.neutral =>
+                          MacosColors.secondaryLabelColor,
+                      }, context),
                     ),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(step.message)),
+                  Expanded(
+                    child: Text(
+                      step.message,
+                      style: TextStyle(
+                        color: MacosDynamicColor.resolve(switch (step.state) {
+                          DeployStepState.ok => MacosColors.systemGreenColor,
+                          DeployStepState.failed => MacosColors.systemRedColor,
+                          DeployStepState.neutral =>
+                            MacosColors.secondaryLabelColor,
+                        }, context),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),

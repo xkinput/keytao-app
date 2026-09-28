@@ -60,10 +60,24 @@ class FakeCore implements RustLibApi {
   final schemeRequests = <String, Completer<SchemeReleaseDto>>{};
   bool delayReleases = false;
   bool updateFails = false;
+  bool addonDeployProgress = false;
   final logFailures = <String>{};
   Completer<void>? deployGate;
   EnglishModeDto english = EnglishModeDto.schema;
   int onboardingWrites = 0;
+
+  Future<void> emitAddonDeployProgress() async {
+    if (!addonDeployProgress) return;
+    for (final message in ['正在部署 librime...', '部署完成', '已通知系统输入法重载']) {
+      events.add(
+        BridgeEvent(
+          kind: BridgeEventKind.deployProgress,
+          deployProgress: message,
+        ),
+      );
+    }
+    await settle();
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
@@ -192,6 +206,7 @@ class FakeCore implements RustLibApi {
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('addonInstall:$id');
+    await emitAddonDeployProgress();
     final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
@@ -209,6 +224,7 @@ class FakeCore implements RustLibApi {
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('addonUninstall:$id');
+    await emitAddonDeployProgress();
     english = EnglishModeDto.ascii;
     return crateApiCoreAddonSchemaStatus(id: id);
   }
@@ -219,6 +235,7 @@ class FakeCore implements RustLibApi {
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('wanxiang:$installed');
+    await emitAddonDeployProgress();
     final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
@@ -369,43 +386,165 @@ void main() {
     RustLib.dispose();
   });
 
-  test('startup checks once and stale source/scheme releases cannot enable install', () async {
-    controller.dispose();
-    controller = create(mobile: false);
-    core.delayReleases = true;
-    core.updateFails = true;
-    expect(await controller.install(), isFalse);
-    await controller.refreshState();
-    await settle();
-    expect(controller.appUpdate, isNull);
-    expect(controller.error, isNull);
-    expect(controller.releaseLoading, isTrue);
-    controller.selectSource('github');
-    controller.selectScheme('xmjd');
-    core.latestRequests[0].complete(release);
-    core.latestRequests[1].completeError(StateError('stale'));
-    core.schemeRequests['xmjd']!.complete(
-      const SchemeReleaseDto(
-        scheme: 'xmjd',
-        label: 'xmjd',
-        version: '3',
-        name: '',
-        downloadUrl: 'offline-xmjd',
-        assetName: 'xmjd6.zip',
-      ),
-    );
-    await settle();
-    expect(controller.downloadUrl, 'offline-xmjd');
-    expect(controller.releaseError, isNull);
-    expect(controller.canInstall, isTrue);
-    await controller.refreshState();
-    expect(core.calls.where((c) => c == 'update').length, 1);
-    final request = controller.refreshRelease();
-    core.schemeRequests['xmjd']!.completeError(StateError('offline'));
-    expect(await request, isFalse);
-    expect(controller.releaseError, '获取版本信息失败：offline');
-    expect(controller.canInstall, isFalse);
+  test('source switching keeps fetched releases and never refetches', () async {
+    for (final mobile in [true, false]) {
+      controller.dispose();
+      controller = create(mobile: mobile)..latestRelease = release;
+      core.calls.clear();
+      core.delayReleases = true;
+      var changes = 0;
+      controller.addListener(() => changes++);
+      for (final source in ['github', 'gitee']) {
+        controller.selectSource(source);
+        await settle();
+        expect(core.calls, isEmpty);
+        expect(controller.latestRelease, same(release));
+        expect(controller.releaseLoading, isFalse);
+        expect(
+          controller.downloadUrl,
+          source == 'github' ? 'offline-gh' : 'offline-ge',
+        );
+        expect(controller.canInstall, isTrue);
+        expect(controller.changelogBody, 'Release notes');
+      }
+      expect(changes, 2);
+      controller.busy = true;
+      controller.selectSource('github');
+      expect(controller.downloadUrl, 'offline-gh');
+      expect(controller.latestRelease, same(release));
+      expect(core.calls, isEmpty);
+    }
   });
+
+  test(
+    'only explicit deploy operations receive deploy progress steps',
+    () async {
+      controller.dispose();
+      controller = create(mobile: false)..local = installedLocal;
+      await controller.connectEvents();
+      await settle();
+      core.addonDeployProgress = true;
+      for (final previousDeploy in [false, true]) {
+        controller.deploySteps.clear();
+        if (previousDeploy) expect(await controller.deploy(), isTrue);
+        final previousSteps = List<DeployStep>.of(controller.deploySteps);
+        for (final action in [
+          controller.installAddon,
+          controller.uninstallAddon,
+          () => controller.manageWanxiang(true),
+          () => controller.manageWanxiang(false),
+        ]) {
+          controller.clearOperationLogs();
+          expect(await action(), isTrue);
+          expect(controller.deploySteps, previousSteps);
+          expect(controller.operationLogs, everyElement(contains('[ADDON]')));
+        }
+        core.events.add(
+          const BridgeEvent(
+            kind: BridgeEventKind.deployProgress,
+            deployProgress: 'late event',
+          ),
+        );
+        await settle();
+        expect(controller.deploySteps, previousSteps);
+      }
+    },
+  );
+
+  test(
+    'install progress updates state without appending operation logs',
+    () async {
+      await controller.connectEvents();
+      await settle();
+      controller.addOperationLogs(['[MERGED] existing result']);
+      final logs = List<String>.of(controller.operationLogs);
+      for (final operation in [
+        OperationKind.install,
+        OperationKind.customDirectory,
+        OperationKind.addon,
+        OperationKind.wanxiang,
+      ]) {
+        controller.operation = operation;
+        const progress = InstallProgressDto(
+          stage: 'downloading',
+          percent: 42,
+          message: 'download tick',
+        );
+        core.events.add(
+          const BridgeEvent(
+            kind: BridgeEventKind.installProgress,
+            installProgress: progress,
+          ),
+        );
+        await settle();
+        expect(controller.installProgress, same(progress));
+        expect(controller.installFraction, .42);
+        expect(controller.operationLogs, logs);
+        if (operation == OperationKind.customDirectory) {
+          expect(controller.customProgress, same(progress));
+        }
+        if (operation == OperationKind.addon) {
+          expect(controller.addonProgress, same(progress));
+        }
+        if (operation == OperationKind.wanxiang) {
+          expect(controller.wanxiangProgress, same(progress));
+        }
+      }
+      var changes = 0;
+      controller.addListener(() => changes++);
+      android.progress.add(
+        const InstallProgressDto(
+          stage: 'extracting',
+          percent: 80,
+          message: 'extract tick',
+        ),
+      );
+      await settle();
+      expect(controller.installFraction, .8);
+      expect(changes, 1);
+      expect(controller.operationLogs, logs);
+    },
+  );
+
+  test(
+    'startup checks once and stale scheme releases cannot enable install',
+    () async {
+      controller.dispose();
+      controller = create(mobile: false);
+      core.delayReleases = true;
+      core.updateFails = true;
+      expect(await controller.install(), isFalse);
+      await controller.refreshState();
+      await settle();
+      expect(controller.appUpdate, isNull);
+      expect(controller.error, isNull);
+      expect(controller.releaseLoading, isTrue);
+      controller.selectSource('github');
+      controller.selectScheme('xmjd');
+      core.latestRequests[0].complete(release);
+      core.schemeRequests['xmjd']!.complete(
+        const SchemeReleaseDto(
+          scheme: 'xmjd',
+          label: 'xmjd',
+          version: '3',
+          name: '',
+          downloadUrl: 'offline-xmjd',
+          assetName: 'xmjd6.zip',
+        ),
+      );
+      await settle();
+      expect(controller.downloadUrl, 'offline-xmjd');
+      expect(controller.releaseError, isNull);
+      expect(controller.canInstall, isTrue);
+      await controller.refreshState();
+      expect(core.calls.where((c) => c == 'update').length, 1);
+      final request = controller.refreshRelease();
+      core.schemeRequests['xmjd']!.completeError(StateError('offline'));
+      expect(await request, isFalse);
+      expect(controller.releaseError, '获取版本信息失败：offline');
+      expect(controller.canInstall, isFalse);
+    },
+  );
 
   test('SAF export is serialized, preserves live state, finishes and always cleans up', () async {
     controller.local = installedLocal;
@@ -451,7 +590,7 @@ void main() {
     expect(await failed, isFalse);
     expect(core.calls.last, 'remove:/cache/archive.zip');
     expect(controller.customError, 'extraction failed');
-    expect(controller.operationLogCount, greaterThan(logCount));
+    expect(controller.operationLogCount, logCount);
     expect(controller.operationLogs.first, matches(r'^\[\d\d:\d\d:\d\d\] '));
     controller.clearOperationLogs();
     expect(controller.operationLogCount, 0);
@@ -576,15 +715,16 @@ void main() {
         'compile',
         'reload',
       ]);
-      expect(controller.deploySteps.last.state, DeployStepState.running);
+      expect(controller.deploySteps.last.state, DeployStepState.neutral);
       core.deployGate!.complete();
       expect(await deploy, isTrue);
       expect(
-        controller.deploySteps.every(
-          (step) => step.state == DeployStepState.ok,
-        ),
+        controller.deploySteps
+            .take(controller.deploySteps.length - 1)
+            .every((step) => step.state == DeployStepState.neutral),
         isTrue,
       );
+      expect(controller.deploySteps.last.state, DeployStepState.ok);
       expect(controller.operationLogs.first, contains('earlier'));
     },
   );

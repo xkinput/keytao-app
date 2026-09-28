@@ -169,7 +169,7 @@ class _MacosErrorPresenterState extends State<MacosErrorPresenter> {
   }
 
   void _errorChanged() {
-    final error = widget.controller.error;
+    final error = widget.controller.unhandledError;
     if (_observed == error) return;
     _observed = error;
     _pending = error;

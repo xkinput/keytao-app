@@ -84,20 +84,10 @@ class VersionPicker extends StatelessWidget {
                 ChoiceChip(
                   label: Text('${downloadSources[source.key]} ${source.value}'),
                   selected: c.source == source.key,
-                  onSelected: c.busy || c.releaseLoading
-                      ? null
-                      : (_) => c.selectSource(source.key),
+                  onSelected: (_) => c.selectSource(source.key),
                 ),
             if (c.scheme == 'keytao' &&
-                sources.length == 1 &&
-                !sources.containsKey('github'))
-              Chip(
-                label: Text(
-                  '${downloadSources[sources.keys.single]} ${sources.values.single}',
-                ),
-              ),
-            if (c.scheme == 'keytao' &&
-                sources.isEmpty &&
+                !sources.containsKey('github') &&
                 c.latestRelease != null)
               Chip(label: Text(c.latestRelease!.version)),
             if (c.scheme != 'keytao' && c.releaseVersion != null)

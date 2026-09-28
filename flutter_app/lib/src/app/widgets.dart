@@ -249,16 +249,6 @@ class AppPageBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final specificErrors = [
-      c.releaseError,
-      c.installError,
-      c.addonError,
-      c.wanxiangError,
-      c.customError,
-      c.debugError,
-      c.migrationError,
-      ...c.deploySteps.map((step) => step.message),
-    ];
     return SingleChildScrollView(
       key: PageStorageKey(page.id),
       primary: false,
@@ -269,8 +259,7 @@ class AppPageBody extends StatelessWidget {
           spacing: 16,
           children: [
             if (c.appUpdate?.hasUpdate == true) AppUpdateBanner(controller: c),
-            if (c.error != null && !specificErrors.contains(c.error))
-              ErrorMessage(c.error),
+            if (c.unhandledError case final error?) ErrorMessage(error),
             ...children,
           ],
         ),
@@ -301,7 +290,7 @@ class AppUpdateBanner extends StatelessWidget {
           ],
         ),
         trailing: const Icon(Icons.open_in_new, size: 20),
-        onTap: controller.busy ? null : controller.openAppUpdate,
+        onTap: controller.openAppUpdate,
       ),
     );
   }

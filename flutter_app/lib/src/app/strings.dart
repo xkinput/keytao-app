@@ -183,7 +183,6 @@ abstract final class AppStrings {
   static const deployCheckFailed = '部署后检查未通过，请查看操作日志';
   static const finishSetupFirst = '请先完成输入法设置';
   static const englishNotReady = '英文方案未就绪';
-  static const cannotOpen = '无法打开：';
 
   static String easyEnglishInstalled(String version) =>
       '[ADDON] Easy English 已安装并部署 v$version';

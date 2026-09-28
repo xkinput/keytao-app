@@ -45,27 +45,34 @@ class MacosExtensionPage extends StatelessWidget {
                   PushButton(
                     controlSize: ControlSize.regular,
                     secondary: true,
-                    onPressed: c.busy ? null : c.openCustomDirectory,
-                    child: const Text(AppStrings.openDirectory),
-                  ),
-                  PushButton(
-                    controlSize: ControlSize.regular,
-                    onPressed: c.canInstallCustom
-                        ? c.installCustomDirectory
-                        : null,
+                    onPressed: c.isOpeningCustomDirectory
+                        ? null
+                        : c.openCustomDirectory,
                     child: Text(
-                      c.isInstallingCustom
-                          ? AppStrings.installing
-                          : AppStrings.installNow,
+                      c.isOpeningCustomDirectory
+                          ? AppStrings.opening
+                          : AppStrings.openDirectory,
                     ),
                   ),
+                  if (c.downloadUrl?.isNotEmpty == true)
+                    PushButton(
+                      controlSize: ControlSize.regular,
+                      onPressed: c.canInstallCustom
+                          ? c.installCustomDirectory
+                          : null,
+                      child: Text(
+                        c.isInstallingCustom
+                            ? AppStrings.installing
+                            : AppStrings.installNow,
+                      ),
+                    ),
                 ],
               ],
             ),
             if (c.selectedDirectory case final directory?) ...[
               MacosMessage(directory, icon: CupertinoIcons.folder),
               if (c.customSchemas case final schemas?) ...[
-                if (!schemas.hasDefaultCustom)
+                if (schemas.schemas.isEmpty)
                   const MacosMessage(
                     AppStrings.noDefaultCustom,
                     icon: CupertinoIcons.info_circle,
