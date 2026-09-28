@@ -22,7 +22,7 @@
           };
         };
 
-        ndkVersion = "26.1.10909125"; # NDK r26b — Tauri 2 requires r25+
+        ndkVersion = "26.1.10909125"; # NDK r26b
         cmdLineToolsVer = "13.0";
 
         androidComposition = pkgs.androidenv.composeAndroidPackages {
@@ -48,6 +48,12 @@
       in
       let
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+        # Update after each release with scripts/update-nix-release.sh.
+        releaseVersion = "1.2.1-alpha.89";
+        releaseHashes = {
+          x86_64-linux = "sha256-fwPE/Jq74BpxsSulIN2eOMNpXFVPXVaRn1mqGq2pPQo=";
+          aarch64-linux = "sha256-23ZmfqUCt6HvgKUZmTHwL41+GKf37kcWNvl3j3SUoVQ=";
+        };
       in
       let
         keytaoLinuxIme = pkgs.rustPlatform.buildRustPackage {
@@ -58,6 +64,8 @@
           cargoBuildFlags = [
             "--package"
             "keytao-linux-ime"
+            "--bin"
+            "keytao-ime"
           ];
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -71,8 +79,6 @@
             dbus
             glib
             gtk3
-            libsoup_3
-            webkitgtk_4_1
             openssl
             freetype
           ];
@@ -101,35 +107,28 @@
           '';
         };
 
-        keytaoAppBin = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
-          pname = "keytao-app";
-          inherit version;
-          src = pkgs.lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [
-            "--package"
-            "keytao-app"
-            "--features"
-            "custom-protocol"
-          ];
-          nativeBuildInputs = with pkgs; [
-            nodejs_22
-            pnpm_10
-            pnpmConfigHook
-            pkg-config
-            llvmPackages.libclang
-          ];
-          pnpmDeps = pkgs.fetchPnpmDeps {
-            inherit (finalAttrs) pname version src;
-            pnpm = pkgs.pnpm_10;
-            fetcherVersion = 3;
-            hash = "sha256-1++bRE2nIYlQXKxtvrW8ThkjLkDcKYQnT5opA4upxOk=";
+        keytaoAppRelease = pkgs.stdenv.mkDerivation {
+          pname = "keytao-app-bin";
+          version = releaseVersion;
+          src = pkgs.fetchurl {
+            url = "https://github.com/xkinput/keytao-app/releases/download/v${releaseVersion}/keytao-app-${releaseVersion}-linux-${
+              {
+                x86_64-linux = "x64";
+                aarch64-linux = "arm64";
+              }
+              .${system}
+            }.deb";
+            hash = releaseHashes.${system};
           };
+          nativeBuildInputs = with pkgs; [
+            dpkg
+            autoPatchelfHook
+            wrapGAppsHook3
+          ];
           buildInputs = with pkgs; [
-            librime
+            stdenv.cc.cc.lib
             libxkbcommon
             libxcb
-            libx11
             dbus
             glib
             gtk3
@@ -138,113 +137,67 @@
             atk
             cairo
             harfbuzz
-            libsoup_3
-            webkitgtk_4_1
-            openssl
-            freetype
-            libayatana-appindicator
-            xdotool
-            xz
+            libepoxy
+            fontconfig
+            gflags
+            snappy
+            libunwind
+            zlib
           ];
-          preBuild = ''
-            pnpm build
-            mkdir -p src-tauri/binaries
-            cp ${keytaoLinuxIme}/bin/keytao-ime \
-              src-tauri/binaries/keytao-ime-x86_64-unknown-linux-gnu
-
-            # tauri.linux.conf.json bundles ../target/keytao-linux-runtime as a
-            # resource and the tauri build script fails if it is absent. On Nix
-            # librime resolves via RPATH and rime shared data via the usual
-            # candidate scan (empty dirs are skipped there), so an empty bundle
-            # only satisfies the build-time existence check.
-            mkdir -p target/keytao-linux-runtime/lib \
-              target/keytao-linux-runtime/rime-data
+          # Flutter loads GL/EGL dynamically, so DT_NEEDED alone is insufficient.
+          runtimeDependencies = [ pkgs.libglvnd ];
+          unpackPhase = ''
+            runHook preUnpack
+            dpkg-deb -x "$src" .
+            runHook postUnpack
           '';
-          doCheck = false;
-          RIME_INCLUDE_DIR = "${pkgs.librime}/include";
-          RIME_LIB_DIR = "${pkgs.librime}/lib";
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        });
-
-        fhsEnv = pkgs.buildFHSEnv {
-          name = "keytao-app-unwrapped";
-          targetPkgs =
-            p: with p; [
-              webkitgtk_4_1
-              gtk3
-              glib
-              gdk-pixbuf
-              pango
-              atk
-              cairo
-              harfbuzz
-              libayatana-appindicator
-              librime
-              openssl
-              dbus
-              xdotool
-              xz
-              libxkbcommon
-              libsoup_3
-              freetype
-              libx11
-              libxcb
-              wayland
+          dontConfigure = true;
+          dontBuild = true;
+          dontStrip = true;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out"
+            cp -a usr/bin usr/lib usr/share etc "$out/"
+            substituteInPlace "$out/share/applications/KeyTao.desktop" \
+              --replace-fail 'Exec=keytao-app' "Exec=$out/bin/keytao-app"
+            substituteInPlace "$out/share/applications/keytao-wayland-launcher.desktop" \
+              "$out/etc/xdg/autostart/keytao-ime.desktop" \
+              --replace-fail 'Exec=keytao-ime' "Exec=$out/bin/keytao-ime"
+            substituteInPlace "$out/share/ibus/component/keytao.xml" \
+              --replace-fail '<exec>keytao-ime' "<exec>$out/bin/keytao-ime"
+            runHook postInstall
+          '';
+          preFixup = ''
+            addAutoPatchelfSearchPath "$out/lib/KeyTao/lib" "$out/lib/KeyTao/runtime/lib"
+            # Wrap the bin symlinks; keep the real executables beside their data.
+            gappsWrapperArgs+=(
+              --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.procps ]}"
+              --prefix LD_LIBRARY_PATH : "$out/lib/KeyTao/lib:$out/lib/KeyTao/runtime/lib"
+            )
+          '';
+          meta = {
+            description = "KeyTao official Linux release, repackaged from deb";
+            homepage = "https://github.com/xkinput/keytao-app";
+            platforms = [
+              "x86_64-linux"
+              "aarch64-linux"
             ];
-          runScript = "${keytaoAppBin}/bin/keytao-app";
-        };
-
-        keytaoAppLauncher = pkgs.writeShellScriptBin "keytao-app" ''
-          export DISPLAY="''${DISPLAY:-:0}"
-          export XMODIFIERS="''${XMODIFIERS:-@im=keytao}"
-
-          export GTK_IM_MODULE="wayland"
-          export QT_IM_MODULE="wayland"
-
-          export GDK_BACKEND="''${GDK_BACKEND:-wayland}"
-          export WEBKIT_DISABLE_DMABUF_RENDERER="''${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
-
-          exec ${fhsEnv}/bin/keytao-app-unwrapped "$@"
-        '';
-
-        desktopItem = pkgs.makeDesktopItem {
-          name = "keytao-app";
-          exec = "${keytaoAppLauncher}/bin/keytao-app %U";
-          icon = "keytao-app";
-          desktopName = "键道";
-          comment = "KeyTao";
-          categories = [ "Utility" ];
-        };
-
-        iconPkg = pkgs.runCommand "keytao-app-icon" { } ''
-          mkdir -p $out/share/icons/hicolor/128x128/apps
-          cp ${self}/src-tauri/icons/128x128.png $out/share/icons/hicolor/128x128/apps/keytao-app.png
-        '';
-
-        keytaoAppPkg = pkgs.symlinkJoin {
-          name = "keytao-app";
-          paths = [
-            keytaoAppLauncher
-            desktopItem
-            iconPkg
-          ];
-        };
-
-        keytaoBundlePkg = pkgs.symlinkJoin {
-          name = "keytao-app";
-          paths = [
-            keytaoAppPkg
-            keytaoLinuxIme
-          ];
+            mainProgram = "keytao-app";
+          };
         };
       in
       {
-        packages.default = keytaoBundlePkg;
-        packages.keytao-linux-ime = keytaoLinuxIme;
+        packages = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          default = keytaoAppRelease;
+          keytao-app-bin = keytaoAppRelease;
+          keytao-linux-ime = keytaoLinuxIme;
+        };
 
-        apps.default = {
-          type = "app";
-          program = "${keytaoBundlePkg}/bin/keytao-app";
+        apps = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          default = {
+            type = "app";
+            program = "${keytaoAppRelease}/bin/keytao-app";
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -258,7 +211,6 @@
             pkgs.patchelf
             pkgs.pkg-config
             pkgs.sccache
-            pkgs.squashfsTools
             pkgs.mold
           ];
 
@@ -273,7 +225,6 @@
             wayland
             dbus
             gtk3
-            webkitgtk_4_1
             glib
             gdk-pixbuf
             gdk-pixbuf.dev
@@ -289,9 +240,7 @@
             xz
             xz.dev
             openssl
-            libsoup_3
             xdotool
-            libayatana-appindicator
             ibus # Added for IBus IM module
           ];
 
@@ -316,7 +265,6 @@
               wayland
               dbus
               gtk3
-              webkitgtk_4_1
               glib
               gdk-pixbuf
               pango
@@ -327,158 +275,83 @@
               bzip2
               xz
               openssl
-              libsoup_3
               xdotool
-              libayatana-appindicator
-              ibus
-            ]
-          );
-
-          # Allow NixOS to run Tauri's downloaded glibc-linked AppRun/linuxdeploy
-          # binaries directly from the dev shell.
-          NIX_LD = pkgs.stdenv.cc.bintools.dynamicLinker;
-          NIX_LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
-            with pkgs;
-            [
-              stdenv.cc.cc.lib
-              zlib
-              glibc
-              fuse3
-              libx11
-              libxcb
-              libxkbcommon
-              wayland
-              glib
-              gtk3
-              webkitgtk_4_1
-              libsoup_3
-              librsvg
-              cairo
-              pango
-              harfbuzz
-              freetype
-              xz
-              libayatana-appindicator
               ibus
             ]
           );
 
           shellHook = ''
-                        export JAVA_HOME="${pkgs.jdk17}"
-                        export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-                        export MOLD_PATH="${pkgs.mold}/bin/mold"
-                        export CARGO_INCREMENTAL=0
+            export JAVA_HOME="${pkgs.jdk17}"
+            export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+            export MOLD_PATH="${pkgs.mold}/bin/mold"
+            export CARGO_INCREMENTAL=0
 
-                        # Generate GTK IM Modules cache safely so direnv doesn't destroy it
-                        export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
-                        _immodules_cache="$HOME/.cache/keytao-immodules.cache"
-                        if ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "/tmp/keytao_im.tmp" 2>/dev/null; then
-                            ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so >> "/tmp/keytao_im.tmp" 2>/dev/null
-                            mv "/tmp/keytao_im.tmp" "$_immodules_cache"
-                        fi
-                        export GTK_IM_MODULE_FILE="$_immodules_cache"
+            # Generate GTK IM Modules cache safely so direnv doesn't destroy it
+            export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
+            _immodules_cache="$HOME/.cache/keytao-immodules.cache"
+            if ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 > "/tmp/keytao_im.tmp" 2>/dev/null; then
+                ${pkgs.gtk3}/bin/gtk-query-immodules-3.0 ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so >> "/tmp/keytao_im.tmp" 2>/dev/null
+                mv "/tmp/keytao_im.tmp" "$_immodules_cache"
+            fi
+            export GTK_IM_MODULE_FILE="$_immodules_cache"
 
-                        # Add Android platform-tools (adb) and cmdline-tools to PATH
-                        export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
-                        export PATH="${androidSdk}/libexec/android-sdk/cmdline-tools/${cmdLineToolsVer}/bin:$PATH"
+            # Add Android platform-tools (adb) and cmdline-tools to PATH
+            export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
+            export PATH="${androidSdk}/libexec/android-sdk/cmdline-tools/${cmdLineToolsVer}/bin:$PATH"
 
-                                    # Fix for Tauri AppImage bundler on NixOS:
-                                    # Nix's pkg-config wrapper returns all transitive -L flags for
-                                    # libayatana-appindicator3-0.1 as a single string. Tauri's AppImage
-                                    # bundler treats this whole string as one file path → "does not exist".
-                                    #
-                                    # Solution: inject a pkg-config shim BEFORE the Nix wrapper in PATH.
-                                    # The shim intercepts the --libs query for libayatana-appindicator3-0.1
-                                    # and returns only the direct -L path + -l flag; all other queries are
-                                    # forwarded to the real pkg-config.
-                                    # Use a stable path so PKG_CONFIG never changes between reloads.
-                                    # A changing PKG_CONFIG invalidates cargo's build-script cache for
-                                    # every C-binding crate (they list PKG_CONFIG in rerun-if-env-changed),
-                                    # forcing a full recompile on every direnv reload.
-                                    _pkgfix_dir="$HOME/.cache/keytao-pkgfix"
-                                    _appindicator_lib="${pkgs.libayatana-appindicator}/lib"
-                                    _real_pkgconfig="$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'keytao-pkgfix' | tr '\n' ':') which pkg-config)"
-                                    mkdir -p "$_pkgfix_dir"
-                                    cat > "$_pkgfix_dir/pkg-config.tmp" << SHIMEOF
-            #!/bin/sh
-            case "\$*" in
-              "--libs libayatana-appindicator3-0.1"|"libayatana-appindicator3-0.1 --libs"|\
-              "--libs ayatana-appindicator3-0.1"|"ayatana-appindicator3-0.1 --libs")
-                echo "-L$_appindicator_lib -layatana-appindicator3"
-                ;;
-              "--libs-only-L libayatana-appindicator3-0.1"|"--libs-only-L ayatana-appindicator3-0.1")
-                echo "-L$_appindicator_lib"
-                ;;
-              "--libs-only-l libayatana-appindicator3-0.1"|"--libs-only-l ayatana-appindicator3-0.1")
-                echo "-layatana-appindicator3"
-                ;;
-              *)
-                exec $_real_pkgconfig "\$@"
-                ;;
-            esac
-            SHIMEOF
-                                    chmod +x "$_pkgfix_dir/pkg-config.tmp"
-                                    mv -f "$_pkgfix_dir/pkg-config.tmp" "$_pkgfix_dir/pkg-config"
-                                    export PATH="$_pkgfix_dir:$PATH"
-                                    export PKG_CONFIG="$_pkgfix_dir/pkg-config"
+                        # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
+                        # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath
+                        # so the dynamic linker finds the libs at runtime even outside the shell.
+                        # Note: Rust on Linux defaults to lld (-fuse-ld=lld via gcc-ld wrapper),
+                        # so no explicit linker selection is needed here.
+                        export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
+                          pkgs.lib.makeLibraryPath (
+                            with pkgs;
+                            [
+                              librime
+                              libxcb
+                              libxkbcommon
+                              wayland
+                              dbus
+                              gtk3
+                              glib
+                              gdk-pixbuf
+                              pango
+                              atk
+                              cairo
+                              harfbuzz
+                              freetype
+                              bzip2
+                              openssl
+                              ibus
+                            ]
+                          )
+                        }"
+                        # Install Android Rust cross-compilation targets (idempotent)
+                        for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
+                          rustup target add "$_t" 2>/dev/null || true
+                        done
 
-                                    # Embed RPATH for all runtime libs so binaries work without LD_LIBRARY_PATH.
-                                    # The -L flags are injected via NIX_LDFLAGS by mkShell; here we add -rpath
-                                    # so the dynamic linker finds the libs at runtime even outside the shell.
-                                    # Note: Rust on Linux defaults to lld (-fuse-ld=lld via gcc-ld wrapper),
-                                    # so no explicit linker selection is needed here.
-                                    export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
-                                      pkgs.lib.makeLibraryPath (
-                                        with pkgs;
-                                        [
-                                          librime
-                                          libxcb
-                                          libxkbcommon
-                                          wayland
-                                          dbus
-                                          gtk3
-                                          webkitgtk_4_1
-                                          glib
-                                          gdk-pixbuf
-                                          pango
-                                          atk
-                                          cairo
-                                          harfbuzz
-                                          freetype
-                                          bzip2
-                                          openssl
-                                          libsoup_3
-                                          libayatana-appindicator
-                                          ibus
-                                        ]
-                                      )
-                                    }"
-                                    # Install Android Rust cross-compilation targets (idempotent)
-                                    for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
-                                      rustup target add "$_t" 2>/dev/null || true
-                                    done
-
-                                    # Nix's mkShell sets DEVELOPER_DIR / SDKROOT to the Nix apple-sdk, which
-                                    # lacks libiconv.tbd stubs. Cargo is configured to use /usr/bin/clang as
-                                    # linker for host builds (src-tauri/.cargo/config.toml), so we point
-                                    # SDKROOT at the Xcode CLT SDK so /usr/bin/clang can find system libs.
-                                    unset DEVELOPER_DIR
-                                    # Try CLT SDK paths in order of preference; fall back to leaving SDKROOT as-is.
-                                    for _sdk_candidate in \
-                                      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" \
-                                      "/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk" \
-                                      "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk"; do
-                                      if [ -d "$_sdk_candidate" ]; then
-                                        export SDKROOT="$_sdk_candidate"
-                                        break
-                                      fi
-                                    done
+                        # Nix's mkShell sets DEVELOPER_DIR / SDKROOT to the Nix apple-sdk, which
+                        # lacks libiconv.tbd stubs. Cargo is configured to use /usr/bin/clang as
+                        # linker for host builds, so we point
+                        # SDKROOT at the Xcode CLT SDK so /usr/bin/clang can find system libs.
+                        unset DEVELOPER_DIR
+                        # Try CLT SDK paths in order of preference; fall back to leaving SDKROOT as-is.
+                        for _sdk_candidate in \
+                          "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" \
+                          "/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk" \
+                          "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk"; do
+                          if [ -d "$_sdk_candidate" ]; then
+                            export SDKROOT="$_sdk_candidate"
+                            break
+                          fi
+                        done
           '';
         };
       }
     ))
     // {
-      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
       nixosModules.default = import ./nix/nixos.nix { inherit self; };
     };
 }

@@ -18,7 +18,16 @@ check(input && input['default'] == '' && input['required'] == false, 'Dispatch d
 check(workflow['permissions'] == { 'contents' => 'read' }, 'Builds must have read-only repository access')
 check(!source.match?(/tauri|pnpm|macos-15-intel/i), 'No legacy Tauri build legs')
 builds = %w[build-desktop build-android build-ios]
-check(jobs.keys.sort == (builds + %w[prepare create-release]).sort, 'Unexpected job set')
+check(jobs.keys.sort == (builds + %w[prepare build-nix create-release]).sort, 'Unexpected job set')
+nix = jobs.fetch('build-nix')
+check(nix['if'] == "github.event_name == 'workflow_dispatch'", 'Nix must run only during dispatch pre-runs')
+check(nix['runs-on'] == 'ubuntu-latest' && !nix.key?('needs'), 'Nix must independently repackage the published release')
+check(!nix.key?('permissions'), 'Nix must inherit read-only permissions')
+check(nix['steps'].map { |s| s['uses'] }.compact == %w[actions/checkout@v4 cachix/install-nix-action@v31], 'Nix needs checkout and installer')
+check(nix['steps'].map { |s| s['run'] }.compact == [
+  'nix build .#packages.x86_64-linux.default --print-build-logs',
+  'nix flake check --no-build'
+], 'Nix pre-run must build and check without updating or publishing')
 release = jobs.fetch('create-release')
 check(release['if'] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", 'Release must be tag-push-only')
 check(release['needs'].sort == (builds + ['prepare']).sort, 'Release must wait for every build')
@@ -132,4 +141,4 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   })().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 check(status.success?, "Metadata/release decision checks: #{output}")
-puts "PASS: YAML, #{paths.length} script paths, 6 build legs, 10 asset names, SDK pins, dispatch isolation, version input and alpha detection"
+puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run, 10 asset names, SDK pins, dispatch isolation, version input and alpha detection"

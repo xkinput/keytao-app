@@ -20,14 +20,18 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${system}.default;
-      defaultText = "inputs.keytao-app.packages.${system}.default";
+      default = self.packages.${system}.keytao-app-bin;
+      defaultText = "inputs.keytao-app.packages.${system}.keytao-app-bin";
       description = "Package providing keytao-app and keytao-ime.";
     };
   };
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+    # NixOS links desktop entries/icons by default; also expose IBus descriptors.
+    environment.pathsToLink = [ "/share/ibus" ];
+    environment.etc."xdg/autostart/keytao-ime.desktop".source =
+      "${cfg.package}/etc/xdg/autostart/keytao-ime.desktop";
     environment.variables.XMODIFIERS = lib.mkDefault "@im=keytao";
   };
 }

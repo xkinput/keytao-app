@@ -38,7 +38,51 @@ sudo dnf install "./keytao-app-<version>-linux-x64.rpm"
 
 包安装完成后，仍需在 App 中安装并部署键道方案，再按桌面启用输入法。
 
-Nix / NixOS 用户可使用仓库的 [flake](../flake.nix) 和 [NixOS module](../nix/nixos.nix)：导入 `inputs.keytao-app.nixosModules.default` 并设置 `services.keytao-app.enable = true;`。该 module 安装程序并设置 `XMODIFIERS=@im=keytao`；deb/rpm 的新增启动项不能据此视为已在 Nix 配置中安装。
+### Nix / NixOS
+
+[flake](../flake.nix) 的默认包 `keytao-app-bin` 重新打包**官方已发布的 deb**，支持 `x86_64-linux` 和 `aarch64-linux`，包含 Flutter App、`keytao-ime` 与包内 Rime runtime，不从源码编译 App。初始固定为 `1.2.1-alpha.89`，实际版本以 `flake.nix` 的 `releaseVersion` 为准；两种架构分别校验 SHA-256，版本独立于工作区的 `Cargo.toml`。
+
+在仓库目录运行：
+
+```bash
+nix build .#keytao-app-bin
+nix run .
+# Optional: install into the current user's Nix profile.
+nix profile install .#keytao-app-bin
+```
+
+NixOS 配置导入 [module](../nix/nixos.nix)：
+
+```nix
+{ inputs, ... }: {
+  imports = [ inputs.keytao-app.nixosModules.default ];
+  services.keytao-app.enable = true;
+}
+```
+
+module 默认安装 `keytao-app-bin`，将自启动项接入 `/etc/xdg/autostart`，并通过系统包提供应用菜单、KDE 虚拟键盘启动项和 IBus 描述，设置 `XMODIFIERS=@im=keytao`。桌面项和 IBus 的启动路径均指向 Nix store 中的 wrapper。普通 Nix profile 安装不会写入 `/etc`；如需登录自启动，可将包内启动项复制到用户配置目录：
+
+```bash
+nix build .#keytao-app-bin
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+cp result/etc/xdg/autostart/keytao-ime.desktop "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/"
+```
+
+更新时，先更新仓库 checkout（NixOS flake 用户更新 `keytao-app` input），然后重新构建、更新 Nix profile 或执行 `nixos-rebuild switch`。手动复制的自启动项也需重复制，以更新其中的 store 路径。
+
+**维护者每次正式发布后**，等 x64 / arm64 两份 deb 都已上传，在可联网、已安装 Nix 和 Python 3 的环境执行：
+
+```bash
+scripts/update-nix-release.sh <version>
+```
+
+`<version>` 不带 `v`。脚本用 `nix store prefetch-file` 获取两份 deb 的 SHA-256，全部成功后才更新 `flake.nix` 的版本与两个哈希；不会更新 `flake.lock` 或自动提交。审阅变更后运行 Release 工作流的 `workflow_dispatch` 预跑：`build-nix` 构建固定的已发布 deb，并执行 `nix flake check --no-build`。它不使用 dispatch 的待发布版本参数，tag 发布也不会运行或等待该 job。只有 Linux 预跑成功才能证明实际 Nix 构建通过；GUI、登录自启动及 KDE/GNOME 输入仍需桌面验收。
+
+仅需从源码构建输入法守护进程时，仍可使用独立包（不含 Flutter App）：
+
+```bash
+nix build .#keytao-linux-ime
+```
 
 ## 2. 分桌面启用
 

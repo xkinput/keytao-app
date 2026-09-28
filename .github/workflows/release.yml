@@ -44,6 +44,18 @@ jobs:
             core.setOutput('version', version)
             core.setOutput('rust-toolchain', rust)
 
+  # Repackage the already-published deb pinned in flake.nix, only during pre-runs.
+  build-nix:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build official release package
+        run: nix build .#packages.x86_64-linux.default --print-build-logs
+      - name: Check flake
+        run: nix flake check --no-build
+
   build-desktop:
     needs: prepare
     env:
