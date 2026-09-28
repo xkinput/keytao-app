@@ -12,16 +12,46 @@ class KeyTaoTheme extends StatelessWidget {
   final BridgePlatform platform;
   final Widget home;
 
+  static const _windowsFontFamily = 'Microsoft YaHei UI';
+  static const _windowsFontFallback = [
+    'Microsoft YaHei',
+    'Segoe UI',
+    'Segoe UI Emoji',
+    'Segoe UI Symbol',
+  ];
+
+  FThemeData _platformTheme(FThemeData base) {
+    if (platform != BridgePlatform.windows) return base;
+    final typeface = FTypeface.inherit(
+      colors: base.colors,
+      touch: false,
+      fontFamily: _windowsFontFamily,
+      fontFamilyFallback: _windowsFontFallback,
+    );
+    // Rebuild component styles too: they capture the typeface at creation.
+    return FThemeData(
+      colors: base.colors,
+      touch: false,
+      typography: FTypography(display: typeface, body: typeface),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final touch =
         platform == BridgePlatform.android || platform == BridgePlatform.ios;
-    final light = touch
-        ? FTheme.neutral.light.touch
-        : FTheme.neutral.light.desktop;
-    final dark = touch
-        ? FTheme.neutral.dark.touch
-        : FTheme.neutral.dark.desktop;
+    final light = _platformTheme(
+      touch ? FTheme.neutral.light.touch : FTheme.neutral.light.desktop,
+    );
+    final dark = _platformTheme(
+      touch ? FTheme.neutral.dark.touch : FTheme.neutral.dark.desktop,
+    );
+    final fontFamily = platform == BridgePlatform.windows
+        ? _windowsFontFamily
+        : FTypeface.defaultFontFamily;
+    final fontFallback = platform == BridgePlatform.windows
+        ? _windowsFontFallback
+        : null;
     return MaterialApp(
       title: 'KeyTao',
       debugShowCheckedModeBanner: false,
@@ -34,12 +64,14 @@ class KeyTaoTheme extends StatelessWidget {
       supportedLocales: FLocalizations.supportedLocales,
       theme: ThemeData(
         brightness: Brightness.light,
-        fontFamily: FTypeface.defaultFontFamily,
+        fontFamily: fontFamily,
+        fontFamilyFallback: fontFallback,
         colorSchemeSeed: light.colors.primary,
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
-        fontFamily: FTypeface.defaultFontFamily,
+        fontFamily: fontFamily,
+        fontFamilyFallback: fontFallback,
         colorSchemeSeed: dark.colors.primary,
       ),
       themeMode: ThemeMode.system,

@@ -159,6 +159,14 @@ jobs:
         shell: bash
         run: scripts/verify-linux-bundles.sh target/release/bundle "$VERSION"
 
+      - name: Test Windows installer process checks
+        if: matrix.os_name == 'windows'
+        shell: powershell
+        run: |
+          ./packaging/windows/tests/check_running_processes_test.ps1
+          ./packaging/windows/tests/running_processes_gate_test.ps1 -MakeNsis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          ./packaging/windows/tests/replace_payload_test.ps1 -MakeNsis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+
       # The entrypoint runs verify-windows-bundle.ps1 with the MSVC environment.
       - name: Build and verify Windows installer
         if: matrix.os_name == 'windows'

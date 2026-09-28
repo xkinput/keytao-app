@@ -22,6 +22,7 @@ $releaseDir = Join-Path $repoRoot "flutter_app\build\windows\x64\runner\Release"
 $workDir = Join-Path $repoRoot "target\keytao-windows-flutter"
 $bundleDir = Join-Path $workDir "bundle"
 $uninstallFiles = Join-Path $workDir "uninstall-files.nsh"
+$installFiles = Join-Path $workDir "install-files.nsh"
 $installer = Join-Path $repoRoot "target\release\bundle\nsis\keytao-app-$version-windows-$Arch-setup.exe"
 
 if ($DryRun) {
@@ -91,10 +92,12 @@ try {
     # Generate exact owned paths for safe uninstall, including future Flutter
     # native assets. Reject NSIS metacharacters instead of interpolating them.
     $lines = @()
+    $installLines = @()
     foreach ($file in Get-ChildItem -LiteralPath $bundleDir -Recurse -File | Sort-Object FullName) {
         $relative = $file.FullName.Substring($bundleDir.Length + 1)
         if ($relative -match '[\r\n$"`]') { throw "Unsafe NSIS payload filename: $relative" }
         $lines += 'Delete "$INSTDIR\' + $relative + '"'
+        $installLines += '!insertmacro InstallPayloadFile "' + $relative + '"'
     }
     foreach ($directory in Get-ChildItem -LiteralPath $bundleDir -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending) {
         $relative = $directory.FullName.Substring($bundleDir.Length + 1)
@@ -102,12 +105,13 @@ try {
         $lines += 'RMDir "$INSTDIR\' + $relative + '"'
     }
     $lines | Set-Content -LiteralPath $uninstallFiles -Encoding UTF8
+    $installLines | Set-Content -LiteralPath $installFiles -Encoding UTF8
     & (Join-Path $PSScriptRoot "verify-windows-bundle.ps1") -ReleaseDir $bundleDir -SkipInstaller -LayoutOnly
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $installer) | Out-Null
     if (Test-Path -LiteralPath $installer) { Remove-Item -LiteralPath $installer -Force }
-    Invoke-Checked $MakeNsis @("/V3", "/DVERSION=$version", "/DVERSION_NUMERIC=$numericVersion",
-        "/DREPO_ROOT=$repoRoot", "/DBUNDLE_DIR=$bundleDir", "/DUNINSTALL_FILES=$uninstallFiles",
+    Invoke-Checked $MakeNsis @("/INPUTCHARSET", "UTF8", "/V3", "/DVERSION=$version", "/DVERSION_NUMERIC=$numericVersion",
+        "/DREPO_ROOT=$repoRoot", "/DBUNDLE_DIR=$bundleDir", "/DUNINSTALL_FILES=$uninstallFiles", "/DINSTALL_FILES=$installFiles",
         "/DOUTPUT_FILE=$installer", (Join-Path $repoRoot "packaging\windows\keytao.nsi"))
     & (Join-Path $PSScriptRoot "verify-windows-bundle.ps1") -ReleaseDir $bundleDir -InstallerPath $installer
     Write-Host "Windows Flutter installer ready: $installer"

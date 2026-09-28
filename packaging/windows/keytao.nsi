@@ -23,6 +23,9 @@ Unicode true
 !ifndef UNINSTALL_FILES
   !error "UNINSTALL_FILES is required"
 !endif
+!ifndef INSTALL_FILES
+  !error "INSTALL_FILES is required"
+!endif
 
 ; Match Tauri's perMachine x64 defaults. The publisher defaults to the
 ; second component of ink.rea.keytao-app, not the Cargo authors field.
@@ -54,27 +57,24 @@ Var PreviousInstallDir
 Var UpdateMode
 !define MUI_PAGE_CUSTOMFUNCTION_PRE DirectoryPage
 !insertmacro MUI_PAGE_DIRECTORY
+Page custom CreateRunningProcessesPage LeaveRunningProcessesPage
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT "$(KeyTaoFinishText)"
+!insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.CreateRunningProcessesPage un.LeaveRunningProcessesPage
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "SimpChinese"
+LangString KeyTaoFinishText ${LANG_ENGLISH} "KeyTao has been installed. Applications that already loaded the old input method can keep running. Reopen those applications, or sign out of Windows later, to use the updated input method."
+LangString KeyTaoFinishText ${LANG_SIMPCHINESE} "KeyTao 已安装完成。已经加载旧输入法的应用可以继续使用；在方便时重新打开这些应用，或注销 Windows 后重新登录，即可使用新版输入法。"
+!include /CHARSET=UTF8 "running-processes.nsh"
+!include "upgrade-existing.nsh"
+!include "replace-payload.nsh"
 
 !macro Context
   SetShellVarContext all
   SetRegView 64
-!macroend
-
-; The Tauri template also stops all processes with this executable name for
-; perMachine installs. Do this before the old uninstaller touches the TSF.
-!macro StopApp
-  nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /F /T /IM keytao-app.exe'
-  Pop $0
-  Pop $1
-  ${If} $0 != 0
-  ${AndIf} $0 != 128
-    DetailPrint "$1"
-    Abort "Unable to stop KeyTao. Close it in every Windows session and retry."
-  ${EndIf}
 !macroend
 
 Function .onInit
@@ -106,40 +106,18 @@ FunctionEnd
 
 Section "KeyTao" SEC_APP
   !insertmacro Context
-  !insertmacro StopApp
   ${If} $PreviousInstallDir != ""
     StrCpy $INSTDIR $PreviousInstallDir
   ${EndIf}
-  ${If} ${FileExists} "$INSTDIR\uninstall.exe"
-    DetailPrint "Removing the previous KeyTao payload; preserving user data..."
-    ClearErrors
-    ; _?= keeps the old uninstaller synchronous and /UPDATE preserves Tauri
-    ; app data, shortcuts and autostart. Never delete the user's Rime directory.
-    ExecWait '"$INSTDIR\uninstall.exe" /S /UPDATE _?=$INSTDIR' $0
-    ${If} ${Errors}
-      Abort "Unable to start the previous KeyTao uninstaller."
-    ${EndIf}
-    ${If} $0 != 0
-      Abort "The previous KeyTao uninstaller failed."
-    ${EndIf}
-  ${ElseIf} ${FileExists} "$INSTDIR\keytao-app.exe"
-    Abort "The existing KeyTao installation has no uninstaller. Repair it before upgrading."
-  ${EndIf}
-  ; Refuse a still-mapped old executable instead of silently scheduling its
-  ; replacement for reboot and reporting an upgraded app that cannot run.
-  ${If} ${FileExists} "$INSTDIR\keytao-app.exe"
-    ClearErrors
-    Delete "$INSTDIR\keytao-app.exe"
-    ${If} ${Errors}
-      Abort "KeyTao is still locked. Restart Windows and retry."
-    ${EndIf}
-  ${EndIf}
+  ; Stop only this installation's verified KeyTao programs before modifying files,
+  ; including /S upgrades where the preparation page is not displayed.
+  Call EnsureProcessesStopped
+  Call PrepareExistingInstallation
+  ; Replace each owned file with rollback for failed copies. A DLL mapped by
+  ; another application is renamed in the same directory before the new file
+  ; is written, allowing that application to keep its existing mapping.
+  !include "${INSTALL_FILES}"
   SetOutPath "$INSTDIR"
-  ClearErrors
-  File /r "${BUNDLE_DIR}\*"
-  ${If} ${Errors}
-    Abort "Unable to copy the KeyTao release bundle."
-  ${EndIf}
   ClearErrors
   WriteUninstaller "$INSTDIR\uninstall.exe"
   ${If} ${Errors}
@@ -183,7 +161,7 @@ FunctionEnd
 
 Section "Uninstall"
   !insertmacro Context
-  !insertmacro StopApp
+  Call un.EnsureProcessesStopped
   SetOutPath "$TEMP"
   !insertmacro NSIS_HOOK_PREUNINSTALL
   ; Delete only files installed by this package, never arbitrary files in a

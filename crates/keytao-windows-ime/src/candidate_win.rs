@@ -14,6 +14,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fmt::{self, Debug, Write},
     hash::Hasher,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -38,13 +39,13 @@ use windows::{
         UI::Shell::{FrameworkInputPane, IFrameworkInputPane},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-            KillTimer, PostMessageW, RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow,
-            UpdateLayeredWindow, CW_USEDEFAULT, EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE,
-            EVENT_OBJECT_IME_SHOW, GWLP_HWNDPARENT, GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT,
-            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-            SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCDESTROY,
-            WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            IsWindowVisible, KillTimer, PostMessageW, RegisterClassExW, SetTimer,
+            SetWindowLongPtrW, ShowWindow, UpdateLayeredWindow, CW_USEDEFAULT,
+            EVENT_OBJECT_IME_CHANGE, EVENT_OBJECT_IME_HIDE, EVENT_OBJECT_IME_SHOW, GWLP_HWNDPARENT,
+            GWLP_USERDATA, MA_NOACTIVATE, OBJID_CLIENT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP,
+            WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
@@ -191,8 +192,9 @@ fn popup_position_in(
     POINT { x, y }
 }
 
-/// Per-window click state, owned by the HWND through `GWLP_USERDATA`.
+/// Per-window state, owned by the HWND through `GWLP_USERDATA`.
 struct ClickTarget {
+    alive: Rc<Cell<bool>>,
     state: WeakState,
     hit_areas: RefCell<PanelHitAreas>,
     caret_reprobe_pending: Cell<bool>,
@@ -292,7 +294,8 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let _ = KillTimer(hwnd, LAYOUT_REPOSITION_TIMER_ID);
             let raw = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if raw != 0 {
-                drop(Box::from_raw(raw as *mut ClickTarget));
+                let target = Box::from_raw(raw as *mut ClickTarget);
+                target.alive.set(false);
             }
         }
         _ => {}
@@ -303,6 +306,9 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 /// Manages the floating candidate panel window.
 pub struct CandidateWindow {
     hwnd: HWND,
+    // An owner can destroy this popup without going through CandidateWindow.
+    // IsWindow alone cannot detect a handle subsequently reused by Windows.
+    alive: Rc<Cell<bool>>,
     owner_hwnd: HWND,
     renderer: Option<PanelRenderer>,
     visible: bool,
@@ -319,6 +325,7 @@ impl CandidateWindow {
     pub fn new() -> Self {
         Self {
             hwnd: HWND(std::ptr::null_mut()),
+            alive: Rc::new(Cell::new(false)),
             owner_hwnd: HWND(std::ptr::null_mut()),
             renderer: None,
             visible: false,
@@ -339,7 +346,27 @@ impl CandidateWindow {
         window
     }
 
+    fn has_live_window(&self) -> bool {
+        self.alive.get() && !self.hwnd.0.is_null()
+    }
+
+    fn forget_destroyed_window(&mut self) {
+        if !self.has_live_window() {
+            self.hwnd = HWND(std::ptr::null_mut());
+            self.owner_hwnd = HWND(std::ptr::null_mut());
+            self.visible = false;
+            self.last_upload = None;
+            self.last_upload_size = (0, 0);
+        }
+    }
+
     fn ensure_window(&mut self, owner_hwnd: HWND, state: &WeakState) -> bool {
+        self.forget_destroyed_window();
+        // The shell can hide owned windows without calling our hide(). Make
+        // the next show upload/show again instead of trusting the cached flag.
+        if self.has_live_window() && !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            self.visible = false;
+        }
         let owner_hwnd = if owner_hwnd.0.is_null() && !self.owner_hwnd.0.is_null() {
             self.owner_hwnd
         } else {
@@ -347,33 +374,42 @@ impl CandidateWindow {
         };
         if !self.hwnd.0.is_null() && self.owner_hwnd != owner_hwnd {
             self.hide();
-            unsafe {
-                let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner_hwnd.0 as _);
-                if GetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT) as usize == owner_hwnd.0 as usize {
-                    self.owner_hwnd = owner_hwnd;
-                    return true;
-                }
-                if DestroyWindow(self.hwnd).is_err() {
-                    return true;
+            // Hiding notifies accessibility clients, which may destroy the host.
+            if self.has_live_window() {
+                unsafe {
+                    let _ = SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner_hwnd.0 as _);
+                    if GetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT) as usize
+                        == owner_hwnd.0 as usize
+                    {
+                        self.owner_hwnd = owner_hwnd;
+                        return true;
+                    }
+                    if DestroyWindow(self.hwnd).is_err() {
+                        return false;
+                    }
                 }
             }
-            self.hwnd = HWND(std::ptr::null_mut());
-            self.visible = false;
+            self.forget_destroyed_window();
         }
         if !self.hwnd.0.is_null() {
             return true;
         }
         match unsafe { Self::create_window(owner_hwnd, self.click_through) } {
             Ok(hwnd) => {
-                if !self.click_through {
-                    let target = Box::new(ClickTarget {
-                        state: state.clone(),
-                        hit_areas: RefCell::new(PanelHitAreas::default()),
-                        caret_reprobe_pending: Cell::new(false),
-                    });
-                    unsafe {
-                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as _);
-                    }
+                self.alive = Rc::new(Cell::new(true));
+                // Mode hints need the same lifetime tracking as candidate popups.
+                let target = Box::new(ClickTarget {
+                    alive: Rc::clone(&self.alive),
+                    state: if self.click_through {
+                        WeakState::new()
+                    } else {
+                        state.clone()
+                    },
+                    hit_areas: RefCell::new(PanelHitAreas::default()),
+                    caret_reprobe_pending: Cell::new(false),
+                });
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(target) as _);
                 }
                 self.hwnd = hwnd;
                 self.owner_hwnd = owner_hwnd;
@@ -381,6 +417,13 @@ impl CandidateWindow {
             }
             Err(e) => {
                 tracing::warn!("candidate window: failed to create popup window: {e}");
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "error",
+                    "candidate_window_create_failed",
+                    owner = owner_hwnd.0 as usize,
+                    hr = e.code().0,
+                );
                 false
             }
         }
@@ -476,7 +519,7 @@ impl CandidateWindow {
         };
         // The first caret query can fail before show() has created our HWND.
         // Create a hidden popup to receive the timer; no position is invented.
-        if self.hwnd.0.is_null()
+        if !self.has_live_window()
             && !self.ensure_window(crate::state::fallback_focus_window(), state)
         {
             return false;
@@ -509,14 +552,14 @@ impl CandidateWindow {
     }
 
     pub fn post_pending_ime_ui(&self) -> bool {
-        if self.hwnd.0.is_null() {
+        if !self.has_live_window() {
             return false;
         }
         unsafe { PostMessageW(self.hwnd, PENDING_IME_UI_MESSAGE, WPARAM(0), LPARAM(0)).is_ok() }
     }
 
     pub fn arm_layout_reposition(&mut self, state: &WeakState) -> bool {
-        if self.hwnd.0.is_null()
+        if !self.has_live_window()
             && !self.ensure_window(crate::state::fallback_focus_window(), state)
         {
             return false;
@@ -525,7 +568,7 @@ impl CandidateWindow {
     }
 
     fn disarm_layout_reposition(&mut self) {
-        if self.hwnd.0.is_null() {
+        if !self.has_live_window() {
             return;
         }
         unsafe {
@@ -537,7 +580,7 @@ impl CandidateWindow {
     }
 
     pub fn disarm_caret_reprobe(&mut self) {
-        if self.hwnd.0.is_null() {
+        if !self.has_live_window() {
             return;
         }
         unsafe {
@@ -580,6 +623,14 @@ impl CandidateWindow {
             x: caret_x,
             y: caret_y,
         });
+        // Input-pane COM calls can reenter the host after ensure_window().
+        // Recheck before the cached-upload fast path trusts our visible flag.
+        if !self.has_live_window() {
+            return false;
+        }
+        if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            self.visible = false;
+        }
         let gap = (4.0 * scale).round() as i32;
         if let Some(previous) = self.last_upload {
             if previous.model == signature.model
@@ -590,7 +641,7 @@ impl CandidateWindow {
                 let position = popup_position_in(work, caret_x, caret_y, w, h, gap);
                 signature.position = (position.x, position.y);
                 if can_skip_panel_upload(self.visible, self.last_upload, signature) {
-                    return true;
+                    return self.has_live_window();
                 }
             }
         }
@@ -624,6 +675,9 @@ impl CandidateWindow {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
+            if !self.has_live_window() {
+                return false;
+            }
             self.visible = true;
             self.notify_ime_event(EVENT_OBJECT_IME_SHOW);
             if let Some(started) = started {
@@ -637,10 +691,11 @@ impl CandidateWindow {
                 );
             }
         }
-        true
+        self.has_live_window()
     }
 
     pub fn hide(&mut self) {
+        self.forget_destroyed_window();
         let started = (self.visible && !self.click_through && runtime_log::enabled(Level::Info))
             .then(Instant::now);
         self.last_upload = None;
@@ -704,6 +759,9 @@ impl CandidateWindow {
                 return;
             }
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            if !self.has_live_window() {
+                return;
+            }
             let _ = SetTimer(self.hwnd, MODE_HINT_TIMER_ID, hint_duration_ms, None);
         }
         self.visible = true;
@@ -712,6 +770,9 @@ impl CandidateWindow {
 
     /// Upload BGRA pixel buffer via UpdateLayeredWindow (per-pixel alpha).
     unsafe fn upload_pixels(&self, pixels: &[u8], w: u32, h: u32, x: i32, y: i32) -> bool {
+        if !self.has_live_window() {
+            return false;
+        }
         let screen_dc = GetDC(HWND(std::ptr::null_mut()));
         let mem_dc = CreateCompatibleDC(screen_dc);
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -757,7 +818,7 @@ impl CandidateWindow {
             cy: h as i32,
         };
 
-        let uploaded = UpdateLayeredWindow(
+        let upload_result = UpdateLayeredWindow(
             self.hwnd,
             screen_dc,
             Some(&pt_dst),
@@ -767,8 +828,17 @@ impl CandidateWindow {
             COLORREF(0),
             Some(&blend),
             ULW_ALPHA,
-        )
-        .is_ok();
+        );
+        if let Err(error) = &upload_result {
+            keytao_core::rt_log!(
+                Level::Info,
+                "error",
+                "candidate_window_upload_failed",
+                hwnd = self.hwnd.0 as usize,
+                hr = error.code().0,
+            );
+        }
+        let uploaded = upload_result.is_ok();
         if uploaded {
             self.notify_ime_event(EVENT_OBJECT_IME_CHANGE);
         }
@@ -777,11 +847,11 @@ impl CandidateWindow {
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(mem_dc);
         ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-        uploaded
+        uploaded && self.has_live_window()
     }
 
     fn notify_ime_event(&self, event: u32) {
-        if self.hwnd.0.is_null() {
+        if !self.has_live_window() {
             return;
         }
         unsafe {
@@ -793,7 +863,7 @@ impl CandidateWindow {
 impl Drop for CandidateWindow {
     fn drop(&mut self) {
         unsafe {
-            if !self.hwnd.0.is_null() {
+            if self.has_live_window() {
                 let _ = DestroyWindow(self.hwnd);
             }
         }
@@ -877,6 +947,138 @@ mod tests {
         let mut window = super::CandidateWindow::new();
         assert!(!window.arm_caret_reprobe(&std::rc::Weak::new()));
         assert!(window.hwnd.0.is_null());
+    }
+
+    #[test]
+    fn owner_destruction_recreates_candidate_and_mode_hint_windows() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+
+        let state = crate::state::new_shared_state();
+        let weak = std::rc::Rc::downgrade(&state);
+        for click_through in [false, true] {
+            let mut owner = super::CandidateWindow::new();
+            assert!(owner.ensure_window(Default::default(), &weak));
+            let mut popup = if click_through {
+                super::CandidateWindow::new_mode_hint()
+            } else {
+                super::CandidateWindow::new()
+            };
+            assert!(popup.ensure_window(owner.hwnd, &weak));
+            let old_hwnd = popup.hwnd;
+            let old_lifetime = std::rc::Rc::clone(&popup.alive);
+            assert!(old_lifetime.get());
+
+            // Win32 destroys owned popups when their owner is destroyed.
+            // All these windows stay hidden and never take keyboard focus.
+            drop(owner);
+            assert!(!old_lifetime.get());
+            assert!(!unsafe { IsWindow(old_hwnd) }.as_bool());
+            assert!(!popup.post_pending_ime_ui());
+            assert!(popup.ensure_window(Default::default(), &weak));
+            assert!(popup.has_live_window());
+            assert!(!std::rc::Rc::ptr_eq(&popup.alive, &old_lifetime));
+            assert!(unsafe { IsWindow(popup.hwnd) }.as_bool());
+            assert!(!unsafe { IsWindowVisible(popup.hwnd) }.as_bool());
+            assert!(!popup.visible);
+        }
+    }
+
+    #[test]
+    fn caret_and_layout_timers_recover_after_owner_destruction() {
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{KillTimer, SendMessageW, WM_TIMER},
+        };
+
+        let state = crate::state::new_shared_state();
+        let weak = std::rc::Rc::downgrade(&state);
+        let mut owner = super::CandidateWindow::new();
+        assert!(owner.ensure_window(Default::default(), &weak));
+        let mut popup = super::CandidateWindow::new();
+        assert!(popup.ensure_window(owner.hwnd, &weak));
+        state.borrow_mut().caret_retry_active = true;
+        assert!(popup.arm_caret_reprobe(&weak));
+        drop(owner);
+
+        assert!(popup.arm_caret_reprobe(&weak));
+        assert!(popup.has_live_window());
+        unsafe {
+            SendMessageW(
+                popup.hwnd,
+                WM_TIMER,
+                WPARAM(super::CARET_RETRY_TIMER_ID),
+                LPARAM(0),
+            );
+        }
+        assert_eq!(state.borrow().caret_retry_attempts, 1);
+        assert!(!super::click_target(popup.hwnd)
+            .unwrap()
+            .caret_reprobe_pending
+            .get());
+
+        // Exercise the independent layout timer's recreation entry point too.
+        unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(popup.hwnd).unwrap() };
+        assert!(!popup.has_live_window());
+        assert!(popup.arm_layout_reposition(&weak));
+        assert!(popup.has_live_window());
+        assert!(unsafe { KillTimer(popup.hwnd, super::LAYOUT_REPOSITION_TIMER_ID) }.is_ok());
+    }
+
+    #[test]
+    fn destroyed_window_never_reuses_an_unrelated_live_handle() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DestroyWindow, IsWindow, KillTimer, SetTimer,
+        };
+
+        let state = crate::state::new_shared_state();
+        let weak = std::rc::Rc::downgrade(&state);
+        let mut popup = super::CandidateWindow::new();
+        assert!(popup.ensure_window(Default::default(), &weak));
+        unsafe { DestroyWindow(popup.hwnd).unwrap() };
+        assert!(!popup.has_live_window());
+
+        let mut unrelated = super::CandidateWindow::new();
+        assert!(unrelated.ensure_window(Default::default(), &weak));
+        // Deterministically model Windows reusing the numeric HWND. A plain
+        // IsWindow check would accept it, but this popup's lifetime has ended.
+        popup.hwnd = unrelated.hwnd;
+        assert!(unsafe { IsWindow(popup.hwnd) }.as_bool());
+        assert_ne!(
+            unsafe { SetTimer(unrelated.hwnd, super::CARET_RETRY_TIMER_ID, 1000, None) },
+            0
+        );
+        assert!(!popup.post_pending_ime_ui());
+        popup.disarm_caret_reprobe();
+        assert!(unsafe { KillTimer(unrelated.hwnd, super::CARET_RETRY_TIMER_ID) }.is_ok());
+        assert!(popup.ensure_window(Default::default(), &weak));
+        assert_ne!(popup.hwnd, unrelated.hwnd);
+        assert!(unrelated.has_live_window());
+
+        unsafe { DestroyWindow(popup.hwnd).unwrap() };
+        popup.hwnd = unrelated.hwnd;
+        popup.hide();
+        assert!(unrelated.has_live_window());
+        popup.hwnd = unrelated.hwnd;
+        drop(popup);
+        assert!(unrelated.has_live_window());
+        assert!(unsafe { IsWindow(unrelated.hwnd) }.as_bool());
+    }
+
+    #[test]
+    fn externally_hidden_window_invalidates_the_cached_visible_flag() {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+        let state = crate::state::new_shared_state();
+        let weak = std::rc::Rc::downgrade(&state);
+        let mut popup = super::CandidateWindow::new();
+        assert!(popup.ensure_window(Default::default(), &weak));
+        // Seed the state left after an external hide without ever showing UI.
+        popup.visible = true;
+        unsafe {
+            let _ = ShowWindow(popup.hwnd, SW_HIDE);
+        }
+        assert!(popup.ensure_window(Default::default(), &weak));
+        assert!(!popup.visible);
     }
 
     #[test]
