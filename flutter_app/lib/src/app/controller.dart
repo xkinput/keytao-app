@@ -1250,6 +1250,8 @@ class AppController extends ChangeNotifier {
   Future<void> _open(String value) async {
     if (isAndroid) {
       await android.openUrl(value);
+    } else if (isIos) {
+      await const IosHost().openUrl(value);
     } else {
       final result = await Process.run(
         isWindows

@@ -36,6 +36,21 @@ import UIKit
             DispatchQueue.main.async { result(failure) }
           }
         }
+      case "openUrl":
+        guard let arguments = call.arguments as? [String: Any],
+          let value = arguments["url"] as? String,
+          let url = URL(string: value), let scheme = url.scheme, !scheme.isEmpty
+        else {
+          result(FlutterError(
+            code: "INVALID_URL", message: "Expected an absolute URL.", details: nil
+          ))
+          return
+        }
+        UIApplication.shared.open(url, options: [:]) { opened in
+          result(opened ? nil : FlutterError(
+            code: "OPEN_URL_FAILED", message: "Cannot open URL.", details: nil
+          ))
+        }
       case "openSettings":
         UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!, options: [:]) {
           opened in

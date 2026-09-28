@@ -14,6 +14,47 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+static void directory_response_cb(GtkNativeDialog* dialog, gint response,
+                                  gpointer user_data) {
+  FlMethodCall* call = FL_METHOD_CALL(user_data);
+  if (response == GTK_RESPONSE_ACCEPT) {
+    g_autofree gchar* path =
+        gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+    g_autofree gchar* utf8 =
+        path ? g_filename_to_utf8(path, -1, nullptr, nullptr, nullptr) : nullptr;
+    if (utf8 && g_path_is_absolute(path)) {
+      g_autoptr(FlValue) value = fl_value_new_string(utf8);
+      fl_method_call_respond_success(call, value, nullptr);
+    } else {
+      fl_method_call_respond_error(call, "PICK_DIRECTORY_FAILED",
+                                   "Cannot select a local directory.", nullptr,
+                                   nullptr);
+    }
+  } else {
+    fl_method_call_respond_success(call, nullptr, nullptr);
+  }
+  gtk_native_dialog_destroy(dialog);
+  g_object_unref(dialog);
+}
+
+static void window_method_call_cb(FlMethodChannel* channel, FlMethodCall* call,
+                                  gpointer user_data) {
+  if (g_strcmp0(fl_method_call_get_name(call), "pickDirectory") != 0) {
+    fl_method_call_respond_not_implemented(call, nullptr);
+    return;
+  }
+  GtkFileChooserNative* dialog = gtk_file_chooser_native_new(
+      "选择目录", GTK_WINDOW(user_data), GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+      "选择", "取消");
+  gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dialog), TRUE);
+  gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(dialog), TRUE);
+  g_signal_connect_data(
+      dialog, "response", G_CALLBACK(directory_response_cb), g_object_ref(call),
+      [](gpointer data, GClosure*) { g_object_unref(data); },
+      static_cast<GConnectFlags>(0));
+  gtk_native_dialog_show(GTK_NATIVE_DIALOG(dialog));
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -74,6 +115,13 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "ink.rea.keytao/window", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(channel, window_method_call_cb,
+                                           window, nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

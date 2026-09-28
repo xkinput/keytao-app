@@ -167,6 +167,10 @@ void main() {
     androidCalls.clear();
     messenger.setMockMethodCallHandler(IosHost.channel, (call) async {
       iosCalls.add(call.method);
+      if (call.method == 'openUrl') {
+        expect(call.arguments, {'url': 'https://example.com/keytao'});
+        return null;
+      }
       return switch (call.method) {
         'getPaths' => {
           'dataDir': '/ios/data',
@@ -423,7 +427,8 @@ void main() {
     expect(await c.saveAndroid({'longPressDelayMs': 350}), isTrue);
     expect(core.mobileSettings.longPressDelayMs, 350);
     expect(await c.openInputMethodSettings(), isTrue);
-    expect(iosCalls, ['openSettings']);
+    expect(await c.open('https://example.com/keytao'), isTrue);
+    expect(iosCalls, ['openSettings', 'openUrl']);
     const urls = DownloadUrlsDto(windows: 'win', linux: 'linux', ios: 'ios');
     c.latestRelease = const ReleaseInfoDto(
       version: '1',

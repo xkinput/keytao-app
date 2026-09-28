@@ -1,6 +1,8 @@
 #include "flutter_window.h"
 
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <wrl/client.h>
 #include <flutter/standard_method_codec.h>
 
 #include <cwchar>
@@ -35,6 +37,42 @@ bool FlutterWindow::OnCreate() {
   args_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "keytao/windows",
       &flutter::StandardMethodCodec::GetInstance());
+
+  flutter::MethodChannel<flutter::EncodableValue> window_channel(
+      flutter_controller_->engine()->messenger(), "ink.rea.keytao/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  window_channel.SetMethodCallHandler(
+      [owner = GetHandle()](const auto& call, auto result) {
+        if (call.method_name() != "pickDirectory") {
+          result->NotImplemented();
+          return;
+        }
+        Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+        HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                      CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(dialog.GetAddressOf()));
+        DWORD options = 0;
+        if (SUCCEEDED(hr)) hr = dialog->GetOptions(&options);
+        if (SUCCEEDED(hr)) {
+          hr = dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        }
+        if (SUCCEEDED(hr)) hr = dialog->Show(owner);
+        if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+          result->Success();
+          return;
+        }
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        if (SUCCEEDED(hr)) hr = dialog->GetResult(item.GetAddressOf());
+        PWSTR path = nullptr;
+        if (SUCCEEDED(hr)) hr = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+        const std::string utf8 = SUCCEEDED(hr) ? Utf8FromUtf16(path) : "";
+        CoTaskMemFree(path);
+        if (FAILED(hr) || utf8.empty()) {
+          result->Error("PICK_DIRECTORY_FAILED", "Cannot select a directory.");
+          return;
+        }
+        result->Success(flutter::EncodableValue(utf8));
+      });
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();

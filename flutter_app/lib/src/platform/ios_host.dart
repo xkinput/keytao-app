@@ -8,4 +8,7 @@ class IosHost {
       (await channel.invokeMapMethod<String, dynamic>('getPaths'))!;
 
   Future<void> openSettings() => channel.invokeMethod<void>('openSettings');
+
+  Future<void> openUrl(String url) =>
+      channel.invokeMethod<void>('openUrl', {'url': url});
 }
