@@ -312,14 +312,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         Section(
                           title: c.isAndroid ? AppStrings.imeSettings : '设置状态',
                           children: [
-                            SettingRow(
-                              _done(step) ? '已完成' : '待完成',
-                              child: ActionButton(
-                                AppStrings.recheck,
-                                icon: FLucideIcons.refreshCw,
-                                onPress: c.busy ? null : c.refreshState,
-                              ),
-                            ),
+                            Text(_done(step) ? '已完成' : '待完成'),
                             Text(description),
                             if (step == SetupStep.component &&
                                 !_done(step)) ...[
@@ -440,6 +433,15 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                   children: [OperationLogButton(controller: c)],
                                 ),
                             ],
+                            ActionRow(
+                              children: [
+                                ActionButton(
+                                  AppStrings.recheck,
+                                  icon: FLucideIcons.refreshCw,
+                                  onPress: c.busy ? null : c.refreshState,
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                       ],
