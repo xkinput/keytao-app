@@ -20,7 +20,13 @@ void main(List<String> args) async {
 
     await FlutterRustBridgeNativeAssetsBuilder(
       cratePath: '../crates/keytao-app-bridge',
-      extraCargoEnvironmentVariables: rime.cargoEnvironment,
+      extraCargoEnvironmentVariables: {
+        ...rime.cargoEnvironment,
+        // Rust links for iOS 10 by default; the static Rime libraries need the
+        // app's deployment target (___chkstk_darwin is missing before iOS 12).
+        if (code.targetOS == OS.iOS)
+          'IPHONEOS_DEPLOYMENT_TARGET': '${code.iOS.targetVersion}.0',
+      },
     ).run(input: input, output: output);
 
     for (final library in rime.bundledLibraries) {
