@@ -18,6 +18,22 @@ class MainFlutterWindow: NSWindow {
       binaryMessenger: windowController.flutterViewController.engine.binaryMessenger
     )
     channel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "pickDirectory" {
+        guard let self = self else {
+          result(nil)
+          return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "选择"
+        panel.beginSheetModal(for: self) { response in
+          result(response == .OK ? panel.url?.path : nil)
+        }
+        return
+      }
       guard call.method == "setTitle", let title = call.arguments as? String else {
         result(FlutterMethodNotImplemented)
         return

@@ -1,5 +1,6 @@
 package ink.rea.keytao_app
 
+import android.content.Intent
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -23,6 +24,11 @@ class MainActivity : FlutterActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         androidChannel?.onRequestPermissionsResult(requestCode)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        androidChannel?.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

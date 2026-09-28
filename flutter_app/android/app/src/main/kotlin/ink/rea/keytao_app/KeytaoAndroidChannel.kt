@@ -15,12 +15,14 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
+import androidx.documentfile.provider.DocumentFile
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -38,6 +40,7 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
     private val mainHandler = Handler(Looper.getMainLooper())
     // Both legacy permission flows share one dialog without losing pending replies.
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
+    private var pendingDirectoryPick: Reply? = null
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = Reply(result, mainHandler)
@@ -50,6 +53,10 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
                 "openStoragePermissionSettings" -> openStoragePermissionSettings(reply)
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
                 "showInputMethodPicker" -> showInputMethodPicker(reply)
+                "pickDirectory" -> pickDirectory(reply)
+                "listFiles" -> listFiles(call, reply)
+                "readLocalSchemas" -> readLocalSchemas(call, reply)
+                "smartExtractZip" -> smartExtractZip(call, reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
                 "copyAddonSchemaAssets" -> copyAddonSchemaAssets(call, reply)
                 "deployImeData" -> deployImeData(reply)
@@ -423,6 +430,324 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
         }
     }
 
+    private fun pickDirectory(reply: Reply) {
+        if (pendingDirectoryPick != null) {
+            return reply.error("Directory picker is already open")
+        }
+        pendingDirectoryPick = reply
+        try {
+            activity.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), directoryPickRequestCode)
+        } catch (ex: Exception) {
+            pendingDirectoryPick = null
+            throw ex
+        }
+    }
+
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode != directoryPickRequestCode) return false
+        val reply = pendingDirectoryPick ?: return false
+        pendingDirectoryPick = null
+        try {
+            handleDirectoryPicked(reply, resultCode, data)
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "Failed to pick directory")
+        }
+        return true
+    }
+
+    private fun handleDirectoryPicked(reply: Reply, resultCode: Int, data: Intent?) {
+        if (resultCode == Activity.RESULT_OK) {
+            val uri = data?.data ?: return reply.error("No URI returned")
+            activity.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            reply.success(mapOf("uri" to uri.toString()))
+        } else {
+            reply.error("User cancelled")
+        }
+    }
+
+    private fun listFiles(call: MethodCall, reply: Reply) {
+        val treeUriString = call.argument<String>("treeUri") ?: return reply.error("Missing treeUri")
+
+        try {
+            val uri = Uri.parse(treeUriString)
+            val root = DocumentFile.fromTreeUri(activity, uri)
+                ?: return reply.error("Invalid directory URI")
+            val items = root.listFiles()
+                .map { Pair(it.name ?: "", it.isDirectory) }
+                .sortedWith(compareByDescending<Pair<String, Boolean>> { it.second }.thenBy { it.first })
+            val files = items.map { (name, isDir) -> mapOf("name" to name, "isDir" to isDir) }
+            reply.success(mapOf("files" to files))
+        } catch (ex: Exception) {
+            reply.error(ex.message ?: "Failed to list files")
+        }
+    }
+
+    private fun readLocalSchemas(call: MethodCall, reply: Reply) {
+        val treeUriString = call.argument<String>("treeUri") ?: return reply.error("Missing treeUri")
+
+        try {
+            val uri = Uri.parse(treeUriString)
+            val root = DocumentFile.fromTreeUri(activity, uri)
+                ?: return reply.error("Invalid directory URI")
+            val content = readFileFromTree(root, "default.custom.yaml")
+                ?: readFileFromTree(root, "default-custom.yaml")
+                ?: ""
+            val schemas = parseSchemas(content).filter(::isManagedSchema)
+            val version = readFileFromTree(root, "version.txt")?.trim()?.takeIf { it.isNotEmpty() }
+            val installed = schemas.isNotEmpty() && schemas.all { schema ->
+                root.findFile("$schema.schema.yaml")?.isFile == true
+            }
+            val build = root.findFile("build")?.takeIf { it.isDirectory }
+            val deployed = installed && build != null && schemas.all { schema ->
+                build.findFile("$schema.schema.yaml")?.isFile == true
+            }
+            reply.success(mutableMapOf<String, Any?>().apply {
+                put("schemas", schemas)
+                if (version != null) put("version", version)
+                put("installed", installed)
+                put("deployed", deployed)
+            })
+        } catch (ex: Exception) {
+            reply.success(mapOf("schemas" to emptyList<String>(), "installed" to false, "deployed" to false))
+        }
+    }
+
+    private fun smartExtractZip(call: MethodCall, reply: Reply) {
+        val zipPath = call.argument<String>("zipPath") ?: return reply.error("Missing zipPath")
+        val treeUriString = call.argument<String>("treeUri") ?: return reply.error("Missing treeUri")
+
+        Thread {
+            try {
+                val uri = Uri.parse(treeUriString)
+                val root = DocumentFile.fromTreeUri(activity, uri)
+                    ?: return@Thread reply.error("Invalid directory URI")
+                val zipFile = File(zipPath)
+                val logs = mutableListOf<String>()
+
+                // Cache directories and load their file URIs in one query per directory.
+                val dirCache = mutableMapOf<String, DocumentFile>()
+                val fileUriCache = mutableMapOf<String, MutableMap<String, Uri>>()
+                fun getCachedFileMap(dir: DocumentFile): MutableMap<String, Uri> {
+                    return fileUriCache.getOrPut(dir.uri.toString()) {
+                        val map = mutableMapOf<String, Uri>()
+                        val docId = if (DocumentsContract.isTreeUri(dir.uri) && !DocumentsContract.isDocumentUri(activity, dir.uri))
+                            DocumentsContract.getTreeDocumentId(dir.uri)
+                        else
+                            DocumentsContract.getDocumentId(dir.uri)
+                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
+                        activity.contentResolver.query(
+                            childrenUri,
+                            arrayOf(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                DocumentsContract.Document.COLUMN_MIME_TYPE
+                            ), null, null, null
+                        )?.use { cursor ->
+                            while (cursor.moveToNext()) {
+                                val childDocId = cursor.getString(0) ?: continue
+                                val name = cursor.getString(1) ?: continue
+                                val mime = cursor.getString(2) ?: continue
+                                if (mime != DocumentsContract.Document.MIME_TYPE_DIR) {
+                                    map[name] = DocumentsContract.buildDocumentUriUsingTree(uri, childDocId)
+                                }
+                            }
+                        }
+                        map
+                    }
+                }
+                fun getOrCreateFileUri(dir: DocumentFile, filename: String): Uri? {
+                    val map = getCachedFileMap(dir)
+                    return map[filename] ?: run {
+                        val newUri = dir.createFile("application/octet-stream", filename)?.uri ?: return null
+                        map[filename] = newUri
+                        newUri
+                    }
+                }
+                fun getOrCreateDir(path: String): DocumentFile {
+                    if (path.isEmpty()) return root
+                    dirCache[path]?.let { return it }
+                    val parts = path.split('/')
+                    var current = root
+                    val sb = StringBuilder()
+                    for (part in parts) {
+                        if (part.isEmpty()) continue
+                        if (sb.isNotEmpty()) sb.append('/')
+                        sb.append(part)
+                        val key = sb.toString()
+                        current = dirCache[key] ?: run {
+                            val dir = current.findFile(part)?.takeIf { it.isDirectory }
+                                ?: current.createDirectory(part)
+                                ?: throw Exception("Failed to create directory: $part")
+                            dirCache[key] = dir
+                            dir
+                        }
+                    }
+                    return current
+                }
+                fun writeToDir(dir: DocumentFile, filename: String, content: ByteArray, relative: String, merged: Boolean = false) {
+                    val outUri = getOrCreateFileUri(dir, filename)
+                        ?: throw Exception("Failed to create: $filename")
+                    val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                        ?: throw Exception("Failed to open: $filename")
+                    pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(content) } }
+                    logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
+                }
+
+                JZipFile(zipFile).use { zip ->
+                    val allEntries = zip.entries().toList()
+                    val zipLuaFilenames = mutableSetOf<String>()
+                    var dcEntry: java.util.zip.ZipEntry? = null
+                    var rimeLuaEntry: java.util.zip.ZipEntry? = null
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
+                        val filename = relative.substringAfterLast('/')
+                        when {
+                            !entry.isDirectory && isDefaultCustom(filename) && dcEntry == null -> dcEntry = entry
+                            !entry.isDirectory && filename == "rime.lua" && !relative.contains('/') && rimeLuaEntry == null -> rimeLuaEntry = entry
+                            !entry.isDirectory && relative.startsWith("lua/") && !relative.substring(4).contains('/') -> zipLuaFilenames.add(filename)
+                        }
+                    }
+                    val zipDcContent = dcEntry?.let { zip.getInputStream(it).bufferedReader().readText() }
+                    val zipRimeLuaContent = rimeLuaEntry?.let { zip.getInputStream(it).bufferedReader().readText() }
+                    val dcMergeResult = zipDcContent?.let {
+                        val existing = readFileFromTree(root, "default.custom.yaml")
+                            ?: readFileFromTree(root, "default-custom.yaml")
+                        mergeDefaultCustom(existing, it)
+                    }
+                    val rimeLuaMergeResult = zipRimeLuaContent?.let { zipRl ->
+                        val localRl = readFileFromTree(root, "rime.lua")
+                        if (localRl != null) mergeRimeLua(localRl, zipRl, zipLuaFilenames)
+                        else RimeLuaMergeResult(zipRl, emptyList())
+                    }
+
+                    // Preserve conflicting user Lua files before extraction overwrites them.
+                    val renamedLuaFiles: List<Pair<String, ByteArray>> =
+                        rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
+                            val luaDir = root.findFile("lua") ?: return@mapNotNull null
+                            val bytes = luaDir.findFile("$oldName.lua")?.uri?.let { fileUri ->
+                                activity.contentResolver.openInputStream(fileUri)?.use { it.readBytes() }
+                            } ?: return@mapNotNull null
+                            newName to bytes
+                        } ?: emptyList()
+
+                    for (entry in allEntries) {
+                        val relative = entry.name.trimEnd('/')
+                        if (relative.isEmpty()) continue
+                        val filename = relative.substringAfterLast('/')
+                        val dirPart = relative.substringBeforeLast('/', "")
+                        when {
+                            entry.isDirectory -> {
+                                try { getOrCreateDir(relative) } catch (e: Exception) {
+                                    logs.add("[WARN] mkdir $relative: ${e.message}")
+                                }
+                            }
+                            isDefaultCustom(filename) && dcMergeResult != null -> {
+                                val dir = getOrCreateDir(dirPart)
+                                try { writeToDir(dir, filename, dcMergeResult.mergedContent.toByteArray(), relative, merged = true) }
+                                catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                            }
+                            filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
+                                val dir = getOrCreateDir(dirPart)
+                                try { writeToDir(dir, filename, rimeLuaMergeResult.mergedContent.toByteArray(), relative, merged = true) }
+                                catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                            }
+                            else -> {
+                                val dir = try { getOrCreateDir(dirPart) } catch (e: Exception) {
+                                    logs.add("[ERROR] mkdir for $relative: ${e.message}")
+                                    return@Thread reply.error("Failed to create directory for: $relative")
+                                }
+                                val outUri = getOrCreateFileUri(dir, filename)
+                                    ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
+                                val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                                if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
+                                pfd.use { FileOutputStream(it.fileDescriptor).buffered(65536).use { out -> zip.getInputStream(entry).copyTo(out, 65536) } }
+                                logs.add("[OK] $relative")
+                            }
+                        }
+                    }
+
+                    if (renamedLuaFiles.isNotEmpty()) {
+                        val luaDir = try { getOrCreateDir("lua") } catch (e: Exception) {
+                            return@Thread reply.error("Failed to ensure lua dir: ${e.message}")
+                        }
+                        for ((newName, bytes) in renamedLuaFiles) {
+                            val fname = "$newName.lua"
+                            val existing = luaDir.findFile(fname)
+                            val outUri = if (existing != null) existing.uri
+                            else luaDir.createFile("application/octet-stream", fname)?.uri
+                            if (outUri == null) { logs.add("[ERROR] createFile for renamed: lua/$fname"); continue }
+                            val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
+                            if (pfd != null) { pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(bytes) } }; logs.add("[RENAMED] lua/$fname") }
+                            else logs.add("[ERROR] openFileDescriptor for renamed: lua/$fname")
+                        }
+                    }
+
+                    root.findFile("build")?.let { build ->
+                        if (!build.delete()) {
+                            return@Thread reply.error("无法清理旧的 Android RIME 部署产物")
+                        }
+                        logs.add("[INVALIDATED] build")
+                    }
+
+                    val verifyArray = mutableListOf<Map<String, Any?>>()
+                    fun addVerify(path: String, ok: Boolean, note: String) {
+                        verifyArray.add(mapOf("path" to path, "ok" to ok, "note" to note))
+                    }
+                    dcMergeResult?.mergedContent?.let { expected ->
+                        val actual = readFileFromTree(root, "default.custom.yaml")
+                        if (actual == expected) addVerify("default.custom.yaml", true, "内容一致")
+                        else if (actual != null) addVerify("default.custom.yaml", false, "内容与写入时不符，可能写入不完整")
+                        else addVerify("default.custom.yaml", false, "文件不存在或无法读取")
+                    }
+                    rimeLuaMergeResult?.mergedContent?.let { expected ->
+                        val actual = readFileFromTree(root, "rime.lua")
+                        if (actual == expected) addVerify("rime.lua", true, "内容一致")
+                        else if (actual != null) addVerify("rime.lua", false, "内容与写入时不符，可能写入不完整")
+                        else addVerify("rime.lua", false, "文件不存在或无法读取")
+                    }
+                    for (entry in allEntries) {
+                        if (entry.isDirectory) continue
+                        val relative = entry.name.trimEnd('/')
+                        val filename = relative.substringAfterLast('/')
+                        val isKey = filename.endsWith(".schema.yaml")
+                            || filename.endsWith(".dict.yaml")
+                            || (filename.endsWith(".lua") && !relative.contains('/'))
+                            || relative.startsWith("lua/")
+                            || relative.startsWith("opencc/")
+                        if (!isKey || isDefaultCustom(filename) || filename == "rime.lua") continue
+                        val dirPart = relative.substringBeforeLast('/', "")
+                        val dir = if (dirPart.isEmpty()) root else dirCache[dirPart]
+                        val exists = dir != null && (fileUriCache[dir.uri.toString()]?.containsKey(filename) == true || dir.findFile(filename) != null)
+                        if (exists) addVerify(relative, true, "文件存在")
+                        else addVerify(relative, false, "文件不存在")
+                    }
+
+                    zipFile.delete()
+                    reply.success(mapOf(
+                        "mergedSchemas" to dcMergeResult?.userSchemas.orEmpty(),
+                        "logs" to logs.toList(),
+                        "verify" to verifyArray,
+                    ))
+                }
+            } catch (ex: Exception) {
+                reply.error(ex.message ?: "Extraction failed")
+            }
+        }.start()
+    }
+
+    private fun readFileFromTree(root: DocumentFile, filename: String): String? {
+        return try {
+            root.findFile(filename)?.uri?.let { uri ->
+                activity.contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() }
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun smartExtractZipToPrivate(call: MethodCall, reply: Reply) {
         val zipPath = call.argument<String>("zipPath") ?: return reply.error("Missing zipPath")
 
@@ -620,6 +945,7 @@ class KeytaoAndroidChannel(private val activity: Activity) : MethodChannel.Metho
     companion object {
         private const val easyEnglishAddonId = "easy_en"
         private const val storagePermissionRequestCode = 0x4B54
+        private const val directoryPickRequestCode = 0x4B55
     }
 
     private fun readPrivateText(root: File, relativePath: String): String? {
