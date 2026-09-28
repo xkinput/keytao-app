@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app/controller.dart';
+import '../app/options.dart';
 import '../app/widgets.dart';
 
 class SchemeCard extends StatelessWidget {
@@ -15,12 +16,7 @@ class SchemeCard extends StatelessWidget {
       children: [
         SchemeSelection(controller: c),
         ValueRow('KeyTao 目录', c.info.userRoot),
-        ValueRow(
-          '本地状态',
-          local == null
-              ? '未读取'
-              : '${local.installed ? '已安装' : '未安装'} · ${local.deployed ? '已部署' : '未部署'}',
-        ),
+        ValueRow('本地状态', c.localStatus),
         ValueRow('本地版本', local?.version ?? '—'),
         if (local?.schemas.isNotEmpty == true)
           ValueRow('本地方案', local!.schemas.join('、')),
@@ -48,7 +44,7 @@ class SchemeCard extends StatelessWidget {
               label: const Text('安装方案'),
             ),
             FilledButton.tonalIcon(
-              onPressed: c.busy || local?.installed != true ? null : c.deploy,
+              onPressed: c.canDeploy ? c.deploy : null,
               icon: const Icon(Icons.play_arrow_rounded),
               label: const Text('部署'),
             ),
@@ -94,7 +90,7 @@ class SchemeSelection extends StatelessWidget {
           ChoiceSetting(
             label: '下载来源',
             value: c.source,
-            options: const {'github': 'GitHub', 'gitee': 'Gitee'},
+            options: downloadSources,
             onChanged: c.busy ? null : c.selectSource,
           ),
         Row(
@@ -133,7 +129,7 @@ class OperationProgress extends StatelessWidget {
           const SizedBox(height: 16),
           Semantics(liveRegion: true, child: Text(c.progress)),
         ],
-        if (c.operationLogs.isNotEmpty || c.verification.isNotEmpty)
+        if (c.hasOperationLog)
           Align(
             alignment: Alignment.centerLeft,
             child: TextButton.icon(

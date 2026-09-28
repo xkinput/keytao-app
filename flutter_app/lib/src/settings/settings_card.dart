@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app/controller.dart';
+import '../app/options.dart';
 import '../app/widgets.dart';
 import '../rust/api/types.dart';
 import 'android_settings.dart';
@@ -72,11 +73,8 @@ class SettingsCard extends StatelessWidget {
         ChoiceSetting<String>(
           label: '英文模式',
           value: s.englishMode,
-          options: {
-            'ascii': 'ASCII',
-            'schema': c.englishReady ? '英文方案' : '英文方案（未就绪）',
-          },
-          disabled: c.englishReady ? const {} : const {'schema'},
+          options: c.androidEnglishModes,
+          disabled: c.disabledAndroidEnglishModes,
           onChanged: c.busy ? null : (value) => save('englishMode', value),
         ),
         slider(
@@ -168,30 +166,20 @@ class SettingsCard extends StatelessWidget {
         ChoiceSetting<UiColorSchemeDto>(
           label: '配色方案',
           value: s.colorScheme,
-          options: const {
-            UiColorSchemeDto.auto: '跟随系统',
-            UiColorSchemeDto.light: '浅色',
-            UiColorSchemeDto.dark: '深色',
-          },
+          options: colorSchemes,
           onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
         ),
         ChoiceSetting<PanelOrientationDto>(
           label: '候选排列',
           value: s.orientation,
-          options: const {
-            PanelOrientationDto.horizontal: '横排',
-            PanelOrientationDto.vertical: '竖排',
-          },
+          options: orientations,
           onChanged: c.busy ? null : (value) => c.saveUi(orientation: value),
         ),
         ChoiceSetting<EnglishModeDto>(
           label: '英文模式',
           value: c.desktopEnglishMode,
-          options: {
-            EnglishModeDto.ascii: 'ASCII',
-            EnglishModeDto.schema: c.englishReady ? '英文方案' : '英文方案（未就绪）',
-          },
-          disabled: c.englishReady ? const {} : const {EnglishModeDto.schema},
+          options: c.englishModes,
+          disabled: c.disabledEnglishModes,
           onChanged: c.busy ? null : c.saveDesktopEnglish,
         ),
         SwitchListTile(
@@ -204,9 +192,9 @@ class SettingsCard extends StatelessWidget {
         SliderSetting(
           label: '候选字号',
           value: s.fontSize,
-          min: 10,
-          max: 36,
-          divisions: 26,
+          min: candidateFontMin,
+          max: candidateFontMax,
+          divisions: candidateFontDivisions,
           onChanged: c.busy ? null : (value) => c.saveUi(fontSize: value),
         ),
         Text('主题色', style: Theme.of(context).textTheme.titleSmall),
@@ -215,12 +203,7 @@ class SettingsCard extends StatelessWidget {
           spacing: 8,
           runSpacing: 8,
           children: [
-            for (final entry in const {
-              '#3B73D9': '蓝',
-              '#0F9F8F': '绿',
-              '#D87A32': '橙',
-              '#8B5CF6': '紫',
-            }.entries)
+            for (final entry in themeAccents.entries)
               ChoiceChip(
                 label: Text(entry.value),
                 avatar: CircleAvatar(
@@ -237,9 +220,7 @@ class SettingsCard extends StatelessWidget {
         ),
         const SizedBox(height: 24),
         OutlinedButton.icon(
-          onPressed: c.busy || !s.themeExists || s.themePath == null
-              ? null
-              : () => c.open(s.themePath!),
+          onPressed: c.canOpenTheme ? () => c.open(s.themePath!) : null,
           icon: const Icon(Icons.description_outlined),
           label: const Text('打开主题文件'),
         ),

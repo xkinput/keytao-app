@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../app/bootstrap.dart';
 import '../app/controller.dart';
+import '../app/options.dart';
 import '../app/widgets.dart';
 
 class AboutPage extends StatelessWidget {
@@ -16,13 +16,10 @@ class AboutPage extends StatelessWidget {
         child: SectionCard(
           title: '关于 KeyTao',
           children: [
-            ValueRow('KeyTao', c.versions?.appVersion ?? c.info.appVersion),
-            const ValueRow('Flutter', flutterVersion),
-            ValueRow('librime', c.versions?.librimeVersion ?? '—'),
-            ValueRow('OpenCC', c.versions?.openccVersion ?? '—'),
-            const Divider(),
-            ValueRow('平台', c.isAndroid ? 'Android' : 'macOS'),
-            ValueRow('KeyTao 目录', c.versions?.dataDir ?? c.info.userRoot),
+            for (final entry in c.aboutValues.entries) ...[
+              if (entry.key == '平台') const Divider(),
+              ValueRow(entry.key, entry.value),
+            ],
             const SizedBox(height: 24),
             OutlinedButton.icon(
               onPressed: c.busy ? null : () => c.open(repositoryUrl),

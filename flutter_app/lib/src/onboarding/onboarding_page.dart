@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app/controller.dart';
+import '../app/options.dart';
 import '../app/widgets.dart';
 import '../scheme/scheme_card.dart';
 
@@ -25,146 +26,104 @@ class _OnboardingPageState extends State<OnboardingPage> {
     super.dispose();
   }
 
-  List<({String title, bool done, Widget content})> _steps(AppController c) => [
-    if (c.isAndroid) ...[
-      (
-        title: '文件访问权限',
-        done: c.storageReady,
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SelectableText(c.storage?['path'] as String? ?? c.info.userRoot),
-            if (!c.storageReady) ...[
-              const SizedBox(height: 16),
-              Text(c.storage?['message'] as String? ?? '请授权 KeyTao 访问文件'),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: c.busy || c.storage?['canOpenSettings'] != true
-                    ? null
-                    : () => c.run(c.android.openStoragePermissionSettings),
-                child: const Text('授权文件访问'),
-              ),
-            ],
-          ],
-        ),
-      ),
-      (
-        title: '数据迁移',
-        done: c.migrationReady,
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (c.storage?['migrationError'] case final String message
-                when message.isNotEmpty)
-              SelectableText(message),
-            if (!c.storageReady) const Text('请先授权文件访问'),
-            if (!c.migrationReady) ...[
-              const SizedBox(height: 16),
-              OutlinedButton(
-                onPressed: c.busy
-                    ? null
-                    : () => c.run(c.android.openStoragePermissionSettings),
-                child: const Text('打开存储设置'),
-              ),
-            ],
-          ],
-        ),
-      ),
-    ] else
-      (
-        title: '输入法组件',
-        done: c.macosIme?.installed == true,
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (c.macosIme?.installed != true) ...[
-              Text(c.macosIme?.message ?? '未检测到 KeyTao 输入法组件'),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: c.busy
-                    ? null
-                    : () => c.open('$repositoryUrl/releases'),
-                child: const Text('下载安装包'),
-              ),
-            ],
-          ],
-        ),
-      ),
-    (
-      title: '安装方案',
-      done: c.local?.installed == true,
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SchemeSelection(controller: c),
+  Widget _content(SetupStep step, AppController c) => switch (step) {
+    SetupStep.storage => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SelectableText(c.storage?['path'] as String? ?? c.info.userRoot),
+        if (!c.storageReady) ...[
+          const SizedBox(height: 16),
+          Text(c.storage?['message'] as String? ?? '请授权 KeyTao 访问文件'),
+          const SizedBox(height: 24),
           FilledButton(
-            onPressed: c.busy || (c.isAndroid && !c.migrationReady)
+            onPressed: c.busy || c.storage?['canOpenSettings'] != true
                 ? null
-                : c.install,
-            child: Text(c.local?.installed == true ? '重新安装' : '安装方案'),
+                : () => c.run(c.android.openStoragePermissionSettings),
+            child: const Text('授权文件访问'),
           ),
-          OperationProgress(controller: c),
         ],
-      ),
+      ],
     ),
-    (
-      title: '部署方案',
-      done: c.local?.deployed == true,
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (c.storage?['deployError'] case final String message
-              when message.isNotEmpty) ...[
-            SelectableText(message),
-            const SizedBox(height: 16),
-          ],
+    SetupStep.migration => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (c.storage?['migrationError'] case final String message
+            when message.isNotEmpty)
+          SelectableText(message),
+        if (!c.storageReady) const Text('请先授权文件访问'),
+        if (!c.migrationReady) ...[
+          const SizedBox(height: 16),
+          OutlinedButton(
+            onPressed: c.busy
+                ? null
+                : () => c.run(c.android.openStoragePermissionSettings),
+            child: const Text('打开存储设置'),
+          ),
+        ],
+      ],
+    ),
+    SetupStep.component => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!step.isComplete(c)) ...[
+          Text(c.macosIme?.message ?? '未检测到 KeyTao 输入法组件'),
+          const SizedBox(height: 24),
           FilledButton(
-            onPressed: c.busy || c.local?.installed != true ? null : c.deploy,
-            child: const Text('部署方案'),
+            onPressed: c.busy ? null : () => c.open('$repositoryUrl/releases'),
+            child: const Text('下载安装包'),
           ),
-          OperationProgress(controller: c),
         ],
-      ),
+      ],
     ),
-    if (c.isAndroid) ...[
-      (
-        title: '启用 KeyTao',
-        done: c.ime?['enabled'] == true,
-        content: FilledButton(
-          onPressed: c.busy
-              ? null
-              : () => c.run(c.android.openInputMethodSettings),
-          child: const Text('打开输入法设置'),
+    SetupStep.install => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SchemeSelection(controller: c),
+        FilledButton(
+          onPressed: c.canInstallDuringSetup ? c.install : null,
+          child: Text(c.installButtonTitle),
         ),
-      ),
-      (
-        title: '切换到 KeyTao',
-        done: c.ime?['selected'] == true,
-        content: FilledButton(
-          onPressed: c.busy || c.ime?['canShowPicker'] != true
-              ? null
-              : () => c.run(c.android.showInputMethodPicker),
-          child: const Text('选择 KeyTao'),
+        OperationProgress(controller: c),
+      ],
+    ),
+    SetupStep.deploy => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (c.storage?['deployError'] case final String message
+            when message.isNotEmpty) ...[
+          SelectableText(message),
+          const SizedBox(height: 16),
+        ],
+        FilledButton(
+          onPressed: c.canDeploy ? c.deploy : null,
+          child: const Text('部署方案'),
         ),
-      ),
-    ],
-    (
-      title: '完成',
-      done: c.setupReady,
-      content: c.isAndroid
+        OperationProgress(controller: c),
+      ],
+    ),
+    SetupStep.enable => FilledButton(
+      onPressed: c.busy ? null : () => c.run(c.android.openInputMethodSettings),
+      child: const Text('打开输入法设置'),
+    ),
+    SetupStep.select => FilledButton(
+      onPressed: c.busy || c.ime?['canShowPicker'] != true
+          ? null
+          : () => c.run(c.android.showInputMethodPicker),
+      child: const Text('选择 KeyTao'),
+    ),
+    SetupStep.finish =>
+      c.isAndroid
           ? const SizedBox.shrink()
           : const Text('注销后，在系统设置 › 键盘 › 输入法中添加 KeyTao。'),
-    ),
-  ];
+  };
 
-  Future<void> _next(int count) async {
-    if (_index == count - 1) {
-      final finished = await widget.controller.finishOnboarding();
-      if (mounted && finished) widget.onFinished();
-    } else {
-      await _go(_index + 1);
-    }
-  }
+  Future<void> _next() => widget.controller.setupSteps[_index].advance(
+    widget.controller,
+    onNext: () => _go(_index + 1),
+    onFinished: () {
+      if (mounted) widget.onFinished();
+    },
+  );
 
   Future<void> _go(int index) => _pages.animateToPage(
     index,
@@ -177,7 +136,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
-    final steps = _steps(c);
+    final steps = c.setupSteps;
     return Scaffold(
       appBar: AppBar(title: Text('KeyTao ${c.info.appVersion}')),
       body: SafeArea(
@@ -215,13 +174,13 @@ class _OnboardingPageState extends State<OnboardingPage> {
                           Row(
                             children: [
                               Icon(
-                                step.done
+                                step.isComplete(c)
                                     ? Icons.check_circle_rounded
                                     : Icons.radio_button_unchecked_rounded,
                                 color: Theme.of(context).colorScheme.primary,
                               ),
                               const SizedBox(width: 8),
-                              Text(step.done ? '已完成' : '待完成'),
+                              Text(step.isComplete(c) ? '已完成' : '待完成'),
                               const Spacer(),
                               IconButton(
                                 tooltip: '重新检测',
@@ -231,7 +190,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                             ],
                           ),
                           const SizedBox(height: 24),
-                          step.content,
+                          _content(step, c),
                           if (c.error != null) ...[
                             const SizedBox(height: 16),
                             Semantics(
@@ -262,9 +221,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                     ),
                     const Spacer(),
                     FilledButton(
-                      onPressed: c.busy || !steps[_index].done
-                          ? null
-                          : () => _next(steps.length),
+                      onPressed: !steps[_index].canContinue(c) ? null : _next,
                       child: Text(_index == steps.length - 1 ? '完成' : '下一步'),
                     ),
                   ],

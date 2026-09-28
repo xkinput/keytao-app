@@ -5,6 +5,7 @@ import '../pages/debug_page.dart';
 import '../scheme/scheme_card.dart';
 import '../settings/settings_card.dart';
 import 'controller.dart';
+import 'options.dart';
 import 'widgets.dart';
 
 class AppShell extends StatefulWidget {
@@ -20,15 +21,12 @@ class _AppShellState extends State<AppShell>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this)..addListener(_tabChanged);
+    _tabs = TabController(length: AppPage.values.length, vsync: this)
+      ..addListener(_tabChanged);
   }
 
   void _tabChanged() {
-    if (_tabs.index == 2 &&
-        widget.controller.logSettings == null &&
-        !widget.controller.busy) {
-      widget.controller.refreshLogs();
-    }
+    AppPage.values[_tabs.index].onSelected(widget.controller);
   }
 
   @override
@@ -60,11 +58,7 @@ class _AppShellState extends State<AppShell>
         ),
         bottom: TabBar(
           controller: _tabs,
-          tabs: const [
-            Tab(text: '输入法'),
-            Tab(text: '关于'),
-            Tab(text: '调试'),
-          ],
+          tabs: [for (final page in AppPage.values) Tab(text: page.title)],
         ),
       ),
       body: SafeArea(

@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
-ThemeData keytaoTheme(Brightness brightness) {
+ThemeData keytaoTheme(Brightness brightness, {ColorScheme? colorScheme}) {
   final dark = brightness == Brightness.dark;
   // KeytaoTheme.kt fallback and its shared default-theme.yaml dark palette.
   final colors =
+      colorScheme ??
       ColorScheme.fromSeed(
         seedColor: const Color(0xFF3B73D9),
         brightness: brightness,

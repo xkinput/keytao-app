@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app/controller.dart';
+import '../app/options.dart';
 import '../app/widgets.dart';
 import '../rust/api/types.dart';
 
@@ -11,7 +12,7 @@ class DebugPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final settings = c.logSettings;
-    final lines = c.runtimeLog?.lines ?? const <String>[];
+    final lines = c.logLines;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: ContentWidth(
@@ -22,21 +23,18 @@ class DebugPage extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               title: const Text('记录运行日志'),
               value: settings?.enabled ?? false,
-              onChanged: c.busy || settings == null
+              onChanged: !c.canEditLogs
                   ? null
-                  : (value) => c.saveLogSettings(value, settings.level),
+                  : (value) => c.saveLogSettings(value, settings!.level),
             ),
             const SizedBox(height: 16),
             ChoiceSetting<RuntimeLogLevelDto>(
               label: '日志级别',
               value: settings?.level ?? RuntimeLogLevelDto.info,
-              options: const {
-                RuntimeLogLevelDto.info: '常规',
-                RuntimeLogLevelDto.verbose: '详细',
-              },
-              onChanged: c.busy || settings == null
+              options: logLevels,
+              onChanged: !c.canEditLogs
                   ? null
-                  : (value) => c.saveLogSettings(settings.enabled, value),
+                  : (value) => c.saveLogSettings(settings!.enabled, value),
             ),
             Wrap(
               spacing: 8,
@@ -64,8 +62,8 @@ class DebugPage extends StatelessWidget {
             ],
             const SizedBox(height: 24),
             if (c.busy) const LinearProgressIndicator(),
-            if (c.runtimeLog?.truncated == true) ...[
-              Text('最近 ${lines.length} 行'),
+            if (c.logLineCount case final count?) ...[
+              Text(count),
               const SizedBox(height: 8),
             ],
             SizedBox(

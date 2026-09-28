@@ -10,14 +10,6 @@ import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
 import '../settings/android_settings.dart';
 
-const schemes = {
-  'keytao': '键道6',
-  'xmjd': '星猫键道',
-  'txjx': '天行键',
-  'keydo': '键道·我流',
-};
-const repositoryUrl = 'https://github.com/xkinput/keytao-app';
-
 String? schemeKeyFromSchemas(List<String> schemas) {
   for (final schema in schemas) {
     final name = schema.trim().toLowerCase();
