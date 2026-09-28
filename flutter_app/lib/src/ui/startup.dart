@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
 
 import '../app/strings.dart';
@@ -26,11 +27,19 @@ class AppStartup extends StatelessWidget {
                   const SizedBox(width: 180, child: FProgress()),
                   const SizedBox(height: 16),
                   const Text(AppStrings.boot),
-                ] else
+                ] else ...[
                   FAlert(
                     title: const Text('启动失败'),
                     subtitle: SelectableText(error!),
                   ),
+                  if (platform == BridgePlatform.macOs) ...[
+                    const SizedBox(height: 16),
+                    FButton(
+                      onPress: SystemNavigator.pop,
+                      child: const Text('关闭'),
+                    ),
+                  ],
+                ],
               ],
             ),
           ),

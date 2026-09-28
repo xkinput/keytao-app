@@ -1,8 +1,31 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import '../rust/api/types.dart';
+
+class AppSystemBars extends StatelessWidget {
+  const AppSystemBars({super.key, required this.child});
+  final Widget child;
+
+  static SystemUiOverlayStyle styleOf(BuildContext context) =>
+      (context.theme.colors.brightness == Brightness.dark
+              ? SystemUiOverlayStyle.light
+              : SystemUiOverlayStyle.dark)
+          .copyWith(
+            statusBarColor: Colors.transparent,
+            systemNavigationBarColor: Colors.transparent,
+            systemNavigationBarContrastEnforced: false,
+          );
+
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: styleOf(context),
+    child: child,
+  );
+}
 
 class Section extends StatelessWidget {
   const Section({
@@ -442,7 +465,8 @@ class AppPageBody extends StatelessWidget {
           children: [
             if (controller.appUpdate?.hasUpdate == true)
               AppUpdateBanner(controller: controller),
-            if (controller.isAndroid && controller.unhandledError != null)
+            if (controller.info.platform != BridgePlatform.macOs &&
+                controller.unhandledError != null)
               ErrorMessage(controller.unhandledError),
             ...children,
           ],

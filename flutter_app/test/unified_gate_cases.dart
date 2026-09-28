@@ -14,6 +14,42 @@ void unifiedGateCases(BridgePlatform platform) {
   final target = platform == BridgePlatform.macOs
       ? TargetPlatform.macOS
       : TargetPlatform.android;
+  testWidgets(
+    '${platform.name} onboarding opens on the first incomplete step',
+    (tester) async {
+      final c = ViewController(platform)
+        ..local = const LocalSchemaDto(
+          installed: false,
+          deployed: false,
+          version: '',
+          schemas: [],
+        );
+      addTearDown(c.dispose);
+      const channel = MethodChannel('ink.rea.keytao/window');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        KeyTaoApp(
+          controller: c,
+          initialOnboarding: const OnboardingDto(completed: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant.only(target),
+  );
   for (final width in [400.0, 1000.0]) {
     for (final completed in [false, true]) {
       testWidgets(
@@ -156,10 +192,8 @@ void unifiedGateCases(BridgePlatform platform) {
           ),
         );
         await tester.pumpAndSettle();
-        for (var i = 0; i < (c.isAndroid ? 3 : 1); i++) {
-          await tester.tap(find.text('继续'));
-          await tester.pumpAndSettle();
-        }
+        await tester.tap(find.byKey(const ValueKey('setup-nav-install')));
+        await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
         expect(find.text(AppStrings.installFailed), findsOneWidget);
         expect(find.byType(FDialog), findsNothing);

@@ -23,6 +23,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
   int _index = 0;
   bool _completionScheduled = false;
   bool _finished = false;
+  bool _retargetPending = false;
+  late final AppLifecycleListener _lifecycle;
   List<SetupStep> get _steps => widget.controller.isAndroid
       ? const [
           SetupStep.enable,
@@ -36,11 +38,24 @@ class _OnboardingPageState extends State<OnboardingPage> {
       step == SetupStep.storage && widget.controller.isAndroid
       ? widget.controller.migrationReady
       : step.isComplete(widget.controller);
+  int get _firstIncomplete => _steps.indexWhere((step) => !_done(step));
+  int get _initialIndex {
+    final first = _firstIncomplete;
+    return first < 0 ? _steps.length - 1 : first;
+  }
 
   @override
   void initState() {
     super.initState();
-    widget.controller.addListener(_checkCompletion);
+    _index = _initialIndex;
+    _retargetPending = widget.controller.busy;
+    widget.controller.addListener(_onControllerChanged);
+    _lifecycle = AppLifecycleListener(
+      onResume: () {
+        _retargetPending = true;
+        _retargetWhenIdle();
+      },
+    );
     widget.controller.setWindowTitle(_steps[_index].title);
     _checkCompletion();
   }
@@ -49,10 +64,30 @@ class _OnboardingPageState extends State<OnboardingPage> {
   void didUpdateWidget(covariant OnboardingPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
-      oldWidget.controller.removeListener(_checkCompletion);
-      widget.controller.addListener(_checkCompletion);
+      oldWidget.controller.removeListener(_onControllerChanged);
+      widget.controller.addListener(_onControllerChanged);
+      _index = _initialIndex;
+      _retargetPending = widget.controller.busy;
+      widget.controller.setWindowTitle(_steps[_index].title);
     }
     _checkCompletion();
+  }
+
+  void _onControllerChanged() {
+    setState(() {});
+    if (_retargetPending) _retargetWhenIdle();
+    _checkCompletion();
+  }
+
+  void _retargetWhenIdle() {
+    // The app owns refreshState; wait for its resume refresh (including any
+    // refresh queued behind a running operation) before choosing the page.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_retargetPending || widget.controller.busy) return;
+      _retargetPending = false;
+      _move(_initialIndex);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   void _checkCompletion() {
@@ -86,9 +121,18 @@ class _OnboardingPageState extends State<OnboardingPage> {
   }
 
   Future<void> _next() async {
+    final first = _firstIncomplete;
+    if (first >= 0 && first < _index) {
+      _move(first);
+      return;
+    }
     if (_index == _steps.length - 1) {
-      if (await widget.controller.finishOnboarding() && mounted) {
+      final completed = await widget.controller.finishOnboarding();
+      if (!mounted) return;
+      if (completed) {
         widget.onFinished();
+      } else if (_firstIncomplete >= 0) {
+        _move(_firstIncomplete);
       }
     } else {
       _move(_index + 1);
@@ -97,7 +141,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
 
   @override
   void dispose() {
-    widget.controller.removeListener(_checkCompletion);
+    _lifecycle.dispose();
+    widget.controller.removeListener(_onControllerChanged);
     super.dispose();
   }
 
@@ -114,16 +159,16 @@ class _OnboardingPageState extends State<OnboardingPage> {
             SetupStep.deploy => AppStrings.deployKeytao,
             _ => step.title,
           };
-    final description = !c.isAndroid
-        ? null
-        : switch (step) {
-            SetupStep.enable => AppStrings.enableDescription,
-            SetupStep.select => AppStrings.selectDescription,
-            SetupStep.storage => c.permissionDescription,
-            SetupStep.install => AppStrings.installDescription,
-            SetupStep.deploy => AppStrings.deployDescription,
-            _ => null,
-          };
+    final description = switch (step) {
+      SetupStep.enable => AppStrings.enableDescription,
+      SetupStep.select => AppStrings.selectDescription,
+      SetupStep.storage || SetupStep.migration => c.permissionDescription,
+      SetupStep.install => AppStrings.installDescription,
+      SetupStep.deploy => AppStrings.deployDescription,
+      SetupStep.component => '安装 KeyTao 输入法组件后，重新检测安装状态。',
+      SetupStep.finish =>
+        c.setupReady ? '设置已就绪，点击完成开始使用 KeyTao。' : AppStrings.finishSetupFirst,
+    };
     final errors = <String>{
       if (c.isAndroid) ...[
         if (c.error?.isNotEmpty == true) c.error!,
@@ -155,7 +200,10 @@ class _OnboardingPageState extends State<OnboardingPage> {
     } else {
       progress = c.ime != null ? .18 : .08;
     }
-    return FScaffold(
+    final onboarding = FScaffold(
+      scaffoldStyle: FScaffoldStyleDelta.delta(
+        systemOverlayStyle: c.isAndroid ? AppSystemBars.styleOf(context) : null,
+      ),
       childPad: false,
       child: SafeArea(
         child: Column(
@@ -210,6 +258,45 @@ class _OnboardingPageState extends State<OnboardingPage> {
                           ],
                         ),
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          spacing: 8,
+                          children: [
+                            for (var i = 0; i < steps.length; i++)
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  spacing: 6,
+                                  children: [
+                                    FButton(
+                                      key: ValueKey(
+                                        'setup-nav-${steps[i].name}',
+                                      ),
+                                      variant: i == _index
+                                          ? FButtonVariant.primary
+                                          : FButtonVariant.outline,
+                                      selected: i == _index,
+                                      semanticsLabel:
+                                          '${i + 1}. ${steps[i].title}，${_done(steps[i]) ? '已完成' : '待完成'}',
+                                      onPress: () => _move(i),
+                                      child: _done(steps[i])
+                                          ? const Icon(
+                                              FLucideIcons.check,
+                                              size: 16,
+                                            )
+                                          : Text('${i + 1}'),
+                                    ),
+                                    Text(
+                                      steps[i].title,
+                                      textAlign: TextAlign.center,
+                                      style: context.theme.typography.body.xs,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                        Row(
                           children: [
                             Expanded(
                               child: Text(
@@ -233,7 +320,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                 onPress: c.busy ? null : c.refreshState,
                               ),
                             ),
-                            if (description != null) Text(description),
+                            Text(description),
                             if (step == SetupStep.component &&
                                 !_done(step)) ...[
                               ValueRow(
@@ -363,27 +450,40 @@ class _OnboardingPageState extends State<OnboardingPage> {
             ),
             Padding(
               padding: const EdgeInsets.all(24),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  ActionButton(
-                    '返回',
-                    onPress: _index == 0 || c.busy
-                        ? null
-                        : () => _move(_index - 1),
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      ActionButton(
+                        '返回',
+                        onPress: _index == 0 || c.busy
+                            ? null
+                            : () => _move(_index - 1),
+                      ),
+                      const SizedBox(width: 8),
+                      ActionButton(
+                        _index == steps.length - 1 ? '完成' : '继续',
+                        primary: true,
+                        onPress:
+                            !c.busy &&
+                                (_done(step) ||
+                                    (_firstIncomplete >= 0 &&
+                                        _firstIncomplete < _index))
+                            ? _next
+                            : null,
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  ActionButton(
-                    _index == steps.length - 1 ? '完成' : '继续',
-                    primary: true,
-                    onPress: !c.busy && _done(step) ? _next : null,
-                  ),
-                ],
+                ),
               ),
             ),
           ],
         ),
       ),
     );
+    return c.isAndroid ? AppSystemBars(child: onboarding) : onboarding;
   }
 }

@@ -45,10 +45,15 @@ class _AppShellState extends State<AppShell> {
         c.selectPage(AppPage.values[index]);
       }
 
-      return LayoutBuilder(
+      final shell = LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 720;
           return FScaffold(
+            scaffoldStyle: FScaffoldStyleDelta.delta(
+              systemOverlayStyle: c.isAndroid
+                  ? AppSystemBars.styleOf(context)
+                  : null,
+            ),
             childPad: false,
             sidebar: wide
                 ? FSidebar(
@@ -125,6 +130,7 @@ class _AppShellState extends State<AppShell> {
           );
         },
       );
+      return c.isAndroid ? AppSystemBars(child: shell) : shell;
     },
   );
 }
