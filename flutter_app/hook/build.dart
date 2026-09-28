@@ -5,7 +5,7 @@ import 'package:flutter_rust_bridge_hooks/flutter_rust_bridge_hooks.dart';
 
 // The bridge links keytao-app-core -> keytao-core -> librime. Hooks run with a
 // scrubbed environment, so the vendored Rime SDK is passed to Cargo explicitly,
-// and Android shared libraries are bundled as code assets. The macOS Runner
+// and Android/Windows shared libraries are bundled as code assets. The macOS Runner
 // build phase bundles librime and its plugins directly in Contents/Frameworks.
 void main(List<String> args) async {
   await build(args, (input, output) async {
@@ -74,8 +74,47 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
         for (final name in ['librime.so', 'libFcitx5Core.so', 'libFcitx5Config.so', 'libFcitx5Utils.so', 'libc++_shared.so'])
           '$lib/$name',
       ]);
+    case OS.windows:
+      final windowsArch = switch (arch) {
+        Architecture.x64 => 'x64',
+        Architecture.arm64 => 'arm64',
+        Architecture.ia32 => 'x86',
+        final other => throw UnsupportedError('librime has no Windows $other build'),
+      };
+      final root = Directory.fromUri(Uri.directory(vendor).resolve('windows-$windowsArch'));
+      final libName = arch == Architecture.arm64 ? 'rime-arm64' : 'rime';
+      final bin = Directory.fromUri(root.uri.resolve('bin/'));
+      final libraries = <String, String>{
+        for (final file in bin.listSync().whereType<File>())
+          if (file.path.toLowerCase().endsWith('.dll'))
+            file.uri.pathSegments.last.toLowerCase(): file.path,
+      };
+      if (!libraries.containsKey('$libName.dll')) {
+        throw StateError('Missing $libName.dll in ${bin.path}');
+      }
+      // Tauri ships bin/*.dll plus the matching MSVC redistributables staged by
+      // build-windows-ime.ps1. Use the arch-specific runtime, never "current",
+      // which may belong to a different architecture in a multi-arch build.
+      final runtime = Uri.directory(vendor).resolve('../../target/keytao-windows-ime-runtime/$windowsArch/');
+      for (final name in ['vcruntime140.dll', 'msvcp140.dll', if (arch != Architecture.ia32) 'vcruntime140_1.dll']) {
+        if (libraries.containsKey(name)) continue;
+        final file = File.fromUri(runtime.resolve(name));
+        if (!file.existsSync()) {
+          throw StateError('Missing $name; run scripts/build-windows-ime.ps1 -Arch $windowsArch first');
+        }
+        libraries[name] = file.path;
+      }
+      return _Rime({
+        ...sdk(root.path),
+        'KEYTAO_RIME_LIB_NAME': libName,
+        'KEYTAO_RIME_DLL_NAME': '$libName.dll',
+      }, libraries.values.toList()..sort());
+    case OS.linux:
+      // librime-dev in Dockerfile.linux-builder supplies these system paths.
+      // container-build.sh packages librime, its dependencies and plugins in
+      // runtime/lib; leave that closure to the Linux packager, not CodeAssets.
+      return _Rime(sdk('/usr'));
     default:
-      // Windows and Linux bundling is wired up in the desktop phase.
       return const _Rime({});
   }
 }
