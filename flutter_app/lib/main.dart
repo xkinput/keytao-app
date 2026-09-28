@@ -6,6 +6,7 @@ import 'package:macos_ui/macos_ui.dart';
 import 'src/app/app.dart';
 import 'src/app/bootstrap.dart';
 import 'src/app/controller.dart';
+import 'src/app/strings.dart';
 import 'src/app/theme.dart';
 import 'src/macos/app.dart';
 
@@ -20,7 +21,18 @@ Future<void> main() async {
     Platform.isMacOS
         ? const MacosStartup()
         : const MaterialApp(
-            home: Scaffold(body: Center(child: CircularProgressIndicator())),
+            home: Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text(AppStrings.boot),
+                  ],
+                ),
+              ),
+            ),
           ),
   );
   try {

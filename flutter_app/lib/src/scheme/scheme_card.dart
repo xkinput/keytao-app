@@ -3,186 +3,176 @@ import 'package:flutter/material.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../app/widgets.dart';
+import 'operation_progress.dart';
+import 'version_picker.dart';
 
 class SchemeCard extends StatelessWidget {
   const SchemeCard({super.key, required this.controller});
   final AppController controller;
+
   @override
   Widget build(BuildContext context) {
     final c = controller;
     final local = c.local;
     return SectionCard(
-      title: '输入方案',
+      title: AppStrings.schemeTitle,
+      icon: Icons.download_outlined,
       children: [
+        VersionPicker(controller: c),
+        const SizedBox(height: 12),
         SchemeSelection(controller: c),
-        ValueRow('KeyTao 目录', c.info.userRoot),
-        ValueRow('本地状态', c.localStatus),
-        ValueRow('本地版本', local?.version ?? '—'),
-        if (local?.schemas.isNotEmpty == true)
-          ValueRow('本地方案', local!.schemas.join('、')),
-        if (c.isAndroid && !c.storageReady) ...[
-          const SizedBox(height: 8),
-          Text(c.storage?['message'] as String? ?? '请先授权文件访问'),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              onPressed: c.busy || c.storage?['canOpenSettings'] != true
-                  ? null
-                  : () => c.run(c.android.openStoragePermissionSettings),
-              child: const Text('授权文件访问'),
-            ),
+        ValueRow(AppStrings.directory, c.defaultDir),
+        if (c.localStatusLine != null)
+          StatusMessage(
+            [
+              c.localStatusLine!,
+              if (c.localSchemaIds != null) c.localSchemaIds!,
+            ].join(' '),
+            icon: local!.deployed
+                ? Icons.check_circle_outline
+                : local.installed
+                ? Icons.warning_amber
+                : Icons.info_outline,
+            color: local.deployed
+                ? successColor(context)
+                : local.installed
+                ? warningColor(context)
+                : null,
           ),
-        ],
-        const SizedBox(height: 16),
+        ErrorMessage(c.installError),
+        InstallProgressView(
+          active: c.isInstalling,
+          progress: c.installProgress,
+        ),
+        DeploySteps(controller: c),
+        const SizedBox(height: 12),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             FilledButton.icon(
-              onPressed: c.busy ? null : c.install,
-              icon: const Icon(Icons.download_rounded),
-              label: const Text('安装方案'),
+              onPressed: c.canInstall ? c.install : null,
+              icon: c.checkingStorage || c.isInstalling || c.isDeploying
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download_outlined),
+              label: Text(c.installButtonLabel),
             ),
-            FilledButton.tonalIcon(
-              onPressed: c.canDeploy ? c.deploy : null,
-              icon: const Icon(Icons.play_arrow_rounded),
-              label: const Text('部署'),
-            ),
-            OutlinedButton(
-              onPressed: c.busy ? null : c.refreshState,
-              child: const Text('检查本地'),
-            ),
-            if (!c.isAndroid)
-              OutlinedButton(
-                onPressed: c.busy ? null : () => c.open(c.info.userRoot),
-                child: const Text('打开目录'),
+            Tooltip(
+              message: c.deployTooltip,
+              child: FilledButton.tonalIcon(
+                onPressed: c.canDeploy ? c.deploy : null,
+                icon: const Icon(Icons.play_arrow_outlined),
+                label: const Text(AppStrings.deploy),
               ),
-          ],
-        ),
-        OperationProgress(controller: c),
-        const SizedBox(height: 24),
-        const TextField(
-          minLines: 2,
-          maxLines: 5,
-          decoration: InputDecoration(labelText: '输入测试'),
-        ),
-      ],
-    );
-  }
-}
-
-class SchemeSelection extends StatelessWidget {
-  const SchemeSelection({super.key, required this.controller});
-  final AppController controller;
-  @override
-  Widget build(BuildContext context) {
-    final c = controller;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ChoiceSetting(
-          label: '方案',
-          value: c.scheme,
-          options: schemes,
-          onChanged: c.busy ? null : c.selectScheme,
-        ),
-        if (c.scheme == 'keytao')
-          ChoiceSetting(
-            label: '下载来源',
-            value: c.source,
-            options: downloadSources,
-            onChanged: c.busy ? null : c.selectSource,
-          ),
-        Row(
-          children: [
-            Expanded(child: Text('最新版本  ${c.releaseVersion ?? '—'}')),
-            IconButton(
-              tooltip: '刷新版本',
-              onPressed: c.busy ? null : c.refreshRelease,
-              icon: const Icon(Icons.refresh_rounded),
             ),
+            OutlinedButton.icon(
+              onPressed: c.busy ? null : c.refreshState,
+              icon: const Icon(Icons.refresh),
+              label: const Text(AppStrings.checkLocal),
+            ),
+            OutlinedButton.icon(
+              onPressed: c.isAndroid || c.busy ? null : c.openDefaultDirectory,
+              icon: const Icon(Icons.folder_open),
+              label: const Text(AppStrings.openDirectory),
+            ),
+            if (c.operationLogCount > 0) OperationLogButton(controller: c),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 20),
+        const TextField(
+          minLines: 3,
+          maxLines: 5,
+          decoration: InputDecoration(hintText: AppStrings.testInput),
+        ),
       ],
     );
   }
 }
 
-class OperationProgress extends StatelessWidget {
-  const OperationProgress({super.key, required this.controller});
+class AddonCard extends StatelessWidget {
+  const AddonCard({super.key, required this.controller});
   final AppController controller;
+
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return SectionCard(
+      title: AppStrings.addonTitle,
+      icon: Icons.menu_book_outlined,
       children: [
-        if (c.busy) ...[
-          const SizedBox(height: 16),
-          LinearProgressIndicator(
-            value: c.installFraction,
-            borderRadius: BorderRadius.circular(8),
-          ),
-        ],
-        if (c.progress.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          Semantics(liveRegion: true, child: Text(c.progress)),
-        ],
-        if (c.hasOperationLog)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              icon: const Icon(Icons.receipt_long_rounded),
-              label: const Text('操作日志'),
-              onPressed: () => showDialog<void>(
-                context: context,
-                builder: (context) => ListenableBuilder(
-                  listenable: c,
-                  builder: (context, _) => AlertDialog(
-                    title: const Text('操作日志'),
-                    content: SizedBox(
-                      width: 600,
-                      height: 400,
-                      child: ListView.builder(
-                        itemCount:
-                            c.operationLogs.length + c.verification.length,
-                        itemBuilder: (context, index) {
-                          if (index < c.operationLogs.length) {
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: SelectableText(c.operationLogs[index]),
-                            );
-                          }
-                          final entry =
-                              c.verification[index - c.operationLogs.length];
-                          return ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(
-                              entry.ok
-                                  ? Icons.check_circle_outline
-                                  : Icons.error_outline,
-                              color: entry.ok
-                                  ? null
-                                  : Theme.of(context).colorScheme.error,
-                            ),
-                            title: SelectableText(entry.path),
-                            subtitle: Text(entry.note),
-                          );
-                        },
-                      ),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('关闭'),
-                      ),
-                    ],
-                  ),
+        Text(
+          AppStrings.easyEnglish,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(c.addonStatusText),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (c.showAddonInstall)
+              Tooltip(
+                message: c.addonTooltip,
+                child: FilledButton.tonalIcon(
+                  onPressed: c.canInstallAddon ? c.installAddon : null,
+                  icon: const Icon(Icons.download_outlined),
+                  label: Text(c.addonButtonLabel),
                 ),
               ),
+            if (c.addon?.installed == true)
+              OutlinedButton(
+                onPressed: c.canUninstallAddon ? c.uninstallAddon : null,
+                child: const Text(AppStrings.uninstall),
+              ),
+          ],
+        ),
+        InstallProgressView(
+          active: c.isManagingAddon,
+          progress: c.addonProgress,
+        ),
+        ErrorMessage(c.addonError),
+        const Divider(),
+        Text(
+          AppStrings.wanxiang,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(c.wanxiangStatusText),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Tooltip(
+              message: c.wanxiangTooltip,
+              child: FilledButton.tonalIcon(
+                onPressed: c.canInstallWanxiang
+                    ? () => c.manageWanxiang(true)
+                    : null,
+                icon: const Icon(Icons.download_outlined),
+                label: Text(c.wanxiangButtonLabel),
+              ),
             ),
-          ),
+            if (c.wanxiang?.installed == true)
+              OutlinedButton(
+                onPressed: c.canUninstallWanxiang
+                    ? () => c.manageWanxiang(false)
+                    : null,
+                child: const Text(AppStrings.uninstall),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        const Text(AppStrings.wanxiangDescription),
+        InstallProgressView(
+          active: c.isManagingWanxiang,
+          progress: c.wanxiangProgress,
+        ),
+        ErrorMessage(c.wanxiangError),
       ],
     );
   }

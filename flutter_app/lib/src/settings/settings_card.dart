@@ -4,7 +4,6 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../app/widgets.dart';
 import '../rust/api/types.dart';
-import 'android_settings.dart';
 
 class SettingsCard extends StatelessWidget {
   const SettingsCard({super.key, required this.controller});
@@ -12,7 +11,7 @@ class SettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      controller.isAndroid ? _android() : _desktop(context);
+      controller.isAndroid ? _android(context) : _desktop(context);
 
   Widget _unavailable(String title) => SectionCard(
     title: title,
@@ -26,13 +25,11 @@ class SettingsCard extends StatelessWidget {
     ],
   );
 
-  Widget _android() {
+  Widget _android(BuildContext context) {
     final c = controller;
     final s = c.androidSettings;
-    if (s == null) return _unavailable('键盘设置');
-    void save(String key, Object value) {
-      c.saveAndroid({key: value});
-    }
+    final enabled = !c.busy && s != null;
+    void save(String key, Object value) => c.saveAndroid({key: value});
 
     Widget slider(
       String label,
@@ -42,7 +39,8 @@ class SettingsCard extends StatelessWidget {
       double max,
       int divisions,
       String unit, {
-      bool enabled = true,
+      bool available = true,
+      String? semanticLabel,
     }) => SliderSetting(
       label: label,
       value: value.toDouble(),
@@ -50,107 +48,160 @@ class SettingsCard extends StatelessWidget {
       max: max,
       divisions: divisions,
       unit: unit,
-      onChanged: c.busy || !enabled ? null : (value) => save(field, value),
+      semanticLabel: semanticLabel,
+      onChanged: enabled && available ? (value) => save(field, value) : null,
     );
-    Widget toggle(String label, String field, bool value) => SwitchListTile(
-      contentPadding: EdgeInsets.zero,
-      title: Text(label),
+    Widget toggle(String label, String field, bool value, {String? hint}) =>
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(label),
+          subtitle: hint == null ? null : Text(hint),
+          value: value,
+          onChanged: enabled ? (value) => save(field, value) : null,
+        );
+    Widget choice(
+      String label,
+      String field,
+      String value,
+      Map<String, String> options, {
+      IconData? icon,
+    }) => ChoiceSetting<String>(
+      label: label,
       value: value,
-      onChanged: c.busy ? null : (value) => save(field, value),
+      options: options,
+      currentLabel: options[value],
+      icon: icon,
+      onChanged: enabled ? (value) => save(field, value) : null,
     );
     return SectionCard(
-      title: '键盘设置',
+      title: AppStrings.mobileKeyboard,
+      icon: Icons.keyboard_outlined,
       children: [
+        Text(
+          AppStrings.gestures,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        const SizedBox(height: 16),
         slider(
-          '长按延迟',
+          AppStrings.longPressDelay,
           'longPressDelayMs',
-          s.longPressDelayMs,
+          s?.longPressDelayMs ?? 300,
           100,
           700,
           60,
-          ' ms',
+          'ms',
         ),
         ChoiceSetting<String>(
-          label: '英文模式',
-          value: s.englishMode,
+          label: AppStrings.englishMode,
+          value: s?.englishMode ?? 'ascii',
+          currentLabel: c.englishModeLabel,
+          hint: c.englishModeHint,
           options: c.androidEnglishModes,
           disabled: c.disabledAndroidEnglishModes,
-          onChanged: c.busy ? null : (value) => save('englishMode', value),
+          onChanged: enabled ? (value) => save('englishMode', value) : null,
         ),
         slider(
-          '键盘高度',
+          AppStrings.keyboardHeight,
           'keyboardHeightScale',
-          s.keyboardHeightScale,
+          s?.keyboardHeightScale ?? 100,
           85,
           130,
           9,
           '%',
         ),
-        ChoiceSetting<String>(
-          label: '删除速度',
-          value: s.deleteSpeed,
-          options: const {'slow': '慢', 'standard': '标准', 'fast': '快'},
-          onChanged: c.busy ? null : (value) => save('deleteSpeed', value),
+        choice(
+          AppStrings.deleteSpeed,
+          'deleteSpeed',
+          s?.deleteSpeed ?? 'standard',
+          const {
+            'slow': AppStrings.slow,
+            'standard': AppStrings.standard,
+            'fast': AppStrings.fast,
+          },
+          icon: Icons.tune,
         ),
-        ChoiceSetting<String>(
-          label: '退格滑动模式',
-          value: s.backspaceGestureMode,
-          options: const {'immediate': '即时删除', 'selectThenDelete': '选中后删除'},
-          onChanged: c.busy
-              ? null
-              : (value) => save('backspaceGestureMode', value),
+        choice(
+          AppStrings.backspaceGesture,
+          'backspaceGestureMode',
+          s?.backspaceGestureMode ?? 'immediate',
+          const {
+            'immediate': AppStrings.immediateDelete,
+            'selectThenDelete': AppStrings.selectThenDelete,
+          },
         ),
-        toggle('下拉输入角标符号', 'flickKeysEnabled', s.flickKeysEnabled),
         toggle(
-          '双击空格输入句号',
+          AppStrings.flickKeys,
+          'flickKeysEnabled',
+          s?.flickKeysEnabled ?? true,
+          hint: AppStrings.flickKeysHint,
+        ),
+        toggle(
+          AppStrings.doubleSpacePeriod,
           'doubleSpacePeriodEnabled',
-          s.doubleSpacePeriodEnabled,
+          s?.doubleSpacePeriodEnabled ?? true,
+          hint: AppStrings.doubleSpaceHint,
         ),
         const SizedBox(height: 16),
         slider(
-          '滑动判定阈值',
+          AppStrings.swipeThreshold,
           'swipeThresholdDp',
-          s.swipeThresholdDp,
+          s?.swipeThresholdDp ?? 34,
           12,
           96,
           84,
-          ' dp',
+          'dp',
         ),
-        toggle('竖屏悬浮键盘', 'floatingPortraitEnabled', s.floatingPortraitEnabled),
+        const Divider(),
+        Text(AppStrings.layout, style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        toggle(
+          AppStrings.floatingPortrait,
+          'floatingPortraitEnabled',
+          s?.floatingPortraitEnabled ?? false,
+        ),
         slider(
-          '竖屏缩放',
+          AppStrings.scale,
           'floatingPortraitScale',
-          s.floatingPortraitScale,
+          s?.floatingPortraitScale ?? 88,
           70,
           100,
           30,
           '%',
-          enabled: s.floatingPortraitEnabled,
+          available: s?.floatingPortraitEnabled ?? false,
+          semanticLabel: AppStrings.floatingScale(AppStrings.floatingPortrait),
         ),
         toggle(
-          '横屏悬浮键盘',
+          AppStrings.floatingLandscape,
           'floatingLandscapeEnabled',
-          s.floatingLandscapeEnabled,
+          s?.floatingLandscapeEnabled ?? true,
         ),
         slider(
-          '横屏缩放',
+          AppStrings.scale,
           'floatingLandscapeScale',
-          s.floatingLandscapeScale,
+          s?.floatingLandscapeScale ?? 72,
           45,
           100,
           55,
           '%',
-          enabled: s.floatingLandscapeEnabled,
+          available: s?.floatingLandscapeEnabled ?? true,
+          semanticLabel: AppStrings.floatingScale(AppStrings.floatingLandscape),
         ),
-        ChoiceSetting<String>(
-          label: '回车键',
-          value: s.enterKeyBehavior,
-          options: const {'system': '智能判断', 'newline': '始终换行'},
-          onChanged: c.busy ? null : (value) => save('enterKeyBehavior', value),
+        choice(
+          AppStrings.enterKey,
+          'enterKeyBehavior',
+          s?.enterKeyBehavior ?? 'system',
+          const {
+            'system': AppStrings.smartEnter,
+            'newline': AppStrings.newline,
+          },
+          icon: Icons.keyboard_return,
         ),
+        if (s?.configPath?.isNotEmpty == true)
+          ValueRow(AppStrings.config, s!.configPath!),
+        const SizedBox(height: 8),
         OutlinedButton(
-          onPressed: c.busy ? null : () => c.saveAndroid(androidDefaults),
-          child: const Text('恢复默认设置'),
+          onPressed: enabled ? c.resetAndroidSettings : null,
+          child: const Text(AppStrings.resetMobileKeyboard),
         ),
       ],
     );

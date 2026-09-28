@@ -1,4 +1,32 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
+
+import 'controller.dart';
+import 'options.dart';
+
+class AndroidScaffold extends StatelessWidget {
+  const AndroidScaffold({
+    super.key,
+    required this.body,
+    this.bottomNavigationBar,
+  });
+  final Widget body;
+  final Widget? bottomNavigationBar;
+
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value:
+        (Theme.of(context).brightness == Brightness.dark
+                ? SystemUiOverlayStyle.light
+                : SystemUiOverlayStyle.dark)
+            .copyWith(
+              statusBarColor: Colors.transparent,
+              systemNavigationBarColor: Colors.transparent,
+              systemNavigationBarContrastEnforced: false,
+            ),
+    child: Scaffold(body: body, bottomNavigationBar: bottomNavigationBar),
+  );
+}
 
 class ContentWidth extends StatelessWidget {
   const ContentWidth({super.key, required this.child});
@@ -14,18 +42,37 @@ class ContentWidth extends StatelessWidget {
 }
 
 class SectionCard extends StatelessWidget {
-  const SectionCard({super.key, required this.title, required this.children});
+  const SectionCard({
+    super.key,
+    required this.title,
+    required this.children,
+    this.icon,
+  });
   final String title;
   final List<Widget> children;
+  final IconData? icon;
   @override
   Widget build(BuildContext context) => Card(
     child: Padding(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(title, style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 24),
+          Row(
+            children: [
+              if (icon != null) ...[
+                Icon(icon, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 12),
+              ],
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
           ...children,
         ],
       ),
@@ -41,19 +88,36 @@ class ChoiceSetting<T> extends StatelessWidget {
     required this.options,
     this.onChanged,
     this.disabled = const {},
+    this.currentLabel,
+    this.hint,
+    this.icon,
   });
   final String label;
   final T value;
   final Map<T, String> options;
   final Set<T> disabled;
   final ValueChanged<T>? onChanged;
+  final String? currentLabel;
+  final String? hint;
+  final IconData? icon;
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 24),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: Theme.of(context).textTheme.titleSmall),
+        Row(
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 20),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: Text(label, style: Theme.of(context).textTheme.titleSmall),
+            ),
+            if (currentLabel != null) Text(currentLabel!),
+          ],
+        ),
         const SizedBox(height: 8),
         Wrap(
           spacing: 8,
@@ -69,6 +133,10 @@ class ChoiceSetting<T> extends StatelessWidget {
               ),
           ],
         ),
+        if (hint != null) ...[
+          const SizedBox(height: 8),
+          Text(hint!, style: Theme.of(context).textTheme.bodySmall),
+        ],
       ],
     ),
   );
@@ -84,6 +152,7 @@ class SliderSetting extends StatefulWidget {
     required this.divisions,
     this.unit = '',
     this.onChanged,
+    this.semanticLabel,
   });
   final String label;
   final double value;
@@ -92,6 +161,7 @@ class SliderSetting extends StatefulWidget {
   final int divisions;
   final String unit;
   final ValueChanged<double>? onChanged;
+  final String? semanticLabel;
   @override
   State<SliderSetting> createState() => _SliderSettingState();
 }
@@ -115,6 +185,8 @@ class _SliderSettingState extends State<SliderSetting> {
         children: [
           Row(
             children: [
+              const Icon(Icons.tune, size: 20),
+              const SizedBox(width: 8),
               Expanded(child: Text(widget.label)),
               Text('${value.round()}${widget.unit}'),
             ],
@@ -126,7 +198,7 @@ class _SliderSettingState extends State<SliderSetting> {
             divisions: widget.divisions,
             label: '${value.round()}${widget.unit}',
             semanticFormatterCallback: (v) =>
-                '${widget.label} ${v.round()}${widget.unit}',
+                '${widget.semanticLabel ?? widget.label} ${v.round()}${widget.unit}',
             onChanged: widget.onChanged == null
                 ? null
                 : (v) => setState(() => _draft = v),
@@ -160,5 +232,236 @@ class ValueRow extends StatelessWidget {
         Expanded(child: SelectableText(value)),
       ],
     ),
+  );
+}
+
+class AppPageBody extends StatelessWidget {
+  const AppPageBody({
+    super.key,
+    required this.controller,
+    required this.page,
+    required this.children,
+  });
+  final AppController controller;
+  final AppPage page;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final specificErrors = [
+      c.releaseError,
+      c.installError,
+      c.addonError,
+      c.wanxiangError,
+      c.customError,
+      c.debugError,
+      c.migrationError,
+      ...c.deploySteps.map((step) => step.message),
+    ];
+    return SingleChildScrollView(
+      key: PageStorageKey(page.id),
+      primary: false,
+      padding: const EdgeInsets.all(16),
+      child: ContentWidth(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: 16,
+          children: [
+            if (c.appUpdate?.hasUpdate == true) AppUpdateBanner(controller: c),
+            if (c.error != null && !specificErrors.contains(c.error))
+              ErrorMessage(c.error),
+            ...children,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AppUpdateBanner extends StatelessWidget {
+  const AppUpdateBanner({super.key, required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final update = controller.appUpdate!;
+    return Card.filled(
+      color: Theme.of(context).colorScheme.primaryContainer,
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        leading: const Icon(Icons.system_update_outlined),
+        title: const Text(AppStrings.appUpdate),
+        subtitle: Wrap(
+          spacing: 12,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Chip(label: Text('v${update.latestVersion}')),
+            Text(AppStrings.currentVersion(update.currentVersion)),
+          ],
+        ),
+        trailing: const Icon(Icons.open_in_new, size: 20),
+        onTap: controller.busy ? null : controller.openAppUpdate,
+      ),
+    );
+  }
+}
+
+class AppBrand extends StatelessWidget {
+  const AppBrand({super.key, required this.version});
+  final String version;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Image.asset(logoAsset, width: 48, height: 48, semanticLabel: 'KeyTao'),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    AppStrings.title,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  Text(
+                    'v$version',
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                AppStrings.tagline,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Color successColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? Colors.green.shade300
+    : Colors.green.shade800;
+
+Color warningColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? Colors.amber.shade300
+    : Colors.amber.shade900;
+
+class StatusMessage extends StatelessWidget {
+  const StatusMessage(
+    this.message, {
+    super.key,
+    this.icon = Icons.info_outline,
+    this.color,
+  });
+  final String message;
+  final IconData icon;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    liveRegion: true,
+    child: Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color:
+            color?.withValues(alpha: 0.08) ??
+            Theme.of(context).colorScheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SelectableText(message, style: TextStyle(color: color)),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class ErrorMessage extends StatelessWidget {
+  const ErrorMessage(this.message, {super.key});
+  final String? message;
+
+  @override
+  Widget build(BuildContext context) => message?.isNotEmpty == true
+      ? StatusMessage(
+          message!,
+          icon: Icons.error_outline,
+          color: Theme.of(context).colorScheme.error,
+        )
+      : const SizedBox.shrink();
+}
+
+class LogLines extends StatelessWidget {
+  const LogLines({
+    super.key,
+    required this.lines,
+    required this.storageKey,
+    this.height = 240,
+    this.colorCoded = false,
+  });
+  final List<String> lines;
+  final String storageKey;
+  final double height;
+  final bool colorCoded;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: height,
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: lines.isEmpty
+        ? const Center(child: Text(AppStrings.noLogs))
+        : ListView.builder(
+            key: PageStorageKey(storageKey),
+            primary: false,
+            padding: const EdgeInsets.all(12),
+            itemCount: lines.length,
+            itemBuilder: (context, index) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SelectableText(
+                lines[index],
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  color: !colorCoded
+                      ? null
+                      : switch (operationLogKind(lines[index])) {
+                          LogLineKind.error => Theme.of(
+                            context,
+                          ).colorScheme.error,
+                          LogLineKind.warning => warningColor(context),
+                          LogLineKind.deploy => successColor(context),
+                          LogLineKind.merged => Theme.of(
+                            context,
+                          ).colorScheme.primary,
+                          LogLineKind.normal => Theme.of(
+                            context,
+                          ).colorScheme.onSurface,
+                        },
+                ),
+              ),
+            ),
+          ),
   );
 }
