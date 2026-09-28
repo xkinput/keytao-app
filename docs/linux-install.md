@@ -1,164 +1,206 @@
-# Linux 安装
+# Linux 安装与使用
 
-KeyTao Linux 版本包含两个组件：
+本文面向按[项目方 Linux 决定](app-flutter-inc2-platforms-plan.md#4-项目方决定2026-09-28)打包的 Flutter deb/rpm：包含自启动项和 KDE 启动项，退出 App 后输入法继续运行。这些是新包的约定；旧包缺少启动项时，需要升级到包含这些改动的版本。
 
-- `keytao-app`：图形安装器，负责下载、合并、部署键道 Rime 方案。
-- `keytao-ime`：系统输入法 daemon，负责 Wayland、XIM、IBus 输入前端。
+## 1. 安装
 
-从 GitHub Release 下载的 Linux deb/rpm 包会同时包含 `keytao-app`、完整 `keytao-ime` 和包内 runtime，不需要额外单独安装输入法二进制。
+从 [KeyTao Releases](https://github.com/xkinput/keytao-app/releases) 下载对应架构的 deb 或 rpm。x64 对应 x86_64，arm64 对应 aarch64。
 
-KeyTao Linux 发行包只提供 `deb` 和 `rpm`。不提供 AppImage 或 tarball，因为系统输入法需要稳定安装 sidecar daemon、runtime library、桌面环境配置和 reload 通知路径，挂载式或解压式运行模型不适合作为主发行格式。
+**Flutter 包当前计划沿用以下 Release 文件名**；`<version>` 不带前缀 `v`，最终以 Release 附件为准。命名调整时，统一更新本表和下面两条安装命令。
 
-deb/rpm 都应包含完整 KeyTao runtime：`librime`、OpenCC 数据、`rime-plugins`、基础 `rime-data` 和 `keytao-ime`。用户不需要额外安装系统 `librime` 才能运行 KeyTao 输入法。
+| 架构 | Debian / Ubuntu | Fedora 等使用 rpm 的发行版 |
+| --- | --- | --- |
+| x64 | `keytao-app-<version>-linux-x64.deb` | `keytao-app-<version>-linux-x64.rpm` |
+| arm64 | `keytao-app-<version>-linux-arm64.deb` | `keytao-app-<version>-linux-arm64.rpm` |
 
-## 标准 Linux 安装
+将下面的文件名替换为实际下载的文件；arm64 用户同时替换架构。
 
-从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载适合发行版的包。
-
-### Debian / Ubuntu
-
-```bash
-sudo apt install ./KeyTao_*_amd64.deb
-```
-
-### Fedora / openSUSE / RHEL
+Debian / Ubuntu：
 
 ```bash
-sudo dnf install ./KeyTao-*.x86_64.rpm
+sudo apt install "./keytao-app-<version>-linux-x64.deb"
 ```
 
-没有 `dnf` 的发行版可以直接用 rpm：
+Fedora（使用 dnf 的系统）：
 
 ```bash
-sudo rpm -Uvh ./KeyTao-*.x86_64.rpm
+sudo dnf install "./keytao-app-<version>-linux-x64.rpm"
 ```
 
-deb/rpm 安装的是一个完整包：图形 app 和内置的 `keytao-ime` 会一起安装。用户正常从桌面菜单启动 KeyTao，不需要单独下载或手动安装 `keytao-ime`。app 会从包内资源解析 `keytao-ime`，但普通 UI 不再提供启动、重启、注册、卸载或 KDE 配置这类系统输入法操作按钮。
+安装后包含：
 
-首次启动后，在 app 的“输入法”页中：
+- `keytao-app`：图形应用，安装、更新和部署方案，查看输入法状态。
+- `keytao-ime`：系统输入法守护进程，不依赖 Fcitx5 进程。
+- 包内 runtime：librime、OpenCC 数据、rime-plugins、基础 rime-data；无需另装系统 librime。
+- `/usr/share/ibus/component/keytao.xml`：供 IBus 发现并按需启动 KeyTao。
+- `/etc/xdg/autostart/keytao-ime.desktop`：登录后自启动，设置 `NotShowIn=GNOME;`；GNOME 由系统 IBus 启动。
+- `/usr/share/applications/keytao-wayland-launcher.desktop`：供 KDE 的虚拟键盘设置选择。
 
-1. 安装或更新键道方案。
-2. 点击“部署”。
-3. 在“Linux 系统输入法”卡片中查看当前 `keytao-ime` 状态。
-4. KDE 用户通过包管理配置或下面的可复现配置启用 KWin Virtual Keyboard，然后重新登录或重启 KWin 会话让配置生效。
+包安装完成后，仍需在 App 中安装并部署键道方案，再按桌面启用输入法。
 
-## Nix / NixOS 安装
+Nix / NixOS 用户可使用仓库的 [flake](../flake.nix) 和 [NixOS module](../nix/nixos.nix)：导入 `inputs.keytao-app.nixosModules.default` 并设置 `services.keytao-app.enable = true;`。该 module 安装程序并设置 `XMODIFIERS=@im=keytao`；deb/rpm 的新增启动项不能据此视为已在 Nix 配置中安装。
 
-本项目提供 flake package 和 NixOS module。
+## 2. 分桌面启用
 
-### 添加 flake input
-
-```nix
-inputs.keytao-app = {
-  url = "github:xkinput/keytao-app";
-  inputs.nixpkgs.follows = "nixpkgs";
-};
-```
-
-### NixOS module
-
-```nix
-{
-  imports = [
-    inputs.keytao-app.nixosModules.default
-  ];
-
-  services.keytao-app.enable = true;
-}
-```
-
-module 会把 `keytao-app` 和 `keytao-ime` 加入系统环境，并设置基础 `XMODIFIERS=@im=keytao`。
-
-### 只安装 package
-
-```nix
-{ pkgs, inputs, ... }:
-{
-  environment.systemPackages = [
-    inputs.keytao-app.packages.${pkgs.stdenv.hostPlatform.system}.default
-  ];
-}
-```
-
-Home Manager 用户也可以放到 `home.packages`。
-
-## KDE Plasma
-
-KDE Plasma Wayland 的原生输入法路径由 KWin Virtual Keyboard 启动。普通应用里手动运行 `keytao-ime` 只能启动 XIM/IBus fallback，不能替代 KWin 的私有 `WAYLAND_SOCKET` 实例。
-
-KDE 原生 Wayland 需要 KWin Virtual Keyboard 指向 KeyTao launcher。标准包或系统配置应写入：
-
-- `~/.local/share/applications/keytao-wayland-launcher.desktop`
-- `~/.config/kwinrc` 的 `Wayland/InputMethod=keytao-wayland-launcher.desktop`
-
-NixOS / Home Manager 可以用可复现配置：
-
-```nix
-{ pkgs, lib, inputs, ... }:
-
-let
-  keytaoPackage = inputs.keytao-app.packages.${pkgs.stdenv.hostPlatform.system}.default;
-  kdeVirtualKeyboardDesktop = "keytao-wayland-launcher.desktop";
-in
-{
-  home.packages = [ keytaoPackage ];
-
-  home.sessionVariables.XMODIFIERS = "@im=keytao";
-  systemd.user.sessionVariables.XMODIFIERS = "@im=keytao";
-
-  xdg.dataFile."applications/${kdeVirtualKeyboardDesktop}".text = ''
-    [Desktop Entry]
-    Name=KeyTao Input Method (Wayland)
-    Exec=${keytaoPackage}/bin/keytao-ime
-    Icon=input-keyboard
-    Type=Application
-    NoDisplay=true
-    OnlyShowIn=KDE;
-    X-KDE-Wayland-VirtualKeyboard=true
-  '';
-
-  xdg.configFile."autostart/keytao-ime.desktop".text = ''
-    [Desktop Entry]
-    Name=KeyTao IME Daemon
-    Exec=${keytaoPackage}/bin/keytao-ime --backend=xim,ibus
-    Type=Application
-    NoDisplay=true
-    X-KDE-autostart-phase=1
-  '';
-
-  home.activation.configureKeytaoKdeVirtualKeyboard =
-    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      if [ -x "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" ]; then
-        "${pkgs.kdePackages.kconfig}/bin/kwriteconfig6" \
-          --file "$HOME/.config/kwinrc" \
-          --group Wayland \
-          --key InputMethod \
-          "${kdeVirtualKeyboardDesktop}"
-      fi
-    '';
-}
-```
-
-## QQ / WeChat
-
-QQ 和微信在很多 Wayland 会话中运行于 XWayland，需要走 `keytao-ime` 的 `XIM+IBUS` 进程，而不是只依赖 `KWIN_WAYLAND`。
-
-启动前先确认 `XIM+IBUS` 已经运行：
+先在终端确认当前会话：
 
 ```bash
-pgrep -a keytao-ime
+printf '%s\n' "$XDG_CURRENT_DESKTOP" "$XDG_SESSION_TYPE"
 ```
 
-app 中应显示 `XIM+IBUS 1`。如果没有，先确认当前会话已经启动 `keytao-ime`，或从终端手动运行 `keytao-ime` 做诊断。
+### KDE Plasma：Wayland
 
-### 标准 Linux wrapper
+1. 打开「系统设置 → 键盘 → 虚拟键盘」，选择 **KeyTao / 键道输入法 (Wayland)**。
+2. 按下一节设置 `XMODIFIERS=@im=keytao`，供 XWayland 应用使用；不要全局设置 `GTK_IM_MODULE`、`QT_IM_MODULE`。
+3. 注销后重新登录，再打开应用测试输入。
 
-不要直接从桌面菜单启动原始 QQ / WeChat。用 wrapper 固定环境变量：
+KWin 会单独启动原生 Wayland 输入进程；包的自启动项另开普通 `keytao-ime`，服务 XIM/IBus 客户端。两类进程同时存在是正常现象。终端手动运行 `keytao-ime` 不能代替 KWin 虚拟键盘进程。
+
+列表里没有 KeyTao 时，先检查包内启动项：
+
+```bash
+ls /usr/share/applications/keytao-wayland-launcher.desktop
+```
+
+文件存在但选择未保存时，Plasma 6 可用以下命令设置，然后注销重登：
+
+```bash
+kwriteconfig6 --file "$HOME/.config/kwinrc" \
+  --group Wayland --key InputMethod keytao-wayland-launcher.desktop
+```
+
+### KDE Plasma：X11
+
+使用普通 `keytao-ime` 的 XIM/IBus 前端，无需配置 Wayland 虚拟键盘。按下一节设置 XIM 环境变量，注销重登后由自启动项运行；需要 IBus 模块的应用再单独配置。
+
+### GNOME：Wayland / X11
+
+两种会话都使用系统 IBus 的 KeyTao engine：
+
+1. 安装包后注销重登，让 IBus 读取 `keytao.xml`。
+2. 打开「设置 → 键盘 → 输入源 → 添加」，在「其他 / 中文」中选择 **KeyTao / 键道**；也可用 `ibus-setup` 添加。
+3. 用 `Super+Space` 切换到 KeyTao，`Shift+Super+Space` 切到上一个输入源。快捷键来源：[GNOME 帮助](https://help.gnome.org/users/gnome-help/stable/keyboard-layouts.html.en)。
+
+没有找到输入源时，在当前 GNOME 会话中检查：
+
+```bash
+ls /usr/share/ibus/component/keytao.xml
+ibus restart
+ibus list-engine | grep keytao
+```
+
+**保留系统 `ibus-daemon`。** GNOME 不通过 KeyTao 的通用 Wayland 后端接入，也不使用 KDE launcher。不要把下文非 GNOME 的 `IBUS_ADDRESS` 覆盖设置带进 GNOME；KeyTao 需要连接系统 IBus 的总线。
+
+GNOME 有系统 IBus 面板时使用系统候选窗，KeyTao 的自绘主题不能完全控制其外观。
+
+### 其他桌面
+
+- Unity、Budgie、Pantheon、Cinnamon：代码选择 IBus engine 路径，通过桌面的输入源设置或 `ibus-setup` 选择 KeyTao，并保留 IBus。
+- 其他 Wayland 会话：合成器须支持 `input-method-v2`；有 XWayland 时还会启用 XIM/IBus，纯 Wayland 会话只启用 Wayland 前端。不能仅凭“使用 Wayland”判断兼容。
+- 其他 X11 会话：使用 XIM/IBus，按下一节设置环境变量。
+
+非 GNOME 的 XDG 自启动由包提供；若窗口管理器没有执行 XDG 自启动，需在它的会话启动配置中运行 `keytao-ime`。诊断时也可在该图形会话的终端运行此命令。
+
+## 3. 环境变量：设置什么、写在哪里
+
+| 场景 | 设置 |
+| --- | --- |
+| 使用 KeyTao XIM 的 X11 / XWayland 应用 | `XMODIFIERS=@im=keytao`；前提是 daemon 已启用 XIM |
+| KDE 原生 Wayland、GTK 原生 Wayland | 不全局设置 `GTK_IM_MODULE` / `QT_IM_MODULE`；不要把 X11 应用的设置扩散到整个会话 |
+| 非 GNOME 的 GTK / Qt 应用需要 IBus 兼容路径 | 只为目标应用设置 `GTK_IM_MODULE=ibus` / `QT_IM_MODULE=ibus`；GTK 需要可用的 `im-ibus.so` |
+| 非 GNOME 应用需要显式连接 KeyTao IBus 兼容层 | 只在应用 wrapper 中设置 `IBUS_ADDRESS` 为当前 session bus；见 QQ 示例 |
+| GNOME 的正常输入源流程 | 沿用桌面管理的 IBus 环境，不照搬非 GNOME wrapper |
+
+不需要为普通安装设置 `RIME_LIB_DIR`、`LD_LIBRARY_PATH` 或共享数据目录变量；包内 runtime 由程序定位。
+
+选择**会被当前会话读取的一处**保存环境变量：
+
+| 文件 | 写法与适用范围 |
+| --- | --- |
+| `~/.config/environment.d/keytao.conf` | `NAME=value`，不写 `export`。survey 核实的图形会话范围为 GDM 或 Plasma 5.22+；其他登录方式不能直接套用 |
+| `~/.profile` | Shell 写法 `export NAME=value`，仅在登录 shell / 图形会话确实读取它时适用；survey 未核实各登录管理器读取此文件的链路，不能作为通用兜底 |
+| `/etc/environment` | survey 未核实其加载范围，仓库也没有配套配置；本指南不提供通用写入步骤。需先确认发行版的会话配置规则，不能假定它与前两者等价 |
+
+例如，适用 `environment.d` 的会话可创建 `~/.config/environment.d/keytao.conf`，内容为：
+
+```ini
+XMODIFIERS=@im=keytao
+```
+
+若已确认会话读取 `~/.profile`，则在该文件添加：
+
+```sh
+export XMODIFIERS="@im=keytao"
+```
+
+保存后**注销并重新登录**，重新启动目标应用；仅在终端 `source ~/.profile` 不会更新已运行桌面和应用的环境。新会话中可用 `printenv XMODIFIERS` 核对；若仍未继承，检查文件是否被加载，必要时重启。
+
+环境变量机制参考 survey 已核对的 [Fcitx Setup](https://fcitx-im.org/wiki/Setup_Fcitx_5) 与 [Wayland 说明](https://fcitx-im.org/wiki/Using_Fcitx_5_on_Wayland)。这里只采用通用会话机制，变量值按 KeyTao 设置。
+
+## 4. 启动与使用
+
+1. 从应用菜单打开 KeyTao，或在终端运行 `keytao-app`。
+2. 首次打开按引导选择键道方案和版本，点击「安装方案」，等待安装完成。
+3. 点击「部署方案」，确认部署完成后结束引导；随后按前面的桌面步骤启用 KeyTao。
+4. 在输入框中测试：单独按下再松开 `Shift` 切换中英文；`F4` 打开 Rime 方案 / 选项菜单。
+5. 更新方案或修改配置后，回到「方案」页点击「部署」，完成重新部署；「检查本地」可刷新方案状态。
+
+部署后 App 写入重载通知，daemon 读取后加载新方案；IBus 路径中已有的预编辑内容可能到下一次按键才刷新。新包按发布决定在退出 `keytao-app` 后保留 `keytao-ime`，不必一直开着 App 窗口。
+
+在「输入法」页查看「Linux 系统输入法」状态。KDE Wayland 重点确认 `KWIN_WAYLAND` 与 `XIM+IBUS` 两类进程；仅“运行中”不能证明所有应用的输入路径都已启用。也可检查：
+
+```bash
+pgrep -af keytao-ime
+```
+
+## 5. 数据与日志
+
+| 内容 | 默认位置 |
+| --- | --- |
+| KeyTao 方案、词库和用户配置 | `~/.local/share/keytao`（设置了 `XDG_DATA_HOME` 时为 `$XDG_DATA_HOME/keytao`） |
+| 输入法重载通知 | 数据目录内的 `keytao-ime.reload` |
+| 输入法日志目录 | `~/.local/state/keytao/log`（设置了有效的绝对路径 `XDG_STATE_HOME` 时为 `$XDG_STATE_HOME/keytao/log`） |
+| 当前输入法日志 | 日志目录内的 `keytao-ime.log`，按日滚动 |
+
+默认路径下查看日志：
+
+```bash
+tail -f "$HOME/.local/state/keytao/log/keytao-ime.log"
+```
+
+KeyTao 的数据目录与下文手动 ibus-rime 的目录独立。不要把方案安装到 ibus-rime 目录后，期待 `keytao-ime` 自动读取。
+
+## 6. 常见问题与避坑
+
+### 登录后没有输入法，或只有部分应用能输入
+
+先看进程和日志，再确认桌面启用方式及应用实际运行在 Wayland 还是 X11 / XWayland。KDE 的原生 Wayland 和 XWayland 分属不同进程；GNOME 要检查输入源是否选中了 KeyTao。
+
+可用于定位前端的日志：`KWin Virtual Keyboard mode`、`X11 XIM server running`、`IBus D-Bus backend started`。需要详细日志时，可在非 GNOME 图形会话中运行 `RUST_LOG=keytao_ime=trace keytao-ime`；它会替换普通 daemon，仍不能代替 KWin 私有进程。
+
+### IBus / Fcitx5 冲突
+
+- 非 GNOME、使用 KeyTao IBus 兼容层时，不要同时启动另一套 `ibus-daemon`；它们可能争用 `org.freedesktop.IBus`。对应日志是 `IBus: failed to request IBus name`。
+- 停用其他输入法的自动启动，避免 Fcitx5 等占用 Wayland 输入法槽位；`zwp_input_method_v2: Unavailable` 表示该前端不可用。KDE 虚拟键盘应选择 KeyTao。
+- **GNOME 以及使用 IBus engine 的桌面是例外：保留系统 IBus。** 无需为使用 KeyTao 再运行 Fcitx5 或选择 ibus-rime。
+
+### Chromium / Electron
+
+survey 已核对上游的以下参数规则，但未实测 KeyTao 与这些应用的原生 Wayland 组合；以下用于排查，不代表逐应用兼容承诺：
+
+- 应用已运行于原生 Wayland 时，需添加 `--enable-wayland-ime`。
+- Chromium 可配 `--wayland-text-input-version=3`，KWin 上优先使用 `--wayland-text-input-version=1`。
+- survey 所核对的 Electron 只支持 text-input-v1，不能照搬 Chromium 的 v3 参数。原生路径不通时，改走 XWayland / IBus 兼容路径。
+
+参数依据：[Fcitx Wayland 说明](https://fcitx-im.org/wiki/Using_Fcitx_5_on_Wayland)。
+
+### QQ / 微信的 XWayland 路径
+
+这是非 GNOME、使用 KeyTao IBus 兼容层时的应用级 wrapper。先用 `pgrep -af keytao-ime` 确认普通 daemon 已启动，再用以下脚本启动 QQ：
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-
 unset WAYLAND_DISPLAY
 export DISPLAY="${DISPLAY:-:0}"
 export QT_QPA_PLATFORM=xcb
@@ -167,106 +209,27 @@ export XMODIFIERS="@im=keytao"
 export QT_IM_MODULE=ibus
 export GTK_IM_MODULE=ibus
 export IBUS_ADDRESS="${IBUS_ADDRESS:-${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
-
 exec qq --ozone-platform-hint=x11 "$@"
 ```
 
-微信可以把最后一行换成：
+微信将最后一行改成 `exec wechat "$@"`。这些设置仅作用于该应用，不要写进全局环境文件；GNOME 应用应连接系统 IBus，不使用此 wrapper 的总线覆盖。
 
-```bash
-exec wechat "$@"
-```
-
-这些变量的作用：
-
-- `unset WAYLAND_DISPLAY`：强制目标应用走 XWayland。
-- `QT_QPA_PLATFORM=xcb` / `GDK_BACKEND=x11`：避免 Qt/GTK 误走 Wayland。
-- `XMODIFIERS=@im=keytao`：提供 XIM 标识。
-- `QT_IM_MODULE=ibus` / `GTK_IM_MODULE=ibus`：让 Qt/GTK/Electron 走 IBus。
-- `IBUS_ADDRESS=...`：把 IBus D-Bus 地址指向当前用户 session bus。
-
-### GTK IBus immodule
-
-如果 QQ / WeChat 仍然没有任何 `IBus ProcessKeyEvent` 日志，通常是 GTK/Electron 看不到 IBus immodule。此时 wrapper 还需要提供：
+若 GTK/Electron 仍未连接 IBus，检查系统是否提供 GTK 的 `im-ibus.so`。模块存在但未被发现时，可在 wrapper 的 `exec` 前生成并指定缓存；先把 `IBUS_SO` 改成发行版的实际路径：
 
 ```bash
 IBUS_SO="/usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
 mkdir -p "$HOME/.cache"
 gtk-query-immodules-3.0 "$IBUS_SO" > "$HOME/.cache/keytao-gtk-immodules.cache"
-
 export GTK_PATH="$(dirname "$(dirname "$IBUS_SO")")${GTK_PATH:+:$GTK_PATH}"
 export GTK_IM_MODULE_FILE="$HOME/.cache/keytao-gtk-immodules.cache"
 ```
 
-不同发行版的 `im-ibus.so` 路径可能不同，可以用下面命令查找：
+## 7. 备选：手动 ibus-rime
 
-```bash
-find /usr /lib /lib64 -path '*gtk-3.0*immodules*im-ibus.so' 2>/dev/null | head -1
-```
+需要使用系统 ibus-rime 时，可选择这条独立路径：
 
-### NixOS / Home Manager wrapper
+1. 通过发行版包管理器安装 `ibus-rime`，例如 Debian / Ubuntu 执行 `sudo apt install ibus-rime`，Fedora 执行 `sudo dnf install ibus-rime`。
+2. 从 [键道方案 Releases](https://github.com/xkinput/KeyTao/releases) 获取 Linux 方案包（文件名含 `keytao-linux`），将方案文件放入 `~/.config/ibus/rime`。
+3. 在系统 IBus 中添加并选择 Rime，重新部署方案，再通过 Rime 的方案菜单选择键道。
 
-NixOS 上推荐在 derivation 中预生成 `GTK_IM_MODULE_FILE`，再包装 QQ / WeChat：
-
-```nix
-{ pkgs, lib, ... }:
-
-let
-  gtkIbusImModulesCache = pkgs.runCommand "keytao-gtk-immodules.cache" { } ''
-    ${pkgs.gtk3.dev}/bin/gtk-query-immodules-3.0 \
-      ${pkgs.ibus}/lib/gtk-3.0/3.0.0/immodules/im-ibus.so > "$out"
-  '';
-in
-{
-  home.packages = [
-    (lib.hiPrio (pkgs.writeShellScriptBin "qq" ''
-      unset WAYLAND_DISPLAY
-      export DISPLAY="''${DISPLAY:-:0}"
-      export GDK_BACKEND=x11
-      export QT_QPA_PLATFORM=xcb
-      export XMODIFIERS="@im=keytao"
-      export QT_IM_MODULE=ibus
-      export GTK_IM_MODULE=ibus
-      export IBUS_ADDRESS="''${IBUS_ADDRESS:-''${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
-      export GTK_PATH="${pkgs.ibus}/lib/gtk-3.0/3.0.0''${GTK_PATH:+:$GTK_PATH}"
-      export GTK_IM_MODULE_FILE="${gtkIbusImModulesCache}"
-      export ELECTRON_OZONE_PLATFORM_HINT=x11
-      export NIXOS_OZONE_WL=0
-
-      exec ${pkgs.qq}/bin/qq --ozone-platform-hint=x11 "$@"
-    ''))
-
-    (lib.hiPrio (pkgs.writeShellScriptBin "wechat" ''
-      unset WAYLAND_DISPLAY
-      export DISPLAY="''${DISPLAY:-:0}"
-      export QT_QPA_PLATFORM=xcb
-      export GDK_BACKEND=x11
-      export XMODIFIERS="@im=keytao"
-      export QT_IM_MODULE=ibus
-      export GTK_IM_MODULE=ibus
-      export IBUS_ADDRESS="''${IBUS_ADDRESS:-''${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
-      export GTK_PATH="${pkgs.ibus}/lib/gtk-3.0/3.0.0''${GTK_PATH:+:$GTK_PATH}"
-      export GTK_IM_MODULE_FILE="${gtkIbusImModulesCache}"
-
-      exec ${pkgs.wechat}/bin/wechat "$@"
-    ''))
-  ];
-}
-```
-
-微信 AppImage 版本可能带有自己的 GTK runtime，仅 wrapper 外层变量还不够。更稳妥的 Nix 做法是用 `pkgs.appimageTools.wrapAppImage`，并在 `extraBuildCommands` 中把 `im-ibus.so` 追加进 AppImage 内部的 `immodules.cache`。
-
-完整实现可参考本地 Nix 配置中的 `wechat-keytao-input` / `keytaoWechat` 封装思路。
-
-## 验证
-
-```bash
-pgrep -a keytao-ime
-tail -f /tmp/keytao-ime.log
-```
-
-关键日志：
-
-- KDE 原生：`KWin Virtual Keyboard mode`、`KDE input-method-v1 context activated`
-- XIM：`X11 XIM server running`、`XIM CreateIC`
-- IBus：`IBus D-Bus backend started`、`IBus ProcessKeyEvent`
+这条路径使用系统 IBus/Rime 和 `~/.config/ibus/rime`，不使用 `keytao-ime` 的数据目录。若从 KeyTao 独立 daemon 切换过来，应先停用其自启动及 KDE 虚拟键盘选择，避免与系统 IBus 争用。

@@ -9,7 +9,7 @@
 Linux 入口是 `src/main.rs`：
 
 1. 解析 `--backend=wayland,xim,ibus`、`--ibus-engine`、`--version` 等参数。
-2. 初始化 `/tmp/keytao-ime.log` 滚动日志。
+2. 初始化 `$XDG_STATE_HOME/keytao/log/keytao-ime.log` 滚动日志（默认 `~/.local/state/keytao/log/keytao-ime.log`）。
 3. 创建 `CoreEngine`，也就是 `keytao_core::ImeRuntime` 的 Linux 侧别名，调用 `engine.init()` 初始化和部署 librime。
 4. 启动 reload watcher，监听 `~/.local/share/keytao/keytao-ime.reload`。
 5. 根据 `WAYLAND_SOCKET`、`WAYLAND_DISPLAY`、`DISPLAY`、`XDG_CURRENT_DESKTOP` 选择后端。
@@ -107,7 +107,7 @@ native key event
 keytao-ime --version
 keytao-ime --backend=wayland,xim,ibus
 pgrep -af keytao-ime
-tail -f /tmp/keytao-ime.log
+tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/keytao/log/keytao-ime.log"
 ```
 
 正式发行走仓库根目录的 `scripts/build-linux.sh`，产物只包含 deb 和 rpm，不产出 AppImage 或 tarball。发行包内置 `runtime/`，包含 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
