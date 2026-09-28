@@ -1,0 +1,27 @@
+#include "../Flutter/Generated.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = ink.rea.keytao-app.keyboard
+PRODUCT_NAME = KeyTaoKeyboard
+IPHONEOS_DEPLOYMENT_TARGET = 15.0
+INFOPLIST_FILE = KeyTaoKeyboard/Info.plist
+SKIP_INSTALL = YES
+APPLICATION_EXTENSION_API_ONLY = YES
+SWIFT_VERSION = 5.0
+ENABLE_BITCODE = NO
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM = 2G395DH7KX
+CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*] = KeyTaoKeyboard/KeyTaoKeyboard.entitlements
+CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*] = KeyTaoKeyboard/KeyTaoKeyboardSimulator.entitlements
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=iphonesimulator*] = NO
+CODE_SIGN_IDENTITY[sdk=iphonesimulator*] = -
+CODE_SIGN_STYLE[sdk=iphonesimulator*] = Manual
+DEVELOPMENT_TEAM[sdk=iphonesimulator*] =
+CURRENT_PROJECT_VERSION = $(FLUTTER_BUILD_NUMBER)
+MARKETING_VERSION = $(FLUTTER_BUILD_NAME)
+KEYTAO_IOS_RUNTIME_NAME[sdk=iphoneos*] = iphoneos-arm64
+KEYTAO_IOS_RUNTIME_NAME[sdk=iphonesimulator*][arch=arm64] = iphonesimulator-arm64
+KEYTAO_IOS_RUNTIME_NAME[sdk=iphonesimulator*][arch=x86_64] = iphonesimulator-x86_64
+KEYTAO_IOS_RUNTIME_DIR = $(SRCROOT)/../../target/keytao-ios-runtime/$(KEYTAO_IOS_RUNTIME_NAME)
+LIBRARY_SEARCH_PATHS = $(inherited) "$(KEYTAO_IOS_RUNTIME_DIR)/lib"
+OTHER_LDFLAGS = $(inherited) -lkeytao_core_ffi -lc++ -liconv -lz
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks

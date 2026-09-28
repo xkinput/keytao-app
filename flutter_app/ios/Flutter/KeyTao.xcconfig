@@ -1,0 +1,13 @@
+IPHONEOS_DEPLOYMENT_TARGET = 15.0
+PRODUCT_BUNDLE_IDENTIFIER = ink.rea.keytao-app
+PRODUCT_NAME = KeyTao
+PRODUCT_MODULE_NAME = Runner
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM = 2G395DH7KX
+CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*] = Runner/Runner.entitlements
+CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*] = Runner/RunnerSimulator.entitlements
+// Simulator AMFI rejects the device App Group and injected application identifier.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=iphonesimulator*] = NO
+CODE_SIGN_IDENTITY[sdk=iphonesimulator*] = -
+CODE_SIGN_STYLE[sdk=iphonesimulator*] = Manual
+DEVELOPMENT_TEAM[sdk=iphonesimulator*] =
