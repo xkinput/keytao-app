@@ -81,12 +81,20 @@ fn main() {
     }
 
     let include_dir = PathBuf::from(include_dir);
-    let mut builder = bindgen::Builder::default()
-        .header(include_dir.join("rime_api.h").to_string_lossy())
-        .header(include_dir.join("rime_levers_api.h").to_string_lossy())
-        .header("./include/keycodes.h")
-        .header("./include/modifiers.h")
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks));
+    let headers = [
+        include_dir.join("rime_api.h"),
+        include_dir.join("rime_levers_api.h"),
+        PathBuf::from("./include/keycodes.h"),
+        PathBuf::from("./include/modifiers.h"),
+    ];
+    // Track only these headers. bindgen's CargoCallbacks also records every
+    // system header (e.g. under C:\Program Files), and native_toolchain_rust
+    // splits Cargo dep-info on spaces, breaking the Flutter Windows build.
+    let mut builder = bindgen::Builder::default();
+    for header in &headers {
+        println!("cargo:rerun-if-changed={}", header.display());
+        builder = builder.header(header.to_string_lossy());
+    }
     for arg in bindgen_args {
         builder = builder.clang_arg(arg);
     }
