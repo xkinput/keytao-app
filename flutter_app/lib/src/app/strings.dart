@@ -1,4 +1,5 @@
-// Verbatim copy from App.tsx, AndroidImeOnboarding.tsx and DebugTab.tsx.
+// Verbatim copy from App.tsx, AndroidImeOnboarding.tsx, DebugTab.tsx and
+// docs/ios-install.md (Enable KeyTao keyboard).
 // Keep dynamic copy here so both platform layouts share the same wording.
 abstract final class AppStrings {
   static const title = 'KeyTao 键道';
@@ -15,6 +16,37 @@ abstract final class AppStrings {
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';
   static const macosIme = 'macOS 系统输入法';
+  static const windowsIme = 'Windows 系统输入法';
+  static const linuxIme = 'Linux 系统输入法';
+  static const windowsChecking = '正在检测 KeyTao Windows IME 状态';
+  static const registering = '正在注册';
+  static const repairing = '正在修复';
+  static const checkingRegistration = '正在检测';
+  static const repairFailed = '修复失败';
+  static const registrationFailed = '注册失败';
+  static const registered = '已注册';
+  static const partiallyRegistered = '部分注册';
+  static const runtimeMissing = '运行时缺失';
+  static const notRegistered = '未注册';
+  static const runtime = '运行时：';
+  static const registeredPath = '已注册：';
+  static const profile = 'Profile：';
+  static const running = '运行中';
+  static const notRunning = '未启动';
+  static const command = '命令：';
+  static const kdeSession = 'KDE 会话';
+  static const nonKdeSession = '非 KDE 会话';
+  static const iosOnboarding = '启用 KeyTao 键盘';
+  static const fullAccess = '允许完全访问';
+  static const deployScheme = '部署方案';
+  static const iosOpenApp = '先打开一次 KeyTao 主 App。';
+  static const iosAddKeyboard = '进入 设置 > 通用 > 键盘 > 键盘 > 添加新键盘。';
+  static const iosChooseKeyboard = '在第三方键盘中选择 KeyTao 输入法。';
+  static const iosEnableFullAccess = '再次进入 KeyTao 输入法设置，按需开启 允许完全访问。';
+  static const iosInstallDeploy = '回到 KeyTao 主 App，安装方案并执行部署。';
+  static const iosGlobe = '打开任意普通文本框，长按地球键并选择 KeyTao 输入法。';
+  static const iosFullAccessDescription =
+      'KeyTao 需要“允许完全访问”才能通过 App Group 与主 App 共享已安装方案、主题和部署状态。不开放时，键盘只能使用扩展自身容器或包内的基础数据。';
   static const mobileKeyboard = '移动端键盘';
   static const customDirectory = '安装到自定义目录';
   static const customDirectoryDescription = '将方案安装到指定的输入法数据目录，安装完成后请手动重新部署输入法。';
@@ -184,6 +216,20 @@ abstract final class AppStrings {
 
   static String easyEnglishInstalled(String version) =>
       '[ADDON] Easy English 已安装并部署 v$version';
+  static String windowsSearchFailure(String error) =>
+      '系统搜索框方案准备失败，可在方案页重新安装主方案重试：$error';
+  static String localCheckFailure(String error) => '检查本地方案失败：$error';
+  static String windowsPackage(bool packaged) =>
+      '安装包 ${packaged ? '完整' : '缺少 IME 运行时'}';
+  static String windowsRegistration(String label) => '注册 $label';
+  static String windowsDll(bool matched) => 'DLL ${matched ? '匹配' : '未匹配'}';
+  static String windowsProfile(bool enabled) =>
+      'Profile ${enabled ? '已启用' : '不可用'}';
+  static String kdeConfiguration(bool configured) =>
+      'KDE ${configured ? '已配置' : '未配置'}';
+  static String managedPid(int pid) => 'pid $pid';
+  static String kdeProcesses(int count) => 'KWIN_WAYLAND $count';
+  static String fallbackProcesses(int count) => 'XIM+IBUS $count';
 
   static String currentVersion(String version) => '当前 v$version';
   static String changelogTitle(String release) => '$release 更新内容';

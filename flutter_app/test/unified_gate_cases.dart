@@ -11,9 +11,15 @@ import 'package:keytao/src/ui/shell.dart';
 import 'view_fixture.dart';
 
 void unifiedGateCases(BridgePlatform platform) {
-  final target = platform == BridgePlatform.macOs
-      ? TargetPlatform.macOS
-      : TargetPlatform.android;
+  final target = switch (platform) {
+    BridgePlatform.macOs => TargetPlatform.macOS,
+    BridgePlatform.android => TargetPlatform.android,
+    BridgePlatform.windows => TargetPlatform.windows,
+    BridgePlatform.linux => TargetPlatform.linux,
+    BridgePlatform.ios => TargetPlatform.iOS,
+  };
+  final desktopUngated =
+      platform == BridgePlatform.windows || platform == BridgePlatform.linux;
   testWidgets(
     '${platform.name} onboarding opens on the first incomplete step',
     (tester) async {
@@ -43,7 +49,19 @@ void unifiedGateCases(BridgePlatform platform) {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
+      if (desktopUngated) {
+        expect(find.byType(OnboardingPage), findsNothing);
+        expect(find.byType(AppShell), findsOneWidget);
+      } else {
+        expect(
+          find.byKey(
+            ValueKey(
+              platform == BridgePlatform.ios ? 'setup-enable' : 'setup-install',
+            ),
+          ),
+          findsOneWidget,
+        );
+      }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
@@ -55,6 +73,7 @@ void unifiedGateCases(BridgePlatform platform) {
       testWidgets(
         '${platform.name} $width completed=$completed gates unified navigation',
         (tester) async {
+          final showShell = completed || desktopUngated;
           final c = ViewController(platform);
           addTearDown(c.dispose);
           tester.view.devicePixelRatio = 1;
@@ -87,25 +106,45 @@ void unifiedGateCases(BridgePlatform platform) {
           await tester.pumpAndSettle();
           expect(
             find.byType(OnboardingPage),
-            completed ? findsNothing : findsOneWidget,
+            showShell ? findsNothing : findsOneWidget,
           );
           expect(
             find.byType(AppShell),
-            completed ? findsOneWidget : findsNothing,
+            showShell ? findsOneWidget : findsNothing,
           );
           expect(
             find.byType(FSidebar),
-            completed && width >= 720 ? findsOneWidget : findsNothing,
+            showShell && width >= 720 ? findsOneWidget : findsNothing,
           );
           expect(
             find.byType(FBottomNavigationBar),
-            completed && width < 720 ? findsOneWidget : findsNothing,
+            showShell && width < 720 ? findsOneWidget : findsNothing,
           );
           expect(
             find.byType(PlatformMenuBar),
             platform == BridgePlatform.macOs ? findsOneWidget : findsNothing,
           );
-          if (completed) {
+          if (showShell) {
+            if (platform == BridgePlatform.windows) {
+              expect(find.text(AppStrings.windowsIme), findsOneWidget);
+              expect(
+                find.text(AppStrings.windowsPackage(true)),
+                findsOneWidget,
+              );
+              expect(find.text(AppStrings.embedded), findsOneWidget);
+            }
+            if (platform == BridgePlatform.linux) {
+              expect(find.text(AppStrings.linuxIme), findsOneWidget);
+              expect(find.text(AppStrings.kdeProcesses(1)), findsOneWidget);
+              expect(find.text(AppStrings.embedded), findsNothing);
+            }
+            if (platform == BridgePlatform.ios) {
+              expect(find.text(AppStrings.iosOnboarding), findsOneWidget);
+              expect(find.text(AppStrings.mobileKeyboard), findsOneWidget);
+              expect(find.text(AppStrings.candidateFontSize), findsNothing);
+              expect(find.text(AppStrings.openStoragePermission), findsNothing);
+              expect(find.text(AppStrings.chooseKeytao), findsNothing);
+            }
             final input = find.byKey(const PageStorageKey('ime'));
             await tester.drag(input, const Offset(0, -300));
             await tester.pumpAndSettle();
@@ -192,9 +231,15 @@ void unifiedGateCases(BridgePlatform platform) {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('setup-nav-install')));
+        if (desktopUngated) {
+          await tester.tap(find.byKey(const ValueKey('nav-scheme')));
+        } else {
+          await tester.tap(find.byKey(const ValueKey('setup-nav-install')));
+        }
         await tester.pumpAndSettle();
-        expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
+        if (!desktopUngated) {
+          expect(find.byKey(const ValueKey('setup-install')), findsOneWidget);
+        }
         expect(find.text(AppStrings.installFailed), findsOneWidget);
         expect(find.byType(FDialog), findsNothing);
         expect(tester.takeException(), isNull);

@@ -48,7 +48,7 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
             duration: MediaQuery.disableAnimationsOf(context)
                 ? Duration.zero
                 : const Duration(milliseconds: 240),
-            child: _completed
+            child: _completed || !widget.controller.hasOnboarding
                 ? AppShell(controller: widget.controller)
                 : OnboardingPage(
                     controller: widget.controller,

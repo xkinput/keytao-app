@@ -97,9 +97,10 @@ enum SetupStep {
   storage('文件访问权限'),
   migration('数据迁移'),
   component('输入法组件'),
-  install('安装方案'),
-  deploy('部署方案'),
-  enable('启用 KeyTao'),
+  install(AppStrings.installScheme),
+  deploy(AppStrings.deployScheme),
+  enable(AppStrings.enableKeytao),
+  fullAccess(AppStrings.fullAccess),
   select('切换到 KeyTao'),
   finish('完成');
 
@@ -112,7 +113,10 @@ enum SetupStep {
     component => c.macosIme?.installed == true,
     install => c.local?.installed == true,
     deploy => c.local?.deployed == true,
-    enable => c.ime?['enabled'] == true,
+    // iOS exposes no keyboard/Full Access status query. These are guidance
+    // pages, not detected system prerequisites; the UI does not mark them done.
+    enable => c.isIos || c.ime?['enabled'] == true,
+    fullAccess => c.isIos,
     select => c.ime?['selected'] == true,
     finish => c.setupReady,
   };
@@ -135,15 +139,22 @@ enum SetupStep {
 // Shared presentation decisions; platform views only arrange these values.
 extension AppViewOptions on AppController {
   List<SetupStep> get setupSteps => [
-    if (isAndroid) ...[
-      SetupStep.storage,
-      SetupStep.migration,
-    ] else
-      SetupStep.component,
-    SetupStep.install,
-    SetupStep.deploy,
-    if (isAndroid) ...[SetupStep.enable, SetupStep.select],
-    SetupStep.finish,
+    if (isIos) ...[
+      SetupStep.enable,
+      SetupStep.fullAccess,
+      SetupStep.install,
+      SetupStep.deploy,
+    ] else ...[
+      if (isAndroid) ...[
+        SetupStep.storage,
+        SetupStep.migration,
+      ] else
+        SetupStep.component,
+      SetupStep.install,
+      SetupStep.deploy,
+      if (isAndroid) ...[SetupStep.enable, SetupStep.select],
+      SetupStep.finish,
+    ],
   ];
 
   String get englishSchemaLabel => AppStrings.englishSchema;
@@ -179,7 +190,13 @@ extension AppViewOptions on AppController {
     'Flutter': flutterVersion,
     'librime': versions?.librimeVersion ?? '—',
     'OpenCC': versions?.openccVersion ?? '—',
-    '平台': isAndroid ? 'Android' : 'macOS',
+    '平台': switch (info.platform) {
+      BridgePlatform.android => 'Android',
+      BridgePlatform.ios => 'iOS',
+      BridgePlatform.windows => 'Windows',
+      BridgePlatform.linux => 'Linux',
+      BridgePlatform.macOs => 'macOS',
+    },
     'KeyTao 目录': versions?.dataDir ?? info.userRoot,
   };
 }

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../platform/android_host.dart';
+import '../platform/ios_host.dart';
 import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
 import '../rust/frb_generated.dart';
@@ -27,14 +28,37 @@ BridgePlatform hostPlatform() => switch (Platform.operatingSystem) {
   ),
 };
 
-Future<({AppController controller, OnboardingDto onboarding})>
-bootstrap() async {
+Future<({AppController controller, OnboardingDto onboarding})> bootstrap({
+  List<String> args = const [],
+}) async {
   await RustLib.init();
   const android = AndroidHost();
   final platform = hostPlatform();
+  final config = await bridgeConfig(platform);
+  final info = await core.initCore(config: config);
+  if (platform == BridgePlatform.android) await android.adoptAppLogger();
+  final controller = AppController(info: info, android: android);
+  try {
+    await controller.connectEvents(args: args);
+    final onboarding = await core.onboarding();
+    await controller.refreshState();
+    return (controller: controller, onboarding: onboarding);
+  } catch (_) {
+    controller.dispose();
+    rethrow;
+  }
+}
+
+Future<BridgeConfig> bridgeConfig(
+  BridgePlatform platform, {
+  Map<String, String>? environment,
+  String? resolvedExecutable,
+}) async {
+  final env = environment ?? Platform.environment;
+  final executable = resolvedExecutable ?? Platform.resolvedExecutable;
   final BridgeConfig config;
   if (platform == BridgePlatform.android) {
-    final paths = await android.paths();
+    final paths = await const AndroidHost().paths();
     config = BridgeConfig(
       dataDir: paths['dataDir'] as String,
       cacheDir: paths['cacheDir'] as String,
@@ -44,7 +68,7 @@ bootstrap() async {
       platform: platform,
     );
   } else if (platform == BridgePlatform.macOs) {
-    final home = Platform.environment['HOME'];
+    final home = env['HOME'];
     if (home == null || !home.startsWith('/')) throw StateError('无法读取用户目录');
     final data = Directory(
       '$home/Library/Application Support/ink.rea.keytao-app',
@@ -55,25 +79,59 @@ bootstrap() async {
     config = BridgeConfig(
       dataDir: data.path,
       cacheDir: cache.path,
-      resourceDir: File(Platform.resolvedExecutable).parent.uri
+      resourceDir: File(executable).parent.uri
           .resolve('../Resources')
           .toFilePath(),
       appVersion: appVersion,
       platform: platform,
     );
+  } else if (platform == BridgePlatform.ios) {
+    final paths = await const IosHost().paths();
+    config = BridgeConfig(
+      dataDir: paths['dataDir'] as String,
+      cacheDir: paths['cacheDir'] as String,
+      resourceDir: paths['dataDir'] as String,
+      userRootOverride: paths['userRoot'] as String,
+      appVersion: appVersion,
+      platform: platform,
+    );
+  } else if (platform == BridgePlatform.windows) {
+    final local = env['LOCALAPPDATA'];
+    if (local == null || local.isEmpty) {
+      throw StateError('LOCALAPPDATA is unavailable');
+    }
+    // Tauri app_local_data_dir and app_cache_dir both use LocalAppData.
+    final data = '$local\\ink.rea.keytao-app';
+    config = BridgeConfig(
+      dataDir: data,
+      cacheDir: data,
+      resourceDir: executable.substring(
+        0,
+        executable.lastIndexOf(RegExp(r'[/\\]')),
+      ),
+      appVersion: appVersion,
+      platform: platform,
+    );
   } else {
-    throw UnsupportedError('当前支持 Android 和 macOS');
+    String xdg(String key, String fallback) {
+      final value = env[key];
+      if (value != null && value.startsWith('/')) return value;
+      final home = env['HOME'];
+      if (home == null || !home.startsWith('/')) {
+        throw StateError('HOME is unavailable');
+      }
+      return '$home/$fallback';
+    }
+
+    config = BridgeConfig(
+      dataDir: '${xdg('XDG_DATA_HOME', '.local/share')}/ink.rea.keytao-app',
+      cacheDir: '${xdg('XDG_CACHE_HOME', '.cache')}/ink.rea.keytao-app',
+      // Dart resolves executable symlinks through the OS; a wrapper execs this
+      // binary too, so resources stay beside /usr/lib/KeyTao/keytao-app.
+      resourceDir: File(executable).parent.path,
+      appVersion: appVersion,
+      platform: platform,
+    );
   }
-  final info = await core.initCore(config: config);
-  if (platform == BridgePlatform.android) await android.adoptAppLogger();
-  final controller = AppController(info: info, android: android);
-  try {
-    await controller.connectEvents();
-    final onboarding = await core.onboarding();
-    await controller.refreshState();
-    return (controller: controller, onboarding: onboarding);
-  } catch (_) {
-    controller.dispose();
-    rethrow;
-  }
+  return config;
 }

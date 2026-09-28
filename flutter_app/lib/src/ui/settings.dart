@@ -12,7 +12,7 @@ class SettingsCard extends StatelessWidget {
   final AppController controller;
   @override
   Widget build(BuildContext context) =>
-      controller.isAndroid ? _android(context) : _desktop(context);
+      controller.isMobile ? _mobile(context) : _desktop(context);
 
   Widget _desktop(BuildContext context) {
     final c = controller;
@@ -59,13 +59,16 @@ class SettingsCard extends StatelessWidget {
             hint: c.englishModeHint,
             onChanged: c.busy ? null : c.saveDesktopEnglish,
           ),
-          SwitchSetting(
-            AppStrings.embedded,
-            value: s.embeddedComposition,
-            stateLabel: s.embeddedComposition ? AppStrings.on : AppStrings.off,
-            hint: AppStrings.embeddedDescription,
-            onChanged: c.busy ? null : c.saveEmbedded,
-          ),
+          if (c.showsEmbeddedComposition)
+            SwitchSetting(
+              AppStrings.embedded,
+              value: s.embeddedComposition,
+              stateLabel: s.embeddedComposition
+                  ? AppStrings.on
+                  : AppStrings.off,
+              hint: AppStrings.embeddedDescription,
+              onChanged: c.busy ? null : c.saveEmbedded,
+            ),
           SliderSetting(
             label: AppStrings.candidateFontSize,
             value: s.fontSize,
@@ -95,11 +98,12 @@ class SettingsCard extends StatelessWidget {
               ],
             ),
         ],
+        if (c.imeUiError case final error?) ErrorMessage(error),
       ],
     );
   }
 
-  Widget _android(BuildContext context) {
+  Widget _mobile(BuildContext context) {
     final c = controller;
     final s = c.androidSettings;
     final enabled = !c.busy && s != null;

@@ -1,6 +1,41 @@
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/rust/api/types.dart';
 
+WindowsImeStatusDto windowsStatus({
+  String state = 'registered',
+  bool busy = false,
+  bool registered = true,
+  String? error,
+}) => WindowsImeStatusDto(
+  supported: true,
+  packaged: true,
+  registered: registered,
+  registeredDll: registered,
+  profileEnabled: registered,
+  registrationBusy: busy,
+  registrationState: state,
+  registrationError: error,
+  runtimeDir: r'C:\ProgramData\KeyTao\runtime',
+  registeredPath: r'C:\ProgramData\KeyTao\runtime\keytao_windows_ime.dll',
+  profileStatus: 'enabled',
+  sharedDataSource: 'packaged',
+  message: 'Windows fixture',
+);
+
+const linuxStatus = LinuxImeStatusDto(
+  supported: true,
+  kdeSession: true,
+  kdeConfigured: true,
+  running: true,
+  managedPid: 123,
+  command: '/usr/lib/KeyTao/keytao-ime',
+  processes: [],
+  kdeNativeProcesses: 1,
+  fallbackProcesses: 2,
+  sharedDataSource: 'packaged',
+  message: 'Linux fixture',
+);
+
 // View-only fixture: no bootstrap, event subscription, FFI, or external IO.
 class ViewController extends AppController {
   ViewController(BridgePlatform platform)
@@ -37,6 +72,8 @@ class ViewController extends AppController {
       appPath: '/Library/Input Methods/KeyTao.app',
       message: '',
     );
+    windowsIme = windowsStatus();
+    linuxIme = linuxStatus;
     ime = {'enabled': true, 'selected': true, 'canShowPicker': true};
     storage = {
       'granted': true,
@@ -84,11 +121,23 @@ class ViewController extends AppController {
     );
     const github = PlatformReleaseDto(
       version: '2026.09.28',
-      downloadUrls: DownloadUrlsDto(macos: 'offline', android: 'offline'),
+      downloadUrls: DownloadUrlsDto(
+        macos: 'offline',
+        android: 'offline',
+        windows: 'offline',
+        linux: 'offline',
+        ios: 'offline',
+      ),
     );
     const gitee = PlatformReleaseDto(
       version: '2026.09.26',
-      downloadUrls: DownloadUrlsDto(macos: 'offline', android: 'offline'),
+      downloadUrls: DownloadUrlsDto(
+        macos: 'offline',
+        android: 'offline',
+        windows: 'offline',
+        linux: 'offline',
+        ios: 'offline',
+      ),
     );
     latestRelease = const ReleaseInfoDto(
       version: '2026.09.28',

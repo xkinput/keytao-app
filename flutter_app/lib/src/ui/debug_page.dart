@@ -13,7 +13,7 @@ class DebugPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final settings = c.logSettings;
-    final enabled = c.canEditLogs && (!c.isAndroid || !c.logsLoading);
+    final enabled = c.canEditLogs && (!c.isMobile || !c.logsLoading);
     return AppPageBody(
       controller: c,
       page: AppPage.debug,
@@ -58,11 +58,11 @@ class DebugPage extends StatelessWidget {
                 ActionButton(
                   AppStrings.clear,
                   icon: FLucideIcons.trash2,
-                  onPress: c.busy || (c.isAndroid && c.logsLoading)
+                  onPress: c.busy || (c.isMobile && c.logsLoading)
                       ? null
                       : c.clearLogs,
                 ),
-                if (!c.isAndroid) ...[
+                if (!c.isMobile) ...[
                   ActionButton(
                     AppStrings.openLogDirectory,
                     icon: FLucideIcons.folderOpen,
@@ -83,7 +83,7 @@ class DebugPage extends StatelessWidget {
               StatusMessage(c.sharedLogResultText!),
             if (c.logStatsText case final stats?) StatusMessage(stats),
             for (final file in c.logFileLines) SelectableText(file),
-            if (!c.isAndroid && c.logDirectory != null)
+            if (!c.isMobile && c.logDirectory != null)
               StatusMessage(c.logDirectory!),
           ],
         ),

@@ -40,6 +40,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
       : step.isComplete(widget.controller);
   int get _firstIncomplete => _steps.indexWhere((step) => !_done(step));
   int get _initialIndex {
+    if (widget.controller.isIos) return _index;
     final first = _firstIncomplete;
     return first < 0 ? _steps.length - 1 : first;
   }
@@ -160,11 +161,20 @@ class _OnboardingPageState extends State<OnboardingPage> {
             _ => step.title,
           };
     final description = switch (step) {
-      SetupStep.enable => AppStrings.enableDescription,
+      SetupStep.enable =>
+        c.isIos
+            ? '${AppStrings.iosOpenApp}\n${AppStrings.iosAddKeyboard}\n${AppStrings.iosChooseKeyboard}'
+            : AppStrings.enableDescription,
+      SetupStep.fullAccess =>
+        '${AppStrings.iosEnableFullAccess}\n${AppStrings.iosFullAccessDescription}',
       SetupStep.select => AppStrings.selectDescription,
       SetupStep.storage || SetupStep.migration => c.permissionDescription,
-      SetupStep.install => AppStrings.installDescription,
-      SetupStep.deploy => AppStrings.deployDescription,
+      SetupStep.install =>
+        c.isIos ? AppStrings.iosInstallDeploy : AppStrings.installDescription,
+      SetupStep.deploy =>
+        c.isIos
+            ? '${AppStrings.iosInstallDeploy}\n${AppStrings.iosGlobe}'
+            : AppStrings.deployDescription,
       SetupStep.component => '安装 KeyTao 输入法组件后，重新检测安装状态。',
       SetupStep.finish =>
         c.setupReady ? '设置已就绪，点击完成开始使用 KeyTao。' : AppStrings.finishSetupFirst,
@@ -239,7 +249,9 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                         .copyWith(fontWeight: FontWeight.w600),
                                   ),
                                   Text(
-                                    c.isAndroid
+                                    c.isIos
+                                        ? AppStrings.iosOnboarding
+                                        : c.isAndroid
                                         ? AppStrings.androidOnboarding
                                         : 'KeyTao ${c.info.appVersion}',
                                     style: context.theme.typography.body.xs,
@@ -276,10 +288,17 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                           ? FButtonVariant.primary
                                           : FButtonVariant.outline,
                                       selected: i == _index,
-                                      semanticsLabel:
-                                          '${i + 1}. ${steps[i].title}，${_done(steps[i]) ? '已完成' : '待完成'}',
+                                      semanticsLabel: c.isIos
+                                          ? '${i + 1}. ${steps[i].title}'
+                                          : '${i + 1}. ${steps[i].title}，${_done(steps[i]) ? '已完成' : '待完成'}',
                                       onPress: () => _move(i),
-                                      child: _done(steps[i])
+                                      child:
+                                          _done(steps[i]) &&
+                                              !(c.isIos &&
+                                                  (steps[i] ==
+                                                          SetupStep.enable ||
+                                                      steps[i] ==
+                                                          SetupStep.fullAccess))
                                           ? const Icon(
                                               FLucideIcons.check,
                                               size: 16,
@@ -310,9 +329,12 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         ),
                         FDeterminateProgress(value: progress),
                         Section(
-                          title: c.isAndroid ? AppStrings.imeSettings : '设置状态',
+                          title: c.isMobile ? AppStrings.imeSettings : '设置状态',
                           children: [
-                            Text(_done(step) ? '已完成' : '待完成'),
+                            if (!(c.isIos &&
+                                (step == SetupStep.enable ||
+                                    step == SetupStep.fullAccess)))
+                              Text(_done(step) ? '已完成' : '待完成'),
                             Text(description),
                             if (step == SetupStep.component &&
                                 !_done(step)) ...[
@@ -333,7 +355,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                 ],
                               ),
                             ],
-                            if (step == SetupStep.enable)
+                            if (step == SetupStep.enable ||
+                                step == SetupStep.fullAccess)
                               ActionRow(
                                 children: [
                                   ActionButton(

@@ -63,7 +63,7 @@ class SchemePage extends StatelessWidget {
                       ? null
                       : c.openDefaultDirectory,
                 ),
-                if (!c.isAndroid)
+                if (!c.isMobile)
                   ActionButton(
                     AppStrings.dictManager,
                     onPress: c.canOpenDictionaryManager

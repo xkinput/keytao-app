@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../platform/android_host.dart';
+import '../platform/ios_host.dart';
 import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
 import '../settings/android_settings.dart';
@@ -79,7 +80,21 @@ class AppController extends ChangeNotifier {
   final BridgeInfo info;
   final AndroidHost android;
   bool get isAndroid => info.platform == BridgePlatform.android;
-  bool busy = false;
+  bool get isWindows => info.platform == BridgePlatform.windows;
+  bool get isLinux => info.platform == BridgePlatform.linux;
+  bool get isIos => info.platform == BridgePlatform.ios;
+  bool get isMobile => isAndroid || isIos;
+  bool get hasOnboarding => isMobile || info.platform == BridgePlatform.macOs;
+  bool get showsEmbeddedComposition =>
+      isWindows || info.platform == BridgePlatform.macOs;
+  bool _busy = false;
+  bool get busy => _busy || windowsRegistrationBusy;
+  set busy(bool value) => _busy = value;
+  bool _platformStarted = false;
+  bool _windowsActionRequested = false;
+  bool _windowsActionInFlight = false;
+  bool _managingWindowsIme = false;
+  static const _windowsChannel = MethodChannel('keytao/windows');
   bool _disposed = false;
   bool _refreshWhenIdle = false;
   bool _manuallySelectedScheme = false;
@@ -101,6 +116,9 @@ class AppController extends ChangeNotifier {
   String? addonError;
   String? wanxiangError;
   String? macosImeError;
+  String? windowsImeError;
+  String? linuxImeError;
+  String? imeUiError;
   String? debugError;
   String? debugNotice;
   InstallProgressDto? installProgress;
@@ -123,10 +141,13 @@ class AppController extends ChangeNotifier {
   final List<String> operationLogs = [];
   List<VerifyEntryDto> verification = [];
   LocalSchemaDto? local;
+  String? _localSchemaError;
   AddonSchemaStatusDto? addon;
   Map<String, dynamic>? storage;
   Map<String, dynamic>? ime;
   MacosImeStatusDto? macosIme;
+  WindowsImeStatusDto? windowsIme;
+  LinuxImeStatusDto? linuxIme;
   AndroidImeInputSettingsDto? androidSettings;
   ImeUiSettingsDto? uiSettings;
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
@@ -240,6 +261,28 @@ class AppController extends ChangeNotifier {
     ImeBadgeState.pendingDeploy => AppStrings.pendingDeploy,
     ImeBadgeState.ready => AppStrings.usable,
   };
+  bool get windowsRegistrationBusy =>
+      isWindows &&
+      (_managingWindowsIme || windowsIme?.registrationBusy == true);
+  String get windowsRegistrationLabel {
+    final state = windowsIme?.registrationState;
+    if (windowsRegistrationBusy) {
+      return switch (state) {
+        'registering' => AppStrings.registering,
+        'repairing' => AppStrings.repairing,
+        _ => AppStrings.checkingRegistration,
+      };
+    }
+    if (state == 'repair_failed') return AppStrings.repairFailed;
+    if (state == 'failed') return AppStrings.registrationFailed;
+    if (windowsIme?.registered == true) return AppStrings.registered;
+    return switch (state) {
+      'partial' => AppStrings.partiallyRegistered,
+      'missing_runtime' => AppStrings.runtimeMissing,
+      _ => windowsIme == null ? AppStrings.checking : AppStrings.notRegistered,
+    };
+  }
+
   String get themeBadge =>
       switch (uiSettings?.colorScheme ?? UiColorSchemeDto.auto) {
         UiColorSchemeDto.auto => AppStrings.followSystem,
@@ -253,9 +296,9 @@ class AppController extends ChangeNotifier {
     queryParameters: {'dir': defaultDir},
   ).toString();
   bool get canOpenDictionaryManager =>
-      !isAndroid && !busy && defaultDir.isNotEmpty;
+      !isMobile && !busy && defaultDir.isNotEmpty;
   String get englishModeLabel =>
-      (isAndroid
+      (isMobile
           ? androidSettings?.englishMode == 'schema'
           : desktopEnglishMode == EnglishModeDto.schema)
       ? AppStrings.englishSchema
@@ -290,6 +333,9 @@ class AppController extends ChangeNotifier {
     wanxiangError,
     customError,
     macosImeError,
+    windowsImeError,
+    linuxImeError,
+    imeUiError,
     debugError,
     migrationError,
     ...deploySteps.map((step) => step.message),
@@ -312,7 +358,7 @@ class AppController extends ChangeNotifier {
           ime?['enabled'] == true &&
           ime?['selected'] == true;
     }
-    return macosIme?.installed == true;
+    return isIos || !hasOnboarding || macosIme?.installed == true;
   }
 
   PlatformReleaseDto? get selectedRelease =>
@@ -320,16 +366,20 @@ class AppController extends ChangeNotifier {
   String? get releaseVersion =>
       scheme == 'keytao' ? selectedRelease?.version : schemeRelease?.version;
   String? get downloadUrl => scheme == 'keytao'
-      ? (isAndroid
-            ? selectedRelease?.downloadUrls.android
-            : selectedRelease?.downloadUrls.macos)
+      ? switch (info.platform) {
+          BridgePlatform.android => selectedRelease?.downloadUrls.android,
+          BridgePlatform.ios => selectedRelease?.downloadUrls.ios,
+          BridgePlatform.windows => selectedRelease?.downloadUrls.windows,
+          BridgePlatform.linux => selectedRelease?.downloadUrls.linux,
+          BridgePlatform.macOs => selectedRelease?.downloadUrls.macos,
+        }
       : schemeRelease?.downloadUrl;
 
   void _changed() {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> connectEvents() async {
+  Future<void> connectEvents({List<String> args = const []}) async {
     if (_events != null) return;
     if (isAndroid) {
       _androidProgress = android.installProgress.listen(
@@ -337,6 +387,17 @@ class AppController extends ChangeNotifier {
       );
     }
     final ready = Completer<void>();
+    if (isWindows) {
+      _windowsChannel.setMethodCallHandler((call) async {
+        if (call.method != 'appArgs') throw MissingPluginException();
+        final value = call.arguments;
+        if (value is! List || value.any((arg) => arg is! String)) {
+          throw PlatformException(code: 'invalid_args');
+        }
+        await ready.future;
+        await core.handleAppArgs(args: value.cast<String>());
+      });
+    }
     _events = core.coreEvents().listen(
       (event) {
         if (event.kind == BridgeEventKind.ready && !ready.isCompleted) {
@@ -350,6 +411,17 @@ class AppController extends ChangeNotifier {
           progress = value;
           _deployStep(value, DeployStepState.neutral);
         }
+        if (isWindows) {
+          if (event.windowsImeStatus case final status?) {
+            windowsIme = status;
+            windowsImeError = status.registrationError;
+          }
+          if (event.kind == BridgeEventKind.windowsImeAction) {
+            selectPage(AppPage.input);
+            _windowsActionRequested = true;
+          }
+          unawaited(_handleWindowsAction());
+        }
         _changed();
       },
       onError: (Object failure) {
@@ -359,6 +431,45 @@ class AppController extends ChangeNotifier {
       },
     );
     await ready.future.timeout(const Duration(seconds: 10));
+    if (isWindows) {
+      await core.handleAppArgs(args: args);
+      _windowsActionRequested = true;
+    }
+  }
+
+  Future<void> _handleWindowsAction() async {
+    if (!isWindows ||
+        _disposed ||
+        !_platformStarted ||
+        (local == null && _localSchemaError == null) ||
+        busy ||
+        _windowsActionInFlight ||
+        !_windowsActionRequested) {
+      return;
+    }
+    _windowsActionInFlight = true;
+    _windowsActionRequested = false;
+    try {
+      final id = await core.windowsPendingImeAction();
+      if (_disposed || id == null) return;
+      if (busy) {
+        _windowsActionRequested = true;
+        return;
+      }
+      selectPage(AppPage.input);
+      await deploy(imeActionId: id);
+      // The old app acknowledges attempted deployments, including errors and
+      // missing schemes; retry requires a new IME request.
+      await core.windowsDismissImeAction(id: id);
+      _windowsActionRequested = true;
+    } catch (failure) {
+      _deployStep(errorText(failure), DeployStepState.failed);
+    } finally {
+      _windowsActionInFlight = false;
+      if (!_disposed && !busy && _windowsActionRequested) {
+        unawaited(_handleWindowsAction());
+      }
+    }
   }
 
   void _receiveInstallProgress(InstallProgressDto value) {
@@ -430,11 +541,18 @@ class AppController extends ChangeNotifier {
         _logsWhenIdle = false;
         if (activePage == AppPage.debug) unawaited(refreshLogs());
       }
+      unawaited(_handleWindowsAction());
     }
   }
 
   Future<void> _readLocal() async {
-    local = await core.checkLocalSchema();
+    _localSchemaError = null;
+    try {
+      local = await core.checkLocalSchema();
+    } catch (failure) {
+      _localSchemaError = errorText(failure);
+      rethrow;
+    }
     if (!_manuallySelectedScheme) {
       final detected = schemeKeyFromSchemas(local!.schemas);
       if (detected != null && detected != scheme) {
@@ -473,7 +591,19 @@ class AppController extends ChangeNotifier {
           ime = await android.imeStatus();
         }),
       ]);
-    } else {
+    } else if (isWindows) {
+      await read(_readWindowsIme);
+    } else if (isLinux) {
+      await read(() async {
+        try {
+          linuxIme = await core.linuxImeStatus();
+          linuxImeError = linuxIme!.error;
+        } catch (failure) {
+          linuxImeError = errorText(failure);
+          rethrow;
+        }
+      });
+    } else if (!isIos) {
       macosIme = null;
       await read(() async {
         try {
@@ -500,11 +630,11 @@ class AppController extends ChangeNotifier {
       read(() async {
         versions = await core.getComponentVersions();
       }),
-      if (isAndroid && storageReady)
+      if (isIos || (isAndroid && storageReady))
         read(() async {
           androidSettings = await core.getAndroidImeInputSettings();
         }),
-      if (!isAndroid) ...[
+      if (!isMobile) ...[
         read(() async {
           uiSettings = await core.getImeUiSettings();
         }),
@@ -522,13 +652,71 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> refreshState() async {
-    final result = await run(_readState);
+    final result = await run(() async {
+      String? startupImeError;
+      if (!_platformStarted) {
+        _platformStarted = true;
+        if (isWindows) {
+          try {
+            windowsIme = await core.windowsImeEnsureRegistered();
+            windowsImeError = windowsIme!.registrationError;
+          } catch (failure) {
+            startupImeError = errorText(failure);
+          }
+          try {
+            await core.windowsPrepareSearchSchemas();
+          } catch (failure) {
+            imeUiError = AppStrings.windowsSearchFailure(errorText(failure));
+            addOperationLogs(['[WINDOWS SEARCH] $imeUiError']);
+          }
+        } else if (isLinux) {
+          try {
+            linuxIme = await core.linuxStartIme(restart: false);
+            linuxImeError = linuxIme!.error;
+          } catch (failure) {
+            startupImeError = errorText(failure);
+          }
+        }
+      }
+      await _readState();
+      if (startupImeError != null) {
+        if (isWindows) windowsImeError = startupImeError;
+        if (isLinux) linuxImeError = startupImeError;
+      }
+    });
     if (!_startupStarted && !_disposed) {
       _startupStarted = true;
       unawaited(_checkAppUpdate());
       unawaited(refreshRelease());
     }
     return result;
+  }
+
+  Future<void> _readWindowsIme() async {
+    try {
+      windowsIme = await core.windowsImeStatus();
+      windowsImeError = windowsIme!.registrationError;
+    } catch (failure) {
+      windowsImeError = errorText(failure);
+      rethrow;
+    }
+  }
+
+  Future<void> refreshWindowsIme() async {
+    if (windowsRegistrationBusy) return;
+    _managingWindowsIme = true;
+    windowsImeError = null;
+    _changed();
+    try {
+      await _readWindowsIme();
+      addOperationLogs(['[WINDOWS IME] ${windowsIme!.message}']);
+    } catch (failure) {
+      addOperationLogs(['[WINDOWS IME ERROR] ${errorText(failure)}']);
+    } finally {
+      _managingWindowsIme = false;
+      _changed();
+      unawaited(_handleWindowsAction());
+    }
   }
 
   Future<void> _checkAppUpdate() async {
@@ -707,12 +895,16 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  Future<bool> deploy() => run(() async {
+  Future<bool> deploy({int? imeActionId}) => run(() async {
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
       if (local?.installed != true) {
-        throw StateError(AppStrings.noSchemeForDeploy);
+        throw StateError(
+          _localSchemaError == null
+              ? AppStrings.noSchemeForDeploy
+              : AppStrings.localCheckFailure(_localSchemaError!),
+        );
       }
       _deployStep(AppStrings.deployingLibrime, DeployStepState.neutral);
       final String message;
@@ -724,7 +916,9 @@ class AppController extends ChangeNotifier {
         }
         message = result['message'] as String? ?? AppStrings.deployDone;
       } else {
-        final result = await core.deployDefault();
+        final result = imeActionId == null
+            ? await core.deployDefault()
+            : await core.windowsRedeployImeAction(id: imeActionId);
         if (!result.success) throw StateError(result.message);
         message = result.message;
       }
@@ -793,7 +987,7 @@ class AppController extends ChangeNotifier {
       ]);
       await _readLocal();
       if (!installed) {
-        if (isAndroid) {
+        if (isMobile) {
           androidSettings = await core.getAndroidImeInputSettings();
         } else {
           desktopEnglishMode = await core.getDesktopEnglishMode();
@@ -1008,7 +1202,7 @@ class AppController extends ChangeNotifier {
   });
 
   Future<bool> saveAndroid(Map<String, Object> patch) => run(() async {
-    await _requireStorage();
+    if (isAndroid) await _requireStorage();
     final current = await core.getAndroidImeInputSettings();
     if (patch['englishMode'] == 'schema') {
       await _readLocal();
@@ -1057,7 +1251,14 @@ class AppController extends ChangeNotifier {
     if (isAndroid) {
       await android.openUrl(value);
     } else {
-      final result = await Process.run('open', [value]);
+      final result = await Process.run(
+        isWindows
+            ? 'rundll32'
+            : isLinux
+            ? 'xdg-open'
+            : 'open',
+        [if (isWindows) 'url.dll,FileProtocolHandler', value],
+      );
       if (result.exitCode != 0) {
         throw StateError('${result.stderr}');
       }
@@ -1108,6 +1309,7 @@ class AppController extends ChangeNotifier {
 
   // A title change must not toggle `busy`; a missing macOS channel is ignored.
   Future<void> setWindowTitle([String? title]) async {
+    if (info.platform != BridgePlatform.macOs) return;
     try {
       await const MethodChannel('ink.rea.keytao/window')
           .invokeMethod<void>('setTitle', title ?? activePage.title);
@@ -1118,8 +1320,9 @@ class AppController extends ChangeNotifier {
     await android.openStoragePermissionSettings();
     await _readStorage();
   });
-  Future<bool> openInputMethodSettings() =>
-      run(android.openInputMethodSettings);
+  Future<bool> openInputMethodSettings() => run(
+    isIos ? const IosHost().openSettings : android.openInputMethodSettings,
+  );
   Future<bool> showInputMethodPicker() => run(android.showInputMethodPicker);
   Future<bool> resetAndroidSettings() => saveAndroid(androidDefaults);
 
@@ -1223,6 +1426,9 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    if (isWindows && _events != null) {
+      _windowsChannel.setMethodCallHandler(null);
+    }
     unawaited(_events?.cancel());
     unawaited(_androidProgress?.cancel());
     super.dispose();
