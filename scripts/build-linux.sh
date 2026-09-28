@@ -1,40 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-DIST_DIR="$PROJECT_DIR/dist"
 IMAGE="keytao-app-builder"
+command -v docker >/dev/null || { echo 'docker is required' >&2; exit 1; }
+VERSION="$(sed -n 's/^version: \([^+]*\).*/\1/p' "$PROJECT_DIR/flutter_app/pubspec.yaml")"
+[[ -n "$VERSION" ]] || { echo 'Missing Flutter version' >&2; exit 1; }
+BUNDLE_DIR="$PROJECT_DIR/target/release/bundle"
+mkdir -p "$BUNDLE_DIR" "$PROJECT_DIR/dist"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker not found. Install Docker: https://docs.docker.com/engine/install/" >&2
-  exit 1
-fi
-
-mkdir -p "$DIST_DIR"
-find "$DIST_DIR" -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -iname '*.appimage' \) -delete
-
-echo "==> Building builder image..."
-docker build -f "$SCRIPT_DIR/Dockerfile.linux-builder" -t "$IMAGE" "$PROJECT_DIR"
-
-echo "==> Building deb + rpm inside container..."
-_uid=$(id -u)
-_gid=$(id -g)
-docker run --rm \
-  --network=host \
-  -v "$PROJECT_DIR":/app \
+echo '==> Building Flutter Linux builder image'
+tar -C "$PROJECT_DIR" -cf - scripts/Dockerfile.linux-builder rust-toolchain.toml \
+  | docker build -f scripts/Dockerfile.linux-builder -t "$IMAGE" -
+echo '==> Building daemon, Flutter release bundle, deb and rpm'
+docker run --rm --pull=never \
+  -v "$PROJECT_DIR":/app:ro -v "$BUNDLE_DIR":/out \
   -v keytao-app-cargo:/root/.cargo/registry \
   -v keytao-app-cargo-git:/root/.cargo/git \
-  -w /app \
-  "$IMAGE" \
-  sh /app/scripts/container-build.sh "$_uid" "$_gid"
+  "$IMAGE" bash /app/scripts/container-build.sh "$(id -u)" "$(id -g)"
 
-echo ""
-echo "==> Artifacts:"
-find "$DIST_DIR" -maxdepth 1 \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -iname '*.appimage' \) -delete
-find "$PROJECT_DIR/target/release/bundle" -type f \( -name '*.deb' -o -name '*.rpm' \) \
-  -exec cp -f {} "$DIST_DIR/" \;
-ls -lh "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm 2>/dev/null \
-  || echo "(check target/release/bundle/)"
-
-exit 0
+# Read the image architecture; the host may be macOS or use a remote Docker daemon.
+case "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" in
+  amd64) ASSET_ARCH=x64 ;;
+  arm64) ASSET_ARCH=arm64 ;;
+  *) echo 'Unsupported builder architecture' >&2; exit 1 ;;
+esac
+find "$PROJECT_DIR/dist" -maxdepth 1 -type f \
+  \( -name '*.deb' -o -name '*.rpm' \) -delete
+for format in deb rpm; do
+  artifact="keytao-app-$VERSION-linux-$ASSET_ARCH.$format"
+  cp "$BUNDLE_DIR/$format/$artifact" "$PROJECT_DIR/dist/$artifact"
+  ls -lh "$PROJECT_DIR/dist/$artifact"
+done

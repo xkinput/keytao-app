@@ -1,117 +1,76 @@
 #!/usr/bin/env bash
-# Verify Linux release artifacts without installing them.
+# Inspect extracted packages; ELF resolution always runs in the Linux builder.
+# shellcheck disable=SC2016
 set -euo pipefail
-
+export LC_ALL=C
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE_DIR="${1:-$PROJECT_DIR/target/release/bundle}"
-RUNTIME_DIR="$PROJECT_DIR/target/keytao-linux-runtime"
-RELEASE_RUNTIME_DIR="$PROJECT_DIR/target/release/runtime"
-
-require_command() {
-    local command_name="$1"
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        echo "ERROR: required command not found: $command_name" >&2
-        exit 1
-    fi
-}
-
-require_file() {
-    local path="$1"
-    if [ ! -f "$path" ]; then
-        echo "ERROR: missing file: $path" >&2
-        exit 1
-    fi
-}
-
-require_executable() {
-    local path="$1"
-    if [ ! -x "$path" ]; then
-        echo "ERROR: missing executable: $path" >&2
-        exit 1
-    fi
-}
-
-require_glob() {
-    local pattern="$1"
-    if ! compgen -G "$pattern" >/dev/null; then
-        echo "ERROR: missing match: $pattern" >&2
-        exit 1
-    fi
-}
-
-find_one() {
-    local result_var="$1"
-    local dir="$2"
-    local pattern="$3"
-    local label="$4"
-    local path
-    path="$(find "$dir" -maxdepth 2 -name "$pattern" -type f -print -quit 2>/dev/null || true)"
-    if [ -z "$path" ]; then
-        echo "ERROR: missing $label in $dir" >&2
-        find "$dir" -maxdepth 4 -type f -print 2>/dev/null | sort >&2 || true
-        exit 1
-    fi
-    printf -v "$result_var" '%s' "$path"
-}
-
-require_listing_match() {
-    local label="$1"
-    local listing="$2"
-    local pattern="$3"
-    if ! printf '%s\n' "$listing" | grep -Eq "$pattern"; then
-        echo "ERROR: $label is missing pattern: $pattern" >&2
-        exit 1
-    fi
-}
-
-require_runtime_listing() {
-    local label="$1"
-    local listing="$2"
-    require_listing_match "$label" "$listing" '(^|/)keytao-app$'
-    require_listing_match "$label" "$listing" '(^|/)keytao-ime(-x86_64-unknown-linux-gnu)?$'
-    require_listing_match "$label" "$listing" '(^|/)runtime/default-theme\.yaml$'
-    require_listing_match "$label" "$listing" '(^|/)runtime/rime-data/default\.yaml$'
-    require_listing_match "$label" "$listing" '(^|/)runtime/rime-data/opencc/'
-    require_listing_match "$label" "$listing" '(^|/)runtime/lib/librime[^/]*\.so'
-    require_listing_match "$label" "$listing" '(^|/)runtime/lib/rime-plugins/librime-lua\.so'
-    # ibus-daemon only keeps KeyTao in the input source list across restarts if
-    # the component XML is installed; RegisterComponent alone is transient.
-    require_listing_match "$label" "$listing" '(^|[[:space:]]|/)usr/share/ibus/component/keytao\.xml$'
-}
-
-require_command dpkg-deb
-require_command rpm
-
-echo "==> Verifying Linux runtime directory"
-require_file "$PROJECT_DIR/crates/keytao-linux-ime/keytao.xml"
-require_executable "$PROJECT_DIR/target/release/keytao-app"
-require_executable "$PROJECT_DIR/target/release/keytao-ime"
-require_file "$RUNTIME_DIR/rime-data/default.yaml"
-require_file "$RUNTIME_DIR/default-theme.yaml"
-require_glob "$RUNTIME_DIR/lib/librime*.so*"
-require_glob "$RUNTIME_DIR/lib/rime-plugins/librime-lua.so*"
-require_file "$RELEASE_RUNTIME_DIR/rime-data/default.yaml"
-require_file "$RELEASE_RUNTIME_DIR/default-theme.yaml"
-require_glob "$RELEASE_RUNTIME_DIR/lib/librime*.so*"
-require_glob "$RELEASE_RUNTIME_DIR/lib/rime-plugins/librime-lua.so*"
-
-if command -v patchelf >/dev/null 2>&1; then
-    keytao_app_rpath="$(patchelf --print-rpath "$PROJECT_DIR/target/release/keytao-app" 2>/dev/null || true)"
-    keytao_ime_rpath="$(patchelf --print-rpath "$PROJECT_DIR/target/release/keytao-ime" 2>/dev/null || true)"
-    require_listing_match "keytao-app rpath" "$keytao_app_rpath" 'runtime/lib'
-    require_listing_match "keytao-ime rpath" "$keytao_ime_rpath" 'runtime/lib'
+VERSION="${2:-$(sed -n 's/^version: \([^+]*\).*/\1/p' "$PROJECT_DIR/flutter_app/pubspec.yaml")}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo 'Invalid expected version' >&2; exit 2; }
+BUNDLE_DIR="$(cd "$BUNDLE_DIR" && pwd)"
+if [[ ${3:-} != --inside-container ]]; then
+  command -v docker >/dev/null || { echo 'Verification requires the existing Linux builder image' >&2; exit 1; }
+  exec docker run --rm --pull=never --network=none \
+    -v "$PROJECT_DIR":/app:ro -v "$BUNDLE_DIR":/bundles:ro \
+    keytao-app-builder bash /app/scripts/verify-linux-bundles.sh /bundles "$VERSION" --inside-container
 fi
+[[ $(uname -s) == Linux ]] || { echo 'ELF checks require Linux' >&2; exit 1; }
+for command_name in dpkg dpkg-deb rpm rpm2cpio cpio patchelf readelf ldd python3; do
+  command -v "$command_name" >/dev/null || { echo "Missing $command_name" >&2; exit 1; }
+done
+case "$(uname -m)" in
+  x86_64) DEB_ARCH=amd64; RPM_ARCH=x86_64; ASSET_ARCH=x64; ELF_MACHINE='Advanced Micro Devices X86-64' ;;
+  aarch64) DEB_ARCH=arm64; RPM_ARCH=aarch64; ASSET_ARCH=arm64; ELF_MACHINE=AArch64 ;;
+  *) echo 'Unsupported verification architecture' >&2; exit 1 ;;
+esac
+fail() { echo "ERROR: $*" >&2; exit 1; }
+DEB="$BUNDLE_DIR/deb/keytao-app-$VERSION-linux-$ASSET_ARCH.deb"
+RPM="$BUNDLE_DIR/rpm/keytao-app-$VERSION-linux-$ASSET_ARCH.rpm"
+[[ -f "$DEB" && -f "$RPM" ]] || fail "Missing deb/rpm pair for $VERSION $ASSET_ARCH"
+[[ -z $(find "$BUNDLE_DIR" -type f \( -iname '*.appimage' -o -name '*.tar.gz' \) -print) ]] || fail 'Unexpected AppImage/tarball'
+[[ $(dpkg-deb -f "$DEB" Package) == key-tao ]] || fail 'Wrong deb package name'
+[[ $(dpkg-deb -f "$DEB" Version) == "$VERSION" ]] || fail 'Wrong deb version'
+[[ $(dpkg-deb -f "$DEB" Architecture) == "$DEB_ARCH" ]] || fail 'Wrong deb architecture'
+[[ $(dpkg-deb -f "$DEB" Maintainer) == 'Rea <hi@rea.ink>' ]] || fail 'Wrong deb maintainer'
+depends="$(dpkg-deb -f "$DEB" Depends)"
+[[ "$depends" == *libgtk-3-* && "$depends" != *webkit* && "$depends" != *librime* ]] || fail "Wrong deb dependencies: $depends"
+RPM_VERSION="${VERSION//-/_}"
+[[ $(rpm -qp --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}' "$RPM") == "key-tao $RPM_VERSION 1 $RPM_ARCH" ]] || fail 'Wrong rpm identity'
+requires="$(rpm -qp --requires "$RPM")"
+[[ "$requires" == *gtk3* && "$requires" != *webkit* ]] || fail 'Wrong rpm dependencies'
+[[ -z $(rpm -qp --scripts "$RPM") ]] || fail 'Unexpected rpm scriptlets'
+[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '$VERSION'))}") == 0 ]] || fail 'RPM version normalization changed ordering'
+[[ $(rpm --eval "%{lua:print(rpm.vercmp('$RPM_VERSION', '1.2.1-alpha.88'))}") == 1 ]] || fail 'RPM does not upgrade alpha.88'
+dpkg --compare-versions "$VERSION" gt 1.2.1-alpha.88 || fail 'deb does not upgrade alpha.88'
 
-echo "==> Verifying Linux deb/rpm bundles"
-forbidden_artifacts="$(find "$BUNDLE_DIR" -maxdepth 2 -type f \( -iname '*.appimage' -o -name '*.tar.gz' \) -print 2>/dev/null | sort || true)"
-if [ -n "$forbidden_artifacts" ]; then
-    echo "ERROR: Linux release must only produce deb/rpm, but found:" >&2
-    printf '%s\n' "$forbidden_artifacts" >&2
-    exit 1
-fi
-find_one deb "$BUNDLE_DIR/deb" '*.deb' 'deb bundle'
-find_one rpm_pkg "$BUNDLE_DIR/rpm" '*.rpm' 'rpm bundle'
-require_runtime_listing "deb bundle" "$(dpkg-deb -c "$deb")"
-require_runtime_listing "rpm bundle" "$(rpm -qpl "$rpm_pkg")"
-
-echo "==> Linux bundle verification passed"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+mkdir "$WORK_DIR/deb" "$WORK_DIR/rpm"
+dpkg-deb -R "$DEB" "$WORK_DIR/deb"
+(cd "$WORK_DIR/rpm" && rpm2cpio "$RPM" | cpio --quiet -idm --no-absolute-filenames)
+# Inspect files themselves, not presentation-dependent dpkg/rpm listing text.
+python3 "$PROJECT_DIR/packaging/linux/check.py" "$WORK_DIR/deb" "$WORK_DIR/rpm"
+for format in deb rpm; do
+  app="$WORK_DIR/$format/usr/lib/KeyTao"
+  [[ $(patchelf --print-rpath "$app/keytao-app") == '$ORIGIN/lib' ]] || fail 'Wrong app RPATH'
+  [[ $(patchelf --print-rpath "$app/keytao-ime") == '$ORIGIN/runtime/lib' ]] || fail 'Wrong daemon RPATH'
+  while IFS= read -r -d '' binary; do
+    case "$binary" in
+      "$app/keytao-app"|"$app/keytao-ime"|*.so|*.so.*) ;;
+      *) continue ;;
+    esac
+    header="$(readelf -h "$binary")" || fail "Invalid ELF: $binary"
+    [[ "$header" == *"$ELF_MACHINE"* ]] || fail "Wrong ELF architecture: $binary"
+    # Dart's AOT image can have no DT_NEEDED entries.
+    dynamic="$(readelf -d "$binary")"
+    [[ "$dynamic" == *'(NEEDED)'* ]] || continue
+    linked="$(env -u LD_LIBRARY_PATH ldd "$binary")" || fail "ldd failed: $binary"
+    [[ "$linked" != *'not found'* ]] || fail "$binary: $linked"
+    # A builder's installed librime must not conceal a broken private RPATH.
+    while IFS= read -r library; do
+      [[ "$library" == "$app/"* ]] || fail "System Rime dependency leaked: $library"
+    done < <(printf '%s\n' "$linked" | awk '/^[[:space:]]*lib(rime|opencc|yaml-cpp|glog|marisa|leveldb|lua)[^ ]* =>/ {print $3}')
+  done < <(find "$app" -type f -print0)
+  echo "PASS: $format key-tao $VERSION $RPM_ARCH; all ELF dependencies resolve"
+done
+echo '==> Linux bundle verification passed'

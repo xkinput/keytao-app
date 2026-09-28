@@ -45,13 +45,13 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "keytao");
+    gtk_header_bar_set_title(header_bar, "KeyTao");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
-  } else {
-    gtk_window_set_title(window, "keytao");
   }
 
+  gtk_window_set_title(window, "KeyTao");
+  gtk_window_set_icon_name(window, "keytao-app");
   gtk_window_set_default_size(window, 1280, 720);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
@@ -141,6 +141,8 @@ MyApplication* my_application_new() {
   // corresponding .desktop file. This ensures better integration by allowing
   // the application to be recognized beyond its binary name.
   g_set_prgname(APPLICATION_ID);
+  // Keep the published desktop entry's X11 window class across upgrades.
+  gdk_set_program_class("keytao-app");
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",

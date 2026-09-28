@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=KeyTao Input Method
+Exec=keytao-ime
+Icon=keytao-app
+Terminal=false
+NotShowIn=GNOME;

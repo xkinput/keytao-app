@@ -87,7 +87,7 @@ keytao-next 工作区里还有别人未提交的改动（BatchPRList、Navbar、
 ## 4 项目方决定（2026-09-28）
 
 1. **发版范围**：Windows、Linux、iOS、Android、macOS 五个平台全部完成并验收后，alpha.89 一次性全部换成 Flutter；不保留 Tauri leg。release.yml 仍加 workflow_dispatch，用于打 tag 前的预跑。
-2. **标识全部沿用**：Windows 用 keytao-app.exe、%LOCALAPPDATA%\ink.rea.keytao-app 和 NSIS（移植 Tauri hooks）；Linux 沿用原包名、/usr/lib/keytao-app，APPLICATION_ID 为 ink.rea.keytao-app；iOS 用 ink.rea.keytao-app / .keyboard / group.ink.rea.keytao-app，继续发未签名 IPA，不上 TestFlight。
+2. **标识全部沿用**：Windows 用 keytao-app.exe、%LOCALAPPDATA%\ink.rea.keytao-app 和 NSIS（移植 Tauri hooks）；Linux 沿用原包名、/usr/lib/KeyTao，APPLICATION_ID 为 ink.rea.keytao-app；iOS 用 ink.rea.keytao-app / .keyboard / group.ink.rea.keytao-app，继续发未签名 IPA，不上 TestFlight。
 3. **macOS 出一个 universal pkg**：IME 与 FFI 编成 universal，Flutter app 保持 universal；删掉 macos-15-intel CI leg；verify-macos-pkg.sh 改为校验 universal（x86_64 + arm64）。
 4. **Linux**：deb/rpm 自带 /etc/xdg/autostart/keytao-ime.desktop（NotShowIn=GNOME）和 KDE 的 keytao-wayland-launcher.desktop，app 退出不再停 keytao-ime；教程以网站 /install 为主写全（分桌面启用、环境变量写在哪、启动与使用、避坑），docs/linux-install.md 同步；ibus-rime 手动方式作为备选；未实测的 Flatpak / SDL / kitty 不写。
 5. **提醒**：CI 出的 Android 包为 release 签名，项目方手机上的本机 debug 版需先卸载一次（/sdcard/keytao 保留）。

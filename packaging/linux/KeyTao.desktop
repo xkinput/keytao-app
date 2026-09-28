@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=KeyTao input method app
+Exec=keytao-app
+StartupWMClass=keytao-app
+Icon=keytao-app
+Name=KeyTao
+Terminal=false
+Type=Application
