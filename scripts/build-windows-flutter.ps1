@@ -48,8 +48,11 @@ $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
 # Keep dumpbin and the matching x64 CRT tools available to final verification,
 # even when invoked from a plain CI PowerShell session.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-$vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+# Do not pipe into Select-Object: stopping the pipeline early can kill vswhere
+# and leave a non-zero $LASTEXITCODE.
+$vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ($LASTEXITCODE -ne 0 -or -not $vsInstall) { throw "Visual Studio C++ tools were not found" }
+$vsInstall = @($vsInstall)[0]
 $vcvars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvarsall.bat"
 $buildEnvironment = & cmd.exe /d /s /c "call `"$vcvars`" x64 >nul && set"
 if ($LASTEXITCODE -ne 0) { throw "Unable to initialize the x64 MSVC environment" }

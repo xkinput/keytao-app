@@ -39,8 +39,8 @@ RUN git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/f
 
 # Install only the Linux host toolchain, not the workspace's mobile targets.
 COPY rust-toolchain.toml /tmp/keytao-rust-toolchain.toml
+# The apt rustup must be initialized by `rustup default` before other commands.
 RUN apt-get update && apt-get install -y --no-install-recommends rustup \
     && rm -rf /var/lib/apt/lists/* \
-    && rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/keytao-rust-toolchain.toml)" --profile minimal \
     && rustup default "$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/keytao-rust-toolchain.toml)" \
     && rustup show
