@@ -176,14 +176,6 @@ public struct KeyTaoKeySpec: Codable, Equatable {
         return nil
     }
 
-    public func swipeUpCommand(asciiMode: Bool) -> KeyTaoKeyCommand? {
-        swipeUp ?? longPressCommand(asciiMode: asciiMode)
-    }
-
-    public func swipeDownCommand() -> KeyTaoKeyCommand? {
-        swipeDown
-    }
-
     private func shiftedValue(_ value: String, shiftState: KeyTaoShiftState) -> String {
         guard shiftState != .off, value.count == 1, value.range(of: "[a-z]", options: .regularExpression) != nil else {
             return value

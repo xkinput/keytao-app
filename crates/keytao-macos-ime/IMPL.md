@@ -435,7 +435,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
    `F4` 已通过 librime 打开 Rime schema / options 菜单；macOS 输入源菜单本身目前仍只有 Redeploy 和 Open App，尚未把同步用户数据、重置用户词典、显示当前 schema/status 等做成原生菜单项。
 
 5. 候选键盘操作未做 Mac 侧增强  
-   数字选词、方向键、PageUp/PageDown 主要依赖 librime 处理。候选窗按钮可点击，但没有实现 `candidateClicked` 以外的 Mac 原生候选交互、鼠标 hover 高亮（`keytao_session_highlight_candidate_json` 已可用但未接）、滚轮翻页等体验。
+   数字选词、方向键、PageUp/PageDown 主要依赖 librime 处理。候选窗按钮可点击，但没有实现 `candidateClicked` 以外的 Mac 原生候选交互、鼠标 hover 高亮（`keytao_session_highlight_candidate` 已可用但未接）、滚轮翻页等体验。
 
 6. 周边文本能力未接  
    当前没有读取或传递 surrounding text。若以后接入需要上下文的 Lua/filter/translator、智能删除、跨段落联想等能力，需要补 IMKTextInput 周边文本读取策略。

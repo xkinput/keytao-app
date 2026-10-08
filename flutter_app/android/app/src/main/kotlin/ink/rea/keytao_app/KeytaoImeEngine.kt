@@ -299,8 +299,6 @@ class KeytaoImeEngine(context: Context) {
         }
     }
 
-    fun isUserDataWritable(): Boolean = userDir?.let(KeytaoAndroidPaths::isWritable) ?: false
-
     @Synchronized
     fun reset(): KeytaoImeState {
         val state = KeytaoNativeBridge.reset(session)

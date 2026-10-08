@@ -785,26 +785,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeSelectC
     })
 }
 
-/// Move the highlight without committing, for candidate hover and navigation.
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHighlightCandidate(
-    mut env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    session: jlong,
-    index: jint,
-) -> jstring {
-    android_jni_guard("nativeHighlightCandidate", std::ptr::null_mut(), || {
-        let Some(session) = android_session(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(state) = session.highlight_candidate_on_page(index.max(0) as usize) else {
-            return std::ptr::null_mut();
-        };
-        jni_string(&mut env, &android_state_json(state, true))
-    })
-}
-
 /// Forget a learned phrase, the action behind "delete candidate" gestures.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -1197,23 +1177,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeTextToK
             return 0;
         };
         keytao_core::key_policy::keysym_for_text(&text).unwrap_or(0) as jint
-    })
-}
-
-/// Whether a keysym is `Return` or keypad `Return`.
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeIsEnterKey(
-    _env: JNIEnv<'_>,
-    _receiver: JObject<'_>,
-    keyval: jint,
-) -> jboolean {
-    android_jni_guard("nativeIsEnterKey", 0, || {
-        if keytao_core::key_policy::is_enter_key(keyval as u32) {
-            1
-        } else {
-            0
-        }
     })
 }
 

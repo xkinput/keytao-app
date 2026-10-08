@@ -88,7 +88,6 @@ internal object KeytaoImeInteractionTuning {
     const val BACKSPACE_HOLD_TOLERANCE_DP = 8f
     const val CURSOR_GESTURE_ACTIVATION_DP = 12.6f
     const val CURSOR_GESTURE_STEP_DP = 10f
-    const val CANDIDATE_DRAG_SLOP_DP = 8f
     const val DOUBLE_SPACE_PERIOD_TIMEOUT_MS = 1_100L
     const val REPEATABLE_EDIT_INTERVAL_MS = 72L
     const val ACCENT_BORDER_WIDTH_DP = 1f

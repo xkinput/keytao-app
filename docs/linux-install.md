@@ -1,6 +1,6 @@
 # Linux 安装与使用
 
-本文面向按[项目方 Linux 决定](app-flutter-inc2-platforms-plan.md#4-项目方决定2026-09-28)打包的 Flutter deb/rpm：包含自启动项和 KDE 启动项，退出 App 后输入法继续运行。这些是新包的约定；旧包缺少启动项时，需要升级到包含这些改动的版本。
+本文面向按[项目方 Linux 决定](#附录项目方决定2026-09-28)打包的 Flutter deb/rpm：包含自启动项和 KDE 启动项，退出 App 后输入法继续运行。这些是新包的约定；旧包缺少启动项时，需要升级到包含这些改动的版本。
 
 ## 1. 安装
 
@@ -277,3 +277,13 @@ export GTK_IM_MODULE_FILE="$HOME/.cache/keytao-gtk-immodules.cache"
 3. 在系统 IBus 中添加并选择 Rime，重新部署方案，再通过 Rime 的方案菜单选择键道。
 
 这条路径使用系统 IBus/Rime 和 `~/.config/ibus/rime`，不使用 `keytao-ime` 的数据目录。若从 KeyTao 独立 daemon 切换过来，应先停用其自启动及 KDE 虚拟键盘选择，避免与系统 IBus 争用。
+
+## 附录：项目方决定（2026-09-28）
+
+1. **发版范围**：Windows、Linux、iOS、Android、macOS 五个平台全部完成并验收后，alpha.89 一次性全部换成 Flutter；不保留 Tauri leg。release.yml 仍加 workflow_dispatch，用于打 tag 前的预跑。
+2. **标识全部沿用**：Windows 用 keytao-app.exe、%LOCALAPPDATA%\ink.rea.keytao-app 和 NSIS（移植 Tauri hooks）；Linux 沿用原包名、/usr/lib/KeyTao，APPLICATION_ID 为 ink.rea.keytao-app；iOS 用 ink.rea.keytao-app / .keyboard / group.ink.rea.keytao-app，继续发未签名 IPA，不上 TestFlight。
+3. **macOS 出一个 universal pkg**：IME 与 FFI 编成 universal，Flutter app 保持 universal；删掉 macos-15-intel CI leg；verify-macos-pkg.sh 改为校验 universal（x86_64 + arm64）。
+4. **Linux**：deb/rpm 自带 /etc/xdg/autostart/keytao-ime.desktop（NotShowIn=GNOME）和 KDE 的 keytao-wayland-launcher.desktop，app 退出不再停 keytao-ime；教程以网站 /install 为主写全（分桌面启用、环境变量写在哪、启动与使用、避坑），docs/linux-install.md 同步；ibus-rime 手动方式作为备选；未实测的 Flatpak / SDL / kitty 不写。
+5. **提醒**：CI 出的 Android 包为 release 签名，项目方手机上的本机 debug 版需先卸载一次（/sdcard/keytao 保留）。
+
+6. **Android 发行 ABI**：只发布 armeabi-v7a、arm64-v8a 和 x86_64 三个 APK，不发布 x86 APK。

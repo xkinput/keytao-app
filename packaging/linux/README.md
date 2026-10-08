@@ -9,7 +9,10 @@ of that evidence, not a fresh artifact extraction in this offline task.
 - deb: `Package: key-tao`, `Version: 1.2.1-alpha.88`, `Architecture: amd64`
   (`arm64` for aarch64), `Maintainer: Rea <hi@rea.ink>`.
 - deb dependencies: `libayatana-appindicator3-1, libwebkit2gtk-4.1-0, libgtk-3-0`.
-  There was no `postinst`.
+  There was no `postinst`. (Historical: these came from the old Tauri
+  package. Current deb dependencies are `libegl1, libgl1, procps` plus the
+  owners of the bundle's linked libraries, computed in `build-packages.sh`;
+  the rpm requires are listed in `key-tao.spec`.)
 - rpm: `Name: key-tao`, `Version: 1.2.1-alpha.88`, `Release: 1`.
 - Entries: `/usr/bin/keytao-app`, `/usr/bin/keytao-ime`.
 - Prefix: `/usr/lib/KeyTao/`, including `addon-schemas/` and

@@ -407,10 +407,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         setup()
     }
 
-    var preferredHeight: CGFloat {
-        config.effectiveKeyboardHeightDp + config.candidateBarHeightDp
-    }
-
     func update(config: KeyTaoIOSImeConfig) {
         if self.config.keyboardHeightScale != config.keyboardHeightScale {
             clearActiveTouches()
@@ -4996,64 +4992,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         return max(labelWidth + secondaryWidth + inlineGap + horizontalPadding, minimumWidth ?? CGFloat(fallbackMinimum))
     }
 
-    private func toolbarGap(for actions: [ToolbarAction], availableWidth: CGFloat) -> CGFloat {
-        let naturalGap: CGFloat = 6
-        guard actions.count > 1 else {
-            return naturalGap
-        }
-        let naturalTotal = actions.map { toolbarChipWidth($0) }.reduce(0, +) + naturalGap * CGFloat(actions.count - 1)
-        return naturalTotal <= availableWidth ? naturalGap : 3
-    }
-
-    private func toolbarChipWidths(for actions: [ToolbarAction], availableWidth: CGFloat, gap: CGFloat) -> [CGFloat] {
-        guard !actions.isEmpty else {
-            return []
-        }
-        let natural = actions.map { toolbarChipWidth($0) }
-        let naturalTotal = natural.reduce(0, +) + gap * CGFloat(max(0, actions.count - 1))
-        if naturalTotal <= availableWidth {
-            return natural
-        }
-
-        let compact = actions.map { toolbarChipWidth($0, horizontalPadding: 12, minimumWidth: 38) }
-        let compactTotal = compact.reduce(0, +) + gap * CGFloat(max(0, actions.count - 1))
-        if compactTotal <= availableWidth {
-            return compact
-        }
-
-        let minimums = actions.map { toolbarMinimumChipWidth($0) }
-        let gapTotal = gap * CGFloat(max(0, actions.count - 1))
-        let minimumContentWidth = minimums.reduce(0, +)
-        let availableContentWidth = max(0, availableWidth - gapTotal)
-        guard minimumContentWidth > 0 else {
-            return minimums
-        }
-        if minimumContentWidth >= availableContentWidth {
-            let scale = availableContentWidth / minimumContentWidth
-            return minimums.map { $0 * scale }
-        }
-
-        let overflow = compactTotal - availableWidth
-        let shrinkable = zip(compact, minimums).map { max(0, $0 - $1) }.reduce(0, +)
-        guard shrinkable > 0 else {
-            return compact
-        }
-        return zip(compact, minimums).map { width, minimum in
-            let share = max(0, width - minimum) / shrinkable
-            return max(minimum, width - overflow * share)
-        }
-    }
-
-    private func toolbarMinimumChipWidth(_ action: ToolbarAction) -> CGFloat {
-        if action.icon != nil && (action.secondaryLabel?.isEmpty ?? true) {
-            return 34
-        }
-        let labelWidth = textWidth(action.label, size: max(11, theme.font.labelSize * 0.72))
-        let secondaryWidth = action.secondaryLabel.map { textWidth($0, size: max(10, theme.font.commentSize * 0.72)) } ?? 0
-        let inlineGap: CGFloat = secondaryWidth > 0 ? 3 : 0
-        return max(labelWidth + secondaryWidth + inlineGap + 6, secondaryWidth > 0 ? 38 : 34)
-    }
-
     private func activeRows() -> [[KeyTaoKeySpec]] {
         var rows = config.rows(for: layerMode)
         if !hostTraits.isSensitive,
@@ -6639,10 +6577,6 @@ final class KeyTaoIOSKeyboardView: UIView {
         let values = emojiPreferences.stringArray(forKey: Self.recentEmojiPreferenceKey) ?? []
         var seen = Set<String>()
         return values.filter { !$0.isEmpty && seen.insert($0).inserted }.prefix(Self.maxRecentEmojiCount).map { $0 }
-    }
-
-    private func usesScrollableSymbolKeyboard(_ rows: [[KeyTaoKeySpec]]? = nil) -> Bool {
-        usesCategorizedSymbolKeyboard(rows) && (rows ?? activeRows()).count > 5
     }
 
     private func isVisibleKey(_ key: KeyRect, at point: CGPoint) -> Bool {

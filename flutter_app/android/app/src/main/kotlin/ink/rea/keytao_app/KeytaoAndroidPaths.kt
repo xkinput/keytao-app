@@ -160,15 +160,9 @@ object KeytaoAndroidPaths {
         resetUserRootCacheForTests()
     }
 
-    fun themeFile(context: Context): File = File(userRoot(context), "theme.yaml")
-
     fun themeFileOrNull(context: Context): File? = userRootOrNull(context)?.let { File(it, "theme.yaml") }
 
-    fun keyboardFile(context: Context): File = File(userRoot(context), "keyboard.yaml")
-
     fun keyboardFileOrNull(context: Context): File? = userRootOrNull(context)?.let { File(it, "keyboard.yaml") }
-
-    fun imeConfigFile(context: Context): File = File(userRoot(context), "android_ime.json")
 
     fun imeConfigFileOrNull(context: Context): File? = userRootOrNull(context)?.let { File(it, "android_ime.json") }
 

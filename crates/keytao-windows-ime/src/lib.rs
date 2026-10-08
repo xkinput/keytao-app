@@ -70,7 +70,6 @@ pub const GUID_PROFILE: GUID = GUID {
 pub const LANGID_CHINESE_SIMPLIFIED: u16 = 0x0804;
 
 /// Branding icon resource embedded in keytao_windows_ime.dll.
-pub const PROFILE_ICON_RESOURCE_ID: u32 = 1;
 pub const PROFILE_ICON_INDEX: u32 = 0;
 
 /// Display attribute used for active KeyTao composition text.

@@ -41,7 +41,6 @@ class AndroidHost {
 
   Future<Map<String, dynamic>> paths() => _map('paths');
   Future<Map<String, dynamic>> imeStatus() => _map('imeStatus');
-  Future<Map<String, dynamic>> keytaoRoot() => _map('keytaoRoot');
   Future<Map<String, dynamic>> storagePermissionStatus() =>
       _map('storagePermissionStatus');
   Future<void> openStoragePermissionSettings() =>

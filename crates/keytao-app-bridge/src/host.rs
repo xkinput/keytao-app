@@ -159,7 +159,7 @@ impl BridgeHost {
         #[cfg(target_os = "ios")]
         {
             // Core deploys into the App Group override and writes the stamp
-            // consumed by the keyboard extension, just like the Tauri host.
+            // consumed by the keyboard extension.
             keytao_app_core::deploy::rime_deploy_default(&self.core, self.clone())
                 .await
                 .map_err(|error| error.to_string())

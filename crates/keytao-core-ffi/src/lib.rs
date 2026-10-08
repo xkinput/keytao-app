@@ -591,19 +591,6 @@ fn reload_now() -> bool {
     }
 }
 
-/// Path of the reload signal for the directory passed to keytao_init(), or null
-/// before initialization. Free with keytao_free_string().
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_reload_stamp_path() -> *mut c_char {
-    guard("keytao_reload_stamp_path", std::ptr::null_mut(), || {
-        let Some(path) = watched_stamp_path() else {
-            return std::ptr::null_mut();
-        };
-        to_cstring(&path.to_string_lossy())
-    })
-}
-
 /// Where keytao_init() installed the reload signal, copied out so that the stat
 /// and read that follow happen without the lock held.
 #[cfg(not(target_os = "android"))]
@@ -648,26 +635,6 @@ fn mark_deployment_loaded(path: &Path, signature: Option<String>) {
     }
 }
 
-/// Current signature of the reload signal, or null when no stamp exists. The
-/// format is keytao-core's and must not be reimplemented by frontends. Free
-/// with keytao_free_string().
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_reload_stamp_signature() -> *mut c_char {
-    guard(
-        "keytao_reload_stamp_signature",
-        std::ptr::null_mut(),
-        || {
-            let Some(path) = watched_stamp_path() else {
-                return std::ptr::null_mut();
-            };
-            ReloadStamp::signature_at(&path)
-                .map(|signature| to_cstring(&signature))
-                .unwrap_or(std::ptr::null_mut())
-        },
-    )
-}
-
 /// Path of the reload signal inside `user_dir`, for frontends that watch the
 /// file before keytao_init() has succeeded. Free with keytao_free_string().
 #[no_mangle]
@@ -682,8 +649,7 @@ pub extern "C" fn keytao_reload_stamp_path_at(user_dir: *const c_char) -> *mut c
 }
 
 /// Signature of the reload signal inside `user_dir`, or null when no deployment
-/// has requested a reload yet. Same format keytao_reload_stamp_signature()
-/// returns. Free with keytao_free_string().
+/// has requested a reload yet. Free with keytao_free_string().
 #[no_mangle]
 #[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reload_stamp_signature_at(user_dir: *const c_char) -> *mut c_char {
@@ -890,31 +856,6 @@ pub extern "C" fn keytao_session_highlight_candidate(
     )
 }
 
-/// Forget a learned phrase, the action behind "delete candidate" gestures.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_delete_candidate(
-    session: *mut c_void,
-    index: u32,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_delete_candidate",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some((state, deleted)) = handle
-                .session
-                .delete_candidate_on_page_result(index as usize)
-            else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, deleted)))
-        },
-    )
-}
-
 #[no_mangle]
 #[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_candidate_is_user_phrase(
@@ -1046,17 +987,6 @@ pub extern "C" fn keytao_session_input_policy_composing(session: *mut c_void) ->
     guard("keytao_session_input_policy_composing", false, || {
         session_handle(session)
             .map(|handle| handle.session.input_policy().composing)
-            .unwrap_or(false)
-    })
-}
-
-/// Whether the current input context may contribute to user learning.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_input_policy_learning(session: *mut c_void) -> bool {
-    guard("keytao_session_input_policy_learning", false, || {
-        session_handle(session)
-            .map(|handle| handle.session.input_policy().learning)
             .unwrap_or(false)
     })
 }
@@ -1614,27 +1544,6 @@ pub extern "C" fn keytao_session_select_candidate_json(
                 return std::ptr::null_mut();
             };
             let Some(state) = handle.session.select_candidate_on_page(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
-}
-
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_highlight_candidate_json(
-    session: *mut c_void,
-    index: u32,
-) -> *mut c_char {
-    guard(
-        "keytao_session_highlight_candidate_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.highlight_candidate_on_page(index as usize) else {
                 return std::ptr::null_mut();
             };
             to_cstring(&state_json(state, true))

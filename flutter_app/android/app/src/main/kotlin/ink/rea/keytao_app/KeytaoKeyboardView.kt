@@ -165,7 +165,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val customizable: Boolean = id != null,
         val drawingRect: RectF = rect,
     )
-    private data class PanelItem(val label: String, val text: String, val command: KeyCommand, val comment: String? = null)
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
     private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
     private enum class PanelItemStyle {
@@ -2298,18 +2297,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         else -> "自动"
     }
 
-    private fun panelItems(vararg items: PanelItem): List<CandidateDrawItem> {
-        return items.mapIndexed { index, item ->
-            CandidateDrawItem(
-                index = -1000 - index,
-                label = item.label,
-                text = item.text,
-                comment = item.comment,
-                command = item.command,
-            )
-        }
-    }
-
     private fun candidateWidth(item: CandidateDrawItem): Float {
         val cacheKey = candidateWidthCacheKey(item)
         candidateWidthCache[cacheKey]?.let { return it }
@@ -3257,14 +3244,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         return (labelWidth + inlineGap + secondaryWidth + dp(22f)).coerceAtLeast(
             if (secondaryWidth > 0f) dp(58f) else dp(48f)
         )
-    }
-
-    private fun minimumToolbarChipWidth(action: ToolbarAction): Float {
-        return when {
-            action.icon != null && action.secondaryLabel.isNullOrBlank() -> dp(28f)
-            !action.secondaryLabel.isNullOrBlank() -> dp(46f)
-            else -> dp(38f)
-        }
     }
 
     private fun drawFunctionPanelBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
@@ -4816,10 +4795,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun usesCategorizedSymbolKeyboard(rows: List<List<KeySpec>> = activeRows()): Boolean {
         return usesFullHeightSymbolKeyboard() && rows.size >= 3
-    }
-
-    private fun usesScrollableSymbolKeyboard(rows: List<List<KeySpec>> = activeRows()): Boolean {
-        return usesCategorizedSymbolKeyboard(rows) && rows.size > 5
     }
 
     private fun expandedCandidatePanelHeight(): Float {

@@ -122,13 +122,6 @@ object KeytaoNativeBridge {
         )
     }
 
-    fun highlightCandidate(session: Long, index: Int): KeytaoImeState? {
-        if (!loaded || session == 0L) return null
-        return KeytaoImeState.fromJson(
-            runCatching { nativeHighlightCandidate(session, index) }.getOrNull()
-        )
-    }
-
     fun deleteCandidate(session: Long, index: Int): KeytaoImeState? {
         if (!loaded || session == 0L) return null
         return KeytaoImeState.fromJson(
@@ -243,11 +236,6 @@ object KeytaoNativeBridge {
         return runCatching { nativeTextToKeysym(text) }.getOrDefault(0)
     }
 
-    fun isEnterKey(keyValue: Int): Boolean {
-        if (!loaded) return false
-        return runCatching { nativeIsEnterKey(keyValue) }.getOrDefault(false)
-    }
-
     fun shouldBypassKey(session: Long, keyValue: Int, modifiers: Int): Boolean {
         if (!loaded || session == 0L) return false
         return runCatching { nativeShouldBypassKey(session, keyValue, modifiers) }.getOrDefault(false)
@@ -331,8 +319,6 @@ object KeytaoNativeBridge {
 
     external fun nativeSelectCandidate(session: Long, index: Int): String?
 
-    external fun nativeHighlightCandidate(session: Long, index: Int): String?
-
     external fun nativeDeleteCandidate(session: Long, index: Int): String?
 
     external fun nativeCandidateIsUserPhrase(session: Long, index: Int): Boolean
@@ -372,8 +358,6 @@ object KeytaoNativeBridge {
     external fun nativeSetAsciiMode(session: Long, enabled: Boolean): String?
 
     external fun nativeTextToKeysym(text: String): Int
-
-    external fun nativeIsEnterKey(keyValue: Int): Boolean
 
     external fun nativeShouldBypassKey(session: Long, keyValue: Int, modifiers: Int): Boolean
 

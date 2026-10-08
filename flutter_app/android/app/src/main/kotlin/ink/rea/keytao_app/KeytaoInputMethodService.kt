@@ -1512,10 +1512,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         selectionModeActive = false
     }
 
-    private fun restoreOneBackspaceText(): Boolean {
-        return restoreBackspaceText(1)
-    }
-
     private fun restoreBackspaceText(count: Int): Boolean {
         if (restoreAllOnNextDirectionalRestore) {
             return restoreAllBackspaceText()
@@ -2055,14 +2051,6 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (description == null) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
         return description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
-    }
-
-    private fun setClipboardText(text: String) {
-        inputCounts.record("clipboard_write")
-        // Copy/cut through KeyTao is an explicit new clipboard write.
-        clipboardSuppression = null
-        clipboardManager?.setPrimaryClip(ClipData.newPlainText("KeyTao", text))
-        rememberClipboardText(text, suggest = false, timestamp = System.currentTimeMillis())
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {

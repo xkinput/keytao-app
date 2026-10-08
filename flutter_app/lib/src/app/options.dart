@@ -111,18 +111,6 @@ enum SetupStep {
     select => c.ime?['selected'] == true,
     finish => c.setupReady,
   };
-
-  Future<void> advance(
-    AppController c, {
-    required void Function() onNext,
-    required void Function() onFinished,
-  }) async {
-    if (this == finish) {
-      if (await c.finishOnboarding()) onFinished();
-    } else {
-      onNext();
-    }
-  }
 }
 
 // Shared presentation decisions; platform views only arrange these values.

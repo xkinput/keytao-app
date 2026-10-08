@@ -1,6 +1,6 @@
-//! Pure librime engine wrapper — no Tauri, no D-Bus, no platform I/O.
-//! Every platform frontend (Tauri app, ibus engine, macOS IMKit, Windows TSF)
-//! links against this crate as its rime back-end.
+//! Pure librime engine wrapper — no D-Bus, no platform I/O.
+//! Every consumer (the Flutter app via keytao-app-bridge, the C FFI and the
+//! platform IMEs) links against this crate as its rime back-end.
 
 pub mod english_mode;
 #[cfg(all(
@@ -1884,10 +1884,6 @@ mod desktop {
             (extract_state_with_commit(&self.session), deleted)
         }
 
-        pub fn delete_candidate_on_page(&self, index: usize) -> ImeState {
-            self.delete_candidate_on_page_result(index).0
-        }
-
         /// Fallback for ABIs without `select_candidate_on_current_page`.
         fn send_select_key(&self, index: usize) {
             let select_keys = session_select_keys(&self.session);
@@ -1944,10 +1940,6 @@ mod desktop {
                 );
             }
             state
-        }
-
-        pub fn all_candidates(&self) -> Vec<Candidate> {
-            self.all_candidates_limited(usize::MAX)
         }
 
         pub fn all_candidates_limited(&self, max_count: usize) -> Vec<Candidate> {
@@ -2114,12 +2106,6 @@ mod desktop {
                 state,
                 accepted: true,
             }
-        }
-
-        pub fn current_schema_name(&self) -> String {
-            self.current_schema()
-                .map(|schema| schema.name)
-                .unwrap_or_else(|| "unknown".to_string())
         }
 
         pub fn list_schemas(&self) -> Vec<SchemaInfo> {
@@ -3464,11 +3450,6 @@ pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<()
     result
 }
 
-#[cfg(target_os = "android")]
-pub fn reinitialize_android(user_data_dir: String, shared_data_dir: String) -> Result<(), String> {
-    reinitialize(user_data_dir, shared_data_dir)
-}
-
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -3880,10 +3861,6 @@ impl ImeRuntimeSession {
         self.with_engine(|engine| engine.highlight_candidate_on_page(index))
     }
 
-    pub fn delete_candidate_on_page(&self, index: usize) -> Option<ImeState> {
-        self.with_engine(|engine| engine.delete_candidate_on_page(index))
-    }
-
     pub fn candidate_is_user_phrase_on_page(&self, index: usize) -> Option<bool> {
         self.with_engine(|engine| engine.candidate_is_user_phrase_on_page(index))
     }
@@ -3914,10 +3891,6 @@ impl ImeRuntimeSession {
 
     pub fn raw_input(&self) -> Option<String> {
         self.with_engine(Engine::raw_input).flatten()
-    }
-
-    pub fn all_candidates(&self) -> Option<Vec<Candidate>> {
-        self.with_engine(Engine::all_candidates)
     }
 
     pub fn all_candidates_limited(&self, max_count: usize) -> Option<Vec<Candidate>> {
@@ -4091,16 +4064,6 @@ impl ImeRuntimeSession {
         }
         result
     }
-}
-
-fn is_default_custom(filename: &str) -> bool {
-    filename == "default.custom.yaml" || filename == "default-custom.yaml"
-}
-
-fn read_optional_default_custom(base: &Path) -> Option<String> {
-    std::fs::read_to_string(base.join("default.custom.yaml"))
-        .ok()
-        .or_else(|| std::fs::read_to_string(base.join("default-custom.yaml")).ok())
 }
 
 fn preferred_schema_location(user_data_dir: Option<&Path>) -> Option<(PathBuf, String)> {
@@ -5026,69 +4989,6 @@ pub fn merge_rime_lua_content(
     }
 
     (merged, renames)
-}
-
-pub fn sync_user_rime_assets(user_data_dir: &Path, shared_data_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(user_data_dir).map_err(|e| format!("create user dir: {e}"))?;
-
-    let package_default_custom = std::fs::read_dir(shared_data_dir).ok().and_then(|entries| {
-        entries
-            .filter_map(|entry| entry.ok())
-            .find(|entry| is_default_custom(&entry.file_name().to_string_lossy()))
-            .and_then(|entry| std::fs::read_to_string(entry.path()).ok())
-    });
-
-    if let Some(package_content) = package_default_custom {
-        let existing = read_optional_default_custom(user_data_dir);
-        let (merged, _) = merge_default_custom_content(existing.as_deref(), &package_content)?;
-        std::fs::write(user_data_dir.join("default.custom.yaml"), merged)
-            .map_err(|e| format!("write default.custom.yaml: {e}"))?;
-    }
-
-    let package_rime_lua = std::fs::read_to_string(shared_data_dir.join("rime.lua")).ok();
-    if let Some(package_content) = package_rime_lua {
-        let package_lua_filenames: HashSet<String> = std::fs::read_dir(shared_data_dir.join("lua"))
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.is_file() {
-                    Some(entry.file_name().to_string_lossy().into_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let local_content = std::fs::read_to_string(user_data_dir.join("rime.lua")).ok();
-        let (merged, renames) = merge_rime_lua_content(
-            local_content.as_deref(),
-            &package_content,
-            &package_lua_filenames,
-        );
-
-        if !renames.is_empty() {
-            let user_lua_dir = user_data_dir.join("lua");
-            std::fs::create_dir_all(&user_lua_dir).map_err(|e| format!("create lua dir: {e}"))?;
-            for (old_name, new_name) in renames {
-                let old_path = user_lua_dir.join(format!("{old_name}.lua"));
-                let new_path = user_lua_dir.join(format!("{new_name}.lua"));
-                if !new_path.exists() && old_path.exists() {
-                    let bytes = std::fs::read(&old_path)
-                        .map_err(|e| format!("read lua/{old_name}.lua: {e}"))?;
-                    std::fs::write(&new_path, bytes)
-                        .map_err(|e| format!("write lua/{new_name}.lua: {e}"))?;
-                }
-            }
-        }
-
-        std::fs::write(user_data_dir.join("rime.lua"), merged)
-            .map_err(|e| format!("write rime.lua: {e}"))?;
-    }
-
-    Ok(())
 }
 
 // ── Platform path helpers (all platforms) ────────────────────────────────────

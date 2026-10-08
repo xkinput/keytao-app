@@ -126,19 +126,6 @@ bool keytao_is_initialized(void);
 bool keytao_reload(void);
 
 /**
- * Path of the reload signal for the directory passed to keytao_init(), or null
- * before initialization. Free with keytao_free_string().
- */
-char *keytao_reload_stamp_path(void);
-
-/**
- * Current signature of the reload signal, or null when no stamp exists. The
- * format is keytao-core's and must not be reimplemented by frontends. Free
- * with keytao_free_string().
- */
-char *keytao_reload_stamp_signature(void);
-
-/**
  * Path of the reload signal inside `user_dir`, for frontends that watch the
  * file before keytao_init() has succeeded. Free with keytao_free_string().
  */
@@ -146,8 +133,7 @@ char *keytao_reload_stamp_path_at(const char *user_dir);
 
 /**
  * Signature of the reload signal inside `user_dir`, or null when no deployment
- * has requested a reload yet. Same format keytao_reload_stamp_signature()
- * returns. Free with keytao_free_string().
+ * has requested a reload yet. Free with keytao_free_string().
  */
 char *keytao_reload_stamp_signature_at(const char *user_dir);
 
@@ -206,11 +192,6 @@ struct KeytaoState *keytao_session_select_candidate(void *session, uint32_t inde
  */
 struct KeytaoState *keytao_session_highlight_candidate(void *session, uint32_t index);
 
-/**
- * Forget a learned phrase, the action behind "delete candidate" gestures.
- */
-struct KeytaoState *keytao_session_delete_candidate(void *session, uint32_t index);
-
 bool keytao_session_candidate_is_user_phrase(void *session, uint32_t index);
 
 /**
@@ -252,11 +233,6 @@ struct KeytaoState *keytao_session_set_input_policy(void *session, bool composin
  * Whether the current input context still lets keys reach librime.
  */
 bool keytao_session_input_policy_composing(void *session);
-
-/**
- * Whether the current input context may contribute to user learning.
- */
-bool keytao_session_input_policy_learning(void *session);
 
 /**
  * Return whether a per-client session is in ASCII mode.
@@ -395,8 +371,6 @@ char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t m
 char *keytao_session_process_enter_json(void *session);
 
 char *keytao_session_select_candidate_json(void *session, uint32_t index);
-
-char *keytao_session_highlight_candidate_json(void *session, uint32_t index);
 
 char *keytao_session_delete_candidate_json(void *session, uint32_t index);
 

@@ -151,8 +151,8 @@ native key event
 | 分类 | 操作 |
 | --- | --- |
 | 按键 | `process_key_result(keycode, mask)`、`process_enter()` |
-| 只读 | `state()`、`raw_input()`、`is_ascii_mode()`、`current_schema_name()`、`input_policy()`、`all_candidates_limited(max)` |
-| 候选 | `select_candidate_on_page(index)`（`select_candidate` 是其别名）、`highlight_candidate_on_page(index)`、`delete_candidate_on_page(index)`、`change_page(backward)` |
+| 只读 | `state()`、`raw_input()`、`is_ascii_mode()`、`input_policy()`、`all_candidates_limited(max)` |
+| 候选 | `select_candidate_on_page(index)`（`select_candidate` 是其别名）、`highlight_candidate_on_page(index)`、`delete_candidate_on_page_result(index)`、`change_page(backward)` |
 | 组字收尾 | `commit_composition()`、`clear_composition()`（`reset()` 是其别名）、`commit_raw_input()` |
 | 模式与策略 | `set_ascii_mode(enabled)`、`set_input_policy(policy)` |
 
@@ -222,12 +222,12 @@ native key event
 | --- | --- |
 | 生命周期 | `keytao_init(user_dir, shared_dir)`、`keytao_is_initialized()`、`keytao_reload()`、`keytao_create_session()`、`keytao_destroy_session(session)` |
 | 按键 | `keytao_session_process_key(session, keyval, modifiers)`、`keytao_session_process_enter(session)` |
-| 候选 | `keytao_session_select_candidate(session, index)`、`keytao_session_highlight_candidate(session, index)`、`keytao_session_delete_candidate(session, index)`、`keytao_session_change_page(session, backward)`、`keytao_session_all_candidates_json(session, limit)` |
+| 候选 | `keytao_session_select_candidate(session, index)`、`keytao_session_highlight_candidate(session, index)`、`keytao_session_change_page(session, backward)`、`keytao_session_all_candidates_json(session, limit)` |
 | 组字收尾 | `keytao_session_commit_composition(session)`、`keytao_session_clear_composition(session)`、`keytao_session_reset(session)` |
 | 状态与模式 | `keytao_session_state(session)`、`keytao_session_get_ascii_mode(session)`、`keytao_session_set_ascii_mode(session, enabled)` |
-| 输入策略 | `keytao_session_set_input_policy(session, composing, learning)`、`keytao_session_input_policy_composing(session)`、`keytao_session_input_policy_learning(session)` |
+| 输入策略 | `keytao_session_set_input_policy(session, composing, learning)`、`keytao_session_input_policy_composing(session)` |
 | key policy | `keytao_text_to_keysym(utf8)`、`keytao_key_policy_is_enter(keyval)`、`keytao_key_policy_should_bypass(session, keyval, modifiers)`、`keytao_utf16_offset_from_chars(text, char_offset)` |
-| reload stamp | `keytao_reload_stamp_path()` / `_signature()`、`keytao_reload_stamp_path_at(user_dir)` / `_signature_at(user_dir)`、`keytao_reload_stamp_changed()`、`keytao_reload_if_stamp_changed()` |
+| reload stamp | `keytao_reload_stamp_path_at(user_dir)` / `_signature_at(user_dir)`、`keytao_reload_stamp_changed()`、`keytao_reload_if_stamp_changed()` |
 | 进程级注入 | `keytao_set_ui_capabilities(...)`、`keytao_set_theme_paths(default, user)`、`keytao_set_system_color_scheme("dark"/"light"/null)` |
 | 主题 | `keytao_resolve_theme_json(...)`、`keytao_resolve_keyboard_json(...)`、`keytao_default_keyboard_yaml()` |
 | 释放 | `keytao_free_state(state)`、`keytao_free_string(ptr)` |
@@ -244,7 +244,7 @@ JSON 状态路径的三项进程级设置默认值是为软键盘候选条准备
 
 ### JNI 侧对应关系
 
-Kotlin 用到的入口与 C 侧一一对应，命名去掉 `keytao_` 前缀改为 `native` 驼峰：`nativeProcessKey` / `nativeProcessEnter` / `nativeSelectCandidate` / `nativeHighlightCandidate` / `nativeDeleteCandidate` / `nativeChangePage` / `nativeCommitComposition` / `nativeClearComposition` / `nativeReset` / `nativeSetInputPolicy` / `nativeInputPolicyComposing` / `nativeInputPolicyLearning` / `nativeTextToKeysym` / `nativeIsEnterKey` / `nativeShouldBypassKey` / `nativeUtf16OffsetFromChars` / `nativeReloadStampPath(userDir)` / `nativeReloadStampSignature(userDir)` / `nativeAllCandidates(session, limit)`。
+Kotlin 用到的入口与 C 侧一一对应，命名去掉 `keytao_` 前缀改为 `native` 驼峰：`nativeProcessKey` / `nativeProcessEnter` / `nativeSelectCandidate` / `nativeDeleteCandidate` / `nativeChangePage` / `nativeCommitComposition` / `nativeClearComposition` / `nativeReset` / `nativeSetInputPolicy` / `nativeInputPolicyComposing` / `nativeInputPolicyLearning` / `nativeTextToKeysym` / `nativeShouldBypassKey` / `nativeUtf16OffsetFromChars` / `nativeReloadStampPath(userDir)` / `nativeReloadStampSignature(userDir)` / `nativeAllCandidates(session, limit)`。
 
 ### 旧 singleton 入口
 
@@ -527,9 +527,9 @@ macOS release CI 必须执行 `scripts/build-macos.sh` 和 `scripts/verify-macos
 
 | 用途 | Rust | C ABI | JNI |
 | --- | --- | --- | --- |
-| 路径 | `ReloadStamp::path(user_dir)` / `default_path()` | `keytao_reload_stamp_path()` / `_path_at(user_dir)` | `nativeReloadStampPath(userDir)` |
+| 路径 | `ReloadStamp::path(user_dir)` / `default_path()` | `keytao_reload_stamp_path_at(user_dir)` | `nativeReloadStampPath(userDir)` |
 | 写入（只有 App 调） | `ReloadStamp::write(user_dir)` / `write_default()` | — | — |
-| 签名 | `ReloadStamp::current_signature(user_dir)` / `signature_at(path)` | `keytao_reload_stamp_signature()` / `_signature_at(user_dir)` | `nativeReloadStampSignature(userDir)` |
+| 签名 | `ReloadStamp::current_signature(user_dir)` / `signature_at(path)` | `keytao_reload_stamp_signature_at(user_dir)` | `nativeReloadStampSignature(userDir)` |
 | 变更检测 | `ReloadStampWatcher::has_changed()` | `keytao_reload_stamp_changed()` | — |
 | 检测并 reload | — | `keytao_reload_if_stamp_changed()` | — |
 

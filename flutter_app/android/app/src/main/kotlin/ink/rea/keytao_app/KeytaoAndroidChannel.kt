@@ -51,7 +51,6 @@ class KeytaoAndroidChannel(
             when (call.method) {
                 "paths" -> paths(reply)
                 "imeStatus" -> imeStatus(reply)
-                "keytaoRoot" -> keytaoRoot(reply)
                 "storagePermissionStatus" -> storagePermissionStatus(reply)
                 "openStoragePermissionSettings" -> openStoragePermissionSettings(reply)
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
@@ -154,22 +153,6 @@ class KeytaoAndroidChannel(
         } catch (ex: Exception) {
             reply.error(ex.message ?: "Failed to read Android input method status")
         }
-    }
-
-    private fun keytaoRoot(reply: Reply) {
-        Thread {
-            try {
-                val root = KeytaoAndroidPaths.requireRoot(activity)
-                reply.success(mutableMapOf<String, Any?>().apply {
-                    put("path", root.absolutePath)
-                    put("themePath", KeytaoAndroidPaths.themeFile(activity).absolutePath)
-                    put("reloadStampPath", KeytaoAndroidPaths.reloadStampFile(activity).absolutePath)
-                    put("writable", KeytaoAndroidPaths.isWritable(root))
-                })
-            } catch (ex: Exception) {
-                reply.error(ex.message ?: "Failed to resolve KeyTao data directory")
-            }
-        }.start()
     }
 
     private fun shareRuntimeLog(reply: Reply) {

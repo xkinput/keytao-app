@@ -11,6 +11,6 @@ rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z
 
 [profile.dev.package."*"]
 # Compile dependencies with optimization even in dev mode
-# This makes GTK/WebKit bindings much faster to run without full release build
+# This makes heavy dependencies much faster to run without full release build
 opt-level = 3
 debug = false
