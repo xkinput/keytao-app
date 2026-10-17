@@ -22,6 +22,10 @@
           };
         };
 
+        # Drop packages the host can't build (e.g. wayland/ibus on darwin) so the
+        # devShell evaluates on macOS too; on Linux the lists are unchanged.
+        availableOnly = builtins.filter (pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform);
+
         ndkVersion = "26.1.10909125"; # NDK r26b
         cmdLineToolsVer = "13.0";
 
@@ -202,7 +206,7 @@
 
         devShells.default = pkgs.mkShell {
           # Tools (go into PATH / nativeBuildInputs, no effect on RPATH)
-          packages = [
+          packages = availableOnly [
             androidSdk
             pkgs.jdk17
             pkgs.curl
@@ -218,7 +222,7 @@
           # automatically injects -L/-rpath into NIX_LDFLAGS, which cargo uses
           # when linking. This gives every compiled binary the correct RPATH
           # without needing patchelf.
-          buildInputs = with pkgs; [
+          buildInputs = availableOnly (with pkgs; [
             librime
             libxcb
             libxkbcommon
@@ -242,7 +246,7 @@
             openssl
             xdotool
             ibus # Added for IBus IM module
-          ];
+          ]);
 
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
           NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk/${ndkVersion}";
@@ -256,7 +260,7 @@
 
           # Ensure runtime libs are findable even when cargo doesn't embed RPATH.
           # As a flake attribute (not shellHook), direnv's `use flake` exports this.
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (availableOnly (
             with pkgs;
             [
               librime
@@ -278,7 +282,7 @@
               xdotool
               ibus
             ]
-          );
+          ));
 
           shellHook = ''
             export JAVA_HOME="${pkgs.jdk17}"
@@ -286,6 +290,8 @@
             export MOLD_PATH="${pkgs.mold}/bin/mold"
             export CARGO_INCREMENTAL=0
 
+          ''
+          + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             # Generate GTK IM Modules cache safely so direnv doesn't destroy it
             export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
             _immodules_cache="$HOME/.cache/keytao-immodules.cache"
@@ -294,6 +300,8 @@
                 mv "/tmp/keytao_im.tmp" "$_immodules_cache"
             fi
             export GTK_IM_MODULE_FILE="$_immodules_cache"
+          ''
+          + ''
 
             # Add Android platform-tools (adb) and cmdline-tools to PATH
             export PATH="${androidSdk}/libexec/android-sdk/platform-tools:$PATH"
@@ -305,7 +313,7 @@
                         # Note: Rust on Linux defaults to lld (-fuse-ld=lld via gcc-ld wrapper),
                         # so no explicit linker selection is needed here.
                         export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
-                          pkgs.lib.makeLibraryPath (
+                          pkgs.lib.makeLibraryPath (availableOnly (
                             with pkgs;
                             [
                               librime
@@ -325,7 +333,7 @@
                               openssl
                               ibus
                             ]
-                          )
+                          ))
                         }"
                         # Install Android Rust cross-compilation targets (idempotent)
                         for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do

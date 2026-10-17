@@ -57,13 +57,13 @@ scripts/                     构建、打包、校验脚本
 
 ## 开发环境
 
-Linux：`nix develop`，或用 direnv 自动加载（`.envrc` 为 `use flake`）：
+`nix develop`，或用 direnv 自动加载（`.envrc` 为 `use flake`）。macOS 上 devShell 不含 Wayland/IBus 等 Linux 专用库：
 
 ```bash
 direnv allow
 ```
 
-macOS：flake devShell 目前无法在 macOS 求值，使用 vendored librime：
+macOS 不用 nix 时，使用 vendored librime：
 
 ```bash
 scripts/fetch-librime.sh --platform macos
