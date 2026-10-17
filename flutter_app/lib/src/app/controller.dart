@@ -967,6 +967,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> syncUserDictionary() async {
     if (busy || syncingDictionary) return;
+    // Block other install/deploy operations so the follow-up deploy runs.
+    busy = true;
     syncingDictionary = true;
     accountError = null;
     accountMessage = null;
@@ -977,6 +979,7 @@ class AppController extends ChangeNotifier {
       accountError = errorText(failure);
     } finally {
       syncingDictionary = false;
+      busy = false;
       _changed();
     }
     // deploy() re-reads the local schema state after deploying.
