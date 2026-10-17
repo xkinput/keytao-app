@@ -389,7 +389,7 @@ mask = Rime modifier mask
 - **空格**：有 candidates 时可选择 `highlighted_candidate_index`；建议同样交给 Rime 的 selector。
 - **上一页/下一页**：调用 `change_page(backward)`，不要在平台层伪造 page state，也不要依赖 `-`/`=` 的 key_binder 绑定。
 - **Escape/cancel**：调用 `clear_composition()`，清 preedit，隐藏候选。
-- **鼠标点击候选**：调用 `select_candidate_on_page(index)`，再按 `ImeState` 应用结果。五端中 Linux 自绘面板仍未实现点选，属遗留。
+- **鼠标点击候选**：调用 `select_candidate_on_page(index)`，再按 `ImeState` 应用结果。Linux 自绘面板（wlroots / KDE / XIM）已实现左键点选与翻页按钮，命中区域与绘制共用 `panel_hit::layout`；IBus 路径的 X11 overlay 仍未接点选。
 - **hover 高亮**：如需回写 Rime 高亮，用 `highlight_candidate_on_page(index)`；只做视觉态时不要调，否则会改变后续 Enter/空格选中的是哪一项。
 
 如果平台候选服务只支持结构化 lookup table，不支持自绘样式，也仍应保持 label、candidate、highlight 和 page 语义一致。
@@ -744,7 +744,7 @@ KeyTao App 的理想操作方式：
 - **iOS 的 vendored librime 是 1.8.5**（源码 commit `08dd95f5`），落后于桌面/Android 的 1.17.x，缺 `change_page` 与 `highlight_candidate_on_current_page`。`keytao-core` 已用 `#[cfg(target_os = "ios")]` 门控降级（highlight no-op、change_page 退回合成 `-`/`=`），iOS target 现在可编译；但这两处「官方 API」在 iOS runtime 升级前无法真正生效。升级 `vendor/librime/ios` 到 1.17.x 后移除门控。
 - **IBus 协议签名分叉**是真实存在的坑：`org.freedesktop.IBus.Engine.UpdatePreeditText` 是 `(vubu)`（第 4 参 `IBusPreeditFocusMode`），`org.freedesktop.IBus.InputContext.UpdatePreeditText` 是 `(vub)`，两者不可混用。IBus 引擎注册需安装期 `/usr/share/ibus/component/<name>.xml` 加运行期 `RegisterComponent`，且必须连 ibus-daemon 的私有总线（`IBUS_ADDRESS` / `~/.config/ibus/bus/*`）而非 session bus。
 - Linux GNOME/IBus/Kimpanel 视觉不能完整受 `theme.yaml` 控制；文档和 UI 设置页需要明确“结构生效，视觉受系统限制”。
-- **Linux 自绘候选面板（wlroots / X11 overlay）的鼠标点选候选与翻页按钮仍未实现**，属遗留（Windows 本轮已补齐点选）。
+- Linux 自绘候选面板（wlroots / KDE / XIM）已支持左键点选候选与翻页按钮（松开时命中按下的同一项才生效），仍需真实桌面回归；IBus 路径的 X11 overlay（`X11OverlayPanel`）尚未接点选，属遗留。
 - Windows TSF 已接入 reload stamp、solo Shift release、候选点选、Enter direct commit、密码框直通与 CapsLock 归一；`context→session` 映射按已登记偏离暂缓，仍需真实 Windows 桌面回归测试。
 
 ## 文档维护规则

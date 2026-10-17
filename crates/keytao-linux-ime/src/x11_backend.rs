@@ -4,11 +4,12 @@
 //! The server registers under the name "keytao"; XIM clients that respect
 //! XMODIFIERS will connect automatically.
 
-use std::{os::fd::AsRawFd, sync::Arc, time::Instant};
+use std::{num::NonZeroU16, os::fd::AsRawFd, sync::Arc, time::Instant};
 
 use keytao_core::{key_policy, ImeState, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
 use x11rb::{
     connection::Connection as _,
+    properties::WmHints,
     protocol::{
         xproto::{
             AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, Gcontext,
@@ -27,6 +28,7 @@ use xim::{
 use crate::{
     engine::{CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
+    panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
 };
 
@@ -38,6 +40,8 @@ const X_KEY_RELEASE: u8 = 3;
 const XIM_FILTER_KEY_EVENTS: u32 = 1 | 2;
 /// Gap between the caret and the top of the candidate window, in pixels.
 const PANEL_CARET_GAP: i32 = 4;
+/// X11 core pointer button 1 (primary).
+const X_BUTTON_PRIMARY: u8 = 1;
 
 fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(), ServerError> {
     tracing::debug!("XIM commit text: {} chars", text.chars().count());
@@ -114,6 +118,35 @@ struct IcData {
     state_epoch: u64,
 }
 
+/// The input context whose candidates the panel is showing, so a click that
+/// arrives outside any XIM callback can still reach its session and client.
+struct PanelOwner {
+    session: ImeSession,
+    client_win: u32,
+    input_method_id: NonZeroU16,
+    input_context_id: NonZeroU16,
+}
+
+impl PanelOwner {
+    fn is(&self, ic: &InputContext) -> bool {
+        self.client_win == ic.client_win()
+            && self.input_method_id == ic.input_method_id()
+            && self.input_context_id == ic.input_context_id()
+    }
+
+    /// An `InputContext` addressing the same client IC.  Only `commit` is sent
+    /// through it; `preedit_draw` is never needed because PREEDIT_CALLBACKS is
+    /// not offered (see `client_supports_preedit`).
+    fn input_context(&self) -> InputContext {
+        InputContext::new(
+            self.client_win,
+            self.input_method_id,
+            self.input_context_id,
+            String::new(),
+        )
+    }
+}
+
 // ── Main handler type ─────────────────────────────────────────────────────────
 
 type MyServer = X11rbServer<Arc<XCBConnection>>;
@@ -143,6 +176,13 @@ struct KeyTaoHandler {
     /// Bumped on every librime reload, so per-context state drawn from the
     /// previous dictionaries can be recognised and dropped.
     reload_epoch: u64,
+    /// Where the candidates on screen were drawn; empty unless candidates are.
+    panel_hit_areas: PanelHitAreas,
+    panel_owner: Option<PanelOwner>,
+    pressed_click: Option<PanelClick>,
+    /// State a panel click produced, owed to that IC's `last_state` so a spot
+    /// update does not bring back the candidates the click replaced.
+    clicked_state: Option<ImeState>,
 }
 
 impl KeyTaoHandler {
@@ -171,9 +211,20 @@ impl KeyTaoHandler {
             &CreateWindowAux::new()
                 .override_redirect(1)
                 .background_pixel(0x1e1e2e)
-                .event_mask(EventMask::EXPOSURE),
+                .event_mask(
+                    EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+                ),
         )
         .expect("create panel window");
+        // Never accept keyboard focus: clicking a candidate must leave the
+        // client focused.  Override-redirect already keeps WMs away; the hint
+        // covers the rest.
+        WmHints {
+            input: Some(false),
+            ..WmHints::new()
+        }
+        .set(conn.as_ref(), panel_win)
+        .ok();
 
         let class = b"keytao-candidate\0keytao-candidate\0";
         conn.change_property8(
@@ -228,6 +279,10 @@ impl KeyTaoHandler {
             mode_hint_until: None,
             last_anchor: (0, 0),
             reload_epoch: 0,
+            panel_hit_areas: PanelHitAreas::default(),
+            panel_owner: None,
+            pressed_click: None,
+            clicked_state: None,
         }
     }
 
@@ -340,16 +395,70 @@ impl KeyTaoHandler {
             }
             return;
         }
+        let (root_x, root_y) = self.anchor_point(user_ic);
+        self.last_anchor = (root_x, root_y);
+        if !self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
+            self.panel_owner = Some(PanelOwner {
+                session: user_ic.user_data.session.clone(),
+                client_win: user_ic.ic.client_win(),
+                input_method_id: user_ic.ic.input_method_id(),
+                input_context_id: user_ic.ic.input_context_id(),
+            });
+        }
+        self.draw_composition(state);
+    }
+
+    /// Draw a composition at the last anchor.
+    fn draw_composition(&mut self, state: &ImeState) {
         let Some(renderer) = &self.renderer else {
             return;
         };
-        let (pixels, w, h) = renderer.render(state);
-        let (root_x, root_y) = self.anchor_point(user_ic);
-        self.last_anchor = (root_x, root_y);
+        let (pixels, w, h, hit_areas) = renderer.render_with_hit_areas(state);
+        if self.panel_hit_areas != hit_areas {
+            // A press on what used to be drawn must not select what is now.
+            self.pressed_click = None;
+            self.panel_hit_areas = hit_areas;
+        }
+        let (root_x, root_y) = self.last_anchor;
         // The panel now holds a composition, so the hint deadline must not be
         // allowed to unmap it later on.
         self.mode_hint_until = None;
         self.draw_panel(&pixels, w, h, root_x, root_y + PANEL_CARET_GAP);
+    }
+
+    /// Primary-button press/release on the panel window, in window pixels.
+    /// Selection happens on release over the candidate that was pressed.
+    fn handle_panel_button(&mut self, server: &mut MyServer, pressed: bool, x: i16, y: i16) {
+        let click = self.panel_hit_areas.click_at(x as f64, y as f64);
+        if pressed {
+            self.pressed_click = click;
+            return;
+        }
+        let Some(click) = self.pressed_click.take().filter(|p| click == Some(*p)) else {
+            return;
+        };
+        let Some(owner) = &self.panel_owner else {
+            return;
+        };
+        let state = match click {
+            PanelClick::Candidate(index) => owner.session.select_candidate_on_page(index),
+            PanelClick::PreviousPage => owner.session.change_page(true),
+            PanelClick::NextPage => owner.session.change_page(false),
+        };
+        let Some(state) = state else { return };
+        let ic = owner.input_context();
+        self.update_ascii_mode(state.is_english_mode());
+        if let Some(text) = &state.committed {
+            if let Err(e) = commit_text(server, &ic, text) {
+                tracing::warn!("XIM commit after panel click failed: {e}");
+            }
+        }
+        if state.preedit.is_empty() && state.candidates.is_empty() {
+            self.hide_panel();
+        } else {
+            self.draw_composition(&state);
+        }
+        self.clicked_state = Some(state);
     }
 
     /// Show the same 中/英 hint the other backends draw when Rime switches.
@@ -359,6 +468,8 @@ impl KeyTaoHandler {
         };
         let (pixels, w, h) = renderer.render_mode_hint(ascii_mode);
         let duration = renderer.mode_hint_duration();
+        self.panel_hit_areas = PanelHitAreas::default();
+        self.pressed_click = None;
         let (x, y) = self.last_anchor;
         self.draw_panel(&pixels, w, h, x - w as i32 / 2, y + PANEL_CARET_GAP);
         self.mode_hint_until = Some(Instant::now() + duration);
@@ -397,6 +508,8 @@ impl KeyTaoHandler {
 
     fn hide_panel(&mut self) {
         self.mode_hint_until = None;
+        self.panel_hit_areas = PanelHitAreas::default();
+        self.pressed_click = None;
         if self.panel_visible {
             self.conn.unmap_window(self.panel_win).ok();
             self.conn.flush().ok();
@@ -472,6 +585,10 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
     ) -> Result<(), ServerError> {
         tracing::info!("XIM DestroyIC client_win={}", user_ic.ic.client_win());
         user_ic.user_data.session.clear_composition();
+        if self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
+            self.panel_owner = None;
+            self.clicked_state = None;
+        }
         self.hide_panel();
         Ok(())
     }
@@ -501,6 +618,11 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
             // the caret must not bring those candidates back.
             user_ic.user_data.last_state = None;
             return Ok(());
+        }
+        if self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
+            if let Some(state) = self.clicked_state.take() {
+                user_ic.user_data.last_state = Some(state);
+            }
         }
         if let Some(state) = user_ic.user_data.last_state.take() {
             self.show_panel(user_ic, &state);
@@ -628,6 +750,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         }
 
         self.show_panel(user_ic, &ime_state);
+        self.clicked_state = None;
         user_ic.user_data.last_state = Some(ime_state);
         user_ic.user_data.state_epoch = self.reload_epoch;
 
@@ -680,10 +803,19 @@ pub fn run(engine: CoreEngine) {
                     if let Err(e) = server.filter_event(&event, &mut connections, &mut handler) {
                         tracing::error!("XIM error: {e}");
                     }
-                    if let Event::Expose(ev) = &event {
-                        // Candidate window was covered and re-exposed.
-                        // The next key event will re-render; nothing to do here.
-                        let _ = ev;
+                    match &event {
+                        Event::ButtonPress(ev)
+                            if ev.event == handler.panel_win && ev.detail == X_BUTTON_PRIMARY =>
+                        {
+                            handler.handle_panel_button(&mut server, true, ev.event_x, ev.event_y);
+                        }
+                        Event::ButtonRelease(ev)
+                            if ev.event == handler.panel_win && ev.detail == X_BUTTON_PRIMARY =>
+                        {
+                            handler.handle_panel_button(&mut server, false, ev.event_x, ev.event_y);
+                        }
+                        // Expose: the next key event re-renders; nothing to do.
+                        _ => {}
                     }
                 }
                 Ok(None) => break,

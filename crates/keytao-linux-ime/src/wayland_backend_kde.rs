@@ -22,9 +22,10 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_keyboard::{self, WlKeyboard},
+        wl_pointer::{self, WlPointer},
         wl_region::WlRegion,
         wl_registry,
-        wl_seat::WlSeat,
+        wl_seat::{self, WlSeat},
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
@@ -43,10 +44,13 @@ use crate::{
     engine::{CoreEngine, ImeSession},
     kimpanel::KimpanelHandle,
     panel::{load_font, PanelRenderer},
+    panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
 };
 
 const DEACTIVATE_DEBOUNCE: Duration = Duration::from_millis(180);
+/// `BTN_LEFT` from linux/input-event-codes.h.
+const BTN_LEFT: u32 = 0x110;
 
 /// `zwp_text_input_v1::content_purpose::password`.  Note that v1 has no `pin`
 /// and numbers its later purposes one lower than `zwp_text_input_v3`, so the
@@ -150,6 +154,12 @@ struct App {
     panel_popup: Option<ZwpInputPanelSurfaceV1>,
     panel_buffer: Option<WlBuffer>,
     panel_visible: bool,
+    /// Where the candidates on screen were drawn; empty unless candidates are.
+    panel_hit_areas: PanelHitAreas,
+    pointer: Option<WlPointer>,
+    /// Pointer position over the panel surface, `None` when it is elsewhere.
+    pointer_pos: Option<(f64, f64)>,
+    pressed_click: Option<PanelClick>,
     ime_state: Option<ImeState>,
 }
 
@@ -191,6 +201,10 @@ impl App {
             panel_popup: None,
             panel_buffer: None,
             panel_visible: false,
+            panel_hit_areas: PanelHitAreas::default(),
+            pointer: None,
+            pointer_pos: None,
+            pressed_click: None,
             ime_state: None,
         }
     }
@@ -351,11 +365,6 @@ impl App {
         let popup = panel_manager.get_input_panel_surface(&surface, qh, ());
         popup.set_overlay_panel();
 
-        // Set input region to empty so clicks pass through the candidate window.
-        let region = compositor.create_region(qh, ());
-        surface.set_input_region(Some(&region));
-        region.destroy();
-
         // 1x1 transparent dummy buffer to make surface valid for KWin
         let mut fd = match tempfile() {
             Ok(file) => file,
@@ -393,6 +402,8 @@ impl App {
             buf.destroy();
         }
         self.panel_visible = false;
+        self.panel_hit_areas = PanelHitAreas::default();
+        self.pressed_click = None;
         self.ime_state = None;
     }
 
@@ -406,19 +417,30 @@ impl App {
         };
 
         let show_hint = self.mode_hint_active();
-        let (pixels, w, h) = if let Some(state) = self
+        let (pixels, w, h, hit_areas) = if let Some(state) = self
             .ime_state
             .as_ref()
             .filter(|state| !state.candidates.is_empty())
         {
-            renderer.render(state)
+            renderer.render_with_hit_areas(state)
         } else if show_hint {
-            renderer.render_mode_hint(self.ascii_mode)
+            let (pixels, w, h) = renderer.render_mode_hint(self.ascii_mode);
+            (pixels, w, h, PanelHitAreas::default())
         } else {
             return;
         };
         if w == 0 || h == 0 {
             return;
+        }
+        // Candidates take clicks; the transient mode hint lets them through.
+        if let Some(compositor) = self.compositor.as_ref() {
+            if hit_areas.candidates.is_empty() {
+                let region = compositor.create_region(qh, ());
+                surface.set_input_region(Some(&region));
+                region.destroy();
+            } else {
+                surface.set_input_region(None);
+            }
         }
         let stride = w * 4;
         let pool_size = (stride * h) as usize;
@@ -453,6 +475,11 @@ impl App {
         surface.damage_buffer(0, 0, w as i32, h as i32);
         surface.commit();
 
+        if self.panel_hit_areas != hit_areas {
+            // A press on what used to be drawn must not select what is now.
+            self.pressed_click = None;
+            self.panel_hit_areas = hit_areas;
+        }
         if let Some(old) = self.panel_buffer.replace(buffer) {
             old.destroy();
         }
@@ -660,6 +687,24 @@ impl App {
             self.hide_panel_popup();
             self.forward_key_press(evdev_keycode);
         }
+    }
+
+    /// A primary click on the panel: the same session calls and client updates
+    /// as a number-key selection or a page key.
+    fn handle_panel_click(&mut self, click: PanelClick, qh: &QueueHandle<Self>) {
+        if !self.active || !self.session.input_policy().composing {
+            return;
+        }
+        let state = match click {
+            PanelClick::Candidate(index) => self.session.select_candidate_on_page(index),
+            PanelClick::PreviousPage => self.session.change_page(true),
+            PanelClick::NextPage => self.session.change_page(false),
+        };
+        let Some(state) = state else { return };
+        self.update_ascii_mode(state.is_english_mode(), qh);
+        self.commit_state_to_context(&state);
+        self.update_kimpanel(&state);
+        self.show_panel(state, qh);
     }
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
@@ -876,7 +921,95 @@ impl Dispatch<WlKeyboard, ()> for App {
     }
 }
 
-delegate_noop!(App: ignore WlSeat);
+impl Dispatch<WlSeat, ()> for App {
+    fn event(
+        state: &mut Self,
+        seat: &WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
+            let has_pointer = caps.contains(wl_seat::Capability::Pointer);
+            if has_pointer && state.pointer.is_none() {
+                state.pointer = Some(seat.get_pointer(qh, ()));
+            } else if !has_pointer {
+                if let Some(pointer) = state.pointer.take() {
+                    if pointer.version() >= 3 {
+                        pointer.release();
+                    }
+                }
+                state.pointer_pos = None;
+                state.pressed_click = None;
+            }
+        }
+    }
+}
+
+/// Pointer input on the candidate panel.  The overlay panel never takes
+/// keyboard focus (KWin keeps it on the text-input client), so clicking it
+/// leaves the client focused.
+impl Dispatch<WlPointer, ()> for App {
+    fn event(
+        state: &mut Self,
+        _pointer: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_pos = (state.panel_surface.as_ref() == Some(&surface))
+                    .then_some((surface_x, surface_y));
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_pos = None;
+                state.pressed_click = None;
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if state.pointer_pos.is_some() {
+                    state.pointer_pos = Some((surface_x, surface_y));
+                }
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: button_state,
+                ..
+            } if button == BTN_LEFT => {
+                let Some((x, y)) = state.pointer_pos else {
+                    return;
+                };
+                let click = state.panel_hit_areas.click_at(x, y);
+                match button_state {
+                    WEnum::Value(wl_pointer::ButtonState::Pressed) => state.pressed_click = click,
+                    WEnum::Value(wl_pointer::ButtonState::Released) => {
+                        if let Some(click) =
+                            state.pressed_click.take().filter(|p| click == Some(*p))
+                        {
+                            state.handle_panel_click(click, qh);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
 delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore WlShm);
 delegate_noop!(App: ignore WlShmPool);

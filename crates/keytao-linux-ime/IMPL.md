@@ -230,7 +230,7 @@ KWin 6 的虚拟键盘路径使用 input-method-v1：
 - `accepted=false` 时先 `commit_state_to_context()` 再清 UI 并转发按键，原因同 input-method-v2 一节：拒绝按键不代表没有 commit。
 - `content_type` 事件按 **text-input-v1** 的编号解析：purpose `password` 是 8（v1 没有 `pin`，9 是 `date`），hint 的 `hidden_text`(0x40) / `sensitive_data`(0x80) / `password`(0xc0) 命中即切 `InputContextPolicy::sensitive()`。不要复用 v2/IBus 的常量表。
 - 候选状态同时更新 Kimpanel 和 input panel overlay。
-- overlay panel 设置空 input region，避免候选窗拦截鼠标点击。
+- overlay panel 显示候选时 input region 为整个表面以接收点选，只显示模式提示时设为空 region 让点击穿透。
 - 失焦有 180ms debounce，到期后 `reset_context_state()` 会 `keyboard.release()` + `context.destroy()`：协议要求 deactivate 处理完必须销毁 context，而 wayland-client 的 proxy 在 `Drop` 时不会自动发 destructor。销毁前后 `Dispatch<ZwpInputMethodContextV1>` 会丢弃非当前 context 的事件，避免旧 context 的 `commit_state`/`reset` 覆盖新 context 的状态。
 - 中英模式变化时，input panel overlay 用 `render_mode_hint()` 显示主题化模式提示，并按 `modeHint.duration` 自动隐藏；同时把新模式记进 `pending_kimpanel_mode`，由事件循环调用 `KimpanelHandle::update_mode()` 发 `UpdateProperty`，让 Plasma 指示器跟随 Rime 状态（Kimpanel 调用是 async，不能在 Wayland dispatch 里直接 await）。
 - `wl_keyboard` 是 `grab_keyboard` 创建的、版本为 1 的对象，早于 `repeat_info`（v4 才有），所以 KDE 路径上收不到用户的重复设置。抓到版本 < 4 的键盘时按 xkb/Plasma 默认值（delay 600 ms、rate 25/s）兜底，否则组字中长按退格完全不重复；KWin 将来提高版本后 `repeat_info` 会直接覆盖这个兜底值。

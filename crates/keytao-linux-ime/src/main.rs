@@ -12,6 +12,7 @@ mod ibus_shared;
 mod kimpanel;
 #[cfg(target_os = "linux")]
 mod panel;
+mod panel_hit;
 #[cfg(target_os = "linux")]
 mod reload_bus;
 #[cfg(target_os = "linux")]

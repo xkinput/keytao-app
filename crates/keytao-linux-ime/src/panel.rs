@@ -18,6 +18,8 @@ use keytao_theme::{
     CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use tiny_skia::*;
+
+use crate::panel_hit::{layout, PanelGeometry, PanelHitAreas};
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{
@@ -563,6 +565,12 @@ impl PanelRenderer {
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
     pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
+        let (pixels, width, height, _) = self.render_with_hit_areas(state);
+        (pixels, width, height)
+    }
+
+    /// Like `render`, plus where each candidate and paging button was drawn.
+    pub fn render_with_hit_areas(&self, state: &ImeState) -> (Vec<u8>, u32, u32, PanelHitAreas) {
         let theme = self.theme_resolver.current();
         let model = theme
             .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
@@ -678,62 +686,34 @@ impl PanelRenderer {
             y += preedit_height;
         }
 
-        if model.orientation == PanelOrientation::Vertical {
-            let mut row_y = y;
-            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
-                self.draw_candidate_option(
-                    &mut pm,
-                    candidate,
-                    panel_pad_x,
-                    row_y,
-                    *option_width,
-                    option_height,
-                    label_size,
-                    font_size,
-                    comment_size,
-                    &theme,
-                );
-                row_y += option_height + option_gap;
-            }
-            if nav_count > 0 {
-                self.draw_navigation_row(
-                    &mut pm,
-                    panel_pad_x,
-                    row_y,
-                    nav_button,
-                    font_size,
-                    &model.navigation,
-                    &theme,
-                );
-            }
-        } else {
-            let mut x = panel_pad_x;
-            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
-                self.draw_candidate_option(
-                    &mut pm,
-                    candidate,
-                    x,
-                    y,
-                    *option_width,
-                    option_height,
-                    label_size,
-                    font_size,
-                    comment_size,
-                    &theme,
-                );
-                x += option_width + option_gap;
-            }
-            if nav_count > 0 {
-                x += panel_gap;
-                self.draw_navigation_row(
-                    &mut pm,
-                    x,
-                    y,
-                    nav_button,
-                    font_size,
-                    &model.navigation,
-                    &theme,
-                );
+        let areas = layout(&PanelGeometry {
+            vertical: model.orientation == PanelOrientation::Vertical,
+            pad_x: panel_pad_x,
+            top: y,
+            gap: panel_gap,
+            option_widths: &option_widths,
+            option_height,
+            nav_button,
+            can_go_previous: model.navigation.can_go_previous,
+            can_go_next: model.navigation.can_go_next,
+        });
+        for (candidate, rect) in model.candidates.iter().zip(areas.candidates.iter()) {
+            self.draw_candidate_option(
+                &mut pm,
+                candidate,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                label_size,
+                font_size,
+                comment_size,
+                &theme,
+            );
+        }
+        for (rect, glyph) in [(areas.previous_page, "‹"), (areas.next_page, "›")] {
+            if let Some(rect) = rect {
+                self.draw_navigation_button(&mut pm, rect, glyph, font_size, &theme);
             }
         }
 
@@ -743,7 +723,7 @@ impl PanelRenderer {
             px.swap(0, 2); // R↔B
         }
 
-        (out, width, height)
+        (out, width, height, areas)
     }
 
     pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
@@ -886,39 +866,23 @@ impl PanelRenderer {
         }
     }
 
-    fn draw_navigation_row(
+    fn draw_navigation_button(
         &self,
         pm: &mut Pixmap,
-        x: f32,
-        y: f32,
-        button_size: f32,
+        rect: crate::panel_hit::PanelRect,
+        glyph: &str,
         font_size: f32,
-        navigation: &keytao_theme::PageNavigationModel,
         theme: &keytao_theme::ResolvedImeTheme,
     ) {
-        let mut nav_x = x;
-        let baseline = y + (button_size + font_size) * 0.5 - self.s(4.0);
-        if navigation.can_go_previous {
-            self.draw_text(
-                pm,
-                "‹",
-                nav_x + button_size * 0.35,
-                baseline,
-                bgra(theme.navigation.foreground),
-                font_size,
-            );
-            nav_x += button_size + self.s(theme.panel.gap);
-        }
-        if navigation.can_go_next {
-            self.draw_text(
-                pm,
-                "›",
-                nav_x + button_size * 0.35,
-                baseline,
-                bgra(theme.navigation.foreground),
-                font_size,
-            );
-        }
+        let baseline = rect.y + (rect.height + font_size) * 0.5 - self.s(4.0);
+        self.draw_text(
+            pm,
+            glyph,
+            rect.x + rect.width * 0.35,
+            baseline,
+            bgra(theme.navigation.foreground),
+            font_size,
+        );
     }
 
     fn s(&self, value: f32) -> f32 {
