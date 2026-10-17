@@ -1,5 +1,6 @@
 use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme::build_client};
 use futures_util::StreamExt;
+use std::time::Duration;
 
 pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreError> {
     let result: Result<_, String> = async {
@@ -33,7 +34,10 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
         };
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .map_err(|_| "下载超时：30 秒内未收到数据".to_string())?
+        {
             let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
             downloaded += chunk.len() as u64;
             bytes.extend_from_slice(&chunk);
