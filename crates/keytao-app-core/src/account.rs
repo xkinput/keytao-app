@@ -110,47 +110,52 @@ async fn keytao_me_at(
     token: String,
     api_base: &str,
 ) -> Result<AppAuthUser, CoreError> {
-    let result: Result<_, String> = async {
-        let token = token.trim();
-        if token.is_empty() {
-            return Err("未登录".into());
-        }
-
-        let client = build_client(core)?;
-        let response = client
-            .get(format!("{api_base}/api/auth/me"))
-            .bearer_auth(token)
-            .timeout(std::time::Duration::from_secs(12))
-            .send()
-            .await
-            .map_err(|e| format!("校验登录状态失败: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(api_error_message(response, "校验登录状态失败").await);
-        }
-
-        let user = response
-            .json::<AppAuthUser>()
-            .await
-            .map_err(|e| format!("解析账号信息失败: {e}"))?;
-        if let Err(error) = serde_json::to_value(&user)
-            .map_err(CoreError::from)
-            .and_then(|stored_user| {
-                core.update_state(|state| {
-                    // Compare under the state lock after the request completes: a stale
-                    // response must not update a newer login or restore a cleared session.
-                    if state.auth_token.as_deref() == Some(token) {
-                        state.user = Some(stored_user);
-                    }
-                })
-            })
-        {
-            tracing::warn!(%error, "Failed to persist refreshed account");
-        }
-        Ok(user)
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(CoreError::Other("未登录".into()));
     }
-    .await;
-    result.map_err(CoreError::Other)
+
+    let client = build_client(core).map_err(CoreError::Other)?;
+    let response = client
+        .get(format!("{api_base}/api/auth/me"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| CoreError::Other(format!("校验登录状态失败: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let message = api_error_message(response, "校验登录状态失败").await;
+        // Only an explicit rejection of the token may end the session; every
+        // other failure is treated as transient by callers.
+        return Err(match status {
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                CoreError::Permission(message)
+            }
+            _ => CoreError::Other(message),
+        });
+    }
+
+    let user = response
+        .json::<AppAuthUser>()
+        .await
+        .map_err(|e| CoreError::Other(format!("解析账号信息失败: {e}")))?;
+    if let Err(error) = serde_json::to_value(&user)
+        .map_err(CoreError::from)
+        .and_then(|stored_user| {
+            core.update_state(|state| {
+                // Compare under the state lock after the request completes: a stale
+                // response must not update a newer login or restore a cleared session.
+                if state.auth_token.as_deref() == Some(token) {
+                    state.user = Some(stored_user);
+                }
+            })
+        })
+    {
+        tracing::warn!(%error, "Failed to persist refreshed account");
+    }
+    Ok(user)
 }
 
 fn active_import_exists(content: &str, import_name: &str) -> bool {

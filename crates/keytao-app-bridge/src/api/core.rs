@@ -47,6 +47,69 @@ pub fn complete_onboarding() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// The persisted account, if a token is stored. The token never leaves Rust.
+pub fn account_session() -> Result<Option<AccountUserDto>, String> {
+    let state = runtime::state()?.core.state();
+    match (state.auth_token, state.user) {
+        (Some(_), Some(user)) => Ok(Some(runtime::dto(user)?)),
+        _ => Ok(None),
+    }
+}
+
+pub async fn account_login(name: String, password: String) -> Result<AccountUserDto, String> {
+    let session = keytao_app_core::account::keytao_login(&runtime::state()?.core, name, password)
+        .await
+        .map_err(|error| error.to_string())?;
+    runtime::dto(session.user)
+}
+
+/// Revalidates the stored token. Only a server rejection (401/403) clears the
+/// session; network and other errors keep it and are returned as Err.
+pub async fn account_refresh() -> Result<Option<AccountUserDto>, String> {
+    let core = &runtime::state()?.core;
+    let Some(token) = core.state().auth_token else {
+        return Ok(None);
+    };
+    match keytao_app_core::account::keytao_me(core, token.clone()).await {
+        Ok(user) => Ok(Some(runtime::dto(user)?)),
+        Err(keytao_app_core::CoreError::Permission(_)) => {
+            // Compare under the state lock: a login that finished meanwhile wins.
+            core.update_state(|state| {
+                if state.auth_token.as_deref() == Some(token.as_str()) {
+                    state.auth_token = None;
+                    state.user = None;
+                    state.legacy_imported = true;
+                }
+            })
+            .map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub fn account_logout() -> Result<(), String> {
+    runtime::state()?
+        .core
+        .clear_auth()
+        .map_err(|error| error.to_string())
+}
+
+/// Writes the user dictionary into the host root without deploying.
+pub async fn account_sync_user_dictionary() -> Result<UserDictionarySyncDto, String> {
+    let state = runtime::state()?;
+    let token = state.core.state().auth_token.ok_or("未登录")?;
+    let _guard = state.install_lock.lock().await;
+    let result = keytao_app_core::account::sync_user_dictionary(&state.core, &state.host, token)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(UserDictionarySyncDto {
+        file_name: result.file_name,
+        count: result.count as u64,
+        message: result.message,
+    })
+}
+
 pub async fn fetch_scheme_release(scheme: String) -> Result<SchemeReleaseDto, String> {
     let release = keytao_app_core::scheme::fetch_scheme_release(&runtime::state()?.core, scheme)
         .await

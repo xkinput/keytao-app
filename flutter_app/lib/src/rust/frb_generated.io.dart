@@ -41,6 +41,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AccountUserDto dco_decode_account_user_dto(dynamic raw);
+
+  @protected
   AddonSchemaStatusDto dco_decode_addon_schema_status_dto(dynamic raw);
 
   @protected
@@ -53,6 +56,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AccountUserDto dco_decode_box_autoadd_account_user_dto(dynamic raw);
 
   @protected
   AndroidImeInputSettingsDto
@@ -171,6 +177,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  AccountUserDto? dco_decode_opt_box_autoadd_account_user_dto(dynamic raw);
+
+  @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
@@ -231,6 +240,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  UserDictionarySyncDto dco_decode_user_dictionary_sync_dto(dynamic raw);
+
+  @protected
   BigInt dco_decode_usize(dynamic raw);
 
   @protected
@@ -257,6 +269,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AccountUserDto sse_decode_account_user_dto(SseDeserializer deserializer);
+
+  @protected
   AddonSchemaStatusDto sse_decode_addon_schema_status_dto(
     SseDeserializer deserializer,
   );
@@ -271,6 +286,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AccountUserDto sse_decode_box_autoadd_account_user_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   AndroidImeInputSettingsDto
@@ -411,6 +431,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  AccountUserDto? sse_decode_opt_box_autoadd_account_user_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
@@ -483,6 +508,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  UserDictionarySyncDto sse_decode_user_dictionary_sync_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BigInt sse_decode_usize(SseDeserializer deserializer);
 
   @protected
@@ -523,6 +553,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
+  void sse_encode_account_user_dto(
+    AccountUserDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_addon_schema_status_dto(
     AddonSchemaStatusDto self,
     SseSerializer serializer,
@@ -539,6 +575,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_account_user_dto(
+    AccountUserDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_android_ime_input_settings_dto(
@@ -727,6 +769,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_account_user_dto(
+    AccountUserDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_debug_log_file_dto(
     DebugLogFileDto? self,
     SseSerializer serializer,
@@ -815,6 +863,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_user_dictionary_sync_dto(
+    UserDictionarySyncDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_usize(BigInt self, SseSerializer serializer);

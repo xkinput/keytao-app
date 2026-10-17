@@ -112,8 +112,12 @@ async fn failed_auth_responses_preserve_the_stored_session() {
                     .err()
                     .unwrap()
             };
-            assert!(matches!(&error, CoreError::Other(_)));
-            assert!(error.to_string().starts_with(expected), "{error}");
+            if !login && status.starts_with("401") {
+                assert!(matches!(&error, CoreError::Permission(m) if m == expected));
+            } else {
+                assert!(matches!(&error, CoreError::Other(_)));
+                assert!(error.to_string().starts_with(expected), "{error}");
+            }
             server.await.unwrap();
             assert!(core.state() == before);
             assert!(open_core(dir.path()).state() == before);
@@ -272,4 +276,37 @@ async fn login_persists_token_and_user_without_changing_response() {
             .unwrap(),
         json!({"name":"alice","password":"test-password"})
     );
+}
+
+#[tokio::test]
+async fn me_marks_only_token_rejections_as_permission_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    for (status, rejected) in [
+        ("401 Unauthorized", true),
+        ("403 Forbidden", true),
+        ("500 Internal Server Error", false),
+        ("502 Bad Gateway", false),
+    ] {
+        let (url, server) = respond(status, r#"{"error":"fixture"}"#).await;
+        let error = keytao_me_at(&core, "stored-token".into(), &url)
+            .await
+            .err()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            matches!(error, CoreError::Permission(_)),
+            rejected,
+            "{status}"
+        );
+    }
+    // Connection failures are transient, never a token rejection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let error = keytao_me_at(&core, "stored-token".into(), &url)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, CoreError::Other(_)));
 }

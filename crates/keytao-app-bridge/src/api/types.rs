@@ -374,3 +374,16 @@ mod tests {
         assert_eq!(expected.as_object().unwrap().len(), 26);
     }
 }
+
+#[derive(serde::Deserialize)]
+pub struct AccountUserDto {
+    pub name: Option<String>,
+    pub nickname: Option<String>,
+    pub email: Option<String>,
+}
+
+pub struct UserDictionarySyncDto {
+    pub file_name: String,
+    pub count: u64,
+    pub message: String,
+}

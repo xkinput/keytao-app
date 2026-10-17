@@ -30,6 +30,30 @@ Future<OnboardingDto> onboarding() =>
 Future<void> completeOnboarding() =>
     RustLib.instance.api.crateApiCoreCompleteOnboarding();
 
+/// The persisted account, if a token is stored. The token never leaves Rust.
+Future<AccountUserDto?> accountSession() =>
+    RustLib.instance.api.crateApiCoreAccountSession();
+
+Future<AccountUserDto> accountLogin({
+  required String name,
+  required String password,
+}) => RustLib.instance.api.crateApiCoreAccountLogin(
+  name: name,
+  password: password,
+);
+
+/// Revalidates the stored token. Only a server rejection (401/403) clears the
+/// session; network and other errors keep it and are returned as Err.
+Future<AccountUserDto?> accountRefresh() =>
+    RustLib.instance.api.crateApiCoreAccountRefresh();
+
+Future<void> accountLogout() =>
+    RustLib.instance.api.crateApiCoreAccountLogout();
+
+/// Writes the user dictionary into the host root without deploying.
+Future<UserDictionarySyncDto> accountSyncUserDictionary() =>
+    RustLib.instance.api.crateApiCoreAccountSyncUserDictionary();
+
 Future<SchemeReleaseDto> fetchSchemeRelease({required String scheme}) =>
     RustLib.instance.api.crateApiCoreFetchSchemeRelease(scheme: scheme);
 
