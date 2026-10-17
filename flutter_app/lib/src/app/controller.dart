@@ -1350,8 +1350,9 @@ class AppController extends ChangeNotifier {
     try {
       await _open(appUpdate!.releaseUrl);
       return true;
-    } catch (_) {
-      // The old release banner was a plain link with no app-level error state.
+    } catch (failure) {
+      error = errorText(failure);
+      _changed();
       return false;
     }
   }
