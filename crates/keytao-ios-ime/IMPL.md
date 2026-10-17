@@ -338,7 +338,7 @@ iOS 由于不能在键盘 view 外绘制候选窗，候选栏固定在键盘顶�
 
 ### 判断方式
 
-UI 一律**按位判断**，不写「iOS 就是没有」。iOS 当前的实测结果是 selection / global selection / deletion 为 1，paging / highlight 为 0（`keytao-core::engine_capabilities()` 对 iOS target 编译期判定后两项不可用，因为 1.8.5 的 `RimeApi` 根本没有这两个字段），但只要换上 librime ≥ 1.9 的 runtime，掩码变了 UI 就自动恢复，不需要改 Swift。
+UI 一律**按位判断**，不写「iOS 就是没有」。iOS 的 vendored librime 是 1.17.0，`RimeApi` 带全部入口，能力位与其他平台一致；换上缺入口的 runtime 时掩码变化，UI 自动降级，不需要改 Swift。
 
 ## Reload 与部署
 
@@ -480,15 +480,7 @@ xcrun simctl uninstall booted ink.rea.keytao-app.keyboard || true
 5. 扩展内存预算实测
    `didReceiveMemoryWarning` 降级钩子已就位，但键盘扩展的 jetsam 上限是未公开数值，键道大词库在扩展内的常驻内存尚无本机实测数据，需要在真机上记录一次基线后再决定是否进一步收缩 `expandedCandidateLimit` 等参数。
 
-6. iOS librime runtime 版本落后
-   `vendor/librime/ios/*` 当前是 librime 1.8.5（`scripts/build-ios-librime.sh` 固定在 LibrimeKit v0.1.0 的 ref），缺 `change_page` 与 `highlight_candidate_on_current_page` 两个 1.9 起才有的入口。keytao-core 现在按 `data_size` 做 ABI 能力探测并对 iOS target 编译期判定这两项为不可用（`EngineCapabilities { native_paging: false, candidate_highlight: false }`），`cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 已恢复通过。仍需重建/导入 librime ≥ 1.9 的 iOS SDK（会连带涉及 Boost 版本与 C++ 标准、librime-lua 的兼容补丁）。当前实际影响：
-   - 选词走官方 `select_candidate_on_current_page`（1.8.5 已有），不合成 select key，安全。
-   - 高亮降级为 no-op，不伪造按键；Swift 侧本来也不调用。
-   - 翻页在 1.8.5 上会退化成合成 `-`/`=` 按键（schema 没导入默认 `paging_with_minus_equal` 时这两个字符会进编码），**因此翻页 UI 现在按能力禁用**；内置默认布局本来就没有翻页键，只有用户自己在 `keyboard.yaml` 里写了这两个动作才会看到差异。
-   - 点击选词同样过 `KEYTAO_CAP_CANDIDATE_SELECTION` / `KEYTAO_CAP_GLOBAL_CANDIDATE_SELECTION` 判断。1.8.5 两项都有，所以当前不会触发；这道 guard 是防止将来换到缺入口的 runtime 时退回合成 select key。
-   - 具体的降级点、能力缓存与刷新时机见「能力位驱动的 UI 降级（D4）」。
-
-7. iPad/外接键盘适配未细化
+6. iPad/外接键盘适配未细化
    当前重点是触摸软键盘。iPad split/floating keyboard、hardware keyboard passthrough 和多窗口需要单独验证。
 
 ## 验证记录
@@ -501,7 +493,7 @@ cargo check -p keytao-core -p keytao-core-ffi
 scripts/verify-ios-ime.sh
 ```
 
-Swift 源码类型检查通过。`scripts/verify-ios-ime.sh` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并运行 rollover、interaction policy、floating layout 三个 host 测试脚本；在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target，没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。keytao-core 加上 ABI 能力探测后，最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.8.5 runtime 上也已通过（原先报 `E0609`）。
+Swift 源码类型检查通过。`scripts/verify-ios-ime.sh` 会校验主 App/extension plist、entitlement、Swift 源码、切换键强制注入断言和 C FFI 头文件，并运行 rollover、interaction policy、floating layout 三个 host 测试脚本；在存在 `vendor/librime/ios/<target>` 或 `KEYTAO_IOS_RIME_ROOT` 时继续检查 iOS Rust target，没有 iOS 版 librime runtime 时会跳过链接检查并明确提示导入命令。最后一步 `cargo check -p keytao-core-ffi --target aarch64-apple-ios-sim` 在本机 librime 1.17.0 runtime 上通过。
 
 `test-touch-rollover.sh`、`test-interaction-policy.sh` 与 `test-floating-layout.sh` 均由 `scripts/verify-ios-ime.sh` 调用。
 

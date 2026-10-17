@@ -174,9 +174,8 @@ impl SessionInputPolicy {
 /// What the librime the process is linked against can do through its own
 /// entry points, as opposed to through synthesized key strokes.
 ///
-/// The vendored iOS librime is 1.8.5 and predates paging and highlighting, and
-/// a user-supplied system librime can be anything, so a frontend must be able
-/// to ask instead of assume: a capability that is missing degrades to a
+/// A user-supplied system librime can be anything (paging and highlighting
+/// arrived in 1.9), so a frontend must be able to ask instead of assume: a capability that is missing degrades to a
 /// fallback that depends on the schema (a select key, `-`/`=`, `Escape`) and
 /// therefore silently misbehaves on schemas that bind those keys differently.
 /// Frontends disable the affected UI instead of offering a control that types
@@ -490,9 +489,7 @@ mod desktop {
         }};
     }
 
-    // `change_page` only exists in the headers of librime 1.9 and newer, see
-    // [`engine_capabilities`].
-    #[cfg(all(test, not(target_os = "ios")))]
+    #[cfg(test)]
     mod api_member_tests {
         use super::{active_user_dictionary_text, api_has_member};
         use librime_sys::RimeApi;
@@ -1580,11 +1577,6 @@ mod desktop {
 
     /// Which of the candidate, paging and composition entry points the linked
     /// librime actually exports.
-    ///
-    /// `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi` has no
-    /// `change_page` and no `highlight_candidate_on_current_page` field at all,
-    /// so those two are answered at compile time. Remove the `cfg` once the
-    /// vendored iOS librime is rebuilt from 1.9 or newer.
     pub(crate) fn engine_capabilities() -> EngineCapabilities {
         let _rime = rime_api_lock();
         // SAFETY: the librime lock is held and only the function pointers of
@@ -1595,13 +1587,9 @@ mod desktop {
                 return EngineCapabilities::none();
             }
 
-            #[cfg(target_os = "ios")]
-            let (native_paging, candidate_highlight) = (false, false);
-            #[cfg(not(target_os = "ios"))]
-            let (native_paging, candidate_highlight) = (
-                rime_api_member!(api, change_page).is_some(),
-                rime_api_member!(api, highlight_candidate_on_current_page).is_some(),
-            );
+            let native_paging = rime_api_member!(api, change_page).is_some();
+            let candidate_highlight =
+                rime_api_member!(api, highlight_candidate_on_current_page).is_some();
 
             EngineCapabilities {
                 candidate_selection: rime_api_member!(api, select_candidate_on_current_page)
@@ -1772,15 +1760,7 @@ mod desktop {
         /// Move the highlight without committing, for hover/arrow interactions.
         pub fn highlight_candidate_on_page(&self, index: usize) -> ImeState {
             let _rime = rime_api_lock();
-            // `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi`
-            // predates `highlight_candidate_on_current_page` (added in 1.9), so
-            // the field does not exist at compile time and moving the highlight
-            // without committing degrades to a no-op. Remove the gate once the
-            // vendored iOS librime is rebuilt from 1.9 or newer.
-            #[cfg(target_os = "ios")]
-            let _ = index;
             // SAFETY: the librime lock is held; the pointer is checked.
-            #[cfg(not(target_os = "ios"))]
             unsafe {
                 let api = rime_get_api();
                 if let Some(highlight) = rime_api_member!(api, highlight_candidate_on_current_page)
@@ -1952,16 +1932,8 @@ mod desktop {
         /// `key_binder` paging preset.
         pub fn change_page(&self, backward: bool) -> ImeState {
             let _rime = rime_api_lock();
-            // `vendor/librime/ios` is built from librime 1.8.5, whose `RimeApi`
-            // predates `change_page` (added in 1.9), so the field does not exist
-            // at compile time and paging always takes the synthetic-key path.
-            // Remove the gate once the vendored iOS librime is rebuilt from 1.9
-            // or newer.
-            #[cfg(target_os = "ios")]
-            let handled = false;
             // SAFETY: the librime lock is held; a missing pointer falls back to
             // the historical synthetic key.
-            #[cfg(not(target_os = "ios"))]
             let handled = unsafe {
                 let api = rime_get_api();
                 rime_api_member!(api, change_page)

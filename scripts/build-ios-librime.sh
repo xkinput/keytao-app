@@ -6,12 +6,11 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_ROOT="${KEYTAO_IOS_LIBRIME_CACHE:-$PROJECT_DIR/.cache/ios-librime}"
 BUILD_ROOT="${KEYTAO_IOS_LIBRIME_BUILD_ROOT:-$PROJECT_DIR/target/ios-librime-build}"
 LIBRIME_URL="${KEYTAO_IOS_LIBRIME_URL:-https://github.com/rime/librime.git}"
-LIBRIME_REF="${KEYTAO_IOS_LIBRIME_REF:-08dd95f5d9282346f0d4a3e8fc6b20811dc3d063}"
+LIBRIME_REF="${KEYTAO_IOS_LIBRIME_REF:-33e78140250125871856cdc5b42ddc6a5fcd3cd4}"
 LIBRIME_LUA_URL="${KEYTAO_IOS_LIBRIME_LUA_URL:-https://github.com/hchunhui/librime-lua.git}"
 LIBRIME_LUA_REF="${KEYTAO_IOS_LIBRIME_LUA_REF:-master}"
 LIBRIME_LUA_THIRDPARTY_REF="${KEYTAO_IOS_LIBRIME_LUA_THIRDPARTY_REF:-thirdparty}"
-LIBRIMEKIT_VERSION="${KEYTAO_IOS_LIBRIMEKIT_VERSION:-v0.1.0}"
-BOOST_VERSION="${KEYTAO_IOS_BOOST_VERSION:-1.76.0}"
+BOOST_VERSION="${KEYTAO_IOS_BOOST_VERSION:-1.84.0}"
 CMAKE_VERSION="${KEYTAO_IOS_CMAKE_VERSION:-4.3.3}"
 IOS_DEPLOYMENT_TARGET="${KEYTAO_IOS_DEPLOYMENT_TARGET:-15.0}"
 TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios)
@@ -28,7 +27,7 @@ Options:
   -h, --help            Show this help.
 
 Environment:
-  KEYTAO_IOS_LIBRIME_REF        librime git ref. Defaults to the LibrimeKit v0.1.0 ref.
+  KEYTAO_IOS_LIBRIME_REF        librime git ref. Defaults to the 1.17.0 tag commit.
   KEYTAO_IOS_LIBRIME_LUA_REF    librime-lua git ref. Defaults to master.
   KEYTAO_IOS_BOOST_VERSION      Boost header version. Defaults to $BOOST_VERSION.
   KEYTAO_IOS_CMAKE_VERSION      Downloaded CMake version if cmake is missing.
@@ -148,15 +147,8 @@ ensure_librime_lua_plugin() {
 
 patch_librime_lua_for_ios() {
     local plugin_dir="$1"
-    local types_cc="$plugin_dir/src/types.cc"
     local cmake_lists="$plugin_dir/CMakeLists.txt"
-    [ -f "$types_cc" ] || die "missing librime-lua source: $types_cc"
     [ -f "$cmake_lists" ] || die "missing librime-lua CMakeLists: $cmake_lists"
-
-    if ! grep -q "KEYTAO_IOS_LIBRIME_LUA_FILESYSTEM_COMPAT" "$types_cc"; then
-        perl -0pi -e 's/#include <boost\/regex\.hpp>\n/#include <boost\/regex.hpp>\n#include <boost\/filesystem.hpp>\n\n\/\/ KEYTAO_IOS_LIBRIME_LUA_FILESYSTEM_COMPAT: librime 1.8.x iOS builds use C++14 and Boost filesystem.\nusing path = boost::filesystem::path;\n/' "$types_cc"
-    fi
-    perl -0pi -e 's/std::filesystem::exists/boost::filesystem::exists/g' "$types_cc"
 
     if ! grep -q "KEYTAO_IOS_LIBRIME_LUA_CMAKE_COMPAT" "$cmake_lists"; then
         perl -0pi -e 's/add_definitions\(-DLUA_COMPAT_5_3\)\n/add_definitions(-DLUA_COMPAT_5_3)\n# KEYTAO_IOS_LIBRIME_LUA_CMAKE_COMPAT: avoid unavailable system() in Lua oslib on iOS.\nif(CMAKE_SYSTEM_NAME MATCHES "iOS")\n  add_definitions(-DLUA_USE_IOS)\nendif()\n/' "$cmake_lists"
@@ -176,18 +168,6 @@ patch_opencc_for_ios() {
     fi
 }
 
-ensure_librimekit_frameworks() {
-    local frameworks_dir="$CACHE_ROOT/librimekit/$LIBRIMEKIT_VERSION/Frameworks"
-    if [ ! -d "$frameworks_dir" ]; then
-        local archive="$CACHE_ROOT/downloads/LibrimeKit-$LIBRIMEKIT_VERSION-Frameworks.tgz"
-        download "https://github.com/amorphobia/LibrimeKit/releases/download/$LIBRIMEKIT_VERSION/Frameworks.tgz" "$archive"
-        rm -rf "$CACHE_ROOT/librimekit/$LIBRIMEKIT_VERSION"
-        mkdir -p "$CACHE_ROOT/librimekit/$LIBRIMEKIT_VERSION"
-        tar -xzf "$archive" -C "$CACHE_ROOT/librimekit/$LIBRIMEKIT_VERSION"
-    fi
-    printf '%s\n' "$frameworks_dir"
-}
-
 ensure_boost_source() {
     local boost_name="boost_${BOOST_VERSION//./_}"
     local root="$CACHE_ROOT/boost/$BOOST_VERSION"
@@ -199,69 +179,6 @@ ensure_boost_source() {
         tar -xjf "$archive" -C "$root"
     fi
     printf '%s\n' "$root/$boost_name"
-}
-
-copy_boost_runtime() {
-    local frameworks_dir="$1"
-    local target="$2"
-    local prefix="$3"
-    local boost_source="$4"
-    local arch runtime slice source
-    arch="$(target_to_arch "$target")"
-    runtime="$(target_to_runtime "$target")"
-
-    case "$runtime" in
-        iphoneos-arm64) slice="ios-arm64" ;;
-        iphonesimulator-*) slice="ios-arm64_x86_64-simulator" ;;
-        *) die "unsupported runtime: $runtime" ;;
-    esac
-
-    mkdir -p "$prefix/lib"
-    for lib in atomic regex system; do
-        source="$frameworks_dir/boost_${lib}.xcframework/$slice/libboost_${lib}.a"
-        [ -f "$source" ] || die "missing Boost library: $source"
-        if lipo -info "$source" 2>/dev/null | grep -q "Non-fat"; then
-            cp "$source" "$prefix/lib/libboost_${lib}.a"
-        else
-            lipo "$source" -thin "$arch" -output "$prefix/lib/libboost_${lib}.a"
-        fi
-    done
-    build_boost_filesystem "$boost_source" "$target" "$prefix"
-}
-
-build_boost_filesystem() {
-    local boost_source="$1"
-    local target="$2"
-    local prefix="$3"
-    local sdk arch min_flag build_dir src obj
-    sdk="$(target_to_sdk "$target")"
-    arch="$(target_to_arch "$target")"
-    if [ "$sdk" = "iphoneos" ]; then
-        min_flag="-miphoneos-version-min=$IOS_DEPLOYMENT_TARGET"
-    else
-        min_flag="-mios-simulator-version-min=$IOS_DEPLOYMENT_TARGET"
-    fi
-
-    build_dir="$prefix/../build/boost-filesystem"
-    rm -rf "$build_dir"
-    mkdir -p "$build_dir/obj"
-    for src in "$boost_source"/libs/filesystem/src/*.cpp; do
-        obj="$build_dir/obj/$(basename "${src%.cpp}").o"
-        xcrun --sdk "$sdk" clang++ \
-            -arch "$arch" \
-            "$min_flag" \
-            -std=c++14 \
-            -O2 \
-            -fvisibility=hidden \
-            -fvisibility-inlines-hidden \
-            -I"$boost_source" \
-            -DBOOST_ALL_NO_LIB \
-            -DBOOST_FILESYSTEM_STATIC_LINK \
-            -DBOOST_SYSTEM_STATIC_LINK \
-            -c "$src" \
-            -o "$obj"
-    done
-    /usr/bin/libtool -static -o "$prefix/lib/libboost_filesystem.a" "$build_dir"/obj/*.o
 }
 
 common_cmake_args() {
@@ -297,8 +214,7 @@ build_target() {
     local target="$1"
     local cmake_bin="$2"
     local source_dir="$3"
-    local frameworks_dir="$4"
-    local boost_source="$5"
+    local boost_source="$4"
     local sdk arch runtime sdkroot work prefix install_dir sdk_dir
     sdk="$(target_to_sdk "$target")"
     arch="$(target_to_arch "$target")"
@@ -315,8 +231,8 @@ build_target() {
     mkdir -p "$prefix/include" "$prefix/lib" "$install_dir" "$sdk_dir/lib"
 
     note "Preparing Boost for $runtime"
+    # librime 1.17 and librime-lua only use header-only Boost.
     cp -R "$boost_source/boost" "$prefix/include/"
-    copy_boost_runtime "$frameworks_dir" "$target" "$prefix" "$boost_source"
 
     local -a common
     common=()
@@ -341,8 +257,10 @@ build_target() {
         -DHAVE_CRC32C=OFF \
         -DHAVE_SNAPPY=OFF \
         -DHAVE_TCMALLOC=OFF
-    build_cmake_project "$cmake_bin" "$source_dir/deps" "$work/build/marisa" \
-        "${common[@]}"
+    build_cmake_project "$cmake_bin" "$source_dir/deps/marisa-trie" "$work/build/marisa" \
+        "${common[@]}" \
+        -DBUILD_TESTING=OFF \
+        -DENABLE_TOOLS=OFF
     build_cmake_project "$cmake_bin" "$source_dir/deps/opencc" "$work/build/opencc" \
         "${common[@]}" \
         -DCMAKE_CXX_FLAGS="-I$prefix/include" \
@@ -363,15 +281,8 @@ build_target() {
         -DBoost_ROOT="$prefix" \
         -DBoost_INCLUDE_DIR="$prefix/include" \
         -DBoost_INCLUDE_DIRS="$prefix/include" \
-        -DBoost_LIBRARY_DIR_RELEASE="$prefix/lib" \
-        -DBoost_LIBRARY_DIRS="$prefix/lib" \
-        -DBoost_FILESYSTEM_LIBRARY_RELEASE="$prefix/lib/libboost_filesystem.a" \
-        -DBoost_REGEX_LIBRARY_RELEASE="$prefix/lib/libboost_regex.a" \
-        -DBoost_SYSTEM_LIBRARY_RELEASE="$prefix/lib/libboost_system.a" \
-        -DBoost_ATOMIC_LIBRARY_RELEASE="$prefix/lib/libboost_atomic.a" \
         -DBOOST_ROOT="$prefix" \
         -DBOOST_INCLUDEDIR="$prefix/include" \
-        -DBOOST_LIBRARYDIR="$prefix/lib" \
         -DGlog_INCLUDE_PATH="$prefix/include" \
         -DGlog_LIBRARY="$prefix/lib/libglog.a" \
         -DYamlCpp_INCLUDE_PATH="$prefix/include" \
@@ -396,10 +307,6 @@ build_target() {
     cp "$install_dir/include"/rime*.h "$sdk_dir/include/"
     cp "$install_dir/lib/librime.a" "$sdk_dir/lib/librime.a"
     for static_lib in \
-        libboost_atomic.a \
-        libboost_filesystem.a \
-        libboost_regex.a \
-        libboost_system.a \
         libglog.a \
         libleveldb.a \
         libmarisa.a \
@@ -482,9 +389,8 @@ fi
 
 cmake_bin="$(ensure_cmake)"
 source_dir="$(prepare_librime_source)"
-frameworks_dir="$(ensure_librimekit_frameworks)"
 boost_source="$(ensure_boost_source)"
 
 for selected in "${selected_targets[@]}"; do
-    build_target "$selected" "$cmake_bin" "$source_dir" "$frameworks_dir" "$boost_source"
+    build_target "$selected" "$cmake_bin" "$source_dir" "$boost_source"
 done

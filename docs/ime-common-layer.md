@@ -158,7 +158,7 @@ native key event
 
 候选、翻页、清空、提交一律调用 librime 官方 API（`RimeSelectCandidateOnCurrentPage`、`RimeHighlightCandidateOnCurrentPage`、`RimeDeleteCandidateOnCurrentPage`、`RimeChangePage`、`RimeCommitComposition`、`RimeClearComposition`、`RimeGetInput`），不再合成按键；只有旧 ABI 缺对应函数指针时才退回合成按键。这意味着通用层不再依赖 `default.yaml` 里 `-`/`=` 的 `key_binder` 绑定、也不依赖 Escape 绑定或 `select_keys` 的长度。
 
-**iOS 的 vendored librime 降级路径**：`vendor/librime/ios` 目前从 librime 1.8.5（源码 commit `08dd95f5`）构建，其 `RimeApi` 结构体尚无 `change_page` 与 `highlight_candidate_on_current_page`（二者是 librime 1.9 才加入的成员）——这在 iOS target 上是**编译期**字段缺失，不是运行期函数指针判空。因此 `keytao-core` 对这两处做 `#[cfg(target_os = "ios")]` 门控降级：`highlight_candidate_on_page` 在 iOS 上是 no-op，`change_page` 在 iOS 上退回合成 `-`/`=` 翻页键；其余平台（macOS/Windows/Linux/Android 用 librime 1.17.x）一律走官方 API。这意味着 D4「走官方 API 而非合成按键」在 iOS runtime 升级到 1.9+ 之前无法在 iOS 上真正生效。升级 `vendor/librime/ios` 到 1.17.x 后应移除该门控（见本文《当前已知差异与收敛点》和 `crates/keytao-ios-ime/IMPL.md`）。
+**iOS 的 vendored librime**：`vendor/librime/ios` 由 `scripts/build-ios-librime.sh` 从 librime 1.17.0（tag commit `33e78140`）构建，与桌面/Android 同版本，`change_page` 与 `highlight_candidate_on_current_page` 和其他平台一样走官方 API，不再有 iOS 专属门控。
 
 平台前端不应直接访问 librime context/menu/status，也不应绕过 core 自己解析候选。
 
@@ -741,7 +741,6 @@ KeyTao App 的理想操作方式：
 
 仍存在的平台差异与遗留：
 
-- **iOS 的 vendored librime 是 1.8.5**（源码 commit `08dd95f5`），落后于桌面/Android 的 1.17.x，缺 `change_page` 与 `highlight_candidate_on_current_page`。`keytao-core` 已用 `#[cfg(target_os = "ios")]` 门控降级（highlight no-op、change_page 退回合成 `-`/`=`），iOS target 现在可编译；但这两处「官方 API」在 iOS runtime 升级前无法真正生效。升级 `vendor/librime/ios` 到 1.17.x 后移除门控。
 - **IBus 协议签名分叉**是真实存在的坑：`org.freedesktop.IBus.Engine.UpdatePreeditText` 是 `(vubu)`（第 4 参 `IBusPreeditFocusMode`），`org.freedesktop.IBus.InputContext.UpdatePreeditText` 是 `(vub)`，两者不可混用。IBus 引擎注册需安装期 `/usr/share/ibus/component/<name>.xml` 加运行期 `RegisterComponent`，且必须连 ibus-daemon 的私有总线（`IBUS_ADDRESS` / `~/.config/ibus/bus/*`）而非 session bus。
 - Linux GNOME/IBus/Kimpanel 视觉不能完整受 `theme.yaml` 控制；文档和 UI 设置页需要明确“结构生效，视觉受系统限制”。
 - Linux 自绘候选面板（wlroots / KDE / XIM）已支持左键点选候选与翻页按钮（松开时命中按下的同一项才生效），仍需真实桌面回归；IBus 路径的 X11 overlay（`X11OverlayPanel`）尚未接点选，属遗留。

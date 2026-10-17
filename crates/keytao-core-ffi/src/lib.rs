@@ -1145,9 +1145,7 @@ fn capability_bits(capabilities: EngineCapabilities) -> u32 {
 /// A missing capability degrades to a synthesized key stroke whose meaning
 /// depends on the schema — a select key, `-`/`=`, `Escape` — so a control that
 /// needs one must be hidden rather than shown and quietly typing characters
-/// into the composition. The iOS build ships librime 1.8.5, where
-/// `KEYTAO_CAP_NATIVE_PAGING` and `KEYTAO_CAP_CANDIDATE_HIGHLIGHT` are always
-/// absent.
+/// into the composition.
 ///
 /// Answerable before keytao_init(): it only inspects the ABI.
 #[no_mangle]

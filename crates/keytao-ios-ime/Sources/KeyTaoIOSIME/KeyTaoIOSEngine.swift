@@ -377,8 +377,7 @@ enum KeyTaoIOSPaths {
 /// A missing capability makes the common layer synthesize a key stroke whose
 /// meaning depends on the schema, so a control that needs one has to be hidden
 /// instead of quietly typing characters into the composition (D4). Nothing here
-/// is hard-coded per platform: the vendored iOS librime happens to be 1.8.5
-/// today, but every consumer asks the mask rather than the OS.
+/// is hard-coded per platform: every consumer asks the mask rather than the OS.
 struct KeyTaoEngineCapabilities: Equatable {
     var candidateSelection: Bool
     var globalCandidateSelection: Bool

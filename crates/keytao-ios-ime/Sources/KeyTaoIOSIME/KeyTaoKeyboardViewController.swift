@@ -520,7 +520,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             showUnavailableMessage()
             return
         }
-        // Both entry points exist in the vendored librime 1.8.5; the guard keeps
+        // Both entry points exist in the vendored librime; the guard keeps
         // a future runtime without them from falling back to sending a select
         // key, which lands in the composition when the schema has none (D4).
         let supported = global
