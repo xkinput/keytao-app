@@ -1839,7 +1839,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // TSF only calls OnKeyDown for keys claimed here, so solo-Shift state
             // has to be maintained in the test callback (windows-1).
             state.borrow_mut().shift_pressed_without_key = shift_pending_after_key_down(vk, mods);
-            if is_application_shortcut(vk, mods) {
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            if is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
@@ -1903,7 +1904,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
             if !state.borrow().shift_pressed_without_key
-                || is_application_shortcut(vk, current_mod_mask())
+                || is_application_shortcut(vk, current_mod_mask(), false)
             {
                 state.borrow_mut().shift_pressed_without_key = false;
                 return Ok(BOOL::from(false));
@@ -1951,7 +1952,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             // Some hosts call OnKeyDown without OnTestKeyDown. Apply the same
             // shortcut policy before context inspection, warmup, or Enter's
             // modifier-free process_enter path.
-            if is_application_shortcut(vk, mods) {
+            let composing = cached_ime_state(&state).is_some_and(|st| has_visible_state(&st));
+            if is_application_shortcut(vk, mods, composing) {
                 return Ok(BOOL::from(false));
             }
             if is_shift_vk(vk) {
@@ -2055,7 +2057,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             };
             if !state.borrow().shift_pressed_without_key
-                || is_application_shortcut(vk, current_mod_mask())
+                || is_application_shortcut(vk, current_mod_mask(), false)
             {
                 state.borrow_mut().shift_pressed_without_key = false;
                 return Ok(BOOL::from(false));

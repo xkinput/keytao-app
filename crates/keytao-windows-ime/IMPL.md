@@ -167,7 +167,7 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 2. `OnTestKeyUp` 只对 solo Shift release 返回拦截，避免 Shift+字母/数字误触发中英切换。
 3. `OnKeyDown` 把 Windows Virtual Key 转成 librime 使用的 X11 keysym。
 4. `current_mod_mask()` 读取 Shift、Control、Alt、Win 与 CapsLock 状态。
-5. 不论是否正在组字，Ctrl / Alt / Win 组合以及 Shift+Insert、Shift+Delete、Shift+F4 都在进入 Rime 前交给宿主。只保留输入法的 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；附加 Alt/Win 时仍透传。这样 Ctrl+V 不再被默认 Emacs 绑定当作候选翻页，Ctrl+A 不再变成预编辑 Home，AltGr 字符也交由宿主布局处理。没有 composition 时，裸 Space、Return、Backspace、Delete、Tab、Escape 和导航键继续放行。
+5. 不论是否正在组字，Ctrl / Alt / Win 组合以及 Shift+Insert、Shift+Delete、Shift+F4 都在进入 Rime 前交给宿主。只保留输入法的 Ctrl+grave、Ctrl+Shift+grave、Ctrl+Shift+1..5 和裸 F4；附加 Alt/Win 时仍透传。这样 Ctrl+V 不再被默认 Emacs 绑定当作候选翻页，Ctrl+A 不再变成预编辑 Home，AltGr 字符也交由宿主布局处理。唯一例外是 librime 的删除候选键 Ctrl+Delete（`rime/gear/editor.cc`）：有可见 preedit 或候选时交给 Rime 以删除已学习的用户词，没有 composition 时仍是宿主的删词快捷键。没有 composition 时，裸 Space、Return、Backspace、Delete、Tab、Escape 和导航键继续放行。
 6. 有 composition 时 Enter 走 `ImeRuntimeSession::process_enter()`：先把 `XK_Return` 交给 Rime，Rime 未接受时由通用层 fallback 到 `commit_raw_input()`。**平台不再自行提交 preedit 字面量**，也**不再本地拦截数字键或空格做选词**——选择键语义完全由 schema 的 `select_keys` / `key_binder` 决定，鼠标点选走 `select_candidate_on_page(index)`。
 7. 普通按键调用 `ImeRuntimeSession::process_key_result(keysym, mods)`。
 8. `should_eat_key()` 仅对普通可打印输入保持宽松判定，让 Rime 的 punctuator 收到标点；`OnKeyDown` 的 `should_consume_processed_state()` 根据 `accepted`、commit 或可见组字状态变化决定是否消费。应用快捷键不走这条“先声明拦截、随后放行”的路径：WPF 等宿主在 Test 阶段就改变快捷键路由，而 Rime 也可能真正接受冲突绑定。中文标点仍由 Rime 处理，Ctrl+C/V/X 等从两个入口直接透传。

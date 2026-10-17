@@ -417,7 +417,10 @@ pub fn should_bypass_empty_composition(vk: u16, mods: u32, state: &keytao_core::
 /// Rime's default Emacs bindings otherwise turn Ctrl+V into candidate paging
 /// and Ctrl+A into preedit navigation. Preserve only the desktop IME's menu
 /// and option hotkeys; ordinary shortcuts must never be offered to the schema.
-pub fn is_application_shortcut(vk: u16, mods: u32) -> bool {
+/// The one exception is librime's delete-candidate chord (Ctrl+Delete, bound in
+/// `rime/gear/editor.cc`): while a composition is visible it goes to Rime so a
+/// learned phrase can be forgotten; otherwise it stays the host's delete-word.
+pub fn is_application_shortcut(vk: u16, mods: u32, has_composition: bool) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_1, VK_5, VK_DELETE, VK_F4, VK_INSERT, VK_OEM_3,
     };
@@ -428,6 +431,9 @@ pub fn is_application_shortcut(vk: u16, mods: u32) -> bool {
     }
     if mods & RIME_MOD_SHIFT != 0 && [VK_F4.0, VK_INSERT.0, VK_DELETE.0].contains(&vk) {
         return true;
+    }
+    if has_composition && vk == VK_DELETE.0 && mods & !RIME_MOD_LOCK == RIME_MOD_CONTROL {
+        return false;
     }
     if mods & RIME_MOD_CONTROL == 0 {
         return false;
@@ -451,7 +457,7 @@ pub fn is_application_shortcut(vk: u16, mods: u32) -> bool {
 pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-    if is_application_shortcut(vk, mods) {
+    if is_application_shortcut(vk, mods, has_composition) {
         return false;
     }
 
@@ -643,15 +649,35 @@ mod tests {
                 RIME_MOD_CONTROL | RIME_MOD_LOCK,
                 RIME_MOD_CONTROL | RIME_MOD_ALT,
             ] {
-                assert!(is_application_shortcut(vk.0, mods));
+                assert!(is_application_shortcut(vk.0, mods, false));
                 assert!(!should_eat_key(vk.0, false, mods));
-                assert!(!should_eat_key(vk.0, true, mods));
+                // Ctrl+Delete alone is Rime's delete-candidate chord.
+                let delete_candidate =
+                    vk == VK_DELETE && mods & !RIME_MOD_LOCK == RIME_MOD_CONTROL;
+                assert_eq!(is_application_shortcut(vk.0, mods, true), !delete_candidate);
+                assert_eq!(should_eat_key(vk.0, true, mods), delete_candidate);
             }
         }
         assert!(!should_eat_key(VK_A.0, true, RIME_MOD_ALT));
         for vk in [VK_F4, VK_INSERT, VK_DELETE] {
-            assert!(is_application_shortcut(vk.0, RIME_MOD_SHIFT));
+            assert!(is_application_shortcut(vk.0, RIME_MOD_SHIFT, true));
             assert!(!should_eat_key(vk.0, true, RIME_MOD_SHIFT));
+        }
+    }
+
+    #[test]
+    fn delete_candidate_chord_reaches_rime_only_while_composing() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        for mods in [RIME_MOD_CONTROL, RIME_MOD_CONTROL | RIME_MOD_LOCK] {
+            assert!(!is_application_shortcut(VK_DELETE.0, mods, true));
+            assert!(should_eat_key(VK_DELETE.0, true, mods));
+            assert!(is_application_shortcut(VK_DELETE.0, mods, false));
+            assert!(!should_eat_key(VK_DELETE.0, false, mods));
+        }
+        assert!(is_application_shortcut(VK_V.0, RIME_MOD_CONTROL, true));
+        assert!(!should_eat_key(VK_V.0, true, RIME_MOD_CONTROL));
+        for mods in [RIME_MOD_CONTROL | RIME_MOD_SHIFT, RIME_MOD_CONTROL | RIME_MOD_ALT] {
+            assert!(is_application_shortcut(VK_DELETE.0, mods, true));
         }
     }
 
