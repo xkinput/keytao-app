@@ -10,7 +10,6 @@ vendor/librime/
 .vscode/*
 !.vscode/extensions.json
 .idea
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
@@ -54,4 +53,3 @@ crates/keytao-ios-ime/.swiftpm/xcode/xcuserdata/
 
 # macOS
 .DS_Store
-**/.DS_Store
