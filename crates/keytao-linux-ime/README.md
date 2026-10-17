@@ -112,4 +112,4 @@ tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/keytao/log/keytao-ime.log"
 
 正式发行走仓库根目录的 `scripts/build-linux.sh`，产物只包含 deb 和 rpm，不产出 AppImage 或 tarball。发行包内置 `runtime/`，包含 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
 
-KDE 原生 Wayland 由 App 写入 `~/.local/share/applications/keytao-wayland-launcher.desktop` 并配置 `kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop`。普通 daemon 仍负责 XIM/IBus fallback；KWin 私有进程只负责 KDE 原生 Wayland 输入法槽位。
+KDE 原生 Wayland 使用发行包安装的 `/usr/share/applications/keytao-wayland-launcher.desktop`，由用户在 KDE 虚拟键盘设置中选择，即 `kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop`；App 只读取 `kwinrc` 显示状态。普通 daemon 仍负责 XIM/IBus fallback；KWin 私有进程只负责 KDE 原生 Wayland 输入法槽位。

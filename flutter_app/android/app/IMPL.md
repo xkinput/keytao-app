@@ -460,6 +460,10 @@ IME 侧在 `onStartInputView()` 调用 `engine.reloadIfNeeded()`：
 
 写用户目录时使用 `safePrivateFile(root, relativePath)` 防止 zip slip。这里仍是 Android 文件安装 adapter；Rime 部署和 session 刷新仍由通用 runtime 完成。
 
+### Easy English 附加方案体积
+
+14,566,541 B 的原始词典 gzip 后为 4,153,342 B；当前 debug APK 中六个 add-on asset 的 deflate 体积合计 4,694,956 B，即 APK 增量约 4.7 MB。安装源码与 28,216,820 B 编译产物合计约占 43 MB。
+
 ## App 对接点
 
 Flutter 主 App 相关命令：

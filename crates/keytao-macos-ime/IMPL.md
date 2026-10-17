@@ -72,13 +72,13 @@ macOS IME 不默认读取 `~/Library/Rime`。那个目录属于鼠须管，KeyTa
 
 ```sh
 scripts/build-macos.sh
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-<version>-macos.pkg
 ```
 
 测试安装命令：
 
 ```sh
-sudo installer -pkg target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg -target /
+sudo installer -pkg target/keytao-macos-pkg/keytao-app-<version>-macos.pkg -target /
 ```
 
 改动按键/候选/主题路径后，建议先跑一次 FFI 契约冒烟（会组字并提交，请指向用户目录的副本）：

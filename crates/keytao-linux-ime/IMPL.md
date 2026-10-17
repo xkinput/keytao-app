@@ -409,10 +409,10 @@ Flutter 主 App 的 Linux 相关 API 在 `crates/keytao-app-bridge/src/api/core.
 
 正式 App UI 只展示 `linux_ime_status` 的结果，不再提供启动、重启或 KDE 配置按钮。`linux_start_ime(restart)` 用于启动/诊断接口，避免普通用户在 App 内直接操作系统输入法组件。
 
-App 启动时会尝试启动 fallback `keytao-ime`。KDE 原生 Wayland 配置仍由系统包、桌面配置或开发接口写入：
+App 启动时会尝试启动 fallback `keytao-ime`。KDE 原生 Wayland 的启动项由发行包安装，`kwinrc` 由用户在 KDE 虚拟键盘设置中选择后写入；App 只读取 `kwinrc` 判断状态：
 
 ```text
-~/.local/share/applications/keytao-wayland-launcher.desktop
+/usr/share/applications/keytao-wayland-launcher.desktop
 kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 ```
 

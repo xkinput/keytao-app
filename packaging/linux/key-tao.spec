@@ -2,7 +2,7 @@ Name: key-tao
 Version: %{keytao_version}
 Release: 1
 Summary: KeyTao input method app
-License: LicenseRef-KeyTao-Unspecified
+License: MIT
 URL: https://github.com/xkinput/keytao-app
 Packager: Rea <hi@rea.ink>
 Requires: gtk3, libEGL.so.1()(64bit), libGL.so.1()(64bit), procps-ng

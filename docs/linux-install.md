@@ -1,12 +1,12 @@
 # Linux 安装与使用
 
-本文面向按[项目方 Linux 决定](#附录项目方决定2026-09-28)打包的 Flutter deb/rpm：包含自启动项和 KDE 启动项，退出 App 后输入法继续运行。这些是新包的约定；旧包缺少启动项时，需要升级到包含这些改动的版本。
+本文面向按[项目方 Linux 决定](#附录项目方决定2026-09-28)打包的 Flutter deb/rpm：包含自启动项和 KDE 启动项，退出 App 后输入法继续运行。
 
 ## 1. 安装
 
 从 [KeyTao Releases](https://github.com/xkinput/keytao-app/releases) 下载对应架构的 deb 或 rpm。x64 对应 x86_64，arm64 对应 aarch64。
 
-**Flutter 包当前计划沿用以下 Release 文件名**；`<version>` 不带前缀 `v`，最终以 Release 附件为准。命名调整时，统一更新本表和下面两条安装命令。
+Release 文件名如下，`<version>` 不带前缀 `v`：
 
 | 架构 | Debian / Ubuntu | Fedora 等使用 rpm 的发行版 |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ sudo dnf install "./keytao-app-<version>-linux-x64.rpm"
 
 ### Nix / NixOS
 
-[flake](../flake.nix) 的默认包 `keytao-app-bin` 重新打包**官方已发布的 deb**，支持 `x86_64-linux` 和 `aarch64-linux`，包含 Flutter App、`keytao-ime` 与包内 Rime runtime，不从源码编译 App。初始固定为 `1.2.1-alpha.89`，实际版本以 `flake.nix` 的 `releaseVersion` 为准；两种架构分别校验 SHA-256，版本独立于工作区的 `Cargo.toml`。
+[flake](../flake.nix) 的默认包 `keytao-app-bin` 重新打包**官方已发布的 deb**，支持 `x86_64-linux` 和 `aarch64-linux`，包含 Flutter App、`keytao-ime` 与包内 Rime runtime，不从源码编译 App。版本以 `flake.nix` 的 `releaseVersion` 为准；两种架构分别校验 SHA-256，版本独立于工作区的 `Cargo.toml`。
 
 在仓库目录运行：
 
@@ -70,13 +70,7 @@ cp result/etc/xdg/autostart/keytao-ime.desktop "${XDG_CONFIG_HOME:-$HOME/.config
 
 更新时，先更新仓库 checkout（NixOS flake 用户更新 `keytao-app` input），然后重新构建、更新 Nix profile 或执行 `nixos-rebuild switch`。手动复制的自启动项也需重复制，以更新其中的 store 路径。
 
-**维护者每次正式发布后**，等 x64 / arm64 两份 deb 都已上传，在可联网、已安装 Nix 和 Python 3 的环境执行：
-
-```bash
-scripts/update-nix-release.sh <version>
-```
-
-`<version>` 不带 `v`。脚本用 `nix store prefetch-file` 获取两份 deb 的 SHA-256，全部成功后才更新 `flake.nix` 的版本与两个哈希；不会更新 `flake.lock` 或自动提交。审阅变更后运行 Release 工作流的 `workflow_dispatch` 预跑：`build-nix` 构建固定的已发布 deb，并执行 `nix flake check --no-build`。它不使用 dispatch 的待发布版本参数，tag 发布也不会运行或等待该 job。只有 Linux 预跑成功才能证明实际 Nix 构建通过；GUI、登录自启动及 KDE/GNOME 输入仍需桌面验收。
+维护者发布后更新 `flake.nix` 的流程见 [README 发版流程](../README.md#发版流程)。
 
 仅需从源码构建输入法守护进程时，仍可使用独立包（不含 Flutter App）：
 

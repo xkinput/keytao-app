@@ -135,18 +135,18 @@ font:
 
 ```sh
 scripts/build-macos.sh
-scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg
+scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-<version>-macos.pkg
 ```
 
 产物：
 
-- `target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg`
+- `target/keytao-macos-pkg/keytao-app-<version>-macos.pkg`
 - GitHub Release 发布一个 `keytao-app-<version>-macos.pkg`，包含 x86_64 + arm64。
 
 测试安装：
 
 ```sh
-sudo installer -pkg target/keytao-macos-pkg/keytao-app-1.2.1-alpha.89-macos.pkg -target /
+sudo installer -pkg target/keytao-macos-pkg/keytao-app-<version>-macos.pkg -target /
 ```
 
 安装器会提示注销；重新登录 macOS 后，再打开 KeyTao 手动安装方案并点击“部署”。随后可继续检查：

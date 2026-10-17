@@ -87,9 +87,10 @@ iOS 工程已保存在 `flutter_app/ios`。使用自定义 Bundle ID 时，还�
 
 ### 3. 构建运行库并打开 Xcode
 
-先导入带 Lua 的 iOS librime SDK 到 `vendor/librime/ios/iphoneos-arm64`。脚本会构建键盘 FFI、Flutter App 和未签名 IPA，不会自动下载 librime。
+先构建带 Lua 的 iOS librime 并导入到 `vendor/librime/ios/iphoneos-arm64`。`build-flutter-ios.sh` 会构建键盘 FFI、Flutter App 和未签名 IPA，不会自动下载 librime。
 
 ```bash
+scripts/build-ios-librime.sh --target aarch64-apple-ios
 scripts/build-flutter-ios.sh
 open flutter_app/ios/Runner.xcworkspace
 ```
