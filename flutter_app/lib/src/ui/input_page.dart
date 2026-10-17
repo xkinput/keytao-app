@@ -28,6 +28,7 @@ class InputPage extends StatelessWidget {
       if (controller.isWindows && controller.deploySteps.isNotEmpty)
         DeploySteps(controller: controller),
       SettingsCard(controller: controller),
+      AccountCard(controller: controller),
     ],
   );
 }

@@ -158,6 +158,11 @@ class AppController extends ChangeNotifier {
   String source = defaultDownloadSource;
   ReleaseInfoDto? latestRelease;
   SchemeReleaseDto? schemeRelease;
+  AccountUserDto? accountUser;
+  bool loggingIn = false;
+  bool syncingDictionary = false;
+  String? accountError;
+  String? accountMessage;
   StreamSubscription<BridgeEvent>? _events;
   StreamSubscription<InstallProgressDto>? _androidProgress;
 
@@ -675,6 +680,7 @@ class AppController extends ChangeNotifier {
     });
     if (!_startupStarted && !_disposed) {
       _startupStarted = true;
+      unawaited(_loadAccount());
       unawaited(_checkAppUpdate());
       unawaited(refreshRelease());
     }
@@ -912,6 +918,70 @@ class AppController extends ChangeNotifier {
       operation = null;
     }
   });
+
+  String? get accountName =>
+      accountUser?.nickname ?? accountUser?.name ?? accountUser?.email;
+
+  Future<void> _loadAccount() async {
+    try {
+      accountUser = await core.accountSession();
+      _changed();
+      // Rust clears the session only when the server rejects the token.
+      await core.accountRefresh();
+      accountUser = await core.accountSession();
+      _changed();
+    } catch (failure) {
+      debugPrint('Account refresh failed: ${errorText(failure)}');
+    }
+  }
+
+  Future<bool> login(String name, String password) async {
+    if (loggingIn) return false;
+    loggingIn = true;
+    accountError = null;
+    accountMessage = null;
+    _changed();
+    try {
+      accountUser = await core.accountLogin(name: name, password: password);
+      return true;
+    } catch (failure) {
+      accountError = errorText(failure);
+      return false;
+    } finally {
+      loggingIn = false;
+      _changed();
+    }
+  }
+
+  Future<void> logout() async {
+    accountError = null;
+    accountMessage = null;
+    try {
+      await core.accountLogout();
+      accountUser = null;
+    } catch (failure) {
+      accountError = errorText(failure);
+    }
+    _changed();
+  }
+
+  Future<void> syncUserDictionary() async {
+    if (busy || syncingDictionary) return;
+    syncingDictionary = true;
+    accountError = null;
+    accountMessage = null;
+    _changed();
+    try {
+      accountMessage = (await core.accountSyncUserDictionary()).message;
+    } catch (failure) {
+      accountError = errorText(failure);
+    } finally {
+      syncingDictionary = false;
+      _changed();
+    }
+    // deploy() re-reads the local schema state after deploying.
+    if (accountError == null) await deploy();
+  }
 
   // The bridge holds its install lock while invoking this callback. Never
   // re-enter a bridge install/deploy call here, including during rollback.

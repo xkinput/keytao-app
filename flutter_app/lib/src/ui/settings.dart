@@ -275,3 +275,85 @@ class SettingsCard extends StatelessWidget {
     );
   }
 }
+
+class AccountCard extends StatefulWidget {
+  const AccountCard({super.key, required this.controller});
+  final AppController controller;
+  @override
+  State<AccountCard> createState() => _AccountCardState();
+}
+
+class _AccountCardState extends State<AccountCard> {
+  final _name = TextEditingController();
+  final _password = TextEditingController();
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    if (await widget.controller.login(_name.text, _password.text)) {
+      _password.clear();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller;
+    final name = c.accountName;
+    return Section(
+      title: AppStrings.account,
+      icon: FLucideIcons.user,
+      children: [
+        if (c.accountUser == null) ...[
+          FTextField(
+            label: const Text(AppStrings.username),
+            control: FTextFieldControl.managed(controller: _name),
+            enabled: !c.loggingIn,
+            autofillHints: const [AutofillHints.username],
+          ),
+          FTextField.password(
+            label: const Text(AppStrings.password),
+            control: FTextFieldControl.managed(controller: _password),
+            enabled: !c.loggingIn,
+            textInputAction: TextInputAction.done,
+            onSubmit: (_) => _login(),
+          ),
+          ActionRow(
+            children: [
+              ActionButton(
+                c.loggingIn ? AppStrings.loggingIn : AppStrings.login,
+                primary: true,
+                onPress: c.loggingIn ? null : _login,
+              ),
+            ],
+          ),
+        ] else ...[
+          if (name != null) Text(name),
+          ActionRow(
+            children: [
+              ActionButton(
+                c.syncingDictionary
+                    ? AppStrings.syncing
+                    : AppStrings.syncUserDictionary,
+                primary: true,
+                onPress: c.busy || c.syncingDictionary
+                    ? null
+                    : c.syncUserDictionary,
+              ),
+              ActionButton(
+                AppStrings.logout,
+                onPress: c.syncingDictionary ? null : c.logout,
+              ),
+            ],
+          ),
+        ],
+        if (c.accountMessage case final message?) StatusMessage(message),
+        if (c.accountError case final error?) ErrorMessage(error),
+      ],
+    );
+  }
+}

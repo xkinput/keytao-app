@@ -12,6 +12,14 @@ abstract final class AppStrings {
   static const schemeTitle = '键道方案';
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';
+  static const account = 'KeyTao 账号';
+  static const username = '用户名';
+  static const password = '密码';
+  static const login = '登录';
+  static const loggingIn = '登录中…';
+  static const syncUserDictionary = '同步用户词库';
+  static const syncing = '同步中…';
+  static const logout = '退出';
   static const macosIme = 'macOS 系统输入法';
   static const windowsIme = 'Windows 系统输入法';
   static const linuxIme = 'Linux 系统输入法';
