@@ -414,11 +414,7 @@ impl KeyTaoHandler {
             return;
         };
         let (pixels, w, h, hit_areas) = renderer.render_with_hit_areas(state);
-        if self.panel_hit_areas != hit_areas {
-            // A press on what used to be drawn must not select what is now.
-            self.pressed_click = None;
-            self.panel_hit_areas = hit_areas;
-        }
+        self.panel_hit_areas = hit_areas;
         let (root_x, root_y) = self.last_anchor;
         // The panel now holds a composition, so the hint deadline must not be
         // allowed to unmap it later on.
@@ -510,6 +506,8 @@ impl KeyTaoHandler {
         self.mode_hint_until = None;
         self.panel_hit_areas = PanelHitAreas::default();
         self.pressed_click = None;
+        // A hidden panel has no composition a spot update may bring back.
+        self.clicked_state = None;
         if self.panel_visible {
             self.conn.unmap_window(self.panel_win).ok();
             self.conn.flush().ok();
@@ -749,6 +747,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
             draw_client_preedit(server, &mut user_ic.ic, "")?;
         }
 
+        // Any key that reaches Rime may change the page or composition, so a
+        // press on what was drawn before must not select what is drawn now.
+        self.pressed_click = None;
         self.show_panel(user_ic, &ime_state);
         self.clicked_state = None;
         user_ic.user_data.last_state = Some(ime_state);

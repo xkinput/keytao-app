@@ -370,11 +370,7 @@ impl App {
         surface.damage_buffer(0, 0, w as i32, h as i32);
         surface.commit();
 
-        if self.panel_hit_areas != hit_areas {
-            // A press on what used to be drawn must not select what is now.
-            self.pressed_click = None;
-            self.panel_hit_areas = hit_areas;
-        }
+        self.panel_hit_areas = hit_areas;
         if let Some(old) = self.panel_buffer.replace(buffer) {
             old.destroy();
         }
@@ -382,6 +378,9 @@ impl App {
     }
 
     fn show_panel(&mut self, state: ImeState, qh: &QueueHandle<Self>) {
+        // The content changes, so a press on what was drawn before must not
+        // select what is drawn now.
+        self.pressed_click = None;
         // The application already renders preedit through set_preedit_string.
         // Keep the popup for actual candidate menus and short mode hints only.
         let has_content = !state.candidates.is_empty();
