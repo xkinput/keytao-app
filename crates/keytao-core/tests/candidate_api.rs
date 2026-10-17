@@ -309,11 +309,14 @@ fn a_sensitive_context_never_composes_under_concurrent_typing() {
                 }
             }
         });
+        // Any exit from here on, a panic included, stops the typist; otherwise
+        // the scope would wait for it forever.
+        let _stop_typing = StopOnDrop(&stop);
 
         for _ in 0..300 {
-            let switched = session
-                .set_input_policy(InputContextPolicy::sensitive())
-                .expect("set_input_policy");
+            let switched = retry_busy("set_input_policy(sensitive)", || {
+                session.set_input_policy(InputContextPolicy::sensitive())
+            });
             if !switched.preedit.is_empty() || !switched.candidates.is_empty() {
                 failures
                     .lock()
@@ -324,7 +327,7 @@ fn a_sensitive_context_never_composes_under_concurrent_typing() {
                     ));
             }
             for _ in 0..16 {
-                let state = session.state();
+                let state = engine_state(&session);
                 if !state.preedit.is_empty() || !state.candidates.is_empty() {
                     failures
                         .lock()
@@ -333,9 +336,9 @@ fn a_sensitive_context_never_composes_under_concurrent_typing() {
                     break;
                 }
             }
-            session
-                .set_input_policy(InputContextPolicy::default())
-                .expect("set_input_policy");
+            retry_busy("set_input_policy(default)", || {
+                session.set_input_policy(InputContextPolicy::default())
+            });
             for _ in 0..16 {
                 if !session.state().preedit.is_empty() {
                     composed.fetch_add(1, Ordering::Relaxed);
@@ -344,7 +347,6 @@ fn a_sensitive_context_never_composes_under_concurrent_typing() {
             }
             std::thread::sleep(Duration::from_micros(200));
         }
-        stop.store(true, Ordering::Relaxed);
     });
 
     let failures = failures.lock().unwrap_or_else(PoisonError::into_inner);
@@ -356,6 +358,38 @@ fn a_sensitive_context_never_composes_under_concurrent_typing() {
 
     drop(session);
     cleanup(&dir);
+}
+
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Session calls only try-lock the engine and return `None` while another
+/// thread holds it; retry for a bounded time instead of failing on contention.
+fn retry_busy<T>(what: &str, mut call: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(value) = call() {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} stayed busy for 5s"
+        );
+        std::thread::sleep(Duration::from_micros(20));
+    }
+}
+
+/// `state()` reports an empty state, without a schema, when the engine is
+/// busy; only a state that carries the schema was actually read from librime.
+fn engine_state(session: &ImeRuntimeSession) -> ImeState {
+    retry_busy("state", || {
+        Some(session.state()).filter(|state| !state.schema_id.is_empty())
+    })
 }
 
 fn cleanup(dir: &Path) {
