@@ -1859,10 +1859,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 clear_input_for_blocked_context(&state);
                 return Ok(BOOL::from(false));
             }
-            let (engine_ready, reload_needed, cached_state) = {
+            let (engine_ready, reload_needed, cached_state, persisted_ascii_mode) = {
                 let mut st = state.borrow_mut();
                 let reload_needed = st.reload_needed_cached();
-                (st.engine_ready(), reload_needed, st.ime_state.clone())
+                (
+                    st.engine_ready(),
+                    reload_needed,
+                    st.ime_state.clone(),
+                    st.ascii_mode,
+                )
             };
             if !engine_ready || reload_needed {
                 if !engine_ready {
@@ -1881,7 +1886,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 .map(has_visible_state)
                 .unwrap_or(false);
             let ascii_rejects = !is_composing
-                && cached_state.as_ref().is_some_and(|st| st.ascii_mode)
+                // A focus change clears `ime_state`; fall back to the persisted mode.
+                && cached_state
+                    .as_ref()
+                    .map_or(persisted_ascii_mode, |st| st.ascii_mode)
                 && ascii_mode_rejects_key(vk, mods);
             let eat = !ascii_rejects && should_eat_key(vk, is_composing, mods);
             append_key_diagnostic!(
