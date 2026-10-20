@@ -43,9 +43,9 @@ use crate::{
     globals::DllActivityGuard,
     guard,
     key_map::{
-        current_mod_mask, is_application_shortcut, is_enter_vk, is_shift_vk, shift_keysym_for_vk,
-        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
-        vk_to_keysym, RIME_RELEASE_MASK,
+        ascii_mode_rejects_key, current_mod_mask, is_application_shortcut, is_enter_vk,
+        is_shift_vk, shift_keysym_for_vk, shift_pending_after_key_down,
+        should_bypass_empty_composition, should_eat_key, vk_to_keysym, RIME_RELEASE_MASK,
     },
     panel_anchor::{start_panel_anchor, PanelAnchor},
     state::{
@@ -1880,7 +1880,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 .as_ref()
                 .map(has_visible_state)
                 .unwrap_or(false);
-            let eat = should_eat_key(vk, is_composing, mods);
+            let ascii_rejects = !is_composing
+                && cached_state.as_ref().is_some_and(|st| st.ascii_mode)
+                && ascii_mode_rejects_key(vk, mods);
+            let eat = !ascii_rejects && should_eat_key(vk, is_composing, mods);
             append_key_diagnostic!(
                 "OnTestKeyDown ready={engine_ready} reload={reload_needed} composing={is_composing} eat={eat}"
             );

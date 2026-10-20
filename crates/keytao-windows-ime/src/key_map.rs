@@ -487,6 +487,19 @@ pub fn should_eat_key(vk: u16, has_composition: bool, mods: u32) -> bool {
     !is_nonstarter_vk(vk) && produces_text_vk(key)
 }
 
+/// Whether librime's `ascii_composer` rejects this key in `ascii_mode` with no
+/// composition, so `OnTestKeyDown` must not claim it. IMM32/CUAS hosts (Flutter)
+/// turn a claimed key into `VK_PROCESSKEY` and never produce the character when
+/// `OnKeyDown` later declines it.
+pub fn ascii_mode_rejects_key(vk: u16, mods: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
+
+    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SUPER) != 0 {
+        return false;
+    }
+    !(mods & RIME_MOD_SHIFT != 0 && vk == VK_SPACE.0)
+}
+
 fn packet_keysym() -> Option<u32> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode, VK_PACKET};
 
@@ -564,9 +577,9 @@ mod tests {
     };
 
     use super::{
-        fallback_printable_keysym, is_application_shortcut, letters_are_uppercase,
-        shift_pending_after_key_down, should_bypass_empty_composition, should_eat_key,
-        unicode_to_keysym, vk_to_keysym,
+        ascii_mode_rejects_key, fallback_printable_keysym, is_application_shortcut,
+        letters_are_uppercase, shift_pending_after_key_down, should_bypass_empty_composition,
+        should_eat_key, unicode_to_keysym, vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -619,6 +632,19 @@ mod tests {
         assert!(should_eat_key(VK_OEM_COMMA.0, false, 0));
         assert!(should_eat_key(VK_1.0, false, 0));
         assert!(should_eat_key(VK_A.0, false, 0));
+    }
+
+    #[test]
+    fn ascii_mode_leaves_plain_keys_to_the_host() {
+        for vk in [VK_A, VK_1, VK_OEM_COMMA, VK_SPACE] {
+            assert!(ascii_mode_rejects_key(vk.0, 0));
+            assert!(ascii_mode_rejects_key(vk.0, RIME_MOD_LOCK));
+        }
+        assert!(ascii_mode_rejects_key(VK_A.0, RIME_MOD_SHIFT));
+        assert!(!ascii_mode_rejects_key(VK_SPACE.0, RIME_MOD_SHIFT));
+        for modifier in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+            assert!(!ascii_mode_rejects_key(VK_A.0, modifier));
+        }
     }
 
     #[test]
