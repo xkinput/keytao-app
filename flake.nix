@@ -191,13 +191,13 @@
         };
       in
       {
-        packages = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        packages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           default = keytaoAppRelease;
           keytao-app-bin = keytaoAppRelease;
           keytao-linux-ime = keytaoLinuxIme;
         };
 
-        apps = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        apps = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           default = {
             type = "app";
             program = "${keytaoAppRelease}/bin/keytao-app";
@@ -291,7 +291,7 @@
             export CARGO_INCREMENTAL=0
 
           ''
-          + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+          + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
             # Generate GTK IM Modules cache safely so direnv doesn't destroy it
             export GTK_PATH="${pkgs.gtk3}/lib/gtk-3.0/3.0.0:${pkgs.ibus}/lib/gtk-3.0/3.0.0"
             _immodules_cache="$HOME/.cache/keytao-immodules.cache"

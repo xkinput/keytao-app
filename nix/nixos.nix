@@ -14,7 +14,7 @@ in
   options.services.keytao-app = {
     enable = lib.mkOption {
       type = lib.types.bool;
-      default = pkgs.stdenv.isLinux;
+      default = pkgs.stdenv.hostPlatform.isLinux;
       description = "Install the KeyTao app and expose keytao-ime environment defaults.";
     };
 
