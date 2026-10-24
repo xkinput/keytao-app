@@ -858,9 +858,10 @@ mod desktop {
             if !source.is_file() {
                 continue;
             }
-            deploy_schema_file(&source)?;
-
             let compiled = compiled_schema_path(user_dir, &schema_id);
+            if !compiled.is_file() {
+                deploy_schema_file(&source)?;
+            }
             require_compiled_schema(&compiled, &schema_id)?;
             pending.extend(schema_dependencies_from_file(&compiled));
         }
