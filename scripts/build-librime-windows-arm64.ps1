@@ -69,12 +69,12 @@ function Invoke-Download([string]$Uri, [string]$Destination) {
 
 function Expand-ZipArchive([string]$Archive, [string]$Destination) {
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    $tar = Get-Command "tar.exe" -ErrorAction SilentlyContinue
-    if ($tar) {
-        Invoke-Checked $tar.Source @("-xf", $Archive, "-C", $Destination)
-    } else {
-        Expand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force
+    $sevenZip = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+    if ($sevenZip) {
+        Invoke-Checked $sevenZip.Source @("x", $Archive, "-o$Destination", "-y")
+        return
     }
+    Expand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force
 }
 
 function Find-LuaPluginRefInVersionInfo([string]$Path) {
