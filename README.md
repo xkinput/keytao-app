@@ -130,9 +130,9 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 1. `node scripts/sync-version.mjs --set <version>`，同步更新 `Cargo.toml` 和 `flutter_app/pubspec.yaml`，然后提交。
 2. 可选预跑：在分支上手动触发 Release 工作流（`workflow_dispatch`），构建全部平台并运行 `build-nix`，不创建 Release。
 3. 打 tag `v<version>` 并推送，`release.yml` 构建并发布 Release；tag 含 `alpha` 时标记为 prerelease。
-4. 附件发布后，在已安装 Nix 和 Python 3 的环境执行 `scripts/update-nix-release.sh <version>`，提交 `flake.nix`。
+4. Release 附件全部上传后，`release.yml` 自动执行 `scripts/update-nix-release.sh <version>`，更新 `flake.nix` 中的版本与哈希、检查 flake，并将变更提交到 `main`。
 
-`update-nix-release.sh` 用 `nix store prefetch-file` 获取 x64 / arm64 两份 deb 的 SHA-256，全部成功后才更新 `flake.nix` 的版本与哈希；不更新 `flake.lock`，不自动提交。`build-nix` 只在 `workflow_dispatch` 时运行，构建 `flake.nix` 固定的已发布 deb 并执行 `nix flake check --no-build`；tag 发布不运行该 job。
+`update-nix-release.sh` 用 `nix store prefetch-file` 获取 x64 / arm64 两份 deb 的 SHA-256，全部成功后才更新 `flake.nix` 的版本与哈希；它不更新 `flake.lock`。如需手动恢复同步，可在已安装 Nix 和 Python 3 的环境执行该脚本，再检查并提交 `flake.nix`。`build-nix` 只在 `workflow_dispatch` 时运行，构建 `flake.nix` 固定的已发布 deb 并执行 `nix flake check --no-build`。
 
 ## 平台文档索引
 
