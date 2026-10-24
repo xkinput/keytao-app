@@ -419,6 +419,11 @@ mod desktop {
     /// and initializes again so that a redeploy is not served from the caches
     /// above.
     static RIME_INITIALIZED: Mutex<bool> = Mutex::new(false);
+    /// `RimeSetup` configures process-wide librime logging and modules. In
+    /// particular, calling it again reaches glog's one-time initializer and
+    /// aborts the process. Finalizing the Rime service does not undo setup, so
+    /// reloads must call `initialize` without repeating `setup`.
+    static RIME_SETUP_COMPLETE: Mutex<bool> = Mutex::new(false);
     static DEPLOY_RESULT: Mutex<Option<bool>> = Mutex::new(None);
 
     /// Deployments serialize against each other — they rename dictionaries
@@ -1043,8 +1048,14 @@ mod desktop {
             require_lua_module();
 
             let api = rime_get_api();
-            if let Some(setup) = (*api).setup {
-                setup(&mut traits);
+            {
+                let mut setup_complete = lock_ignore_poison(&RIME_SETUP_COMPLETE);
+                if !*setup_complete {
+                    if let Some(setup) = (*api).setup {
+                        setup(&mut traits);
+                    }
+                    *setup_complete = true;
+                }
             }
             if let Some(initialize) = (*api).initialize {
                 initialize(&mut traits);
