@@ -31,7 +31,7 @@
 
         androidComposition = pkgs.androidenv.composeAndroidPackages {
           cmdLineToolsVersion = cmdLineToolsVer;
-          platformToolsVersion = "35.0.2";
+          platformToolsVersion = "37.0.1";
           buildToolsVersions = [ "35.0.0" ];
           platformVersions = [ "36" ];
           includeNDK = true;
@@ -53,10 +53,10 @@
       let
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
         # Update after each release with scripts/update-nix-release.sh.
-        releaseVersion = "1.2.1-alpha.97";
+        releaseVersion = "1.2.1-alpha.98";
         releaseHashes = {
-          x86_64-linux = "sha256-JcOM710iULz7EBAMYMvAj3+wfg6L3aF0HdHx1jSK89E=";
-          aarch64-linux = "sha256-+KS7yqvspY93NGfRc5k0t+MifTzSGNagL/JtVkVbKss=";
+          x86_64-linux = "sha256-GV/UgpPTFz+RSjPTy194tyi+CPF8mddD6u8/ZZZzN3M=";
+          aarch64-linux = "sha256-JgchZtNupO9GiVqPxho0DhWs8AJy/6OJxuSSuvamFuo=";
         };
       in
       let
