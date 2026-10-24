@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.1-alpha.95"
+version = "1.2.1-alpha.96"
 license = "MIT"
 
 # Shared version pinning across all workspace members
