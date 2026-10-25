@@ -424,6 +424,10 @@ mod desktop {
     /// aborts the process. Finalizing the Rime service does not undo setup, so
     /// reloads must call `initialize` without repeating `setup`.
     static RIME_SETUP_COMPLETE: Mutex<bool> = Mutex::new(false);
+    /// glog keeps the first setup's directory even when librime is finalized
+    /// and initialized for another user root. Older librime versions iterate
+    /// this directory without catching filesystem exceptions during deployment.
+    static RIME_SETUP_LOG_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
     static DEPLOY_RESULT: Mutex<Option<bool>> = Mutex::new(None);
 
     /// Deployments serialize against each other — they rename dictionaries
@@ -680,7 +684,7 @@ mod desktop {
             #[cfg(not(target_os = "android"))]
             {
                 setup_only(user_data_dir.clone(), shared_data_dir)?;
-                if !full_deploy_and_wait() {
+                if !full_deploy_and_wait()? {
                     return Err(format!(
                         "Rime deployment failed. See librime logs in {}",
                         log_dir.display()
@@ -1014,6 +1018,7 @@ mod desktop {
         prebuilt_data_dir: &str,
         log_dir: &str,
     ) {
+        let configured_log_dir = PathBuf::from(log_dir);
         let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
         let shared_data_dir = CString::new(shared_data_dir).expect("valid shared data dir");
         let staging_dir = CString::new(staging_dir).expect("valid staging dir");
@@ -1053,6 +1058,7 @@ mod desktop {
                 if !*setup_complete {
                     if let Some(setup) = (*api).setup {
                         setup(&mut traits);
+                        *lock_ignore_poison(&RIME_SETUP_LOG_DIR) = Some(configured_log_dir);
                     }
                     *setup_complete = true;
                 }
@@ -1511,8 +1517,20 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn full_deploy_and_wait() -> bool {
+    fn full_deploy_and_wait() -> Result<bool, String> {
         let _rime = rime_api_lock();
+        // RimeFinalize does not reset glog's process-wide log directory. A
+        // previous user root may have been removed after switching runtimes;
+        // librime 1.10's synchronous clean_old_log_files task would then throw
+        // a C++ filesystem exception across the C API into Rust.
+        if let Some(log_dir) = lock_ignore_poison(&RIME_SETUP_LOG_DIR).as_ref() {
+            std::fs::create_dir_all(log_dir).map_err(|error| {
+                format!(
+                    "Rime deployment failed: cannot prepare process-wide librime log directory {}: {error}",
+                    log_dir.display()
+                )
+            })?;
+        }
         {
             let mut result = lock_ignore_poison(&DEPLOY_RESULT);
             *result = None;
@@ -1520,16 +1538,16 @@ mod desktop {
         unsafe {
             let api = rime_get_api();
             let Some(start_maintenance) = (*api).start_maintenance else {
-                return false;
+                return Ok(false);
             };
             if start_maintenance(1) == 0 {
-                return false;
+                return Ok(false);
             }
             if let Some(join_maintenance_thread) = (*api).join_maintenance_thread {
                 join_maintenance_thread();
             }
         }
-        *lock_ignore_poison(&DEPLOY_RESULT) == Some(true)
+        Ok(*lock_ignore_poison(&DEPLOY_RESULT) == Some(true))
     }
 
     #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]

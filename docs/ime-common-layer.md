@@ -9,6 +9,7 @@
 现在直接操作 librime 的代码在 `crates/keytao-core/src/lib.rs`：
 
 - `deploy()` 负责 `setup()`、`initialize()`、`full_deploy_and_wait()`。
+- `setup()` 每个进程只执行一次；glog 的首次日志目录不会随 finalize 或目录切换重置。每次 maintenance 前必须确保该实际目录存在，失败返回 Rust 错误，避免 librime 1.10 的日志清理任务抛 C++ 文件系统异常越过 C ABI。
 - `Engine::process_key_result()` 负责调用 `session.process_key(KeyEvent::new(...))`。
 - `extract_state()` 负责把 librime context/menu/status 转成统一 `ImeState`。
 
