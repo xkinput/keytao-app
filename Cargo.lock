@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app-core"
-version = "1.2.1-alpha.98"
+version = "1.2.1-alpha.99"
 dependencies = [
  "dirs",
  "futures-util",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "1.2.1-alpha.98"
+version = "1.2.1-alpha.99"
 dependencies = [
  "dirs",
  "freetype-rs",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "1.2.1-alpha.98"
+version = "1.2.1-alpha.99"
 dependencies = [
  "embed-resource",
  "fontdue",
