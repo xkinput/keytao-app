@@ -104,6 +104,13 @@ fn preedit_cursor_bytes(preedit: &str, cursor: usize) -> i32 {
         .unwrap_or(preedit.len()) as i32
 }
 
+fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
+    // xkbcommon 0.7 includes the C terminator in keysym_to_utf8's String.
+    // Strip it at this boundary before validating a single printable character.
+    let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
+    unhandled_key_text(text.trim_end_matches('\0'), mods)
+}
+
 /// Turn a `repeat_info` event into (initial delay, interval between repeats).
 ///
 /// `rate` is in keys per second and zero disables repeating entirely; negative
@@ -859,8 +866,7 @@ impl App {
                 // Without a virtual keyboard there is no physical forwarding
                 // path. Rime declines plain digits and ASCII-mode letters;
                 // they still need to reach the client as committed text.
-                let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
-                if let Some(ch) = unhandled_key_text(&text, self.mods) {
+                if let Some(ch) = unhandled_keysym_text(sym, self.mods) {
                     self.surrounding_text.invalidate();
                     im.commit_string(ch.to_string());
                     im.commit(self.serial);
@@ -1381,22 +1387,28 @@ fn tempfile() -> std::io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_type_policy, preedit_cursor_bytes, repeat_timings};
-    use crate::engine::unhandled_key_text;
+    use super::{content_type_policy, preedit_cursor_bytes, repeat_timings, unhandled_keysym_text};
     use std::time::Duration;
-    use xkbcommon::xkb;
 
     #[test]
     fn number_row_and_keypad_digits_have_text_without_virtual_keyboard() {
         for digit in 0..=9u32 {
             for sym in ['0' as u32 + digit, 0xffb0 + digit] {
-                let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
                 assert_eq!(
-                    unhandled_key_text(&text, 0),
+                    unhandled_keysym_text(sym, 0),
                     char::from_u32('0' as u32 + digit)
                 );
             }
         }
+    }
+
+    #[test]
+    fn xkb_text_fallback_removes_only_terminators_and_preserves_unicode() {
+        use keytao_core::RIME_MOD_CONTROL;
+        assert_eq!(unhandled_keysym_text(0x0100_952e, 0), Some('键'));
+        assert_eq!(unhandled_keysym_text(0x0101_f642, 0), Some('🙂'));
+        assert_eq!(unhandled_keysym_text(0xffbe, 0), None);
+        assert_eq!(unhandled_keysym_text(0x31, RIME_MOD_CONTROL), None);
     }
 
     #[test]
