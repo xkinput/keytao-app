@@ -252,6 +252,10 @@ marked text 按 IMK 惯例分三段标注：
 
 鼠标点击提交目前**没有**接入：`recognizedEvents` 只声明 `keyDown | flagsChanged`，因此 IMK 内建的"点击组字区外自动 commitComposition:"不生效，`IMKMouseHandling` 的回调也不会被派发。之前那份 `mouseDown(onCharacterIndex:)` 实现是死代码，已删除。若要恢复该能力，需要在 `recognizedEvents` 里加 `leftMouseDown` 并在真实客户端上实测回调确实到达（Rime 官方前端 Squirrel 同样只声明 `keyDown | flagsChanged`，这是业界通行取舍）。
 
+IMK 客户端 getter、`insertText` 和 `setMarkedText` 可以同步重入取消、失焦或重载。controller 使用 `InputContextGeneration`：上下文变化使旧 token 失效，每次宿主调用后复核，旧 `apply` 不得恢复已取消的 preedit 或候选窗。Deactivate 仍在原回调中同步提交，先标记 inactive，且不能在重入激活后继续覆盖新状态。marked-text 所有权在 setter 前建立；Shift flags 同样在宿主调用前更新，避免旧 defer 覆盖焦点重置。
+
+候选面板隐藏时清空回调；候选及翻页 action 同时核对当前可见性、control 所属 window 和当前候选视图层级，已移除的旧 control 不得操作新的候选列表。`crates/keytao-macos-ime/test-input-context.sh` 用纯 Swift 回归同步重入及过期回调，不依赖 IMKit 会话。
+
 ## 候选窗
 
 `CandidatePanel` 是一个 borderless nonactivating `NSPanel`：

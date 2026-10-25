@@ -433,7 +433,10 @@ impl IBusEngine {
     }
 }
 
-#[interface(name = "org.freedesktop.IBus.Engine")]
+// zbus 4.4's macro inverts the explicit `spawn` flag: true generates
+// spawn_tasks_for_methods() == false. Keep key/focus/reset calls serialized
+// across signal publication. ibus_shared tests guard this dependency behavior.
+#[interface(name = "org.freedesktop.IBus.Engine", spawn = true)]
 impl IBusEngine {
     // ── Signals (emitted by our engine to the daemon) ─────────────────────
 
@@ -551,7 +554,7 @@ impl IBusEngine {
     }
 
     #[zbus(property)]
-    async fn set_content_type(&self, value: (u32, u32)) {
+    async fn set_content_type(&mut self, value: (u32, u32)) {
         let (purpose, hints) = value;
         self.apply_content_type(purpose, hints).await;
     }
@@ -606,7 +609,8 @@ pub struct IBusEngineService {
     x11_panel_tx: Option<std::sync::mpsc::Sender<OverlayPanelMessage>>,
 }
 
-#[interface(name = "org.freedesktop.IBus.Service")]
+// Use the same serialized dispatch as IBusEngine, including Destroy.
+#[interface(name = "org.freedesktop.IBus.Service", spawn = true)]
 impl IBusEngineService {
     async fn destroy(
         &self,

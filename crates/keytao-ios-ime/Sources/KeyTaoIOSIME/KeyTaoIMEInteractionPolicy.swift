@@ -330,6 +330,47 @@ struct KeyTaoBackspaceRepeatPolicy {
     }
 }
 
+/// Characters removed by one bounded backward-deletion batch, in deletion
+/// order. The same batch feeds the undo stack so it never restores text that
+/// remained in the document when the operation reached its limit.
+func keyTaoBackwardDeletionBatch(_ text: String, remainingLimit: Int) -> [String] {
+    guard remainingLimit > 0 else { return [] }
+    return text.suffix(remainingLimit).reversed().map(String.init)
+}
+
+/// Marked text belongs to one document, even though a keyboard controller and
+/// its text proxy can survive a field switch. Release ownership before invoking
+/// the host so a synchronous callback cannot clear the same region twice.
+struct KeyTaoMarkedTextOwnership {
+    private var documentIdentifier: UUID?
+
+    init() {}
+
+    mutating func claim(_ documentIdentifier: UUID) {
+        self.documentIdentifier = documentIdentifier
+    }
+
+    mutating func release(for currentDocument: UUID) -> Bool {
+        let ownedCurrentDocument = documentIdentifier == currentDocument
+        documentIdentifier = nil
+        return ownedCurrentDocument
+    }
+}
+
+/// A copied startup queue still belongs to its original input context. Host
+/// writes can synchronously move focus or reset the caret between commands.
+func keyTaoReplayPendingCommands<Command>(
+    _ commands: [Command],
+    isCurrent: () -> Bool,
+    perform: (Command) -> Void
+) {
+    for command in commands {
+        guard isCurrent() else { return }
+        perform(command)
+        guard isCurrent() else { return }
+    }
+}
+
 private enum KeyTaoDeletionSegmentClass {
     case whitespace
     case cjk

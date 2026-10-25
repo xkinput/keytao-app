@@ -271,7 +271,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (restarting) {
             currentInputConnection?.finishComposingText()
         }
-        applyEditorInfo(attribute, clearComposition = true)
+        // Hardware keyboards can start an editor without showing an input view.
+        // They need the same deployment/reload check as the soft keyboard path.
+        applyEditorInfo(attribute, clearComposition = true, reloadIfNeeded = true)
         currentState = KeytaoImeState.empty(asciiMode = currentState.asciiMode)
         composing = false
         selectionModeActive = false
@@ -499,11 +501,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         // Keep input gated until the current editor's privacy policy is installed.
         engine.runInBackground {
             val result = runCatching {
-                if (reloadIfNeeded) engine.reloadIfNeeded()
-                engine.setInputPolicy(policy.allowsComposing, policy.allowsLearning)
-                if (clearComposition && engine.nativeReady) engine.clearComposition()
-                engine.setAsciiMode(targetAsciiMode)
-                if (engine.nativeReady) engine.state().withoutTransientCommit() else null
+                KeytaoEditorUpdate.run(
+                    object : KeytaoEditorEngineUpdate {
+                        override val ready: Boolean get() = engine.nativeReady
+                        override fun reloadIfNeeded() { engine.reloadIfNeeded() }
+                        override fun applyPolicy() { engine.setInputPolicy(policy.allowsComposing, policy.allowsLearning) }
+                        override fun clearComposition() { engine.clearComposition() }
+                        override fun restoreMode() { engine.setAsciiMode(targetAsciiMode) }
+                        override fun state() = engine.state()
+                    },
+                    reloadIfNeeded,
+                    clearComposition,
+                )
             }
             val state = result.getOrNull()
             mainHandler.post {
@@ -514,7 +523,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     scheduleEditorUpdate(policy, targetAsciiMode, clearComposition = true, reloadIfNeeded = false)
                     return@post
                 }
-                editorUpdatePending = false
+                // A failed policy/mode update has not opened this editor for
+                // input. A stale READY snapshot must not release its gate.
+                // The next input/view lifecycle request retries the update.
+                editorUpdatePending = result.isFailure
                 state?.let {
                     currentState = it
                     composing = it.hasComposition

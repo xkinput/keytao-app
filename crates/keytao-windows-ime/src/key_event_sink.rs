@@ -22,7 +22,7 @@ use keytao_core::{
 use windows::{
     core::{implement, Interface, Result, GUID, PCWSTR, VARIANT},
     Win32::{
-        Foundation::{BOOL, E_FAIL, E_INVALIDARG, HWND, LPARAM, POINT, RECT, WPARAM},
+        Foundation::{BOOL, E_FAIL, E_INVALIDARG, E_UNEXPECTED, HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO,
             MONITOR_DEFAULTTONEAREST,
@@ -84,14 +84,12 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-/// Start an ITfComposition at the current caret and set initial preedit text.
+/// Create the native composition before any text write, so a later failure
+/// cannot lose the only handle needed to clean it up.
 fn start_composition(
     ec: u32,
     context: &ITfContext,
-    preedit: &str,
-    cursor: usize,
     comp_sink: &ITfCompositionSink,
-    display_attribute_atom: Option<u32>,
 ) -> Result<ITfComposition> {
     unsafe {
         // Get insertion point (query only — don't insert yet)
@@ -112,16 +110,7 @@ fn start_composition(
         let range = ITfRange::from_raw(raw_range);
 
         let ctx_comp: ITfContextComposition = context.cast()?;
-        let comp = ctx_comp.StartComposition(ec, &range, comp_sink)?;
-
-        // Set preedit text into the composition range
-        let wide = to_wide(preedit);
-        let comp_range = comp.GetRange()?;
-        comp_range.SetText(ec, 0, &wide)?;
-        set_composition_display_attribute(ec, context, &comp_range, display_attribute_atom)?;
-        set_composition_cursor(ec, context, &comp_range, preedit, cursor)?;
-
-        Ok(comp)
+        ctx_comp.StartComposition(ec, &range, comp_sink)
     }
 }
 
@@ -133,13 +122,18 @@ fn update_composition_text(
     preedit: &str,
     cursor: usize,
     display_attribute_atom: Option<u32>,
+    input: (&SharedState, u64),
+    written: &Cell<bool>,
 ) -> Result<()> {
     unsafe {
         let range = composition.GetRange()?;
+        require_current_input(Some(input))?;
         let wide = to_wide(preedit);
         range.SetText(ec, 0, &wide)?;
+        written.set(true);
+        require_current_input(Some(input))?;
         set_composition_display_attribute(ec, context, &range, display_attribute_atom)?;
-        set_composition_cursor(ec, context, &range, preedit, cursor)?;
+        set_composition_cursor(ec, context, &range, preedit, cursor, input)?;
     }
     Ok(())
 }
@@ -150,6 +144,7 @@ fn set_composition_cursor(
     composition_range: &ITfRange,
     preedit: &str,
     cursor: usize,
+    input: (&SharedState, u64),
 ) -> Result<()> {
     unsafe {
         let caret = composition_range.Clone()?;
@@ -160,6 +155,7 @@ fn set_composition_cursor(
         let mut shifted = 0;
         caret.ShiftEnd(ec, requested, &mut shifted, std::ptr::null())?;
         caret.Collapse(ec, TF_ANCHOR_END)?;
+        require_current_input(Some(input))?;
 
         let mut selections = [TF_SELECTION::default()];
         selections[0].range = std::mem::ManuallyDrop::new(Some(caret));
@@ -179,11 +175,29 @@ fn end_composition(
     composition: &ITfComposition,
     committed: Option<&str>,
 ) -> Result<()> {
+    end_composition_with_commit_tracking(ec, context, composition, committed, None, None)
+}
+
+fn end_composition_with_commit_tracking(
+    ec: u32,
+    context: &ITfContext,
+    composition: &ITfComposition,
+    committed: Option<&str>,
+    written: Option<&Cell<bool>>,
+    input: Option<(&SharedState, u64)>,
+) -> Result<()> {
     unsafe {
         let range = composition.GetRange()?;
+        require_current_input(input)?;
         clear_composition_display_attribute(ec, context, &range);
+        require_current_input(input)?;
         let wide = committed.map(to_wide).unwrap_or_default();
         range.SetText(ec, 0, &wide)?;
+        if committed.is_some() {
+            if let Some(written) = written {
+                written.set(true);
+            }
+        }
 
         // SetText can leave the document selection spanning the old
         // composition range. Collapse it after the committed text before
@@ -193,6 +207,7 @@ fn end_composition(
         if committed.is_some() {
             let caret = range.Clone()?;
             caret.Collapse(ec, TF_ANCHOR_END)?;
+            require_current_input(input)?;
             let mut selections = [TF_SELECTION::default()];
             selections[0].range = std::mem::ManuallyDrop::new(Some(caret));
             selections[0].style.ase = TF_AE_END;
@@ -202,6 +217,13 @@ fn end_composition(
             result?;
         }
         composition.EndComposition(ec)?;
+    }
+    Ok(())
+}
+
+fn require_current_input(input: Option<(&SharedState, u64)>) -> Result<()> {
+    if input.is_some_and(|(state, generation)| state.borrow().input_generation != generation) {
+        return Err(E_UNEXPECTED.into());
     }
     Ok(())
 }
@@ -260,7 +282,101 @@ pub(crate) struct PendingWindowUpdate {
 pub(crate) struct PendingCommitRetry {
     context: ITfContext,
     client_id: u32,
+    input_generation: u64,
     committed: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingCompositionEnd {
+    context: ITfContext,
+    pub(crate) composition: ITfComposition,
+}
+
+pub(crate) fn defer_failed_composition_end(
+    shared_state: &SharedState,
+    context: &ITfContext,
+    composition: &ITfComposition,
+) {
+    let mut st = shared_state.borrow_mut();
+    if !st
+        .pending_composition_ends
+        .iter()
+        .any(|pending| pending.composition.as_raw() == composition.as_raw())
+    {
+        st.pending_composition_ends.push(PendingCompositionEnd {
+            context: context.clone(),
+            composition: composition.clone(),
+        });
+    }
+}
+
+pub(crate) fn take_pending_composition_end(
+    shared_state: &SharedState,
+    identity: usize,
+) -> Option<PendingCompositionEnd> {
+    let mut st = shared_state.borrow_mut();
+    let index = st
+        .pending_composition_ends
+        .iter()
+        .position(|pending| pending.composition.as_raw() as usize == identity)?;
+    Some(st.pending_composition_ends.remove(index))
+}
+
+struct CompositionEndFlushGuard(SharedState);
+
+impl Drop for CompositionEndFlushGuard {
+    fn drop(&mut self) {
+        self.0.borrow_mut().composition_end_flush_in_progress = false;
+    }
+}
+
+/// Terminate failed native compositions outside the text-store write lock.
+/// A host may refuse both EndComposition and TerminateComposition; retain that
+/// handle until a later flush or its own termination callback resolves it.
+pub(crate) fn flush_pending_composition_ends(shared_state: &SharedState) {
+    let pending = {
+        let mut st = shared_state.borrow_mut();
+        if st.ime_write_session_active
+            || st.caret_probe_session_in_progress
+            || st.composition_end_flush_in_progress
+        {
+            return;
+        }
+        st.composition_end_flush_in_progress = true;
+        st.pending_composition_ends.clone()
+    };
+    let _guard = CompositionEndFlushGuard(shared_state.clone());
+    for pending in pending {
+        let (Ok(services), Ok(view)) = (
+            pending.context.cast::<ITfContextOwnerCompositionServices>(),
+            pending.composition.cast::<ITfCompositionView>(),
+        ) else {
+            continue;
+        };
+        if unsafe { services.TerminateComposition(&view) }.is_ok() {
+            drop(take_pending_composition_end(
+                shared_state,
+                pending.composition.as_raw() as usize,
+            ));
+        }
+    }
+}
+
+fn end_composition_or_defer(
+    ec: u32,
+    context: &ITfContext,
+    shared_state: &SharedState,
+    composition: &ITfComposition,
+    clear_text: bool,
+) {
+    let ended = if clear_text {
+        end_composition(ec, context, composition, None)
+    } else {
+        unsafe { composition.EndComposition(ec) }
+    };
+    if ended.is_err() {
+        defer_failed_composition_end(shared_state, context, composition);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -910,15 +1026,22 @@ fn queue_lost_commit_once(
     shared_state: &SharedState,
     committed: &str,
     scheduled: &Cell<bool>,
+    input_generation: u64,
+    committed_written: &Cell<bool>,
 ) {
-    if scheduled.replace(true) {
+    if committed_written.get() || scheduled.replace(true) {
         return;
     }
     let committed_len = committed.chars().count();
     keytao_core::rt_log!(Level::Info, "error", "commit_lost", len = committed_len);
-    shared_state.borrow_mut().pending_commit_retry = Some(PendingCommitRetry {
+    let mut st = shared_state.borrow_mut();
+    if st.input_generation != input_generation || st.client_id != client_id {
+        return;
+    }
+    st.pending_commit_retry = Some(PendingCommitRetry {
         context: context.clone(),
         client_id,
+        input_generation,
         committed: committed.to_owned(),
     });
 }
@@ -927,19 +1050,50 @@ pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
     let Some(retry) = shared_state.borrow_mut().pending_commit_retry.take() else {
         return;
     };
+    if !commit_retry_is_current(shared_state, &retry) {
+        return;
+    }
+    if shared_state
+        .borrow()
+        .pending_composition_ends
+        .iter()
+        .any(|pending| pending.context.as_raw() == retry.context.as_raw())
+    {
+        shared_state.borrow_mut().pending_commit_retry = Some(retry);
+        return;
+    }
     let state = Rc::clone(shared_state);
     let comp_sink: ITfCompositionSink = CompositionSink {
         state: Rc::downgrade(shared_state),
         _dll_guard: DllActivityGuard::new(),
     }
     .into();
+    let context = retry.context.clone();
     if let Err(error) =
-        with_async_dontcare_write_session(&retry.context, retry.client_id, move |ec, ctx| {
+        with_async_dontcare_write_session(&context, retry.client_id, move |ec, ctx| {
+            if !commit_retry_is_current(&state, &retry) {
+                return Ok(());
+            }
             let _write_session_guard = ImeWriteSessionGuard::enter(&state);
             let result = (|| {
-                let composition = start_composition(ec, ctx, "", 0, &comp_sink, None)?;
+                let composition = start_composition(ec, ctx, &comp_sink)?;
                 track_composition_in_flight(&state, Some(&composition));
-                end_composition(ec, ctx, &composition, Some(&retry.committed))
+                if !commit_retry_is_current(&state, &retry) {
+                    end_composition_or_defer(ec, ctx, &state, &composition, false);
+                    return Ok(());
+                }
+                let result = end_composition_with_commit_tracking(
+                    ec,
+                    ctx,
+                    &composition,
+                    Some(&retry.committed),
+                    None,
+                    Some((&state, retry.input_generation)),
+                );
+                if result.is_err() {
+                    end_composition_or_defer(ec, ctx, &state, &composition, false);
+                }
+                result
             })();
             track_composition_in_flight(&state, None);
             if let Err(error) = &result {
@@ -962,6 +1116,13 @@ pub(crate) fn flush_pending_commit_retry(shared_state: &SharedState) {
             hr = error.code().0,
         );
     }
+}
+
+fn commit_retry_is_current(shared_state: &SharedState, retry: &PendingCommitRetry) -> bool {
+    let st = shared_state.borrow();
+    st.client_id != 0
+        && st.client_id == retry.client_id
+        && st.input_generation == retry.input_generation
 }
 
 fn window_update_context_matches(
@@ -1120,6 +1281,8 @@ fn apply_ime_state(
     let ime_state_clone = ime_state.clone();
     let failed_commit_retry_scheduled = Rc::new(Cell::new(false));
     let failed_commit_retry_for_session = Rc::clone(&failed_commit_retry_scheduled);
+    let committed_written = Rc::new(Cell::new(false));
+    let committed_written_for_session = Rc::clone(&committed_written);
     let committed_for_retry = ime_state
         .committed
         .as_deref()
@@ -1185,7 +1348,6 @@ fn apply_ime_state(
             st.composition.take()
         };
         track_composition_in_flight(&state_arc_for_session, composition.as_ref());
-        let original_composition = composition.clone();
         let mut panel_anchor = state_arc_for_session.borrow_mut().panel_anchor.take();
         if panel_anchor
             .as_ref()
@@ -1205,34 +1367,48 @@ fn apply_ime_state(
             finish_panel_anchor(ec, panel_anchor.take(), client_id);
             if let Some(comp) = composition.as_ref() {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
-                let _ = end_composition(ec, ctx, comp, None);
+                end_composition_or_defer(ec, ctx, &state_arc_for_session, comp, true);
                 track_composition_in_flight(&state_arc_for_session, None);
             }
             return Ok(());
         }
 
+        let mut committing_composition = false;
+        let composition_owns_text = Cell::new(composition.is_some());
         let apply_result = (|| -> Result<()> {
             if let Some(committed) = committed {
                 let committed_len = committed.chars().count();
-                let comp = if let Some(comp) = composition.take() {
+                if composition.is_some() {
                     append_key_diagnostic!("commit path=composition len={committed_len}");
-                    comp
                 } else {
                     append_key_diagnostic!("commit path=fresh-composition len={committed_len}");
-                    start_composition(ec, ctx, "", 0, &comp_sink_iface, None)?
-                };
+                    composition = Some(start_composition(ec, ctx, &comp_sink_iface)?);
+                }
+                committing_composition = true;
+                let comp = composition.as_ref().unwrap();
                 track_composition_in_flight(&state_arc_for_session, Some(&comp));
-                end_composition(ec, ctx, &comp, Some(committed))?;
+                end_composition_with_commit_tracking(
+                    ec,
+                    ctx,
+                    comp,
+                    Some(committed),
+                    Some(&committed_written_for_session),
+                    Some((&state_arc_for_session, input_generation)),
+                )?;
                 track_composition_in_flight(&state_arc_for_session, None);
+                composition = None;
+                committing_composition = false;
+                composition_owns_text.set(false);
             }
 
             match plan.target {
                 CompositionTarget::None => {
-                    if let Some(comp) = composition.take() {
+                    if let Some(comp) = composition.as_ref() {
                         append_key_diagnostic!("composition end reason=clear");
                         track_composition_in_flight(&state_arc_for_session, Some(&comp));
                         end_composition(ec, ctx, &comp, None)?;
                         track_composition_in_flight(&state_arc_for_session, None);
+                        composition = None;
                     }
                 }
                 CompositionTarget::Preedit => {
@@ -1248,21 +1424,26 @@ fn apply_ime_state(
                             &ime_state_clone.preedit,
                             ime_state_clone.cursor,
                             display_attribute_atom,
+                            (&state_arc_for_session, input_generation),
+                            &composition_owns_text,
                         )?;
                     } else {
                         append_key_diagnostic!(
                             "composition start mode=embedded text_len={}",
                             ime_state_clone.preedit.chars().count()
                         );
-                        composition = Some(start_composition(
+                        composition = Some(start_composition(ec, ctx, &comp_sink_iface)?);
+                        track_composition_in_flight(&state_arc_for_session, composition.as_ref());
+                        update_composition_text(
                             ec,
                             ctx,
+                            composition.as_ref().unwrap(),
                             &ime_state_clone.preedit,
                             ime_state_clone.cursor,
-                            &comp_sink_iface,
                             display_attribute_atom,
-                        )?);
-                        track_composition_in_flight(&state_arc_for_session, composition.as_ref());
+                            (&state_arc_for_session, input_generation),
+                            &composition_owns_text,
+                        )?;
                     }
                 }
             }
@@ -1271,11 +1452,24 @@ fn apply_ime_state(
 
         if let Err(error) = apply_result {
             finish_panel_anchor(ec, panel_anchor.take(), client_id);
-            if let Some(comp) = composition.as_ref().or(original_composition.as_ref()) {
+            if let Some(comp) = composition.as_ref() {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
-                let _ = end_composition(ec, ctx, comp, None);
+                if (committing_composition && committed_written_for_session.get())
+                    || !composition_owns_text.get()
+                {
+                    // SetText already inserted the commit. Cleanup must neither
+                    // erase it nor schedule a second insertion after a later
+                    // selection/EndComposition/preedit failure. A fresh range
+                    // whose SetText failed still contains the user's selection.
+                    end_composition_or_defer(ec, ctx, &state_arc_for_session, comp, false);
+                } else {
+                    end_composition_or_defer(ec, ctx, &state_arc_for_session, comp, true);
+                }
             }
             track_composition_in_flight(&state_arc_for_session, None);
+            if state_arc_for_session.borrow().input_generation != input_generation {
+                return Err(error);
+            }
             let mut st = state_arc_for_session.borrow_mut();
             st.composition = None;
             st.composition_context = None;
@@ -1297,6 +1491,8 @@ fn apply_ime_state(
                     &state_arc_for_session,
                     committed,
                     &failed_commit_retry_for_session,
+                    input_generation,
+                    &committed_written_for_session,
                 );
             }
             if async_dontcare {
@@ -1310,7 +1506,7 @@ fn apply_ime_state(
             finish_panel_anchor(ec, panel_anchor.take(), client_id);
             if let Some(comp) = composition.as_ref() {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
-                let _ = end_composition(ec, ctx, comp, None);
+                end_composition_or_defer(ec, ctx, &state_arc_for_session, comp, true);
                 track_composition_in_flight(&state_arc_for_session, None);
             }
             if async_dontcare {
@@ -1363,7 +1559,7 @@ fn apply_ime_state(
             finish_panel_anchor(ec, panel_anchor.take(), client_id);
             if let Some(comp) = composition.as_ref() {
                 track_composition_in_flight(&state_arc_for_session, Some(comp));
-                let _ = end_composition(ec, ctx, comp, None);
+                end_composition_or_defer(ec, ctx, &state_arc_for_session, comp, true);
                 track_composition_in_flight(&state_arc_for_session, None);
             }
             return Ok(());
@@ -1427,9 +1623,24 @@ fn apply_ime_state(
                 &state_arc,
                 committed,
                 &failed_commit_retry_scheduled,
+                input_generation,
+                &committed_written,
             );
         }
-        reset_input_for_focus_change(&state_arc);
+        // COM calls may have switched focus while the failed frame was being
+        // applied. Do not clear that newer input session. A retry from this
+        // frame alone survives our own cleanup, then expires on any later reset.
+        if state_arc.borrow().input_generation == input_generation {
+            let retry = state_arc.borrow_mut().pending_commit_retry.take();
+            reset_input_for_focus_change(&state_arc);
+            let mut st = state_arc.borrow_mut();
+            if st.input_generation == input_generation.wrapping_add(1) {
+                st.pending_commit_retry = retry.map(|mut retry| {
+                    retry.input_generation = st.input_generation;
+                    retry
+                });
+            }
+        }
         flush_pending_ime_ui(&state_arc);
     } else {
         flush_pending_ime_ui(&state_arc);
@@ -2591,6 +2802,10 @@ mod tests {
 #[cfg(test)]
 #[path = "shortcut_passthrough_tests.rs"]
 mod shortcut_passthrough_tests;
+
+#[cfg(test)]
+#[path = "commit_retry_tests.rs"]
+mod commit_retry_tests;
 
 #[cfg(test)]
 #[path = "unhandled_key_tests.rs"]

@@ -130,6 +130,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
     private var backspaceGestureRestoreStart = 0
     private struct BackspaceSelectionSession {
+        var documentIdentifier: UUID
         var originalBefore: String
         var selectedText: String
     }
@@ -137,7 +138,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var lastCommittedText: String?
     private let doubleSpacePeriodTracker = KeyTaoDoubleSpacePeriodTracker()
     private var hostTraits = KeyTaoHostTraits.default
-    private var markedTextActive = false
+    private var inputDocumentIdentifier: UUID?
+    private var inputContextGeneration: UInt64 = 0
+    private var markedTextOwnership = KeyTaoMarkedTextOwnership()
     private var hostTextMutationDepth = 0
     private var runtimeStarting = false
     private var queuedCommands: [KeyTaoKeyCommand] = []
@@ -311,6 +314,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard hostTextMutationDepth == 0 else {
             return
         }
+        _ = refreshInputDocumentIfNeeded()
         reloadIfNeeded()
         keyboardView?.updateInputModeSwitchKey(visible: needsInputModeSwitchKey)
         applyHostTraits()
@@ -386,6 +390,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches() {
+        inputContextGeneration &+= 1
+        inputDocumentIdentifier = textDocumentProxy.documentIdentifier
         // Cold-start keystrokes belong to the context where they were queued.
         // Runtime initialization may finish after a field change or dismissal.
         queuedCommands.removeAll()
@@ -405,6 +411,23 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyboardView?.update(state: currentState)
     }
 
+    /// Host notifications can arrive after the proxy has already switched.
+    /// Check identity at input entry points before using undo, queued input or
+    /// candidate state cached for the preceding document.
+    @discardableResult
+    private func refreshInputDocumentIfNeeded() -> Bool {
+        guard inputDocumentIdentifier == textDocumentProxy.documentIdentifier else {
+            resetInputContextCaches()
+            applyHostTraits()
+            return false
+        }
+        return true
+    }
+
+    private func inputContextIsCurrent(_ generation: UInt64, documentIdentifier: UUID) -> Bool {
+        generation == inputContextGeneration && textDocumentProxy.documentIdentifier == documentIdentifier
+    }
+
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didTrigger command: KeyTaoKeyCommand) {
         if runtimeMetricsEnabled {
             commandCounts[KeyTaoLog.commandType(command.type), default: 0] += 1
@@ -413,6 +436,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func performCommand(_ command: KeyTaoKeyCommand) {
+        refreshInputDocumentIfNeeded()
         // The runtime is still coming up on the startup queue. Queue the key
         // instead of committing it raw, otherwise the first few characters of
         // every cold start would land in the host as latin letters. Once text
@@ -522,6 +546,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didSelectCandidate index: Int, global: Bool) {
+        guard refreshInputDocumentIfNeeded() else { return }
         if !inputAvailable {
             showUnavailableMessage()
             return
@@ -540,10 +565,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, candidateIsUserPhrase index: Int) -> Bool {
-        inputAvailable && engineCapabilities.candidateDeletion && engine.candidateIsUserPhrase(index)
+        refreshInputDocumentIfNeeded() && inputAvailable && engineCapabilities.candidateDeletion && engine.candidateIsUserPhrase(index)
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteCandidate index: Int) -> Bool {
+        guard refreshInputDocumentIfNeeded() else { return false }
         guard inputAvailable, engineCapabilities.candidateDeletion else {
             showMessage("系统词不可删除")
             return false
@@ -555,6 +581,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestExpandedCandidates completion: @escaping ([KeyTaoCandidate]) -> Void) {
+        guard refreshInputDocumentIfNeeded() else { completion([]); return }
         if !inputAvailable {
             showUnavailableMessage()
             completion([])
@@ -569,6 +596,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestClipboardHistory completion: @escaping ([ClipboardEntry]) -> Void) {
+        refreshInputDocumentIfNeeded()
         guard !hostTraits.isSensitive, hasFullAccess else {
             resetClipboardState()
             completion([])
@@ -673,6 +701,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, commitClipboardMedia key: String) {
+        guard refreshInputDocumentIfNeeded() else { return }
         guard !hostTraits.isSensitive, hasFullAccess else {
             resetClipboardState()
             return
@@ -874,6 +903,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         let fallbackText = fallbackValue ?? sequence
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         if hostTraits.bypassesRime {
             commitDirect(fallbackText)
             return
@@ -897,9 +928,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         // the following state would overwrite it and the text would be lost.
         var consumed = 0
         for key in keys {
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
             let result = engine.processKey(key)
             if result.accepted {
                 apply(result)
+                guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
                 consumed += 1
                 continue
             }
@@ -914,9 +947,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func applyRejectedKeyFallback(_ result: KeyTaoImeState, text: String) {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         apply(result)
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         if currentState.hasComposition {
             apply(engine.commitComposition())
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         }
         insertHostText(text)
     }
@@ -953,7 +990,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         case "restoreGesture":
             let count = max(0, backspaceRestoreStack.count - backspaceGestureRestoreStart)
             for _ in 0..<count {
-                _ = restoreOneBackspaceText()
+                guard restoreOneBackspaceText() else { break }
             }
         case "select":
             updateBackspaceSelection(count: count)
@@ -976,11 +1013,17 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func updateBackspaceSelection(count: Int) {
         guard !hostTraits.isSensitive else { return }
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         resetCompositionBeforeBackspaceGesture()
-        let originalBefore = backspaceSelectionSession?.originalBefore
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
+        let originalBefore = backspaceSelectionSession.flatMap {
+            $0.documentIdentifier == documentIdentifier ? $0.originalBefore : nil
+        }
             ?? textDocumentProxy.documentContextBeforeInput
             ?? ""
         restoreBackspaceSelectionMarkup()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         let selectionLength = keyTaoTrailingDeletionSegmentsLength(
             originalBefore,
             count: max(1, min(count, 96))
@@ -993,29 +1036,37 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         withHostTextMutation {
             for _ in selectedText {
+                guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
                 textDocumentProxy.deleteBackward()
             }
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
+            markedTextOwnership.claim(documentIdentifier)
+            backspaceSelectionSession = BackspaceSelectionSession(
+                documentIdentifier: documentIdentifier,
+                originalBefore: originalBefore,
+                selectedText: selectedText
+            )
             textDocumentProxy.setMarkedText(
                 selectedText,
                 selectedRange: NSRange(location: 0, length: selectedText.utf16.count)
             )
         }
-        markedTextActive = true
-        backspaceSelectionSession = BackspaceSelectionSession(
-            originalBefore: originalBefore,
-            selectedText: selectedText
-        )
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         keyboardView?.showBackspaceDeletionPreview(selectedText, pendingSelection: true)
     }
 
     private func restoreBackspaceSelectionMarkup() {
         guard let session = backspaceSelectionSession else { return }
+        backspaceSelectionSession = nil
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
+        _ = markedTextOwnership.release(for: documentIdentifier)
+        guard session.documentIdentifier == documentIdentifier else { return }
         withHostTextMutation {
             textDocumentProxy.insertText(session.selectedText)
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
             textDocumentProxy.unmarkText()
         }
-        markedTextActive = false
-        backspaceSelectionSession = nil
     }
 
     private func cancelBackspaceSelection() {
@@ -1025,19 +1076,30 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func commitBackspaceSelection() {
         guard let session = backspaceSelectionSession else { return }
-        let selectedText = session.selectedText
         backspaceSelectionSession = nil
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
+        guard session.documentIdentifier == documentIdentifier else {
+            _ = markedTextOwnership.release(for: documentIdentifier)
+            keyboardView?.showBackspaceDeletionPreview("")
+            return
+        }
+        let selectedText = session.selectedText
         backspaceRestoreStack.removeAll()
         backspaceGestureRestoreStart = 0
         clearHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         backspaceRestoreStack.append(contentsOf: selectedText.reversed().map(String.init))
         keyboardView?.showBackspaceDeletionPreview(selectedText)
     }
 
     private func deleteTrailingSegmentBeforeCursorForRestore() {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         let before = textDocumentProxy.documentContextBeforeInput ?? ""
         let count = keyTaoTrailingDeletionSegmentLength(before)
         for _ in 0..<count {
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
             guard deleteOneBeforeCursorForRestore() else {
                 break
             }
@@ -1045,7 +1107,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func deleteOneBeforeCursorForRestore() -> Bool {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         resetCompositionBeforeBackspaceGesture()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
         return withHostTextMutation {
             guard let before = textDocumentProxy.documentContextBeforeInput,
                   let deleted = before.last else {
@@ -1053,6 +1118,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                 return false
             }
             textDocumentProxy.deleteBackward()
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
             backspaceRestoreStack.append(String(deleted))
             return true
         }
@@ -1062,37 +1128,49 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// hand over, so "delete everything before the caret" has to re-read it
     /// after every batch until the host stops giving text back.
     private func deleteAllBeforeCursorForRestore() {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         resetCompositionBeforeBackspaceGesture()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         withHostTextMutation {
             var deleted = 0
             while deleted < Self.deleteAllBatchLimit {
+                guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
                 guard let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty else {
                     return
                 }
-                for _ in before {
+                let batch = keyTaoBackwardDeletionBatch(
+                    before,
+                    remainingLimit: Self.deleteAllBatchLimit - deleted
+                )
+                for removedText in batch {
+                    guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
                     textDocumentProxy.deleteBackward()
+                    guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
+                    backspaceRestoreStack.append(removedText)
                     deleted += 1
-                    if deleted >= Self.deleteAllBatchLimit {
-                        break
-                    }
                 }
-                backspaceRestoreStack.append(contentsOf: before.reversed().map { String($0) })
             }
         }
     }
 
     private func restoreOneBackspaceText() -> Bool {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         guard let text = backspaceRestoreStack.popLast() else {
             return false
         }
         clearHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
         withHostTextMutation {
             textDocumentProxy.insertText(text)
         }
-        return true
+        return inputContextIsCurrent(generation, documentIdentifier: documentIdentifier)
     }
 
     private func restoreAllBackspaceText() {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         guard !backspaceRestoreStack.isEmpty else {
             return
         }
@@ -1101,6 +1179,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             restored.append(text)
         }
         clearHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         withHostTextMutation {
             textDocumentProxy.insertText(restored)
         }
@@ -1110,8 +1189,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard currentState.hasComposition else {
             return
         }
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         _ = engine.reset()
         clearHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
     }
@@ -1611,7 +1693,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         if currentState.hasComposition {
             _ = engine.reset()
         }
-        insertHostText(text)
+        guard insertHostText(text) else { return }
         lastCommittedText = hostTraits.isSensitive ? nil : text
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
@@ -1622,11 +1704,15 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         defer {
             if let started { applyHistogram.record((KeyTaoLog.now() - started) * 1000) }
         }
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         if !state.committed.isEmpty {
-            insertHostText(state.committed)
+            guard insertHostText(state.committed) else { return }
         }
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         currentState = state.withoutTransientCommit()
         updateHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
         keyboardView?.update(state: currentState)
     }
 
@@ -1653,15 +1739,20 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         return result
     }
 
-    private func insertHostText(_ text: String) {
+    @discardableResult
+    private func insertHostText(_ text: String) -> Bool {
         guard !text.isEmpty else {
-            return
+            return true
         }
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         backspaceRestoreStack.removeAll()
         clearHostMarkedText()
+        guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
         withHostTextMutation {
             textDocumentProxy.insertText(text)
         }
+        return inputContextIsCurrent(generation, documentIdentifier: documentIdentifier)
     }
 
     /// iOS 13+ lets a keyboard extension show the pending composition inside the
@@ -1675,22 +1766,24 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         let selected = markedTextSelectedRange(in: preedit)
+        markedTextOwnership.claim(textDocumentProxy.documentIdentifier)
         withHostTextMutation {
             textDocumentProxy.setMarkedText(preedit, selectedRange: selected)
         }
-        markedTextActive = true
     }
 
     /// `unmarkText()` only finalises the marked text, it does not remove it, so
     /// the composition has to be replaced with an empty string first. Otherwise
     /// the preedit would stay in the document next to the text Rime commits.
     private func clearHostMarkedText() {
-        guard markedTextActive else {
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
+        guard markedTextOwnership.release(for: documentIdentifier) else {
             return
         }
-        markedTextActive = false
         withHostTextMutation {
             textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return }
             textDocumentProxy.unmarkText()
         }
     }
@@ -1737,14 +1830,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard !runtimeStarting, !queuedCommands.isEmpty else {
             return
         }
+        guard refreshInputDocumentIfNeeded() else { return }
+        let generation = inputContextGeneration
+        let documentIdentifier = textDocumentProxy.documentIdentifier
         let pending = queuedCommands
         queuedCommands.removeAll()
         guard keyboardView != nil else {
             return
         }
-        for command in pending {
-            performCommand(command)
-        }
+        keyTaoReplayPendingCommands(
+            pending,
+            isCurrent: { self.inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) },
+            perform: { self.performCommand($0) }
+        )
     }
 
     /// Re-reads what the session behind the engine can do and hands it to the

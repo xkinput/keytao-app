@@ -12,6 +12,7 @@ fn empty_runtime_session() -> (ImeRuntime, ImeRuntimeSession) {
     );
     let session = ImeRuntimeSession {
         shared: runtime.0.clone(),
+        dirs: runtime.data_dirs().unwrap(),
         inner: Arc::new(Mutex::new(ImeRuntimeSessionInner {
             engine: None,
             generation: PROCESS_RIME.generation.load(Ordering::SeqCst),

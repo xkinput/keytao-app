@@ -165,6 +165,14 @@ iOS 不走 Android JNI，而是复用 `keytao-core-ffi` per-session C ABI。
 
 清 marked text 必须是「先 `setMarkedText("")` 再 `unmarkText()`」：`unmarkText()` 只是把 marked text 定稿成普通文本，不会删掉它，直接 unmark 会让 preedit 和 Rime 提交的文本同时留在输入框里。
 
+宿主 marked text 和退格选删会话都绑定 `UITextDocumentProxy.documentIdentifier`。输入框已切换时，只释放旧所有权，不对新文档清标记或恢复旧文档的选中文字；释放发生在宿主调用之前，避免同步重入重复处理。`setMarkedText` 清空与后续 `unmarkText` 之间也复核文档身份。
+
+普通按键、undo、选词/删除用户词、展开候选和剪贴板入口也复核文档身份；宿主 focus 通知延迟或遗漏时先清旧输入上下文并刷新新宿主策略，旧候选/媒体操作直接失效，不能把旧退格恢复栈或排队按键写进新框。
+
+上下文重置还递增 generation。清标记→插入提交→写入新 preedit、批量删除/恢复以及已复制到本地的启动队列，都在宿主调用之间复核 generation 与文档身份；任何一步同步切框或取消后，旧操作立即停止，不能继续写新框或恢复旧 UI。启动队列重放的纯策略回归覆盖首条命令触发重置后丢弃其余快照。
+
+「删除全部」以 Unicode 字符为单位，单次最多删除 4096 个；删除调用和退格恢复栈使用同一份有界 batch，预算中途耗尽时不能把仍留在宿主的前缀也记入恢复栈。纯策略测试覆盖超长上下文、组合字符、Emoji 以及跨文档 marked-text 所有权释放。
+
 少数宿主（尤其 WKWebView 内的输入框）对 proxy marked text 支持不佳。`ios_ime.json` 的 `hostMarkedText: false` 可以关掉宿主内 preedit，只保留候选栏 preedit。
 
 所有对宿主的写入都经 `withHostTextMutation`，在当前 runloop 内屏蔽由我们自己触发的 `textWillChange` / `selectionWillChange`，否则每次 `setMarkedText` 都会被当成用户切到了另一个输入框而清掉组字。

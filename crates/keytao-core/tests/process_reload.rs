@@ -99,6 +99,44 @@ fn independent_runtimes_share_one_librime() {
 }
 
 #[test]
+fn sessions_do_not_cross_over_to_another_runtimes_data_directories() {
+    let _serialized = serialized();
+    let first_dir = smoke_fixture::scratch_dir("runtime-first-directories");
+    let second_dir = smoke_fixture::scratch_dir("runtime-second-directories");
+    smoke_fixture::write(&first_dir).unwrap();
+    smoke_fixture::write(&second_dir).unwrap();
+    let first = ImeRuntime::with_dirs(&first_dir, first_dir.to_string_lossy().into_owned());
+    let second = ImeRuntime::with_dirs(&second_dir, second_dir.to_string_lossy().into_owned());
+    first.init().unwrap();
+    assert!(first.is_initialized());
+    let first_session = first.create_session().unwrap();
+    assert_composes(&first_session, "before directory switch");
+
+    second.init().unwrap();
+    assert!(second.is_initialized());
+    assert!(!first.is_initialized());
+    let second_session = second.create_session().unwrap();
+    assert_composes(&second_session, "new runtime after directory switch");
+    assert!(first.create_session().is_err());
+    assert!(
+        first_session.process_key_result(b'a' as u32, 0).is_none(),
+        "an old session must not rebuild against another directory's deployment"
+    );
+    assert!(first_session.reset().is_none());
+
+    // Returning to the original deployment can rebuild its old session again.
+    first.init().unwrap();
+    assert!(first.is_initialized());
+    assert!(!second.is_initialized());
+    assert_composes(&first_session, "after restoring the original directories");
+    assert!(second_session.process_key_result(b'a' as u32, 0).is_none());
+    drop(first_session);
+    drop(second_session);
+    let _ = std::fs::remove_dir_all(&first_dir);
+    let _ = std::fs::remove_dir_all(&second_dir);
+}
+
+#[test]
 fn concurrent_reloads_from_two_runtimes_keep_sessions_alive() {
     let _serialized = serialized();
     let dir = smoke_fixture::scratch_dir("process-reload-race");

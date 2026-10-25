@@ -183,11 +183,18 @@ class CandidatePanel: NSPanel {
     // MARK: - Actions
 
     @objc private func candidateClicked(_ sender: NSControl) {
+        guard isVisible, sender.window === self, sender.isDescendant(of: candidateStack) else { return }
         onSelect?(sender.tag)
     }
 
-    @objc private func prevPage() { onPageChange?(true) }
-    @objc private func nextPage() { onPageChange?(false) }
+    @objc private func prevPage(_ sender: NSControl) {
+        guard isVisible, sender.window === self, sender.isDescendant(of: candidateStack) else { return }
+        onPageChange?(true)
+    }
+    @objc private func nextPage(_ sender: NSControl) {
+        guard isVisible, sender.window === self, sender.isDescendant(of: candidateStack) else { return }
+        onPageChange?(false)
+    }
 
     // MARK: - View factories
 
@@ -198,20 +205,20 @@ class CandidatePanel: NSPanel {
             row.alignment = .centerY
             row.spacing = theme.panel.gap
             if navigation.canGoPrevious {
-                row.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
+                row.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage(_:)), theme: theme))
             }
             if navigation.canGoNext {
-                row.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
+                row.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage(_:)), theme: theme))
             }
             candidateStack.addArrangedSubview(row)
             return
         }
 
         if navigation.canGoPrevious {
-            candidateStack.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage), theme: theme))
+            candidateStack.addArrangedSubview(makeNavButton(symbol: "‹", action: #selector(prevPage(_:)), theme: theme))
         }
         if navigation.canGoNext {
-            candidateStack.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage), theme: theme))
+            candidateStack.addArrangedSubview(makeNavButton(symbol: "›", action: #selector(nextPage(_:)), theme: theme))
         }
     }
 

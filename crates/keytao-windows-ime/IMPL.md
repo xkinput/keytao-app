@@ -171,10 +171,14 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 6. 有 composition 时 Enter 走 `ImeRuntimeSession::process_enter()`：先把 `XK_Return` 交给 Rime，Rime 未接受时由通用层 fallback 到 `commit_raw_input()`。**平台不再自行提交 preedit 字面量**，也**不再本地拦截数字键或空格做选词**——选择键语义完全由 schema 的 `select_keys` / `key_binder` 决定，鼠标点选走 `select_candidate_on_page(index)`。
 7. 普通按键调用 `ImeRuntimeSession::process_key_result(keysym, mods)`。
 8. `should_eat_key()` 仅对普通可打印输入保持宽松判定，让 Rime 的 punctuator 收到标点；`OnKeyDown` 的 `should_consume_processed_state()` 根据 `accepted`、commit 或可见组字状态变化决定是否消费。应用快捷键从两个入口直接透传：WPF 等宿主在 Test 阶段就改变快捷键路由，而 Rime 也可能真正接受冲突绑定。`ascii_mode` 且无组字时，`ascii_composer` 必然拒绝的无 Ctrl/Alt/Win 按键（Shift+Space 除外）在 Test 阶段就不声明拦截（`ascii_mode_rejects_key()`）。中文模式仍先交给 Rime；若 Rime 明确拒绝且处理后没有 preedit/候选，则 `complete_unhandled_key()` 将布局转换后的可打印字符追加到本键的 commit，再交给正常 TSF commit 路径，并消费原键。这覆盖空组字的主/小键盘数字，也覆盖 ExpressEditor 先提交旧组字再拒绝本键的情况（如 `aa` 后输入 `!`，必须保留“旧候选 + !”）。IMM32/CUAS 宿主（如 Flutter）在 Test 阶段把按键改为 `VK_PROCESSKEY` 后无法还原字符，不能只返回 false。补提交通路只允许 Shift/CapsLock 修饰；不覆盖 Rime 已接受的数字编码、选词、全角转换或自定义绑定，也不在引擎未就绪、处理失败及仍有组字时补字符。
-9. 有 `committed` 时一律通过 composition：嵌入模式可复用已有 composition；非嵌入模式在本次 write session 内从 QUERYONLY insertion range 创建临时 composition。写入提交文本后先把 TSF selection 折叠到 range 末尾，再 `EndComposition`。若该帧的 TSF 写入失败，按键仍保持 eaten、session 标记为下一键复位；带 commit 的失败帧记录长度并通过 `TF_ES_ASYNCDONTCARE` 只重试一次提交。
+9. 有 `committed` 时一律通过 composition：嵌入模式可复用已有 composition；非嵌入模式在本次 write session 内从 QUERYONLY insertion range 创建临时 composition。写入提交文本后先把 TSF selection 折叠到 range 末尾，再 `EndComposition`。若该帧失败，按键仍保持 eaten、session 标记为下一键复位；只有 commit 的 `SetText` 尚未成功时才通过 `TF_ES_ASYNCDONTCARE` 重试一次。已写 commit 遇到后续 selection、EndComposition 或新 preedit 失败时不得清字或重放；新建 range 尚未成功写入时仍属于用户原选区，只结束 composition。重试绑定原 input generation 和 client id，focus/reset/reload/停用后过期；COM getter 重入后也在写正文或 selection 前复核 generation。
 10. `plan_composition(state, embedded)` 决定正文 preedit：嵌入模式把非空 preedit 写进 composition range；非嵌入模式返回 `CompositionTarget::None`，但定位失败时可以创建独立且不含文字的 `PanelAnchor`。
 11. `ImeState.cursor` 是 Unicode 标量偏移（通用层 D8 契约）；嵌入模式写 TSF selection 前用 `keytao_core::utf16_offset_from_chars` 换算成 UTF-16 code unit 偏移，非嵌入模式则由候选面板在对应标量位置插入 `|`。
 12. 候选窗口用 `CandidateWindow` 绘制并按 caret screen position 定位。
+
+失败的 `EndComposition` 保留 composition/context 句柄，在文档锁外以该 composition view 调用 `ITfContextOwnerCompositionServices::TerminateComposition`；宿主继续拒绝时保留至后续 flush 或真实 termination，不能释放唯一清理句柄。旧待终止 composition 的回调只释放对应条目，不清除后来的输入状态。`commit_retry_tests` 通过真实 COM edit-session 队列覆盖失败、重复写入、原选区保护、跨焦点/停用/reload 失效、重入、双重结束失败与晚到 termination。
+
+降级限制：首次同步 write session 被宿主拒绝时无法取得原插入 range，异步 commit retry 仍从执行时的 selection 建 range。同一输入上下文内，若宿主把 retry 排到后续按键或光标移动之后，该降级分支尚不保证原始字符顺序/位置；本轮没有引入按键队列或猜测旧光标坐标。正常同步提交与跨 context generation 失效不受此限制。
 
 `OnKeyUp` 只处理 solo Shift：先发送 `Shift_L` 或 `Shift_R` keysym 的 press（mask `0`），再发送同一 keysym 的 release（`RIME_RELEASE_MASK`）。librime 的 ascii composer 必须先看到 press 才会在 release 上切换；两次调用都在真实 `OnKeyUp` 内，`OnTestKeyDown` 始终不调用 librime。如果 Shift 按下后出现其它 keyDown，或同时按着 Ctrl/Alt/Win，pending flag 会被清除；两个 release 入口也复核组合修饰键，避免 Ctrl+Shift 触发额外中英切换。Shift keydown 仍向宿主透传。
 

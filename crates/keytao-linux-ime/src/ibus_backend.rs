@@ -241,7 +241,10 @@ impl InputContext {
     }
 }
 
-#[interface(name = "org.freedesktop.IBus.InputContext")]
+// zbus 4.4's macro inverts the explicit `spawn` flag: true generates
+// spawn_tasks_for_methods() == false. Keep key/focus/reset calls serialized
+// across signal publication. ibus_shared tests guard this dependency behavior.
+#[interface(name = "org.freedesktop.IBus.InputContext", spawn = true)]
 impl InputContext {
     async fn focus_in(&self) {
         tracing::debug!("IBus InputContext: FocusIn");
@@ -279,7 +282,7 @@ impl InputContext {
     }
 
     #[zbus(property)]
-    async fn set_content_type(&self, value: (u32, u32)) {
+    async fn set_content_type(&mut self, value: (u32, u32)) {
         let (purpose, hints) = value;
         self.apply_content_type(purpose, hints).await;
     }
@@ -392,7 +395,8 @@ struct InputContextService {
     x11_panel_tx: std::sync::mpsc::Sender<OverlayPanelMessage>,
 }
 
-#[interface(name = "org.freedesktop.IBus.Service")]
+// Use the same serialized dispatch as InputContext, including Destroy.
+#[interface(name = "org.freedesktop.IBus.Service", spawn = true)]
 impl InputContextService {
     async fn destroy(
         &self,

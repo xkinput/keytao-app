@@ -35,6 +35,7 @@ final class KeyTaoInputController: IMKInputController {
     private var lastPreeditCursor = 0
     private var lastCursorRect = NSRect.zero
     private var reloadObserver: NSObjectProtocol?
+    private let inputContextGeneration = KeyTaoInputContextGeneration()
 
     // MARK: Lifecycle
 
@@ -72,6 +73,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     override func activateServer(_ sender: Any!) {
+        inputContextGeneration.invalidate()
         let client = sender as? IMKTextInput
         isActive = true
         KeyTaoRuntime.shared.checkForReload()
@@ -80,15 +82,17 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     override func deactivateServer(_ sender: Any!) {
+        let generation = inputContextGeneration.invalidate()
+        isActive = false
         // The composition belongs to the client that is going away, so it has to
         // be handed back before the session is dropped; otherwise the client
         // keeps underlined marked text nobody owns any more.
         if hasComposition {
             endComposition(commit: true, client: sender as? IMKTextInput)
         }
+        guard inputContextGeneration.isCurrent(generation) else { return }
         hideCandidates()
         hideModeIndicator()
-        isActive = false
         lastModifierFlags = []
         shiftPressedWithoutKey = false
     }
@@ -156,18 +160,22 @@ final class KeyTaoInputController: IMKInputController {
     // MARK: Commit / cancel
 
     override func commitComposition(_ sender: Any!) {
+        let generation = inputContextGeneration.invalidate()
         guard hasComposition else {
             hideCandidates()
             hideModeIndicator()
             return
         }
         endComposition(commit: true, client: sender as? IMKTextInput)
+        guard inputContextGeneration.isCurrent(generation) else { return }
         hideCandidates()
         hideModeIndicator()
     }
 
     override func cancelComposition() {
+        let generation = inputContextGeneration.invalidate()
         endComposition(commit: false, client: client())
+        guard inputContextGeneration.isCurrent(generation) else { return }
         hideCandidates()
         hideModeIndicator()
     }
@@ -175,6 +183,7 @@ final class KeyTaoInputController: IMKInputController {
     /// Ends the composition session in both directions: librime forgets it and
     /// the client is left without marked text.
     private func endComposition(commit: Bool, client: IMKTextInput?) {
+        let generation = inputContextGeneration.current
         guard let session else {
             clearMarkedText(client: client)
             return
@@ -186,6 +195,7 @@ final class KeyTaoInputController: IMKInputController {
         if let state = KeyTaoImeState.consuming(json) {
             apply(state, to: client)
         }
+        guard inputContextGeneration.isCurrent(generation) else { return }
 
         if hasComposition {
             // librime kept something composing; the session is over regardless.
@@ -200,19 +210,31 @@ final class KeyTaoInputController: IMKInputController {
 
     private func apply(_ state: KeyTaoImeState, to sender: Any?) {
         let client = sender as? IMKTextInput
-        rememberCursorRect(for: client, reason: "beforeApply")
+        let generation = inputContextGeneration.current
+        guard inputContextGeneration.perform(generation, {
+            rememberCursorRect(for: client, reason: "beforeApply")
+        }) else { return }
 
         if !state.committed.isEmpty {
             if hasMarkedText {
-                clearMarkedText(client: client)
+                guard inputContextGeneration.perform(generation, {
+                    clearMarkedText(client: client)
+                }) else { return }
             }
-            client?.insertText(
-                state.committed,
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
+            guard inputContextGeneration.perform(generation, {
+                _ = client?.insertText(
+                    state.committed,
+                    replacementRange: NSRange(location: NSNotFound, length: 0)
+                )
+            }) else { return }
         }
 
-        updateMarkedText(state, client: client)
+        // Publish ownership before the host call, so a reentrant commit/cancel
+        // sees the composition being installed and can end it immediately.
+        hasComposition = state.hasComposition
+        guard inputContextGeneration.perform(generation, {
+            updateMarkedText(state, client: client)
+        }) else { return }
         hasComposition = state.hasComposition
         englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
 
@@ -320,34 +342,50 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?) {
+        let generation = inputContextGeneration.current
+        guard isActive else { hideCandidates(); return }
+        let windowLevel = panelLevel(for: client)
+        guard inputContextGeneration.isCurrent(generation), isActive else { return }
+        let rect = cursorRect(for: client)
+        guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = candidatePanel ?? CandidatePanel()
         candidatePanel = panel
 
         panel.onSelect = { [weak self, weak client] index in
-            self?.handleCandidateSelection(index: index, client: client)
+            guard let self, let client, self.isActive, self.inputContextGeneration.isCurrent(generation) else { return }
+            self.handleCandidateSelection(index: index, client: client)
         }
         panel.onPageChange = { [weak self, weak client] backward in
-            self?.handlePageChange(backward: backward, client: client)
+            guard let self, let client, self.isActive, self.inputContextGeneration.isCurrent(generation) else { return }
+            self.handlePageChange(backward: backward, client: client)
         }
 
         panel.update(
             model: model,
-            windowLevel: panelLevel(for: client),
-            near: cursorRect(for: client)
+            windowLevel: windowLevel,
+            near: rect
         )
     }
 
     private func hideCandidates() {
+        candidatePanel?.onSelect = nil
+        candidatePanel?.onPageChange = nil
         candidatePanel?.orderOut(nil)
     }
 
     private func showModeIndicator(_ modeHint: KeyTaoModeHintModel, client: IMKTextInput?) {
+        let generation = inputContextGeneration.current
+        guard isActive else { return }
+        let windowLevel = panelLevel(for: client)
+        guard inputContextGeneration.isCurrent(generation), isActive else { return }
+        let rect = cursorRect(for: client)
+        guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let panel = modeIndicatorPanel ?? ModeIndicatorPanel()
         modeIndicatorPanel = panel
         panel.show(
             modeHint: modeHint,
-            windowLevel: panelLevel(for: client),
-            near: cursorRect(for: client)
+            windowLevel: windowLevel,
+            near: rect
         )
     }
 
@@ -365,6 +403,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func handleCandidateSelection(index: Int, client: IMKTextInput?) {
+        guard isActive, candidatePanel?.isVisible == true, index >= 0 else { return }
         guard let session = ensureSession() else { return }
         guard let state = KeyTaoImeState.consuming(
             keytao_session_select_candidate_json(session, UInt32(index))
@@ -373,6 +412,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func handlePageChange(backward: Bool, client: IMKTextInput?) {
+        guard isActive, candidatePanel?.isVisible == true else { return }
         guard let session = ensureSession() else { return }
         guard let state = KeyTaoImeState.consuming(
             keytao_session_change_page_json(session, backward)
@@ -483,6 +523,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func runtimeDidReload() {
+        let generation = inputContextGeneration.invalidate()
         guard isActive else {
             hasComposition = false
             hideCandidates()
@@ -494,6 +535,7 @@ final class KeyTaoInputController: IMKInputController {
         if hasComposition {
             clearMarkedText(client: client)
         }
+        guard inputContextGeneration.isCurrent(generation) else { return }
         hideCandidates()
         hideModeIndicator()
         ensureSession()
@@ -515,9 +557,13 @@ final class KeyTaoInputController: IMKInputController {
     // MARK: Modifier handling
 
     private func handleFlagsChanged(_ event: NSEvent, client: IMKTextInput?) -> Bool {
+        let generation = inputContextGeneration.current
         let newFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let changedFlags = lastModifierFlags.symmetricDifference(newFlags)
-        defer { lastModifierFlags = newFlags }
+        let previousFlags = lastModifierFlags
+        let changedFlags = previousFlags.symmetricDifference(newFlags)
+        // Install before calling the host. A reentrant focus reset must not
+        // later be overwritten by a defer from the obsolete flags callback.
+        lastModifierFlags = newFlags
 
         if !newFlags.isDisjoint(with: chordModifiers) {
             shiftPressedWithoutKey = false
@@ -533,7 +579,7 @@ final class KeyTaoInputController: IMKInputController {
         }
 
         let wasSoloShift = shiftPressedWithoutKey
-            && lastModifierFlags.isDisjoint(with: chordModifiers)
+            && previousFlags.isDisjoint(with: chordModifiers)
             && newFlags.isDisjoint(with: chordModifiers)
         shiftPressedWithoutKey = false
 
@@ -551,6 +597,7 @@ final class KeyTaoInputController: IMKInputController {
         }
 
         apply(state, to: client)
+        guard inputContextGeneration.isCurrent(generation) else { return state.accepted }
         // ascii_composer may change a mode while leaving the release event
         // unhandled. Falling back after that would undo the language switch.
         if state.accepted || englishMode != wasEnglishMode {
@@ -561,10 +608,12 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func toggleEnglishMode(client: IMKTextInput?) -> Bool {
+        let generation = inputContextGeneration.invalidate()
         guard let session = ensureSession() else { return false }
         let nextEnglishMode = !keytao_session_get_english_mode(session)
         if hasComposition {
             endComposition(commit: false, client: client)
+            guard inputContextGeneration.isCurrent(generation) else { return false }
             hideCandidates()
         }
 
@@ -572,6 +621,7 @@ final class KeyTaoInputController: IMKInputController {
             keytao_session_set_english_mode_json(session, nextEnglishMode)
         ) else { return false }
         apply(state, to: client)
+        guard inputContextGeneration.isCurrent(generation) else { return true }
         showModeIndicator(state.modeHint, client: client)
         return true
     }

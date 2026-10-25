@@ -107,9 +107,11 @@ check(desktop['steps'].find { |s| s['uses'] == 'actions/upload-artifact@v4' }.di
   end
 end
 check(File.read('scripts/build-windows-flutter.ps1').include?('"verify-windows-bundle.ps1") -ReleaseDir $bundleDir -InstallerPath $installer'), 'Windows entrypoint must verify its installer')
+check(desktop['steps'].any? { |s| s['if'] == "matrix.os_name == 'macos'" && s['run'] == 'bash crates/keytao-macos-ime/test-input-context.sh' }, 'macOS must run input-context regressions before packaging')
 
 android = jobs.fetch('build-android')
 ios = jobs.fetch('build-ios')
+check(ios['steps'].any? { |s| s['run'] == 'bash crates/keytao-ios-ime/test-interaction-policy.sh' }, 'iOS must run keyboard interaction regressions before packaging')
 check(android['runs-on'] == 'ubuntu-latest' && ios['runs-on'] == 'macos-15', 'Wrong mobile runners')
 android_run = android['steps'].map { |s| s.fetch('run', '') }.join("\n")
 check(android_run.include?('for abi in armeabi-v7a arm64-v8a x86_64; do') && !android_run.include?('sync --all'), 'Android must import only three ABIs; Gradle syncs assets')

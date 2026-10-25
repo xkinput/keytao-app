@@ -404,6 +404,22 @@ pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::OwnedVa
 
 #[cfg(test)]
 mod tests {
+    // Guard the pinned zbus macro's inverted flag. A dependency upgrade must
+    // not silently restore concurrent dispatch to the IME interfaces.
+    struct OrderedDispatch;
+
+    #[zbus::interface(name = "org.keytao.DispatchContract", spawn = true)]
+    impl OrderedDispatch {
+        fn ping(&self) {}
+    }
+
+    #[test]
+    fn ime_dispatch_is_serial_with_the_pinned_zbus_macro() {
+        assert!(!zbus::object_server::Interface::spawn_tasks_for_methods(
+            &OrderedDispatch
+        ));
+    }
+
     use super::{
         ibus_lookup_table_value, ibus_text_variant, is_shift_key, key_phase, press_route,
         state_to_panel_model, ContentTypeState, KeyOutcome, KeyPhase, ModeChange, ModeIndicator,

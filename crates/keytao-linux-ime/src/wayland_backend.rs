@@ -387,6 +387,10 @@ impl App {
         // The application already renders preedit through set_preedit_string.
         // Keep the popup for actual candidate menus and short mode hints only.
         let has_content = !state.candidates.is_empty();
+        if has_content {
+            // A hint's timeout must never hide candidates typed after it.
+            self.mode_hint_until = None;
+        }
         let show_hint = self.mode_hint_active();
         self.ime_state = Some(state);
         if has_content || show_hint {

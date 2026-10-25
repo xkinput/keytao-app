@@ -3293,6 +3293,9 @@ pub struct ImeRuntime(Arc<ImeRuntimeState>);
 #[derive(Clone)]
 pub struct ImeRuntimeSession {
     shared: Arc<ImeRuntimeState>,
+    /// The resolved deployment this session belongs to. Another runtime may
+    /// switch the process-wide librime instance to different directories.
+    dirs: RimeDataDirs,
     inner: Arc<Mutex<ImeRuntimeSessionInner>>,
     policy: Arc<SessionInputPolicy>,
 }
@@ -3499,6 +3502,16 @@ impl ImeRuntime {
     /// What the linked librime can do natively, see [`EngineCapabilities`].
     pub fn capabilities(&self) -> EngineCapabilities {
         engine_capabilities()
+    }
+
+    /// Whether the process-wide librime instance is running for this runtime's
+    /// directories. Waits for an in-flight initialization/reload so callers
+    /// deciding whether to retire handles do not mistake contention for teardown.
+    pub fn is_initialized(&self) -> bool {
+        let Ok(dirs) = self.data_dirs() else {
+            return false;
+        };
+        lock_ignore_poison(&PROCESS_RIME.initialized).as_ref() == Some(&dirs)
     }
 
     /// Initialize and deploy. Idempotent per process: librime can only run for
@@ -3721,6 +3734,7 @@ impl ImeRuntime {
             drop(initialized);
             Ok(ImeRuntimeSession {
                 shared: self.0.clone(),
+                dirs,
                 inner,
                 policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
             })
@@ -3993,9 +4007,17 @@ impl ImeRuntimeSession {
         &self,
         action: impl FnOnce(&Engine, InputContextPolicy, &mut english_mode::EnglishModeController) -> T,
     ) -> Option<T> {
+        // A surviving session must not rebuild against another runtime's
+        // deployment. Take locks in the same order as initialization, and keep
+        // the read barrier pinned before releasing the directory check.
+        let initialized = try_lock_ignore_poison(&PROCESS_RIME.initialized)?;
+        if initialized.as_ref() != Some(&self.dirs) {
+            return None;
+        }
         // A reload may compile dictionaries for many seconds. No synchronous
         // host key/focus callback may wait for that worker's write lock.
         let _barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)?;
+        drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
         self.refresh_if_needed(&mut inner).ok()?;
         let (policy, clear_composition) = self.policy.take_for_engine();

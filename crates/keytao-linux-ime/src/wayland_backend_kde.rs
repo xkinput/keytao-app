@@ -497,6 +497,10 @@ impl App {
         // select what is drawn now.
         self.pressed_click = None;
         let has_content = !state.candidates.is_empty();
+        if has_content {
+            // A hint's timeout must never hide candidates typed after it.
+            self.mode_hint_until = None;
+        }
         let show_hint = self.mode_hint_active();
         self.ime_state = Some(state);
         if has_content || show_hint {

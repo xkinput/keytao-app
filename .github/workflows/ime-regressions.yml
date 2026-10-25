@@ -1,0 +1,51 @@
+name: IME regressions
+
+'on':
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ime-regressions.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native IME test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-dev cmake pkg-config \
+            librime-dev librime-plugin-lua libfreetype6-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libdbus-1-dev
+      - name: Read Rust toolchain pin
+        id: rust
+        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-ime-regressions
+      - name: Test shared runtime, FFI and Linux backends
+        run: cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime
+
+  apple-policy:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test macOS input context lifetime
+        run: bash crates/keytao-macos-ime/test-input-context.sh
+      - name: Test iOS keyboard policies and interaction
+        run: |
+          bash crates/keytao-ios-ime/test-interaction-policy.sh
+          bash crates/keytao-ios-ime/test-floating-layout.sh
+          bash crates/keytao-ios-ime/test-touch-rollover.sh

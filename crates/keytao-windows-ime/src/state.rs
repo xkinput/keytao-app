@@ -147,6 +147,8 @@ pub struct TsfState {
     pub windows_hide_pending: bool,
     pub(crate) pending_window_update: Option<PendingWindowUpdate>,
     pub(crate) pending_commit_retry: Option<PendingCommitRetry>,
+    pub(crate) pending_composition_ends: Vec<crate::key_event_sink::PendingCompositionEnd>,
+    pub(crate) composition_end_flush_in_progress: bool,
     pub candidate_ui: Option<CandidateUiManager>,
     pub ascii_mode: bool,
     /// UI language: English can use a candidate schema while raw ASCII is off.
@@ -354,6 +356,8 @@ impl TsfState {
             windows_hide_pending: false,
             pending_window_update: None,
             pending_commit_retry: None,
+            pending_composition_ends: Vec::new(),
+            composition_end_flush_in_progress: false,
             candidate_ui: Some(CandidateUiManager::new()),
             ascii_mode: false,
             english_mode: false,
@@ -508,6 +512,8 @@ impl TsfState {
             return false;
         }
         self.reload_in_progress = true;
+        self.input_generation = self.input_generation.wrapping_add(1);
+        self.pending_commit_retry = None;
         self.session = None;
         self.runtime = None;
         self.rime_dll = None;
@@ -1548,6 +1554,7 @@ pub(crate) fn flush_pending_ime_ui(shared_state: &SharedState) {
     if hide_pending {
         hide_ime_windows(shared_state);
     }
+    crate::key_event_sink::flush_pending_composition_ends(shared_state);
     crate::key_event_sink::flush_pending_commit_retry(shared_state);
     crate::key_event_sink::flush_pending_window_update(shared_state);
     if rearm_pending && !hide_pending {
@@ -1697,6 +1704,7 @@ fn take_active_composition(
 ) -> Option<(ITfContext, ITfComposition, u32)> {
     let mut st = shared_state.borrow_mut();
     st.input_generation = st.input_generation.wrapping_add(1);
+    st.pending_commit_retry = None;
     let shift_pending = st.shift_pressed_without_key;
     st.shift_pressed_without_key = false;
     st.session_reset_pending = true;
@@ -1738,6 +1746,15 @@ pub(crate) fn clear_input_after_composition_terminated(
         return;
     };
     let terminated_identity = terminated.as_raw() as usize;
+    if let Some(pending) =
+        crate::key_event_sink::take_pending_composition_end(shared_state, terminated_identity)
+    {
+        // A failed old EndComposition can finish after a different input frame
+        // became active. Release only that old handle, not the new Rime state.
+        drop(pending);
+        append_diagnostic("composition terminated pending_cleanup=1 cleared=0");
+        return;
+    }
     let policy = {
         let st = shared_state.borrow();
         termination_policy(st.composition_in_flight, terminated_identity)
@@ -1750,6 +1767,7 @@ pub(crate) fn clear_input_after_composition_terminated(
     let (in_write_session, shift_pending, panel_anchor, client_id) = {
         let mut st = shared_state.borrow_mut();
         st.input_generation = st.input_generation.wrapping_add(1);
+        st.pending_commit_retry = None;
         let in_write_session = st.ime_write_session_active;
         let shift_pending = st.shift_pressed_without_key;
         st.shift_pressed_without_key = false;
@@ -1816,15 +1834,26 @@ fn request_composition_end(
     client_id: u32,
 ) {
     if client_id == 0 {
+        crate::key_event_sink::defer_failed_composition_end(shared_state, &context, &composition);
         return;
     }
     let state = Rc::clone(shared_state);
+    let composition_for_session = composition.clone();
     let result =
         crate::edit_session::with_async_write_session(&context, client_id, move |ec, ctx| {
-            let _in_flight = CompositionInFlightGuard::enter(&state, &composition);
-            clear_composition_range(ec, ctx, &composition)
+            let _in_flight = CompositionInFlightGuard::enter(&state, &composition_for_session);
+            let result = clear_composition_range(ec, ctx, &composition_for_session);
+            if result.is_err() {
+                crate::key_event_sink::defer_failed_composition_end(
+                    &state,
+                    ctx,
+                    &composition_for_session,
+                );
+            }
+            result
         });
     if let Err(error) = result {
+        crate::key_event_sink::defer_failed_composition_end(shared_state, &context, &composition);
         append_diagnostic(format!(
             "failed to end composition after focus change: {error}"
         ));
@@ -1849,15 +1878,24 @@ fn end_composition_now(
         }
     }
     // The host refused a synchronous lock. TerminateComposition works outside
-    // one, and a null view terminates every composition this TIP owns in the
-    // context; the text stays in the document but no dangling composition range
-    // survives the text service.
-    if let Ok(services) = context.cast::<ITfContextOwnerCompositionServices>() {
+    // one. Target this composition explicitly: a reentrant activation may
+    // already have installed another one in the same context.
+    if let (Ok(services), Ok(view)) = (
+        context.cast::<ITfContextOwnerCompositionServices>(),
+        composition.cast::<ITfCompositionView>(),
+    ) {
         let _in_flight = CompositionInFlightGuard::enter(shared_state, &composition);
-        let terminated = unsafe { services.TerminateComposition(None) };
+        let terminated = unsafe { services.TerminateComposition(&view) };
         if let Err(error) = terminated {
             append_diagnostic(format!("failed to terminate composition: {error}"));
+            crate::key_event_sink::defer_failed_composition_end(
+                shared_state,
+                context,
+                &composition,
+            );
         }
+    } else {
+        crate::key_event_sink::defer_failed_composition_end(shared_state, context, &composition);
     }
 }
 

@@ -27,6 +27,58 @@ expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 1), 5, "one s
 expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 2), 6, "two selection steps include the preceding segment")
 expect(keyTaoTrailingDeletionSegmentsLength("中文 hello", count: 3), 8, "selection steps stop at segment boundaries")
 
+let longDeletionContext = String(repeating: "中😀e\u{301}", count: 2_000)
+let boundedDeletion = keyTaoBackwardDeletionBatch(longDeletionContext, remainingLimit: 4_096)
+expect(boundedDeletion.count, 4_096, "delete-all stops at the character budget")
+expect(
+    String(longDeletionContext.dropLast(boundedDeletion.count)) + boundedDeletion.reversed().joined(),
+    longDeletionContext,
+    "undo restores only the deleted suffix without duplicating the untouched prefix"
+)
+expect(
+    keyTaoBackwardDeletionBatch("a中😀e\u{301}", remainingLimit: 2),
+    ["e\u{301}", "😀"],
+    "deletion batches preserve supplementary and combining characters"
+)
+expect(keyTaoBackwardDeletionBatch("中", remainingLimit: 0), [], "an exhausted deletion budget is a no-op")
+expect(keyTaoBackwardDeletionBatch("中", remainingLimit: -1), [], "a negative deletion budget is a no-op")
+
+let firstMarkedDocument = UUID()
+let nextMarkedDocument = UUID()
+var markedOwnership = KeyTaoMarkedTextOwnership()
+markedOwnership.claim(firstMarkedDocument)
+expect(markedOwnership.release(for: firstMarkedDocument), true, "the owning document may clear its marked text")
+expect(markedOwnership.release(for: firstMarkedDocument), false, "a reentrant callback cannot clear an already released mark")
+markedOwnership.claim(firstMarkedDocument)
+expect(markedOwnership.release(for: nextMarkedDocument), false, "a switched document must not receive the old mark's clear")
+expect(markedOwnership.release(for: firstMarkedDocument), false, "discarded ownership cannot revive on a late callback")
+markedOwnership.claim(nextMarkedDocument)
+expect(markedOwnership.release(for: nextMarkedDocument), true, "the next document can own a fresh mark")
+
+var replayGeneration = 0
+var replayedCommands: [String] = []
+keyTaoReplayPendingCommands(
+    ["first", "old second"],
+    isCurrent: { replayGeneration == 0 },
+    perform: {
+        replayedCommands.append($0)
+        replayGeneration += 1
+    }
+)
+expect(replayedCommands, ["first"], "a synchronous context reset stops an already copied startup queue")
+keyTaoReplayPendingCommands(
+    ["already stale"],
+    isCurrent: { false },
+    perform: { replayedCommands.append($0) }
+)
+expect(replayedCommands, ["first"], "a stale queue never invokes its first command")
+keyTaoReplayPendingCommands(
+    ["new first", "new second"],
+    isCurrent: { true },
+    perform: { replayedCommands.append($0) }
+)
+expect(replayedCommands, ["first", "new first", "new second"], "a stable context preserves replay order")
+
 expect(KeyTaoBackspaceGestureMode(setting: nil), .immediate, "backspace gesture defaults to immediate deletion")
 expect(KeyTaoBackspaceGestureMode(setting: "selectThenDelete"), .selectThenDelete, "selection mode parses from runtime settings")
 expect(

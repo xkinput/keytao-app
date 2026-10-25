@@ -173,6 +173,11 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows-flutter.ps1 -Arch x64
 
+      - name: Test macOS input context guards
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: bash crates/keytao-macos-ime/test-input-context.sh
+
       - name: Build macOS universal pkg
         if: matrix.os_name == 'macos'
         shell: bash
@@ -333,6 +338,9 @@ jobs:
         run: |
           node scripts/sync-version.mjs --set "$VERSION"
           cargo update --workspace
+
+      - name: Test iOS keyboard interaction policy
+        run: bash crates/keytao-ios-ime/test-interaction-policy.sh
 
       - name: Build and import iOS librime runtime
         run: scripts/build-ios-librime.sh --target aarch64-apple-ios

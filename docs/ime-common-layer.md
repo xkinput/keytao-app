@@ -176,6 +176,8 @@ native key event
 - `reload_without_deploy()`：只重载现有编译产物并递增 generation，不在输入法进程中部署。
 - `reload()`：`reload_without_deploy()` 的语义再加一次部署。
 - `create_session()`：在对应目录已初始化且未重载时，为输入上下文创建 `ImeRuntimeSession` 并登记；初始化/重载尚未完成时立即返回错误，由宿主稍后重试。
+- 每个 session 固定绑定创建时解析的 user/shared 目录。若进程内另一个 runtime 切换了 librime 的目录，旧 session 暂时拒绝操作，不得懒重建到其它词库；切回所属目录后才能恢复。
+- FFI 初始化失败不能仅因“请求了不同目录”就退休旧句柄。校验未安装/未部署目录失败且旧 runtime 仍有效时，保留原组字；只有实际切换或旧 runtime 已失效才推进句柄 epoch。
 
 `reload_without_deploy()` 的完整语义是：
 

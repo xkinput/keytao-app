@@ -5,6 +5,15 @@ fn parse_version(tag: &str) -> Option<Version> {
     Version::parse(tag.trim_start_matches('v')).ok()
 }
 
+async fn release_json(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    response
+        .error_for_status()
+        .map_err(|error| format!("检查更新失败: {error}"))?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Picks the highest-semver release (tag, html_url) and whether it is newer than `current`.
 /// Unparsable versions never report an update.
 pub(crate) fn pick_update(current: &str, releases: &[(String, String)]) -> (String, bool, String) {
@@ -43,7 +52,7 @@ pub async fn check_app_update(core: &Core) -> Result<AppUpdateInfo, CoreError> {
                 );
                 e.to_string()
             })?;
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let json = release_json(resp).await?;
         tracing::info!("[check_app_update] done in {}ms", t0.elapsed().as_millis());
         let entries = match json.as_array() {
             Some(list) => list.iter().collect::<Vec<_>>(),
@@ -73,7 +82,33 @@ pub async fn check_app_update(core: &Core) -> Result<AppUpdateInfo, CoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_update;
+    use super::{pick_update, release_json};
+
+    #[tokio::test]
+    async fn github_http_errors_are_not_reported_as_no_update() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            stream.read(&mut request).unwrap();
+            let body = r#"{"message":"API rate limit exceeded"}"#;
+            write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/releases"))
+            .send()
+            .await
+            .unwrap();
+        let error = release_json(response).await.unwrap_err();
+        assert!(error.contains("403"), "{error}");
+        server.join().unwrap();
+    }
 
     fn rel(tags: &[&str]) -> Vec<(String, String)> {
         tags.iter()

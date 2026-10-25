@@ -464,36 +464,31 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             user: PathBuf::from(&user),
             shared: shared.clone(),
         };
-        let previous = {
+        let (previous, previous_runtime, same_ready_runtime) = {
             let g = lock_ignore_poison(&GLOBAL);
-            if g.initialized && g.dirs.as_ref() == Some(&dirs) && g.singleton_session.is_some() {
-                // librime is already up for exactly these directories; tearing
-                // the runtime down and rebuilding it would only throw away the
-                // sessions and the composition they hold.
-                return true;
-            }
-            g.dirs.clone()
+            (
+                g.dirs.clone(),
+                g.runtime.clone(),
+                g.initialized && g.dirs.as_ref() == Some(&dirs) && g.singleton_session.is_some(),
+            )
         };
+        if same_ready_runtime
+            && previous_runtime
+                .as_ref()
+                .is_some_and(ImeRuntime::is_initialized)
+        {
+            return true;
+        }
 
-        let switching = previous.is_some_and(|previous| previous != dirs);
+        let switching = previous.as_ref().is_some_and(|previous| *previous != dirs);
         // No session call may be inside keytao-core while librime is taken down
         // and brought back up, so the whole rebuild runs under the write guard.
         // `GLOBAL` was released above: it is only ever taken below this lock.
         let mut epoch = write_ignore_poison(&SESSION_EPOCH);
-        if switching {
-            // keytao-core finalizes librime before bringing it up for the new
-            // directories, so every session handed out so far is done.
-            log_error(format_args!(
-                "keytao_init: switching to {}; sessions created earlier are now invalid",
-                dirs.user.display()
-            ));
-            *epoch += 1;
-            clear_global();
-        }
-
         let runtime = ImeRuntime::with_dirs(user, shared);
         if let Err(e) = runtime.init_without_deploy() {
             log_error(format_args!("keytao_init: runtime init failed: {e}"));
+            retire_unavailable_runtime(previous_runtime.as_ref(), &mut epoch);
             return false;
         }
         let singleton_session = match create_session_retrying_a_switch(&runtime) {
@@ -502,9 +497,16 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
                 log_error(format_args!(
                     "keytao_init: runtime.create_session failed: {e}"
                 ));
+                retire_unavailable_runtime(previous_runtime.as_ref(), &mut epoch);
                 return false;
             }
         };
+        if switching {
+            // Validation failures leave the old librime untouched. Retire its
+            // handles only once initialization really switched deployments.
+            *epoch += 1;
+            clear_global();
+        }
         drop(epoch);
 
         // Reads the stamp, so it is built before the lock is taken.
@@ -522,6 +524,14 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         drop(stale);
         true
     })
+}
+
+#[cfg(not(target_os = "android"))]
+fn retire_unavailable_runtime(previous: Option<&ImeRuntime>, epoch: &mut u64) {
+    if previous.is_some_and(|runtime| !runtime.is_initialized()) {
+        *epoch += 1;
+        clear_global();
+    }
 }
 
 /// Forget the runtime, the session and the reload signal, for when librime went
@@ -2165,8 +2175,86 @@ unsafe fn free_cstring(ptr: *mut c_char) {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
+/// cbindgen:ignore
+mod smoke_fixture;
+
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_uninstalled_directory_does_not_retire_the_working_runtime() {
+        const CHILD: &str = "KEYTAO_FFI_INVALID_INIT_CHILD";
+        // This test needs a real singleton runtime; keep it out of the process
+        // running the existing ABI tests, which deliberately start uninitialized.
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::an_uninstalled_directory_does_not_retire_the_working_runtime",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated FFI runtime regression failed");
+            return;
+        }
+        let dir = smoke_fixture::scratch_dir("ffi-valid-runtime");
+        smoke_fixture::write(&dir).unwrap();
+        let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+        runtime.init().unwrap();
+        let arg = CString::new(dir.to_string_lossy().as_ref()).unwrap();
+        assert!(keytao_init(arg.as_ptr(), arg.as_ptr()));
+        let session = keytao_create_session();
+        assert!(!session.is_null());
+        for ch in smoke_fixture::CODE.chars() {
+            let state = keytao_session_process_key(session, ch as u32, 0);
+            assert!(!state.is_null());
+            keytao_free_state(state);
+        }
+        let undeployed = dir.join("undeployed");
+        smoke_fixture::write(&undeployed).unwrap();
+        for invalid in [dir.join("uninstalled"), undeployed] {
+            let invalid = CString::new(invalid.to_string_lossy().as_ref()).unwrap();
+            assert!(!keytao_init(invalid.as_ptr(), invalid.as_ptr()));
+            assert!(keytao_is_initialized());
+            let state = keytao_session_state(session);
+            assert!(
+                !state.is_null(),
+                "failed validation must preserve the old handle"
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr((*state).preedit) }
+                    .to_str()
+                    .unwrap(),
+                smoke_fixture::CODE
+            );
+            keytao_free_state(state);
+        }
+
+        // A genuine switch still retires the old handle and creates a usable
+        // replacement. Deploy through core first, as the containing app does.
+        let second = smoke_fixture::scratch_dir("ffi-second-runtime");
+        smoke_fixture::write(&second).unwrap();
+        ImeRuntime::with_dirs(&second, second.to_string_lossy().into_owned())
+            .init()
+            .unwrap();
+        let arg = CString::new(second.to_string_lossy().as_ref()).unwrap();
+        assert!(keytao_init(arg.as_ptr(), arg.as_ptr()));
+        assert!(keytao_session_state(session).is_null());
+        let replacement = keytao_create_session();
+        assert!(!replacement.is_null());
+        let state = keytao_session_process_key(replacement, b'a' as u32, 0);
+        assert!(!state.is_null());
+        assert!(unsafe { (*state).accepted });
+        keytao_free_state(state);
+        keytao_destroy_session(session);
+        keytao_destroy_session(replacement);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(second);
+    }
 
     #[test]
     fn guard_turns_a_panic_into_the_default_value() {

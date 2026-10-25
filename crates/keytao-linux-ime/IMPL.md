@@ -40,6 +40,8 @@ Linux daemon 要和 macOS IMK、Windows TSF 等前端共享同一套实现边界
 8. 后端不得各自发明样式、候选 label 或分页语义；这些应来自 `ImeState` 和统一主题/布局模型。
 9. 检测到密码/PIN 类输入上下文时必须调用 `ImeSession::set_input_policy(InputContextPolicy::sensitive())` 并清空候选/预编辑 UI。
 
+Wayland 两后端出现新候选时会撤销旧中英提示的超时任务，避免用户在提示结束前开始组字后，旧 timer 用空状态隐藏新候选。IBus 的按键、焦点、reset 和 Destroy 方法按接收顺序执行，不允许提交/预编辑信号在多个方法之间交错；`ContentType` 属性 setter 使用独占接口锁，与按键方法互斥。当前固定的 zbus 4.4.0 macro 对显式 `spawn` 参数取反，因此生产接口使用 `spawn = true` 生成串行分发，并用 `ibus_shared` 的兼容测试约束升级行为。属性由独立的 `org.freedesktop.DBus.Properties` 接口派发，互斥不等于所有跨接口消息都严格保序。
+
 这套契约也是后续补 Android/Windows/macOS UI 一致性时的基础：协议不同可以分叉，key event 语义、state 应用顺序和 UI 输入模型不能分叉。
 
 ## 统一 `theme.yaml` 接入方式
