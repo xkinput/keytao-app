@@ -47,8 +47,12 @@ jobs:
             python3 - <<'PY'
           from pathlib import Path
           detail = Path('ime-regressions.log').read_text(errors='replace')[-12000:]
-          detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-          print(f'::error title=Native IME regression failed::{detail}')
+          # GitHub truncates each annotation at 4096 characters. Emit the end
+          # of the log first, in small blocks, so the actual error stays visible.
+          for index, end in enumerate(range(len(detail), 0, -2500), 1):
+              block = detail[max(0, end - 2500):end]
+              block = block.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Native IME failure detail {index}::{block}')
           PY
           fi
           exit "$result"
