@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-dev cmake pkg-config \
+            clang libclang-dev cmake pkg-config gdb \
             librime-dev librime-plugin-lua libfreetype6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libdbus-1-dev
       - name: Read Rust toolchain pin
@@ -40,12 +40,27 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set +e
-          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime > ime-regressions.log 2>&1
+          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
           result=$?
           cat ime-regressions.log
           if [ "$result" -ne 0 ]; then
             python3 - <<'PY'
           from pathlib import Path
+          import re
+          import subprocess
+          log = Path('ime-regressions.log')
+          original = log.read_text(errors='replace')
+          if 'Rust cannot catch foreign exceptions' in original:
+              with log.open('a') as output:
+                  subprocess.run(['pkg-config', '--modversion', 'rime'], stdout=output, stderr=subprocess.STDOUT)
+                  subprocess.run(['dpkg-query', '-W', 'librime*'], stdout=output, stderr=subprocess.STDOUT)
+                  binary = re.search(r'target/debug/deps/candidate_api-[0-9a-f]+', original)
+                  if binary:
+                      Path('ime-regression.gdb').write_text('set pagination off\nset print thread-events off\ncatch throw\ncommands\nsilent\nprintf "C++ exception\\n"\nbt 12\ncontinue\nend\nrun\nthread apply all bt 20\n')
+                      try:
+                          subprocess.run(['gdb', '-q', '-batch', '-x', 'ime-regression.gdb', '--args', binary[0], '--test-threads=1', '--nocapture'], stdout=output, stderr=subprocess.STDOUT, timeout=180)
+                      except subprocess.TimeoutExpired:
+                          output.write('\nNative crash diagnostic timed out.\n')
           detail = Path('ime-regressions.log').read_text(errors='replace')[-12000:]
           # GitHub truncates each annotation at 4096 characters. Emit the end
           # of the log first, in small blocks, so the actual error stays visible.
