@@ -36,7 +36,22 @@ jobs:
         with:
           key: linux-ime-regressions
       - name: Test shared runtime, FFI and Linux backends
-        run: cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set +e
+          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime > ime-regressions.log 2>&1
+          result=$?
+          cat ime-regressions.log
+          if [ "$result" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          detail = Path('ime-regressions.log').read_text(errors='replace')[-12000:]
+          detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print(f'::error title=Native IME regression failed::{detail}')
+          PY
+          fi
+          exit "$result"
 
   apple-policy:
     runs-on: macos-15
