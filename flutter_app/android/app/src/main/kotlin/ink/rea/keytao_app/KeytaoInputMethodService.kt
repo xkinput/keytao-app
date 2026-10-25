@@ -260,6 +260,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        shiftPressedWithoutKey = false
+        pendingShiftKeyCode = 0
         discardPendingHostBackspace(resetOutstanding = true)
         hasKnownCursor = (attribute?.initialSelStart ?: -1) >= 0 &&
             (attribute?.initialSelEnd ?: -1) >= 0
@@ -715,6 +717,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         editorUpdateGeneration++
+        shiftPressedWithoutKey = false
+        pendingShiftKeyCode = 0
         rimeOptionsGeneration++
         editorUpdatePending = false
         // finishComposingText() already puts the composing text into the editor,
@@ -742,15 +746,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         discardPendingHostBackspace()
         inputCounts.record("key_down")
         if (isShiftKey(keyCode)) {
-            shiftPressedWithoutKey = true
-            pendingShiftKeyCode = keyCode
+            shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
+            pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
             return super.onKeyDown(keyCode, event)
         }
         if (shiftPressedWithoutKey) {
             shiftPressedWithoutKey = false
             pendingShiftKeyCode = 0
         }
-        if (!inputAvailable) {
+        if (!inputAvailable || event.isMetaPressed) {
             return super.onKeyDown(keyCode, event)
         }
         val key = AndroidKeyMapper.fromAndroidKeyEvent(event) ?: return super.onKeyDown(keyCode, event)
@@ -762,8 +766,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
             return super.onKeyDown(keyCode, event)
         }
-        val result = engine.processKey(key.keyCode, key.modifiers)
-        if (!result.accepted && !result.hasComposition) {
+        val result = if (key.keyCode == AndroidKeyMapper.XK_RETURN &&
+            key.modifiers and AndroidKeyMapper.RIME_MOD_LOCK.inv() == 0
+        ) {
+            engine.processEnter()
+        } else {
+            engine.processKey(key.keyCode, key.modifiers)
+        }
+        if (!result.accepted) {
             KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
             return super.onKeyDown(keyCode, event)
         }
@@ -774,19 +784,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         inputCounts.record("key_up")
         if (!isShiftKey(keyCode)) return super.onKeyUp(keyCode, event)
-        val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode
+        val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
+            AndroidKeyMapper.permitsSoloShift(event)
         shiftPressedWithoutKey = false
         pendingShiftKeyCode = 0
         if (!shouldToggle) return super.onKeyUp(keyCode, event)
-        if (!inputAvailable) return super.onKeyUp(keyCode, event)
+        if (bypassesComposition()) return super.onKeyUp(keyCode, event)
 
         val shiftKeysym = if (keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT) {
             AndroidKeyMapper.XK_SHIFT_R
         } else {
             AndroidKeyMapper.XK_SHIFT_L
         }
-        val result = engine.processKey(shiftKeysym, AndroidKeyMapper.RIME_RELEASE_MASK)
-        if (result.accepted || result.hasComposition) {
+        val beforeAsciiMode = currentState.asciiMode
+        val result = KeytaoRimeInput.processSoloShift(shiftKeysym, engine::processKey, ::applyState)
+        if (result.accepted || result.hasComposition || result.asciiMode != beforeAsciiMode) {
             applyState(result)
         } else {
             KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
@@ -1119,6 +1131,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private val rimeKeySink = object : KeytaoRimeKeySink {
         override val hostComposing: Boolean get() = composing
+
+        override fun canProcessText(text: String): Boolean = AndroidKeyMapper.fromText(text) != null
 
         override fun processText(text: String): KeytaoImeState? {
             val key = AndroidKeyMapper.fromText(text) ?: return null

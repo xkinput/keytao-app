@@ -386,6 +386,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches() {
+        // Cold-start keystrokes belong to the context where they were queued.
+        // Runtime initialization may finish after a field change or dismissal.
+        queuedCommands.removeAll()
         cancelBackspaceSelection()
         backspaceRestoreStack.removeAll()
         doubleSpacePeriodTracker.reset()
@@ -412,8 +415,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private func performCommand(_ command: KeyTaoKeyCommand) {
         // The runtime is still coming up on the startup queue. Queue the key
         // instead of committing it raw, otherwise the first few characters of
-        // every cold start would land in the host as latin letters.
-        if runtimeStarting && command.requiresInstalledSchema {
+        // every cold start would land in the host as latin letters. Once text
+        // is pending, later deletes, direct text and document edits must wait
+        // behind it rather than changing the host before those keys arrive.
+        if runtimeStarting && (command.requiresInstalledSchema
+            || (!queuedCommands.isEmpty && command.editsHostDocument)) {
             if queuedCommands.count < Self.queuedCommandLimit {
                 queuedCommands.append(command)
             }
@@ -1728,7 +1734,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func flushQueuedCommands() {
-        guard !queuedCommands.isEmpty else {
+        guard !runtimeStarting, !queuedCommands.isEmpty else {
             return
         }
         let pending = queuedCommands
@@ -2394,6 +2400,18 @@ private extension String {
 }
 
 private extension KeyTaoKeyCommand {
+    var editsHostDocument: Bool {
+        switch type {
+        case KeyTaoCommandType.backspace,
+            KeyTaoCommandType.backspaceGesture,
+            KeyTaoCommandType.directInput,
+            KeyTaoCommandType.edit:
+            return true
+        default:
+            return false
+        }
+    }
+
     var requiresInstalledSchema: Bool {
         switch type {
         case KeyTaoCommandType.openPage,

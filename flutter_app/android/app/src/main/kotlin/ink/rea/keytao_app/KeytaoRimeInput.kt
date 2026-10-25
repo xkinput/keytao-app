@@ -8,7 +8,10 @@ internal interface KeytaoRimeKeySink {
     /** Whether the editor still holds a composing region we put there. */
     val hostComposing: Boolean
 
-    /** Keysym lookup plus `processKey`, or null when the text maps to no keysym. */
+    /** Pure mapping check; must not send a key or change the Rime session. */
+    fun canProcessText(text: String): Boolean
+
+    /** Keysym lookup plus `processKey`, or null when processing is unavailable. */
     fun processText(text: String): KeytaoImeState?
 
     /** Push a result to the editor: its commit first, then its preedit. */
@@ -22,6 +25,16 @@ internal interface KeytaoRimeKeySink {
 }
 
 internal object KeytaoRimeInput {
+    /** Rime only switches on release after it has observed the Shift press. */
+    fun processSoloShift(
+        keysym: Int,
+        processKey: (Int, Int) -> KeytaoImeState,
+        applyPress: (KeytaoImeState) -> Unit,
+    ): KeytaoImeState {
+        applyPress(processKey(keysym, 0))
+        return processKey(keysym, AndroidKeyMapper.RIME_RELEASE_MASK)
+    }
+
     /**
      * Flush what a declined key already produced before the key itself falls
      * through to the host.
@@ -32,7 +45,7 @@ internal object KeytaoRimeInput {
      * a stale composing region behind. Mirrors iOS `applyRejectedKeyFallback`.
      */
     fun applyRejectedResult(sink: KeytaoRimeKeySink, result: KeytaoImeState) {
-        if (result.committed.isEmpty() && !sink.hostComposing) return
+        if (result.committed.isEmpty() && !result.hasComposition && !sink.hostComposing) return
         sink.applyState(result)
     }
 
@@ -42,20 +55,35 @@ internal object KeytaoRimeInput {
      *
      * Keeping only the last result loses any commit an earlier key produced —
      * a code that auto-commits halfway through would have that text overwritten
-     * by the state the final key returns.
+     * by the state the final key returns. Once a prefix has been consumed, a
+     * fallback may insert only the remaining code points, never that prefix again.
      */
     fun feedSequence(sink: KeytaoRimeKeySink, sequence: String, fallbackText: String) {
-        for (codePoint in sequence.codePoints().toArray()) {
-            val result = sink.processText(String(Character.toChars(codePoint)))
+        val characters = sequence.codePoints().toArray().map { String(Character.toChars(it)) }
+        // Discover an unmappable suffix before a prefix can produce commits or
+        // a composing region. Falling back halfway through would either replay
+        // a committed prefix or replace a still-uncommitted one in the editor.
+        if (characters.any { !sink.canProcessText(it) }) {
+            sink.resetEngine()
+            sink.commitDirect(fallbackText)
+            return
+        }
+        fun remainingText(consumed: Int): String = if (consumed == 0) {
+            fallbackText
+        } else {
+            sequence.substring(sequence.offsetByCodePoints(0, consumed))
+        }
+        for ((consumed, character) in characters.withIndex()) {
+            val result = sink.processText(character)
             if (result == null) {
                 sink.resetEngine()
-                sink.commitDirect(fallbackText)
+                sink.commitDirect(remainingText(consumed))
                 return
             }
             if (!result.accepted && !result.hasComposition) {
                 applyRejectedResult(sink, result)
                 sink.resetEngine()
-                sink.commitDirect(fallbackText)
+                sink.commitDirect(remainingText(consumed))
                 return
             }
             sink.applyState(result)

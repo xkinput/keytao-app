@@ -296,6 +296,8 @@ FFI 里仍保留旧的 module-level singleton API（`keytao_process_key()`、`ke
 5. 根据 `candidates` 显示或隐藏候选 UI。
 6. 返回或记录 `accepted`，决定原生按键是否继续传给客户端。
 
+`accepted = false` 不代表返回状态可以丢弃，也不代表触发字符已经包含在 `committed` 中。例如 ExpressEditor 会先提交旧组字，再拒绝当前符号：平台必须先应用这份提交，再让符号进入宿主。Linux/macOS 原生回传、Android/iOS 原文插入以及 Windows 的补提交需要保持同样的顺序。Shift release 也必须应用完整状态，不能只读取模式位，否则 `commit_code` / `commit_text` 切换策略产生的提交会丢失。
+
 这个顺序对顶功很重要：一次按键可能同时返回 `committed` 和新的 `preedit`。平台实现不能先设置新 preedit 再提交旧文本。
 
 另一条同源不变量：**提交 `committed` 之后必须在同一次协议提交里写回新的 `preedit` 与 `cursor`**，不能只发提交、把新 preedit 留到下一次按键。Linux 的 input-method-v2 曾因绕过这条把顶功后的新 preedit 丢掉，现在三条路径统一收敛到一个 `apply_state_to_input_method()`（commit_string → set_preedit_string → commit(serial)）。
@@ -342,7 +344,7 @@ mask = Rime modifier mask
 - 平台能拿到布局后的 printable 字符时，应优先传实际字符的 keysym。
 - Shift+a 在 macOS/Linux 当前目标行为是传 `0x41` 加 Shift mask，让 librime 的 ASCII composer 自己决定行为。
 - Windows TSF 也应对 Shift+字母传大写 ASCII keysym，同时保留 Shift modifier mask；后续如果接入完整键盘布局转换，应继续保持“keysym 表示实际字符、mask 表示修饰键”的语义。
-- NumLock 不进 Rime modifier mask。CapsLock 由平台把 `Lock` 位放进 mask 即可，通用层的 `key_policy::normalize_key_for_modifiers` 会按 caps XOR shift 折出实际字母并剥掉 Lock 位；平台不要再写自己的大小写补偿。
+- NumLock 不进 Rime modifier mask。CapsLock 由平台把 `Lock` 位放进 mask 即可，通用层的 `key_policy::normalize_key_for_modifiers` 在 Shift/Lock 有效时按 caps XOR shift 折出实际字母并剥掉 Lock 位；两者都未按下时保留传入字符的大小写，避免软键盘显式输入的 `A` 被改成 `a`。平台不要再写自己的大小写补偿。
 - 文本到 keysym 的映射只有一份实现：`key_policy::keysym_for_char` / `keysym_for_text`（经 FFI 是 `keytao_text_to_keysym`，经 JNI 是 `nativeTextToKeysym`）。ASCII 与 Latin-1 直通，其余用 `0x01000000 | codepoint`，控制字符返回 0/`None`。
   - **返回 0 表示“不要送 Rime，直接上屏”**。
   - 非 ASCII 现在会得到合法 keysym 并被送进 Rime，Rime 多半不接受，**平台必须在 `accepted == false` 时把原文直接上屏**，否则字符会丢。
@@ -366,7 +368,7 @@ mask = Rime modifier mask
 
 平台侧的两点必要补充：
 
-- Windows TSF 的 `OnTestKeyDown` 是**刻意放宽的超集**：所有可打印键与所有非系统保留的修饰组合都声明拦截，真正的放行发生在 `OnKeyDown`，由“`accepted` 或产生 commit 或 preedit/候选/高亮/页码确实变化”决定。原因是 TSF 的语义是 `TestKeyDown && fEaten` 才会调 `KeyDown`，测试回调保守会**永久性**丢功能（标点、key_binder 绑定都到不了 Rime）。任何有“测试回调”的平台协议都应照此处理。
+- Windows TSF 的 `OnTestKeyDown` 对普通可打印输入是**刻意放宽的超集**，让标点与 schema 绑定能到达 Rime；应用快捷键和空组字 ASCII 模式下必然被拒绝的键提前放行。`OnKeyDown` 根据“`accepted` 或产生 commit 或 preedit/候选/高亮/页码确实变化”决定是否消费。IMM32/CUAS 宿主（如 Flutter）可能在测试阶段把已接管的键改为 `VK_PROCESSKEY`，事后返回未消费不能恢复字符；因此 Rime 明确拒绝且处理后没有组字的普通可打印键，Windows 平台通过 TSF commit 提交实际字符并消费原键（仅允许 Shift/CapsLock 修饰）。若本键先提交旧组字再被拒绝，则把原字符追加在旧提交之后；不能因有 commit 就丢掉触发字符。不能直接放行所有空组字数字，否则会绕过数字编码、全角转换和自定义绑定。
 - 未映射的键（如小键盘 Enter）在**有 composition 时不得直接放行**：先补上正确的 keysym（keypad Enter 是 `0xff8d`）交给 Rime，仍未接受再按 Enter 的 fallback 处理。
 
 ### Shift release

@@ -16,8 +16,8 @@ use std::{
 };
 
 use keytao_core::{
-    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT,
-    RIME_RELEASE_MASK,
+    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK,
+    RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
 use wayland_client::{
     delegate_noop,
@@ -48,10 +48,11 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{CoreEngine, ImeSession},
+    engine::{shift_key_modifiers, unhandled_key_text, CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
+    surrounding::SurroundingText,
 };
 
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
@@ -148,6 +149,7 @@ struct App {
     deactivate_deadline: Option<Instant>,
     /// Double-buffered `content_type`, applied on the next `done`.
     pending_content_type: Option<(u32, u32)>,
+    surrounding_text: SurroundingText,
     key_repeat: Option<KeyRepeat>,
     repeat_delay: Option<Duration>,
     repeat_interval: Option<Duration>,
@@ -206,6 +208,7 @@ impl App {
             pending_active: None,
             deactivate_deadline: None,
             pending_content_type: None,
+            surrounding_text: SurroundingText::default(),
             key_repeat: None,
             repeat_delay: None,
             repeat_interval: None,
@@ -440,7 +443,19 @@ impl App {
     /// preedit, then a single `commit(serial)` — the order
     /// `zwp_input_method_v2.commit` prescribes.  Every path that produces a
     /// state goes through here so none of them can forget the preedit.
-    fn apply_state_to_input_method(&self, state: &ImeState) {
+    fn apply_state_to_input_method(&mut self, state: &ImeState) {
+        if state
+            .committed
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+            || !state.preedit.is_empty()
+            || self
+                .ime_state
+                .as_ref()
+                .is_some_and(|old| !old.preedit.is_empty())
+        {
+            self.surrounding_text.invalidate();
+        }
         let Some(im) = &self.input_method else { return };
         if let Some(committed) = &state.committed {
             if !committed.is_empty() {
@@ -454,7 +469,8 @@ impl App {
         im.commit(self.serial);
     }
 
-    fn clear_client_preedit(&self) {
+    fn clear_client_preedit(&mut self) {
+        self.surrounding_text.invalidate();
         let Some(im) = &self.input_method else { return };
         im.set_preedit_string(String::new(), 0, 0);
         im.commit(self.serial);
@@ -465,6 +481,9 @@ impl App {
         let policy = content_type_policy(hint, purpose);
         let previous = self.session.input_policy();
         self.session.set_input_policy(policy);
+        if !policy.composing {
+            self.surrounding_text.invalidate();
+        }
         if previous.composing && !policy.composing {
             tracing::debug!("Wayland: sensitive content type, passing keys through");
             self.cancel_key_repeat();
@@ -602,7 +621,7 @@ impl App {
             if is_shift_key(base_sym) && self.session.input_policy().composing {
                 let _ = self
                     .session
-                    .process_key_result(base_sym, self.mods & !RIME_MOD_SHIFT);
+                    .process_key_result(base_sym, shift_key_modifiers(self.mods));
             }
             self.forward_unhandled_key(evdev_keycode, sym);
             return;
@@ -626,14 +645,15 @@ impl App {
         let sym_raw = self.key_sym(evdev_keycode);
         tracing::trace!("key sym: {sym_raw:#x}");
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
-            tracing::warn!("key dropped: NoSymbol (xkb_state likely None)");
+            tracing::warn!("unmapped key: forwarding without XKB translation");
+            self.forward_unhandled_key(evdev_keycode, sym_raw);
             return;
         }
 
         let base_sym = self.base_key_sym(evdev_keycode);
         let shift_press = is_shift_key(base_sym);
         let effective_mods = if shift_press {
-            self.mods & !RIME_MOD_SHIFT
+            shift_key_modifiers(self.mods)
         } else {
             self.mods
         };
@@ -653,13 +673,12 @@ impl App {
                 self.forward_unhandled_key(evdev_keycode, sym_raw);
                 return;
             };
-            if !result.accepted {
-                self.forward_unhandled_key(evdev_keycode, sym_raw);
-                return;
-            }
             self.update_ascii_mode(result.state.is_english_mode(), qh);
             self.apply_state_to_input_method(&result.state);
             self.show_panel(result.state, qh);
+            if !result.accepted {
+                self.forward_unhandled_key(evdev_keycode, sym_raw);
+            }
             return;
         }
 
@@ -729,13 +748,18 @@ impl App {
             self.session.input_policy().composing
         );
         if is_shift_key(sym_raw) && self.session.input_policy().composing {
-            match self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
+            match self
+                .session
+                .process_key_result(sym_raw, shift_key_modifiers(self.mods | RIME_RELEASE_MASK))
+            {
                 Some(result) => {
                     tracing::debug!(
                         "shift release processed: ascii_mode={}",
                         result.state.ascii_mode
                     );
                     self.update_ascii_mode(result.state.is_english_mode(), qh);
+                    self.apply_state_to_input_method(&result.state);
+                    self.show_panel(result.state, qh);
                 }
                 None => tracing::debug!("shift release: process_key_result returned None"),
             }
@@ -764,10 +788,13 @@ impl App {
 
     fn forward_unhandled_key(&mut self, evdev_keycode: u32, sym: u32) {
         if self.virtual_keyboard.is_some() && self.virtual_keymap.is_some() {
+            self.surrounding_text.invalidate();
             self.forwarded_keys.insert(evdev_keycode);
             self.forward_physical_key(evdev_keycode, WL_KEY_PRESSED);
-        } else {
-            self.forward_text_key(sym);
+        } else if self.forward_text_key(sym) {
+            // Text commits do not deliver a physical press for the client to
+            // repeat. Keep repeating from the grab until its release arrives.
+            self.arm_key_repeat(evdev_keycode);
         }
     }
 
@@ -781,41 +808,63 @@ impl App {
     // Forward a key to the application when IME does not consume it.
     // zwp_input_method_v2 has no explicit forward_key request; we use
     // commit_string for printable chars and delete_surrounding_text for
-    // delete/backspace.  Arrow/cursor keys cannot be forwarded this way —
-    // the keyboard grab must release them; wlroots-based compositors do
-    // this automatically for keys the IME commits nothing for.
-    fn forward_text_key(&self, sym: u32) {
-        let Some(im) = &self.input_method else { return };
+    // delete/backspace. Arrow/cursor keys cannot be represented by these
+    // text-only requests; complete native routing requires a virtual keyboard.
+    fn forward_text_key(&mut self, sym: u32) -> bool {
+        // Neither delete_surrounding_text nor literal whitespace can express
+        // a shortcut (Ctrl+Backspace, Alt+Return, Win+Space, ...).
+        if self.mods & (RIME_MOD_CONTROL | RIME_MOD_ALT | RIME_MOD_SUPER) != 0 {
+            return false;
+        }
+        let Some(im) = &self.input_method else {
+            return false;
+        };
         match sym {
             // Space
             0x0020 => {
+                self.surrounding_text.invalidate();
                 im.commit_string(" ".into());
                 im.commit(self.serial);
+                true
             }
             // Return / KP_Enter
             0xff0d | 0xff8d => {
+                self.surrounding_text.invalidate();
                 im.commit_string("\n".into());
                 im.commit(self.serial);
+                true
             }
-            // BackSpace: delete one char to the left
-            0xff08 => {
-                im.delete_surrounding_text(1, 0);
-                im.commit(self.serial);
-            }
-            // Delete: delete one char to the right
-            0xffff => {
-                im.delete_surrounding_text(0, 1);
-                im.commit(self.serial);
+            // The protocol counts UTF-8 bytes. Use each fresh collapsed
+            // surrounding snapshot only once, then let repeats wait for done.
+            0xff08 | 0xffff => {
+                if let Some((before, after)) = self.surrounding_text.take_delete(sym == 0xff08) {
+                    im.delete_surrounding_text(before, after);
+                    im.commit(self.serial);
+                }
+                // Keep the repeat timer alive while awaiting a fresh snapshot.
+                true
             }
             // Tab
             0xff09 => {
+                self.surrounding_text.invalidate();
                 im.commit_string("\t".into());
                 im.commit(self.serial);
+                true
             }
-            // Arrow keys and other navigation — cannot be forwarded via
-            // commit_string; the compositor passes them through the grab
-            // automatically when the IME does not call commit().
-            _ => {}
+            _ => {
+                // Without a virtual keyboard there is no physical forwarding
+                // path. Rime declines plain digits and ASCII-mode letters;
+                // they still need to reach the client as committed text.
+                let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
+                if let Some(ch) = unhandled_key_text(&text, self.mods) {
+                    self.surrounding_text.invalidate();
+                    im.commit_string(ch.to_string());
+                    im.commit(self.serial);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -870,6 +919,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
+                state.surrounding_text.invalidate();
                 state.pending_active = Some(true);
                 // activate resets the content type together with everything
                 // else the previous text input had set.
@@ -880,8 +930,16 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 tracing::debug!("IME activate pending until done");
             }
             zwp_input_method_v2::Event::Deactivate => {
+                state.surrounding_text.invalidate();
                 state.pending_active = Some(false);
                 tracing::debug!("IME deactivate pending until done");
+            }
+            zwp_input_method_v2::Event::SurroundingText {
+                text,
+                cursor,
+                anchor,
+            } => {
+                state.surrounding_text.stage(text, cursor, anchor);
             }
             zwp_input_method_v2::Event::ContentType { hint, purpose } => {
                 let hint = match hint {
@@ -899,6 +957,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 // `done` makes every double-buffered event since the last one
                 // current, in the order the protocol lists them.
                 state.serial = state.serial.wrapping_add(1);
+                state.surrounding_text.done();
                 let next_active = state.pending_active.take();
                 match next_active {
                     Some(true) => {
@@ -907,6 +966,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                         tracing::debug!("IME activated");
                     }
                     Some(false) => {
+                        state.surrounding_text.invalidate();
                         state.deactivate_deadline = Some(Instant::now() + DEACTIVATE_DEBOUNCE);
                         tracing::debug!("IME deactivation deferred for debounce");
                     }
@@ -929,6 +989,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 }
             }
             zwp_input_method_v2::Event::Unavailable => {
+                state.surrounding_text.invalidate();
                 // KDE Plasma: this fires when another IME (Fcitx5, IBus, Maliit) already
                 // holds the input-method slot, OR if "Virtual Keyboard" in System Settings
                 // → Input Devices is not set to "None".  Signal the event loop to exit
@@ -1014,6 +1075,12 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE) {
                         m |= RIME_MOD_ALT;
+                    }
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE) {
+                        m |= RIME_MOD_LOCK;
+                    }
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE) {
+                        m |= RIME_MOD_SUPER;
                     }
                     state.mods = m;
                 }
@@ -1311,7 +1378,22 @@ fn tempfile() -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::{content_type_policy, preedit_cursor_bytes, repeat_timings};
+    use crate::engine::unhandled_key_text;
     use std::time::Duration;
+    use xkbcommon::xkb;
+
+    #[test]
+    fn number_row_and_keypad_digits_have_text_without_virtual_keyboard() {
+        for digit in 0..=9u32 {
+            for sym in ['0' as u32 + digit, 0xffb0 + digit] {
+                let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
+                assert_eq!(
+                    unhandled_key_text(&text, 0),
+                    char::from_u32('0' as u32 + digit)
+                );
+            }
+        }
+    }
 
     #[test]
     fn repeat_info_maps_to_a_delay_and_an_interval() {

@@ -17,6 +17,7 @@
 - `src/panel.rs`：候选窗和模式提示的 BGRA 像素渲染。
 - `src/kimpanel.rs`：KDE Kimpanel/impanel2 D-Bus 候选服务。
 - `src/reload_bus.rs`：reload 广播，reload watcher 通知各后端清掉旧词库产出的 UI。
+- `src/surrounding.rs`：Wayland v2 文本 fallback 的双缓冲 surrounding snapshot、UTF-8 边界校验与单次安全删除。
 - `src/tray.rs`：Linux 托盘菜单，打开 `keytao-app` 或退出 daemon。
 - `keytao.xml`：IBus component 描述，安装到 `/usr/share/ibus/component/keytao.xml`。
 - `keytao-wayland-launcher.desktop`：KDE Virtual Keyboard 入口。
@@ -158,13 +159,13 @@ Linux 各后端尽量遵守同一套 librime 事件形状：
 3. modifier mask 保留 Shift、Control、Alt、Super 和 release mask；core 的 `rime_modifier_mask()` 会过滤 NumLock、鼠标等噪声位，CapsLock 由 `normalize_key_for_modifiers` 折进 keysym。
 4. Ctrl/Alt 组合键**不再**提前放行：先送 Rime（`Ctrl+grave`、`F4` 等 key_binder 绑定需要它），未接受再放行。只有 Super/Meta 这类系统保留组合可以提前放行。
 5. 没有 composition 时，空格、回车、退格、删除、Tab、Escape、导航键等直接放行。
-6. Shift 自身的按下不切换模式；Shift release 送入 Rime，用于中英模式切换。
+6. Shift 自身的按下不切换模式；Shift release 送入 Rime，用于中英模式切换。`engine::shift_key_modifiers()` 对 solo Shift 剥去自身 Shift 位，但 Ctrl/Alt/Super+Shift 保留两个修饰位；release 同样保留其它修饰位。特别是 Ctrl 已经按住才获得输入焦点、Rime 没有见到 Ctrl press 时，仍不能把随后的 Ctrl+Shift 伪装成 solo Shift 而切换模式或提交旧编码。
 7. Shift+字母、Shift+数字符号不是 solo Shift，必须走普通 key press 路径，让 librime 的 ASCII composer 决定提交大写或符号。
 8. F4 不属于空 composition bypass；Wayland/X11/IBus 后端收到 `XK_F4` / `0xffc1` 时会送入 librime 打开 Rime schema / options 菜单。
 9. 有 composition 时按 Enter 一律走 `ImeSession::process_enter()`（把 `XK_Return` 交给 Rime，Rime 不接受时由 core 退回 `commit_raw_input()`）。后端**不得**再自己提交 preedit 字面量。
 10. 数字/选择键一律送 Rime，由 schema 的 `select_keys` / `key_binder` 决定；后端不得本地拦截数字键做选词。UI 点击选词走 `select_candidate_on_page(index)`。
 11. 翻页走 `change_page(backward)`，清空走 `clear_composition()`，失焦需提交走 `commit_composition()`，都不再伪造按键。
-12. `accepted=false` 时放行或转发按键。
+12. `accepted=false` 时先发布完整 `ImeState`，再放行或转发当前按键；提交旧组字不代表 Rime 接受了触发键，不能因存在 commit 就吞键。Shift release 同样可能产生 commit（如 `ascii_composer/switch_key/Shift_L: commit_code`）、清空或保留组字，不能只更新中英指示器。
 13. 有 `committed` 时用当前后端原生接口提交。
 14. 有 `preedit` 时用当前后端原生接口更新客户端预编辑；`ImeState::cursor` 是 Unicode 标量偏移，IBus 可直接用（`engine::ibus_cursor_pos()` 只做越界收敛），Wayland text-input（v1/v2）要的是**字节偏移**，两个 Wayland 后端各有一个 `preedit_cursor_bytes()` 做换算。
 15. 有 `candidates` 时更新候选窗或候选服务。
@@ -189,9 +190,12 @@ Linux 各后端尽量遵守同一套 librime 事件形状：
 
 - 用 keyboard grab 接管按键。
 - 用 xkbcommon 从 evdev keycode 得到 keysym；`key_get_one_sym` 已经包含 Shift 后的 printable keysym。
-- 用 xkb state 提取 Shift、Control、Alt。
+- 用 xkb state 提取 Shift、Control、Alt、CapsLock 和 Super，保留 core 的大小写归一与系统保留组合键策略；识别 Shift 自身时使用无修饰的 base state。
 - 未消费的物理按键优先通过 virtual keyboard 原样转发。
-- 如果没有 virtual keyboard，只能用 `commit_string`/`delete_surrounding_text` 转发空格、回车、退格、删除、Tab；方向键等无法通过该 fallback 表达。
+- 如果没有 virtual keyboard，用 xkb 的 keysym→UTF-8 转换和 `commit_string` 传递被拒绝的普通字符（含主键盘/小键盘数字和英文模式字母）；空格、回车、退格、删除、Tab 保留对应的 `commit_string`/`delete_surrounding_text` fallback。文本 fallback 不产生客户端可重复的物理 press，因此由 grab 自己重复至 release；Ctrl/Alt/Super 组合不能被替换成字面字符或单字符删除，方向键等无法通过该 fallback 表达。
+- 两条 Wayland 路径都把 `NoSymbol` 原键交给原生转发接口；缺少 XKB 翻译不能导致已有转发能力的键被静默吞掉。
+- v2 的 `delete_surrounding_text` 参数是 UTF-8 **字节数**。无 virtual keyboard 时只接受本轮 `surrounding_text` / `done` 提供的、光标与 anchor 重合且字节边界有效的快照，按相邻 Unicode scalar 的 `len_utf8()` 删除；发送一次即使快照失效，重复键等待下一份 fresh 快照，不能拿乐观预测状态覆盖迟到的宿主结果。activate/deactivate、reload、敏感上下文和自身文本提交/组字修改都会清快照。
+- 无 virtual keyboard 的删除仍有协议降级边界：宿主不提供新鲜 surrounding、光标有非空选区或光标超出当前有效片段时，不猜测范围、不发送删除请求；短按可能无法表达该删除，长按只能随宿主新快照继续。正常 virtual keyboard 路径继续原生转发 Backspace/Delete 和选区行为。本轮不以文本请求模拟选区删除或导航键。
 - **所有** `ImeState` 都经过同一个 `apply_state_to_input_method()`：先 `commit_string`，再按 `ImeState.preedit` + 字节游标 `set_preedit_string`，最后 `commit(serial)`。空格选词、Enter 与普通按键三条路径共用它，任何一条都不会再把客户端 preedit 清空。
 - Enter 走 `ImeSession::process_enter()`，数字/空格一律送 Rime；后端不再自己提交 preedit 字面量，也不再本地拦截空格选中高亮候选。
 - `accepted=false` 时也要先应用一次 `ImeState` 再转发按键：librime 拒绝按键的同时仍可能顺手 flush 一个 commit（`ascii_composer` 切模式时会确认当前 composition），直接转发会把这段文字丢掉。
@@ -227,7 +231,8 @@ KWin 6 的虚拟键盘路径使用 input-method-v1：
 - modifier 通过 `context.modifiers(...)` 转发给 KWin。
 - 提交使用 `context.commit_string(serial, text)`，预编辑使用 `preedit_cursor` + `preedit_string`。`preedit_string` 的第三个参数是"客户端在 reset/失焦时用来替换预编辑的提交文本"，这里传当前 preedit 本身，组字中被 reset 不再直接丢字。本进程在 debounce 到期时只 `clear_composition()` 丢弃自己这一侧的组字、不主动 `commit_string`，是否上屏完全由 KWin 依据这个字符串决定，因此两侧不会重复提交。
 - Enter 走 `ImeSession::process_enter()`，数字/空格一律送 Rime；不再自己提交 preedit 字面量。
-- `accepted=false` 时先 `commit_state_to_context()` 再清 UI 并转发按键，原因同 input-method-v2 一节：拒绝按键不代表没有 commit。
+- `accepted=false` 时先 `commit_state_to_context()` 并同步真实预编辑和候选，再转发按键，原因同 input-method-v2 一节：拒绝按键不代表没有 commit，也不代表当前 composition 已结束。`Reset` 同时取消重复键并隐藏 overlay，避免 reset 后旧组字 UI 或重复操作继续生效。
+- KDE 与 v2 一样保存无修饰的 base XKB state 以识别 Shift press/release，避免带 Shift 的布局把 modifier keysym 解析成 CapsLock 等其它符号。
 - `content_type` 事件按 **text-input-v1** 的编号解析：purpose `password` 是 8（v1 没有 `pin`，9 是 `date`），hint 的 `hidden_text`(0x40) / `sensitive_data`(0x80) / `password`(0xc0) 命中即切 `InputContextPolicy::sensitive()`。不要复用 v2/IBus 的常量表。
 - 候选状态同时更新 Kimpanel 和 input panel overlay。
 - overlay panel 显示候选时 input region 为整个表面以接收点选，只显示模式提示时设为空 region 让点击穿透。
@@ -317,7 +322,7 @@ gdbus introspect --session --dest org.freedesktop.IBus.KeyTao \
 
 `page_up` / `page_down`、`cursor_up` / `cursor_down` 和 `candidate_clicked` 与 GNOME IBus engine 共享同一套行为：翻页走 `change_page()`，上下移动送 `XK_Up` / `XK_Down`，点击候选走 `select_candidate_on_page(index)`。property activate/show/hide 当前仍为空方法。
 
-`ProcessKeyEvent` 的决策不再由两个后端各写一份：`src/ibus_shared.rs` 里的 `process_key_event(session, keyval, state)` 统一判定敏感直通、Shift release 模式切换、空 composition 放行、Enter 交给 Rime 与普通按键，并返回 `KeyOutcome::{Forward, ClearUi, ModeChanged, Publish}`；`ibus_backend` 与 `gnome_ibus_engine` 只把 outcome 翻译成各自 D-Bus 接口上的信号。纯决策部分（`key_phase` / `press_route`）有单测，不需要 librime。
+`ProcessKeyEvent` 的决策不再由两个后端各写一份：`src/ibus_shared.rs` 里的 `process_key_event(session, keyval, state)` 统一判定敏感直通、Shift release、空 composition 放行、Enter 交给 Rime 与普通按键，并返回 `KeyOutcome::{Forward, ClearUi, Publish}`；`ibus_backend` 与 `gnome_ibus_engine` 只把 outcome 翻译成各自 D-Bus 接口上的信号。Shift release 和普通按键共用完整状态发布路径，因此切换模式时产生的 commit、预编辑和候选不会丢失。纯决策部分（`key_phase` / `press_route`）有单测，不需要 librime。
 
 按键之外还有三处决策同样收在 `ibus_shared`，两个前端只剩发布代码：
 
@@ -432,7 +437,7 @@ kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 
 ## 测试
 
-`src/main.rs` 里除 `panel` 外的模块全部带 `#[cfg(target_os = "linux")]`，所以在 macOS/Windows host 上 `cargo test -p keytao-linux-ime` **不会编译**后端代码，也就看不出后端里的编译错误（`ibus_backend` 的单测曾经因此长期编译不过而无人发现）。改这个 crate 后必须在 Linux 上跑一次：
+`src/main.rs` 里的平台后端模块带 `#[cfg(target_os = "linux")]`，只有 `panel_hit`、`surrounding` 等纯逻辑模块可在其它系统测试。因此 macOS/Windows host 上的 `cargo test -p keytao-linux-ime` **不会编译**后端代码，也就看不出后端里的编译错误（`ibus_backend` 的单测曾经因此长期编译不过而无人发现）。改这个 crate 后还需要在 Linux 上跑一次：
 
 ```bash
 # Linux 机器上

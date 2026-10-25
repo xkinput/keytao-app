@@ -5,6 +5,26 @@ import org.junit.Test
 
 class KeytaoRimeInputTest {
     @Test
+    fun `solo Shift sends a press before release and preserves an intermediate commit`() {
+        val log = mutableListOf<String>()
+        val released = accepted(committed = "remaining").copy(asciiMode = true)
+        val result = KeytaoRimeInput.processSoloShift(
+            AndroidKeyMapper.XK_SHIFT_L,
+            processKey = { keysym, modifiers ->
+                assertEquals(AndroidKeyMapper.XK_SHIFT_L, keysym)
+                log.add("process:$modifiers")
+                if (modifiers == 0) accepted(committed = "previous") else released
+            },
+            applyPress = { log.add("apply:${it.committed}") },
+        )
+        assertEquals(
+            listOf("process:0", "apply:previous", "process:${AndroidKeyMapper.RIME_RELEASE_MASK}"),
+            log,
+        )
+        assertEquals(released, result)
+    }
+
+    @Test
     fun `every result of a multi character code is applied in order`() {
         val sink = RecordingSink(
             "a" to accepted(preedit = "a"),
@@ -58,7 +78,7 @@ class KeytaoRimeInputTest {
                 "process:b",
                 "apply:啊/",
                 "reset",
-                "commitDirect:、",
+                "commitDirect:b",
             ),
             sink.log,
         )
@@ -66,11 +86,68 @@ class KeytaoRimeInputTest {
 
     @Test
     fun `a code whose first key maps to no keysym falls back untouched`() {
-        val sink = RecordingSink("☃" to null)
+        val sink = RecordingSink("☃" to null).apply { unmappableTexts.add("☃") }
 
         KeytaoRimeInput.feedSequence(sink, "☃", "☃")
 
-        assertEquals(listOf("process:☃", "reset", "commitDirect:☃"), sink.log)
+        assertEquals(listOf("reset", "commitDirect:☃"), sink.log)
+    }
+
+    @Test
+    fun `an unmappable suffix is found before a prefix can compose or commit`() {
+        for (prefixResult in listOf(accepted(preedit = "a"), accepted(committed = "a"))) {
+            val sink = RecordingSink("a" to prefixResult).apply { unmappableTexts.add("🦊") }
+
+            KeytaoRimeInput.feedSequence(sink, "a🦊b", "custom fallback")
+
+            assertEquals(listOf("a", "🦊"), sink.mappingChecks)
+            assertEquals(listOf("reset", "commitDirect:custom fallback"), sink.log)
+            assertEquals("custom fallback", sink.committed.toString())
+        }
+    }
+
+    @Test
+    fun `a rejected suffix never repeats an already committed prefix`() {
+        val sink = RecordingSink(
+            "a" to accepted(committed = "a"),
+            "b" to rejected(),
+        )
+
+        KeytaoRimeInput.feedSequence(sink, "ab", "ab")
+
+        assertEquals(
+            listOf("process:a", "apply:a/", "process:b", "reset", "commitDirect:b"),
+            sink.log,
+        )
+        assertEquals("ab", sink.committed.toString())
+    }
+
+    @Test
+    fun `rejected and unmapped suffixes retain complete Unicode code points`() {
+        for (result in listOf(null, rejected(committed = "旧"))) {
+            val sink = RecordingSink(
+                "🙂" to accepted(committed = "🙂"),
+                "🦊" to result,
+            )
+
+            KeytaoRimeInput.feedSequence(sink, "🙂🦊b", "custom fallback")
+
+            val expected = mutableListOf("process:🙂", "apply:🙂/", "process:🦊")
+            if (result != null) expected.add("apply:旧/")
+            expected.addAll(listOf("reset", "commitDirect:🦊b"))
+            assertEquals(expected, sink.log)
+            assertEquals(if (result == null) "🙂🦊b" else "🙂旧🦊b", sink.committed.toString())
+        }
+    }
+
+    @Test
+    fun `the first rejected key keeps the declared fallback after flushing an earlier commit`() {
+        val sink = RecordingSink("a" to rejected(committed = "旧"))
+
+        KeytaoRimeInput.feedSequence(sink, "ab", "、")
+
+        assertEquals(listOf("process:a", "apply:旧/", "reset", "commitDirect:、"), sink.log)
+        assertEquals("旧、", sink.committed.toString())
     }
 
     @Test
@@ -92,6 +169,16 @@ class KeytaoRimeInputTest {
     }
 
     @Test
+    fun `a rejected hardware key retains its composition before reaching the host`() {
+        val sink = RecordingSink()
+
+        KeytaoRimeInput.applyRejectedResult(sink, rejected(preedit = "aa"))
+
+        assertEquals(listOf("apply:/aa"), sink.log)
+        assertEquals(true, sink.hostComposing)
+    }
+
+    @Test
     fun `a rejected key clears the composing region the editor still shows`() {
         val sink = RecordingSink().apply { hostComposing = true }
 
@@ -110,8 +197,16 @@ class KeytaoRimeInputTest {
         vararg scripted: Pair<String, KeytaoImeState?>,
     ) : KeytaoRimeKeySink {
         val log = mutableListOf<String>()
+        val committed = StringBuilder()
+        val mappingChecks = mutableListOf<String>()
+        val unmappableTexts = mutableSetOf<String>()
         override var hostComposing: Boolean = false
         private val scriptedResults = scripted.toMap()
+
+        override fun canProcessText(text: String): Boolean {
+            mappingChecks.add(text)
+            return text !in unmappableTexts
+        }
 
         override fun processText(text: String): KeytaoImeState? {
             log.add("process:$text")
@@ -120,6 +215,7 @@ class KeytaoRimeInputTest {
 
         override fun applyState(state: KeytaoImeState) {
             log.add("apply:${state.committed}/${state.preedit}")
+            committed.append(state.committed)
             hostComposing = state.preedit.isNotEmpty()
         }
 
@@ -129,6 +225,7 @@ class KeytaoRimeInputTest {
 
         override fun commitDirect(text: String) {
             log.add("commitDirect:$text")
+            committed.append(text)
             hostComposing = false
         }
     }

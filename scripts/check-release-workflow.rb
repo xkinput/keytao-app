@@ -18,7 +18,7 @@ check(input && input['default'] == '' && input['required'] == false, 'Dispatch d
 check(workflow['permissions'] == { 'contents' => 'read' }, 'Builds must have read-only repository access')
 check(!source.match?(/tauri|pnpm|macos-15-intel/i), 'No legacy Tauri build legs')
 builds = %w[build-desktop build-android build-ios]
-check(jobs.keys.sort == (builds + %w[prepare build-nix create-release]).sort, 'Unexpected job set')
+check(jobs.keys.sort == (builds + %w[prepare build-nix create-release sync-nix-release]).sort, 'Unexpected job set')
 nix = jobs.fetch('build-nix')
 check(nix['if'] == "github.event_name == 'workflow_dispatch'", 'Nix must run only during dispatch pre-runs')
 check(nix['runs-on'] == 'ubuntu-latest' && !nix.key?('needs'), 'Nix must independently repackage the published release')
@@ -34,6 +34,28 @@ check(release['needs'].sort == (builds + ['prepare']).sort, 'Release must wait f
 check(release['permissions'] == { 'contents' => 'write' }, 'Release needs contents write access')
 check(release['steps'].any? { |s| s['uses'] == 'actions/download-artifact@v4' && s.dig('with', 'merge-multiple') }, 'Release must collect all artifacts')
 check(release['steps'].any? { |s| s['run'] == 'gh release upload "$GITHUB_REF_NAME" dist/release-upload/* --clobber' }, 'Release must upload the collected artifacts')
+
+sync_nix = jobs.fetch('sync-nix-release')
+check(sync_nix['if'] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", 'Nix release sync must be tag-push-only')
+check(sync_nix['needs'].sort == %w[prepare create-release].sort, 'Nix release sync must wait for uploaded Release assets')
+check(sync_nix['runs-on'] == 'ubuntu-latest', 'Nix release sync needs the Linux Nix runner')
+check(sync_nix['permissions'] == { 'contents' => 'write' }, 'Nix release sync needs only contents write access')
+check(sync_nix['concurrency'] == { 'group' => 'sync-nix-release-pin', 'cancel-in-progress' => false }, 'Serialize Nix release pin updates without cancellation')
+check(sync_nix.dig('env', 'VERSION') == '${{ needs.prepare.outputs.version }}', 'Nix release sync must use the prepared version')
+sync_steps = sync_nix.fetch('steps')
+check(sync_steps.map { |s| s['uses'] }.compact == %w[actions/checkout@v4 cachix/install-nix-action@v31], 'Nix release sync needs checkout and Nix installer')
+check(sync_steps.find { |s| s['uses'] == 'actions/checkout@v4' }.dig('with', 'ref') == 'main', 'Nix release sync must update main')
+check(sync_steps.any? { |s| !s.key?('if') && s['run'] == 'scripts/update-nix-release.sh "$VERSION"' }, 'Nix release sync must update both published deb hashes')
+sync_commit = sync_steps.find { |s| s.fetch('run', '').include?('git push origin HEAD:main') }
+check(sync_commit && !sync_commit.key?('if'), 'Nix release sync must push the checked pin update to main')
+[
+  'nix flake check --no-build',
+  'git diff --quiet -- flake.nix',
+  'git add flake.nix',
+  'git commit -m "build(nix): pin KeyTao release $VERSION"'
+].each do |command|
+  check(sync_commit['run'].include?(command), "Missing Nix sync check/commit command: #{command}")
+end
 
 paths = source.scan(%r{scripts/[\w.-]+\.(?:sh|ps1|mjs)\b}).uniq
 paths.each { |path| check(File.file?(path), "Missing referenced script: #{path}") }
@@ -141,4 +163,4 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   })().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 check(status.success?, "Metadata/release decision checks: #{output}")
-puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run, 10 asset names, SDK pins, dispatch isolation, version input and alpha detection"
+puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input and alpha detection"

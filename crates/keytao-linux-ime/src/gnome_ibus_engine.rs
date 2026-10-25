@@ -506,9 +506,6 @@ impl IBusEngine {
         match outcome {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => self.clear_ui(&ctxt).await,
-            KeyOutcome::ModeChanged { ascii_mode, .. } => {
-                self.apply_mode_change(ascii_mode, true, &ctxt).await;
-            }
             KeyOutcome::Publish { state, .. } => self.apply_ime_state(*state, &ctxt).await,
         }
         accepted

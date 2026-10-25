@@ -15,6 +15,7 @@ mod panel;
 mod panel_hit;
 #[cfg(target_os = "linux")]
 mod reload_bus;
+mod surrounding;
 #[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]

@@ -15,6 +15,7 @@ use std::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use keytao_core::{
+    key_policy,
     runtime_log::{self, Level},
     utf16_offset_from_chars, ImeRuntimeSession, ImeState, KeyProcessResult,
 };
@@ -1686,12 +1687,37 @@ fn should_apply_processed_state(consumed: bool, before: &ImeState, after: &ImeSt
 /// Whether `OnKeyDown` should report the key as eaten.
 ///
 /// `OnTestKeyDown` deliberately claims more than librime will take (every
-/// printable key has to be offered to the punctuator), so this is where a key
-/// librime declined is handed back to the host. Anything librime actually did
+/// printable key has to be offered to the punctuator). Declined printable keys
+/// declined by Rime are completed by `complete_unhandled_key` before this check;
+/// other declined keys are handed back to the host. Anything librime actually did
 /// — accepting the key, committing text, or changing the composition — is
 /// eaten so the host never sees it twice.
 fn should_consume_processed_state(accepted: bool, before: &ImeState, after: &ImeState) -> bool {
     accepted || has_commit(after) || visible_state_changed(before, after)
+}
+
+/// Complete a printable key that Rime left to the application.
+/// IMM32/CUAS hosts (including Flutter) may already have replaced the physical
+/// key with VK_PROCESSKEY after OnTestKeyDown claimed it. Returning false from
+/// OnKeyDown then loses the character. Use the normal TSF commit path instead,
+/// but only after Rime has had the chance to handle schema bindings, digit
+/// codes and full-width punctuation itself. ExpressEditor can commit the old
+/// composition and still reject the triggering character; append that character
+/// to the commit so neither half of the input disappears.
+fn complete_unhandled_key(keysym: u32, mods: u32, result: &mut KeyProcessResult) {
+    if result.accepted
+        || has_visible_state(&result.state)
+        || mods & !(keytao_core::RIME_MOD_SHIFT | keytao_core::RIME_MOD_LOCK) != 0
+    {
+        return;
+    }
+    if let Some(ch) = key_policy::char_for_keysym(keysym) {
+        result
+            .state
+            .committed
+            .get_or_insert_with(String::new)
+            .push(ch);
+    }
 }
 
 fn process_key_result(
@@ -1997,21 +2023,21 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(BOOL::from(false));
             }
 
+            let keysym = match vk_to_keysym(vk, lparam.0, mods) {
+                Some(keysym) => keysym,
+                None => {
+                    append_key_diagnostic!("OnKeyDown mapped=false");
+                    return Ok(BOOL::from(false));
+                }
+            };
             // Enter has exactly one meaning across all platforms: hand XK_Return to
             // Rime and let core fall back to committing the raw input (D5).
             let result = if is_enter_vk(vk) {
                 runtime_session(&state).and_then(|session| session.process_enter())
             } else {
-                let keysym = match vk_to_keysym(vk, lparam.0, mods) {
-                    Some(keysym) => keysym,
-                    None => {
-                        append_key_diagnostic!("OnKeyDown mapped=false");
-                        return Ok(BOOL::from(false));
-                    }
-                };
                 process_key_result(&state, keysym, mods)
             };
-            let result = match result {
+            let mut result = match result {
                 Some(r) => r,
                 None => {
                     append_key_diagnostic!("OnKeyDown result=false");
@@ -2022,6 +2048,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                     return Ok(BOOL::from(false));
                 }
             };
+            complete_unhandled_key(keysym, mods, &mut result);
             let ime_state = result.state;
 
             let consumed =
@@ -2564,3 +2591,7 @@ mod tests {
 #[cfg(test)]
 #[path = "shortcut_passthrough_tests.rs"]
 mod shortcut_passthrough_tests;
+
+#[cfg(test)]
+#[path = "unhandled_key_tests.rs"]
+mod unhandled_key_tests;

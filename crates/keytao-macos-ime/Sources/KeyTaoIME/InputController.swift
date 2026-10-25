@@ -4,6 +4,7 @@ import Carbon
 import CKeytaoCore
 
 private let rimeModifierShift: UInt32 = 0x0001
+private let rimeModifierLock: UInt32 = 0x0002
 private let rimeModifierControl: UInt32 = 0x0004
 private let rimeModifierAlt: UInt32 = 0x0008
 private let rimeModifierSuper: UInt32 = 1 << 26
@@ -604,9 +605,10 @@ final class KeyTaoInputController: IMKInputController {
             NSLog("KeyTao: manual runtime reload failed")
             return
         }
-        hasComposition = false
-        hideCandidates()
-        refreshSessionState(from: client())
+        // Explicit reloads use the same client cleanup as stamp-triggered
+        // reloads. Clearing only the engine flag leaves embedded marked text
+        // in the host even though the corresponding Rime composition is gone.
+        runtimeDidReload()
         NSSound(named: NSSound.Name("Glass"))?.play()
     }
 
@@ -670,6 +672,7 @@ final class KeyTaoInputController: IMKInputController {
     private func rimeModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var mask: UInt32 = 0
         if flags.contains(.shift) { mask |= rimeModifierShift }
+        if flags.contains(.capsLock) { mask |= rimeModifierLock }
         if flags.contains(.control) { mask |= rimeModifierControl }
         if flags.contains(.option) { mask |= rimeModifierAlt }
         // X11 and Rime call the window system's own modifier Super; on macOS

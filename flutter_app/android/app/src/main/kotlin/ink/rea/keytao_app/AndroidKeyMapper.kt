@@ -9,8 +9,10 @@ data class RimeKey(
 
 object AndroidKeyMapper {
     const val RIME_MOD_SHIFT = 0x0001
+    const val RIME_MOD_LOCK = 0x0002
     const val RIME_MOD_CONTROL = 0x0004
     const val RIME_MOD_ALT = 0x0008
+    const val RIME_MOD_SUPER = 1 shl 26
     const val RIME_RELEASE_MASK = 1 shl 30
 
     const val XK_SPACE = 0x0020
@@ -51,9 +53,9 @@ object AndroidKeyMapper {
         }
         if (special != null) return RimeKey(special, modifiers(event))
 
-        val unicode = event.getUnicodeChar(event.metaState)
-        if (unicode <= 0) return null
-        return RimeKey(unicode, modifiers(event))
+        return fromUnicodeCodePoint(event.getUnicodeChar(event.metaState), modifiers(event)) {
+            KeytaoNativeBridge.textToKeysym(it)
+        }
     }
 
     /**
@@ -66,16 +68,57 @@ object AndroidKeyMapper {
      */
     fun fromText(value: String): RimeKey? {
         if (value.codePointCount(0, value.length) != 1) return null
-        val keysym = KeytaoNativeBridge.textToKeysym(value)
+        return fromUnicodeCodePoint(value.codePointAt(0), 0) {
+            KeytaoNativeBridge.textToKeysym(it)
+        }
+    }
+
+    /** Share the native Unicode-to-keysym mapping for hardware and soft keys. */
+    internal fun fromUnicodeCodePoint(
+        codePoint: Int,
+        modifiers: Int,
+        textToKeysym: (String) -> Int,
+    ): RimeKey? {
+        // Android marks dead accents with COMBINING_ACCENT in the sign bit.
+        // Neither these nor invalid Unicode scalars are standalone text keys.
+        if (
+            !Character.isValidCodePoint(codePoint) ||
+            codePoint in 0xd800..0xdfff || codePoint == 0
+        ) return null
+        val keysym = textToKeysym(String(Character.toChars(codePoint)))
         if (keysym == 0) return null
-        return RimeKey(keysym, 0)
+        return RimeKey(keysym, modifiers)
+    }
+
+    fun permitsSoloShift(event: KeyEvent): Boolean = permitsSoloShift(modifiers(event))
+
+    internal fun permitsSoloShift(modifiers: Int): Boolean {
+        return modifiers and (RIME_MOD_CONTROL or RIME_MOD_ALT or RIME_MOD_SUPER) == 0
     }
 
     private fun modifiers(event: KeyEvent): Int {
+        return modifiers(
+            shift = event.isShiftPressed,
+            control = event.isCtrlPressed,
+            alt = event.isAltPressed,
+            meta = event.isMetaPressed,
+            capsLock = event.isCapsLockOn,
+        )
+    }
+
+    internal fun modifiers(
+        shift: Boolean,
+        control: Boolean,
+        alt: Boolean,
+        meta: Boolean,
+        capsLock: Boolean,
+    ): Int {
         var mask = 0
-        if (event.isShiftPressed) mask = mask or RIME_MOD_SHIFT
-        if (event.isCtrlPressed) mask = mask or RIME_MOD_CONTROL
-        if (event.isAltPressed) mask = mask or RIME_MOD_ALT
+        if (shift) mask = mask or RIME_MOD_SHIFT
+        if (capsLock) mask = mask or RIME_MOD_LOCK
+        if (control) mask = mask or RIME_MOD_CONTROL
+        if (alt) mask = mask or RIME_MOD_ALT
+        if (meta) mask = mask or RIME_MOD_SUPER
         return mask
     }
 }

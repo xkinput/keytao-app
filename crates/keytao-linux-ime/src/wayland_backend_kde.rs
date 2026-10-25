@@ -12,8 +12,8 @@ use std::{
 };
 
 use keytao_core::{
-    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT,
-    RIME_RELEASE_MASK,
+    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK,
+    RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
 use wayland_client::{
     delegate_noop,
@@ -41,7 +41,7 @@ use wayland_protocols::wp::input_method::zv1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{CoreEngine, ImeSession},
+    engine::{shift_key_modifiers, CoreEngine, ImeSession},
     kimpanel::KimpanelHandle,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
@@ -127,6 +127,7 @@ struct App {
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
     xkb_state: Option<xkb::State>,
+    xkb_base_state: Option<xkb::State>,
     mods: u32,
     last_key_time: u32,
     /// Serial of the last `wl_keyboard::key`; `context.key` has to echo that
@@ -179,6 +180,7 @@ impl App {
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
+            xkb_base_state: None,
             mods: 0,
             last_key_time: 0,
             last_key_serial: 0,
@@ -214,6 +216,14 @@ impl App {
         self.xkb_state
             .as_ref()
             .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
+            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
+            .into()
+    }
+
+    fn base_key_sym(&self, evdev_keycode: u32) -> u32 {
+        self.xkb_base_state
+            .as_ref()
+            .map(|s| s.key_get_one_sym(xkb::Keycode::from(evdev_keycode + 8)))
             .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
             .into()
     }
@@ -619,12 +629,15 @@ impl App {
 
         let sym_raw = self.key_sym(evdev_keycode);
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
-            tracing::warn!("KDE IME key dropped: NoSymbol");
+            tracing::warn!("KDE IME unmapped key: forwarding without XKB translation");
+            self.forward_key_press(evdev_keycode);
             return;
         }
 
-        let effective_mods = if is_shift_key(sym_raw) {
-            self.mods & !RIME_MOD_SHIFT
+        let base_sym = self.base_key_sym(evdev_keycode);
+        let shift_press = is_shift_key(base_sym);
+        let effective_mods = if shift_press {
+            shift_key_modifiers(self.mods)
         } else {
             self.mods
         };
@@ -645,18 +658,20 @@ impl App {
                 self.forward_key_press(evdev_keycode);
                 return;
             };
-            if !result.accepted {
-                self.forward_key_press(evdev_keycode);
-                return;
-            }
             self.update_ascii_mode(result.state.is_english_mode(), qh);
             self.commit_state_to_context(&result.state);
             self.update_kimpanel(&result.state);
             self.show_panel(result.state, qh);
+            if !result.accepted {
+                self.forward_key_press(evdev_keycode);
+            }
             return;
         }
 
-        let Some(result) = self.session.process_key_result(sym_raw, effective_mods) else {
+        let Some(result) = self
+            .session
+            .process_key_result(if shift_press { base_sym } else { sym_raw }, effective_mods)
+        else {
             self.forward_key_press(evdev_keycode);
             return;
         };
@@ -678,12 +693,11 @@ impl App {
         } else {
             // librime rejected the key, but it can still have flushed a commit
             // on the way out (the ascii_composer confirms the composition when
-            // it switches mode), so the commit goes out before the UI is torn
-            // down or those characters are lost.
+            // it switches mode). Publish the actual composition as well; a
+            // rejected key does not mean Rime stopped composing.
             self.commit_state_to_context(&ime_state);
-            self.clear_context_preedit();
-            self.clear_kimpanel();
-            self.hide_panel_popup();
+            self.update_kimpanel(&ime_state);
+            self.show_panel(ime_state, qh);
             self.forward_key_press(evdev_keycode);
         }
     }
@@ -708,10 +722,16 @@ impl App {
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
         self.cancel_key_repeat_for(evdev_keycode);
-        let sym_raw = self.key_sym(evdev_keycode);
+        let sym_raw = self.base_key_sym(evdev_keycode);
         if is_shift_key(sym_raw) && self.session.input_policy().composing {
-            if let Some(result) = self.session.process_key_result(sym_raw, RIME_RELEASE_MASK) {
+            if let Some(result) = self
+                .session
+                .process_key_result(sym_raw, shift_key_modifiers(self.mods | RIME_RELEASE_MASK))
+            {
                 self.update_ascii_mode(result.state.is_english_mode(), qh);
+                self.commit_state_to_context(&result.state);
+                self.update_kimpanel(&result.state);
+                self.show_panel(result.state, qh);
             }
         }
         // Only keys whose press reached the client may deliver a release, or
@@ -829,9 +849,11 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for App {
                 state.apply_content_type(hint, purpose);
             }
             zwp_input_method_context_v1::Event::Reset => {
+                state.key_repeat = None;
                 state.session.reset();
                 state.clear_context_preedit();
                 state.clear_kimpanel();
+                state.hide_panel_popup();
             }
             _ => {}
         }
@@ -870,6 +892,7 @@ impl Dispatch<WlKeyboard, ()> for App {
                     xkb::KEYMAP_COMPILE_NO_FLAGS,
                 ) {
                     state.xkb_state = Some(xkb::State::new(&km));
+                    state.xkb_base_state = Some(xkb::State::new(&km));
                     state.xkb_keymap = Some(km);
                 }
             }
@@ -910,6 +933,12 @@ impl Dispatch<WlKeyboard, ()> for App {
                     }
                     if xkb_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE) {
                         m |= RIME_MOD_ALT;
+                    }
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE) {
+                        m |= RIME_MOD_LOCK;
+                    }
+                    if xkb_state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE) {
+                        m |= RIME_MOD_SUPER;
                     }
                     state.mods = m;
                 }

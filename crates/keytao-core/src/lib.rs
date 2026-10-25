@@ -2911,13 +2911,17 @@ pub mod key_policy {
         keysym_for_char(first)
     }
 
-    /// Fold `Shift`/`CapsLock` into the keysym and drop the Lock bit.
+    /// Fold an active `Shift`/`CapsLock` into the keysym and drop the Lock bit.
     ///
     /// Rime expects the keysym to carry the character that was actually typed
     /// while the mask carries only real modifiers, so a locked `a` must arrive
     /// as `A` and never as `a` plus a Lock bit that librime would treat as an
-    /// unknown modifier.
+    /// unknown modifier. With neither modifier, preserve the supplied character:
+    /// soft keyboards and text-to-keysym callers already encode its case.
     pub fn normalize_key_for_modifiers(sym: u32, mods: u32) -> (u32, u32) {
+        if mods & (RIME_MOD_LOCK | RIME_MOD_SHIFT) == 0 {
+            return (sym, mods);
+        }
         let uppercase = (mods & RIME_MOD_LOCK != 0) != (mods & RIME_MOD_SHIFT != 0);
         let mods = mods & !RIME_MOD_LOCK;
         let Some(ch) = char_for_keysym(sym) else {
@@ -3148,6 +3152,19 @@ mod ime_runtime_tests {
         }
         assert_eq!(key_policy::char_for_keysym(key_policy::XK_BACK_SPACE), None);
         assert_eq!(key_policy::char_for_keysym(key_policy::XK_RETURN), None);
+    }
+
+    #[test]
+    fn text_keys_keep_their_explicit_case_without_case_modifiers() {
+        for text in ["A", "Z", "a", "z", "É", "（"] {
+            let sym = key_policy::keysym_for_text(text).unwrap();
+            for mods in [0, RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+                assert_eq!(
+                    key_policy::normalize_key_for_modifiers(sym, mods),
+                    (sym, mods)
+                );
+            }
+        }
     }
 
     #[test]

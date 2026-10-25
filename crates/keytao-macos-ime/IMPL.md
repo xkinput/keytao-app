@@ -186,6 +186,8 @@ session 本身不会被销毁重建：`keytao_reload()` 会丢弃 runtime 内全
 
 因此用户在 App 里重新部署后，不需要手动重启输入法；文件事件到达时就会刷新。
 
+输入菜单的手动重载成功后也复用 `runtimeDidReload()`：先清理宿主 marked text、候选窗和模式提示，再刷新 session。不能只把 `hasComposition` 设为 false，否则嵌入模式下重载前的预编辑仍会留在宿主。
+
 ## 按键处理
 
 热路径在 `InputController.swift`。
@@ -193,7 +195,7 @@ session 本身不会被销毁重建：`keytao_reload()` 会丢弃 runtime 内全
 1. `recognizedEvents` 只声明 `keyDown` 和 `flagsChanged`。
 2. `flagsChanged` 交给 `handleFlagsChanged()`。
 3. 任何 keyDown 都先无条件清掉 `shiftPressedWithoutKey`——包括 Command 组合键。否则 Cmd+Shift+X 之后松开 Shift 会被误判成 solo Shift 并切换中英。
-4. Shift/Control/Option/Command 转成 Rime modifier mask；Command 映射为 **Super**（`1 << 26`），与 X11/Rime 对窗口系统修饰键的约定一致。
+4. Shift/CapsLock/Control/Option/Command 转成 Rime modifier mask；CapsLock 映射为 `Lock`（`0x0002`），由通用层按 CapsLock XOR Shift 折入字符后剥除；Command 映射为 **Super**（`1 << 26`），与 X11/Rime 对窗口系统修饰键的约定一致。
 5. mask 含 Super 时提前放行：Cmd 组合是窗口系统保留组合，librime 在 macOS 上不绑定它们。
 6. Carbon 特殊键转换为 X11 keysym：Return、**小键盘 Enter（`XK_KP_Enter`/`0xff8d`）**、Backspace、Delete、Escape、Space、方向键、Home/End、PageUp/PageDown、Tab、F4。
 7. 其余按键的文本→keysym 转换调用 `keytao_text_to_keysym()`，即 `keytao-core::key_policy::keysym_for_text` —— Latin-1 直通、其余 `0x01000000 | codepoint`。macOS 不再自己限制 ASCII 范围。无修饰键时用 `event.characters` 保留布局实际产生的字符（Shift+a 得到 `0x41`），带 Control/Option/Command 时用 `charactersIgnoringModifiers` 取基键。
@@ -401,7 +403,7 @@ macOS 前端要尽量模拟 Linux/X11 传给 librime 的事件形状：
 - Ctrl/Option 组合键应保留为基键加 Control/Alt mask，先送 Rime，由 `accepted` 决定是否放行给应用（Rime 的 `key_binder`、`Ctrl+grave` 之类的绑定要能收到）。
 - Command 映射为 Super mask（`1 << 26`）；作为窗口系统保留组合，macOS 仍提前放行，见「按键处理」的偏离登记。
 - solo Shift release 才用于中英模式切换；Shift+字母、Shift+数字符号必须清掉 `shiftPressedWithoutKey`，走普通 key press 路径。
-- CapsLock 不进入 Rime modifier mask；如果系统布局已经产出大写字符，keyval 本身可以是大写 keysym。
+- CapsLock 作为 `Lock` 传给通用层，确保与 Shift 同时按下时正确恢复小写；通用层折入字符后剥除该位，不把 Lock 交给 librime。这不代表实现 CapsLock 中英切换。
 - 非 Latin-1 字符按 X11 约定编码为 `0x01000000 | codepoint`，由 `keytao_text_to_keysym()` 统一产出；Rime 不接受时 `handle` 返回 false，字符由 macOS 原生路径上屏，不会丢字。
 
 ## 当前已接入能力

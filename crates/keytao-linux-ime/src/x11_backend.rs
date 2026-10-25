@@ -6,7 +6,7 @@
 
 use std::{num::NonZeroU16, os::fd::AsRawFd, sync::Arc, time::Instant};
 
-use keytao_core::{key_policy, ImeState, RIME_MOD_SHIFT, RIME_RELEASE_MASK};
+use keytao_core::{key_policy, ImeState, RIME_RELEASE_MASK};
 use x11rb::{
     connection::Connection as _,
     properties::WmHints,
@@ -26,7 +26,7 @@ use xim::{
 };
 
 use crate::{
-    engine::{CoreEngine, ImeSession},
+    engine::{shift_key_modifiers, CoreEngine, ImeSession},
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
@@ -480,6 +480,31 @@ impl KeyTaoHandler {
         self.show_mode_hint(ascii_mode);
     }
 
+    fn apply_ime_state(
+        &mut self,
+        server: &mut MyServer,
+        user_ic: &mut UserInputContext<IcData>,
+        ime_state: ImeState,
+    ) -> Result<(), ServerError> {
+        self.update_ascii_mode(ime_state.is_english_mode());
+        if let Some(text) = ime_state
+            .committed
+            .as_deref()
+            .filter(|text| !text.is_empty())
+        {
+            draw_client_preedit(server, &mut user_ic.ic, "")?;
+            commit_text(server, &user_ic.ic, text)?;
+        }
+        // Releases can clear or replace the preedit too (Shift commit_code).
+        draw_client_preedit(server, &mut user_ic.ic, &ime_state.preedit)?;
+        self.pressed_click = None;
+        self.show_panel(user_ic, &ime_state);
+        self.clicked_state = None;
+        user_ic.user_data.last_state = Some(ime_state);
+        user_ic.user_data.state_epoch = self.reload_epoch;
+        Ok(())
+    }
+
     /// Milliseconds until the mode hint expires, or -1 when none is showing.
     fn poll_timeout_ms(&self) -> i32 {
         let Some(deadline) = self.mode_hint_until else {
@@ -662,7 +687,12 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         // fetched at init time.  xev.detail is the raw X11 keycode and the Shift
         // bit (bit 0) of xev.state picks the keysym level.
         let shift = u32::from(xev.state) & 0x0001 != 0;
-        let keysym = self.keysym_for(xev.detail, shift);
+        let base_sym = self.keysym_for(xev.detail, false);
+        let keysym = if is_shift_key(base_sym) {
+            base_sym
+        } else {
+            self.keysym_for(xev.detail, shift)
+        };
 
         if keysym == 0 {
             return Ok(false);
@@ -679,9 +709,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
                     if let Some(result) = user_ic
                         .user_data
                         .session
-                        .process_key_result(keysym, RIME_RELEASE_MASK)
+                        .process_key_result(keysym, shift_key_modifiers(mods | RIME_RELEASE_MASK))
                     {
-                        self.update_ascii_mode(result.state.is_english_mode());
+                        self.apply_ime_state(server, user_ic, result.state)?;
                     }
                 }
                 return Ok(false);
@@ -701,16 +731,20 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         // Shift held down while typing is a normal modifier; Shift on its own
         // must not carry its own bit into the press event.
         let effective_mods = if is_shift_key(keysym) {
-            mods & !RIME_MOD_SHIFT
+            shift_key_modifiers(mods)
         } else {
             mods
         };
 
         let before_state = user_ic.user_data.session.state();
         if key_policy::should_bypass_empty_composition(keysym, effective_mods, &before_state) {
-            user_ic.user_data.last_state = None;
-            self.hide_panel();
-            draw_client_preedit(server, &mut user_ic.ic, "")?;
+            // System-reserved chords also bypass Rime while composing. They
+            // must not hide UI for a composition the session still retains.
+            if before_state.preedit.is_empty() && before_state.candidates.is_empty() {
+                user_ic.user_data.last_state = None;
+                self.hide_panel();
+                draw_client_preedit(server, &mut user_ic.ic, "")?;
+            }
             return Ok(false);
         }
 
@@ -731,30 +765,8 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
             return Ok(false);
         };
 
-        let ime_state = result.state;
         let consumed = result.accepted;
-
-        self.update_ascii_mode(ime_state.is_english_mode());
-
-        if let Some(text) = &ime_state.committed {
-            draw_client_preedit(server, &mut user_ic.ic, "")?;
-            commit_text(server, &user_ic.ic, text)?;
-        }
-
-        if !ime_state.preedit.is_empty() {
-            draw_client_preedit(server, &mut user_ic.ic, &ime_state.preedit)?;
-        } else if ime_state.committed.is_some() {
-            draw_client_preedit(server, &mut user_ic.ic, "")?;
-        }
-
-        // Any key that reaches Rime may change the page or composition, so a
-        // press on what was drawn before must not select what is drawn now.
-        self.pressed_click = None;
-        self.show_panel(user_ic, &ime_state);
-        self.clicked_state = None;
-        user_ic.user_data.last_state = Some(ime_state);
-        user_ic.user_data.state_epoch = self.reload_epoch;
-
+        self.apply_ime_state(server, user_ic, result.state)?;
         Ok(consumed)
     }
 }

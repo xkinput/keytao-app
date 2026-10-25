@@ -6,6 +6,30 @@
 pub use keytao_core::{ImeRuntime as CoreEngine, ImeRuntimeSession as ImeSession};
 use keytao_core::{ImeState, InputContextPolicy};
 
+/// Text fallback for a Wayland grab without a virtual keyboard. Shortcut
+/// chords must not turn into literal characters in the document.
+pub fn unhandled_key_text(text: &str, mods: u32) -> Option<char> {
+    use keytao_core::{key_policy, RIME_MOD_LOCK, RIME_MOD_SHIFT};
+    if mods & !(RIME_MOD_SHIFT | RIME_MOD_LOCK) != 0 {
+        return None;
+    }
+    key_policy::keysym_for_text(text).and_then(key_policy::char_for_keysym)
+}
+
+/// A solo Shift must not carry its own modifier into ascii_composer. A Shift
+/// chord must carry it: otherwise Ctrl+Shift looks like one modifier and Rime
+/// arms a solo-Shift toggle. Preserve Release and every other modifier.
+pub fn shift_key_modifiers(mods: u32) -> u32 {
+    use keytao_core::{key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT};
+    if mods & (RIME_MOD_CONTROL | RIME_MOD_ALT) != 0
+        || key_policy::is_system_reserved_modifier(mods)
+    {
+        mods | RIME_MOD_SHIFT
+    } else {
+        mods & !RIME_MOD_SHIFT
+    }
+}
+
 /// `IBusInputPurpose::PASSWORD`, mirroring `GtkInputPurpose` and
 /// `zwp_text_input_v3::content_purpose`.
 pub const IBUS_INPUT_PURPOSE_PASSWORD: u32 = 8;
@@ -49,10 +73,52 @@ pub fn ibus_cursor_pos(state: &ImeState) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ibus_content_type_policy, ibus_cursor_pos, ImeState, IBUS_INPUT_HINT_PRIVATE,
-        IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_PURPOSE_PIN,
+        ibus_content_type_policy, ibus_cursor_pos, shift_key_modifiers, unhandled_key_text,
+        ImeState, IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_PURPOSE_PIN,
     };
     use keytao_core::rime_modifier_mask;
+
+    #[test]
+    fn shift_chords_keep_both_modifiers_on_press_and_release() {
+        use keytao_core::{
+            RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
+        };
+        assert_eq!(shift_key_modifiers(RIME_MOD_SHIFT), 0);
+        assert_eq!(
+            shift_key_modifiers(RIME_MOD_SHIFT | RIME_RELEASE_MASK),
+            RIME_RELEASE_MASK
+        );
+        for other in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+            for shift in [0, RIME_MOD_SHIFT] {
+                assert_eq!(shift_key_modifiers(other | shift), other | RIME_MOD_SHIFT);
+                assert_eq!(
+                    shift_key_modifiers(other | shift | RIME_RELEASE_MASK),
+                    other | RIME_MOD_SHIFT | RIME_RELEASE_MASK
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unhandled_printable_keys_survive_without_a_virtual_keyboard() {
+        use keytao_core::{RIME_MOD_LOCK, RIME_MOD_SHIFT};
+        for ch in "0123456789abc!é键".chars() {
+            for mods in [0, RIME_MOD_SHIFT, RIME_MOD_LOCK] {
+                assert_eq!(unhandled_key_text(&ch.to_string(), mods), Some(ch));
+            }
+        }
+    }
+
+    #[test]
+    fn text_fallback_never_inserts_shortcuts_or_function_keys() {
+        use keytao_core::{RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_SUPER};
+        for mods in [RIME_MOD_CONTROL, RIME_MOD_ALT, RIME_MOD_SUPER] {
+            assert_eq!(unhandled_key_text("1", mods), None);
+        }
+        for text in ["", "\0", "\n", "\t", "\u{8}", "ab"] {
+            assert_eq!(unhandled_key_text(text, 0), None);
+        }
+    }
 
     #[test]
     fn rime_modifier_mask_strips_lock_and_pointer_modifiers() {

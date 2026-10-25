@@ -57,6 +57,81 @@ fn type_code(session: &ImeRuntimeSession) -> ImeState {
     state
 }
 
+#[test]
+fn a_shift_mode_switch_can_commit_text_even_when_rime_rejects_the_release() {
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("shift-release-commit");
+    smoke_fixture::write(&dir).expect("write the fixture");
+    let schema_path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let schema = std::fs::read_to_string(&schema_path).unwrap();
+    assert!(schema.contains("Shift_L: noop"));
+    std::fs::write(
+        &schema_path,
+        schema.replace("Shift_L: noop", "Shift_L: commit_code"),
+    )
+    .unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime.init().expect("deploy the fixture");
+    let session = runtime.create_session().expect("create a session");
+    assert!(!type_code(&session).preedit.is_empty());
+    session.process_key_result(0xffe1, 0).unwrap();
+    let result = session
+        .process_key_result(0xffe1, keytao_core::RIME_RELEASE_MASK)
+        .unwrap();
+    assert!(
+        !result.accepted,
+        "the client must still receive the key release"
+    );
+    assert_eq!(result.state.committed.as_deref(), Some(smoke_fixture::CODE));
+    assert!(result.state.preedit.is_empty());
+    assert!(result.state.candidates.is_empty());
+    assert!(result.state.ascii_mode);
+
+    // The editor can gain focus while Ctrl/Alt/Super is already held, so Rime
+    // need not have seen that modifier's press. A Shift event must retain the
+    // full chord, or the release would wrongly commit and switch languages.
+    for modifier in [
+        keytao_core::RIME_MOD_CONTROL,
+        keytao_core::RIME_MOD_ALT,
+        keytao_core::RIME_MOD_SUPER,
+    ] {
+        session.set_ascii_mode(false).unwrap();
+        type_code(&session);
+        session
+            .process_key_result(0xffe1, modifier | keytao_core::RIME_MOD_SHIFT)
+            .unwrap();
+        let result = session
+            .process_key_result(0xffe1, modifier | keytao_core::RIME_RELEASE_MASK)
+            .unwrap();
+        assert!(!result.state.ascii_mode);
+        assert!(result.state.committed.is_none());
+        assert_eq!(result.state.preedit, smoke_fixture::CODE);
+    }
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
+fn explicit_uppercase_text_does_not_start_a_lowercase_schema_code() {
+    let _serialized = serialized();
+    let (runtime, dir) = deployed_runtime("uppercase-text-keys");
+    let session = runtime.create_session().expect("create a session");
+    for text in ["A", "Z"] {
+        session.reset().unwrap();
+        let keysym = keytao_core::key_policy::keysym_for_text(text).unwrap();
+        let result = session.process_key_result(keysym, 0).unwrap();
+        assert!(!result.accepted, "uppercase text belongs to the host");
+        assert!(result.state.preedit.is_empty());
+        assert!(result.state.candidates.is_empty());
+        assert!(result.state.committed.is_none());
+    }
+    let result = session.process_key_result(b'a' as u32, 0).unwrap();
+    assert!(result.accepted);
+    assert!(!result.state.preedit.is_empty());
+    drop(session);
+    cleanup(&dir);
+}
+
 fn page_words(state: &ImeState) -> Vec<&str> {
     state
         .candidates

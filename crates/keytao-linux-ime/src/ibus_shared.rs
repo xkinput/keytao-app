@@ -13,7 +13,7 @@
 //! The decision machine and the IBus value builders live here.  The frontends
 //! only publish the outcome over their own interface.
 
-use crate::engine::{ibus_content_type_policy, ImeSession};
+use crate::engine::{ibus_content_type_policy, shift_key_modifiers, ImeSession};
 use keytao_core::{key_policy, ImeState, InputContextPolicy, KeyProcessResult, RIME_RELEASE_MASK};
 use keytao_theme::{
     CandidateOptionModel, CandidatePanelInput, CandidatePanelModel, ThemeCandidate, ThemeResolver,
@@ -63,6 +63,8 @@ pub fn key_phase(keyval: u32, state: u32, policy: InputContextPolicy) -> KeyPhas
 /// Where a press goes once the composition librime holds is known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PressRoute {
+    /// The desktop owns the chord, including while a composition is visible.
+    SystemShortcut,
     /// Nothing is being composed and the key belongs to the client.
     BypassEmptyComposition,
     /// `Return` over a live composition: only the schema knows whether it
@@ -73,6 +75,9 @@ pub enum PressRoute {
 }
 
 pub fn press_route(keyval: u32, mods: u32, before: &ImeState) -> PressRoute {
+    if key_policy::is_system_reserved_modifier(mods) {
+        return PressRoute::SystemShortcut;
+    }
     if key_policy::should_bypass_empty_composition(keyval, mods, before) {
         return PressRoute::BypassEmptyComposition;
     }
@@ -91,8 +96,6 @@ pub enum KeyOutcome {
     Forward,
     /// Tear the preedit and candidate UI down, then the client keeps the key.
     ClearUi,
-    /// Only the displayed language mode moved (including English dictionary).
-    ModeChanged { ascii_mode: bool, accepted: bool },
     /// Publish the new IME state.
     Publish {
         state: Box<ImeState>,
@@ -105,9 +108,7 @@ impl KeyOutcome {
     pub fn accepted(&self) -> bool {
         match self {
             KeyOutcome::Forward | KeyOutcome::ClearUi => false,
-            KeyOutcome::ModeChanged { accepted, .. } | KeyOutcome::Publish { accepted, .. } => {
-                *accepted
-            }
+            KeyOutcome::Publish { accepted, .. } => *accepted,
         }
     }
 
@@ -128,27 +129,26 @@ impl KeyOutcome {
 pub fn process_key_event(session: &ImeSession, keyval: u32, state: u32) -> KeyOutcome {
     match key_phase(keyval, state, session.input_policy()) {
         KeyPhase::Sensitive | KeyPhase::IgnoredRelease => KeyOutcome::Forward,
-        KeyPhase::ShiftRelease => match session.process_key_result(keyval, RIME_RELEASE_MASK) {
-            Some(result) => {
-                tracing::debug!(
-                    "IBus mode after Shift release: ascii_mode={}",
-                    result.state.ascii_mode
-                );
-                KeyOutcome::ModeChanged {
-                    ascii_mode: result.state.is_english_mode(),
-                    accepted: result.accepted,
-                }
-            }
-            None => KeyOutcome::Forward,
-        },
+        // A mode-switch release can commit the current code or clear the
+        // composition even when Rime returns accepted=false. Publish the full
+        // result before handing the release back to the client.
+        KeyPhase::ShiftRelease => {
+            KeyOutcome::from_result(session.process_key_result(keyval, shift_key_modifiers(state)))
+        }
         KeyPhase::Press => {
             tracing::trace!("IBus ProcessKeyEvent keyval={keyval:#x} state={state:#x}");
             let before = session.state();
             match press_route(keyval, state, &before) {
+                PressRoute::SystemShortcut => KeyOutcome::Forward,
                 PressRoute::BypassEmptyComposition => KeyOutcome::ClearUi,
                 PressRoute::Enter => KeyOutcome::from_result(session.process_enter()),
                 PressRoute::Rime => {
-                    KeyOutcome::from_result(session.process_key_result(keyval, state))
+                    let mods = if is_shift_key(keyval) {
+                        shift_key_modifiers(state)
+                    } else {
+                        state
+                    };
+                    KeyOutcome::from_result(session.process_key_result(keyval, mods))
                 }
             }
         }
@@ -406,10 +406,13 @@ pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::OwnedVa
 mod tests {
     use super::{
         ibus_lookup_table_value, ibus_text_variant, is_shift_key, key_phase, press_route,
-        state_to_panel_model, ContentTypeState, KeyPhase, ModeChange, ModeIndicator, PressRoute,
+        state_to_panel_model, ContentTypeState, KeyOutcome, KeyPhase, ModeChange, ModeIndicator,
+        PressRoute,
     };
     use crate::engine::{IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD};
-    use keytao_core::{key_policy, Candidate, ImeState, InputContextPolicy, RIME_RELEASE_MASK};
+    use keytao_core::{
+        key_policy, Candidate, ImeState, InputContextPolicy, KeyProcessResult, RIME_RELEASE_MASK,
+    };
     use keytao_theme::ThemeResolver;
 
     fn composing_state() -> ImeState {
@@ -458,6 +461,45 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_shift_release_publishes_its_commit_and_clears_preedit() {
+        // ascii_composer's commit_code switch commits on release but returns
+        // kNoop. That text must be published while the client keeps the release.
+        let mut state = ImeState::empty();
+        state.ascii_mode = true;
+        state.committed = Some("ni".into());
+        let outcome = KeyOutcome::from_result(Some(KeyProcessResult {
+            accepted: false,
+            state,
+        }));
+        assert!(!outcome.accepted());
+        match outcome {
+            KeyOutcome::Publish { state, .. } => {
+                assert_eq!(state.committed.as_deref(), Some("ni"));
+                assert!(state.preedit.is_empty());
+                assert!(state.ascii_mode);
+            }
+            other => panic!("release state was discarded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejecting_a_key_does_not_discard_a_still_active_composition() {
+        let state = composing_state();
+        let outcome = KeyOutcome::from_result(Some(KeyProcessResult {
+            accepted: false,
+            state,
+        }));
+        assert!(!outcome.accepted());
+        match outcome {
+            KeyOutcome::Publish { state, .. } => {
+                assert_eq!(state.preedit, "ni");
+                assert_eq!(state.candidates[0].text, "你");
+            }
+            other => panic!("composition was discarded: {other:?}"),
+        }
+    }
+
+    #[test]
     fn an_empty_composition_hands_editing_keys_back_to_the_client() {
         let empty = ImeState::empty();
         assert_eq!(
@@ -482,6 +524,14 @@ mod tests {
         assert_eq!(
             press_route(key_policy::XK_KP_ENTER, 0, &state),
             PressRoute::Enter
+        );
+    }
+
+    #[test]
+    fn system_shortcuts_leave_a_live_composition_visible() {
+        assert_eq!(
+            press_route('e' as u32, keytao_core::RIME_MOD_SUPER, &composing_state()),
+            PressRoute::SystemShortcut,
         );
     }
 

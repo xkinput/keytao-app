@@ -210,14 +210,14 @@ Rust 返回 JSON，Kotlin 只反序列化：
 
 硬键路径在 `KeytaoInputMethodService.onKeyDown()` / `onKeyUp()`：
 
-1. Shift key down 只记录 pending，不立即切换中英。
+1. Shift key down 只记录 pending，不立即切换中英；Ctrl / Alt / Meta 同按时不置位，release 再复核一次，切换编辑器和结束输入时清除 pending。
 2. 如果 Shift 按住期间出现其它 keyDown，清掉 pending，避免 Shift+letter 被当成 solo Shift。
 3. 编辑器声明为密码框或数字/电话/日期类时整段交回系统（见「EditorInfo 契约」）。
 4. `AndroidKeyMapper.fromAndroidKeyEvent()` 把 Android key event 转为 X11 keysym + Rime modifier mask。
-5. bypass 判定调用 `nativeShouldBypassKey(session, keysym, mask)`，即通用层 `key_policy::should_bypass_empty_composition`：只有空 composition 下的导航/编辑类键和 Super/Meta 组合提前放行；**`ascii_mode` 不是 bypass 判据**，英文模式下按键仍要进 librime 的 `ascii_composer`，Ctrl/Alt 组合也先送 Rime。Kotlin 不再自己维护 keysym 白名单。
-6. 其它按键调用 `nativeProcessKey()`。
-7. `accepted=false && !hasComposition` 时放行给系统。
-8. `accepted=true` 或有 composition 时按 `ImeState` 应用到 `InputConnection`。
+5. Meta 系统组合无论是否组字都先交回宿主。其余 bypass 判定调用 `nativeShouldBypassKey(session, keysym, mask)`，即通用层 `key_policy::should_bypass_empty_composition`：空 composition 下的导航/编辑类键提前放行；**`ascii_mode` 不是 bypass 判据**，英文模式下按键仍要进 librime 的 `ascii_composer`，Ctrl/Alt 组合也先送 Rime。Kotlin 不再自己维护 keysym 白名单。
+6. 有组字时无修饰 Return 调用 `nativeProcessEnter()`，与软键共用 Rime 优先、被拒时提交原始编码的规则；其它按键调用 `nativeProcessKey()`。
+7. `accepted=false` 时先应用该结果已有的 commit / composition，再放行原按键给系统；不能因为 preedit 仍存在就吞掉 Rime 拒绝的 Ctrl 等快捷键。
+8. `accepted=true` 时按 `ImeState` 应用到 `InputConnection` 并消费按键。
 
 移动端 `englishMode` 默认 `ascii`，中/En、独按硬件 Shift 与 Rime 选项页因此默认沿用 `ascii_mode`。仅当 `englishMode == "schema"` 且已安装 English 方案时，这些入口才会先清掉未上屏 composition，再选择 English schema；返回中文会恢复进入 English 前快照的中文 schema 选项（包括临时 `ascii_punct`）。敏感/直通输入框的性能旁路始终只使用 `ascii_mode`，不切换 schema；桌面契约不受此移动端设置影响。
 
@@ -239,30 +239,34 @@ Android keysym 基线：
 modifier mask 只保留：
 
 - Shift：`0x0001`
+- CapsLock：`0x0002`，保留 toggle 状态供通用层折叠到字符大小写，随后剥离 Lock bit
 - Control：`0x0004`
 - Alt：`0x0008`
+- Meta / Super：`1 << 26`，用于通用层系统快捷键透传
 - Release：`1 << 30`
 
-CapsLock、NumLock、meta、鼠标状态不进入 Rime mask。
+NumLock、鼠标状态不进入 Rime mask。
 
-软键文本转 keysym 也不在 Kotlin 里做：`AndroidKeyMapper.fromText()` 调 `nativeTextToKeysym()`，由通用层 `key_policy::keysym_for_text` 决定（Latin-1 直通，其余 `0x01000000 | codepoint`），返回 0 表示「不要送 Rime，直接上屏」。这修掉了旧实现里 `（`（U+FF08）会被当成 `XK_BackSpace` 的分叉。Rime 拒绝该 keysym 时，Android 按 `fallbackValue` 直接 `commitText()`，不会丢字。
+硬键的 `getUnicodeChar()` 与软键的 `fromText()` 都调用 `nativeTextToKeysym()`，由通用层 `key_policy::keysym_for_text` 决定（Latin-1 直通，其余 `0x01000000 | codepoint`），返回 0 表示「不要送 Rime，交给宿主或直接上屏」。硬键也不能把 Unicode 标量直接作为 keysym，否则 `（`（U+FF08）会与 `XK_BackSpace` 冲突。dead accent 标志、无效标量和孤立 surrogate 不送给 Rime。Rime 拒绝软键 keysym 时，Android 按 `fallbackValue` 直接 `commitText()`，不会丢字。
 
 ### 被拒按键与多字符 rimeInput 的保序（`KeytaoRimeInput`）
 
 Rime 拒绝一个按键之前，往往已经把上一段组字提交掉了（`ascii_composer` 切模式、顶字自动上屏都是这样）：同一个结果里 `accepted=false` 但 `committed` 非空。所以硬键 `onKeyDown()`、软键 `handleTextInput()`、`handleBackspace()` 和 solo Shift release 的 fallback 分支都先调 `KeytaoRimeInput.applyRejectedResult()` 把该结果应用掉（提交 `committed`、清掉宿主残留的 composing region），再把按键交给宿主或 `commitText(fallbackValue)`；顺序与 iOS `applyRejectedKeyFallback()` 一致。
 
-一个键位的 `rimeValue` 可能是多字符编码，`KeytaoRimeInput.feedSequence()` 逐字符送 Rime 并**逐次按序应用**每个结果。旧实现只保存最后一个结果，序列中途触发的自动上屏会被最后一个 state 覆盖，造成永久丢字。中途遇到被拒按键时同样先应用该结果，再 `reset()` + 提交 `fallbackValue`。
+一个键位的 `rimeValue` 可能是多字符编码，`KeytaoRimeInput.feedSequence()` 先通过无副作用的 `canProcessText()` 验证全部 code point 都能映射，再逐字符送 Rime 并**逐次按序应用**每个结果。任意字符无法映射时整串尚未送入引擎，直接回退完整 `fallbackValue`，避免半截 preedit 被覆盖。旧实现只保存最后一个结果，序列中途触发的自动上屏会被最后一个 state 覆盖，造成永久丢字。中途遇到被拒按键时同样先应用该结果，再 `reset()` + 提交尚未消费的编码后缀；首键即被拒时仍提交完整 `fallbackValue`。预检后运行期仍返回 null 时也只补未消费的后缀。后缀按 Unicode code point 计算，不能截断 surrogate pair，也不能重复提交已上屏的编码前缀。
 
 这两条规则抽成 `KeytaoRimeInput` + `KeytaoRimeKeySink` 接口，`KeytaoRimeInputTest` 用假 sink 断言调用顺序，不需要跑起 `InputMethodService`。
+
+`AndroidKeyMapperTest` 覆盖 Unicode 转换委托（包括全角字符与 supplementary scalar）、数字字符、dead accent / 非法标量、CapsLock / Shift / Meta mask 和 solo Shift 的组合键门控。`KeytaoRimeInputTest` 还验证 solo Shift 的 press、press commit、release 顺序，以及硬键被拒时保留仍在的 preedit。
 
 ## Shift 与中英切换
 
 硬键 solo Shift release 当前按通用基线处理：
 
-1. Shift key down 记录 `shiftPressedWithoutKey=true`。
-2. 如果期间没有其它 keyDown，Shift key up 发送 `XK_Shift_L` 或 `XK_Shift_R`，mask 为 `RIME_RELEASE_MASK`。
-3. 如果 Rime 接受，应用返回状态。
-4. 如果 Rime 不接受，调用 `setAsciiMode(!currentState.asciiMode)` 作为 fallback。
+1. 无 Ctrl / Alt / Meta 的 Shift key down 记录 `shiftPressedWithoutKey=true`；release 也复核修饰键。输入框切换和结束输入会清除 pending，敏感或直通输入框不切换引擎模式。
+2. 如果期间没有其它 keyDown，Shift key up 先发送对应 `XK_Shift_L` / `XK_Shift_R` 的 press（mask `0`）并应用可能的 commit，再发送 release（`RIME_RELEASE_MASK`）。`ascii_composer` 必须先观察到 press 才会执行 schema 的 `commit_code` 等切换规则，只有 release 会绕过这条路径。
+3. 如果 Rime 接受或返回的模式已变化，应用返回状态。不能在已切换的模式上再次执行 fallback，否则带 commit 的拒绝结果可能切换两次。
+4. 如果 Rime 不接受且模式没变，先应用可能存在的 commit，再调用 `setAsciiMode(!currentState.asciiMode)` 作为 fallback。
 
 软键盘上的 `中/英` 键不模拟 Shift；它直接调用 `setAsciiMode()`，因为移动端用户预期是显式模式键，而不是硬件键盘的 Shift release 行为。
 
