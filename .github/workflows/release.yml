@@ -342,6 +342,9 @@ jobs:
       - name: Test iOS keyboard interaction policy
         run: bash crates/keytao-ios-ime/test-interaction-policy.sh
 
+      - name: Typecheck iOS keyboard with device SDK
+        run: bash crates/keytao-ios-ime/check-swift-sdk.sh
+
       - name: Build and import iOS librime runtime
         run: scripts/build-ios-librime.sh --target aarch64-apple-ios
 

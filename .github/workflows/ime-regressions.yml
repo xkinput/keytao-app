@@ -76,6 +76,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Typecheck iOS keyboard with device SDK
+        run: bash crates/keytao-ios-ime/check-swift-sdk.sh
       - name: Test macOS input context lifetime
         run: bash crates/keytao-macos-ime/test-input-context.sh
       - name: Test iOS keyboard policies and interaction

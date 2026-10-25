@@ -509,6 +509,8 @@ Swift 源码类型检查通过。`scripts/verify-ios-ime.sh` 会校验主 App/ex
 
 `test-touch-rollover.sh`、`test-interaction-policy.sh` 与 `test-floating-layout.sh` 均由 `scripts/verify-ios-ime.sh` 调用。
 
+`bash crates/keytao-ios-ime/check-swift-sdk.sh` 用真机 iOS SDK 对全部 UIKit 生产源码做纯类型检查，不链接 Rust 或 librime；原生策略 CI 与发布 iOS 构建前均执行。失败时将编译器末尾日志分成不超过 2500 字符的公开 annotation，保留具体 Swift 错误供无登录日志访问时诊断。
+
 2026-06-24 的旧外壳模拟器 smoke 曾验证键盘扩展安装、切换和 `qey` 提交；这是迁移前的历史记录，不证明当前 Flutter App 的设备行为。当前构建入口见上面的 Flutter iOS 工程说明。
 
 此前切换失败的根因是 simulator `.appex` 在 ad-hoc 签名下仍包含 restricted entitlement。系统日志中的关键错误为：
