@@ -350,6 +350,10 @@ struct KeyTaoMarkedTextOwnership {
         self.documentIdentifier = documentIdentifier
     }
 
+    func belongs(to currentDocument: UUID) -> Bool {
+        documentIdentifier == currentDocument
+    }
+
     mutating func release(for currentDocument: UUID) -> Bool {
         let ownedCurrentDocument = documentIdentifier == currentDocument
         documentIdentifier = nil

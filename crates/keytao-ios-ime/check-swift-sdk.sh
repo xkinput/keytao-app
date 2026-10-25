@@ -17,6 +17,8 @@ SDKROOT="$(xcrun --sdk "$SDK" --show-sdk-path)"
 set +e
 xcrun --sdk "$SDK" swiftc \
     -typecheck \
+    -application-extension \
+    -swift-version 5 \
     -target "$TARGET" \
     -sdk "$SDKROOT" \
     -I "$IOS_IME_DIR/Sources/CKeytaoCore" \

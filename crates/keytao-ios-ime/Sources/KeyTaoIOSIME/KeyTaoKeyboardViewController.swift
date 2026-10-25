@@ -1286,7 +1286,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
 
-        if currentState.hasComposition || markedTextActive {
+        if currentState.hasComposition || markedTextOwnership.belongs(to: textDocumentProxy.documentIdentifier) {
             clearHostMarkedText()
             apply(engine.clearComposition())
         }
