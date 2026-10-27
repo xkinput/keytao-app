@@ -434,10 +434,30 @@ fn main() {
                 }
             }
         }
-        // Keep the process alive so IBus/XIM threads can serve apps.
-        loop {
-            std::thread::park();
+        wait_for_backend_threads(kwin_socket);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_backend_threads(kwin_socket: bool) -> ! {
+    if kwin_socket {
+        // This process owns only KWin's private, single-use WAYLAND_SOCKET.
+        // It cannot reconnect through WAYLAND_DISPLAY, and has no IBus/XIM
+        // threads to keep alive. KWin relaunches its virtual keyboard on
+        // QProcess::CrashExit only, so exit(1) would leave input broken too.
+        // SIGTERM produces that status without generating a core dump.
+        tracing::error!(
+            "KWin Wayland backend exited; terminating so KWin can launch a fresh connection"
+        );
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            libc::raise(libc::SIGTERM);
         }
+        std::process::exit(1);
+    }
+    // Keep the process alive so IBus/XIM threads can serve apps.
+    loop {
+        std::thread::park();
     }
 }
 
@@ -562,6 +582,46 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::ReloadStampGate;
     use keytao_core::ReloadStamp;
+
+    #[test]
+    fn a_stopped_kwin_backend_exits_by_signal_for_compositor_recovery() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "KEYTAO_TEST_KWIN_DISCONNECT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::wait_for_backend_threads(true);
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_stopped_kwin_backend_exits_by_signal_for_compositor_recovery",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(
+                    status.signal(),
+                    Some(libc::SIGTERM),
+                    "KWin restarts CrashExit, not a normal exit"
+                );
+                assert!(!status.core_dumped());
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("KWin's input backend stopped but the process kept waiting forever");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir =

@@ -91,6 +91,7 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
 6. 根据 `WAYLAND_SOCKET`、`WAYLAND_DISPLAY`、`DISPLAY` 和 `XDG_CURRENT_DESKTOP` 选择后端。
 7. XIM 和 IBus shim 以线程方式启动；GNOME IBus engine 和 Wayland 主后端在当前线程运行。
 8. 非 KWin 私有进程会启动托盘。
+9. KWin 私有 Wayland 后端返回后以 `SIGTERM` 终止当前进程，让 KWin 按 `QProcess::CrashExit` 的恢复机制重新启动并分配新 socket；普通 `exit(1)` 不会触发这条机制，永久等待则会留下无法输入的空壳进程。此信号不会生成 core dump；重启次数仍受 KWin 自身的限制。
 
 ## 数据目录与重载
 
@@ -231,14 +232,16 @@ KWin 6 的虚拟键盘路径使用 input-method-v1：
 - 未消费按键通过 `context.key(serial, time, evdev_key, state)` 转发。协议要求这四个参数原样来自 `wl_keyboard::key`，所以 serial 用 `last_key_serial`（**不是** `commit_state` 的 serial）。
 - 只有按下时被放行的键才转发 release（`forwarded_keys` 集合），否则客户端会收到没有配对 press 的 release。
 - modifier 通过 `context.modifiers(...)` 转发给 KWin。
-- 提交使用 `context.commit_string(serial, text)`，预编辑使用 `preedit_cursor` + `preedit_string`。`preedit_string` 的第三个参数是"客户端在 reset/失焦时用来替换预编辑的提交文本"，这里传当前 preedit 本身，组字中被 reset 不再直接丢字。本进程在 debounce 到期时只 `clear_composition()` 丢弃自己这一侧的组字、不主动 `commit_string`，是否上屏完全由 KWin 依据这个字符串决定，因此两侧不会重复提交。
+- 提交使用 `context.commit_string(serial, text)`，预编辑使用 `preedit_cursor` + `preedit_string`。`preedit_string` 的第三个参数是"客户端在 reset/失焦时用来替换预编辑的提交文本"，这里传当前 preedit 本身，组字中被 reset 不再直接丢字。本进程在 deactivate 时重置自己这一侧的组字、不主动 `commit_string`，是否上屏完全由 KWin 依据这个字符串决定，因此两侧不会重复提交。
 - Enter 走 `ImeSession::process_enter()`，数字/空格一律送 Rime；不再自己提交 preedit 字面量。
 - `accepted=false` 时先 `commit_state_to_context()` 并同步真实预编辑和候选，再转发按键，原因同 input-method-v2 一节：拒绝按键不代表没有 commit，也不代表当前 composition 已结束。`Reset` 同时取消重复键并隐藏 overlay，避免 reset 后旧组字 UI 或重复操作继续生效。
 - KDE 与 v2 一样保存无修饰的 base XKB state 以识别 Shift press/release，避免带 Shift 的布局把 modifier keysym 解析成 CapsLock 等其它符号。
 - `content_type` 事件按 **text-input-v1** 的编号解析：purpose `password` 是 8（v1 没有 `pin`，9 是 `date`），hint 的 `hidden_text`(0x40) / `sensitive_data`(0x80) / `password`(0xc0) 命中即切 `InputContextPolicy::sensitive()`。不要复用 v2/IBus 的常量表。
 - 候选状态同时更新 Kimpanel 和 input panel overlay。
 - overlay panel 显示候选时 input region 为整个表面以接收点选，只显示模式提示时设为空 region 让点击穿透。
-- 失焦有 180ms debounce，到期后 `reset_context_state()` 会 `keyboard.release()` + `context.destroy()`：协议要求 deactivate 处理完必须销毁 context，而 wayland-client 的 proxy 在 `Drop` 时不会自动发 destructor。销毁前后 `Dispatch<ZwpInputMethodContextV1>` 会丢弃非当前 context 的事件，避免旧 context 的 `commit_state`/`reset` 覆盖新 context 的状态。
+- KWin 在发送 `deactivate` 后立即删除服务端 context 及其 keyboard。收到该事件或替换 context 时，`reset_context_state()` 立即停用输入、取消重复键、清空 XKB/serial/转发键状态，并通过 `Backend::destroy_object()` 仅销毁本地 proxy。不能向已删除的资源发送 `keyboard.release()` / `context.destroy()`；`release` 本身也是 wl_keyboard v3 才有的请求。源码依据：[KWin context 生命周期](https://github.com/KDE/kwin/blob/Plasma/6.5/src/wayland/inputmethod_v1.cpp)。
+- context 和 keyboard dispatch 都只接受当前对象，排队中的旧事件不能污染新输入上下文。KDE 路径不再延迟 180ms 清理；该窗口内重复键或 reload 对旧 context 的写入也会触发 `invalid object`。
+- 事件循环按 `dispatch_pending` / `prepare_read` / `poll` / `read` 驱动；同时到来的 deactivate 先于 reload 处理。socket HUP/ERR/NVAL、不可恢复的 flush/read/poll 错误会返回主程序触发恢复；写缓冲临时满时监听 POLLOUT 后重试。
 - 中英模式变化时，input panel overlay 用 `render_mode_hint()` 显示主题化模式提示，并按 `modeHint.duration` 自动隐藏；同时把新模式记进 `pending_kimpanel_mode`，由事件循环调用 `KimpanelHandle::update_mode()` 发 `UpdateProperty`，让 Plasma 指示器跟随 Rime 状态（Kimpanel 调用是 async，不能在 Wayland dispatch 里直接 await）。
 - `wl_keyboard` 是 `grab_keyboard` 创建的、版本为 1 的对象，早于 `repeat_info`（v4 才有），所以 KDE 路径上收不到用户的重复设置。抓到版本 < 4 的键盘时按 xkb/Plasma 默认值（delay 600 ms、rate 25/s）兜底，否则组字中长按退格完全不重复；KWin 将来提高版本后 `repeat_info` 会直接覆盖这个兜底值。
 
@@ -258,7 +261,7 @@ KWin 6 的虚拟键盘路径使用 input-method-v1：
 
 - 原因：两个 input-method 协议里，输入法进程对合成器只暴露**一个** `zwp_input_method_v2` / `zwp_input_method_v1` 对象，`activate`/`deactivate` 只表示“当前有没有文本输入”，并不给出可用来区分应用的稳定标识；v1 的 context 对象虽然每次 activate 换一个，但 KWin 在同一应用内也会换，用它当 session key 会在同一输入框里丢状态。
 - 影响：`ascii_mode` 与组字状态跨应用共享——在 A 应用切成英文，切到 B 应用仍是英文。`activate` 时会把 `InputContextPolicy` 复位成默认值，所以密码框的敏感策略**不会**泄漏到下一个应用。
-- 收敛方式：v2 的 `activate`/`deactivate` 与 v1 的 context 对象足以支撑“每次 activate 建 session、deactivate 销毁”，代价是每次焦点切换都丢弃组字（现在的 180ms debounce 正是为了避免这一点）。要真正做到 per-context，需要合成器提供稳定的文本输入标识。
+- 收敛方式：v2 的 `activate`/`deactivate` 与 v1 的 context 对象足以支撑“每次 activate 建 session、deactivate 销毁”，代价是每次焦点切换都丢弃组字。v2 仍通过 180ms debounce 避免瞬间失焦丢字；KDE 为遵守服务端对象生命周期立即清理。要真正做到 per-context，需要合成器提供稳定的文本输入标识。
 
 ## GNOME IBus Engine
 
@@ -405,7 +408,7 @@ Linux 的复杂度主要来自桌面协议分裂，不应该让这些差异泄�
 1. 把 IBus/Kimpanel 结构通道也显式标注 `UiCapabilities::system_lookup_table()`，避免误认为视觉会完全生效。
 2. IBus shim 与 GNOME engine 接入 `reload_bus`（两者是 tokio 异步循环，需要用 `tokio::io::unix::AsyncFd` 或换成 `tokio::sync::watch`）。
 3. KDE 路径若接入能提供光标矩形的通道，补 kimpanel `UpdateSpotLocation` + impanel2 `SetSpotRect`。
-4. 继续补真实 Linux 桌面 golden 回归：目前的 `cargo test -p keytao-linux-ime` 只覆盖纯逻辑，协议层靠 `gdbus introspect` 手工复核。
+4. 继续补真实 Linux 桌面 golden 回归：KDE 已有隔离 Unix socket 上的真实 dispatch 回归，覆盖停用清理、对象替换、旧键盘事件、100 次焦点切换及断线，并以子进程验证 KWin 恢复所需的退出信号；真实桌面窗口焦点、候选窗和 KWin 实际重启仍需桌面环境验证。
 
 ## App 对接点
 

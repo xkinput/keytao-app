@@ -30,7 +30,7 @@ use wayland_client::{
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
-    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::wp::input_method::zv1::client::{
     zwp_input_method_context_v1::{self, ZwpInputMethodContextV1},
@@ -48,7 +48,6 @@ use crate::{
     reload_bus,
 };
 
-const DEACTIVATE_DEBOUNCE: Duration = Duration::from_millis(180);
 /// `BTN_LEFT` from linux/input-event-codes.h.
 const BTN_LEFT: u32 = 0x110;
 
@@ -106,6 +105,16 @@ fn repeat_timings(rate: i32, delay: i32) -> Option<(Duration, Duration)> {
     ))
 }
 
+/// KWin deletes the context and its keyboard resource on deactivate. Sending
+/// context.destroy or keyboard.release afterwards hits an invalid object (and
+/// release is not even a request on the v1 keyboard returned by grab_keyboard).
+/// Retire the client-side proxy too, so already queued events are ignored.
+fn retire_proxy(proxy: impl Proxy) {
+    if let Some(backend) = proxy.backend().upgrade() {
+        let _ = backend.destroy_object(&proxy.id());
+    }
+}
+
 /// A key the IME consumed and now has to repeat itself, since the grab took it
 /// away from the compositor.
 struct KeyRepeat {
@@ -122,7 +131,6 @@ struct App {
     keyboard: Option<WlKeyboard>,
     serial: u32,
     active: bool,
-    deactivate_deadline: Option<Instant>,
     mode_hint_until: Option<Instant>,
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
@@ -175,7 +183,6 @@ impl App {
             keyboard: None,
             serial: 0,
             active: false,
-            deactivate_deadline: None,
             mode_hint_until: None,
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
@@ -228,25 +235,27 @@ impl App {
             .into()
     }
 
-    /// Give the context and its keyboard grab back to KWin.
-    ///
-    /// input-method-v1 says a context keeps no state after deactivation and
-    /// must be destroyed once that is handled; dropping the proxy is not
-    /// enough, because wayland-client never sends a destructor on `Drop`.  A
-    /// context left alive also keeps delivering `commit_state`/`reset` events
-    /// that would clobber the state of whatever context replaced it.
+    /// Stop using the context as soon as KWin deactivates or replaces it.
     fn reset_context_state(&mut self) {
         self.active = false;
-        self.deactivate_deadline = None;
         self.mode_hint_until = None;
         self.key_repeat = None;
         self.forwarded_keys.clear();
         if let Some(keyboard) = self.keyboard.take() {
-            keyboard.release();
+            retire_proxy(keyboard);
         }
         if let Some(context) = self.context.take() {
-            context.destroy();
+            retire_proxy(context);
         }
+        self.serial = 0;
+        self.last_key_serial = 0;
+        self.last_key_time = 0;
+        self.mods = 0;
+        self.xkb_keymap = None;
+        self.xkb_state = None;
+        self.xkb_base_state = None;
+        self.repeat_delay = None;
+        self.repeat_interval = None;
         self.session.reset();
         self.pending_kimpanel_state = None;
         self.clear_kimpanel = true;
@@ -326,7 +335,6 @@ impl App {
     fn poll_timeout_ms(&self) -> i32 {
         let deadlines = [
             self.mode_hint_until,
-            self.deactivate_deadline,
             self.key_repeat.as_ref().map(|repeat| repeat.next),
         ];
         let Some(next) = deadlines.into_iter().flatten().min() else {
@@ -810,13 +818,12 @@ impl Dispatch<ZwpInputMethodV1, ()> for App {
             }
             zwp_input_method_v1::Event::Deactivate { context } => {
                 tracing::info!("KDE input-method-v1 context deactivated!");
-                // The context named by the event is the one that has to be
-                // destroyed; if the compositor already handed us a newer one,
-                // destroy the stale proxy right away instead of the live one.
+                // KWin has already deleted this context and its keyboard.
+                // Do not debounce protocol cleanup: queued keys, reloads and
+                // repeat timers must never send requests through these proxies.
                 if state.context.as_ref().is_some_and(|live| *live == context) {
-                    state.deactivate_deadline = Some(Instant::now() + DEACTIVATE_DEBOUNCE);
+                    state.reset_context_state();
                 } else {
-                    // A newer activate already replaced (and destroyed) it.
                     tracing::debug!("KDE: deactivate for an already replaced context");
                 }
             }
@@ -838,9 +845,7 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for App {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // A context that was deactivated but not yet destroyed can still emit
-        // events; letting them through would reset the composition of the
-        // context that replaced it.
+        // Old context events must not reset the replacement's composition.
         if !state.context.as_ref().is_some_and(|live| live == proxy) {
             return;
         }
@@ -867,12 +872,15 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for App {
 impl Dispatch<WlKeyboard, ()> for App {
     fn event(
         state: &mut Self,
-        _proxy: &WlKeyboard,
+        proxy: &WlKeyboard,
         event: wl_keyboard::Event,
         _: &(),
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        if !state.active || state.keyboard.as_ref() != Some(proxy) {
+            return;
+        }
         match event {
             wl_keyboard::Event::Keymap { format, fd, size } => {
                 if format != WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
@@ -1086,15 +1094,29 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
     app.seat = Some(seat);
     app.input_method = Some(input_method);
     app.input_panel = Some(input_panel);
-    queue.roundtrip(&mut app).expect("initial KDE roundtrip");
+    queue
+        .roundtrip(&mut app)
+        .map_err(|e| format!("initial KDE roundtrip: {e}"))?;
     for g in globals.contents().clone_list() {
         tracing::info!("KDE Wayland global: {} v{}", g.interface, g.version);
     }
 
-    let reload_signal = reload_bus::subscribe();
-
     tracing::info!("KDE Wayland IME running (input-method-v1)");
+    run_event_loop(&conn, &mut queue, &mut app, &kimpanel_runtime)
+}
+
+fn run_event_loop(
+    conn: &Connection,
+    queue: &mut EventQueue<App>,
+    app: &mut App,
+    kimpanel_runtime: &tokio::runtime::Runtime,
+) -> Result<(), String> {
+    let qh = queue.handle();
+    let reload_signal = reload_bus::subscribe();
     loop {
+        queue
+            .dispatch_pending(app)
+            .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;
         if app
             .mode_hint_until
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -1103,21 +1125,10 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             app.show_panel(ImeState::empty(), &qh);
         }
 
-        if app
-            .deactivate_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            app.reset_context_state();
-            tracing::debug!("KDE input-method-v1 deactivated after debounce");
-        }
-
         if app.key_repeat_due() {
             app.fire_key_repeat(&qh);
         }
 
-        if let Err(e) = queue.flush() {
-            tracing::warn!("KDE Wayland flush error: {e}");
-        }
         if let Some(kimpanel) = &app.kimpanel {
             if let Some(ascii_mode) = app.pending_kimpanel_mode.take() {
                 kimpanel_runtime.block_on(kimpanel.update_mode(ascii_mode));
@@ -1129,10 +1140,25 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
                 kimpanel_runtime.block_on(kimpanel.update_state(&state));
             }
         }
+        // Prepare the read before polling, as required by wayland-client. A
+        // pending event must be dispatched even if the socket is no longer
+        // readable; blocking_dispatch after poll can otherwise miss it.
+        let Some(read_guard) = queue.prepare_read() else {
+            continue;
+        };
+        let write_blocked = match queue.flush() {
+            Ok(()) => false,
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                true
+            }
+            Err(e) => return Err(format!("KDE Wayland flush: {e}")),
+        };
         let timeout_ms = app.poll_timeout_ms();
         let mut pfds = vec![libc::pollfd {
             fd: conn.as_fd().as_raw_fd(),
-            events: libc::POLLIN,
+            events: libc::POLLIN | if write_blocked { libc::POLLOUT } else { 0 },
             revents: 0,
         }];
         if let Some(signal) = &reload_signal {
@@ -1146,20 +1172,35 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms) };
         if ready < 0 {
             let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                tracing::warn!("KDE Wayland poll failed: {err}");
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
-            continue;
+            return Err(format!("KDE Wayland poll: {err}"));
         }
+        if pfds[0].revents & libc::POLLIN != 0 {
+            match read_guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(format!("KDE Wayland connection closed: {e}")),
+            }
+        } else {
+            drop(read_guard);
+        }
+        if pfds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(format!(
+                "KDE Wayland socket disconnected: {:#x}",
+                pfds[0].revents
+            ));
+        }
+        // Handle deactivate before a simultaneous reload can clear preedit
+        // through a context KWin has just deleted.
+        queue
+            .dispatch_pending(app)
+            .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;
         if let Some(signal) = &reload_signal {
             if signal.take() {
                 app.handle_reload();
-            }
-        }
-        if pfds[0].revents & libc::POLLIN != 0 {
-            if let Err(e) = queue.blocking_dispatch(&mut app) {
-                tracing::warn!("KDE Wayland dispatch error: {e}");
-                return Err(format!("KDE Wayland connection closed: {e}"));
             }
         }
     }
@@ -1175,6 +1216,10 @@ fn tempfile() -> std::io::Result<File> {
     }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
+
+#[cfg(test)]
+#[path = "wayland_backend_kde_protocol_tests.rs"]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {
