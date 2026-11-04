@@ -208,6 +208,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         markPresentationLoad()
         val view = KeytaoKeyboardView(this)
         view.listener = this
+        engine.onSchemaLogoChanged = {
+            mainHandler.post { keyboardView?.updateSchemaLogo(engine.schemaLogo) }
+        }
+        view.updateSchemaLogo(engine.schemaLogo)
         host.addView(
             view,
             0,

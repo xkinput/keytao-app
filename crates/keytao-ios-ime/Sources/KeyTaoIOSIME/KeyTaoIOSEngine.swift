@@ -2,6 +2,8 @@ import Foundation
 import CryptoKit
 import CKeytaoCore
 import Darwin
+import ImageIO
+import UIKit
 
 enum KeyTaoLog {
     private struct PendingEvent {
@@ -402,10 +404,22 @@ struct KeyTaoEngineCapabilities: Equatable {
 }
 
 final class KeyTaoIOSEngine {
+    private struct SchemaLogoKey: Equatable {
+        var id: String
+        var modificationTime: Date?
+        var generation: UInt64
+    }
+
     let userRoot: URL
+    private var schemaLogoGeneration: UInt64 = 0
+    private var schemaLogoKey: SchemaLogoKey?
+    private var schemaLogoRequest: SchemaLogoKey?
+    private(set) var schemaLogoImage: UIImage?
+    var onSchemaLogoChanged: ((UIImage?) -> Void)?
     private var session: UnsafeMutableRawPointer?
     private var lastState = KeyTaoImeState.empty
     private var lastDisplaySchemaName = ""
+    private var lastDisplaySchemaId = ""
     private var lastTheme: KeyTaoImeTheme?
     private var lastThemeColorScheme: KeyTaoEffectiveColorScheme?
     private var lastConfig: KeyTaoIOSImeConfig?
@@ -935,6 +949,7 @@ final class KeyTaoIOSEngine {
         let ok = keytao_reload()
         reloaded = ok
         if ok {
+            schemaLogoGeneration &+= 1
             refreshCapabilities()
             lastState = state().withoutTransientCommit()
         }
@@ -955,6 +970,7 @@ final class KeyTaoIOSEngine {
         guard keytao_reload_if_stamp_changed() else {
             return false
         }
+        schemaLogoGeneration &+= 1
         refreshCapabilities()
         lastState = state().withoutTransientCommit()
         KeyTaoLog.event("rime", "reload_if_needed", duration: started.map { (KeyTaoLog.now() - $0) * 1000 } ?? .nan) {
@@ -976,6 +992,10 @@ final class KeyTaoIOSEngine {
     }
 
     func close() {
+        schemaLogoGeneration &+= 1
+        schemaLogoKey = nil
+        schemaLogoImage = nil
+        onSchemaLogoChanged?(nil)
         if let session {
             keytao_destroy_session(session)
         }
@@ -1025,15 +1045,73 @@ final class KeyTaoIOSEngine {
 
     private func stableSchemaState(_ state: KeyTaoImeState) -> KeyTaoImeState {
         let name = state.schemaName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !name.hasPrefix(".") else {
-            if lastDisplaySchemaName.isEmpty {
-                return state
-            }
+        let id = state.schemaId
+        guard !name.isEmpty, !name.hasPrefix("."), !id.isEmpty, !id.hasPrefix(".") else {
             var next = state
-            next.schemaName = lastDisplaySchemaName
+            if !lastDisplaySchemaName.isEmpty { next.schemaName = lastDisplaySchemaName }
+            if !lastDisplaySchemaId.isEmpty { next.schemaId = lastDisplaySchemaId }
+            refreshSchemaLogo(next)
             return next
         }
         lastDisplaySchemaName = name
+        lastDisplaySchemaId = id
+        refreshSchemaLogo(state)
         return state
+    }
+
+    private func refreshSchemaLogo(_ state: KeyTaoImeState) {
+        let id = state.schemaId
+        guard !id.isEmpty, !id.hasPrefix(".") else { return }
+        let key = SchemaLogoKey(id: id, modificationTime: nil, generation: schemaLogoGeneration)
+        guard schemaLogoRequest != key else { return }
+        schemaLogoRequest = key
+        let cachedKey = schemaLogoKey
+        let cachedImage = schemaLogoImage
+        let logoRoot = userRoot.appendingPathComponent(".keytao-logo", isDirectory: true)
+        startupQueue.async { [weak self] in
+            let (image, modificationTime) = Self.loadSchemaLogo(root: logoRoot, key: key, cachedKey: cachedKey, cachedImage: cachedImage)
+            DispatchQueue.main.async {
+                guard let self, self.schemaLogoRequest == key, self.schemaLogoGeneration == key.generation else { return }
+                self.schemaLogoRequest = nil
+                let loadedKey = SchemaLogoKey(id: key.id, modificationTime: modificationTime, generation: key.generation)
+                guard self.schemaLogoKey != loadedKey else { return }
+                self.schemaLogoKey = loadedKey
+                self.schemaLogoImage = image
+                self.onSchemaLogoChanged?(image)
+            }
+        }
+    }
+
+    private static func loadSchemaLogo(root: URL, key: SchemaLogoKey, cachedKey: SchemaLogoKey?, cachedImage: UIImage?) -> (UIImage?, Date?) {
+        let id = key.id
+        guard !id.isEmpty, id != ".", id != "..", !id.contains("/"), !id.contains("\\"), !id.contains("\0") else {
+            return (nil, nil)
+        }
+        let url = root.appendingPathComponent("\(id).png")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return (nil, nil)
+        }
+        let modificationTime = attributes[.modificationDate] as? Date
+        if cachedKey == SchemaLogoKey(id: id, modificationTime: modificationTime, generation: key.generation) {
+            return (cachedImage, modificationTime)
+        }
+        let maxBytes = 1024 * 1024
+        guard let size = attributes[.size] as? NSNumber, size.int64Value <= Int64(maxBytes),
+              let handle = try? FileHandle(forReadingFrom: url) else {
+            return (nil, modificationTime)
+        }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maxBytes + 1), data.count <= maxBytes,
+              data.starts(with: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let sourceType = CGImageSourceGetType(source), sourceType as String == "public.png",
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+              width.intValue > 0, height.intValue > 0, width.intValue <= 512, height.intValue <= 512,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else {
+            return (nil, modificationTime)
+        }
+        return (UIImage(cgImage: image), modificationTime)
     }
 }

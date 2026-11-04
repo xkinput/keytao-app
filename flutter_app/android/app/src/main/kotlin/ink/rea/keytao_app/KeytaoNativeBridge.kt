@@ -299,6 +299,8 @@ object KeytaoNativeBridge {
         userKeyboardPath: String?,
     ): String
 
+    external fun nativeRenderSchemaLogos(userDir: String)
+
     external fun nativeEngineAvailable(): Boolean
 
     external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String

@@ -183,6 +183,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let theme = engine.resolveTheme(systemColorScheme: systemColorScheme)
         let config = engine.loadConfig()
         let view = KeyTaoIOSKeyboardView(
+            engine: engine,
             config: config,
             theme: theme,
             state: currentState

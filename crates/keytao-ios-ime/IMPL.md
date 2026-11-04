@@ -4,6 +4,8 @@
 
 跨平台通用契约见 [输入法通用层实现规范](../../docs/ime-common-layer.md)；本文只补充 iOS `UIInputViewController`、`UITextDocumentProxy`、App Group、移动端键盘配置和 C FFI 的平台差异。
 
+主 App 部署时按用户目录根部的 `<schema_name>.svg`、`<schema_name>.ico`、`<schema_id>.svg`、`<schema_id>.ico`、`logo.svg`、`logo.ico` 顺序渲染首个有效图像至 `.keytao-logo/<schema_id>.png`。键盘仅在后台读取 PNG，按稳定方案 ID、文件修改时间和引擎重载代次缓存；文件不可用时沿用内置标志。SVG 文字须转换为轮廓。访问权限沿用现有用户目录要求。
+
 ## 代码地图
 
 - `Package.swift`：SwiftPM 源码包，由 `flutter_app/ios/Runner.xcodeproj` 的键盘 extension target 引入。

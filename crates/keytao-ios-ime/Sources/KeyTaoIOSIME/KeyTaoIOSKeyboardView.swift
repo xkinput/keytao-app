@@ -381,6 +381,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     private let selectionHapticGenerator = UISelectionFeedbackGenerator()
     private let notificationHapticGenerator = UINotificationFeedbackGenerator()
     private var cachedLogoImage: UIImage?
+    private var schemaLogoImage: UIImage?
     private var logoImage: UIImage? {
         if let cachedLogoImage {
             return cachedLogoImage
@@ -389,12 +390,17 @@ final class KeyTaoIOSKeyboardView: UIView {
         return cachedLogoImage
     }
 
-    init(config: KeyTaoIOSImeConfig, theme: KeyTaoImeTheme, state: KeyTaoImeState) {
+    init(engine: KeyTaoIOSEngine, config: KeyTaoIOSImeConfig, theme: KeyTaoImeTheme, state: KeyTaoImeState) {
         self.config = config
         self.settingsConfig = config
         self.theme = theme
         self.state = state
         super.init(frame: .zero)
+        schemaLogoImage = engine.schemaLogoImage
+        engine.onSchemaLogoChanged = { [weak self] image in
+            self?.schemaLogoImage = image
+            self?.setNeedsDisplay()
+        }
         setup()
     }
 
@@ -3443,7 +3449,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         guard !rect.isEmpty else {
             return
         }
-        if let logoImage {
+        if let logoImage = schemaLogoImage ?? logoImage {
             logoImage.draw(in: rect, blendMode: .normal, alpha: 0.86)
             return
         }

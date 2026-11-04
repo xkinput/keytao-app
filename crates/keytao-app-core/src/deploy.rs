@@ -18,6 +18,43 @@ use serde::Serialize;
 #[cfg(target_os = "ios")]
 use std::path::Path;
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
+    let mut schemas = std::collections::BTreeMap::new();
+    for dir in [user_dir.join("build"), user_dir.to_path_buf()] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".schema.yaml"))
+            else {
+                continue;
+            };
+            let schema = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok());
+            let Some(schema) = schema else {
+                tracing::warn!("Cannot read schema logo metadata: {}", path.display());
+                continue;
+            };
+            let id = schema["schema"]["schema_id"].as_str().unwrap_or(id);
+            let name = schema["schema"]["name"].as_str().unwrap_or("");
+            schemas
+                .entry(id.to_owned())
+                .or_insert_with(|| name.to_owned());
+        }
+    }
+    keytao_schema_logo::render_schema_logos(
+        user_dir,
+        &schemas.into_iter().collect::<Vec<_>>(),
+        192,
+    );
+}
+
 #[cfg(target_os = "ios")]
 fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<String> {
     let mut candidates = vec![
@@ -193,7 +230,14 @@ pub async fn rime_deploy_default(
 
         core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
 
-        match tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await {
+        let logo_root = dest.clone();
+        match tokio::task::spawn_blocking(move || {
+            keytao_core::deploy(user, shared)?;
+            render_user_schema_logos(&logo_root);
+            Ok::<(), String>(())
+        })
+        .await
+        {
             Ok(Ok(())) => {
                 core.emit(CoreEvent::DeployProgress("部署完成".into()));
                 match write_ios_reload_stamp(&dest) {

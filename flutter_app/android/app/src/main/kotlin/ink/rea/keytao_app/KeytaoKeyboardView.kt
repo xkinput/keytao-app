@@ -422,6 +422,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private val logoBitmap: Bitmap? = runCatching {
         BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher_foreground)
     }.getOrNull()
+    private var schemaLogoBitmap: Bitmap? = null
+
+    fun updateSchemaLogo(bitmap: Bitmap?) {
+        schemaLogoBitmap = bitmap
+        invalidate()
+    }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -3587,7 +3593,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val left = width - leftPadding - size
         val top = (barHeight - size) / 2f
         val rect = RectF(left, top, left + size, top + size)
-        val bitmap = logoBitmap
+        val bitmap = schemaLogoBitmap ?: logoBitmap
         if (bitmap != null) {
             paint.alpha = 215
             canvas.drawBitmap(bitmap, null, rect, paint)

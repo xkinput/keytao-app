@@ -6,6 +6,7 @@ members = [
   "crates/keytao-core",
   "crates/keytao-core-ffi",
   "crates/keytao-theme",
+  "crates/keytao-schema-logo",
   "crates/keytao-linux-ime",
   "crates/keytao-windows-ime",
 ]

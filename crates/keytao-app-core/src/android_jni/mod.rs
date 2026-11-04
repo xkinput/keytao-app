@@ -221,6 +221,7 @@ struct AndroidImeStateJson {
     committed: String,
     select_keys: String,
     ascii_mode: bool,
+    schema_id: String,
     schema_name: String,
     accepted: bool,
     candidate_panel: keytao_theme::CandidatePanelModel,
@@ -264,6 +265,7 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
         committed: state.committed.unwrap_or_default(),
         select_keys: state.select_keys.unwrap_or_default(),
         ascii_mode: state.ascii_mode,
+        schema_id: state.schema_id,
         schema_name: state.schema_name,
         accepted,
         candidate_panel,
@@ -1226,6 +1228,21 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeUtf16Of
             return 0;
         };
         keytao_core::utf16_offset_from_chars(&text, char_offset.max(0) as usize) as jint
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeRenderSchemaLogos(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) {
+    android_jni_guard("nativeRenderSchemaLogos", (), || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return;
+        };
+        crate::deploy::render_user_schema_logos(&user_dir);
     })
 }
 

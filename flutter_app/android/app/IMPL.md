@@ -27,6 +27,8 @@
 
 Flutter 主 App 不处理 Android 输入法按键热路径。它负责下载安装方案、触发部署/reload stamp、展示状态和打开配置页面；系统输入由 Android `InputMethodService` 负责。
 
+Toolbar schema logos are rendered at deployment in `:rime_deployer`, after all schema steps succeed and before the reload signal. Source lookup in the Rime user root is `<schema_name>.svg`, `<schema_name>.ico`, `<schema_id>.svg`, `<schema_id>.ico`, `logo.svg`, `logo.ico`; the first usable file wins. SVG text must be converted to outlines. The keyboard only reads `.keytao-logo/<schema_id>.png` on a dedicated executor, checks the 1 MiB and 512-pixel limits before decoding, and caches by stable schema ID, file mtime, and reload generation. Schema changes and deployment reloads refresh it; missing or unusable PNGs retain the built-in logo with the existing drawing bounds and alpha.
+
 ## Android 官方契约对齐点
 
 Android 系统输入法必须通过 framework 注册和运行：

@@ -62,10 +62,19 @@ object KeytaoRimeDeployClient {
         private val processed = linkedSetOf<String>()
         private var initialSchemas = emptyList<String>()
         private var current: PendingSchema? = null
+        private var renderingLogos = false
         private var startedNs = 0L
         private var stepStartedNs = 0L
         private val timeout = Runnable {
-            finish(Result(success = false, error = "Android RIME deployment timed out"))
+            if (renderingLogos) {
+                context.stopService(Intent(context, KeytaoRimeDeployService::class.java))
+                handler.postDelayed(
+                    { handleStepResult(false, emptyList(), "") },
+                    processExitGraceMs,
+                )
+            } else {
+                finish(Result(success = false, error = "Android RIME deployment timed out"))
+            }
         }
 
         fun start() {
@@ -75,9 +84,10 @@ object KeytaoRimeDeployClient {
             startStep(null)
         }
 
-        private fun startStep(schema: PendingSchema?) {
+        private fun startStep(schema: PendingSchema?, renderLogos: Boolean = false) {
             if (finished.get()) return
             current = schema
+            renderingLogos = renderLogos
             stepStartedNs = System.nanoTime()
             val delivered = AtomicBoolean(false)
             val receiver = object : ResultReceiver(handler) {
@@ -102,6 +112,7 @@ object KeytaoRimeDeployClient {
                 val intent = Intent(context, KeytaoRimeDeployService::class.java).apply {
                     putExtra(KeytaoRimeDeployContract.extraReceiver, receiver)
                     schema?.let { putExtra(KeytaoRimeDeployContract.extraSchemaId, it.id) }
+                    putExtra(KeytaoRimeDeployContract.extraRenderLogos, renderLogos)
                     KeytaoAndroidPaths.testRootOverride?.let {
                         putExtra(KeytaoRimeDeployContract.extraTestRoot, it.absolutePath)
                     }
@@ -110,11 +121,10 @@ object KeytaoRimeDeployClient {
                     throw IllegalStateException("Android RIME deployment service is unavailable")
                 }
             } catch (error: Throwable) {
-                finish(
-                    Result(
-                        success = false,
-                        error = error.message ?: "Failed to start Android RIME deployment service",
-                    )
+                handleStepResult(
+                    false,
+                    emptyList(),
+                    error.message ?: "Failed to start Android RIME deployment service",
                 )
             }
         }
@@ -122,11 +132,14 @@ object KeytaoRimeDeployClient {
         private fun handleStepResult(success: Boolean, schemas: List<String>, error: String) {
             if (finished.get()) return
             logStepResult(success, schemas.size)
+            if (renderingLogos) {
+                completeDeployment()
+                return
+            }
             if (!success) {
                 finish(Result(success = false, error = error.ifBlank { "Android RIME 部署失败" }))
                 return
             }
-
             val completed = current
             if (completed == null) {
                 initialSchemas = schemas.distinct()
@@ -160,7 +173,11 @@ object KeytaoRimeDeployClient {
                 startStep(schema)
                 return
             }
-            completeDeployment()
+            if (!KeytaoAndroidPaths.hasDeployedSchema(userRoot)) {
+                finish(Result(success = false, error = "Android RIME 部署未生成方案产物"))
+                return
+            }
+            startStep(null, renderLogos = true)
         }
 
         private fun completeDeployment() {
@@ -232,6 +249,7 @@ internal object KeytaoRimeDeployContract {
     const val extraTestRoot = "ink.rea.keytao_app.extra.TEST_ROOT"
     const val extraReceiver = "ink.rea.keytao_app.extra.RIME_DEPLOY_RECEIVER"
     const val extraSchemaId = "ink.rea.keytao_app.extra.RIME_DEPLOY_SCHEMA_ID"
+    const val extraRenderLogos = "ink.rea.keytao_app.extra.RIME_RENDER_LOGOS"
     const val keySuccess = "success"
     const val keySchemas = "schemas"
     const val keyError = "error"

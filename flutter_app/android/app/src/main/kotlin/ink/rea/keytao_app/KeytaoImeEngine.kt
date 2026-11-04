@@ -1,6 +1,8 @@
 package ink.rea.keytao_app
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -44,6 +46,16 @@ class KeytaoImeEngine(context: Context) {
     private var inputPolicyComposing = true
     private var inputPolicyLearning = true
     private val schemaNameDurations = KeytaoDurationHistogram()
+    private data class SchemaLogoKey(val schemaId: String, val modifiedAt: Long, val generation: Long)
+    private var schemaLogoGeneration = 0L
+    private var schemaLogoKey: SchemaLogoKey? = null
+    private var schemaLogoRequest: Pair<String, Long>? = null
+    private val schemaLogoExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "KeyTao-Schema-Logo")
+    }
+    @Volatile var schemaLogo: Bitmap? = null
+        private set
+    @Volatile var onSchemaLogoChanged: (() -> Unit)? = null
 
     /**
      * Everything that touches the filesystem or librime runs here: the IME main
@@ -102,9 +114,15 @@ class KeytaoImeEngine(context: Context) {
      */
     @Synchronized
     fun refreshReadiness(): Readiness {
-        val root = userDir ?: return when (KeytaoAndroidPaths.lastStatus) {
-            StorageStatus.PERMISSION_MISSING -> Readiness.PERMISSION_MISSING
-            else -> Readiness.STORAGE_NOT_READY
+        val root = userDir ?: run {
+            schemaLogoKey = null
+            schemaLogoRequest = null
+            schemaLogo = null
+            onSchemaLogoChanged?.invoke()
+            return when (KeytaoAndroidPaths.lastStatus) {
+                StorageStatus.PERMISSION_MISSING -> Readiness.PERMISSION_MISSING
+                else -> Readiness.STORAGE_NOT_READY
+            }
         }
         warmUpIfStorageReady()
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
@@ -358,6 +376,7 @@ class KeytaoImeEngine(context: Context) {
         KeytaoNativeBridge.destroySession(session)
         session = 0L
         backgroundExecutor.shutdownNow()
+        schemaLogoExecutor.shutdownNow()
     }
 
     private fun initializeRuntime(deploy: Boolean, reinitialize: Boolean = false): Boolean {
@@ -368,6 +387,9 @@ class KeytaoImeEngine(context: Context) {
         var success = false
         try {
             invalidateSchemaNameCache()
+            schemaLogoGeneration++
+            schemaLogoKey = null
+            schemaLogoRequest = null
             if (!hasInstalledSchema()) return false
             if (!deploy && !hasDeployedSchema()) return false
             ensureBundledSharedData(appContext)
@@ -416,12 +438,9 @@ class KeytaoImeEngine(context: Context) {
     private fun stableSchemaState(state: KeytaoImeState): KeytaoImeState {
         val root = userDir ?: return state
         val name = state.schemaName.trim()
-        if (name.isNotEmpty() && !name.startsWith(".")) {
-            // State exposes a name, not an id. Query the id only when the raw
-            // name changes; ordinary keys use the per-schema map below.
-            if (displaySchemaId == null || rawDisplaySchemaName != name) {
-                displaySchemaId = KeytaoNativeBridge.currentSchema(session)?.id
-                    ?.takeIf { it.isNotBlank() && !it.startsWith(".") } ?: name
+        if (name.isNotEmpty() && !name.startsWith(".") && state.schemaId.isNotEmpty() && !state.schemaId.startsWith(".")) {
+            if (displaySchemaId == null || displaySchemaId != state.schemaId || rawDisplaySchemaName != name) {
+                displaySchemaId = state.schemaId
                 rawDisplaySchemaName = name
             }
             val displayName = schemaDisplayNames.getOrPut(displaySchemaId!!) {
@@ -433,12 +452,69 @@ class KeytaoImeEngine(context: Context) {
                 }
             }
             lastDisplaySchemaName = displayName
+            requestSchemaLogo(displaySchemaId!!)
             return state.copy(schemaName = displayName)
         }
         return if (lastDisplaySchemaName.isNotEmpty()) {
             state.copy(schemaName = lastDisplaySchemaName)
         } else {
             state
+        }
+    }
+
+    private fun requestSchemaLogo(schemaId: String) {
+        if (schemaId.isEmpty() || schemaId == "." || schemaId == ".." ||
+            schemaId.any { it == '/' || it == '\\' || it == '\u0000' }) {
+            schemaLogoRequest = null
+            schemaLogoKey = null
+            schemaLogo = null
+            onSchemaLogoChanged?.invoke()
+            return
+        }
+        val request = schemaId to schemaLogoGeneration
+        if (schemaLogoRequest == request) return
+        schemaLogoRequest = request
+        schemaLogoExecutor.execute {
+            var key: SchemaLogoKey? = null
+            val bitmap = runCatching {
+                val root = userDir ?: return@runCatching null
+                val file = File(File(root, ".keytao-logo"), "$schemaId.png")
+                key = SchemaLogoKey(schemaId, file.lastModified(), request.second)
+                synchronized(this) {
+                    if (schemaLogoKey == key) {
+                        if (schemaLogoRequest == request) schemaLogoRequest = null
+                        return@execute
+                    }
+                }
+                if (!file.isFile || file.length() > 1024 * 1024) return@runCatching null
+                val png = file.inputStream().use { input ->
+                    val buffer = ByteArray(1024 * 1024 + 1)
+                    var count = 0
+                    while (count < buffer.size) {
+                        val read = input.read(buffer, count, buffer.size - count)
+                        if (read < 0) break
+                        count += read
+                    }
+                    if (count > 1024 * 1024) return@runCatching null
+                    buffer.copyOf(count)
+                }
+                val signature = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
+                if (png.size < signature.size || !png.copyOfRange(0, signature.size).contentEquals(signature)) {
+                    return@runCatching null
+                }
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(png, 0, png.size, bounds)
+                if (bounds.outWidth !in 1..512 || bounds.outHeight !in 1..512) return@runCatching null
+                BitmapFactory.decodeByteArray(png, 0, png.size)
+            }.getOrNull()
+            synchronized(this) {
+                if (schemaLogoRequest == request) {
+                    schemaLogoRequest = null
+                    schemaLogoKey = key
+                    schemaLogo = bitmap
+                    onSchemaLogoChanged?.invoke()
+                }
+            }
         }
     }
 

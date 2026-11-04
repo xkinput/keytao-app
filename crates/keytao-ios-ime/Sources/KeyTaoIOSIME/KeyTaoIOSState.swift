@@ -72,6 +72,7 @@ public struct KeyTaoImeState: Codable, Equatable {
     public var committed: String
     public var selectKeys: String
     public var asciiMode: Bool
+    public var schemaId: String
     public var schemaName: String
     public var accepted: Bool
     public var candidatePanel: KeyTaoPanelModel
@@ -120,6 +121,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         case committed
         case selectKeys
         case asciiMode
+        case schemaId
         case schemaName
         case accepted
         case candidatePanel
@@ -144,6 +146,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         committed = Self.field(container, .committed, empty.committed)
         selectKeys = Self.field(container, .selectKeys, empty.selectKeys)
         asciiMode = Self.field(container, .asciiMode, empty.asciiMode)
+        schemaId = Self.field(container, .schemaId, empty.schemaId)
         schemaName = Self.field(container, .schemaName, empty.schemaName)
         accepted = Self.field(container, .accepted, empty.accepted)
         candidatePanel = Self.field(container, .candidatePanel, empty.candidatePanel)
@@ -171,6 +174,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         committed: String,
         selectKeys: String,
         asciiMode: Bool,
+        schemaId: String = "",
         schemaName: String,
         accepted: Bool,
         candidatePanel: KeyTaoPanelModel,
@@ -188,6 +192,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         self.committed = committed
         self.selectKeys = selectKeys
         self.asciiMode = asciiMode
+        self.schemaId = schemaId
         self.schemaName = schemaName
         self.accepted = accepted
         self.candidatePanel = candidatePanel

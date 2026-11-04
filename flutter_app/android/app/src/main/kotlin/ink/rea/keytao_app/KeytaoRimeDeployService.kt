@@ -20,6 +20,12 @@ class KeytaoRimeDeployService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Preserve .rendering when a timed-out native renderer is still running.
+        if (deploymentRunning.get()) Process.killProcess(Process.myPid())
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val receiver = intent?.resultReceiver()
         if (receiver == null) {
@@ -47,7 +53,15 @@ class KeytaoRimeDeployService : Service() {
 
         Thread(
             {
-                val result = runDeployment(intent.getStringExtra(KeytaoRimeDeployContract.extraSchemaId))
+                val result = if (intent.getBooleanExtra(KeytaoRimeDeployContract.extraRenderLogos, false)) {
+                    runCatching {
+                        val root = KeytaoAndroidPaths.userRoot(applicationContext)
+                        KeytaoNativeBridge.nativeRenderSchemaLogos(root.absolutePath)
+                    }.onFailure { Log.w(tag, "Failed to render schema logos", it) }
+                    DeploymentResult(success = true)
+                } else {
+                    runDeployment(intent.getStringExtra(KeytaoRimeDeployContract.extraSchemaId))
+                }
                 sendResult(receiver, result)
                 deploymentRunning.set(false)
                 stopDeploymentForeground()
