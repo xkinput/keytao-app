@@ -103,6 +103,12 @@ Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 
 
 当前实现是一进程一个 service session。Android framework 通常一个输入法 service 同时服务当前 focus editor；如果后续要支持多 display、多窗口并发或更细粒度 input context，可以把 session 生命周期从 service 级下沉到 editor/input connection 级。
 
+## 空格长按语音输入
+
+空格无自定义长按或候选动作、无组字、编辑器隐私策略允许且系统提供默认识别服务时，显示麦克风键角提示及「空格，长按语音输入」无障碍标签。长按调用系统 `SpeechRecognizer`，ASCII 模式使用 `en-US`，其余使用 `zh-CN`；识别器自行结束，仅最终结果首项走 `commitDirect()`，不保存音频、不增加网络请求。识别期间空格显示「正在听…」，任何按键或候选操作先取消识别，空格拖动仍优先取消长按。
+
+缺少录音权限时，仅启动同 IME 进程的非导出透明 `KeytaoVoicePermissionActivity` 请求权限并结束，用户需再次长按。永久拒绝标记保存在私有偏好中，权限授予后清除。取消、输入切换/结束、视图隐藏、隐私变化及销毁均递增 generation，并在主线程取消和销毁识别器；所有识别回调先检查 generation，迟到结果不会提交。纯逻辑测试覆盖提供条件与迟到回调守卫。
+
 ## 用户目录和 shared data
 
 2026-09-27 owner decision：Android 唯一数据根目录为 `Environment.getExternalStorageDirectory()/keytao`（通常显示为 `/sdcard/keytao`），让用户就地编辑全部文件；App、`:ime`、`:rime_deployer` 同 UID、分别解析同一路径。方案、custom YAML、theme.yaml、keyboard.yaml、android_ime.json、rime-data、build、用户词库、reload stamp、clipboard 和 log 全部在此目录，无应用目录回退、复制或同步。

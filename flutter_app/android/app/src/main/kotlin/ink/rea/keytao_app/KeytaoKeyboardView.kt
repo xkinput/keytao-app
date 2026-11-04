@@ -65,6 +65,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
     interface Listener {
+        fun onUserInteraction()
+        fun onVoiceInputRequested(): Boolean
         fun onKeyCommand(command: KeyCommand)
         fun onCandidate(index: Int, global: Boolean)
         fun onCandidateIsUserPhrase(index: Int): Boolean
@@ -228,6 +230,31 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private enum class VerticalScrollSurface { EXPANDED_PANEL, SYMBOL_KEYBOARD }
 
     var listener: Listener? = null
+    private var voiceRecognitionAvailable = false
+    private var voicePrivacyAllowed = false
+    private var voicePermanentlyDenied = false
+    private var voiceListening = false
+    private var voiceLongPressSuppressed = false
+
+    fun updateVoiceInput(available: Boolean, privacyAllowed: Boolean, permanentlyDenied: Boolean, listening: Boolean) {
+        voiceRecognitionAvailable = available
+        voicePrivacyAllowed = privacyAllowed
+        voicePermanentlyDenied = permanentlyDenied
+        voiceListening = listening
+        refreshAccessibilityNodes()
+        invalidate()
+    }
+
+    private fun isVoiceInputOffered(key: KeySpec): Boolean {
+        return isSpaceKey(key) && KeytaoVoiceInput.isOffered(
+            recognitionAvailable = voiceRecognitionAvailable,
+            privacyAllowed = voicePrivacyAllowed,
+            hasComposition = hasActiveComposition(),
+            hasConfiguredAction = key.longPress != null || key.asciiLongPress != null || !key.hint.isNullOrBlank() ||
+                key.alternates.isNotEmpty() || key.asciiAlternates.isNotEmpty(),
+            permanentlyDenied = voicePermanentlyDenied,
+        )
+    }
 
     private var config: KeytaoAndroidImeConfig = KeytaoAndroidImeConfig.load(context)
     private var settingsConfig: KeytaoAndroidImeConfig = config
@@ -962,6 +989,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val signature = buildString {
             append(keyboardLayer).append('|')
             append(shiftState).append('|')
+            append(voiceRecognitionAvailable).append('|')
+            append(voicePrivacyAllowed).append('|')
+            append(voicePermanentlyDenied).append('|')
+            append(voiceListening).append('|')
             append(config.keyboardHeightScale).append('|')
             append(keyRects.size).append('|')
             append(candidateRects.size).append('|')
@@ -1024,7 +1055,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             targets.add(
                 AccessibilityTarget(
                     accessibilityKeyNodeBase + index,
-                    displayLabel(key.spec).ifBlank { key.spec.label }.ifBlank { "按键" },
+                    if (voiceListening && isSpaceKey(key.spec)) "正在听…"
+                    else if (isVoiceInputOffered(key.spec)) "空格，长按语音输入"
+                    else displayLabel(key.spec).ifBlank { key.spec.label }.ifBlank { "按键" },
                     key.rect,
                 ) { activateKey(key) }
             )
@@ -1074,12 +1107,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         ): Boolean {
             if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
             val target = accessibilityTargets().firstOrNull { it.id == virtualViewId } ?: return false
+            listener?.onUserInteraction()
             target.activate()
             return true
         }
     }
 
     override fun onDetachedFromWindow() {
+        listener?.onUserInteraction()
         clearActiveKeyTouches()
         touchBounceTracker.reset()
         stopVerticalScrollAnimations()
@@ -1095,6 +1130,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     override fun onWindowVisibilityChanged(visibility: Int) {
         if (visibility != VISIBLE) {
+            listener?.onUserInteraction()
             clearActiveKeyTouches()
             touchBounceTracker.reset()
         }
@@ -1102,6 +1138,11 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            voiceLongPressSuppressed = voiceListening ||
+                (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN && voiceLongPressSuppressed)
+            listener?.onUserInteraction()
+        }
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             val started = touchDownRebuildDurations.start()
             try {
@@ -3690,7 +3731,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         textPaint.color = keyForegroundColor(key, selected, pressProgress)
         canvas.drawText(label, keyRect.centerX(), keyRect.centerY() + textBaselineOffset(textPaint), textPaint)
 
-        key.hint?.takeIf { config.keyHintVisible }?.let { hint ->
+        (if (isVoiceInputOffered(key)) "🎤" else key.hint)?.takeIf { config.keyHintVisible }?.let { hint ->
             textPaint.textAlign = Paint.Align.RIGHT
             textPaint.textSize = sp(keyHintSizeSp(keyRect.height()))
             textPaint.color = theme.commentColor.toArgb()
@@ -4124,6 +4165,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun displayLabel(key: KeySpec): String {
+        if (voiceListening && isSpaceKey(key)) return "正在听…"
         if (key.action.type == KeyCommandTypes.SHIFT) {
             return if (shiftState == ShiftState.LOCKED) "⇪" else key.label
         }
@@ -5965,6 +6007,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun registerLongPress(pointerId: Int, touch: KeyTouch) {
         val spec = touch.key.spec
+        val voiceLongPress = !voiceLongPressSuppressed && isVoiceInputOffered(spec)
         val hasLongPressAction = spec.longPress != null ||
             spec.asciiLongPress != null ||
             !spec.hint.isNullOrBlank() ||
@@ -5973,22 +6016,29 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         activeKeyTouches.begin(
             pointerId = pointerId,
             state = touch,
-            delayMs = config.longPressDelayMs.takeIf { hasLongPressAction },
-            onLongPress = if (hasLongPressAction) {
+            delayMs = config.longPressDelayMs.takeIf { hasLongPressAction || voiceLongPress },
+            onLongPress = if (hasLongPressAction || voiceLongPress) {
                 { activeTouch ->
-                    activeTouch.longPressConsumed = true
-                    val options = explicitAlternates(activeTouch.key.spec)
-                    if (options.isNotEmpty()) {
-                        activeTouch.alternatePanel = createAlternatePanel(activeTouch.key, options, activeTouch.currentX)
-                    } else if (isRepeatableKey(activeTouch.key.spec)) {
-                        startRepeatingKey(pointerId, activeTouch.key)
+                    if (voiceLongPress) {
+                        if (!voiceLongPressSuppressed && isVoiceInputOffered(activeTouch.key.spec)) {
+                            activeTouch.longPressConsumed = listener?.onVoiceInputRequested() == true
+                            if (activeTouch.longPressConsumed) activeTouch.cursorGesture = null
+                        }
                     } else {
-                        val command = resolveLongPressCommand(activeTouch.key.spec)
-                        clearRecentClipboardSuggestionForCommand(command)
-                        listener?.onKeyCommand(command)
-                        clearOneShotShiftAfter(command)
+                        activeTouch.longPressConsumed = true
+                        val options = explicitAlternates(activeTouch.key.spec)
+                        if (options.isNotEmpty()) {
+                            activeTouch.alternatePanel = createAlternatePanel(activeTouch.key, options, activeTouch.currentX)
+                        } else if (isRepeatableKey(activeTouch.key.spec)) {
+                            startRepeatingKey(pointerId, activeTouch.key)
+                        } else {
+                            val command = resolveLongPressCommand(activeTouch.key.spec)
+                            clearRecentClipboardSuggestionForCommand(command)
+                            listener?.onKeyCommand(command)
+                            clearOneShotShiftAfter(command)
+                        }
                     }
-                    performConfiguredHaptic(strong = true, playSound = false)
+                    if (activeTouch.longPressConsumed) performConfiguredHaptic(strong = true, playSound = false)
                     invalidate()
                 }
             } else {

@@ -14,11 +14,15 @@ import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.icu.text.BreakIterator
 import android.os.Build
+import android.os.Bundle
 import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.text.Spanned
 import android.text.style.ReplacementSpan
@@ -32,6 +36,7 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import androidx.core.view.inputmethod.EditorInfoCompat
@@ -53,6 +58,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var pendingKeystrokeStartNs = 0L
     private lateinit var engine: KeytaoImeEngine
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val voiceInput = KeytaoVoiceInput()
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceRecognitionAvailable = false
     private val candidateExecutor = Executors.newSingleThreadExecutor()
     private val clipboardHistory = mutableListOf<String>()
     private val clipboardHistoryTimestamps = mutableMapOf<String, Long>()
@@ -177,6 +185,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDestroy() {
+        cancelVoiceInput()
         discardPendingHostBackspace(resetOutstanding = true)
         serviceDestroyed = true
         inputViewShown = false
@@ -229,6 +238,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         view.updateSystemBottomInsetDp(systemBottomInsetDp)
         view.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
+        refreshVoiceInput()
         KeytaoRuntimeLog.event("lifecycle", "ime_create_input_view", KeytaoRuntimeLog.elapsedMs(started))
         return host
     }
@@ -263,6 +273,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        cancelVoiceInput()
+        voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
         shiftPressedWithoutKey = false
@@ -288,6 +300,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         doubleSpacePeriodTracker.reset()
         lastCommittedText = null
         keyboardView?.updateState(currentState)
+        refreshVoiceInput()
         scheduleAvailabilityRefresh()
         logStartInput("input", attribute, restarting, started)
     }
@@ -307,6 +320,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         keyboardView?.updateState(currentState)
+        refreshVoiceInput()
         scheduleAvailabilityRefresh()
         logStartInput("input_view", info, restarting, started)
         logMemorySnapshot("start_input_view")
@@ -320,6 +334,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         inputViewShown = false
+        cancelVoiceInput()
         mainHandler.removeCallbacks(storageRetry)
         unregisterClipboardListener()
         keyboardView?.clearRecentClipboardSuggestion()
@@ -357,6 +372,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onWindowHidden() {
+        cancelVoiceInput()
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         super.onWindowHidden()
@@ -440,7 +456,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val nextPrivacy = KeytaoEditorPolicy.resolvePrivacyMode(inputType, imeOptions)
         directInputEditor = KeytaoEditorPolicy.isDirectInputEditor(inputType)
         if (nextPrivacy != privacyMode) {
+            cancelVoiceInput()
             privacyMode = nextPrivacy
+            refreshVoiceInput()
             if (!nextPrivacy.allowsClipboard) {
                 clipboardHistory.clear()
                 clipboardHistoryTimestamps.clear()
@@ -734,6 +752,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onFinishInput() {
+        cancelVoiceInput()
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         editorUpdateGeneration++
@@ -763,6 +782,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     override fun onEvaluateFullscreenMode(): Boolean = false
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        onUserInteraction()
         discardPendingHostBackspace()
         inputCounts.record("key_down")
         if (isShiftKey(keyCode)) {
@@ -838,6 +858,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onKeyCommand(command: KeyCommand) {
+        onUserInteraction()
         if (command.type != KeyCommandTypes.BACKSPACE) discardPendingHostBackspace()
         inputCounts.recordCommand(command.type)
         if (!inputAvailable && command.requiresInstalledSchema()) {
@@ -880,6 +901,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onCandidate(index: Int, global: Boolean) {
+        onUserInteraction()
         if (!inputAvailable) {
             showUnavailableMessage()
             return
@@ -898,6 +920,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDeleteCandidate(index: Int): Boolean {
+        onUserInteraction()
         if (!inputAvailable) {
             showUnavailableMessage()
             return false
@@ -913,6 +936,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onRequestExpandCandidates(callback: (List<KeytaoCandidate>) -> Unit) {
+        onUserInteraction()
         if (!inputAvailable) {
             showUnavailableMessage()
             callback(emptyList())
@@ -2410,6 +2434,92 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             keyboardView?.updateSystemBottomInsetDp(clamped)
             baseKeyboardConfig?.let { applyKeyboardPresentation(it, keyboardLayoutState) }
         }
+    }
+
+    override fun onUserInteraction() {
+        if (voiceInput.listening) cancelVoiceInput()
+    }
+
+    private fun refreshVoiceInput() {
+        keyboardView?.updateVoiceInput(
+            available = voiceRecognitionAvailable && inputViewShown && !serviceDestroyed,
+            privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
+            permanentlyDenied = KeytaoVoicePermissionActivity.isPermanentlyDenied(this),
+            listening = voiceInput.listening,
+        )
+    }
+
+    private fun cancelVoiceInput() {
+        voiceInput.cancel()
+        val recognizer = speechRecognizer
+        speechRecognizer = null
+        runCatching { recognizer?.cancel() }
+        runCatching { recognizer?.destroy() }
+        refreshVoiceInput()
+    }
+
+    override fun onVoiceInputRequested(): Boolean {
+        if (voiceInput.listening || !inputViewShown || serviceDestroyed || currentInputConnection == null) return false
+        if (!KeytaoVoiceInput.isOffered(
+                recognitionAvailable = voiceRecognitionAvailable,
+                privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
+                hasComposition = composing || currentState.hasComposition,
+                hasConfiguredAction = false,
+                permanentlyDenied = KeytaoVoicePermissionActivity.isPermanentlyDenied(this),
+            )
+        ) {
+            refreshVoiceInput()
+            return false
+        }
+        if (!KeytaoVoicePermissionActivity.hasPermission(this)) {
+            runCatching {
+                startActivity(Intent(this, KeytaoVoicePermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            return true
+        }
+        val token = voiceInput.start()
+        refreshVoiceInput()
+        try {
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            speechRecognizer = recognizer
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) = voiceInput.runIfCurrent(token) { }
+                override fun onBeginningOfSpeech() = voiceInput.runIfCurrent(token) { }
+                override fun onRmsChanged(rmsdB: Float) = voiceInput.runIfCurrent(token) { }
+                override fun onBufferReceived(buffer: ByteArray?) = voiceInput.runIfCurrent(token) { }
+                override fun onEndOfSpeech() = voiceInput.runIfCurrent(token) { }
+                override fun onPartialResults(partialResults: Bundle?) = voiceInput.runIfCurrent(token) { }
+                override fun onEvent(eventType: Int, params: Bundle?) = voiceInput.runIfCurrent(token) { }
+
+                override fun onError(error: Int) = voiceInput.runIfCurrent(token) {
+                    cancelVoiceInput()
+                    if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        KeytaoVoicePermissionActivity.hasPermission(this@KeytaoInputMethodService)
+                        refreshVoiceInput()
+                    }
+                    if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        Toast.makeText(this@KeytaoInputMethodService, "语音输入失败", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
+                override fun onResults(results: Bundle?) = voiceInput.runIfCurrent(token) {
+                    val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    cancelVoiceInput()
+                    if (!text.isNullOrEmpty()) commitDirect(text)
+                }
+            })
+            recognizer.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, if (currentState.asciiMode) "en-US" else "zh-CN")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            })
+        } catch (_: RuntimeException) {
+            voiceInput.runIfCurrent(token) {
+                cancelVoiceInput()
+                Toast.makeText(this, "语音输入失败", Toast.LENGTH_SHORT).show()
+            }
+        }
+        return true
     }
 
     private fun commitDirect(text: String) {
