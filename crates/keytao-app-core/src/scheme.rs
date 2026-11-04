@@ -168,6 +168,8 @@ fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
     match scheme {
         "keytao" => Ok("keytao"),
         "xmjd" => Ok("xmjd"),
+        // 星猫键道的非顶功发行包，与 xmjd 同属一个 release
+        "xmjd-feiding" => Ok("xmjd-feiding"),
         "txjx" => Ok("txjx"),
         "keydo" => Ok("keydo"),
         _ => Err("不支持的方案".into()),

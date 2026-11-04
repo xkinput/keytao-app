@@ -13,10 +13,17 @@ const schemes = {
   'txjx': '天行键',
   'keydo': '键道·我流',
 };
+// 星猫键道在同一个 release 里发两个包：顶功版 xmjd6.zip、非顶版 feiding-xmjd6.zip。
+// 选中「星猫键道」后再列一次具体文件；键名直接作为后端 scheme 参数，值即 asset 名。
+const xmjdVariantSchemes = {
+  'xmjd': 'xmjd6.zip',
+  'xmjd-feiding': 'feiding-xmjd6.zip',
+};
 const logoAsset = 'assets/logo.png';
 const schemeAssets = {
   'keytao': 'keytao-linux',
   'xmjd': 'xmjd6.zip',
+  'xmjd-feiding': 'feiding-xmjd6.zip',
   'txjx': 'txjx.zip',
   'keydo': 'nightly zip',
 };

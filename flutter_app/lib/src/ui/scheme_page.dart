@@ -114,14 +114,14 @@ class SchemeSelection extends StatelessWidget {
                     width: width,
                     child: FTooltip(
                       tipBuilder: (_, _) => Text(
-                        !c.isAndroid && c.scheme == entry.key
+                        !c.isAndroid && c.schemeFamily == entry.key
                             ? c.selectedSchemeAsset
                             : schemeAssets[entry.key]!,
                       ),
                       child: Semantics(
-                        selected: c.scheme == entry.key,
+                        selected: c.schemeFamily == entry.key,
                         child: FButton(
-                          variant: c.scheme == entry.key
+                          variant: c.schemeFamily == entry.key
                               ? FButtonVariant.primary
                               : FButtonVariant.outline,
                           onPress: c.busy || (c.isAndroid && c.releaseLoading)
@@ -132,7 +132,7 @@ class SchemeSelection extends StatelessWidget {
                               Text(entry.value),
                               const SizedBox(height: 3),
                               Text(
-                                c.scheme == entry.key
+                                c.schemeFamily == entry.key
                                     ? c.releaseVersion ?? c.selectedSchemeAsset
                                     : schemeAssets[entry.key]!,
                                 maxLines: 1,
@@ -149,6 +149,19 @@ class SchemeSelection extends StatelessWidget {
             );
           },
         ),
+        // 星猫键道发了顶功 / 非顶功两个包，选中后再列一次具体文件。
+        if (c.schemeFamily == 'xmjd') ...[
+          const SizedBox(height: 12),
+          ChoiceSetting<String>(
+            label: '具体文件',
+            value: c.scheme,
+            options: xmjdVariantSchemes,
+            hint: '两包词库内容相同，只差顶功开关',
+            onChanged: c.busy || (c.isAndroid && c.releaseLoading)
+                ? null
+                : c.selectScheme,
+          ),
+        ],
         const SizedBox(height: 10),
         StatusMessage(c.schemeSelectionText, icon: FLucideIcons.download),
       ],

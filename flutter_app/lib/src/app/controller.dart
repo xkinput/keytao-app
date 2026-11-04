@@ -11,7 +11,12 @@ import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
 import '../settings/android_settings.dart';
 import 'options.dart'
-    show AppPage, defaultDownloadSource, schemeAssets, schemes;
+    show
+        AppPage,
+        defaultDownloadSource,
+        schemeAssets,
+        schemes,
+        xmjdVariantSchemes;
 import 'strings.dart';
 
 enum OperationKind { install, deploy, addon, wanxiang, customDirectory }
@@ -228,11 +233,14 @@ class AppController extends ChangeNotifier {
       local?.installed == true && local!.schemas.isNotEmpty
       ? '(${local!.schemas.join(', ')})'
       : null;
+
+  /// 星猫键道有两个发行包（顶功 / 非顶功），它们同属一个方案族。
+  String get schemeFamily => scheme == 'xmjd-feiding' ? 'xmjd' : scheme;
   String get selectedSchemeAsset => scheme == 'keytao'
       ? schemeAssets[scheme]!
       : schemeRelease?.assetName ?? schemeAssets[scheme] ?? '';
   String get schemeSelectionText =>
-      '${AppStrings.selection}${schemes[scheme] ?? scheme}'
+      '${AppStrings.selection}${schemes[schemeFamily] ?? scheme}'
       '${releaseVersion == null ? '' : ' $releaseVersion'} · $selectedSchemeAsset';
   Map<String, String> get sourceVersions => {
     if (latestRelease?.github case final release?) 'github': release.version,
@@ -733,7 +741,9 @@ class AppController extends ChangeNotifier {
   }
 
   void selectScheme(String value) {
-    if (busy || !schemes.containsKey(value)) return;
+    final known =
+        schemes.containsKey(value) || xmjdVariantSchemes.containsKey(value);
+    if (busy || !known) return;
     _manuallySelectedScheme = true;
     if (value == scheme) return;
     scheme = value;
