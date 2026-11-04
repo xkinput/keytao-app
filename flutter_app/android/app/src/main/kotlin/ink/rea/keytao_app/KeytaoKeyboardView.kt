@@ -4125,8 +4125,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             enterLabelOverride?.let { return it }
         }
         if (key.action.type == KeyCommandTypes.SPACE) {
-            val mode = if (isEnglishMode) "En" else "中"
-            return "${state.schemaName.ifBlank { key.label }} · $mode"
+            return state.schemaName.ifBlank { key.label }
         }
         if (key.action.type == KeyCommandTypes.MODE) {
             return if (isEnglishMode) theme.modeHintEnglishText else theme.modeHintChineseText
@@ -4700,27 +4699,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             paint,
         )
 
-        paint.color = color
-        val inset = dp(5f)
-        val size = dp(9f)
-        val corners = Path().apply {
-            moveTo(inset + size, inset)
-            lineTo(inset, inset)
-            lineTo(inset, inset + size)
-
-            moveTo(width - inset - size, inset)
-            lineTo(width - inset, inset)
-            lineTo(width - inset, inset + size)
-
-            moveTo(inset, height - inset - size)
-            lineTo(inset, height - inset)
-            lineTo(inset + size, height - inset)
-
-            moveTo(width - inset - size, height - inset)
-            lineTo(width - inset, height - inset)
-            lineTo(width - inset, height - inset - size)
-        }
-        canvas.drawPath(corners, paint)
     }
 
     private fun languageToggleAction(): ToolbarAction {

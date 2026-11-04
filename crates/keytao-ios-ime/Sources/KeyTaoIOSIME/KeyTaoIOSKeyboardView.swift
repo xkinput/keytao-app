@@ -6425,8 +6425,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return label
         }
         if key.action?.type == KeyTaoCommandType.space {
-            let mode = isEnglishMode ? "En" : "中"
-            return "\(state.schemaName.isEmpty ? key.label : state.schemaName) · \(mode)"
+            return state.schemaName.isEmpty ? key.label : state.schemaName
         }
         if key.action?.type == KeyTaoCommandType.mode {
             return isEnglishMode ? theme.modeHint.englishText : theme.modeHint.chineseText
