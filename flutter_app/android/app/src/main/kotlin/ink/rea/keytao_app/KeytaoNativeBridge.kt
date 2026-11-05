@@ -282,6 +282,10 @@ object KeytaoNativeBridge {
 
     external fun nativeLogEvent(level: Int, cat: String, ev: String, durMs: Double, kvJson: String?)
 
+    external fun nativeLogKeystroke(ms: Double)
+
+    external fun nativeLogDrainKeyStats()
+
     external fun nativeLogFlush(timeoutMs: Int)
 
     external fun nativeResolveThemeJson(

@@ -1175,7 +1175,7 @@ fn window_update_is_current(
 }
 
 pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
-    let Some(update) = shared_state.borrow_mut().pending_window_update.take() else {
+    let Some(mut update) = shared_state.borrow_mut().pending_window_update.take() else {
         return;
     };
     let generation = next_window_update_generation();
@@ -1233,14 +1233,18 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
     if !window_update_is_current(shared_state, &update, generation) {
         return;
     }
-    if !update_ime_windows(
+    let updated = update_ime_windows(
         shared_state,
         &update.ime_state,
         update.document_mgr.as_ref(),
         caret,
         update.show_mode_hint,
         update.embedded,
-    ) {
+    );
+    if let Some(started) = update.key_started.take() {
+        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    if !updated {
         if !window_update_is_current(shared_state, &update, generation) {
             return;
         }
@@ -1248,13 +1252,6 @@ pub(crate) fn flush_pending_window_update(shared_state: &SharedState) {
         if st.pending_window_update.is_none() {
             st.pending_window_update = Some(update);
         }
-    } else if let Some(started) = update.key_started {
-        keytao_core::rt_log!(
-            Level::Info,
-            "input",
-            "keystroke",
-            dur_ms = started.elapsed().as_secs_f64() * 1000.0,
-        );
     }
 }
 

@@ -6,7 +6,7 @@
 
 use std::{num::NonZeroU16, os::fd::AsRawFd, sync::Arc, time::Instant};
 
-use keytao_core::{key_policy, ImeState, RIME_RELEASE_MASK};
+use keytao_core::{key_policy, runtime_log, ImeState, RIME_RELEASE_MASK};
 use x11rb::{
     connection::Connection as _,
     properties::WmHints,
@@ -607,6 +607,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM DestroyIC client_win={}", user_ic.ic.client_win());
+        runtime_log::drain_key_stats();
         user_ic.user_data.session.clear_composition();
         if self.panel_owner.as_ref().is_some_and(|o| o.is(&user_ic.ic)) {
             self.panel_owner = None;
@@ -669,6 +670,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
     ) -> Result<(), ServerError> {
         tracing::info!("XIM UnsetFocus client_win={}", user_ic.ic.client_win());
+        runtime_log::drain_key_stats();
         // The composition never reached the client, so dropping it is the
         // "discard" half of the shared focus-loss contract.
         user_ic.user_data.session.clear_composition();
@@ -683,6 +685,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         user_ic: &mut UserInputContext<IcData>,
         xev: &x11rb::protocol::xproto::KeyPressEvent,
     ) -> Result<bool, ServerError> {
+        let started = Instant::now();
         // Convert the X11 hardware keycode to a keysym using the keyboard mapping
         // fetched at init time.  xev.detail is the raw X11 keycode and the Shift
         // bit (bit 0) of xev.state picks the keysym level.
@@ -711,7 +714,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
                         .session
                         .process_key_result(keysym, shift_key_modifiers(mods | RIME_RELEASE_MASK))
                     {
-                        self.apply_ime_state(server, user_ic, result.state)?;
+                        let applied = self.apply_ime_state(server, user_ic, result.state);
+                        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+                        applied?;
                     }
                 }
                 return Ok(false);
@@ -766,7 +771,9 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         };
 
         let consumed = result.accepted;
-        self.apply_ime_state(server, user_ic, result.state)?;
+        let applied = self.apply_ime_state(server, user_ic, result.state);
+        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+        applied?;
         Ok(consumed)
     }
 }

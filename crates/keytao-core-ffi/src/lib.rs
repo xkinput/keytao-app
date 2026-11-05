@@ -289,7 +289,11 @@ fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
     let started =
         (!matches!(
             name,
-            "keytao_log_enabled" | "keytao_log_event" | "keytao_log_flush"
+            "keytao_log_enabled"
+                | "keytao_log_event"
+                | "keytao_log_keystroke"
+                | "keytao_log_drain_key_stats"
+                | "keytao_log_flush"
         ) && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
         .then(std::time::Instant::now);
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
@@ -413,6 +417,22 @@ pub extern "C" fn keytao_log_event(
             (!dur_ms.is_nan()).then_some(dur_ms),
             kv,
         );
+    });
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_log_keystroke(ms: f64) {
+    guard("keytao_log_keystroke", (), || {
+        keytao_core::runtime_log::record_keystroke(ms);
+    });
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_log_drain_key_stats() {
+    guard("keytao_log_drain_key_stats", (), || {
+        keytao_core::runtime_log::drain_key_stats();
     });
 }
 

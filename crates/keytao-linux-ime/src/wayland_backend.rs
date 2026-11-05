@@ -16,8 +16,8 @@ use std::{
 };
 
 use keytao_core::{
-    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK,
-    RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
+    key_policy, runtime_log, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL,
+    RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
 use wayland_client::{
     delegate_noop,
@@ -611,8 +611,9 @@ impl App {
         key_state: wl_keyboard::KeyState,
         qh: &QueueHandle<Self>,
     ) {
+        let started = Instant::now();
         if key_state == wl_keyboard::KeyState::Released {
-            self.handle_key_release(evdev_keycode, qh);
+            self.handle_key_release(evdev_keycode, qh, started);
             return;
         }
 
@@ -687,6 +688,7 @@ impl App {
             self.update_ascii_mode(result.state.is_english_mode(), qh);
             self.apply_state_to_input_method(&result.state);
             self.show_panel(result.state, qh);
+            runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             if !result.accepted {
                 self.forward_unhandled_key(evdev_keycode, sym_raw);
             }
@@ -727,6 +729,7 @@ impl App {
             self.apply_state_to_input_method(&ime_state);
             self.forward_unhandled_key(evdev_keycode, sym_raw);
             self.show_panel(ime_state, qh);
+            runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             return;
         }
 
@@ -744,9 +747,10 @@ impl App {
         }
 
         self.show_panel(ime_state, qh);
+        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
     }
 
-    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
+    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
         self.cancel_key_repeat_for(evdev_keycode);
         // Modifier detection must use the pristine state: at release time the
         // Shift key is still depressed in the live state, which resolves it to
@@ -771,6 +775,7 @@ impl App {
                     self.update_ascii_mode(result.state.is_english_mode(), qh);
                     self.apply_state_to_input_method(&result.state);
                     self.show_panel(result.state, qh);
+                    runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
                 }
                 None => tracing::debug!("shift release: process_key_result returned None"),
             }
@@ -999,6 +1004,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for App {
                 }
             }
             zwp_input_method_v2::Event::Unavailable => {
+                runtime_log::drain_key_stats();
                 state.surrounding_text.invalidate();
                 // KDE Plasma: this fires when another IME (Fcitx5, IBus, Maliit) already
                 // holds the input-method slot, OR if "Virtual Keyboard" in System Settings
@@ -1327,6 +1333,7 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             app.session.reset();
             app.mode_hint_until = None;
             app.hide_panel_popup();
+            runtime_log::drain_key_stats();
             tracing::debug!("IME deactivated after debounce (had_grab={had_grab})");
         }
 

@@ -12,8 +12,8 @@ use std::{
 };
 
 use keytao_core::{
-    key_policy, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK,
-    RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
+    key_policy, runtime_log, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL,
+    RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
 use wayland_client::{
     delegate_noop,
@@ -616,12 +616,13 @@ impl App {
         key_state: wl_keyboard::KeyState,
         qh: &QueueHandle<Self>,
     ) {
+        let started = Instant::now();
         tracing::trace!(
             "KDE handling key event: key={evdev_keycode}, state={key_state:?}, active={}",
             self.active
         );
         if key_state == wl_keyboard::KeyState::Released {
-            self.handle_key_release(evdev_keycode, qh);
+            self.handle_key_release(evdev_keycode, qh, started);
             return;
         }
 
@@ -674,6 +675,7 @@ impl App {
             self.commit_state_to_context(&result.state);
             self.update_kimpanel(&result.state);
             self.show_panel(result.state, qh);
+            runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             if !result.accepted {
                 self.forward_key_press(evdev_keycode);
             }
@@ -712,6 +714,7 @@ impl App {
             self.show_panel(ime_state, qh);
             self.forward_key_press(evdev_keycode);
         }
+        runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// A primary click on the panel: the same session calls and client updates
@@ -732,7 +735,7 @@ impl App {
         self.show_panel(state, qh);
     }
 
-    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>) {
+    fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
         self.cancel_key_repeat_for(evdev_keycode);
         let sym_raw = self.base_key_sym(evdev_keycode);
         if is_shift_key(sym_raw) && self.session.input_policy().composing {
@@ -744,6 +747,7 @@ impl App {
                 self.commit_state_to_context(&result.state);
                 self.update_kimpanel(&result.state);
                 self.show_panel(result.state, qh);
+                runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
         }
         // Only keys whose press reached the client may deliver a release, or
@@ -823,6 +827,7 @@ impl Dispatch<ZwpInputMethodV1, ()> for App {
                 // repeat timers must never send requests through these proxies.
                 if state.context.as_ref().is_some_and(|live| *live == context) {
                     state.reset_context_state();
+                    runtime_log::drain_key_stats();
                 } else {
                     tracing::debug!("KDE: deactivate for an already replaced context");
                 }

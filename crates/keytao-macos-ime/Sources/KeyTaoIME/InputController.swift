@@ -82,6 +82,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     override func deactivateServer(_ sender: Any!) {
+        defer { keytao_log_drain_key_stats() }
         let generation = inputContextGeneration.invalidate()
         isActive = false
         // The composition belongs to the client that is going away, so it has to
@@ -148,12 +149,14 @@ final class KeyTaoInputController: IMKInputController {
 
         let usesEnterPath = keytao_key_policy_is_enter(keyval)
             && modifiers & (rimeModifierControl | rimeModifierAlt) == 0
+        let keyStarted = DispatchTime.now().uptimeNanoseconds
         let json = usesEnterPath
             ? keytao_session_process_enter_json(session)
             : keytao_session_process_key_json(session, keyval, modifiers)
         guard let state = KeyTaoImeState.consuming(json) else { return false }
 
         apply(state, to: sender)
+        keytao_log_keystroke(Double(DispatchTime.now().uptimeNanoseconds - keyStarted) / 1_000_000)
         return state.accepted
     }
 

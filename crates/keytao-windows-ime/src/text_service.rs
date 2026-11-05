@@ -389,6 +389,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             drop(st);
             hide_ime_windows(&self.state);
 
+            keytao_core::runtime_log::drain_key_stats();
             tracing::info!("KeyTao TSF deactivated");
             append_diagnostic("TSF deactivated");
             Ok(())

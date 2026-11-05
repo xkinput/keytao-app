@@ -104,12 +104,16 @@ mod android_log {
 /// JNI export funnels through here.
 #[cfg(target_os = "android")]
 fn android_jni_guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
-    let started = (!matches!(
-        name,
-        "nativeLogEnabled" | "nativeLogEvent" | "nativeLogFlush"
-    )
-        && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
-    .then(std::time::Instant::now);
+    let started =
+        (!matches!(
+            name,
+            "nativeLogEnabled"
+                | "nativeLogEvent"
+                | "nativeLogKeystroke"
+                | "nativeLogDrainKeyStats"
+                | "nativeLogFlush"
+        ) && keytao_core::runtime_log::enabled(keytao_core::runtime_log::Level::Verbose))
+        .then(std::time::Instant::now);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(value) => {
             if let Some(started) = started {
@@ -436,6 +440,29 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogEven
             (!dur_ms.is_nan()).then_some(dur_ms),
             kv,
         );
+    });
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogKeystroke(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    ms: jni::sys::jdouble,
+) {
+    android_jni_guard("nativeLogKeystroke", (), || {
+        keytao_core::runtime_log::record_keystroke(ms);
+    });
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeLogDrainKeyStats(
+    _env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+) {
+    android_jni_guard("nativeLogDrainKeyStats", (), || {
+        keytao_core::runtime_log::drain_key_stats();
     });
 }
 

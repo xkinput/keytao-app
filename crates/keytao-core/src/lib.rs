@@ -17,7 +17,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         TryLockError, Weak,
     },
@@ -1839,9 +1839,6 @@ mod desktop {
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
-            static HISTOGRAM: runtime_log::DurationHistogram =
-                runtime_log::DurationHistogram::new();
-            static CALLS: AtomicU32 = AtomicU32::new(0);
             let started = runtime_log::enabled(Level::Info).then(Instant::now);
             let _rime = rime_api_lock();
             let status = self.session.process_key(key_event(keycode, mask));
@@ -1854,14 +1851,7 @@ mod desktop {
             };
             if let Some(started) = started {
                 let ms = started.elapsed().as_secs_f64() * 1000.0;
-                HISTOGRAM.record(ms);
-                if CALLS
-                    .fetch_add(1, Ordering::Relaxed)
-                    .wrapping_add(1)
-                    .is_multiple_of(100)
-                {
-                    HISTOGRAM.drain_into("process_key");
-                }
+                runtime_log::record_engine_key(&result.state.schema_id, ms);
                 if ms > 50.0 {
                     crate::rt_log!(
                         Level::Info,

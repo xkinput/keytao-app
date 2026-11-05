@@ -98,6 +98,10 @@ void keytao_log_event(int32_t level,
                       double dur_ms,
                       const char *kv_json);
 
+void keytao_log_keystroke(double ms);
+
+void keytao_log_drain_key_stats(void);
+
 /**
  * Wait up to `timeout_ms` for queued runtime log events to be written, without fsync.
  */

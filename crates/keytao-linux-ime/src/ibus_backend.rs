@@ -11,7 +11,7 @@ use crate::ibus_shared::{
 };
 use crate::kimpanel::mode_property as kimpanel_mode_property;
 use crate::panel::{spawn_x11_overlay_panel, OverlayPanelMessage};
-use keytao_core::ImeState;
+use keytao_core::{runtime_log, ImeState};
 use keytao_theme::ThemeResolver;
 use std::{
     fs,
@@ -19,6 +19,7 @@ use std::{
         atomic::{AtomicI32, AtomicU32, Ordering},
         Arc,
     },
+    time::Instant,
 };
 use zbus::{connection, interface, object_server::SignalContext, zvariant};
 
@@ -255,6 +256,7 @@ impl InputContext {
         tracing::debug!("IBus InputContext: FocusOut");
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
+        runtime_log::drain_key_stats();
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
@@ -301,6 +303,7 @@ impl InputContext {
         tracing::debug!("IBus InputContext: Disable");
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
+        runtime_log::drain_key_stats();
     }
 
     async fn page_up(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
@@ -341,6 +344,7 @@ impl InputContext {
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> bool {
+        let started = Instant::now();
         // The decision is shared with the GNOME engine backend; this object only
         // publishes the outcome over org.freedesktop.IBus.InputContext.
         let outcome = ibus_shared::process_key_event(&self.session, keyval, state);
@@ -348,7 +352,10 @@ impl InputContext {
         match outcome {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => self.clear_ui(&ctxt).await,
-            KeyOutcome::Publish { state, .. } => self.apply_ime_state(*state, &ctxt).await,
+            KeyOutcome::Publish { state, .. } => {
+                self.apply_ime_state(*state, &ctxt).await;
+                runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         accepted
     }
@@ -404,6 +411,7 @@ impl InputContextService {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
         tracing::info!("IBus InputContext: Destroy {}", ctxt.path());
+        runtime_log::drain_key_stats();
         self.session.clear_composition();
         if let Some(kctxt) = &self.kimpanel_ctxt {
             let _ = Kimpanel::show_preedit(kctxt, false).await;

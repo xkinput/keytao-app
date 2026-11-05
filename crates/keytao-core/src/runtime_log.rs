@@ -811,6 +811,7 @@ impl DurationHistogram {
         kv.insert("p50".into(), percentile(50).into());
         kv.insert("p95".into(), percentile(95).into());
         kv.insert("max".into(), data.max.into());
+        kv.insert("buckets".into(), json::json!(data.buckets));
         *data = HistogramData {
             buckets: [0; 11],
             max: 0.0,
@@ -832,6 +833,87 @@ impl DurationHistogram {
                 kv,
             );
         }
+    }
+}
+
+// ponytail: shortcut: One process-wide schema slot misattributes concurrent sessions
+// on different schemas; use per-session stats if needed.
+static KEY_STATS: Mutex<KeyStats> = Mutex::new(KeyStats::new());
+
+struct KeyStats {
+    schema: String,
+    engine: DurationHistogram,
+    e2e: DurationHistogram,
+    keys: u32,
+}
+
+impl KeyStats {
+    const fn new() -> Self {
+        Self {
+            schema: String::new(),
+            engine: DurationHistogram::new(),
+            e2e: DurationHistogram::new(),
+            keys: 0,
+        }
+    }
+
+    fn record_engine(
+        &mut self,
+        schema: &str,
+        ms: f64,
+        mut emit: impl FnMut(&str, Map<String, Value>),
+    ) {
+        if self.schema != schema {
+            self.drain(&mut emit);
+            self.schema.clear();
+            self.schema.push_str(schema);
+        }
+        self.engine.record(ms);
+        self.keys += 1;
+        if self.keys == 100 {
+            self.drain(emit);
+        }
+    }
+
+    fn drain(&mut self, mut emit: impl FnMut(&str, Map<String, Value>)) {
+        for (ev, histogram) in [("process_key", &self.engine), ("keystroke", &self.e2e)] {
+            if let Some(mut kv) = histogram.take() {
+                if self.schema.is_empty() {
+                    continue;
+                }
+                kv.insert("schema".into(), self.schema.as_str().into());
+                emit(ev, kv);
+            }
+        }
+        self.keys = 0;
+    }
+}
+
+fn emit_key_stats(ev: &str, kv: Map<String, Value>) {
+    log_event(
+        Level::Info,
+        if ev == "keystroke" { "input" } else { "rime" },
+        ev,
+        None,
+        kv,
+    );
+}
+
+pub(crate) fn record_engine_key(schema: &str, ms: f64) {
+    if enabled(Level::Info) {
+        super::lock_ignore_poison(&KEY_STATS).record_engine(schema, ms, emit_key_stats);
+    }
+}
+
+pub fn record_keystroke(ms: f64) {
+    if enabled(Level::Info) {
+        super::lock_ignore_poison(&KEY_STATS).e2e.record(ms);
+    }
+}
+
+pub fn drain_key_stats() {
+    if enabled(Level::Info) {
+        super::lock_ignore_poison(&KEY_STATS).drain(emit_key_stats);
     }
 }
 
@@ -1296,6 +1378,74 @@ mod tests {
         assert_eq!(data["p95"], 1.0);
         assert_eq!(data["max"], 80.0);
         assert!(histogram.take().is_none());
+    }
+
+    #[test]
+    fn key_stats_schema_change_drains_under_old_schema() {
+        let mut stats = KeyStats::new();
+        let mut events = Vec::new();
+        stats.record_engine("old", 1.0, |ev, kv| events.push((ev.to_owned(), kv)));
+        stats.e2e.record(3.0);
+        stats.record_engine("new", 2.0, |ev, kv| events.push((ev.to_owned(), kv)));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "process_key");
+        assert_eq!(events[1].0, "keystroke");
+        for (_, data) in &events {
+            assert_eq!(data["schema"], "old");
+            assert_eq!(data["n"], 1);
+        }
+        assert_eq!(events[0].1["max"], 1.0);
+        assert_eq!(events[1].1["max"], 3.0);
+        stats.drain(|ev, kv| events.push((ev.to_owned(), kv)));
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2].1["schema"], "new");
+        assert_eq!(events[2].1["n"], 1);
+        assert_eq!(events[2].1["max"], 2.0);
+    }
+
+    #[test]
+    fn key_stats_discards_samples_without_schema() {
+        let mut stats = KeyStats::new();
+        let mut events = Vec::new();
+        stats.record_engine("", 1.0, |ev, kv| events.push((ev.to_owned(), kv)));
+        stats.e2e.record(3.0);
+        stats.drain(|ev, kv| events.push((ev.to_owned(), kv)));
+        assert!(events.is_empty());
+        assert_eq!(stats.keys, 0);
+        assert!(stats.engine.take().is_none());
+        assert!(stats.e2e.take().is_none());
+
+        stats.e2e.record(5.0);
+        stats.record_engine("schema", 2.0, |ev, kv| events.push((ev.to_owned(), kv)));
+        stats.e2e.record(4.0);
+        stats.drain(|ev, kv| events.push((ev.to_owned(), kv)));
+        assert_eq!(events.len(), 2);
+        for (_, data) in &events {
+            assert_eq!(data["schema"], "schema");
+            assert_eq!(data["n"], 1);
+        }
+        assert_eq!(events[0].1["max"], 2.0);
+        assert_eq!(events[1].1["max"], 4.0);
+    }
+
+    #[test]
+    fn key_stats_drained_buckets_sum_to_count() {
+        let mut stats = KeyStats::new();
+        let mut events = Vec::new();
+        for ms in 0..100 {
+            stats.record_engine("schema", f64::from(ms), |_, kv| events.push(kv));
+            stats.e2e.record(f64::from(ms) * 2.0);
+        }
+        assert_eq!(events.len(), 2);
+        for data in events {
+            let sum: u64 = data["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|count| count.as_u64().unwrap())
+                .sum();
+            assert_eq!(sum, data["n"].as_u64().unwrap());
+        }
     }
 
     #[test]

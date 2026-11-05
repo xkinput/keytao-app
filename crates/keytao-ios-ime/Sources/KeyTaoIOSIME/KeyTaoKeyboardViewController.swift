@@ -1,6 +1,7 @@
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import CKeytaoCore
 import os
 
 private let rimeKeySpace: UInt32 = 0x0020
@@ -85,6 +86,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var startupLatencyRecorded = false
     private var commandCounts: [String: UInt64] = [:]
     private var applyHistogram = KeyTaoDurationHistogram()
+    private var pendingKeystrokeStarted: TimeInterval?
     private var runtimeMetricsEnabled = true
     private let engine = KeyTaoIOSEngine()
     private let candidateQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.candidates", qos: .userInitiated)
@@ -302,6 +304,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         keyboardView?.flushRuntimeMetrics()
         engine.flushRuntimeMetrics()
+        keytao_log_drain_key_stats()
         // viewDidDisappear flushes the writer after these summaries are queued.
     }
 
@@ -430,6 +433,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didTrigger command: KeyTaoKeyCommand) {
+        let started = KeyTaoLog.now()
+        let previousKeystrokeStarted = pendingKeystrokeStarted
+        pendingKeystrokeStarted = started
+        defer { pendingKeystrokeStarted = previousKeystrokeStarted }
         if runtimeMetricsEnabled {
             commandCounts[KeyTaoLog.commandType(command.type), default: 0] += 1
         }
@@ -1701,8 +1708,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func apply(_ state: KeyTaoImeState) {
+        let keystrokeStarted = pendingKeystrokeStarted
+        pendingKeystrokeStarted = nil
         let started = runtimeMetricsEnabled ? KeyTaoLog.now() : nil
         defer {
+            if let keystrokeStarted {
+                keytao_log_keystroke((KeyTaoLog.now() - keystrokeStarted) * 1000)
+            }
             if let started { applyHistogram.record((KeyTaoLog.now() - started) * 1000) }
         }
         let generation = inputContextGeneration

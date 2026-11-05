@@ -24,12 +24,13 @@ use crate::{
     },
     panel::{spawn_x11_overlay_panel, OverlayPanelMessage},
 };
-use keytao_core::ImeState;
+use keytao_core::{runtime_log, ImeState};
 use keytao_theme::ThemeResolver;
 use std::sync::{
     atomic::{AtomicI32, AtomicU32, Ordering},
     Arc,
 };
+use std::time::Instant;
 use zbus::{interface, object_server::SignalContext, proxy, zvariant};
 
 // ── IBus constants ────────────────────────────────────────────────────────────
@@ -502,6 +503,7 @@ impl IBusEngine {
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> bool {
+        let started = Instant::now();
         // The decision is shared with the standalone IBus shim; this object only
         // publishes the outcome over org.freedesktop.IBus.Engine.
         let outcome = ibus_shared::process_key_event(&self.session, keyval, state);
@@ -509,7 +511,10 @@ impl IBusEngine {
         match outcome {
             KeyOutcome::Forward => {}
             KeyOutcome::ClearUi => self.clear_ui(&ctxt).await,
-            KeyOutcome::Publish { state, .. } => self.apply_ime_state(*state, &ctxt).await,
+            KeyOutcome::Publish { state, .. } => {
+                self.apply_ime_state(*state, &ctxt).await;
+                runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         accepted
     }
@@ -522,6 +527,7 @@ impl IBusEngine {
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
+        runtime_log::drain_key_stats();
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
@@ -537,6 +543,7 @@ impl IBusEngine {
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
+        runtime_log::drain_key_stats();
     }
 
     async fn set_cursor_location(&self, x: i32, y: i32, _w: i32, _h: i32) {
@@ -618,6 +625,7 @@ impl IBusEngineService {
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
         tracing::info!("IBus Engine: Destroy {}", ctxt.path());
+        runtime_log::drain_key_stats();
         self.session.clear_composition();
         if let Some(tx) = &self.x11_panel_tx {
             let _ = tx.send(OverlayPanelMessage::Hide);

@@ -50,6 +50,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var startupLatencyLogged = false
     private val inputCounts = KeytaoInputCounts()
     private val applyStateDurations = KeytaoDurationHistogram()
+    private var pendingKeystrokeStartNs = 0L
     private lateinit var engine: KeytaoImeEngine
     private val mainHandler = Handler(Looper.getMainLooper())
     private val candidateExecutor = Executors.newSingleThreadExecutor()
@@ -419,6 +420,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (::engine.isInitialized) {
             // The histogram has its own short lock; this never takes the engine monitor.
             engine.flushRuntimeHistograms()
+            if (engine.nativeReady) {
+                runCatching { KeytaoNativeBridge.nativeLogDrainKeyStats() }
+            }
         }
     }
 
@@ -782,19 +786,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (engine.shouldBypassKey(key.keyCode, key.modifiers)) {
             return super.onKeyDown(keyCode, event)
         }
-        val result = if (key.keyCode == AndroidKeyMapper.XK_RETURN &&
-            key.modifiers and AndroidKeyMapper.RIME_MOD_LOCK.inv() == 0
-        ) {
-            engine.processEnter()
-        } else {
-            engine.processKey(key.keyCode, key.modifiers)
+        pendingKeystrokeStartNs = System.nanoTime()
+        try {
+            val result = if (key.keyCode == AndroidKeyMapper.XK_RETURN &&
+                key.modifiers and AndroidKeyMapper.RIME_MOD_LOCK.inv() == 0
+            ) {
+                engine.processEnter()
+            } else {
+                engine.processKey(key.keyCode, key.modifiers)
+            }
+            if (!result.accepted) {
+                KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
+                pendingKeystrokeStartNs = 0L
+                return super.onKeyDown(keyCode, event)
+            }
+            applyState(result)
+            return true
+        } finally {
+            pendingKeystrokeStartNs = 0L
         }
-        if (!result.accepted) {
-            KeytaoRimeInput.applyRejectedResult(rimeKeySink, result)
-            return super.onKeyDown(keyCode, event)
-        }
-        applyState(result)
-        return true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
@@ -834,33 +844,38 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             showUnavailableMessage()
             return
         }
-        when (command.type) {
-            KeyCommandTypes.INPUT -> handleTextInput(command.value.orEmpty(), command.fallbackValue)
-            KeyCommandTypes.DIRECT_INPUT -> commitDirect(command.value.orEmpty())
-            KeyCommandTypes.RIME_INPUT -> handleRimeInput(command.value.orEmpty(), command.fallbackValue)
-            KeyCommandTypes.BACKSPACE -> handleBackspace()
-            KeyCommandTypes.BACKSPACE_GESTURE -> handleBackspaceGesture(command.value.orEmpty(), command.fallbackValue)
-            KeyCommandTypes.ENTER -> handleEnter()
-            KeyCommandTypes.SPACE -> handleSpace()
-            KeyCommandTypes.SHIFT -> keyboardView?.toggleShift()
-            KeyCommandTypes.MODE -> handleMode(command.value)
-            KeyCommandTypes.OPEN_PAGE -> openAppPage(command.value)
-            KeyCommandTypes.KEYBOARD_PICKER -> showKeyboardPicker()
-            KeyCommandTypes.NEXT_INPUT_METHOD -> switchToNextKeyboard()
-            KeyCommandTypes.KEYBOARD_MODE -> keyboardView?.setKeyboardLayer(command.value)
-            KeyCommandTypes.NEXT_PAGE -> applyState(engine.changePage(backward = false))
-            KeyCommandTypes.PREVIOUS_PAGE -> applyState(engine.changePage(backward = true))
-            KeyCommandTypes.RESET -> applyState(engine.reset())
-            KeyCommandTypes.RIME_MENU -> openRimeMenu()
-            KeyCommandTypes.RIME_SCHEMA -> selectRimeSchema(command.value.orEmpty())
-            KeyCommandTypes.RIME_OPTION -> setRimeOption(
-                command.value.orEmpty(),
-                command.fallbackValue,
-            )
-            KeyCommandTypes.EDIT -> handleEditAction(command.value.orEmpty(), command.fallbackValue)
-            KeyCommandTypes.ONE_HANDED -> toggleOneHandedKeyboard()
-            KeyCommandTypes.FLOATING -> toggleFloatingKeyboard()
-            KeyCommandTypes.PANEL -> Unit
+        pendingKeystrokeStartNs = System.nanoTime()
+        try {
+            when (command.type) {
+                KeyCommandTypes.INPUT -> handleTextInput(command.value.orEmpty(), command.fallbackValue)
+                KeyCommandTypes.DIRECT_INPUT -> commitDirect(command.value.orEmpty())
+                KeyCommandTypes.RIME_INPUT -> handleRimeInput(command.value.orEmpty(), command.fallbackValue)
+                KeyCommandTypes.BACKSPACE -> handleBackspace()
+                KeyCommandTypes.BACKSPACE_GESTURE -> handleBackspaceGesture(command.value.orEmpty(), command.fallbackValue)
+                KeyCommandTypes.ENTER -> handleEnter()
+                KeyCommandTypes.SPACE -> handleSpace()
+                KeyCommandTypes.SHIFT -> keyboardView?.toggleShift()
+                KeyCommandTypes.MODE -> handleMode(command.value)
+                KeyCommandTypes.OPEN_PAGE -> openAppPage(command.value)
+                KeyCommandTypes.KEYBOARD_PICKER -> showKeyboardPicker()
+                KeyCommandTypes.NEXT_INPUT_METHOD -> switchToNextKeyboard()
+                KeyCommandTypes.KEYBOARD_MODE -> keyboardView?.setKeyboardLayer(command.value)
+                KeyCommandTypes.NEXT_PAGE -> applyState(engine.changePage(backward = false))
+                KeyCommandTypes.PREVIOUS_PAGE -> applyState(engine.changePage(backward = true))
+                KeyCommandTypes.RESET -> applyState(engine.reset())
+                KeyCommandTypes.RIME_MENU -> openRimeMenu()
+                KeyCommandTypes.RIME_SCHEMA -> selectRimeSchema(command.value.orEmpty())
+                KeyCommandTypes.RIME_OPTION -> setRimeOption(
+                    command.value.orEmpty(),
+                    command.fallbackValue,
+                )
+                KeyCommandTypes.EDIT -> handleEditAction(command.value.orEmpty(), command.fallbackValue)
+                KeyCommandTypes.ONE_HANDED -> toggleOneHandedKeyboard()
+                KeyCommandTypes.FLOATING -> toggleFloatingKeyboard()
+                KeyCommandTypes.PANEL -> Unit
+            }
+        } finally {
+            pendingKeystrokeStartNs = 0L
         }
     }
 
@@ -2457,6 +2472,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             keyboardView?.updateState(currentState)
         } finally {
             applyStateDurations.finish(started)
+            val keyStarted = pendingKeystrokeStartNs
+            pendingKeystrokeStartNs = 0L
+            if (keyStarted != 0L) {
+                runCatching {
+                    KeytaoNativeBridge.nativeLogKeystroke(KeytaoRuntimeLog.elapsedMs(keyStarted))
+                }
+            }
         }
     }
 
