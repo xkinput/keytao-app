@@ -5,6 +5,9 @@ name: IME regressions
     branches: [main]
     paths:
       - '.github/workflows/ime-regressions.yml'
+      - 'scripts/librime-versions.env'
+      - 'scripts/fetch-librime.sh'
+      - 'scripts/fetch-librime-windows.ps1'
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'

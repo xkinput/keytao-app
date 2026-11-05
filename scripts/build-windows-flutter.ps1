@@ -2,11 +2,16 @@ param(
     [ValidateSet("x64")]
     [string]$Arch = "x64",
     [string]$MakeNsis = "makensis.exe",
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$LibrimeVersion = $env:LIBRIME_VERSION
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$librimeVersions = ConvertFrom-StringData (Get-Content -LiteralPath (Join-Path $repoRoot "scripts\librime-versions.env") -Raw)
+if (-not $LibrimeVersion) {
+    $LibrimeVersion = $librimeVersions.LIBRIME_VERSION
+}
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw
 if ($manifest -notmatch '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(?<version>[^"\r\n]+)"') {
     throw "Missing workspace.package.version"
@@ -72,7 +77,7 @@ Push-Location $repoRoot
 try {
     # Separate processes prevent cross-architecture MSVC/RIME environment leaks.
     foreach ($imeArch in @("x86", "x64", "arm64")) {
-        $imeArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts\build-windows-ime.ps1", "-Arch", $imeArch)
+        $imeArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts\build-windows-ime.ps1", "-Arch", $imeArch, "-Version", $LibrimeVersion)
         if ($imeArch -ne "x64") { $imeArgs += "-SkipAppRuntime" }
         Invoke-Checked $powershell $imeArgs
     }

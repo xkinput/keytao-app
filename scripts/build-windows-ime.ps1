@@ -1,7 +1,7 @@
 param(
     [ValidateSet("native", "x64", "arm64", "x86")]
     [string]$Arch = "native",
-    [string]$Version = "latest",
+    [string]$Version = $env:LIBRIME_VERSION,
     [switch]$DebugBuild,
     [switch]$SkipAppRuntime
 )
@@ -9,6 +9,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSCommandPath) ".."))
+$librimeVersions = ConvertFrom-StringData (Get-Content -LiteralPath (Join-Path $repoRoot "scripts\librime-versions.env") -Raw)
+if (-not $Version) {
+    $Version = $librimeVersions.LIBRIME_VERSION
+}
 
 function Add-PathIfExists([string]$Path) {
     if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -198,6 +202,13 @@ $needsFetch = -not (Test-Path (Join-Path $vendorDir "include\rime_api.h")) -or
     -not (Test-Path (Join-Path $vendorDir "librime-features.txt")) -or
     -not (Test-Path (Join-Path $vendorDir "rime-data\default.yaml")) -or
     -not (Test-Path $envFile)
+
+if (-not $needsFetch) {
+    $features = Get-Content -LiteralPath (Join-Path $vendorDir "librime-features.txt") -Raw
+    $cachedVersion = if ($features -match '(?m)^librime=([^\r\n]+)\r?$') { $Matches[1] } else { "" }
+    $needsFetch = $Version -eq "latest" -or
+        ($cachedVersion -replace '^v', '') -ne ($Version -replace '^v', '')
+}
 
 if ($needsFetch) {
     & (Join-Path $repoRoot "scripts\fetch-librime-windows.ps1") -Arch $Arch -Version $Version -Destination $vendorDir

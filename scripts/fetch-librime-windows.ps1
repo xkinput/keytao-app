@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "latest",
+    [string]$Version = $env:LIBRIME_VERSION,
     [string]$Arch = "x64",
     [ValidateSet("msvc", "clang")]
     [string]$Toolset = "msvc",
@@ -103,6 +103,10 @@ function Find-PluginRefInVersionInfo([string]$Path, [string]$Plugin) {
 }
 
 $repoRoot = Resolve-RepoRoot
+$librimeVersions = ConvertFrom-StringData (Get-Content -LiteralPath (Join-Path $repoRoot "scripts\librime-versions.env") -Raw)
+if (-not $Version) {
+    $Version = $librimeVersions.LIBRIME_VERSION
+}
 if ($Arch -in @("arm", "aarch64")) {
     $Arch = "arm64"
 }

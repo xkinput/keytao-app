@@ -6,6 +6,7 @@ export COPYFILE_DISABLE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LIBRIME_VERSION="${LIBRIME_VERSION:-$(source "$WORKSPACE_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}"
 BUILD_DIR="${KEYTAO_MACOS_BUILD_DIR:-$SCRIPT_DIR/build}"
 PROFILE="release"
 BUILD_PKG=1
@@ -151,10 +152,12 @@ if { [ -z "${RIME_INCLUDE_DIR:-}" ] || [ -z "${RIME_LIB_DIR:-}" ]; } &&
     { [ ! -f "$VENDOR_ENV" ] ||
         [ ! -f "$VENDOR_DIR/include/rime_api.h" ] ||
         [ ! -e "$VENDOR_DIR/lib/librime.1.dylib" ] ||
-        [ ! -f "$VENDOR_DIR/rime-data/default.yaml" ]; }; then
+        [ ! -f "$VENDOR_DIR/rime-data/default.yaml" ] ||
+        [ "$LIBRIME_VERSION" = latest ] ||
+        ! grep -Fqx "version=$LIBRIME_VERSION" "$VENDOR_DIR/librime-release.txt" 2>/dev/null; }; then
     "$WORKSPACE_DIR/scripts/fetch-librime.sh" \
         --platform macos \
-        --version "${LIBRIME_VERSION:-latest}" \
+        --version "$LIBRIME_VERSION" \
         --destination "$VENDOR_DIR"
 fi
 

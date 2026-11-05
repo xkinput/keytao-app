@@ -7,8 +7,9 @@ ANDROID_RIME_ROOT="$PROJECT_DIR/vendor/librime/android"
 ANDROID_APP_DIR="$PROJECT_DIR/flutter_app/android/app"
 ANDROID_ASSETS_DIR=""
 ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
-LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-1.17.0}"
-FCITX5_RIME_VERSION="${KEYTAO_ANDROID_FCITX5_RIME_VERSION:-latest}"
+LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}}"
+FCITX5_RIME_VERSION="${KEYTAO_ANDROID_FCITX5_RIME_VERSION:-${FCITX5_ANDROID_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$FCITX5_ANDROID_VERSION")}}"
+ANDROID_LIBRIME_EXPECTED="${ANDROID_LIBRIME_EXPECTED:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$ANDROID_LIBRIME_EXPECTED")}"
 CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
 
 usage() {
@@ -25,7 +26,7 @@ Commands:
 
   import-fcitx5-rime --abi ABI [--version VERSION] [--include-dir DIR] [--rime-data DIR]
       Download the Fcitx5 Android Rime plugin APK for ABI and import its pure
-      Android librime.so. VERSION defaults to latest. Headers default to
+      Android librime.so. VERSION defaults to FCITX5_ANDROID_VERSION from librime-versions.env. Headers default to
       vendor/librime/macos-universal/include,
       then a cached rime/librime source-header download.
 
@@ -226,9 +227,14 @@ copy_runtime_metadata_from_source() {
 ensure_android_metadata() {
     local destination="$1"
     local source="$2"
-    if [ ! -f "$destination/librime-release.txt" ]; then
-        write_librime_metadata "$destination" "$LIBRIME_HEADERS_VERSION" "$source"
+    local runtime_version
+    runtime_version="$(librime_runtime_version "$destination/lib/librime.so")"
+    if [ -f "$destination/librime-release.txt" ]; then
+        local existing_source
+        existing_source="$(sed -n 's/^source=//p' "$destination/librime-release.txt")"
+        source="${existing_source:-$source}"
     fi
+    write_librime_metadata "$destination" "$runtime_version" "$source"
     if [ ! -f "$destination/opencc-release.txt" ]; then
         for source_data in \
             "$PROJECT_DIR/vendor/librime/macos-universal/rime-data/opencc" \
@@ -238,6 +244,25 @@ ensure_android_metadata() {
             fi
         done
     fi
+}
+
+librime_runtime_version() {
+    local lib="$1"
+    local version
+    # shortcut: only librime 1.x is identified; replace this reader before a major upgrade.
+    version="$(strings "$lib" | sed -n -E '/^1\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$/p' | LC_ALL=C sort -u)"
+    [ -n "$version" ] && [[ "$version" != *$'\n'* ]] || die "cannot determine a unique librime 1.x runtime version: $lib"
+    [ "$version" = "$(normalize_version_tag "$ANDROID_LIBRIME_EXPECTED")" ] ||
+        die "Android librime runtime version mismatch: expected $ANDROID_LIBRIME_EXPECTED, found $version in $lib"
+    printf '%s\n' "$version"
+}
+
+validate_librime_metadata() {
+    local root="$1"
+    local version
+    version="$(librime_runtime_version "$root/lib/librime.so")"
+    grep -Fqx "version=$version" "$root/librime-release.txt" 2>/dev/null ||
+        die "librime-release.txt does not match runtime $version in $root; re-import the Android runtime"
 }
 
 contains_elf_string() {
@@ -259,6 +284,7 @@ contains_dynamic_symbol() {
 validate_librime_so() {
     local lib="$1"
     [ -f "$lib" ] || die "missing librime.so: $lib"
+    librime_runtime_version "$lib" >/dev/null
     if contains_dynamic_symbol "$lib" '(^|[[:space:]])(rime_get_api|rime_get_api_stdbool)($|[[:space:]])' ||
         contains_elf_string "$lib" '(^|[^A-Za-z0-9_])rime_get_api([^A-Za-z0-9_]|$)'; then
         :
@@ -421,7 +447,8 @@ find_child_dir_with_file() {
 
 default_include_dir() {
     local include_dir="$PROJECT_DIR/vendor/librime/macos-universal/include"
-    if [ -f "$include_dir/rime_api.h" ]; then
+    if [ -f "$include_dir/rime_api.h" ] && [ "$LIBRIME_HEADERS_VERSION" != latest ] &&
+        grep -Fqx "version=$LIBRIME_HEADERS_VERSION" "$PROJECT_DIR/vendor/librime/macos-universal/librime-release.txt" 2>/dev/null; then
         printf '%s\n' "$include_dir"
         return 0
     fi
@@ -429,13 +456,22 @@ default_include_dir() {
 }
 
 fetch_default_include_dir() {
-    local include_dir="$PROJECT_DIR/.cache/android-librime/headers/$LIBRIME_HEADERS_VERSION/include"
+    local version="$LIBRIME_HEADERS_VERSION"
+    if [ "$version" = latest ]; then
+        version="$(curl -fsSL "${CURL_RETRY_ARGS[@]}" -H "User-Agent: keytao-android-runtime" \
+            https://api.github.com/repos/rime/librime/releases/latest | python3 -c 'import json, sys
+release = json.load(sys.stdin)
+if release.get("prerelease") or release.get("draft") or release.get("tag_name") in (None, "", "latest"):
+    sys.exit("expected a stable librime release")
+print(release["tag_name"])')"
+    fi
+    local include_dir="$PROJECT_DIR/.cache/android-librime/headers/$version/include"
     local header
     mkdir -p "$include_dir"
     for header in rime_api.h rime_api_deprecated.h rime_api_stdbool.h rime_levers_api.h; do
         if [ ! -f "$include_dir/$header" ]; then
-            local url="https://raw.githubusercontent.com/rime/librime/$LIBRIME_HEADERS_VERSION/src/$header"
-            note "Downloading librime header $header from rime/librime $LIBRIME_HEADERS_VERSION" >&2
+            local url="https://raw.githubusercontent.com/rime/librime/$version/src/$header"
+            note "Downloading librime header $header from rime/librime $version" >&2
             local tmp="$include_dir/$header.tmp"
             rm -f "$tmp"
             if ! curl -fsSL "${CURL_RETRY_ARGS[@]}" \
@@ -514,6 +550,7 @@ verify_one() {
     [ -f "$root/lib/librime.so" ] || die "$abi is missing lib/librime.so"
     [ -f "$root/rime-data/default.yaml" ] || die "$abi is missing rime-data/default.yaml"
     validate_runtime_lib_dir "$root/lib" "$abi"
+    validate_librime_metadata "$root"
     ensure_rime_data_closure "$root/rime-data"
 }
 
@@ -828,12 +865,15 @@ sync_assets() {
         fi
         die "no Android rime-data found under $ANDROID_RIME_ROOT"
     fi
+    local source_root
+    source_root="$(metadata_root_for_data_dir "$source_data/opencc")"
+    if [ -f "$source_root/librime-release.txt" ]; then
+        validate_librime_metadata "$source_root"
+    fi
     local assets_dir="${ANDROID_ASSETS_DIR:-$ANDROID_APP_DIR/src/main/assets}"
     mkdir -p "$assets_dir"
     rm -rf "$assets_dir/keytao-rime-data"
     copy_dir_contents "$source_data" "$assets_dir/keytao-rime-data"
-    local source_root
-    source_root="$(metadata_root_for_data_dir "$source_data/opencc")"
     for metadata_file in librime-release.txt opencc-release.txt; do
         if [ -f "$source_root/$metadata_file" ]; then
             cp "$source_root/$metadata_file" "$assets_dir/$metadata_file"

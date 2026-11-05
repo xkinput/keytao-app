@@ -11,6 +11,11 @@ name: Release
         required: false
         default: ''
         type: string
+      librime_version:
+        description: 'librime release for this pre-run (empty = scripts/librime-versions.env)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -21,6 +26,7 @@ jobs:
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       rust-toolchain: ${{ steps.metadata.outputs.rust-toolchain }}
+      librime-version: ${{ steps.librime.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve version and Rust toolchain
@@ -44,6 +50,25 @@ jobs:
             core.setOutput('version', version)
             core.setOutput('rust-toolchain', rust)
 
+      - name: Resolve librime version
+        id: librime
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LIBRIME_VERSION: ${{ inputs.librime_version }}
+        run: |
+          set -euo pipefail
+          source scripts/librime-versions.env
+          version="$LIBRIME_VERSION"
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ -n "$REQUESTED_LIBRIME_VERSION" ]; then
+            version="$REQUESTED_LIBRIME_VERSION"
+          fi
+          if ! [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Invalid librime release tag"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   # Repackage the already-published deb pinned in flake.nix, only during pre-runs.
   build-nix:
     if: github.event_name == 'workflow_dispatch'
@@ -61,6 +86,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
+      LIBRIME_VERSION: ${{ needs.prepare.outputs.librime-version }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
@@ -201,8 +227,8 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
+      LIBRIME_VERSION: ${{ needs.prepare.outputs.librime-version }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION: '1.17.0'
     steps:
       - uses: actions/checkout@v4
 
@@ -311,6 +337,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
+      LIBRIME_VERSION: ${{ needs.prepare.outputs.librime-version }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4

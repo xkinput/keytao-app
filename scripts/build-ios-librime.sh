@@ -3,12 +3,13 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIBRIME_VERSION="${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}"
 CACHE_ROOT="${KEYTAO_IOS_LIBRIME_CACHE:-$PROJECT_DIR/.cache/ios-librime}"
 BUILD_ROOT="${KEYTAO_IOS_LIBRIME_BUILD_ROOT:-$PROJECT_DIR/target/ios-librime-build}"
 LIBRIME_URL="${KEYTAO_IOS_LIBRIME_URL:-https://github.com/rime/librime.git}"
-LIBRIME_REF="${KEYTAO_IOS_LIBRIME_REF:-33e78140250125871856cdc5b42ddc6a5fcd3cd4}"
+LIBRIME_REF="${KEYTAO_IOS_LIBRIME_REF:-$LIBRIME_VERSION}"
 LIBRIME_LUA_URL="${KEYTAO_IOS_LIBRIME_LUA_URL:-https://github.com/hchunhui/librime-lua.git}"
-LIBRIME_LUA_REF="${KEYTAO_IOS_LIBRIME_LUA_REF:-6da5d6cedb853380ed1b5b9b6979cb1a9c028353}"
+LIBRIME_LUA_REF="${KEYTAO_IOS_LIBRIME_LUA_REF:-${LIBRIME_LUA_REF:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_LUA_REF")}}"
 LIBRIME_LUA_THIRDPARTY_REF="${KEYTAO_IOS_LIBRIME_LUA_THIRDPARTY_REF:-thirdparty}"
 BOOST_VERSION="${KEYTAO_IOS_BOOST_VERSION:-1.84.0}"
 CMAKE_VERSION="${KEYTAO_IOS_CMAKE_VERSION:-4.3.3}"
@@ -27,8 +28,8 @@ Options:
   -h, --help            Show this help.
 
 Environment:
-  KEYTAO_IOS_LIBRIME_REF        librime git ref. Defaults to the 1.17.0 tag commit.
-  KEYTAO_IOS_LIBRIME_LUA_REF    librime-lua git ref. Defaults to the ref verified with librime 1.17.0.
+  KEYTAO_IOS_LIBRIME_REF        librime git ref. Defaults to LIBRIME_VERSION from librime-versions.env.
+  KEYTAO_IOS_LIBRIME_LUA_REF    librime-lua git ref. Defaults to LIBRIME_LUA_REF from librime-versions.env.
   KEYTAO_IOS_BOOST_VERSION      Boost header version. Defaults to $BOOST_VERSION.
   KEYTAO_IOS_CMAKE_VERSION      Downloaded CMake version if cmake is missing.
   KEYTAO_IOS_DEPLOYMENT_TARGET  iOS deployment target. Defaults to $IOS_DEPLOYMENT_TARGET.
@@ -376,6 +377,16 @@ done
 
 if ! command -v xcrun >/dev/null 2>&1; then
     die "xcrun is required to build iOS librime"
+fi
+
+if [ "$LIBRIME_REF" = latest ]; then
+    LIBRIME_REF="$(curl -fsSL --retry 3 -H "User-Agent: keytao-ios-librime" \
+        https://api.github.com/repos/rime/librime/releases/latest | \
+        python3 -c 'import json, sys
+release = json.load(sys.stdin)
+if release.get("prerelease") or release.get("draft") or release.get("tag_name") in (None, "", "latest"):
+    sys.exit("expected a stable librime release")
+print(release["tag_name"])')"
 fi
 
 selected_targets=()

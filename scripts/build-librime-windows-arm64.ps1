@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "latest",
+    [string]$Version = $env:LIBRIME_VERSION,
     [string]$Destination = "",
     [string]$LuaPluginRef = ""
 )
@@ -94,6 +94,10 @@ function Find-LuaPluginRefInVersionInfo([string]$Path) {
 }
 
 $repoRoot = Resolve-RepoRoot
+$librimeVersions = ConvertFrom-StringData (Get-Content -LiteralPath (Join-Path $repoRoot "scripts\librime-versions.env") -Raw)
+if (-not $Version) {
+    $Version = $librimeVersions.LIBRIME_VERSION
+}
 $resolvedVersion = if ($Version -eq "latest") {
     (Invoke-GitHubApi "https://api.github.com/repos/rime/librime/releases/latest").tag_name
 } else {
@@ -112,6 +116,9 @@ if (-not $LuaPluginRef) {
     $LuaPluginRef = $env:KEYTAO_LIBRIME_LUA_REF
 }
 if (-not $LuaPluginRef) {
+    $LuaPluginRef = $env:LIBRIME_LUA_REF
+}
+if (-not $LuaPluginRef) {
     $vendorRoot = Split-Path -Parent $Destination
     foreach ($versionInfo in @(
         (Join-Path $vendorRoot "windows-x64\librime-version-info.txt"),
@@ -124,7 +131,7 @@ if (-not $LuaPluginRef) {
     }
 }
 if (-not $LuaPluginRef) {
-    $LuaPluginRef = (Invoke-GitHubApi "https://api.github.com/repos/hchunhui/librime-lua/commits/master").sha
+    $LuaPluginRef = $librimeVersions.LIBRIME_LUA_REF
 }
 if (-not $LuaPluginRef) {
     throw "Unable to resolve a librime-lua revision for the ARM64 build."

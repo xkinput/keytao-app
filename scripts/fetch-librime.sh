@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${LIBRIME_VERSION:-latest}"
+VERSION="${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}"
 DESTINATION_ROOT="$PROJECT_DIR/vendor/librime"
 PLATFORM_DESTINATION=""
 WINDOWS_ARCH="x64"
@@ -11,7 +11,7 @@ WINDOWS_TOOLSET="msvc"
 USER_AGENT="keytao-librime-fetch"
 CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
 PLATFORMS=()
-OPENCC_PORTABLE_VERSION="${OPENCC_PORTABLE_VERSION:-latest}"
+OPENCC_PORTABLE_VERSION="${OPENCC_PORTABLE_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$OPENCC_PORTABLE_VERSION")}"
 
 usage() {
     cat <<EOF

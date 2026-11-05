@@ -1,0 +1,103 @@
+name: Propose librime upgrades
+
+'on':
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: librime-update
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Propose stable release pins and start pre-runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/librime-versions.env
+          stable_tag() {
+            gh api "repos/$1/releases/latest" --jq \
+              'if .prerelease or .draft or .tag_name == "latest" then error("Expected a stable release") else .tag_name end'
+          }
+          librime="$(stable_tag rime/librime)"
+          fcitx="$(stable_tag fcitx5-android/fcitx5-android)"
+          for version in "$librime" "$fcitx"; do
+            if ! [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Unexpected stable release tag: $version"
+              exit 1
+            fi
+          done
+          if [ "$librime" = "$LIBRIME_VERSION" ] && [ "$fcitx" = "$FCITX5_ANDROID_VERSION" ]; then
+            echo "Stable release pins are current"
+            exit 0
+          fi
+
+          branch="automation/librime-$librime-fcitx5-$fcitx"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            git fetch origin "refs/heads/$branch"
+            git switch -c "$branch" FETCH_HEAD
+            # Reuse an existing proposal without overwriting review edits.
+            source scripts/librime-versions.env
+            if [ "$LIBRIME_VERSION" != "$librime" ] || [ "$FCITX5_ANDROID_VERSION" != "$fcitx" ]; then
+              echo "::error::Existing proposal pins differ; review the branch manually"
+              exit 1
+            fi
+          else
+            git switch -c "$branch"
+            LIBRIME_VERSION="$librime" FCITX5_ANDROID_VERSION="$fcitx" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+
+          path = Path('scripts/librime-versions.env')
+          text = path.read_text()
+          for key in ('LIBRIME_VERSION', 'FCITX5_ANDROID_VERSION'):
+              text, count = re.subn(rf'^{key}=.*$', f'{key}={os.environ[key]}', text, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one {key} pin')
+          path.write_text(text)
+          PY
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add scripts/librime-versions.env
+            git commit -m "build: propose librime $librime and fcitx5-android $fcitx"
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          pr="$(gh pr list --base "$BASE_BRANCH" --head "$branch" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$pr" ]; then
+            cat > "$RUNNER_TEMP/librime-update.md" <<EOF
+          Proposes stable releases from rime/librime and fcitx5-android/fcitx5-android:
+
+          - LIBRIME_VERSION=$librime
+          - FCITX5_ANDROID_VERSION=$fcitx
+
+          ANDROID_LIBRIME_EXPECTED remains $ANDROID_LIBRIME_EXPECTED. This job cannot determine the librime version embedded in the plugin APK from release metadata. Verify the actual runtime and update this pin manually if needed; a mismatch will fail the Android pre-run.
+
+          Release and IME regression pre-runs are explicitly dispatched on this branch because GITHUB_TOKEN-created PRs do not trigger workflows. Review their results before merging. This job never merges, tags, or publishes releases.
+          EOF
+            gh pr create --base "$BASE_BRANCH" --head "$branch" \
+              --title "build: update librime to $librime and fcitx5-android to $fcitx" \
+              --body-file "$RUNNER_TEMP/librime-update.md"
+          else
+            echo "Existing proposal: $pr"
+          fi
+          gh workflow run release.yml --ref "$branch"
+          gh workflow run ime-regressions.yml --ref "$branch"
