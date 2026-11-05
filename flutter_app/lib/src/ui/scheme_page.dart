@@ -43,7 +43,7 @@ class SchemePage extends StatelessWidget {
                   c.installButtonLabel,
                   primary: true,
                   icon: FLucideIcons.download,
-                  onPress: c.canInstall ? c.install : null,
+                  onPress: c.canInstall ? c.installAndDeploy : null,
                 ),
                 ActionButton(
                   AppStrings.deploy,

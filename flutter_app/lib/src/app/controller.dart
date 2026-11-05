@@ -860,6 +860,13 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
+  Future<bool> installAndDeploy() async {
+    if (!await install()) return false;
+    // Deploying clears the verification list, so keep failures on screen.
+    if (verification.any((entry) => !entry.ok)) return false;
+    return deploy();
+  }
+
   Future<bool> install() {
     if (!canInstall) return Future.value(false);
     final url = downloadUrl!;
