@@ -50,6 +50,32 @@ object KeytaoNativeBridge {
             ?.takeIf { it.isNotBlank() }
     }
 
+    fun prepareRimeLuaInstall(
+        localContent: String?,
+        packageContent: String?,
+        packageLuaFilenames: Set<String>,
+    ): RimeLuaMergeResult? {
+        check(loaded) { "KeyTao native bridge is unavailable" }
+        val json = runCatching {
+            nativePrepareRimeLuaInstall(
+                localContent,
+                packageContent,
+                JSONArray(packageLuaFilenames.toList()).toString(),
+            )
+        }.getOrElse { throw IllegalStateException("Failed to prepare rime.lua installation", it) }
+            ?: error("Failed to prepare rime.lua installation")
+        val result = JSONObject(json)
+        if (result.isNull("mergedContent")) return null
+        val renames = result.getJSONArray("renames")
+        return RimeLuaMergeResult(
+            result.getString("mergedContent"),
+            (0 until renames.length()).map { index ->
+                val pair = renames.getJSONArray(index)
+                pair.getString(0) to pair.getString(1)
+            },
+        )
+    }
+
     fun resolveKeyboardJson(
         defaultKeyboardPath: String?,
         userKeyboardPath: String?,
@@ -297,6 +323,12 @@ object KeytaoNativeBridge {
     external fun nativeWriteThemeUi(path: String, colorScheme: String, accentHex: String?): Boolean
 
     external fun nativeDefaultKeyboardYaml(): String
+
+    external fun nativePrepareRimeLuaInstall(
+        localContent: String?,
+        packageContent: String?,
+        packageLuaFilenamesJson: String,
+    ): String?
 
     external fun nativeResolveKeyboardJson(
         defaultKeyboardPath: String?,

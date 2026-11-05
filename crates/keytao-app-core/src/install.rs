@@ -20,6 +20,25 @@ pub(crate) fn merge_rime_lua(
     keytao_core::merge_rime_lua_content(Some(local_content), zip_content, zip_lua_filenames)
 }
 
+pub fn prepare_rime_lua_install(
+    local_content: Option<&str>,
+    package_content: Option<&str>,
+    package_lua_filenames: &HashSet<String>,
+) -> (Option<String>, Vec<(String, String)>) {
+    if let Some(package) = package_content {
+        let (merged, renames) = match local_content {
+            Some(local) => merge_rime_lua(local, package, package_lua_filenames),
+            None => (package.to_string(), Vec::new()),
+        };
+        return (Some(merged), renames);
+    }
+    let cleaned = local_content.and_then(|local| {
+        let cleaned = keytao_core::strip_rime_lua_gc_tuning(local);
+        (cleaned != local).then_some(cleaned)
+    });
+    (cleaned, Vec::new())
+}
+
 pub fn merge_default_custom(
     existing: Option<&str>,
     zip_content: &str,
@@ -372,30 +391,23 @@ pub async fn smart_install(
                 };
 
             // Merge rime.lua
-            let (rl_path, rl_content, renamed) = if let (Some(path), Some(zip_rl)) =
-                (zip_rime_lua_path, zip_rime_lua_content)
-            {
-                if let Ok(local_rl) = std::fs::read_to_string(dest.join("rime.lua")) {
-                    let (merged, renames) = merge_rime_lua(&local_rl, &zip_rl, &zip_lua_filenames);
-                    // Read local lua files that need renaming before zip overwrites them
-                    let renamed_contents: Vec<(String, Vec<u8>)> = renames
-                        .iter()
-                        .filter_map(|(old, new)| {
-                            let local_file = dest.join("lua").join(format!("{}.lua", old));
-                            std::fs::read(&local_file)
-                                .ok()
-                                .map(|bytes| (new.clone(), bytes))
-                        })
-                        .collect();
-                    (Some(path), Some(merged), renamed_contents)
-                } else {
-                    (Some(path), Some(zip_rl), Vec::new())
-                }
-            } else {
-                (None, None, Vec::new())
-            };
+            let local_rl = std::fs::read_to_string(dest.join("rime.lua")).ok();
+            let (rl_content, renames) = prepare_rime_lua_install(
+                local_rl.as_deref(),
+                zip_rime_lua_content.as_deref(),
+                &zip_lua_filenames,
+            );
+            // Read local Lua files before extraction overwrites them.
+            let renamed = renames
+                .iter()
+                .filter_map(|(old, new)| {
+                    std::fs::read(dest.join("lua").join(format!("{old}.lua")))
+                        .ok()
+                        .map(|bytes| (new.clone(), bytes))
+                })
+                .collect::<Vec<_>>();
 
-            (dc_path, dc_content, schemas, rl_path, rl_content, renamed)
+            (dc_path, dc_content, schemas, zip_rime_lua_path, rl_content, renamed)
         };
 
         // Second pass: smart extraction
@@ -465,6 +477,13 @@ pub async fn smart_install(
                 percent,
                 &format!("正在安装... {}/{}: {}", i + 1, total, fname),
             );
+        }
+
+        if merged_rime_lua_path.is_none() {
+            if let Some(content) = &merged_rime_lua_content {
+                let tag = write_file_force(&dest.join("rime.lua"), content.as_bytes())?;
+                logs.push(format!("[MERGED]{tag} rime.lua"));
+            }
         }
 
         // Write renamed user lua files (saved before zip overwrote them)

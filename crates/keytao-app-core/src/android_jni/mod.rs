@@ -50,7 +50,7 @@ fn optional_jni_raw_text(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<Str
         return None;
     }
     let value = env.get_string(&value).ok()?;
-    Some(value.to_string_lossy().into_owned())
+    Some(String::from(value))
 }
 
 #[cfg(target_os = "android")]
@@ -554,6 +554,48 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDefault
 ) -> jstring {
     android_jni_guard("nativeDefaultKeyboardYaml", std::ptr::null_mut(), || {
         jni_string(&mut env, keytao_theme::default_keyboard_yaml())
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareRimeLuaInstall(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    local_content: JString<'_>,
+    package_content: JString<'_>,
+    package_lua_filenames_json: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativePrepareRimeLuaInstall", std::ptr::null_mut(), || {
+        let has_local = !local_content.is_null();
+        let has_package = !package_content.is_null();
+        let local_content = optional_jni_raw_text(&mut env, local_content);
+        let package_content = optional_jni_raw_text(&mut env, package_content);
+        if (has_local && local_content.is_none()) || (has_package && package_content.is_none()) {
+            return std::ptr::null_mut();
+        }
+        let Some(filenames_json) = optional_jni_raw_text(&mut env, package_lua_filenames_json) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(filenames) = serde_json::from_str::<std::collections::HashSet<String>>(&filenames_json)
+        else {
+            return std::ptr::null_mut();
+        };
+        let (merged_content, renames) = if let Some(package) = package_content.as_deref() {
+            let (merged, renames) = keytao_core::merge_rime_lua_content_preserving_local_lines(
+                local_content.as_deref(),
+                package,
+                &filenames,
+            );
+            (Some(merged), renames)
+        } else {
+            crate::install::prepare_rime_lua_install(local_content.as_deref(), None, &filenames)
+        };
+        let json = serde_json::json!({
+            "mergedContent": merged_content,
+            "renames": renames,
+        });
+        jni_string(&mut env, &json.to_string())
     })
 }
 

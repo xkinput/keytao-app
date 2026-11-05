@@ -407,6 +407,31 @@ fn rime_log_dir(user_data_dir: &Path) -> PathBuf {
     user_data_dir.join("log")
 }
 
+fn prune_rime_logs(log_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let mut logs: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if ![".log.INFO.", ".log.WARNING.", ".log.ERROR.", ".log.FATAL."]
+                .iter()
+                .any(|marker| name.contains(marker))
+                || !entry.file_type().ok()?.is_file()
+            {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, entry.path()))
+        })
+        .collect();
+    logs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, path) in logs.into_iter().skip(20) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -1160,7 +1185,6 @@ mod desktop {
         let distribution_name = CString::new("KeyTao").unwrap();
         let distribution_code_name = CString::new("keytao").unwrap();
         let distribution_version = CString::new("1.0.0").unwrap();
-        let app_name = CString::new("rime.keytao").unwrap();
         let module_default = CString::new("default").unwrap();
         let module_lua = CString::new("lua").unwrap();
         let mut modules = [
@@ -1178,7 +1202,9 @@ mod desktop {
         traits.distribution_name = distribution_name.as_ptr();
         traits.distribution_code_name = distribution_code_name.as_ptr();
         traits.distribution_version = distribution_version.as_ptr();
-        traits.app_name = app_name.as_ptr();
+        // glog retains this pointer after setup returns.
+        traits.app_name = c"rime.keytao".as_ptr();
+        traits.min_log_level = 1;
         traits.modules = if deployer_only {
             std::ptr::null_mut()
         } else {
@@ -1196,6 +1222,7 @@ mod desktop {
                 let mut setup_complete = lock_ignore_poison(&RIME_SETUP_COMPLETE);
                 if !*setup_complete {
                     if let Some(setup) = (*api).setup {
+                        prune_rime_logs(&configured_log_dir);
                         setup(&mut traits);
                         *lock_ignore_poison(&RIME_SETUP_LOG_DIR) = Some(configured_log_dir);
                     }
@@ -5096,14 +5123,177 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
     Ok(changed)
 }
 
+/// Remove standalone, single-line local GC tuning without changing other lines.
+pub fn strip_rime_lua_gc_tuning(content: &str) -> String {
+    fn lua_string(text: &str) -> Option<(&str, usize)> {
+        let first = *text.as_bytes().first()?;
+        if matches!(first, b'\'' | b'"') {
+            let mut escaped = false;
+            for (index, byte) in text.bytes().enumerate().skip(1) {
+                if !escaped && byte == first {
+                    return Some((&text[1..index], index + 1));
+                }
+                escaped = !escaped && byte == b'\\';
+            }
+        } else if first == b'[' {
+            let equals = text[1..].bytes().take_while(|&byte| byte == b'=').count();
+            let start = equals + 2;
+            if text.as_bytes().get(start - 1) == Some(&b'[') {
+                let closing = format!("]{}]", "=".repeat(equals));
+                let end = start + text[start..].find(&closing)?;
+                let value = &text[start..end];
+                let value = value
+                    .strip_prefix("\r\n")
+                    .or_else(|| value.strip_prefix("\n\r"))
+                    .or_else(|| value.strip_prefix(['\n', '\r']))
+                    .unwrap_or(value);
+                return Some((value, end + closing.len()));
+            }
+        }
+        None
+    }
+
+    fn comment_length(text: &str) -> Option<usize> {
+        let comment = text.strip_prefix("--")?;
+        Some(
+            lua_string(comment)
+                .filter(|_| comment.starts_with('['))
+                .map(|(_, length)| length + 2)
+                .unwrap_or_else(|| text.find('\n').unwrap_or(text.len())),
+        )
+    }
+
+    let mut cleaned = String::with_capacity(content.len());
+    let mut kept_start = 0;
+    let mut offset = 0;
+    let mut previous_token = "";
+    let mut delimiter_depth = 0usize;
+    while offset < content.len() {
+        let rest = &content[offset..];
+        if let Some(length) = comment_length(rest) {
+            offset += length;
+            continue;
+        }
+        if let Some((_, length)) = lua_string(rest) {
+            previous_token = &rest[..length];
+            offset += length;
+            continue;
+        }
+        let first = rest.chars().next().unwrap();
+        if first.is_alphabetic() || first == '_' {
+            let end = rest
+                .find(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                .unwrap_or(rest.len());
+            let (name, after) = rest.split_at(end);
+            if name == "collectgarbage" {
+                let line_end = offset + rest.find('\n').unwrap_or(rest.len());
+                let after = after[..line_end - offset - end].trim_start();
+                let argument = after.strip_prefix('(').unwrap_or(after).trim_start();
+                if let Some(("setpause" | "setstepmul", length)) = lua_string(argument) {
+                    let mut call_end = line_end - argument.len() + length;
+                    let mut complete = true;
+                    if after.starts_with('(') {
+                        let mut depth = 1;
+                        while call_end < line_end && depth > 0 {
+                            let tail = &content[call_end..line_end];
+                            if let Some(length) = comment_length(tail) {
+                                call_end += length;
+                                continue;
+                            }
+                            if let Some((_, length)) = lua_string(tail) {
+                                call_end += length;
+                                continue;
+                            }
+                            let ch = tail.chars().next().unwrap();
+                            match ch {
+                                '(' => depth += 1,
+                                ')' => depth -= 1,
+                                _ => {}
+                            }
+                            call_end += ch.len_utf8();
+                        }
+                        complete = depth == 0;
+                    }
+                    let start = content[..offset].rfind('\n').map_or(0, |index| index + 1);
+                    let suffix = content[call_end..line_end].trim();
+                    let terminated = suffix.starts_with(';');
+                    let suffix = suffix.strip_prefix(';').unwrap_or(suffix).trim_start();
+                    let standalone_suffix = suffix.is_empty()
+                        || suffix.strip_prefix("--").is_some_and(|comment| {
+                            !comment.starts_with('[')
+                                || lua_string(comment)
+                                    .is_some_and(|(_, length)| length == comment.len())
+                        });
+                    let mut next = content[line_end..].trim_start();
+                    while let Some(length) = comment_length(next) {
+                        next = next[length..].trim_start();
+                    }
+                    let continuation = delimiter_depth > 0
+                        || (!terminated && next.starts_with(['.', ':', '[', '(', '{', '\'', '"']))
+                        || matches!(
+                            previous_token,
+                            "=" | "." | ":" | "," | "+" | "-" | "*" | "/" | "%" | "^"
+                                | "<" | ">" | "~" | "#" | "&" | "|" | "and" | "or" | "not"
+                                | "return" | "local" | "function"
+                                | "if" | "elseif" | "while" | "until" | "in"
+                        );
+                    if complete
+                        && !continuation
+                        && content[start..offset].trim().is_empty()
+                        && standalone_suffix
+                    {
+                        let end = line_end + usize::from(line_end < content.len());
+                        cleaned.push_str(&content[kept_start..start]);
+                        kept_start = end;
+                        offset = end;
+                        continue;
+                    }
+                }
+            }
+            previous_token = name;
+            offset += end;
+        } else {
+            if !first.is_whitespace() {
+                previous_token = &rest[..first.len_utf8()];
+                match first {
+                    '(' | '[' | '{' => delimiter_depth += 1,
+                    ')' | ']' | '}' => delimiter_depth = delimiter_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            offset += first.len_utf8();
+        }
+    }
+    cleaned.push_str(&content[kept_start..]);
+    cleaned
+}
+
 pub fn merge_rime_lua_content(
     local_content: Option<&str>,
     package_content: &str,
     package_lua_filenames: &HashSet<String>,
 ) -> (String, Vec<(String, String)>) {
+    merge_rime_lua_content_impl(local_content, package_content, package_lua_filenames, false)
+}
+
+pub fn merge_rime_lua_content_preserving_local_lines(
+    local_content: Option<&str>,
+    package_content: &str,
+    package_lua_filenames: &HashSet<String>,
+) -> (String, Vec<(String, String)>) {
+    merge_rime_lua_content_impl(local_content, package_content, package_lua_filenames, true)
+}
+
+fn merge_rime_lua_content_impl(
+    local_content: Option<&str>,
+    package_content: &str,
+    package_lua_filenames: &HashSet<String>,
+    preserve_local_lines: bool,
+) -> (String, Vec<(String, String)>) {
     let Some(local_content) = local_content else {
         return (package_content.to_string(), Vec::new());
     };
+    let local_content = strip_rime_lua_gc_tuning(local_content);
 
     let package_requires: HashSet<String> = parse_rime_lua_requires(package_content)
         .into_iter()
@@ -5120,6 +5310,9 @@ pub fn merge_rime_lua_content(
 
     for line in local_content.lines() {
         let t = line.trim();
+        if preserve_local_lines && (in_block_comment || t.is_empty() || t.starts_with("--")) {
+            extra_lines.push(line.to_string());
+        }
         if in_block_comment {
             if t.contains("--]]") {
                 in_block_comment = false;
@@ -5150,7 +5343,7 @@ pub fn merge_rime_lua_content(
             } else if seen_lines.insert(t.to_string()) {
                 extra_lines.push(line.to_string());
             }
-        } else if seen_lines.insert(t.to_string()) {
+        } else if preserve_local_lines || seen_lines.insert(t.to_string()) {
             extra_lines.push(line.to_string());
         }
     }
@@ -6037,8 +6230,152 @@ mod tests {
         );
         let package = "package_module = require(\"package_module\")\n";
         let (merged, _) = merge_rime_lua_content(Some(local), package, &HashSet::new());
-        assert_eq!(merged.matches("collectgarbage").count(), 1);
+        assert!(!merged.contains("collectgarbage"));
         assert_eq!(merged.matches("user_flag = true").count(), 1);
+    }
+
+    #[test]
+    fn merge_rime_lua_drops_local_gc_tuning_and_preserves_package_and_user_lines() {
+        let local = concat!(
+            "collectgarbage(\"setpause\", 50)\n",
+            " \tcollectgarbage \t( 'setstepmul' , 400 )\r\n",
+            "old_pause = collectgarbage([=[setpause]=], 50)\n",
+            "user_module = require('personal')\n",
+            "user_flag = true\n",
+            "collectgarbage('collect')\n",
+            "mycollectgarbage('setpause', 60)\n",
+            "message = 'collectgarbage(\"setpause\", 50)'\n",
+        );
+        let package = "collectgarbage('setpause', 150)\ncollectgarbage(\"setstepmul\", 200)\n";
+        let (merged, renames) = merge_rime_lua_content(Some(local), package, &HashSet::new());
+        assert_eq!(merged, format!("{package}{}", concat!(
+            "old_pause = collectgarbage([=[setpause]=], 50)\n",
+            "user_module = require('personal')\n",
+            "user_flag = true\n",
+            "collectgarbage('collect')\n",
+            "mycollectgarbage('setpause', 60)\n",
+            "message = 'collectgarbage(\"setpause\", 50)'\n",
+        )));
+        assert!(renames.is_empty());
+        assert_eq!(
+            merge_rime_lua_content(None, package, &HashSet::new()).0,
+            package
+        );
+    }
+
+    #[test]
+    fn android_merge_rime_lua_preserves_repeated_user_function_lines() {
+        let local = concat!(
+            "same = require('package')\n",
+            "custom = require('custom')\n",
+            "-- User functions\n\n",
+            "--[[\ncomment = require('ignored')\n--]]\n",
+            "function date_translator(input, seg)\n",
+            "  if input == 'date' then\n",
+            "    emit('😀 𠀀')\n",
+            "  end\n",
+            "end\n",
+            "function time_translator(input, seg)\n",
+            "  if input == 'time' then\n",
+            "    emit('😀 𠀀')\n",
+            "  end\n",
+            "end\n",
+        );
+        let package = "same = require('package')\nfunction package_function()\nend\n";
+        let files = HashSet::from(["custom.lua".to_string()]);
+        let (merged, renames) = super::merge_rime_lua_content_preserving_local_lines(
+            Some(local), package, &files,
+        );
+        let expected_local = local
+            .strip_prefix("same = require('package')\n")
+            .unwrap()
+            .replacen("require('custom')", "require('custom_user')", 1);
+        assert_eq!(merged, format!("{package}{expected_local}"));
+        assert_eq!(renames, vec![("custom".to_string(), "custom_user".to_string())]);
+    }
+
+    #[test]
+    fn strip_rime_lua_gc_tuning_preserves_nonstandalone_calls() {
+        for content in [
+            "collectgarbage('setpause', 50); user_module = require('personal')\n",
+            "local a = 1; collectgarbage('setpause', 50)\nprint(a)\n",
+            "if low then collectgarbage('setpause', 50)\n  foo()\nend\n",
+            "local old =\n  collectgarbage('setpause', 50)\nuser_flag = true\n",
+            "local old = -- Keep the return value\n  collectgarbage('setpause', 50)\n",
+            "return\n  collectgarbage('setpause', 50)\n",
+            "if\n  collectgarbage('setpause', 50)\nthen\n  foo()\nend\n",
+            "if false then\nelseif\n  collectgarbage('setpause', 50)\nthen\nend\n",
+            "while\n  collectgarbage('setpause', 50)\ndo\n  foo()\nend\n",
+            "repeat\n  foo()\nuntil\n  collectgarbage('setpause', 50)\n",
+            "for value in\n  collectgarbage('setpause', 50)\ndo\nend\n",
+            "local value = 1 +\n  collectgarbage('setpause', 50)\n",
+            "local value = wrap(\n  collectgarbage('setpause', 50)\n)\n",
+            "collectgarbage('setpause', 50) --[[ note\n still ]]\nnext_call()\n",
+            "collectgarbage = function(...) return { foo = function() end } end\ncollectgarbage('setpause', 50)\n.foo()\n",
+            "collectgarbage('setpause', 50)\n-- continuation\n.field()\n",
+            "collectgarbage('setpause', 50)\n('argument')\n",
+            "collectgarbage (\n  [[setstepmul]], 400\n)\n",
+            "collectgarbage([[\nsetpause]], 50)\n",
+            "collectgarbage([=[\r\nsetstepmul]=], 400)\n",
+            "collectgarbage('setpause', -- ) explanation\n50)\n",
+            "collectgarbage('setstepmul', --[[ ( explanation ]]\n400)\n",
+            "collectgarbage('setpause', 50\n",
+            "obj.collectgarbage('setpause', 50)\n",
+            "-- collectgarbage('setpause', 50)\n",
+            "message = [[\ncollectgarbage('setpause', 50)\n]]\n",
+        ] {
+            assert_eq!(super::strip_rime_lua_gc_tuning(content), content, "{content:?}");
+        }
+    }
+
+    #[test]
+    fn strip_rime_lua_gc_tuning_removes_standalone_lines() {
+        let content = concat!(
+            "collectgarbage('setpause', 50)\n",
+            " \tcollectgarbage ( 'setstepmul', 400 ); -- stale\r\n",
+            "collectgarbage('setpause', 50) --[[ stale ]]\n",
+            "user_flag = true\r\n",
+            "collectgarbage('collect')\n",
+            "collectgarbage([=[setpause]=], 50)",
+        );
+        assert_eq!(
+            super::strip_rime_lua_gc_tuning(content),
+            "user_flag = true\r\ncollectgarbage('collect')\n",
+        );
+        assert_eq!(
+            super::strip_rime_lua_gc_tuning("collectgarbage('setpause', 50);\n(next_call)()\n"),
+            "(next_call)()\n",
+        );
+    }
+
+    #[test]
+    fn prune_rime_logs_keeps_newest_twenty_and_preserves_other_files() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-glog-prune-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let levels = ["INFO", "WARNING", "ERROR", "FATAL"];
+        let mut names = Vec::new();
+        for index in 0..25 {
+            let name = format!("rime.keytao.log.{}.{:02}", levels[index % 4], 99 - index);
+            let file = std::fs::File::create(dir.join(&name)).unwrap();
+            file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(index as u64 + 1))
+                .unwrap();
+            names.push(name);
+        }
+        for name in ["keytao-app.log", "keytao-ime.log", "rime.log.INFO", "other.txt"] {
+            std::fs::write(dir.join(name), "keep").unwrap();
+        }
+        std::fs::create_dir(dir.join("directory.log.INFO.keep")).unwrap();
+        super::prune_rime_logs(&dir);
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(dir.join(name).exists(), index >= 5, "{name}");
+        }
+        for name in ["keytao-app.log", "keytao-ime.log", "rime.log.INFO", "other.txt"] {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "keep");
+        }
+        assert!(dir.join("directory.log.INFO.keep").is_dir());
+        super::prune_rime_logs(&dir.join("missing"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

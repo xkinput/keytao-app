@@ -609,11 +609,11 @@ class KeytaoAndroidChannel(
                             ?: readFileFromTree(root, "default-custom.yaml")
                         mergeDefaultCustom(existing, it)
                     }
-                    val rimeLuaMergeResult = zipRimeLuaContent?.let { zipRl ->
-                        val localRl = readFileFromTree(root, "rime.lua")
-                        if (localRl != null) mergeRimeLua(localRl, zipRl, zipLuaFilenames)
-                        else RimeLuaMergeResult(zipRl, emptyList())
-                    }
+                    val rimeLuaMergeResult = KeytaoNativeBridge.prepareRimeLuaInstall(
+                        readFileFromTree(root, "rime.lua"),
+                        zipRimeLuaContent,
+                        zipLuaFilenames,
+                    )
 
                     // Preserve conflicting user Lua files before extraction overwrites them.
                     val renamedLuaFiles: List<Pair<String, ByteArray>> =
@@ -662,6 +662,10 @@ class KeytaoAndroidChannel(
                                 processed++; emitProgress(filename)
                             }
                         }
+                    }
+
+                    if (rimeLuaEntry == null && rimeLuaMergeResult != null) {
+                        writeToDir(root, "rime.lua", rimeLuaMergeResult.mergedContent.toByteArray(), "rime.lua", merged = true)
                     }
 
                     if (renamedLuaFiles.isNotEmpty()) {
@@ -778,12 +782,14 @@ class KeytaoAndroidChannel(
                         mergeDefaultCustom(existing, zipContent)
                     }
 
-                    val rimeLuaMergeResult = rimeLuaEntry?.let { entry ->
-                        val zipContent = zip.getInputStream(entry).bufferedReader().readText()
-                        val localContent = readPrivateText(root, "rime.lua")
-                        if (localContent != null) mergeRimeLua(localContent, zipContent, zipLuaFilenames)
-                        else RimeLuaMergeResult(zipContent, emptyList())
+                    val zipRimeLuaContent = rimeLuaEntry?.let { entry ->
+                        zip.getInputStream(entry).bufferedReader().readText()
                     }
+                    val rimeLuaMergeResult = KeytaoNativeBridge.prepareRimeLuaInstall(
+                        readPrivateText(root, "rime.lua"),
+                        zipRimeLuaContent,
+                        zipLuaFilenames,
+                    )
 
                     val renamedLuaFiles = rimeLuaMergeResult?.renames?.mapNotNull { (oldName, newName) ->
                         val oldFile = File(root, "lua/$oldName.lua")
@@ -818,6 +824,11 @@ class KeytaoAndroidChannel(
                                 logs.add("[OK] $relative")
                             }
                         }
+                    }
+
+                    if (rimeLuaEntry == null && rimeLuaMergeResult != null) {
+                        File(root, "rime.lua").writeText(rimeLuaMergeResult.mergedContent)
+                        logs.add("[MERGED] rime.lua")
                     }
 
                     if (renamedLuaFiles.isNotEmpty()) {
