@@ -209,6 +209,7 @@ abstract final class AppStrings {
   static const systemFailure = '系统操作失败';
   static const installDone = '安装完成';
   static const installFailed = '安装失败';
+  static const downloadCancelled = '下载已取消';
   static const deployIncomplete = '部署未完成';
   static const deployDone = '部署完成';
   static const deployFailed = '部署失败';

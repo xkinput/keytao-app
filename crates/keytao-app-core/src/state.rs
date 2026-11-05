@@ -30,6 +30,7 @@ mod tests {
         )
         .unwrap();
         assert!(state.installed_scheme.is_none());
+        assert!(state.installed_scheme_version.is_none());
     }
 
     #[test]
@@ -53,6 +54,8 @@ pub struct AppState {
     pub legacy_imported: bool,
     #[serde(default)]
     pub installed_scheme: Option<String>,
+    #[serde(default)]
+    pub installed_scheme_version: Option<String>,
 }
 
 fn existing_onboarding_initialized() -> bool {

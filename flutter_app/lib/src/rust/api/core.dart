@@ -30,8 +30,11 @@ Future<OnboardingDto> onboarding() =>
 Future<void> completeOnboarding() =>
     RustLib.instance.api.crateApiCoreCompleteOnboarding();
 
-Future<void> recordInstalledScheme({required String scheme}) =>
-    RustLib.instance.api.crateApiCoreRecordInstalledScheme(scheme: scheme);
+Future<void> recordInstalledScheme({required String scheme, String? version}) =>
+    RustLib.instance.api.crateApiCoreRecordInstalledScheme(
+      scheme: scheme,
+      version: version,
+    );
 
 /// The persisted account, if a token is stored. The token never leaves Rust.
 Future<AccountUserDto?> accountSession() =>
@@ -79,6 +82,9 @@ Future<LocalSchemasDto> readLocalSchemas({required String dir}) =>
 /// Returns Core's directory-first, name-sorted entries. SAF uses listFiles.
 Future<List<FileItemDto>> listDir({required String dir}) =>
     RustLib.instance.api.crateApiCoreListDir(dir: dir);
+
+Future<void> cancelSchemeDownload() =>
+    RustLib.instance.api.crateApiCoreCancelSchemeDownload();
 
 /// Downloads and smart-installs into the selected filesystem directory without
 /// deploying. Android SAF uses download_scheme_archive and smartExtractZip.

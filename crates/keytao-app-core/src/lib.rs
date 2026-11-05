@@ -44,6 +44,7 @@ pub struct Core {
     env: AppEnv,
     sink: Arc<dyn EventSink>,
     state: Mutex<AppState>,
+    download_cancel: tokio::sync::watch::Sender<u64>,
     recovered_state_file: Option<PathBuf>,
 }
 
@@ -75,6 +76,7 @@ impl Core {
             env,
             sink,
             state: Mutex::new(state),
+            download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file,
         }))
     }
@@ -90,6 +92,10 @@ impl Core {
 
     pub fn emit(&self, event: CoreEvent) {
         self.sink.emit(event);
+    }
+
+    pub fn cancel_download(&self) {
+        self.download_cancel.send_modify(|generation| *generation += 1);
     }
 
     pub fn state(&self) -> AppState {

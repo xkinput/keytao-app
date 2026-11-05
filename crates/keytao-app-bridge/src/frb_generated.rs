@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2133717292;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -220597374;
 
 // Section: executor
 
@@ -330,6 +330,38 @@ fn wire__crate__api__core__addon_schema_uninstall_impl(
                     })()
                     .await,
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__cancel_scheme_download_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "cancel_scheme_download",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::cancel_scheme_download()?;
+                    std::result::Result::Ok(output_ok)
+                })())
             }
         },
     )
@@ -1421,10 +1453,12 @@ fn wire__crate__api__core__record_installed_scheme_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_scheme = <String>::sse_decode(&mut deserializer);
+            let api_version = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::core::record_installed_scheme(api_scheme)?;
+                    let output_ok =
+                        crate::api::core::record_installed_scheme(api_scheme, api_version)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -2465,12 +2499,14 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
         let mut var_version = <Option<String>>::sse_decode(deserializer);
         let mut var_schemas = <Vec<String>>::sse_decode(deserializer);
         let mut var_installedScheme = <Option<String>>::sse_decode(deserializer);
+        let mut var_installedSchemeVersion = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::LocalSchemaDto {
             installed: var_installed,
             deployed: var_deployed,
             version: var_version,
             schemas: var_schemas,
             installed_scheme: var_installedScheme,
+            installed_scheme_version: var_installedSchemeVersion,
         };
     }
 }
@@ -2886,111 +2922,112 @@ fn pde_ffi_dispatcher_primary_impl(
         6 => wire__crate__api__core__addon_schema_install_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__core__addon_schema_status_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__core__addon_schema_uninstall_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
-        15 => {
+        9 => wire__crate__api__core__cancel_scheme_download_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
+        16 => {
             wire__crate__api__core__download_scheme_archive_impl(port, ptr, rust_vec_len, data_len)
         }
-        16 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
-        18 => {
+        17 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
+        19 => {
             wire__crate__api__core__finish_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        19 => wire__crate__api__core__get_android_ime_input_settings_impl(
+        20 => wire__crate__api__core__get_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        20 => {
+        21 => {
             wire__crate__api__core__get_component_versions_impl(port, ptr, rust_vec_len, data_len)
         }
-        21 => {
+        22 => {
             wire__crate__api__core__get_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        23 => {
+        23 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        24 => {
             wire__crate__api__core__get_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        24 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        25 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
+        29 => {
             wire__crate__api__core__install_scheme_from_url_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
-        36 => {
+        30 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
+        37 => {
             wire__crate__api__core__prepare_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        37 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        40 => {
+        38 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        41 => {
             wire__crate__api__core__record_installed_scheme_impl(port, ptr, rust_vec_len, data_len)
         }
-        41 => wire__crate__api__core__remove_downloaded_archive_impl(
+        42 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        43 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => {
+        44 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        44 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        45 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        46 => {
+        46 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        48 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        50 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__core__windows_pending_ime_action_impl(
+        51 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        53 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        54 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -3537,6 +3574,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::LocalSchemaDto {
             self.version.into_into_dart().into_dart(),
             self.schemas.into_into_dart().into_dart(),
             self.installed_scheme.into_into_dart().into_dart(),
+            self.installed_scheme_version.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4307,6 +4345,7 @@ impl SseEncode for crate::api::types::LocalSchemaDto {
         <Option<String>>::sse_encode(self.version, serializer);
         <Vec<String>>::sse_encode(self.schemas, serializer);
         <Option<String>>::sse_encode(self.installed_scheme, serializer);
+        <Option<String>>::sse_encode(self.installed_scheme_version, serializer);
     }
 }
 

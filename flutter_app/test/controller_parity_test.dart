@@ -61,6 +61,7 @@ class FakeCore implements RustLibApi {
   bool delayReleases = false;
   bool updateFails = false;
   bool addonDeployProgress = false;
+  String? installFailure;
   final logFailures = <String>{};
   Completer<void>? deployGate;
   EnglishModeDto english = EnglishModeDto.schema;
@@ -193,6 +194,15 @@ class FakeCore implements RustLibApi {
   }
 
   @override
+  Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
+    required String url,
+  }) async {
+    calls.add('install:$url');
+    if (installFailure != null) throw StateError(installFailure!);
+    return result;
+  }
+
+  @override
   Future<List<FileItemDto>> crateApiCoreListDir({required String dir}) async =>
       [const FileItemDto(name: 'default.custom.yaml', isDir: false)];
   @override
@@ -248,6 +258,7 @@ class FakeCore implements RustLibApi {
 
   @override
   Future<DeployResultDto> crateApiCoreDeployDefault() async {
+    calls.add('deployDefault');
     await deployGate?.future;
     local = deployedLocal;
     return const DeployResultDto(success: true, message: 'done');
@@ -545,6 +556,29 @@ void main() {
       expect(controller.canInstall, isFalse);
     },
   );
+
+  test('cancelled installs stay inline and never deploy, allowing retry', () async {
+    controller.dispose();
+    controller = create(mobile: false)
+      ..latestRelease = release
+      ..local = installedLocal;
+    core.installFailure = AppStrings.downloadCancelled;
+    for (final install in [controller.install, controller.installAndDeploy]) {
+      expect(await install(), isFalse);
+      expect(controller.installError, isNull);
+      expect(controller.error, isNull);
+      expect(controller.progress, AppStrings.downloadCancelled);
+      expect(controller.canInstall, isTrue);
+      expect(controller.busy, isFalse);
+      expect(controller.operation, isNull);
+      expect(
+        controller.operationLogs.any((line) => line.contains('[ERROR]')),
+        isFalse,
+      );
+    }
+    expect(core.calls.where((call) => call.startsWith('install:')), hasLength(2));
+    expect(core.calls, isNot(contains('deployDefault')));
+  });
 
   test('SAF export is serialized, preserves live state, finishes and always cleans up', () async {
     controller.local = installedLocal;

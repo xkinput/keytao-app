@@ -26,12 +26,14 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
     let local =
         keytao_app_core::scheme::check_local_schema(&state.core, Some(state.host.user_root()?))
             .map_err(|error| error.to_string())?;
+    let app_state = state.core.state();
     Ok(LocalSchemaDto {
         installed: local.installed,
         deployed: local.deployed,
         version: local.version,
         schemas: local.schemas,
-        installed_scheme: state.core.state().installed_scheme,
+        installed_scheme: app_state.installed_scheme,
+        installed_scheme_version: app_state.installed_scheme_version,
     })
 }
 
@@ -48,9 +50,13 @@ pub fn complete_onboarding() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-pub fn record_installed_scheme(scheme: String) -> Result<(), String> {
-    keytao_app_core::scheme::record_installed_scheme(&runtime::state()?.core, &scheme)
-        .map_err(|error| error.to_string())
+pub fn record_installed_scheme(scheme: String, version: Option<String>) -> Result<(), String> {
+    keytao_app_core::scheme::record_installed_scheme(
+        &runtime::state()?.core,
+        &scheme,
+        version.as_deref(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The persisted account, if a token is stored. The token never leaves Rust.
@@ -189,6 +195,11 @@ pub fn list_dir(dir: String) -> Result<Vec<FileItemDto>, String> {
         keytao_app_core::scheme::list_dir(&runtime::state()?.core, dir)
             .map_err(|error| error.to_string())?,
     )
+}
+
+pub fn cancel_scheme_download() -> Result<(), String> {
+    runtime::state()?.core.cancel_download();
+    Ok(())
 }
 
 /// Downloads and smart-installs into the selected filesystem directory without

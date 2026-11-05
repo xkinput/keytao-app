@@ -84,6 +84,20 @@ String? installedSchemeKey(List<String> schemas, String? installedScheme) {
 String schemeForFamily(String family, String? installed) =>
     installed == 'xmjd-feiding' && family == 'xmjd' ? 'xmjd-feiding' : family;
 
+String? displayedSchemeVersion(
+  List<String> schemas,
+  String? fileVersion,
+  String? installedScheme,
+  String? installedVersion,
+) {
+  final family = schemeKeyFromSchemas(schemas);
+  if (family == 'keytao') return fileVersion;
+  final installedFamily = installedScheme == 'xmjd-feiding'
+      ? 'xmjd'
+      : installedScheme;
+  return family != null && installedFamily == family ? installedVersion : null;
+}
+
 String errorText(Object error) => error is PlatformException
     ? error.message ?? AppStrings.systemFailure
     : error is StateError
@@ -184,6 +198,8 @@ class AppController extends ChangeNotifier {
   bool get canInstall =>
       !busy && !releaseLoading && downloadUrl?.isNotEmpty == true;
   bool get isInstalling => operation == OperationKind.install;
+  bool get canCancelDownload =>
+      isInstalling && installProgress?.stage == 'downloading';
   bool get isDeploying => operation == OperationKind.deploy;
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
@@ -236,7 +252,12 @@ class AppController extends ChangeNotifier {
       : AppStrings.localStatus(
           installed: local!.installed,
           deployed: local!.deployed,
-          version: local!.version,
+          version: displayedSchemeVersion(
+            local!.schemas,
+            local!.version,
+            local!.installedScheme,
+            local!.installedSchemeVersion,
+          ),
           label: schemes[schemeKeyFromSchemas(local!.schemas)],
         );
   String? get localSchemaIds =>
@@ -345,6 +366,7 @@ class AppController extends ChangeNotifier {
   String? get sharedLogResultText =>
       sharedLogPath == null ? null : AppStrings.savedLog(sharedLogPath!);
   bool _isInlineError(String? message) => [
+    AppStrings.downloadCancelled,
     releaseError,
     installError,
     addonError,
@@ -860,6 +882,10 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
+  Future<void> cancelDownload() async {
+    if (canCancelDownload) await core.cancelSchemeDownload();
+  }
+
   Future<bool> installAndDeploy() async {
     if (!await install()) return false;
     // Deploying clears the verification list, so keep failures on screen.
@@ -871,6 +897,7 @@ class AppController extends ChangeNotifier {
     if (!canInstall) return Future.value(false);
     final url = downloadUrl!;
     final installing = scheme;
+    final installingVersion = releaseVersion;
     return run(() async {
       _startOperation(OperationKind.install, AppStrings.installing);
       installError = null;
@@ -893,13 +920,21 @@ class AppController extends ChangeNotifier {
         }
         _recordInstallResult(result);
         verification = result.verify;
-        await core.recordInstalledScheme(scheme: installing);
+        await core.recordInstalledScheme(
+          scheme: installing,
+          version: installingVersion,
+        );
         await _readLocal();
         progress = AppStrings.installDone;
       } catch (failure) {
-        progress = AppStrings.installFailed;
-        installError = errorText(failure);
-        addOperationLogs(['[ERROR] $installError']);
+        final message = errorText(failure);
+        if (message == AppStrings.downloadCancelled) {
+          progress = message;
+        } else {
+          progress = AppStrings.installFailed;
+          installError = message;
+          addOperationLogs(['[ERROR] $installError']);
+        }
         rethrow;
       } finally {
         operation = null;

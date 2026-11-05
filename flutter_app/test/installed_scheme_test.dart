@@ -37,4 +37,39 @@ void main() {
   test('keytao family ignores an installed non-top package', () {
     expect(schemeForFamily('keytao', 'xmjd-feiding'), 'keytao');
   });
+
+  test('keytao schemas display the file version', () {
+    expect(
+      displayedSchemeVersion(['keytao'], 'v1.3.25', 'xmjd', 'v2'),
+      'v1.3.25',
+    );
+  });
+
+  test('xmjd schemas display the recorded top package version', () {
+    expect(
+      displayedSchemeVersion(['xmjd6'], 'v1.3.25', 'xmjd', 'v2'),
+      'v2',
+    );
+  });
+
+  test('xmjd schemas display the recorded non-top package version', () {
+    expect(
+      displayedSchemeVersion(['xmjd6'], 'v1.3.25', 'xmjd-feiding', 'v2'),
+      'v2',
+    );
+  });
+
+  test('xmjd schemas ignore the file version without an installation record', () {
+    expect(
+      displayedSchemeVersion(['xmjd6'], 'v1.3.25', null, null),
+      isNull,
+    );
+  });
+
+  test('xmjd schemas ignore a stale keytao installation record', () {
+    expect(
+      displayedSchemeVersion(['xmjd6'], 'v1.3.25', 'keytao', 'v1.3.25'),
+      isNull,
+    );
+  });
 }

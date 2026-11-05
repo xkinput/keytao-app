@@ -45,6 +45,8 @@ class SchemePage extends StatelessWidget {
                   icon: FLucideIcons.download,
                   onPress: c.canInstall ? c.installAndDeploy : null,
                 ),
+                if (c.canCancelDownload)
+                  ActionButton(AppStrings.cancel, onPress: c.cancelDownload),
                 ActionButton(
                   AppStrings.deploy,
                   icon: FLucideIcons.play,

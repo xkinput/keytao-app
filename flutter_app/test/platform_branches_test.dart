@@ -126,6 +126,7 @@ class PlatformCore extends FakeCore {
   @override
   Future<void> crateApiCoreRecordInstalledScheme({
     required String scheme,
+    String? version,
   }) async {
     calls.add('record:$scheme');
   }
