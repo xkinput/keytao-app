@@ -4,6 +4,8 @@
 set -euo pipefail
 export LC_ALL=C
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=librime-versions.env
+source "$PROJECT_DIR/scripts/librime-versions.env"
 BUNDLE_DIR="${1:-$PROJECT_DIR/target/release/bundle}"
 VERSION="${2:-$(sed -n 's/^version: \([^+]*\).*/\1/p' "$PROJECT_DIR/flutter_app/pubspec.yaml")}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo 'Invalid expected version' >&2; exit 2; }
@@ -15,7 +17,7 @@ if [[ ${3:-} != --inside-container ]]; then
     keytao-app-builder bash /app/scripts/verify-linux-bundles.sh /bundles "$VERSION" --inside-container
 fi
 [[ $(uname -s) == Linux ]] || { echo 'ELF checks require Linux' >&2; exit 1; }
-for command_name in dpkg dpkg-deb rpm rpm2cpio cpio patchelf readelf ldd python3; do
+for command_name in dpkg dpkg-deb rpm rpm2cpio cpio patchelf readelf strings ldd python3; do
   command -v "$command_name" >/dev/null || { echo "Missing $command_name" >&2; exit 1; }
 done
 case "$(uname -m)" in
@@ -55,6 +57,14 @@ dpkg-deb -R "$DEB" "$WORK_DIR/deb"
 python3 "$PROJECT_DIR/packaging/linux/check.py" "$WORK_DIR/deb" "$WORK_DIR/rpm"
 for format in deb rpm; do
   app="$WORK_DIR/$format/usr/lib/KeyTao"
+  rime_lib="$app/runtime/lib/librime.so.1"
+  rime_strings="$(strings "$rime_lib")"
+  grep -Fxq -- "$LIBRIME_VERSION" <<< "$rime_strings" || fail "$format: wrong librime version (expected $LIBRIME_VERSION)"
+  rime_symbols="$(readelf --dyn-syms --wide "$rime_lib")"
+  awk '$7 != "UND" && ($8 == "rime_require_module_lua" || $8 == "_Z23rime_require_module_luav") { found = 1 } END { exit !found }' \
+    <<< "$rime_symbols" || fail "$format: missing merged Lua module"
+  rime_dynamic="$(readelf -d "$rime_lib")"
+  grep -Eq '\(NEEDED\).*\[libsnappy\.so\.1\]' <<< "$rime_dynamic" || fail "$format: missing Snappy dependency"
   [[ $(patchelf --print-rpath "$app/keytao-app") == '$ORIGIN/lib' ]] || fail 'Wrong app RPATH'
   [[ $(patchelf --print-rpath "$app/keytao-ime") == '$ORIGIN/runtime/lib' ]] || fail 'Wrong daemon RPATH'
   while IFS= read -r -d '' binary; do

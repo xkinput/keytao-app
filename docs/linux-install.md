@@ -31,12 +31,14 @@ sudo dnf install "./keytao-app-<version>-linux-x64.rpm"
 
 - `keytao-app`：图形应用，安装、更新和部署方案，查看输入法状态。
 - `keytao-ime`：系统输入法守护进程，不依赖 Fcitx5 进程。
-- 包内 runtime：librime、OpenCC 数据、rime-plugins、基础 rime-data；无需另装系统 librime。
+- 包内 runtime：合并 Lua 的单个 `librime.so.1`、OpenCC 数据、基础 rime-data；无需另装系统 librime 或 Lua 插件。librime 在 `ubuntu:24.04` 中通过 `scripts/build-linux-librime.sh` 从源码构建，版本由 [librime-versions.env](../scripts/librime-versions.env) 固定。
 - `/usr/share/ibus/component/keytao.xml`：供 IBus 发现并按需启动 KeyTao。
 - `/etc/xdg/autostart/keytao-ime.desktop`：登录后自启动，设置 `NotShowIn=GNOME;`；GNOME 由系统 IBus 启动。
 - `/usr/share/applications/keytao-wayland-launcher.desktop`：供 KDE 的虚拟键盘设置选择。
 
 包安装完成后，仍需在 App 中安装并部署键道方案，再按桌面启用输入法。
+
+升级 librime 后，daemon 启动时会比较用户目录中的版本记录；已有部署数据会由独立子进程重新部署，完成后自动重载，以重建旧版本不兼容的 prism 文件。失败会记录日志并在下次启动重试，不阻止 daemon 运行；无方案时只记录版本。
 
 ### Nix / NixOS
 

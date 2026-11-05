@@ -116,9 +116,9 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
         'KEYTAO_RIME_DLL_NAME': '$libName.dll',
       }, libraries.values.toList()..sort());
     case OS.linux:
-      // librime-dev in Dockerfile.linux-builder supplies these system paths.
-      // container-build.sh packages librime, its dependencies and plugins in
-      // runtime/lib; leave that closure to the Linux packager, not CodeAssets.
+      // build-linux-librime.sh installs the pinned source build at these paths.
+      // container-build.sh packages librime with merged Lua in runtime/lib;
+      // leave that library to the Linux packager, not CodeAssets.
       return _Rime(sdk('/usr'));
     default:
       return const _Rime({});

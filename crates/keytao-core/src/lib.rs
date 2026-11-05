@@ -55,6 +55,70 @@ fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 pub const WINDOWS_IME_ENGINE_INIT_MUTEX_NAME: &str = "Local\\KeyTao.WindowsIme.EngineInit";
 
+#[cfg(target_os = "linux")]
+pub const LINUX_UPGRADE_DEPLOY_SUBCOMMAND: &str = "--deploy-librime-upgrade";
+
+/// Serialize Linux App deployments and upgrade children across processes.
+#[cfg(target_os = "linux")]
+pub fn linux_deploy_lock(
+    user_dir: &Path,
+    timeout: Duration,
+) -> Result<Option<std::fs::File>, String> {
+    use std::fs::{OpenOptions, TryLockError};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Linux UAPI O_NOFOLLOW, including the ARM, PowerPC and m68k overrides.
+    #[cfg(any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
+    const O_NOFOLLOW: i32 = 0x8000;
+    #[cfg(not(any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )))]
+    const O_NOFOLLOW: i32 = 0x20000;
+
+    std::fs::create_dir_all(user_dir)
+        .map_err(|error| format!("cannot create {}: {error}", user_dir.display()))?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(user_dir.join("keytao-librime-upgrade.lock"))
+        .map_err(|error| format!("cannot open librime deployment lock: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(TryLockError::WouldBlock) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+            Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+                if started.elapsed() >= timeout {
+                    return Ok(None);
+                }
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(format!("cannot lock librime deployment: {error}"));
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImeState {
     pub preedit: String,
@@ -505,6 +569,32 @@ mod desktop {
         use std::ffi::c_int;
         use std::mem::{offset_of, size_of};
 
+        #[cfg(not(target_os = "android"))]
+        #[test]
+        fn deployment_file_validation_requires_all_selected_schemas() {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("keytao-deploy-files-{suffix}"));
+            std::fs::create_dir_all(dir.join("build")).unwrap();
+            assert!(super::validate_deployed_schema_files(&dir).is_err());
+            std::fs::write(
+                dir.join("default.custom.yaml"),
+                "patch:\n  schema_list:\n    - schema: first\n    - schema: second\n",
+            )
+            .unwrap();
+            std::fs::write(dir.join("build/first.schema.yaml"), "").unwrap();
+            let error = super::validate_deployed_schema_files(&dir).unwrap_err();
+            assert!(error.contains("second"), "{error}");
+            std::fs::write(dir.join("build/second.schema.yaml"), "").unwrap();
+            assert_eq!(
+                super::validate_deployed_schema_files(&dir).unwrap(),
+                ["first", "second"]
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
         #[test]
         fn members_past_data_size_are_reported_as_missing() {
             librime_sys::rime_struct!(api: RimeApi);
@@ -576,7 +666,7 @@ mod desktop {
             if *initialized {
                 false
             } else {
-                initialize_rime(&user_data_dir, &shared_data_dir);
+                initialize_rime(&user_data_dir, &shared_data_dir, false);
                 *initialized = true;
                 true
             }
@@ -638,7 +728,7 @@ mod desktop {
             let _rime = rime_api_lock();
             finalize_rime()?;
             let mut initialized = lock_ignore_poison(&RIME_INITIALIZED);
-            initialize_rime(&user_data_dir, &shared_data_dir);
+            initialize_rime(&user_data_dir, &shared_data_dir, false);
             *initialized = true;
         }
         initialize_user_dictionary_cache(Path::new(&user_data_dir));
@@ -717,6 +807,44 @@ mod desktop {
             );
         }
         result
+    }
+
+    /// Deploy in a fresh upgrade child without opening user dictionaries.
+    #[cfg(target_os = "linux")]
+    pub fn deploy_for_upgrade(
+        user_data_dir: String,
+        shared_data_dir: String,
+    ) -> Result<(), String> {
+        let user_dir = Path::new(&user_data_dir);
+        runtime_log::init_for_engine(user_dir);
+        let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        {
+            let _rime = rime_api_lock();
+            if *lock_ignore_poison(&RIME_SETUP_COMPLETE) || *lock_ignore_poison(&RIME_INITIALIZED) {
+                return Err("upgrade deployment requires a fresh librime process".into());
+            }
+            unsafe {
+                let api = rime_get_api();
+                if api.is_null()
+                    || (*api).setup.is_none()
+                    || (*api).deployer_initialize.is_none()
+                    || (*api).set_notification_handler.is_none()
+                    || (*api).start_maintenance.is_none()
+                    || (*api).join_maintenance_thread.is_none()
+                {
+                    return Err("librime maintenance API is unavailable".into());
+                }
+            }
+            // setup_only exports user dictionaries; Lua initialization can run user code.
+            initialize_rime(&user_data_dir, &shared_data_dir, true);
+        }
+        if !full_deploy_and_wait()? {
+            return Err(format!(
+                "Rime upgrade deployment failed. See librime logs in {}",
+                rime_log_dir(user_dir).display()
+            ));
+        }
+        validate_deployed_schema_files(user_dir).map(|_| ())
     }
 
     #[cfg(target_os = "android")]
@@ -817,7 +945,7 @@ mod desktop {
         Ok(Some(AndroidDictionaryOverride { source, backup }))
     }
 
-    fn initialize_rime(user_data_dir: &str, shared_data_dir: &str) {
+    fn initialize_rime(user_data_dir: &str, shared_data_dir: &str, deployer_only: bool) {
         let user_dir = Path::new(user_data_dir);
         let shared_dir = Path::new(shared_data_dir);
         let (staging_dir, prebuilt_dir) = rime_build_dirs(user_dir, shared_dir);
@@ -833,6 +961,7 @@ mod desktop {
             &staging_dir.to_string_lossy(),
             &prebuilt_dir.to_string_lossy(),
             &log_dir.to_string_lossy(),
+            deployer_only,
         );
     }
 
@@ -878,17 +1007,20 @@ mod desktop {
     }
 
     #[cfg(not(target_os = "android"))]
-    fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
+    fn validate_deployed_schema_files(user_dir: &Path) -> Result<Vec<String>, String> {
         let schemas = parse_schema_list_from_dir(user_dir);
         if schemas.is_empty() {
             return Err("no schema selected in default.custom.yaml".into());
         }
-        // Reading the build directory is plain file I/O and stays out of the
-        // librime lock; only the validation session below needs it.
         for schema_id in &schemas {
             require_compiled_schema(&compiled_schema_path(user_dir, schema_id), schema_id)?;
         }
+        Ok(schemas)
+    }
 
+    #[cfg(not(target_os = "android"))]
+    fn validate_deployed_schemas(user_dir: &Path) -> Result<(), String> {
+        let schemas = validate_deployed_schema_files(user_dir)?;
         let _rime = rime_api_lock();
         let session =
             create_session().map_err(|error| format!("create validation session: {error:?}"))?;
@@ -1017,6 +1149,7 @@ mod desktop {
         staging_dir: &str,
         prebuilt_data_dir: &str,
         log_dir: &str,
+        deployer_only: bool,
     ) {
         let configured_log_dir = PathBuf::from(log_dir);
         let user_data_dir = CString::new(user_data_dir).expect("valid user data dir");
@@ -1046,11 +1179,17 @@ mod desktop {
         traits.distribution_code_name = distribution_code_name.as_ptr();
         traits.distribution_version = distribution_version.as_ptr();
         traits.app_name = app_name.as_ptr();
-        traits.modules = modules.as_mut_ptr();
+        traits.modules = if deployer_only {
+            std::ptr::null_mut()
+        } else {
+            modules.as_mut_ptr()
+        };
 
         unsafe {
-            require_levers_module();
-            require_lua_module();
+            if !deployer_only {
+                require_levers_module();
+                require_lua_module();
+            }
 
             let api = rime_get_api();
             {
@@ -1063,7 +1202,11 @@ mod desktop {
                     *setup_complete = true;
                 }
             }
-            if let Some(initialize) = (*api).initialize {
+            if deployer_only {
+                if let Some(initialize) = (*api).deployer_initialize {
+                    initialize(&mut traits);
+                }
+            } else if let Some(initialize) = (*api).initialize {
                 initialize(&mut traits);
             }
             #[cfg(target_os = "android")]
@@ -1560,7 +1703,9 @@ mod desktop {
                 return;
             }
             unsafe {
-                load_unix_lua_plugin().expect("load librime-lua plugin");
+                if !lua_module_registered() {
+                    load_unix_lua_plugin().expect("load librime-lua plugin");
+                }
             }
         }
     }
@@ -2703,6 +2848,8 @@ mod desktop {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub use desktop::deploy_for_upgrade;
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -5443,6 +5590,34 @@ mod tests {
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_deploy_lock_handles_free_held_and_released_lock() {
+        use std::time::{Duration, Instant};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-deploy-lock-{suffix}"));
+        let lock = super::linux_deploy_lock(&dir, Duration::ZERO)
+            .unwrap()
+            .expect("a free lock must be acquired");
+        assert!(super::linux_deploy_lock(&dir, Duration::ZERO)
+            .unwrap()
+            .is_none());
+        let timeout = Duration::from_millis(20);
+        let started = Instant::now();
+        assert!(super::linux_deploy_lock(&dir, timeout).unwrap().is_none());
+        assert!(started.elapsed() >= timeout);
+        drop(lock);
+        let lock = super::linux_deploy_lock(&dir, Duration::ZERO)
+            .unwrap()
+            .expect("a released lock must be acquired");
+        drop(lock);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn caret_extent_accepts_zero_width_collapsed_rect() {

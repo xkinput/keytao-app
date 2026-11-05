@@ -31,11 +31,9 @@ def check_layout(root):
                  'runtime/default-theme.yaml', 'runtime/rime-data/default.yaml',
                  'runtime/rime-data/key_bindings.yaml', 'runtime/rime-data/punctuation.yaml',
                  'runtime/rime-data/symbols.yaml', 'runtime/rime-data/essay.txt',
-                 'runtime/lib/librime.so.1', 'runtime/lib/libmarisa.so.0',
-                 'runtime/lib/libopencc.so.1.1', 'runtime/lib/libyaml-cpp.so.0.8',
-                 'runtime/lib/liblua5.4.so.0', 'runtime/lib/libglog.so.1',
-                 'runtime/lib/libleveldb.so.1d', 'runtime/lib/rime-plugins/librime-lua.so'):
+                 'runtime/lib/librime.so.1'):
         assert (app / name).is_file(), name
+    assert {path.name for path in (app / 'runtime/lib').iterdir()} == {'librime.so.1'}, 'Rime runtime libraries'
     assert any((app / 'data/flutter_assets').iterdir()), 'Flutter assets'
     assert any((app / 'runtime/rime-data/opencc').iterdir()), 'OpenCC data'
     assert (app / 'rime-data').is_symlink()
@@ -109,9 +107,7 @@ def fixtures():
         for name in ('default-theme.yaml', 'rime-data/default.yaml', 'rime-data/key_bindings.yaml',
                      'rime-data/punctuation.yaml', 'rime-data/symbols.yaml', 'rime-data/essay.txt',
                      'rime-data/opencc/test.json',
-                     'lib/librime.so.1', 'lib/libmarisa.so.0', 'lib/libopencc.so.1.1',
-                     'lib/libyaml-cpp.so.0.8', 'lib/liblua5.4.so.0', 'lib/libglog.so.1',
-                     'lib/libleveldb.so.1d', 'lib/rime-plugins/librime-lua.so'):
+                     'lib/librime.so.1'):
             path = runtime / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n')

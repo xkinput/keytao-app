@@ -19,6 +19,8 @@ mod surrounding;
 #[cfg(target_os = "linux")]
 mod tray;
 #[cfg(target_os = "linux")]
+mod upgrade_deploy;
+#[cfg(target_os = "linux")]
 mod wayland_backend;
 #[cfg(target_os = "linux")]
 mod wayland_backend_kde;
@@ -235,10 +237,10 @@ impl ReloadStampGate {
 }
 
 #[cfg(target_os = "linux")]
-fn install_reload_watcher(engine: engine::CoreEngine) {
+fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
     let Some(user_data_dir) = keytao_core::default_user_data_dir() else {
         tracing::warn!("cannot determine reload stamp path; dictionary reload watcher disabled");
-        return;
+        return false;
     };
 
     // Seeded here rather than inside the thread: the caller has just finished
@@ -274,7 +276,9 @@ fn install_reload_watcher(engine: engine::CoreEngine) {
         })
     {
         tracing::warn!("failed to spawn reload watcher: {e}");
+        return false;
     }
+    true
 }
 
 fn main() {
@@ -305,13 +309,13 @@ fn main() {
     {
         init_logging();
 
-        let engine = engine::CoreEngine::new();
-        if let Err(e) = engine.init_without_deploy() {
-            tracing::error!("librime init failed: {e}");
-            std::process::exit(1);
+        if args.iter().any(|arg| arg == upgrade_deploy::SUBCOMMAND) {
+            if let Err(error) = upgrade_deploy::run_child() {
+                tracing::error!("librime upgrade deployment failed: {error}");
+                std::process::exit(1);
+            }
+            return;
         }
-        tracing::info!("librime ready");
-        install_reload_watcher(engine.clone());
 
         // KWin launches the configured Virtual Keyboard with a private
         // WAYLAND_SOCKET. On KDE this socket advertises input-method-v1, not the
@@ -329,6 +333,30 @@ fn main() {
                     std::process::exit(0);
                 }
             });
+        }
+
+        let upgrade = match upgrade_deploy::prepare() {
+            Ok(upgrade) => upgrade,
+            Err(error) => {
+                tracing::warn!("cannot prepare librime upgrade deployment: {error}");
+                None
+            }
+        };
+        let engine = engine::CoreEngine::new();
+        if let Err(e) = engine.init_without_deploy() {
+            tracing::error!("librime init failed: {e}");
+            std::process::exit(1);
+        }
+        tracing::info!("librime ready");
+        let reload_watcher_ready = install_reload_watcher(engine.clone());
+        if let Some(upgrade) = upgrade {
+            if reload_watcher_ready {
+                upgrade.spawn();
+            } else {
+                tracing::warn!(
+                    "librime upgrade deployment deferred until the reload watcher is available"
+                );
+            }
         }
 
         let has_wayland = kwin_socket || std::env::var_os("WAYLAND_DISPLAY").is_some();

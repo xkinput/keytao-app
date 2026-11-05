@@ -6,8 +6,8 @@ the tree and `packaging/linux/key-tao.spec` packages it as rpm.
 
 ## Installed files
 
-- `/usr/lib/KeyTao/`: Flutter bundle, `keytao-ime`, `runtime/` (librime and its
-  libraries, `rime-plugins`, `rime-data`), `rime-data -> runtime/rime-data`,
+- `/usr/lib/KeyTao/`: Flutter bundle, `keytao-ime`, `runtime/` (one stripped
+  `librime.so.1` with merged Lua, OpenCC data and `rime-data`), `rime-data -> runtime/rime-data`,
   and `addon-schemas/`.
 - `/usr/bin/keytao-app`, `/usr/bin/keytao-ime`: relative symlinks into
   `/usr/lib/KeyTao`, so `current_exe()` and Dart `resolvedExecutable` find the
@@ -21,6 +21,12 @@ the tree and `packaging/linux/key-tao.spec` packages it as rpm.
 
 RPATHs: the app uses `$ORIGIN/lib`, bridge libraries `$ORIGIN:$ORIGIN/../runtime/lib`,
 and the daemon `$ORIGIN/runtime/lib`. No system librime or WebKit is required.
+
+The `ubuntu:24.04` builder runs `scripts/build-linux-librime.sh` with the pins in
+`scripts/librime-versions.env`; it does not install apt librime. Snappy remains a
+system dependency for existing compressed user dictionaries. On a runtime version
+change, the daemon redeploys existing schemes in a separate child process and
+reloads after success.
 
 ## Dependencies
 

@@ -6,6 +6,7 @@ name: IME regressions
     paths:
       - '.github/workflows/ime-regressions.yml'
       - 'scripts/librime-versions.env'
+      - 'scripts/build-linux-librime.sh'
       - 'scripts/fetch-librime.sh'
       - 'scripts/fetch-librime-windows.ps1'
       - 'crates/**'
@@ -26,9 +27,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-dev cmake pkg-config gdb \
-            librime-dev librime-plugin-lua libfreetype6-dev \
+            clang libclang-dev cmake ninja-build g++ pkg-config gdb \
+            libboost-regex-dev libsnappy-dev libfreetype6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libdbus-1-dev
+      - name: Build pinned librime with merged Lua
+        run: |
+          prefix="$RUNNER_TEMP/keytao-librime"
+          bash scripts/build-linux-librime.sh "$prefix"
+          echo "RIME_INCLUDE_DIR=$prefix/include" >> "$GITHUB_ENV"
+          echo "RIME_LIB_DIR=$prefix/lib" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
       - name: Read Rust toolchain pin
         id: rust
         run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"

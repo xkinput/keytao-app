@@ -408,6 +408,11 @@ fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
                     if pid == current_pid || !is_keytao_ime_executable(pid) {
                         return None;
                     }
+                    if std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .is_ok_and(|args| is_upgrade_deploy_command_line(&args))
+                    {
+                        return None;
+                    }
                     Some(KeytaoImeProcess {
                         pid,
                         line: line.to_owned(),
@@ -417,6 +422,12 @@ fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn is_upgrade_deploy_command_line(args: &[u8]) -> bool {
+    args.split(|byte| *byte == 0)
+        .any(|arg| arg == keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND.as_bytes())
 }
 
 #[cfg(target_os = "linux")]
@@ -532,4 +543,19 @@ pub fn launch_keytao_ime(
 #[cfg(target_os = "linux")]
 pub fn linux_ime_status(core: &Core, host: &impl ImeHost) -> LinuxImeStatus {
     linux_ime_status_with_message(core, host, "已刷新 keytao-ime 状态".into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::is_upgrade_deploy_command_line;
+
+    #[test]
+    fn upgrade_deploy_process_filter_matches_exact_argument() {
+        let subcommand = keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND;
+        let child_args = format!("/usr/bin/keytao-ime\0{subcommand}\0");
+        assert!(is_upgrade_deploy_command_line(child_args.as_bytes()));
+        assert!(!is_upgrade_deploy_command_line(b"/usr/bin/keytao-ime\0"));
+        let other_args = format!("/usr/bin/keytao-ime\0{subcommand}-other\0");
+        assert!(!is_upgrade_deploy_command_line(other_args.as_bytes()));
+    }
 }

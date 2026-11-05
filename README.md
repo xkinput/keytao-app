@@ -121,7 +121,7 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 | Android | `cd flutter_app && flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64` | `flutter_app/build/app/outputs/flutter-apk/app-<abi>-release.apk` |
 | iOS | `scripts/build-ios-librime.sh --target aarch64-apple-ios && scripts/build-flutter-ios.sh` | `flutter_app/build/ios/ipa/keytao-app-<version>-ios-arm64-unsigned.ipa` |
 
-各平台发行包都自带 librime、OpenCC 数据、`rime-plugins` 和基础 `rime-data`，App 与系统输入法使用同一套 runtime。平台细节：macOS 见 [crates/keytao-macos-ime/README.md](crates/keytao-macos-ime/README.md#构建与排查)，Linux 见 [packaging/linux/README.md](packaging/linux/README.md)，Windows 见 [packaging/windows/README.md](packaging/windows/README.md)。
+各平台发行包都自带 librime、OpenCC 数据和基础 `rime-data`，App 与系统输入法使用同一套 runtime。Linux 在 `ubuntu:24.04` 中通过 `scripts/build-linux-librime.sh` 从源码构建 [版本文件](scripts/librime-versions.env) 固定的 librime，Lua 合并进单个 stripped `librime.so.1`，不使用 Ubuntu apt 的 librime。升级后 daemon 会在独立子进程中重新部署已有方案，成功后自动重载。平台细节：macOS 见 [crates/keytao-macos-ime/README.md](crates/keytao-macos-ime/README.md#构建与排查)，Linux 见 [packaging/linux/README.md](packaging/linux/README.md)，Windows 见 [packaging/windows/README.md](packaging/windows/README.md)。
 
 ## 发版流程
 

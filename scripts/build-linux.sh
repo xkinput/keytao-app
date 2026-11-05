@@ -10,7 +10,8 @@ BUNDLE_DIR="$PROJECT_DIR/target/release/bundle"
 mkdir -p "$BUNDLE_DIR" "$PROJECT_DIR/dist"
 
 echo '==> Building Flutter Linux builder image'
-tar -C "$PROJECT_DIR" -cf - scripts/Dockerfile.linux-builder rust-toolchain.toml \
+tar -C "$PROJECT_DIR" -cf - scripts/Dockerfile.linux-builder \
+  scripts/build-linux-librime.sh scripts/librime-versions.env rust-toolchain.toml \
   | docker build -f scripts/Dockerfile.linux-builder -t "$IMAGE" -
 echo '==> Building daemon, Flutter release bundle, deb and rpm'
 docker run --rm --pull=never \

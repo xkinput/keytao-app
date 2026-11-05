@@ -129,6 +129,14 @@ pub(crate) async fn rime_deploy_default_inner(
 
     core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
 
+    #[cfg(target_os = "linux")]
+    let _deploy_lock = tokio::task::spawn_blocking(move || {
+        keytao_core::linux_deploy_lock(&dest, std::time::Duration::from_secs(300))?
+            .ok_or_else(|| "Timed out waiting 5 minutes for the librime deployment lock".to_owned())
+    })
+    .await
+    .map_err(|error| format!("Deployment lock task failed: {error}"))??;
+
     // The test-input session must be closed before the deployment, not replaced
     // after it: librime keeps its config and dictionary caches alive as long as
     // a session references them, so deploying underneath a live session would
@@ -143,7 +151,15 @@ pub(crate) async fn rime_deploy_default_inner(
     let deploy_result =
         tokio::task::spawn_blocking(move || keytao_core::deploy(user, shared)).await;
     #[cfg(target_os = "linux")]
-    let deploy_result = tokio::task::spawn_blocking(move || runtime.reload()).await;
+    let (deploy_result, _deploy_lock) = match tokio::task::spawn_blocking(move || {
+        let result = runtime.reload();
+        (result, _deploy_lock)
+    })
+    .await
+    {
+        Ok((result, lock)) => (Ok(result), Some(lock)),
+        Err(error) => (Err(error), None),
+    };
 
     // Reopen the test input, on the new schemas after a successful deployment
     // and on the previous ones after a failed one — either way it must not stay

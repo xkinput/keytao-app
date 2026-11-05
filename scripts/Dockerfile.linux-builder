@@ -18,8 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgtk-3-dev \
         liblzma-dev libglu1-mesa libegl1 \
         libssl-dev libdbus-1-dev \
-        librime-dev \
-        librime-plugin-lua \
+        libboost-regex-dev libsnappy-dev \
         libfreetype6-dev \
         libxcb1-dev \
         libxdo-dev \
@@ -29,6 +28,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/* \
     && command -v dpkg-deb dpkg-query rpmbuild rpm2cpio cpio patchelf readelf
+
+COPY scripts/build-linux-librime.sh scripts/librime-versions.env /tmp/keytao-librime/
+RUN bash /tmp/keytao-librime/build-linux-librime.sh \
+    && rm -rf /tmp/keytao-librime
 
 # A source checkout lets Flutter select the native x64/arm64 engine artifacts.
 ARG FLUTTER_VERSION=3.47.5

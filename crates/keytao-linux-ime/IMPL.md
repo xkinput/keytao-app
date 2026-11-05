@@ -85,9 +85,9 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
    - `--ibus-engine` 只运行 GNOME/IBus engine。
    - `--backend=wayland,xim,ibus` 或 `--wayland`、`--xim`、`--ibus` 显式选择后端。
 2. 初始化 `$XDG_STATE_HOME/keytao/log/keytao-ime.log`（默认 `~/.local/state/keytao/log`）日志，目录权限 0700，按天滚动并保留 3 天；旧版本留在 `/tmp` 的日志会被删除。日志打不开时退回 stderr，不再让 daemon 启动失败。
-3. 创建 `CoreEngine` 并调用 `engine.init()` 部署/初始化 librime。
-4. 启动 reload watcher，监听用户数据目录里的 `keytao-ime.reload`。
-5. 如果不是 KWin 私有 `WAYLAND_SOCKET` 进程，通过 D-Bus 名称 `org.xkinput.keytao.ime.Daemon` 做单实例检查；若已有旧 daemon，会尝试 `SIGTERM` 后重试。
+3. 如果不是 KWin 私有 `WAYLAND_SOCKET` 进程，通过 D-Bus 名称 `org.xkinput.keytao.ime.Daemon` 做单实例检查；若已有旧 daemon，会尝试 `SIGTERM` 后重试。
+4. 比较 librime 运行版本与用户目录中的 `keytao-librime.version`，准备升级部署锁，再创建 `CoreEngine` 并调用 `engine.init_without_deploy()` 初始化 librime。
+5. 启动 reload watcher，监听用户数据目录里的 `keytao-ime.reload`。版本不同且有部署数据时，由同一 binary 的隐藏子命令 `--deploy-librime-upgrade` 在独立进程执行完整部署。部署锁保证同时只有一个子进程，成功后通知重载并记录版本；失败只记日志，下次启动重试。无方案时直接记录版本，避免每次登录重复部署。
 6. 根据 `WAYLAND_SOCKET`、`WAYLAND_DISPLAY`、`DISPLAY` 和 `XDG_CURRENT_DESKTOP` 选择后端。
 7. XIM 和 IBus shim 以线程方式启动；GNOME IBus engine 和 Wayland 主后端在当前线程运行。
 8. 非 KWin 私有进程会启动托盘。
@@ -110,7 +110,7 @@ Linux 把“可完全主题化”和“受系统限制”的通道分开：
 
 `CoreEngine` 是 `keytao_core::ImeRuntime` 的 Linux 侧别名，真实 runtime 行为在 `crates/keytao-core/src/lib.rs`：
 
-1. `init()` 首次调用 `deploy(user_data_dir, shared_data_dir)`。
+1. daemon 使用 `init_without_deploy()`，避免在输入进程里持有全局 Rime 锁执行完整部署；`init()` 仍会调用 `deploy(user_data_dir, shared_data_dir)`。
 2. `create_session()` 为每个输入上下文创建独立 `Engine`。
 3. `reload()` 重新部署 librime，并递增 `generation`。
 4. 每个 `ImeSession` 在 `state()`、`process_key_result()`、`select_candidate()`、`reset()` 前检查 generation；发现变化后重建内部 `Engine`。
@@ -435,9 +435,9 @@ kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 - Linux 发行目标只包含 `deb` 和 `rpm`，不构建 AppImage 或 tarball。
 - deb/rpm 通过 `packaging/linux/build-packages.sh` 打入 `target/keytao-linux-runtime`，并同时包含 `keytao-app`、`keytao-ime` 和 runtime。
 - deb/rpm 还通过打包脚本安装 `/usr/share/ibus/component/keytao.xml`；`scripts/verify-linux-bundles.sh` 会校验它在两种包里都存在。
-- runtime 必须包含 `librime.so.*`、OpenCC 数据、`rime-plugins`、基础 `rime-data`，以及 librime/OpenCC 需要的非系统依赖。
+- runtime 必须包含单个 stripped `librime.so.1`（合并 Lua 和静态依赖）、OpenCC 数据和基础 `rime-data`，不包含独立 Lua 插件；Snappy 保留为系统运行依赖，以兼容已有压缩 userdb。
 - 打包时设置 RUNPATH：App 使用 `$ORIGIN/lib`，IME 使用 `$ORIGIN/runtime/lib`，Flutter native library 使用 `$ORIGIN:$ORIGIN/../runtime/lib`；安装目录为 `/usr/lib/KeyTao`。
-- 构建镜像安装 `librime-dev` 只作为编译来源；打包阶段会把构建镜像里的 librime runtime 闭包复制进 KeyTao runtime。用户安装 deb/rpm 后不应再依赖系统预装 `librime` 或 `opencc` 才能运行 KeyTao 输入法。
+- 构建镜像保持 `ubuntu:24.04`，通过 `scripts/build-linux-librime.sh` 从源码构建 `scripts/librime-versions.env` 固定的 librime、librime-lua 及其 thirdparty，不使用 apt librime。glog、LevelDB（启用 Snappy）、marisa、OpenCC 和 yaml-cpp 以 PIC 静态链接进 librime；脚本检查 LevelDB 的 `HAVE_SNAPPY 1`，缺失时构建失败。用户安装 deb/rpm 后不依赖系统预装 `librime` 或 `opencc`。
 - 开发时也可以直接运行 `cargo build -p keytao-linux-ime --release`。
 
 ## 测试
@@ -448,7 +448,7 @@ kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop
 # Linux 机器上
 cargo test -p keytao-linux-ime
 
-# 其它 host 上用容器（镜像里要有 rust、librime-dev、libxkbcommon-dev、libdbus-1-dev、freetype 依赖）
+# Other hosts: use a container with Rust, source-built librime and IME dependencies.
 docker run --rm -v "$PWD":/app -w /app -e CARGO_TARGET_DIR=/target <linux-rust-image> \
   cargo test -p keytao-linux-ime
 ```

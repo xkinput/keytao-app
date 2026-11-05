@@ -10,8 +10,8 @@ Linux 入口是 `src/main.rs`：
 
 1. 解析 `--backend=wayland,xim,ibus`、`--ibus-engine`、`--version` 等参数。
 2. 初始化 `$XDG_STATE_HOME/keytao/log/keytao-ime.log` 滚动日志（默认 `~/.local/state/keytao/log/keytao-ime.log`）。
-3. 创建 `CoreEngine`，也就是 `keytao_core::ImeRuntime` 的 Linux 侧别名，调用 `engine.init()` 初始化和部署 librime。
-4. 启动 reload watcher，监听 `~/.local/share/keytao/keytao-ime.reload`。
+3. 创建 `CoreEngine`，也就是 `keytao_core::ImeRuntime` 的 Linux 侧别名，调用 `engine.init_without_deploy()` 初始化 librime。
+4. 启动 reload watcher，监听 `~/.local/share/keytao/keytao-ime.reload`。运行版本与用户目录记录不同时，已有部署交给同一 binary 的独立子进程重新部署；成功后写版本并触发重载，无方案时只记录版本。
 5. 根据 `WAYLAND_SOCKET`、`WAYLAND_DISPLAY`、`DISPLAY`、`XDG_CURRENT_DESKTOP` 选择后端。
 6. 为每个输入上下文创建独立 `ImeSession`，把平台按键转成 X11 keysym + Rime modifier mask。
 7. 调用通用层 `process_key_result()`，再把 `ImeState` 映射回平台提交、preedit 和候选 UI。
@@ -110,6 +110,6 @@ pgrep -af keytao-ime
 tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/keytao/log/keytao-ime.log"
 ```
 
-正式发行走仓库根目录的 `scripts/build-linux.sh`，产物只包含 deb 和 rpm，不产出 AppImage 或 tarball。发行包内置 `runtime/`，包含 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
+正式发行走仓库根目录的 `scripts/build-linux.sh`，产物只包含 deb 和 rpm，不产出 AppImage 或 tarball。builder 保持 `ubuntu:24.04`，通过 `scripts/build-linux-librime.sh` 从源码构建 `scripts/librime-versions.env` 固定的 librime 和 librime-lua，不安装 apt librime。依赖静态合并，Lua 内置于单个 stripped `runtime/lib/librime.so.1`，Snappy 仍为系统运行依赖；`runtime/` 另含 OpenCC 数据和基础 `rime-data`。
 
 KDE 原生 Wayland 使用发行包安装的 `/usr/share/applications/keytao-wayland-launcher.desktop`，由用户在 KDE 虚拟键盘设置中选择，即 `kwinrc [Wayland] InputMethod=keytao-wayland-launcher.desktop`；App 只读取 `kwinrc` 显示状态。普通 daemon 仍负责 XIM/IBus fallback；KWin 私有进程只负责 KDE 原生 Wayland 输入法槽位。

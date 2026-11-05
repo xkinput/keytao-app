@@ -58,7 +58,7 @@ copy_selected_deps() {
 }
 
 prepare_linux_runtime() {
-  local candidate rime_data_src='' rime_lib libdir plugin copied lib
+  local candidate rime_data_src='' rime_lib copied lib
   mkdir -p "$LINUX_RUNTIME_LIB_DIR" "$LINUX_RUNTIME_RIME_DATA_DIR"
   cp crates/keytao-theme/default-theme.yaml "$LINUX_RUNTIME_DIR/default-theme.yaml"
   for candidate in "${KEYTAO_RIME_SHARED_DATA_DIR:-}" "${RIME_SHARED_DATA_DIR:-}" \
@@ -78,16 +78,8 @@ prepare_linux_runtime() {
   [[ -n "$rime_lib" ]] || { echo 'Missing librime.so.1 in builder' >&2; return 1; }
   copied="$(copy_runtime_lib "$rime_lib")"
   copy_selected_deps "$copied"
-  for libdir in "$(dirname "$rime_lib")" /usr/lib/*-linux-gnu /usr/lib /usr/local/lib; do
-    [[ -d "$libdir/rime-plugins" ]] || continue
-    while IFS= read -r -d '' plugin; do
-      copied="$(copy_runtime_lib "$plugin" "$LINUX_RUNTIME_LIB_DIR/rime-plugins")"
-      if [[ -n "$copied" ]]; then copy_selected_deps "$copied"; fi
-    done < <(find "$libdir/rime-plugins" -maxdepth 1 -name '*.so*' -print0)
-  done
-  [[ -f "$LINUX_RUNTIME_LIB_DIR/rime-plugins/librime-lua.so" ]] || { echo 'Missing Rime Lua plugin' >&2; return 1; }
   while IFS= read -r -d '' lib; do
-    patchelf --set-rpath '$ORIGIN:$ORIGIN/..:$ORIGIN/rime-plugins' "$lib"
+    patchelf --set-rpath '$ORIGIN' "$lib"
   done < <(find "$LINUX_RUNTIME_LIB_DIR" -type f -name '*.so*' -print0)
 }
 
