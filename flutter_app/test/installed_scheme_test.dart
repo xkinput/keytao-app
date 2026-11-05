@@ -21,4 +21,20 @@ void main() {
   test('empty schemas do not restore a recorded package', () {
     expect(installedSchemeKey([], 'xmjd-feiding'), isNull);
   });
+
+  test('xmjd family restores the installed non-top package', () {
+    expect(schemeForFamily('xmjd', 'xmjd-feiding'), 'xmjd-feiding');
+  });
+
+  test('xmjd family defaults to the top package without an installation', () {
+    expect(schemeForFamily('xmjd', null), 'xmjd');
+  });
+
+  test('xmjd family ignores an installed keytao package', () {
+    expect(schemeForFamily('xmjd', 'keytao'), 'xmjd');
+  });
+
+  test('keytao family ignores an installed non-top package', () {
+    expect(schemeForFamily('keytao', 'xmjd-feiding'), 'keytao');
+  });
 }

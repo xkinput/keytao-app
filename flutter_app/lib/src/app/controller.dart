@@ -81,6 +81,9 @@ String? installedSchemeKey(List<String> schemas, String? installedScheme) {
       : family;
 }
 
+String schemeForFamily(String family, String? installed) =>
+    installed == 'xmjd-feiding' && family == 'xmjd' ? 'xmjd-feiding' : family;
+
 String errorText(Object error) => error is PlatformException
     ? error.message ?? AppStrings.systemFailure
     : error is StateError
@@ -748,6 +751,15 @@ class AppController extends ChangeNotifier {
     } else {
       unawaited(refreshState());
     }
+  }
+
+  void selectSchemeFamily(String family) {
+    final installed = local == null
+        ? null
+        : installedSchemeKey(local!.schemas, local!.installedScheme);
+    selectScheme(
+      schemeFamily == family ? scheme : schemeForFamily(family, installed),
+    );
   }
 
   void selectScheme(String value) {

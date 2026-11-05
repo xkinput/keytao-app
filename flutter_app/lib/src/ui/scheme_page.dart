@@ -126,11 +126,7 @@ class SchemeSelection extends StatelessWidget {
                               : FButtonVariant.outline,
                           onPress: c.busy || (c.isAndroid && c.releaseLoading)
                               ? null
-                              : () => c.selectScheme(
-                                  c.schemeFamily == entry.key
-                                      ? c.scheme
-                                      : entry.key,
-                                ),
+                              : () => c.selectSchemeFamily(entry.key),
                           child: Column(
                             children: [
                               Text(entry.value),
