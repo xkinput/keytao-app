@@ -74,6 +74,13 @@ String? schemeKeyFromSchemas(List<String> schemas) {
   return null;
 }
 
+String? installedSchemeKey(List<String> schemas, String? installedScheme) {
+  final family = schemeKeyFromSchemas(schemas);
+  return family == 'xmjd' && installedScheme == 'xmjd-feiding'
+      ? 'xmjd-feiding'
+      : family;
+}
+
 String errorText(Object error) => error is PlatformException
     ? error.message ?? AppStrings.systemFailure
     : error is StateError
@@ -556,7 +563,10 @@ class AppController extends ChangeNotifier {
       rethrow;
     }
     if (!_manuallySelectedScheme) {
-      final detected = schemeKeyFromSchemas(local!.schemas);
+      final detected = installedSchemeKey(
+        local!.schemas,
+        local!.installedScheme,
+      );
       if (detected != null && detected != scheme) {
         scheme = detected;
         schemeRelease = null;
@@ -841,6 +851,7 @@ class AppController extends ChangeNotifier {
   Future<bool> install() {
     if (!canInstall) return Future.value(false);
     final url = downloadUrl!;
+    final installing = scheme;
     return run(() async {
       _startOperation(OperationKind.install, AppStrings.installing);
       installError = null;
@@ -863,6 +874,7 @@ class AppController extends ChangeNotifier {
         }
         _recordInstallResult(result);
         verification = result.verify;
+        await core.recordInstalledScheme(scheme: installing);
         await _readLocal();
         progress = AppStrings.installDone;
       } catch (failure) {

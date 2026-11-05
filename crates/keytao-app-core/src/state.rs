@@ -18,6 +18,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn state_without_installed_scheme_deserializes() {
+        let state: AppState = serde_json::from_str(
+            r#"{
+                "auth_token": "test-token",
+                "user": {"id": 7},
+                "onboarding_completed": true,
+                "onboarding_initialized": true,
+                "legacy_imported": true
+            }"#,
+        )
+        .unwrap();
+        assert!(state.installed_scheme.is_none());
+    }
+
+    #[test]
     fn old_user_rule_requires_first_run_and_installed_scheme() {
         assert!(should_complete_onboarding(true, true));
         assert!(!should_complete_onboarding(true, false));
@@ -36,6 +51,8 @@ pub struct AppState {
     #[serde(default = "existing_onboarding_initialized")]
     pub onboarding_initialized: bool,
     pub legacy_imported: bool,
+    #[serde(default)]
+    pub installed_scheme: Option<String>,
 }
 
 fn existing_onboarding_initialized() -> bool {

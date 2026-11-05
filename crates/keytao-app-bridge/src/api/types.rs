@@ -28,6 +28,7 @@ pub struct LocalSchemaDto {
     pub deployed: bool,
     pub version: Option<String>,
     pub schemas: Vec<String>,
+    pub installed_scheme: Option<String>,
 }
 
 pub struct LocalSchemasDto {

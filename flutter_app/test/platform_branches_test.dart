@@ -122,6 +122,13 @@ class PlatformCore extends FakeCore {
     local = installedLocal;
     return result;
   }
+
+  @override
+  Future<void> crateApiCoreRecordInstalledScheme({
+    required String scheme,
+  }) async {
+    calls.add('record:$scheme');
+  }
 }
 
 Future<Object?> appArgs(Object args) async {

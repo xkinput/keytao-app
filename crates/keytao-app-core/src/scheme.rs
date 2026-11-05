@@ -176,6 +176,11 @@ fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
     }
 }
 
+pub fn record_installed_scheme(core: &Core, scheme: &str) -> Result<(), CoreError> {
+    let scheme = validate_scheme_key(scheme.trim()).map_err(CoreError::Other)?;
+    core.update_state(|state| state.installed_scheme = Some(scheme.to_string()))
+}
+
 pub async fn fetch_scheme_release(
     core: &Core,
     scheme: String,
@@ -271,6 +276,36 @@ mod tests {
     struct NullSink;
     impl crate::EventSink for NullSink {
         fn emit(&self, _: crate::CoreEvent) {}
+    }
+
+    #[test]
+    fn record_installed_scheme_rejects_unknown_and_persists_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: dir.path().join("state"),
+                cache_dir: dir.path().to_owned(),
+                resource_dir: dir.path().join("resources"),
+                app_version: "test".into(),
+                platform: crate::Platform::MacOs,
+            },
+            std::sync::Arc::new(NullSink),
+        )
+        .unwrap();
+
+        assert!(record_installed_scheme(&core, "unknown").is_err());
+        assert!(core.state().installed_scheme.is_none());
+        assert!(!core.env().data_dir.join("app-state.json").exists());
+
+        record_installed_scheme(&core, "xmjd-feiding").unwrap();
+        assert_eq!(core.state().installed_scheme.as_deref(), Some("xmjd-feiding"));
+        assert_eq!(
+            crate::AppState::load(&core.env().data_dir)
+                .unwrap()
+                .installed_scheme
+                .as_deref(),
+            Some("xmjd-feiding")
+        );
     }
 
     #[tokio::test]

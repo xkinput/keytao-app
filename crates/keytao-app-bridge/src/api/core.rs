@@ -31,6 +31,7 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         deployed: local.deployed,
         version: local.version,
         schemas: local.schemas,
+        installed_scheme: state.core.state().installed_scheme,
     })
 }
 
@@ -44,6 +45,11 @@ pub fn complete_onboarding() -> Result<(), String> {
     runtime::state()?
         .core
         .complete_onboarding()
+        .map_err(|error| error.to_string())
+}
+
+pub fn record_installed_scheme(scheme: String) -> Result<(), String> {
+    keytao_app_core::scheme::record_installed_scheme(&runtime::state()?.core, &scheme)
         .map_err(|error| error.to_string())
 }
 

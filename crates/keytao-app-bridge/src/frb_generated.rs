@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1540002194;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2133717292;
 
 // Section: executor
 
@@ -1398,6 +1398,39 @@ fn wire__crate__api__core__read_runtime_log_impl(
         },
     )
 }
+fn wire__crate__api__core__record_installed_scheme_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "record_installed_scheme",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_scheme = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::record_installed_scheme(api_scheme)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__remove_downloaded_archive_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2431,11 +2464,13 @@ impl SseDecode for crate::api::types::LocalSchemaDto {
         let mut var_deployed = <bool>::sse_decode(deserializer);
         let mut var_version = <Option<String>>::sse_decode(deserializer);
         let mut var_schemas = <Vec<String>>::sse_decode(deserializer);
+        let mut var_installedScheme = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::LocalSchemaDto {
             installed: var_installed,
             deployed: var_deployed,
             version: var_version,
             schemas: var_schemas,
+            installed_scheme: var_installedScheme,
         };
     }
 }
@@ -2901,58 +2936,61 @@ fn pde_ffi_dispatcher_primary_impl(
         37 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
         38 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
         39 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__core__remove_downloaded_archive_impl(
+        40 => {
+            wire__crate__api__core__record_installed_scheme_impl(port, ptr, rust_vec_len, data_len)
+        }
+        41 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        41 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        42 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => {
+        43 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        44 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        45 => {
+        45 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        46 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        46 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        47 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        49 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__core__windows_pending_ime_action_impl(
+        50 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        52 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        53 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -3498,6 +3536,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::LocalSchemaDto {
             self.deployed.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
             self.schemas.into_into_dart().into_dart(),
+            self.installed_scheme.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4267,6 +4306,7 @@ impl SseEncode for crate::api::types::LocalSchemaDto {
         <bool>::sse_encode(self.deployed, serializer);
         <Option<String>>::sse_encode(self.version, serializer);
         <Vec<String>>::sse_encode(self.schemas, serializer);
+        <Option<String>>::sse_encode(self.installed_scheme, serializer);
     }
 }
 
