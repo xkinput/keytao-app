@@ -228,6 +228,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       RUSTUP_TOOLCHAIN: ${{ needs.prepare.outputs.rust-toolchain }}
       LIBRIME_VERSION: ${{ needs.prepare.outputs.librime-version }}
+      ANDROID_NDK_VERSION: 27.0.12077973
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -262,9 +263,48 @@ jobs:
 
       - name: Install Android SDK and NDK
         run: |
-          sdkmanager "ndk;27.0.12077973" "platforms;android-36" "build-tools;36.0.0"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-36" "build-tools;36.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmake/3.22.1/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve Android librime cache version
+        id: android-librime-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$LIBRIME_VERSION"
+          if [ "$version" = latest ]; then
+            version="$(gh api repos/rime/librime/releases/latest --jq .tag_name)"
+          fi
+          if ! [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "$version" = latest ]; then
+            echo "::error::Invalid resolved librime release tag"
+            exit 1
+          fi
+          echo "LIBRIME_VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Android librime armeabi-v7a
+        id: android-librime-arm
+        uses: actions/cache@v4
+        with:
+          path: vendor/librime/android/armeabi-v7a
+          key: android-librime-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}-armeabi-v7a-${{ steps.android-librime-version.outputs.version }}-${{ hashFiles('scripts/build-android-librime.sh', 'scripts/android-librime-runtime.sh', 'scripts/patches/librime-android.patch', 'scripts/librime-versions.env') }}
+
+      - name: Cache Android librime arm64-v8a
+        id: android-librime-arm64
+        uses: actions/cache@v4
+        with:
+          path: vendor/librime/android/arm64-v8a
+          key: android-librime-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}-arm64-v8a-${{ steps.android-librime-version.outputs.version }}-${{ hashFiles('scripts/build-android-librime.sh', 'scripts/android-librime-runtime.sh', 'scripts/patches/librime-android.patch', 'scripts/librime-versions.env') }}
+
+      - name: Cache Android librime x86_64
+        id: android-librime-x64
+        uses: actions/cache@v4
+        with:
+          path: vendor/librime/android/x86_64
+          key: android-librime-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}-x86_64-${{ steps.android-librime-version.outputs.version }}-${{ hashFiles('scripts/build-android-librime.sh', 'scripts/android-librime-runtime.sh', 'scripts/patches/librime-android.patch', 'scripts/librime-versions.env') }}
 
       - name: Set build version
         run: |
@@ -295,11 +335,29 @@ jobs:
           echo "password=$ANDROID_KEY_PASSWORD" >> keystore.properties
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
-      - name: Import and verify Android librime runtime
+      - name: Build Android librime armeabi-v7a
+        if: steps.android-librime-arm.outputs.cache-hit != 'true'
+        run: scripts/build-android-librime.sh --abi armeabi-v7a
+
+      - name: Build Android librime arm64-v8a
+        if: steps.android-librime-arm64.outputs.cache-hit != 'true'
+        run: scripts/build-android-librime.sh --abi arm64-v8a
+
+      - name: Build Android librime x86_64
+        if: steps.android-librime-x64.outputs.cache-hit != 'true'
+        run: scripts/build-android-librime.sh --abi x86_64
+
+      - name: Refresh Android data and verify librime runtime
         run: |
           set -euo pipefail
+          # Refresh upstream rime-data and OpenCC on every release, including cache hits.
+          data_root="$(mktemp -d "$RUNNER_TEMP/keytao-android-data.XXXXXX")"
+          scripts/fetch-librime.sh --platform android --destination "$data_root"
           for abi in armeabi-v7a arm64-v8a x86_64; do
-            scripts/android-librime-runtime.sh import-fcitx5-rime --abi "$abi"
+            runtime="vendor/librime/android/$abi"
+            rm -rf "$runtime/rime-data"
+            cp -R "$data_root/rime-data" "$runtime/rime-data"
+            cp "$data_root/opencc-release.txt" "$runtime/opencc-release.txt"
             scripts/android-librime-runtime.sh verify --abi "$abi"
           done
 

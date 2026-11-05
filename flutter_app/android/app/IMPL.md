@@ -22,6 +22,7 @@
 - `src/main/kotlin/ink/rea/keytao_app/KeytaoRimeInput.kt`：被拒按键与多字符 `rimeInput` 的结果保序规则，抽成 `KeytaoRimeKeySink` 便于单测。
 - `src/main/kotlin/ink/rea/keytao_app/KeytaoAndroidChannel.kt`：Android 文件安装 adapter；方案、主题和 reload stamp 只写入 `/sdcard/keytao`，负责文件访问权限请求，不执行数据迁移。
 - `crates/keytao-app-core/src/android_jni/mod.rs`：Android JNI bridge，直接创建 `keytao_core::ImeRuntime` / `ImeRuntimeSession`，并调用 `keytao-theme` 生成主题和 UI model JSON。
+- `scripts/build-android-librime.sh`：按 ABI 从固定源码版本构建并导入 Android librime SDK。
 - `scripts/android-librime-runtime.sh`：Android ABI runtime 管理脚本，导入/校验 `librime.so` 闭包，并同步到 Gradle `jniLibs` 和 assets。
 - `crates/librime-sys/build.rs`：本地 patched `librime-sys`，Android target 会按 ABI 自动查找 `vendor/librime/android/<abi>`，并要求 Android NDK sysroot。
 
@@ -123,15 +124,20 @@ Insets 规则：FULL 使用 `super.onComputeInsets()`；ONE_HANDED 也先调用 
 
 ## Android ABI runtime 闭包
 
-Android 复用 `keytao-core` 的 Rime 调用逻辑，但 native `librime` 二进制必须按 Android ABI 提供。仓库不提交 `.so` 二进制；本地或 CI 应把闭包导入到：
+Android 复用 `keytao-core` 的 Rime 调用逻辑，native `librime` 由 `scripts/build-android-librime.sh` 按 ABI 从源码构建，再调用 `import-sdk` 导入。仓库不提交 `.so` 二进制；SDK 布局为：
 
 ```text
 vendor/librime/android/<abi>/
   include/rime_api.h
   lib/librime.so
-  lib/*.so
+  lib/libc++_shared.so
   rime-data/default.yaml
+  librime-release.txt
 ```
+
+构建固定使用 NDK `27.0.12077973`、API 24、`ANDROID_STL=c++_shared`，读取 `scripts/librime-versions.env` 的 `LIBRIME_VERSION` 和固定插件 ref；`LIBRIME_VERSION` 环境变量可覆盖版本，Release 的 `librime_version` dispatch input 也传入该变量。Lua、grammar、predict 和 levers 模块合并进 `librime.so`，不依赖 `libFcitx5*`；`libc++_shared.so` 来自同一 NDK。`librime-release.txt` 记录实际版本和 `source-<sha>`。
+
+`scripts/patches/librime-android.patch` 固定收录 fcitx5-android/prebuilder 的 librime 补丁：`RimeSetOption` 必须保留 `save_options` 持久化，否则用户开关会在重启后重置；同时保留 deprecated-config 兼容处理。LevelDB 禁用 snappy，与现有 Android 库和已写入的数据保持一致。
 
 发布 APK 支持三个 ABI（runtime 导入脚本另保留 x86 SDK 支持）：
 
@@ -144,25 +150,30 @@ vendor/librime/android/<abi>/
 脚本入口：
 
 ```sh
-# 导入自编 Android librime SDK
+# Build and import one release ABI, or all three.
+scripts/build-android-librime.sh --abi arm64-v8a
+scripts/build-android-librime.sh --all
+
+# Import an existing source-built Android librime SDK.
 scripts/android-librime-runtime.sh import-sdk --abi arm64-v8a --source /path/to/android-librime-sdk
 
-# 或从已有 Android APK 提取 native .so；APK 必须包含纯 lib/<abi>/librime.so，
-# 不能是 librime_jni.so 或其它输入法自己的 JNI wrapper。
-scripts/android-librime-runtime.sh import-apk --abi arm64-v8a --apk /path/to/pure-librime-arm64.apk
-
-# 或从 Fcitx5 Android Rime 插件 release 下载纯 Android librime.so 作为 bootstrap 来源
-scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a --version 0.1.2
-
-# 同步到 Android 工程：jniLibs/<abi> 和 assets/keytao-rime-data
-scripts/android-librime-runtime.sh sync --all
+# Verify version, exported modules, dependency closure and ELF alignment.
+scripts/android-librime-runtime.sh verify --all
 
 # Build split Flutter APKs for the three release ABIs.
 (cd flutter_app && flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64)
 
-# 打印单 ABI Rust 构建环境
+# Print the Rust build environment for one ABI.
 source <(scripts/android-librime-runtime.sh env --abi arm64-v8a)
 cargo check -p keytao-core --target aarch64-linux-android
+```
+
+`import-fcitx5-rime` 保留为回滚入口，默认使用 env 文件中固定的 `FCITX5_ANDROID_VERSION`；`ANDROID_LIBRIME_EXPECTED` 只校验该回滚路径，librime 升级不需要修改它。回滚后必须同步完整 APK 依赖闭包到 Gradle 默认的 `src/main/jniLibs/<abi>`，使旧 runtime 需要的 Fcitx5 依赖也进入 APK：
+
+```sh
+# Roll back one ABI to the pinned Fcitx5 Android plugin runtime.
+scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a
+scripts/android-librime-runtime.sh sync --abi arm64-v8a --assets-dir flutter_app/build/app/generated/keytao/assets
 ```
 
 Gradle `preBuild` 会自动执行：
@@ -177,7 +188,7 @@ Gradle 只同步 shared data assets；native libraries 由 `flutter_app/hook/bui
 - matching ABI 的 `vendor/librime/android/<abi>/lib/librime.so`
 - Android NDK sysroot：`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT` 或 `NDK_HOME`
 
-CI release job 先为三个发布 ABI 导入并校验 runtime，再通过 Flutter 构建 split APK；Gradle 同步 assets，native-assets hook 为每个目标 ABI 准备 Rust bridge 与 librime 闭包。
+CI release job 为三个发布 ABI 从源码构建并校验 runtime，按构建脚本、patch、env 文件、NDK 版本和 ABI 缓存 `vendor/librime/android/<abi>`。命中缓存后仍在每次发布通过 `fetch-librime` 重新获取 OpenCC 和基础 `rime-data`。随后 Flutter 构建 split APK；Gradle 同步 assets，native-assets hook 为每个目标 ABI 打包 Rust bridge、`librime.so` 和 `libc++_shared.so`。
 
 ## 通用 runtime 接入
 
@@ -533,51 +544,48 @@ Android 特有部分是软键盘布局、hint、上下滑手势和打开 App 页
 - 回退键长按 repeat：按住后连续派发 `backspace`，松手或移出按键停止；没有 composition 时直接删除宿主输入框正文，不再同步进入 Rime。
 - 用户目录下的 `keytao-ime.reload` reload stamp，路径与签名统一由通用层 `ReloadStamp` 提供。
 - 方案 zip 写入 Android 用户目录并兼容外部 SAF 目录。
-- Android ABI runtime 导入/校验/同步脚本。
+- Android ABI runtime 源码构建及导入/校验/同步脚本。
 - APK assets 内置 `keytao-rime-data` 到用户目录的解包路径。
 - Flutter platform channel 查询 Android 输入法启用/当前选中状态，打开系统输入法设置，并弹出系统输入法选择器。
 - Flutter Android 首启引导：未启用或未选中 KeyTao 时停在配置页，返回 App 后自动重新检测，满足条件后进入主界面。
-- Release CI Android job：安装 NDK，导入三个发布 ABI 的 runtime，构建 split APK，并上传到 GitHub Release。
+- Release CI Android job：安装 NDK 和 CMake，从源码构建或缓存恢复三个发布 ABI 的 runtime，每次发布刷新 OpenCC 和基础 `rime-data`，构建 split APK，并上传到 GitHub Release。
 
 ## 未实现或待补齐
 
-1. Android ABI `librime` 发行源仍需产品化
-   CI 当前使用 Fcitx5 Android Rime 插件里的纯 `librime.so` bootstrap 三个发布 ABI，并通过脚本拒绝 `librime_jni.so`、`JNI_OnLoad` 和第三方输入法 Java wrapper 符号。这个路径可解决当前 APK 闭包和启动闪退问题；正式长期方案建议换成可复现的自建 Android librime/OpenCC/rime-plugins SDK，并记录源码版本、patch、构建参数和产物校验。
-
-2. Android NDK 未安装时不能完成 Rust target 检查
+1. Android NDK 未安装时不能完成 Rust target 检查
    `cargo check -p keytao-core --target aarch64-linux-android` 需要 NDK sysroot，并会明确提示设置 `ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT` 或 `NDK_HOME`。Release CI 已安装 `ndk;27.0.12077973`；本地仍需自行安装并导出环境变量。
 
-3. Gradle 测试需要完整的 Flutter/Android 构建环境
+2. Gradle 测试需要完整的 Flutter/Android 构建环境
    入口为 `flutter_app/android/gradlew`；先在 `flutter_app` 准备依赖和本地 SDK 配置。JNI 仪器化测试还需要设备或模拟器、对应 ABI 的 runtime 和真实方案 fixture。
 
-4. preedit 内部选区还没有视觉呈现
+3. preedit 内部选区还没有视觉呈现
    `ImeState.cursor` 已经通过 `composingRegionStart` + `nativeUtf16OffsetFromChars()` + `setSelection()` 精确落点（见「Composition 与提交」），但编辑器不上报 `candidatesStart` 时仍退回末尾光标，需要逐个宿主实测。`sel_start` / `sel_end`（librime 的当前未转换段）只解析进 `KeytaoImeState`，还没有做成 composing 文本上的 span。
 
-5. reload 触发时机仍偏保守
+4. reload 触发时机仍偏保守
    现在只在 `onStartInputView()` 触发一次后台 stamp 检查。输入法已经打开时，App 部署后的刷新可能要等下一次启动 input view。
 
-6. 诊断入口不足
+5. 诊断入口不足
    目前没有 Android 专用 `ime_status` 命令展示 native library loaded、engine init error、user/shared dir、reload signature、schema 是否存在、最近 JNI 错误等。
 
-7. 移动端键盘配置没有 UI 编辑器
+6. 移动端键盘配置没有 UI 编辑器
    `android_ime.json` 已支持声明式 `rows` / `numberRows` / `symbolRows`、自定义键位、`weight` 宽度、`style` 样式类、hint、上下滑动作、数字/符号页和中英符号覆盖，但主 App 还没有专门的可视化编辑/校验界面。
 
-8. 手势能力仍很基础
+7. 手势能力仍很基础
    当前支持上滑复用 hint/长按符号数字、下滑动作、展开候选区上下滚动和回退键长按 repeat。还没有长按弹出、左右滑移动光标、候选翻页手势、键盘高度拖拽等移动端常见能力。
 
-9. `EditorInfo` 深度适配只做了一半
+8. `EditorInfo` 深度适配只做了一半
    已按 `inputType` 处理密码、数字/电话/日期和多行，按 `imeOptions` 处理 Enter 动作与键帽。仍未按 `TYPE_TEXT_VARIATION_EMAIL_ADDRESS` / `URI` 提供 `@`、`.`、`.com` 之类的专用键位，也没有读取 surrounding text 做上下文预测。
 
-10. 系统级剪贴板历史不可完整枚举
+9. 系统级剪贴板历史不可完整枚举
     Android 公开 `ClipboardManager` 只能可靠读取当前 primary clip；当前剪贴板页显示当前系统剪贴板和 KeyTao IME 会话内文本/图片/文件历史。历史不持久化，也没有 `index.json`；媒体临时文件只用于 URI 授权，进程下次创建时会清除强停遗留文件，不能枚举系统键盘的完整历史。强停不会保证执行 `onDestroy`，不承诺强停瞬间目录已经为空。
 
-11. 多 session / 多 display 并发未细化
+10. 多 session / 多 display 并发未细化
     当前 service 级一个 session 对普通手机输入足够，但多窗口、多 display、外接硬键盘复杂场景可能需要按 input context 管理 session。
 
-12. 禁用 fullscreen extract 模式（偏离项）
+11. 禁用 fullscreen extract 模式（偏离项）
     `onEvaluateFullscreenMode()` 无条件返回 `false`。偏离原因：现代第三方输入法普遍不使用 extract 视图，启用后需要额外维护 `onCreateExtractTextView()` 的视觉一致性，且与悬浮/单手布局冲突。影响范围：横屏矮屏设备上，键盘（默认 246dp 键盘 + 52dp 候选栏 + 系统底部避让）可能遮挡大部分编辑区，而没有 extract 视图兜底。后续收敛方式：按 `orientation` 下调横屏键盘高度，或引导用户使用悬浮键盘模式，而不是恢复 extract 模式。
 
-13. Direct Boot 未支持（暂缓）
+12. Direct Boot 未支持（暂缓）
     IME service 没有声明 `android:directBootAware="true"`，首次解锁前系统会回退到自带输入法。要真正落地必须同时把启动必需数据搬到 `createDeviceProtectedStorageContext()` 的目录，并让 engine 在 `UserManager.isUserUnlocked()==false` 时降级为纯 ASCII 直通——否则只会得到一个不可用的锁屏键盘。当前共享用户目录在首次解锁前不可用，改造范围涉及部署、迁移与 shared data 查找，收益（仅锁屏输密码场景）小于风险，暂缓。
 
 ## 仪器化测试
@@ -678,7 +686,7 @@ App 的异步 setup 若晚于 `onCreate` / `onResume`，或日志当时为 Off�
 ### Flutter 桥接与迁移经验
 
 - FRB native-assets hook 会清理环境；`flutter_app/hook/build.dart` 通过 `extraCargoEnvironmentVariables` 显式传入 vendored Rime SDK 和从 C 编译器路径推导的 Android NDK 根目录。
-- librime 必须注册为代码资源：macOS 按架构 `lipo -thin`，Android 包含 Fcitx5 依赖和 `libc++_shared`。始终把私有副本交给 Flutter，直接传 vendor 文件曾导致资源安装步骤删除原始 dylib。
+- librime 必须注册为代码资源：macOS 按架构 `lipo -thin`，Android 源码构建只打包 `librime.so` 和 `libc++_shared.so`。始终把私有副本交给 Flutter，直接传 vendor 文件曾导致资源安装步骤删除原始 dylib。
 - Flutter 在 macOS 将代码资源包装为 framework 并改写依赖路径；`flutter test` 使用 `ExternalLibrary.open(build/native_assets/<os>/…)` 加载测试库。
 - 迁移时 NDK 固定为已安装的 `27.0.12077973`；升级需同时验证 hook、JNI 导出和 APK 闭包。首次 release/LTO 构建后应核对 bridge 的 `Java_*` 导出。
 - Windows 的 data/cache 根目录可能重合并包含凭据；清缓存不能删除整个应用数据目录。凭据迁到独立子目录仍需单独处理。

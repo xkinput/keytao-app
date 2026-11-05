@@ -512,7 +512,9 @@ App 的方案安装只写文件；部署才调用 `keytao_core::deploy()`。任�
 - macOS 只构建 pkg。pkg 同时安装主 App 和 `/Library/Input Methods/KeyTao.app`，并要求安装后注销、重新登录当前用户会话；不构建 dmg，因为 dmg 拖拽安装无法可靠完成系统输入法注册。
 - Linux 只构建 deb 和 rpm，不构建 AppImage 或 tarball。deb/rpm 通过 `packaging/linux/build-packages.sh` 放入 `runtime/`，并同时包含主 App、系统 IME 和完整 runtime。
 - Windows 继续使用 installer 方式，并应保持 `resources/rime-data` 和 runtime DLL 闭包完整。
-- Android 通过 `scripts/android-librime-runtime.sh` 导入 ABI 对应的 `librime.so` 闭包，Gradle 同步到 `jniLibs/<abi>`，基础 `rime-data` 同步到 APK assets 后由 `InputMethodService` 解包到用户目录下的 `rime-data`。
+- Android 通过 `scripts/build-android-librime.sh --abi ABI` 或 `--all` 从 `scripts/librime-versions.env` 的 `LIBRIME_VERSION` 构建 runtime，支持同名环境变量和 Release `librime_version` input 覆盖。固定使用 NDK `27.0.12077973`、API 24 和 `ANDROID_STL=c++_shared`，发布 ABI 为 `arm64-v8a`、`armeabi-v7a`、`x86_64`。Lua、grammar、predict 和 levers 合并进 `librime.so`，native-assets hook 只另打包 NDK 的 `libc++_shared.so`，不需要 `libFcitx5*`。固定收录的 `scripts/patches/librime-android.patch` 保留 KeyTao 依赖的 `save_options` 开关持久化和 deprecated-config 处理。构建结果经 `android-librime-runtime.sh import-sdk` 导入原有布局，基础 `rime-data` 同步到 APK assets 后由 `InputMethodService` 解包到用户目录下的 `rime-data`。CI 按 ABI 缓存 runtime，但每次发布重新获取 OpenCC 和基础 `rime-data`。
+
+Android 的 `android-librime-runtime.sh import-fcitx5-rime --abi ABI` 保留为回滚入口，默认固定到 env 文件的 `FCITX5_ANDROID_VERSION`，并仅在该路径使用 `ANDROID_LIBRIME_EXPECTED`。回滚后运行 `scripts/android-librime-runtime.sh sync --abi ABI --assets-dir flutter_app/build/app/generated/keytao/assets`，通过 Gradle 默认 `jniLibs` 打包旧 runtime 的完整 Fcitx5 依赖闭包，并将 assets 写入 Gradle 使用的生成目录，避免重复打包。
 
 macOS release CI 必须执行 `scripts/build-macos.sh` 和 `scripts/verify-macos-pkg.sh`，再上传一个 `keytao-app-<version>-macos.pkg`，主 App、IME 与 FFI 均为 x86_64 + arm64 universal。
 

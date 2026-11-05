@@ -7,7 +7,8 @@ ANDROID_RIME_ROOT="$PROJECT_DIR/vendor/librime/android"
 ANDROID_APP_DIR="$PROJECT_DIR/flutter_app/android/app"
 ANDROID_ASSETS_DIR=""
 ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
-LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}}"
+LIBRIME_SOURCE_VERSION="${LIBRIME_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$LIBRIME_VERSION")}"
+LIBRIME_HEADERS_VERSION="${KEYTAO_ANDROID_LIBRIME_HEADERS_VERSION:-$LIBRIME_SOURCE_VERSION}"
 FCITX5_RIME_VERSION="${KEYTAO_ANDROID_FCITX5_RIME_VERSION:-${FCITX5_ANDROID_VERSION:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$FCITX5_ANDROID_VERSION")}}"
 ANDROID_LIBRIME_EXPECTED="${ANDROID_LIBRIME_EXPECTED:-$(source "$PROJECT_DIR/scripts/librime-versions.env"; printf '%s' "$ANDROID_LIBRIME_EXPECTED")}"
 CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
@@ -25,8 +26,9 @@ Commands:
       lib/<abi>/librime.so, not an input-method JNI wrapper.
 
   import-fcitx5-rime --abi ABI [--version VERSION] [--include-dir DIR] [--rime-data DIR]
-      Download the Fcitx5 Android Rime plugin APK for ABI and import its pure
-      Android librime.so. VERSION defaults to FCITX5_ANDROID_VERSION from librime-versions.env. Headers default to
+      Roll back to the Fcitx5 Android Rime plugin APK for ABI and import its pure
+      Android librime.so. VERSION defaults to pinned FCITX5_ANDROID_VERSION from librime-versions.env.
+      Only this rollback uses ANDROID_LIBRIME_EXPECTED. Headers default to
       vendor/librime/macos-universal/include,
       then a cached rime/librime source-header download.
 
@@ -36,7 +38,8 @@ Commands:
       --assets-only copies assets without checking or writing native libraries.
 
   verify [--abi ABI|--all]
-      Verify imported runtime layout.
+      Verify layout, exact runtime version, module exports, dependency closure
+      and 16 KB LOAD alignment on 64-bit ABIs. Source runtimes must not need libFcitx5.
 
   env --abi ABI
       Print shell exports for building Rust against one Android ABI.
@@ -252,15 +255,30 @@ librime_runtime_version() {
     # shortcut: only librime 1.x is identified; replace this reader before a major upgrade.
     version="$(strings "$lib" | sed -n -E '/^1\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$/p' | LC_ALL=C sort -u)"
     [ -n "$version" ] && [[ "$version" != *$'\n'* ]] || die "cannot determine a unique librime 1.x runtime version: $lib"
-    [ "$version" = "$(normalize_version_tag "$ANDROID_LIBRIME_EXPECTED")" ] ||
-        die "Android librime runtime version mismatch: expected $ANDROID_LIBRIME_EXPECTED, found $version in $lib"
     printf '%s\n' "$version"
+}
+
+is_fcitx5_rollback() {
+    local source
+    source="$(sed -n 's/^source=//p' "$1/librime-release.txt" 2>/dev/null)"
+    case "$source" in
+        fcitx5-android:*|android-apk:*/fcitx5-rime/*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 validate_librime_metadata() {
     local root="$1"
-    local version
+    local version expected="$LIBRIME_SOURCE_VERSION"
     version="$(librime_runtime_version "$root/lib/librime.so")"
+    if is_fcitx5_rollback "$root"; then
+        expected="$ANDROID_LIBRIME_EXPECTED"
+    elif [ "$expected" = latest ]; then
+        expected="$(curl -fsSL "${CURL_RETRY_ARGS[@]}" https://api.github.com/repos/rime/librime/releases/latest |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')"
+    fi
+    [ "$version" = "$(normalize_version_tag "$expected")" ] ||
+        die "Android librime runtime version mismatch: expected $expected, found $version in $root/lib/librime.so"
     grep -Fqx "version=$version" "$root/librime-release.txt" 2>/dev/null ||
         die "librime-release.txt does not match runtime $version in $root; re-import the Android runtime"
 }
@@ -274,10 +292,25 @@ contains_elf_string() {
 contains_dynamic_symbol() {
     local file="$1"
     local pattern="$2"
-    if command_exists nm; then
-        nm -D "$file" 2>/dev/null | grep -E "$pattern" >/dev/null
-        return $?
+    local reader
+    reader="$(find_nm || true)"
+    [ -n "$reader" ] || die "nm or Android NDK llvm-nm is required to verify Android module exports"
+    # Merged module require functions have C++ linkage, so demangle before matching.
+    "$reader" -D -C --defined-only "$file" 2>/dev/null | grep -E "$pattern" >/dev/null
+}
+
+find_nm() {
+    local root
+    root="$(find_ndk_root || true)"
+    if [ -n "$root" ]; then
+        local tool
+        tool="$root/toolchains/llvm/prebuilt/$(host_tag)/bin/llvm-nm"
+        if [ -x "$tool" ]; then
+            printf '%s\n' "$tool"
+            return 0
+        fi
     fi
+    command_exists nm && { command -v nm; return 0; }
     return 1
 }
 
@@ -285,8 +318,7 @@ validate_librime_so() {
     local lib="$1"
     [ -f "$lib" ] || die "missing librime.so: $lib"
     librime_runtime_version "$lib" >/dev/null
-    if contains_dynamic_symbol "$lib" '(^|[[:space:]])(rime_get_api|rime_get_api_stdbool)($|[[:space:]])' ||
-        contains_elf_string "$lib" '(^|[^A-Za-z0-9_])rime_get_api([^A-Za-z0-9_]|$)'; then
+    if contains_dynamic_symbol "$lib" '(^|[[:space:]])rime_get_api($|[[:space:]])'; then
         :
     else
         die "librime.so does not export rime_get_api: $lib"
@@ -296,6 +328,32 @@ validate_librime_so() {
         contains_elf_string "$lib" 'JNI_OnLoad|Java_com_osfans_trime|com/osfans/trime|com\.osfans\.trime'; then
         die "librime.so looks like an input-method JNI wrapper, not a pure librime library: $lib"
     fi
+}
+
+validate_source_runtime() {
+    local root="$1" abi="$2" module lib
+    is_fcitx5_rollback "$root" && return 0
+    for module in lua grammar predict levers; do
+        contains_dynamic_symbol "$root/lib/librime.so" "(^|[[:space:]])rime_require_module_$module\\(\\)($|[[:space:]])" ||
+            die "librime.so does not export rime_require_module_$module: $root/lib/librime.so"
+    done
+    while IFS= read -r -d '' lib; do
+        if elf_needed_libs "$lib" | grep -E '^libFcitx5' >/dev/null; then
+            die "source-built Android runtime must not need libFcitx5: $lib"
+        fi
+    done < <(find "$root/lib" -maxdepth 1 -type f -name '*.so' -print0)
+    case "$abi" in
+        arm64-v8a|x86_64)
+            local reader
+            reader="$(find_readelf)" || die "readelf is required to verify 16 KB LOAD alignment"
+            while IFS= read -r -d '' lib; do
+                "$reader" -lW "$lib" | awk '
+                    $1 == "LOAD" { count++; if ($NF !~ /^0x0*4000$/) bad = 1 }
+                    END { exit !count || bad }
+                ' || die "64-bit Android LOAD alignment must be 0x4000: $lib"
+            done < <(find "$root/lib" -maxdepth 1 -type f -name '*.so' -print0)
+            ;;
+    esac
 }
 
 validate_runtime_lib_dir() {
@@ -545,12 +603,13 @@ EOF
 verify_one() {
     local abi="$1"
     local root
-    root="$(runtime_dir "$abi")"
+    root="${2:-$(runtime_dir "$abi")}"
     [ -f "$root/include/rime_api.h" ] || die "$abi is missing include/rime_api.h"
     [ -f "$root/lib/librime.so" ] || die "$abi is missing lib/librime.so"
     [ -f "$root/rime-data/default.yaml" ] || die "$abi is missing rime-data/default.yaml"
     validate_runtime_lib_dir "$root/lib" "$abi"
     validate_librime_metadata "$root"
+    validate_source_runtime "$root" "$abi"
     ensure_rime_data_closure "$root/rime-data"
 }
 
@@ -600,6 +659,7 @@ import_sdk() {
     fi
     ensure_rime_data_closure "$staging/rime-data"
     ensure_android_metadata "$staging" "android-sdk:$source"
+    verify_one "$abi" "$staging"
     rm -rf "$destination"
     mv "$staging" "$destination"
     write_env_file "$abi" "$destination"
@@ -683,6 +743,7 @@ import_apk() {
     fi
     ensure_rime_data_closure "$staging/rime-data"
     ensure_android_metadata "$staging" "android-apk:$apk"
+    verify_one "$abi" "$staging"
     rm -rf "$destination"
     mv "$staging" "$destination"
     write_env_file "$abi" "$destination"
@@ -972,6 +1033,11 @@ print_env() {
     verify_one "$abi"
     cat "$(runtime_dir "$abi")/env.sh"
 }
+
+# Allow the source builder to reuse NDK discovery and libc++_shared lookup.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0
+fi
 
 if [ $# -eq 0 ]; then
     usage

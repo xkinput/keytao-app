@@ -23,8 +23,8 @@ fn main() {
     if target.contains("android") {
         let Some(root) = android_rime_root(&target) else {
             panic!(
-                "Android target {target} requires an imported librime runtime. \
-                 Run scripts/android-librime-runtime.sh import-sdk/import-fcitx5-rime for the matching ABI, \
+                "Android target {target} requires a source-built librime runtime. \
+                 Run scripts/build-android-librime.sh --abi ABI for the matching ABI, \
                  or set KEYTAO_ANDROID_RIME_ROOT/RIME_INCLUDE_DIR/RIME_LIB_DIR."
             );
         };

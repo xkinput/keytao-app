@@ -30,6 +30,9 @@ void main(List<String> args) async {
     ).run(input: input, output: output);
 
     for (final library in rime.bundledLibraries) {
+      if (code.targetOS == OS.android) {
+        output.dependencies.add(Uri.file(library));
+      }
       final file = Uri.file(library).pathSegments.last;
       output.assets.code.add(
         CodeAsset(
@@ -72,12 +75,12 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
         final other => throw UnsupportedError('librime has no Android $other build'),
       };
       final lib = '${vendor}android/$abi/lib';
-      // librime.so needs the Fcitx5 support libraries and the shared C++ runtime.
+      // Source-built librime.so needs only the shared C++ runtime bundled here.
       return _Rime({
         'KEYTAO_ANDROID_RIME_ROOT': '${vendor}android',
         'ANDROID_NDK_HOME': ?ndkRoot,
       }, [
-        for (final name in ['librime.so', 'libFcitx5Core.so', 'libFcitx5Config.so', 'libFcitx5Utils.so', 'libc++_shared.so'])
+        for (final name in ['librime.so', 'libc++_shared.so'])
           '$lib/$name',
       ]);
     case OS.windows:

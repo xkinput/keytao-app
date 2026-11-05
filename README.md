@@ -79,16 +79,20 @@ flutter pub get
 flutter run
 ```
 
-Android 需要 Android NDK，并为目标 ABI 导入 librime runtime（版本默认 latest）：
+Android 使用 NDK `27.0.12077973`、API 24 和 `ANDROID_STL=c++_shared` 从源码构建 librime runtime。版本读取 `scripts/librime-versions.env` 的 `LIBRIME_VERSION`，可用同名环境变量覆盖；发布 ABI 为 `arm64-v8a`、`armeabi-v7a` 和 `x86_64`：
 
 ```bash
-scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a
-# Or import a self-built SDK:
-scripts/android-librime-runtime.sh import-sdk --abi arm64-v8a --source /path/to/android-librime-sdk
+scripts/build-android-librime.sh --abi arm64-v8a
+# Or build all three release ABIs:
+scripts/build-android-librime.sh --all
 # Rust environment for one ABI:
 source <(scripts/android-librime-runtime.sh env --abi arm64-v8a)
 cargo check -p keytao-core --target aarch64-linux-android
 ```
+
+Android 的 `librime.so` 合并 Lua、grammar、predict 和 levers 模块，不依赖 `libFcitx5*`；随包保留 NDK 的 `libc++_shared.so`。`scripts/patches/librime-android.patch` 固定收录 fcitx5-android/prebuilder 补丁，保留 KeyTao 依赖的 `save_options` 开关持久化和旧配置兼容处理。CI 按 ABI 缓存 runtime，但每次发布重新获取 OpenCC 和基础 `rime-data`。
+
+回滚时可运行 `scripts/android-librime-runtime.sh import-fcitx5-rime --abi arm64-v8a`，再运行 `scripts/android-librime-runtime.sh sync --abi arm64-v8a --assets-dir flutter_app/build/app/generated/keytao/assets`，将 APK runtime 的完整依赖闭包放入 Gradle `jniLibs`，并将 assets 写入 Gradle 使用的生成目录，避免重复打包。此入口默认固定到 env 文件的 `FCITX5_ANDROID_VERSION`，`ANDROID_LIBRIME_EXPECTED` 仅校验该回滚版本，不约束源码构建。
 
 iOS 需要先构建并导入 librime：
 
