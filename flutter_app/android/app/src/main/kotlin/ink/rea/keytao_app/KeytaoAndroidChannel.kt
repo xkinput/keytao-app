@@ -840,7 +840,6 @@ class KeytaoAndroidChannel(
                     fun addVerify(path: String, ok: Boolean, note: String) {
                         verifyArray.add(mapOf("path" to path, "ok" to ok, "note" to note))
                     }
-                    addVerify("default.yaml", File(root, "default.yaml").isFile, "KeyTao IME shared data marker")
                     addVerify("*.schema.yaml", root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true, "Rime schema")
 
                     reply.success(mutableMapOf<String, Any?>().apply {
