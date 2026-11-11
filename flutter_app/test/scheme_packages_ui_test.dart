@@ -138,7 +138,7 @@ void main() {
   testWidgets('package rows expose only applicable actions', (tester) async {
     final c = _PackageController();
     addTearDown(c.dispose);
-    _size(tester, const Size(400, 860));
+    _size(tester, const Size(360, 800));
     final cases = [
       (package: null, update: false, labels: ['下载'], calls: ['install:keytao']),
       (
@@ -226,12 +226,37 @@ void main() {
         ..schemeUpdates = [if (entry.update) _update];
       c.actions.clear();
       await _pumpRow(tester, c, 'keytao');
+      final row = find.byType(SchemePackageRow);
+      final title = find.text('键道6');
+      expect(
+        tester
+            .widget<FButton>(
+              find.ancestor(of: title, matching: find.byType(FButton)),
+            )
+            .variant,
+        FButtonVariant.ghost,
+      );
+      expect(tester.getTopLeft(title).dx, tester.getTopLeft(row).dx);
+      expect(
+        find.descendant(of: row, matching: find.byType(ActionRow)),
+        findsOneWidget,
+      );
       expect(_actionLabels(tester), entry.labels);
       expect(
         find.text('使用中'),
         entry.package?.active == true ? findsOneWidget : findsNothing,
       );
-      if (entry.package != null) expect(find.text('v1'), findsOneWidget);
+      if (entry.package != null) {
+        expect(find.text('v1'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('v1')).dy,
+          greaterThan(tester.getBottomLeft(title).dy),
+        );
+        expect(
+          tester.getTopLeft(find.byType(ActionRow)).dy,
+          greaterThan(tester.getBottomLeft(find.text('v1')).dy),
+        );
+      }
       if (entry.update) {
         expect(find.text('→ v2'), findsOneWidget);
         expect(
@@ -295,6 +320,13 @@ void main() {
     expect(find.text('星猫键道 · 非顶'), findsOneWidget);
     expect(find.text('20261104'), findsOneWidget);
     expect(find.text('20261103'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('scheme-package-xmjd')),
+        matching: find.byType(ChoiceSetting<String>),
+      ),
+      findsOneWidget,
+    );
     await tester.tap(find.text('非顶'));
     await tester.pumpAndSettle();
     expect(c.scheme, 'xmjd-feiding');
@@ -303,11 +335,18 @@ void main() {
       find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
       findsOneWidget,
     );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
+        matching: find.byType(ChoiceSetting<String>),
+      ),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  for (final size in [const Size(400, 860), const Size(1000, 760)]) {
+  for (final size in [const Size(360, 800), const Size(1000, 760)]) {
     testWidgets('update banner and scheme tab indicator at $size', (
       tester,
     ) async {
@@ -347,8 +386,12 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.descendant(of: banner, matching: find.text('v2')),
+        find.descendant(of: banner, matching: find.text('→ v2')),
         findsOneWidget,
+      );
+      expect(
+        find.descendant(of: banner, matching: find.byType(FBadge)),
+        findsNothing,
       );
       expect(
         find.byKey(const ValueKey('scheme-update-indicator')),

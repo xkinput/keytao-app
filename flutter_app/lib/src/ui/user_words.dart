@@ -60,7 +60,7 @@ class UserWordsNotice extends StatelessWidget {
       children: [
         if (report != null) ...[
           Text(
-            '已合并 ${report.removed.length} 条，冲突 ${report.conflicts.length} 条',
+            '已移除重复 ${report.removed.length} 条，冲突 ${report.conflicts.length} 条',
           ),
           ActionRow(
             children: [
@@ -332,6 +332,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         side: FLayout.btt,
         mainAxisMaxRatio: 1,
         useSafeArea: true,
+        resizeToAvoidBottomInset: false,
         builder: (_) => editor,
       );
     }
@@ -1162,20 +1163,29 @@ class _UserWordEditorState extends State<_UserWordEditor> {
       );
     }
     return Padding(
-      padding: const EdgeInsets.all(24),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: 20,
-          children: [
-            Text(title, style: context.theme.typography.display.lg),
-            fields,
-            Align(
-              alignment: Alignment.centerRight,
-              child: ActionRow(children: actions),
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: Material(
+        color: context.theme.colors.background,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        clipBehavior: Clip.antiAlias,
+        child: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 20,
+              children: [
+                Text(title, style: context.theme.typography.display.lg),
+                fields,
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: ActionRow(children: actions),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

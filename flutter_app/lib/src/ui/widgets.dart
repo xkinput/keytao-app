@@ -553,7 +553,12 @@ class SchemeUpdateBanner extends StatelessWidget {
             const SizedBox(height: 8),
             ActionRow(
               children: [
-                FBadge(child: Text(update.latestVersion)),
+                Text(
+                  '→ ${update.latestVersion}',
+                  style: context.theme.typography.body.sm.copyWith(
+                    color: context.theme.colors.mutedForeground,
+                  ),
+                ),
                 ActionButton(
                   '更新',
                   primary: true,
