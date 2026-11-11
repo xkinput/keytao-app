@@ -318,13 +318,15 @@ fn wire__crate__api__core__account_sync_user_dictionary_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_allow_deletions = <bool>::sse_decode(&mut deserializer);
+            let api_confirmed_deletions = <Option<
+                crate::api::types::UserDictionaryDeletionConfirmationDto,
+            >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok =
-                            crate::api::core::account_sync_user_dictionary(api_allow_deletions)
+                            crate::api::core::account_sync_user_dictionary(api_confirmed_deletions)
                                 .await?;
                         std::result::Result::Ok(output_ok)
                     })()
@@ -3455,6 +3457,21 @@ impl SseDecode for Option<u32> {
     }
 }
 
+impl SseDecode for Option<crate::api::types::UserDictionaryDeletionConfirmationDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(
+                <crate::api::types::UserDictionaryDeletionConfirmationDto>::sse_decode(
+                    deserializer,
+                ),
+            );
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::types::WindowsImeStatusDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3652,6 +3669,20 @@ impl SseDecode for crate::api::types::UiColorSchemeDto {
 impl SseDecode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
+}
+
+impl SseDecode for crate::api::types::UserDictionaryDeletionConfirmationDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_localDeletions =
+            <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_decode(deserializer);
+        let mut var_serverDeletions =
+            <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_decode(deserializer);
+        return crate::api::types::UserDictionaryDeletionConfirmationDto {
+            local_deletions: var_localDeletions,
+            server_deletions: var_serverDeletions,
+        };
+    }
 }
 
 impl SseDecode for crate::api::types::UserDictionaryDeletionDto {
@@ -4846,6 +4877,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::UiColorSchemeDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::UserDictionaryDeletionConfirmationDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.local_deletions.into_into_dart().into_dart(),
+            self.server_deletions.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::UserDictionaryDeletionConfirmationDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::UserDictionaryDeletionConfirmationDto>
+    for crate::api::types::UserDictionaryDeletionConfirmationDto
+{
+    fn into_into_dart(self) -> crate::api::types::UserDictionaryDeletionConfirmationDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::types::UserDictionaryDeletionDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5638,6 +5690,18 @@ impl SseEncode for Option<u32> {
     }
 }
 
+impl SseEncode for Option<crate::api::types::UserDictionaryDeletionConfirmationDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::types::UserDictionaryDeletionConfirmationDto>::sse_encode(
+                value, serializer,
+            );
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::types::WindowsImeStatusDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5800,6 +5864,20 @@ impl SseEncode for crate::api::types::UiColorSchemeDto {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
+}
+
+impl SseEncode for crate::api::types::UserDictionaryDeletionConfirmationDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_encode(
+            self.local_deletions,
+            serializer,
+        );
+        <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_encode(
+            self.server_deletions,
+            serializer,
+        );
+    }
 }
 
 impl SseEncode for crate::api::types::UserDictionaryDeletionDto {

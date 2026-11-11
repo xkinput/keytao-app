@@ -87,6 +87,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(dynamic raw);
+
+  @protected
   WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
@@ -231,6 +235,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  dco_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    dynamic raw,
+  );
+
+  @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
@@ -279,6 +289,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_user_dictionary_deletion_confirmation_dto(dynamic raw);
 
   @protected
   UserDictionaryDeletionDto dco_decode_user_dictionary_deletion_dto(
@@ -383,6 +397,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   WindowsImeStatusDto sse_decode_box_autoadd_windows_ime_status_dto(
@@ -553,6 +573,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  sse_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
     SseDeserializer deserializer,
   );
@@ -613,6 +639,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   UserDictionaryDeletionDto sse_decode_user_dictionary_deletion_dto(
@@ -756,6 +788,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_windows_ime_status_dto(
@@ -983,6 +1021,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
     SseSerializer serializer,
@@ -1062,6 +1106,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_user_dictionary_deletion_dto(

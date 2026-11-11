@@ -56,6 +56,11 @@ pub struct UserDictionaryDeletion {
     pub code: String,
 }
 
+pub struct UserDictionaryDeletionConfirmation {
+    pub local_deletions: Vec<UserDictionaryDeletion>,
+    pub server_deletions: Vec<UserDictionaryDeletion>,
+}
+
 pub(crate) const API_BASE: &str = "https://keytao.rea.ink";
 
 async fn throttle(api_base: &str) {
@@ -655,9 +660,9 @@ pub async fn sync_user_dictionary(
     core: &Core,
     host: &impl ImeHost,
     token: String,
-    allow_deletions: bool,
+    confirmed_deletions: Option<UserDictionaryDeletionConfirmation>,
 ) -> Result<UserDictionarySyncResult, CoreError> {
-    sync_user_dictionary_at(core, host, token, API_BASE, allow_deletions).await
+    sync_user_dictionary_at(core, host, token, API_BASE, confirmed_deletions).await
 }
 
 async fn sync_user_dictionary_at(
@@ -665,7 +670,7 @@ async fn sync_user_dictionary_at(
     host: &impl ImeHost,
     token: String,
     api_base: &str,
-    allow_deletions: bool,
+    confirmed_deletions: Option<UserDictionaryDeletionConfirmation>,
 ) -> Result<UserDictionarySyncResult, CoreError> {
     let api = ApiClient::new(core, api_base);
     if api.token()?.trim() != token.trim() {
@@ -755,7 +760,34 @@ async fn sync_user_dictionary_at(
             code: entry.code.clone(),
         })
         .collect();
-    if !allow_deletions && (local_deletions.len() > 3 || server_deletions.len() > 3) {
+    let confirmed_local: BTreeSet<_> = confirmed_deletions
+        .as_ref()
+        .into_iter()
+        .flat_map(|confirmed| &confirmed.local_deletions)
+        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .collect();
+    let confirmed_server: BTreeSet<_> = confirmed_deletions
+        .as_ref()
+        .into_iter()
+        .flat_map(|confirmed| &confirmed.server_deletions)
+        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .collect();
+    let unconfirmed_local: BTreeSet<_> = local_deletions
+        .iter()
+        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .filter(|key| !confirmed_local.contains(key))
+        .collect();
+    let unconfirmed_server: BTreeSet<_> = server_deletions
+        .iter()
+        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .filter(|key| !confirmed_server.contains(key))
+        .collect();
+    let needs_confirmation = if confirmed_deletions.is_some() {
+        unconfirmed_local.len() + unconfirmed_server.len() > 3
+    } else {
+        unconfirmed_local.len() > 3 || unconfirmed_server.len() > 3
+    };
+    if needs_confirmation {
         return Ok(UserDictionarySyncResult {
             file_name: "keytao.user.dict.yaml".into(),
             path: path_string(root.join("keytao.user.dict.yaml")),
@@ -773,7 +805,9 @@ async fn sync_user_dictionary_at(
     for key in &local_set {
         if !remote_by_key.contains_key(key) {
             if base.contains(key) {
-                resulting.remove(key);
+                if confirmed_deletions.is_none() || confirmed_local.contains(key) {
+                    resulting.remove(key);
+                }
             } else {
                 let uploaded = api
                     .request(
@@ -803,6 +837,9 @@ async fn sync_user_dictionary_at(
     for (key, entries) in &remote_by_key {
         if !local_set.contains(key) {
             if base.contains(key) {
+                if confirmed_deletions.is_some() && !confirmed_server.contains(key) {
+                    continue;
+                }
                 for entry in entries {
                     let deleted = api
                         .request(
@@ -857,7 +894,12 @@ async fn sync_user_dictionary_at(
             .user_words
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        save_base(&root, account, &resulting)?;
+        let mut next_base = resulting.clone();
+        if confirmed_deletions.is_some() {
+            // Keep deferred deletions in the base so the next sync still detects them.
+            next_base.extend(unconfirmed_server);
+        }
+        save_base(&root, account, &next_base)?;
     }
     match std::fs::remove_file(legacy_base_path(core, account)) {
         Ok(()) => {}

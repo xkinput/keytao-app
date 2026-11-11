@@ -1020,6 +1020,27 @@ class SchemeUpdateDto {
 
 enum UiColorSchemeDto { auto, light, dark }
 
+class UserDictionaryDeletionConfirmationDto {
+  final List<UserDictionaryDeletionDto> localDeletions;
+  final List<UserDictionaryDeletionDto> serverDeletions;
+
+  const UserDictionaryDeletionConfirmationDto({
+    required this.localDeletions,
+    required this.serverDeletions,
+  });
+
+  @override
+  int get hashCode => localDeletions.hashCode ^ serverDeletions.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserDictionaryDeletionConfirmationDto &&
+          runtimeType == other.runtimeType &&
+          localDeletions == other.localDeletions &&
+          serverDeletions == other.serverDeletions;
+}
+
 class UserDictionaryDeletionDto {
   final String word;
   final String code;

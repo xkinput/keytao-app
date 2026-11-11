@@ -407,7 +407,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
     try {
       if (!automatic && !await ensureAccountLogin(context, c)) return;
       if (automatic && c.accountUser == null) return;
-      var synced = await c.syncUserDictionary();
+      var synced = await c.syncUserDictionary(automatic: automatic);
       if (!synced) {
         await c.reloadAccountSession();
         if (!automatic &&
@@ -492,7 +492,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         c.dismissDictionarySyncConfirmation();
         return;
       }
-      if (!await c.syncUserDictionary(allowDeletions: true) && mounted) {
+      if (!await c.syncUserDictionary(confirmedDeletions: pending) && mounted) {
         setState(() => _error = c.accountError);
       }
     } finally {

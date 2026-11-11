@@ -441,3 +441,8 @@ pub struct UserDictionaryDeletionDto {
     pub word: String,
     pub code: String,
 }
+
+pub struct UserDictionaryDeletionConfirmationDto {
+    pub local_deletions: Vec<UserDictionaryDeletionDto>,
+    pub server_deletions: Vec<UserDictionaryDeletionDto>,
+}

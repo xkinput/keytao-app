@@ -309,7 +309,7 @@ pub async fn account_logout() -> Result<(), String> {
 
 /// Merges the user dictionary in place without deploying.
 pub async fn account_sync_user_dictionary(
-    allow_deletions: bool,
+    confirmed_deletions: Option<UserDictionaryDeletionConfirmationDto>,
 ) -> Result<UserDictionarySyncDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -318,7 +318,26 @@ pub async fn account_sync_user_dictionary(
         &state.core,
         &state.host,
         token,
-        allow_deletions,
+        confirmed_deletions.map(|confirmed| {
+            keytao_app_core::account::UserDictionaryDeletionConfirmation {
+                local_deletions: confirmed
+                    .local_deletions
+                    .into_iter()
+                    .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
+                        word: entry.word,
+                        code: entry.code,
+                    })
+                    .collect(),
+                server_deletions: confirmed
+                    .server_deletions
+                    .into_iter()
+                    .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
+                        word: entry.word,
+                        code: entry.code,
+                    })
+                    .collect(),
+            }
+        }),
     )
     .await
     .map_err(|error| error.to_string())?;

@@ -141,7 +141,7 @@ async fn first_sync_unions_local_and_remote_preserving_file_and_remote_weight() 
     ])
     .await;
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
     assert!(result.is_ok(), "{}", result.err().unwrap());
     assert_eq!(
@@ -205,7 +205,7 @@ async fn three_way_merge_table_covers_every_local_remote_base_membership() {
             ),
         ])
         .await;
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
             .await
             .unwrap();
         let requests = mock.finish().await;
@@ -263,7 +263,7 @@ async fn remote_list_failure_or_malformed_response_never_deletes_or_updates_base
         let dictionary = std::fs::read(host.0.join("keytao.user.dict.yaml")).unwrap();
         let mock = server(vec![(status, body)]).await;
         assert!(
-            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
+            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
                 .await
                 .is_err()
         );
@@ -292,7 +292,7 @@ async fn rate_limit_stops_sync_without_partial_base_update() {
         ("429 Too Many Requests", json!({"error":"too fast"})),
     ])
     .await;
-    let error = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
+    let error = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
         .await
         .err()
         .unwrap();
@@ -439,7 +439,7 @@ async fn malformed_upsert_response_stops_before_remote_or_local_deletions() {
     ])
     .await;
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
     assert_eq!(
         requests.len(),
@@ -476,7 +476,7 @@ async fn missing_local_dictionary_restores_remote_union_without_deleting_from_sa
     ])
     .await;
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
     assert!(result.is_ok());
     assert_eq!(
@@ -515,7 +515,7 @@ async fn listing_recreated_local_dictionary_restores_remote_without_deleting_sav
     ])
     .await;
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
     assert!(result.is_ok(), "{}", result.err().unwrap());
     assert_eq!(
@@ -560,7 +560,7 @@ async fn reset_local_dictionary_with_new_word_restores_remote_without_deleting_s
     ])
     .await;
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
     assert!(result.is_ok(), "{}", result.err().unwrap());
     assert!(
@@ -629,7 +629,7 @@ async fn reset_directory_with_readded_base_word_never_deletes_remote_words() {
     ])
     .await;
         let result =
-            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
         let requests = mock.finish().await;
         assert!(result.is_ok());
         assert!(
@@ -683,7 +683,7 @@ async fn external_recreated_dictionary_with_stale_sidecar_never_deletes_remote_w
     .await;
 
     let result =
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false).await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
     let requests = mock.finish().await;
 
     assert!(result.is_ok());
@@ -705,7 +705,7 @@ async fn external_recreated_dictionary_with_stale_sidecar_never_deletes_remote_w
 }
 
 #[tokio::test]
-async fn bulk_deletions_without_allow_leave_both_sides_and_base_unchanged() {
+async fn bulk_deletions_without_confirmation_leave_both_sides_and_base_unchanged() {
     for delete_on_server in [false, true] {
         let (_dir, core, host) = fixture();
         let mut base = BTreeSet::from([("kept".into(), "zzzz".into())]);
@@ -730,10 +730,9 @@ async fn bulk_deletions_without_allow_leave_both_sides_and_base_unchanged() {
         let mut responses = vec![("200 OK", json!({"total":entries.len(),"entries":entries}))];
         responses.extend((0..4).map(|_| ("200 OK", json!({"success":true}))));
         let mock = server(responses).await;
-        let result =
-            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
-                .await
-                .unwrap();
+        let result = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
         let requests = mock.finish().await;
         assert_eq!(requests.len(), 1, "pending sync must not send DELETE");
         assert_eq!(
@@ -759,7 +758,279 @@ async fn bulk_deletions_without_allow_leave_both_sides_and_base_unchanged() {
 }
 
 #[tokio::test]
-async fn bulk_deletions_with_allow_apply_to_both_sides_and_update_base() {
+async fn confirmed_local_deletions_recheck_growth_before_deleting() {
+    confirmed_deletions_recheck_growth(false, 4).await;
+}
+
+#[tokio::test]
+async fn confirmed_server_deletions_recheck_growth_before_deleting() {
+    confirmed_deletions_recheck_growth(true, 4).await;
+}
+
+#[tokio::test]
+async fn confirmed_deletions_preserve_small_unconfirmed_excess_on_both_sides() {
+    for delete_on_server in [false, true] {
+        for extra in 1..=3 {
+            confirmed_deletions_recheck_growth(delete_on_server, extra).await;
+        }
+    }
+}
+
+async fn confirmed_deletions_recheck_growth(delete_on_server: bool, extra: usize) {
+    let (_dir, core, host) = fixture();
+    let mut base = BTreeSet::from([("kept".into(), "zzzz".into())]);
+    user_words::add_user_word(&core, "keytao", &host.0, "kept", "zzzz", None).unwrap();
+    let mut entries = vec![remote("kept", "zzzz", 1)];
+    let mut initial_entries = entries.clone();
+    let words = &["a", "b", "c", "d", "e", "f", "g", "h"][..4 + extra];
+    for (index, word) in words.iter().enumerate() {
+        base.insert(((*word).into(), (*word).into()));
+        if delete_on_server {
+            entries.push(remote(word, word, index as i64 + 2));
+        }
+        if !delete_on_server || index >= 4 {
+            user_words::add_user_word(&core, "keytao", &host.0, word, word, None).unwrap();
+        }
+        if delete_on_server || index >= 4 {
+            initial_entries.push(remote(word, word, index as i64 + 2));
+        }
+    }
+    save_base(&host.0, 7, &base).unwrap();
+    let initial = server(vec![(
+        "200 OK",
+        json!({"total":initial_entries.len(),"entries":initial_entries}),
+    )])
+    .await;
+    let pending = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &initial.url, None)
+        .await
+        .unwrap();
+    assert_eq!(initial.finish().await.len(), 1);
+    assert!(pending.pending);
+    assert_eq!(
+        pending.local_deletions.len() + pending.server_deletions.len(),
+        4
+    );
+    if delete_on_server {
+        for entry in user_words::list_user_words(&core, "keytao", &host.0)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .filter(|entry| entry.word != "kept")
+        {
+            user_words::delete_user_word(
+                &core,
+                "keytao",
+                &host.0,
+                entry.id,
+                &entry.word,
+                &entry.code,
+            )
+            .unwrap();
+        }
+    }
+    let base_before = std::fs::read(base_path(&host.0, 7)).unwrap();
+    let dictionary_before = std::fs::read(host.0.join("keytao.user.dict.yaml")).unwrap();
+    let mut responses = vec![("200 OK", json!({"total":entries.len(),"entries":entries}))];
+    responses.extend((0..8).map(|_| ("200 OK", json!({"success":true}))));
+    let mock = server(responses).await;
+    let result = sync_user_dictionary_at(
+        &core,
+        &host,
+        "fixture-token".into(),
+        &mock.url,
+        Some(UserDictionaryDeletionConfirmation {
+            local_deletions: pending.local_deletions,
+            server_deletions: pending.server_deletions,
+        }),
+    )
+    .await
+    .unwrap();
+    let requests = mock.finish().await;
+    if extra <= 3 {
+        assert!(!result.pending);
+        assert_eq!(requests.len(), if delete_on_server { 5 } else { 1 });
+        let mut expected = BTreeSet::from([("kept".into(), "zzzz".into())]);
+        expected.extend(
+            words[4..]
+                .iter()
+                .map(|word| ((*word).into(), (*word).into())),
+        );
+        let saved: DictionaryBase =
+            serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+        assert_eq!(
+            saved.entries, expected,
+            "deferred deletions must remain in the base"
+        );
+        if delete_on_server {
+            assert_eq!(local(&core, &host), [("kept".into(), "zzzz".into())]);
+            for (request, id) in requests.iter().skip(1).zip(2..=5) {
+                assert!(request.starts_with(&format!("DELETE /api/user/dictionary/{id} HTTP/1.1")));
+            }
+        } else {
+            assert_eq!(
+                local(&core, &host),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
+        return;
+    }
+    assert!(
+        result.pending,
+        "new deletions must require confirmation again"
+    );
+    assert_eq!(requests.len(), 1, "pending sync must not send DELETE");
+    assert_eq!(std::fs::read(base_path(&host.0, 7)).unwrap(), base_before);
+    assert_eq!(
+        std::fs::read(host.0.join("keytao.user.dict.yaml")).unwrap(),
+        dictionary_before
+    );
+    let deletions = if delete_on_server {
+        result.server_deletions
+    } else {
+        result.local_deletions
+    };
+    assert_eq!(
+        deletions
+            .into_iter()
+            .map(|entry| (entry.word, entry.code))
+            .collect::<BTreeSet<_>>(),
+        ["a", "b", "c", "d", "e", "f", "g", "h"]
+            .map(|word| (word.into(), word.into()))
+            .into()
+    );
+}
+
+#[tokio::test]
+async fn confirmed_deletions_recheck_combined_excess_before_deleting() {
+    let (_dir, core, host) = fixture();
+    let mut base = BTreeSet::from([("kept".into(), "zzzz".into())]);
+    user_words::add_user_word(&core, "keytao", &host.0, "kept", "zzzz", None).unwrap();
+    for word in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        base.insert((word.into(), word.into()));
+        if !matches!(word, "g" | "h") {
+            user_words::add_user_word(&core, "keytao", &host.0, word, word, None).unwrap();
+        }
+    }
+    save_base(&host.0, 7, &base).unwrap();
+    let before = std::fs::read(base_path(&host.0, 7)).unwrap();
+    let dictionary = std::fs::read(host.0.join("keytao.user.dict.yaml")).unwrap();
+    let mock = server(vec![(
+        "200 OK",
+        json!({"total":3,"entries":[remote("kept","zzzz",1),remote("g","g",8),remote("h","h",9)]}),
+    )])
+    .await;
+    let result = sync_user_dictionary_at(
+        &core,
+        &host,
+        "fixture-token".into(),
+        &mock.url,
+        Some(UserDictionaryDeletionConfirmation {
+            local_deletions: ["a", "b", "c", "d"]
+                .map(|word| UserDictionaryDeletion {
+                    word: word.into(),
+                    code: word.into(),
+                })
+                .into(),
+            server_deletions: Vec::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mock.finish().await.len(), 1);
+    assert!(
+        result.pending,
+        "four new deletions across both sides require confirmation"
+    );
+    assert_eq!(result.local_deletions.len(), 6);
+    assert_eq!(result.server_deletions.len(), 2);
+    assert_eq!(std::fs::read(base_path(&host.0, 7)).unwrap(), before);
+    assert_eq!(
+        std::fs::read(host.0.join("keytao.user.dict.yaml")).unwrap(),
+        dictionary
+    );
+}
+
+#[tokio::test]
+async fn confirmed_deletions_match_both_code_and_side() {
+    for delete_on_server in [false, true] {
+        let (_dir, core, host) = fixture();
+        user_words::add_user_word(&core, "keytao", &host.0, "kept", "zzzz", None).unwrap();
+        let mut entries = vec![remote("kept", "zzzz", 1)];
+        for (id, code) in [(2, "old"), (3, "new")] {
+            if delete_on_server {
+                entries.push(remote("same", code, id));
+            } else {
+                user_words::add_user_word(&core, "keytao", &host.0, "same", code, None).unwrap();
+            }
+        }
+        save_base(
+            &host.0,
+            7,
+            &BTreeSet::from([
+                ("kept".into(), "zzzz".into()),
+                ("same".into(), "old".into()),
+                ("same".into(), "new".into()),
+            ]),
+        )
+        .unwrap();
+        let confirmed = vec![UserDictionaryDeletion {
+            word: "same".into(),
+            code: "old".into(),
+        }];
+        let wrong_side = vec![UserDictionaryDeletion {
+            word: "same".into(),
+            code: "new".into(),
+        }];
+        let (local_deletions, server_deletions) = if delete_on_server {
+            (wrong_side, confirmed)
+        } else {
+            (confirmed, wrong_side)
+        };
+        let mock = server(vec![
+            ("200 OK", json!({"total":entries.len(),"entries":entries})),
+            ("200 OK", json!({"success":true})),
+        ])
+        .await;
+        let result = sync_user_dictionary_at(
+            &core,
+            &host,
+            "fixture-token".into(),
+            &mock.url,
+            Some(UserDictionaryDeletionConfirmation {
+                local_deletions,
+                server_deletions,
+            }),
+        )
+        .await
+        .unwrap();
+        let requests = mock.finish().await;
+        assert!(!result.pending);
+        assert_eq!(requests.len(), if delete_on_server { 2 } else { 1 });
+        if delete_on_server {
+            assert!(requests[1].starts_with("DELETE /api/user/dictionary/2 HTTP/1.1"));
+        } else {
+            assert_eq!(
+                local(&core, &host),
+                [
+                    ("kept".into(), "zzzz".into()),
+                    ("same".into(), "new".into()),
+                ]
+            );
+        }
+        let saved: DictionaryBase =
+            serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+        assert_eq!(
+            saved.entries,
+            BTreeSet::from([
+                ("kept".into(), "zzzz".into()),
+                ("same".into(), "new".into()),
+            ])
+        );
+    }
+}
+
+#[tokio::test]
+async fn bulk_deletions_matching_confirmation_apply_to_both_sides_and_update_base() {
     for delete_on_server in [false, true] {
         let (_dir, core, host) = fixture();
         let mut base = BTreeSet::from([("kept".into(), "zzzz".into())]);
@@ -779,12 +1050,32 @@ async fn bulk_deletions_with_allow_apply_to_both_sides_and_update_base() {
             }
         }
         save_base(&host.0, 7, &base).unwrap();
+        let initial = server(vec![(
+            "200 OK",
+            json!({"total":entries.len(),"entries":entries}),
+        )])
+        .await;
+        let pending =
+            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &initial.url, None)
+                .await
+                .unwrap();
+        assert!(pending.pending);
+        assert_eq!(initial.finish().await.len(), 1);
         let mut responses = vec![("200 OK", json!({"total":entries.len(),"entries":entries}))];
         responses.extend((0..4).map(|_| ("200 OK", json!({"success":true}))));
         let mock = server(responses).await;
-        let result = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, true)
-            .await
-            .unwrap();
+        let result = sync_user_dictionary_at(
+            &core,
+            &host,
+            "fixture-token".into(),
+            &mock.url,
+            Some(UserDictionaryDeletionConfirmation {
+                local_deletions: pending.local_deletions,
+                server_deletions: pending.server_deletions,
+            }),
+        )
+        .await
+        .unwrap();
         let requests = mock.finish().await;
         assert!(!result.pending);
         assert_eq!(local(&core, &host), [("kept".into(), "zzzz".into())]);
@@ -829,10 +1120,9 @@ async fn legacy_base_migrates_once_only_for_an_existing_dictionary_instance() {
             ("200 OK", json!({"success":true})),
             ("200 OK", json!({"success":true})),
         ]).await;
-        let result =
-            sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
-                .await
-                .unwrap();
+        let result = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
         let requests = mock.finish().await;
         assert_eq!(requests.len(), if recreated { 1 } else { 3 });
         assert_eq!(result.count, if recreated { 3 } else { 1 });
@@ -842,7 +1132,7 @@ async fn legacy_base_migrates_once_only_for_an_existing_dictionary_instance() {
         std::fs::create_dir_all(&host.0).unwrap();
         user_words::add_user_word(&core, "keytao", &host.0, "X", "aaaa", None).unwrap();
         let mock = server(vec![("200 OK", json!({"entries":[remote("X","aaaa",12),remote("Y","bbbb",13),remote("Z","cccc",14)],"total":3}))]).await;
-        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, false)
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
             .await
             .unwrap();
         assert_eq!(

@@ -205,6 +205,7 @@ class AppController extends ChangeNotifier {
   bool syncingDictionary = false;
   UserDictionarySyncDto? pendingDictionarySync;
   Object? _pendingDictionarySyncAccountId;
+  final Map<Object, Set<String>> _cancelledDictionarySyncDeletions = {};
   Timer? _dictionarySyncDebounce;
   String? accountError;
   String? accountMessage;
@@ -1405,22 +1406,44 @@ class AppController extends ChangeNotifier {
       if (busy || syncingDictionary) {
         scheduleUserDictionarySync();
       } else {
-        unawaited(syncUserDictionary());
+        unawaited(syncUserDictionary(automatic: true));
       }
     });
   }
 
   void dismissDictionarySyncConfirmation() {
+    final pending = pendingDictionarySync;
+    final account = accountUser?.id;
+    if (pending != null &&
+        account != null &&
+        _pendingDictionarySyncAccountId == account) {
+      (_cancelledDictionarySyncDeletions[account] ??= {}).add(
+        _dictionarySyncDeletionKey(pending),
+      );
+    }
     pendingDictionarySync = null;
     _pendingDictionarySyncAccountId = null;
     _changed();
   }
 
-  Future<bool> syncUserDictionary({bool allowDeletions = false}) async {
+  String _dictionarySyncDeletionKey(UserDictionarySyncDto sync) => jsonEncode([
+    for (final entries in [sync.localDeletions, sync.serverDeletions])
+      (entries
+          .map((entry) => jsonEncode([entry.word, entry.code]))
+          .toSet()
+          .toList()
+        ..sort()),
+  ]);
+
+  Future<bool> syncUserDictionary({
+    UserDictionarySyncDto? confirmedDeletions,
+    bool automatic = false,
+  }) async {
     if (busy || syncingDictionary || accountUser == null) return false;
     final pending = pendingDictionarySync;
-    if (allowDeletions &&
+    if (confirmedDeletions != null &&
         (pending == null ||
+            !identical(confirmedDeletions, pending) ||
             !pending.pending ||
             (pending.localDeletions.isEmpty &&
                 pending.serverDeletions.isEmpty) ||
@@ -1436,10 +1459,22 @@ class AppController extends ChangeNotifier {
     _changed();
     try {
       final result = await core.accountSyncUserDictionary(
-        allowDeletions: allowDeletions,
+        confirmedDeletions: confirmedDeletions == null
+            ? null
+            : UserDictionaryDeletionConfirmationDto(
+                localDeletions: List.of(confirmedDeletions.localDeletions),
+                serverDeletions: List.of(confirmedDeletions.serverDeletions),
+              ),
       );
       accountMessage = result.message;
-      pendingDictionarySync = result.pending && accountUser?.id == account
+      pendingDictionarySync =
+          result.pending &&
+              accountUser?.id == account &&
+              !(automatic &&
+                  (_cancelledDictionarySyncDeletions[account]?.contains(
+                        _dictionarySyncDeletionKey(result),
+                      ) ??
+                      false))
           ? result
           : null;
       _pendingDictionarySyncAccountId = pendingDictionarySync != null

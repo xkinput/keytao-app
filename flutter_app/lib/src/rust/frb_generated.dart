@@ -102,7 +102,7 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiCoreAccountSubmitWords({required String previewJson});
 
   Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary({
-    required bool allowDeletions,
+    UserDictionaryDeletionConfirmationDto? confirmedDeletions,
   });
 
   Future<InstallResultDto> crateApiCoreActivateScheme({
@@ -532,13 +532,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary({
-    required bool allowDeletions,
+    UserDictionaryDeletionConfirmationDto? confirmedDeletions,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_bool(allowDeletions, serializer);
+          sse_encode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+            confirmedDeletions,
+            serializer,
+          );
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -551,7 +554,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreAccountSyncUserDictionaryConstMeta,
-        argValues: [allowDeletions],
+        argValues: [confirmedDeletions],
         apiImpl: this,
       ),
     );
@@ -560,7 +563,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreAccountSyncUserDictionaryConstMeta =>
       const TaskConstMeta(
         debugName: "account_sync_user_dictionary",
-        argNames: ["allowDeletions"],
+        argNames: ["confirmedDeletions"],
       );
 
   @override
@@ -2800,6 +2803,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_user_dictionary_deletion_confirmation_dto(raw);
+  }
+
+  @protected
   WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   ) {
@@ -3247,6 +3259,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  dco_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(raw);
+  }
+
+  @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   ) {
@@ -3400,6 +3423,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void dco_decode_unit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return;
+  }
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_user_dictionary_deletion_confirmation_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return UserDictionaryDeletionConfirmationDto(
+      localDeletions: dco_decode_list_user_dictionary_deletion_dto(arr[0]),
+      serverDeletions: dco_decode_list_user_dictionary_deletion_dto(arr[1]),
+    );
   }
 
   @protected
@@ -3746,6 +3782,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_32(deserializer));
+  }
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_user_dictionary_deletion_confirmation_dto(deserializer));
   }
 
   @protected
@@ -4334,6 +4379,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  sse_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+        deserializer,
+      ));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
     SseDeserializer deserializer,
   ) {
@@ -4515,6 +4576,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_decode_unit(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_localDeletions = sse_decode_list_user_dictionary_deletion_dto(
+      deserializer,
+    );
+    var var_serverDeletions = sse_decode_list_user_dictionary_deletion_dto(
+      deserializer,
+    );
+    return UserDictionaryDeletionConfirmationDto(
+      localDeletions: var_localDeletions,
+      serverDeletions: var_serverDeletions,
+    );
   }
 
   @protected
@@ -4892,6 +4971,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_user_dictionary_deletion_confirmation_dto(self, serializer);
   }
 
   @protected
@@ -5385,6 +5473,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+        self,
+        serializer,
+      );
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
     SseSerializer serializer,
@@ -5537,6 +5641,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  void sse_encode_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_user_dictionary_deletion_dto(
+      self.localDeletions,
+      serializer,
+    );
+    sse_encode_list_user_dictionary_deletion_dto(
+      self.serverDeletions,
+      serializer,
+    );
   }
 
   @protected
