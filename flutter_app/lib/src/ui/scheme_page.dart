@@ -158,9 +158,10 @@ class SchemePackageRow extends StatelessWidget {
     final active = package?.active == true;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
     final deploying = activating || (active && c.isDeploying);
-    final deployFailed = c.deploySteps.any(
+    final failedDeploySteps = c.deploySteps.where(
       (step) => step.state == DeployStepState.failed,
     );
+    final deployFailed = failedDeploySteps.isNotEmpty;
     final needsDeploy = active && (deployFailed || c.local?.deployed != true);
     return Column(
       key: ValueKey('scheme-package-$schemeKey'),
@@ -234,6 +235,11 @@ class SchemePackageRow extends StatelessWidget {
             ],
           ),
         ],
+        if (active && !deploying)
+          for (final step in failedDeploySteps) ...[
+            const SizedBox(height: 8),
+            ErrorMessage(step.message),
+          ],
         if (schemeKey == (c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd')) ...[
           const SizedBox(height: 8),
           Semantics(

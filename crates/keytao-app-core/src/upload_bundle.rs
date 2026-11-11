@@ -755,7 +755,119 @@ pub(crate) fn verify_deploy_artifacts(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<(), CoreError> {
-    checked(root, shared, schema_ids, None, false).map(|_| ())
+    if schema_ids.is_empty() {
+        return Err(failure("方案包缺少 schema_list/schema manifest"));
+    }
+    let mut pending: BTreeSet<_> = schema_ids.iter().cloned().collect();
+    let mut visited = BTreeSet::new();
+    let sources = BTreeSet::new();
+    while let Some(id) = pending.pop_first() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let source = format!("{id}.schema.yaml");
+        let source_path = crate::packages::safe_path(root, &source).map_err(failure)?;
+        if !source_path.is_file() && shared.is_some_and(|dir| dir.join(&source).is_file()) {
+            continue;
+        }
+        let compiled = format!("build/{id}.schema.yaml");
+        verify_artifact(root, &id, &compiled, &sources, false)?;
+        let value = yaml(&fs::read(root.join(&compiled))?, &compiled)?;
+        if value["schema"]["schema_id"].as_str() != Some(&id) {
+            return Err(failure(format!(
+                "方案 {id}：{compiled} 的 schema/schema_id 不匹配"
+            )));
+        }
+        if let Some(dependencies) = value["schema"]["dependencies"].as_sequence() {
+            pending.extend(
+                dependencies
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from),
+            );
+        }
+        // Deployment needs compiled artifacts, not the upload's source/runtime closure.
+        let mut schema = SchemaFiles::default();
+        for components in ["filters", "translators"] {
+            if let Some(items) = value["engine"][components].as_sequence() {
+                for component in items.iter().filter_map(Value::as_str) {
+                    let (kind, namespace) = component
+                        .split_once('@')
+                        .unwrap_or((component, "reverse_lookup"));
+                    if matches!(kind, "reverse_lookup_filter" | "reverse_lookup_translator") {
+                        schema.reverse_lookups.insert(namespace.into());
+                    }
+                }
+            }
+        }
+        collect_deploy_dictionaries(&value, false, &mut schema);
+        for dictionary in schema.dictionaries.keys().cloned().collect::<Vec<_>>() {
+            let name = format!("{dictionary}.dict.yaml");
+            let local = crate::packages::safe_path(root, &name).map_err(failure)?;
+            if !local.is_file() && shared.is_some_and(|dir| dir.join(&name).is_file()) {
+                schema.dictionaries.remove(&dictionary);
+                schema.prisms.retain(|(_, id)| id != &dictionary);
+            }
+        }
+        for (dictionary, table) in schema.dictionaries {
+            if table {
+                verify_artifact(
+                    root,
+                    &id,
+                    &format!("build/{dictionary}.table.bin"),
+                    &sources,
+                    false,
+                )?;
+            }
+            verify_artifact(
+                root,
+                &id,
+                &format!("build/{dictionary}.reverse.bin"),
+                &sources,
+                false,
+            )?;
+        }
+        for (prism, _) in schema.prisms {
+            verify_artifact(
+                root,
+                &id,
+                &format!("build/{prism}.prism.bin"),
+                &sources,
+                false,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_deploy_dictionaries(value: &Value, reverse_only: bool, schema: &mut SchemaFiles) {
+    match value {
+        Value::Mapping(map) => {
+            if let Some(dictionary) = value["dictionary"].as_str().filter(|id| !id.is_empty()) {
+                *schema.dictionaries.entry(dictionary.into()).or_default() |= !reverse_only;
+                if !reverse_only {
+                    let prism = value["prism"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or(dictionary);
+                    schema.prisms.insert((prism.into(), dictionary.into()));
+                }
+            }
+            for (key, item) in map {
+                let reverse = reverse_only
+                    || key
+                        .as_str()
+                        .is_some_and(|key| schema.reverse_lookups.contains(key));
+                collect_deploy_dictionaries(item, reverse, schema);
+            }
+        }
+        Value::Sequence(items) => {
+            for item in items {
+                collect_deploy_dictionaries(item, reverse_only, schema);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn checked(

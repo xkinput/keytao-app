@@ -433,6 +433,72 @@ fn android_deploy_receipt_requires_every_active_schema_and_dictionary_artifact()
 }
 
 #[test]
+fn android_deploy_checks_artifacts_without_requiring_upload_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rime");
+    std::fs::create_dir_all(root.join("build")).unwrap();
+    std::fs::create_dir_all(root.join("rime-data")).unwrap();
+    std::fs::create_dir_all(root.join("opencc")).unwrap();
+    std::fs::create_dir_all(root.join("lua")).unwrap();
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("data"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: root.join("rime-data"),
+            app_version: "test".into(),
+            platform: Platform::Android,
+        },
+        Arc::new(Sink),
+    )
+    .unwrap();
+    let schema = "schema:\n  schema_id: xmjd6\nengine:\n  filters: [lua_filter@*lazy_simplifier@emoji_cn]\ntranslator:\n  dictionary: xmjd6.extended\nemoji_cn:\n  opencc_config: emoji.json\n";
+    for (name, text) in [
+        (
+            "default.custom.yaml",
+            "patch:\n  schema_list:\n    - schema: xmjd6\n",
+        ),
+        ("xmjd6.schema.yaml", schema),
+        ("build/xmjd6.schema.yaml", schema),
+        ("xmjd6.extended.dict.yaml", "name: xmjd6.extended\n"),
+        ("build/xmjd6.extended.table.bin", "compiled"),
+        ("build/xmjd6.extended.reverse.bin", "compiled"),
+        ("build/xmjd6.extended.prism.bin", "compiled"),
+        ("lua/lazy_simplifier.lua", "return {}\n"),
+        (
+            "opencc/emoji.json",
+            r#"{"conversion_chain":[{"dict":{"type":"text","file":"emoji.txt"}}]}"#,
+        ),
+    ] {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+
+    crate::deploy::record_android_result(&core, &root, true).unwrap();
+    assert!(core.state().last_deploy.unwrap().success);
+    let upload_error =
+        crate::upload_bundle::build(&root, Some(&root.join("rime-data")), &["xmjd6".into()])
+            .unwrap_err()
+            .to_string();
+    assert!(upload_error.contains("opencc/emoji.txt"), "{upload_error}");
+
+    for artifact in [
+        "build/xmjd6.schema.yaml",
+        "build/xmjd6.extended.table.bin",
+        "build/xmjd6.extended.reverse.bin",
+        "build/xmjd6.extended.prism.bin",
+    ] {
+        let path = root.join(artifact);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let error = crate::deploy::record_android_result(&core, &root, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(artifact), "{error}");
+        assert!(!core.state().last_deploy.unwrap().success);
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+#[test]
 fn android_deploy_accepts_unchanged_sources_newer_than_artifacts() {
     for source in [
         "xmjd6.user.dict.yaml",

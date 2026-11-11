@@ -207,6 +207,34 @@ fn artifacts_follow_translator_dictionary_and_prism_names() {
 }
 
 #[test]
+fn deploy_verifies_compiled_dependencies_and_reverse_only_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let schema = "schema:\n  schema_id: main\n  dependencies: [helper]\nengine:\n  filters: [reverse_lookup_filter@comments]\ntranslator:\n  dictionary: main\n  prism: custom_prism\ncomments:\n  dictionary: lookup\n";
+    write(root, "build/main.schema.yaml", schema);
+    write(
+        root,
+        "build/helper.schema.yaml",
+        "schema:\n  schema_id: helper\ntranslator:\n  dictionary: shared\n",
+    );
+    write(root, "rime-data/shared.dict.yaml", "name: shared\n");
+    for name in [
+        "main.table.bin",
+        "main.reverse.bin",
+        "custom_prism.prism.bin",
+        "lookup.reverse.bin",
+    ] {
+        write(root, &format!("build/{name}"), "compiled");
+    }
+    verify_deploy_artifacts(root, Some(&root.join("rime-data")), &["main".into()]).unwrap();
+    fs::remove_file(root.join("build/helper.schema.yaml")).unwrap();
+    let error = verify_deploy_artifacts(root, Some(&root.join("rime-data")), &["main".into()])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("build/helper.schema.yaml"), "{error}");
+}
+
+#[test]
 fn optional_user_text_tables_are_included_only_when_present() {
     let dir = fixture();
     write(

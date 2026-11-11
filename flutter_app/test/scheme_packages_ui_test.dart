@@ -125,12 +125,13 @@ void main() {
       await _pumpRow(tester, c, 'keytao');
       expect(find.text('使用中'), findsNothing);
       expect(find.text('待部署'), findsOneWidget);
-      c.deploySteps.add(
-        const DeployStep('Missing english.schema.yaml', DeployStepState.failed),
-      );
+      const deployError =
+          '方案 english：缺少构建产物 build/english.schema.yaml: No such file or directory';
+      c.deploySteps.add(const DeployStep(deployError, DeployStepState.failed));
       await _pumpRow(tester, c, 'keytao');
       expect(find.text('使用中'), findsNothing);
       expect(find.text('部署失败'), findsOneWidget);
+      expect(find.text(deployError), findsOneWidget);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
