@@ -156,7 +156,20 @@ class SchemePackageRow extends StatelessWidget {
                 child: Text(schemeDisplayName(schemeKey)),
               ),
             ),
-            if (active) FBadge(child: const Text('使用中')),
+            if (active)
+              FBadge(
+                child: Text(
+                  c.isDeploying
+                      ? '部署中'
+                      : c.deploySteps.any(
+                          (step) => step.state == DeployStepState.failed,
+                        )
+                      ? '部署失败'
+                      : c.local?.deployed == true
+                      ? '使用中'
+                      : '待部署',
+                ),
+              ),
             if (package != null)
               Text(
                 package.version?.trim().isNotEmpty == true

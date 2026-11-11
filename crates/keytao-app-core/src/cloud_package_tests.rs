@@ -331,6 +331,173 @@ async fn identical_archive_under_another_scheme_skips_upload_without_changing_cl
 }
 
 #[tokio::test]
+async fn android_prepare_resolves_bundled_shared_data() {
+    let (dir, _, _) = deployed_fixture();
+    let root = dir.path().join("rime");
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("android-state"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "test".into(),
+            platform: Platform::Android,
+        },
+        Arc::new(Sink),
+    )
+    .unwrap();
+    let shared = root.join("rime-data");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("default.yaml"), "menu: {page_size: 6}\n").unwrap();
+    let schema = "schema:\n  schema_id: xmjd6\nspeller:\n  alphabet: abc\nmenu:\n  __include: default:/menu\n";
+    std::fs::write(root.join("xmjd6.schema.yaml"), schema).unwrap();
+    std::fs::File::open(root.join("xmjd6.schema.yaml"))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file(
+        "xmjd6.schema.yaml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(schema.as_bytes()).unwrap();
+    crate::packages::stage_install(
+        &core,
+        &zip.finish().unwrap().into_inner(),
+        Default::default(),
+        String::new(),
+    )
+    .unwrap();
+    crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
+    core.update_state(|state| state.active_scheme = Some("xmjd".into()))
+        .unwrap();
+    crate::deploy::record_result(&core, &root, true).unwrap();
+    let prepared = prepare_android(&core, "xmjd", &root).unwrap();
+    assert_eq!(prepared.shared.as_deref(), Some(shared.as_path()));
+    assert!(!prepared.bundle.files.contains(&"default.yaml".into()));
+}
+
+#[test]
+fn android_deploy_receipt_requires_every_active_schema_and_dictionary_artifact() {
+    let (dir, core, _) = deployed_fixture();
+    let root = dir.path().join("rime");
+    std::fs::write(
+        root.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: xmjd6\n    - schema: english\n",
+    )
+    .unwrap();
+    let english = "schema:\n  schema_id: english\ntranslator:\n  dictionary: english\n";
+    std::fs::write(root.join("english.schema.yaml"), english).unwrap();
+    std::fs::write(root.join("english.dict.yaml"), "name: english\n").unwrap();
+    for name in ["english.schema.yaml", "english.dict.yaml"] {
+        std::fs::File::open(root.join(name))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .unwrap();
+    }
+    for next in [
+        "english.schema.yaml",
+        "english.table.bin",
+        "english.reverse.bin",
+        "english.prism.bin",
+    ] {
+        let result = crate::deploy::record_android_result(&core, &root, true);
+        assert!(
+            result.is_err(),
+            "Accepted an incomplete build before {next}"
+        );
+        assert!(!core.state().last_deploy.unwrap().success);
+        std::fs::write(
+            root.join("build").join(next),
+            if next.ends_with("yaml") {
+                english
+            } else {
+                "compiled"
+            },
+        )
+        .unwrap();
+    }
+    crate::deploy::record_android_result(&core, &root, true).unwrap();
+    assert!(core.state().last_deploy.unwrap().success);
+    std::fs::write(
+        root.join("build/english.schema.yaml"),
+        "schema:\n  schema_id: wrong\n",
+    )
+    .unwrap();
+    let error = crate::deploy::record_android_result(&core, &root, true)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("schema/schema_id"), "{error}");
+    assert!(!core.state().last_deploy.unwrap().success);
+}
+
+#[test]
+fn android_deploy_accepts_unchanged_sources_newer_than_artifacts() {
+    for source in [
+        "xmjd6.user.dict.yaml",
+        "xmjd6.custom.yaml",
+        "xmjd6.schema.yaml",
+    ] {
+        let (dir, core, _) = deployed_fixture();
+        let root = dir.path().join("rime");
+        let schema = "schema:\n  schema_id: xmjd6\ntranslator:\n  dictionary: xmjd6\n";
+        for (name, text) in [
+            (
+                "default.custom.yaml",
+                "patch:\n  schema_list:\n    - schema: xmjd6\n",
+            ),
+            ("xmjd6.schema.yaml", schema),
+            (
+                "xmjd6.dict.yaml",
+                "name: xmjd6\nimport_tables: [xmjd6.user]\n",
+            ),
+            ("xmjd6.user.dict.yaml", "name: xmjd6.user\n"),
+            ("xmjd6.custom.yaml", "# Comment-only edit\npatch: {}\n"),
+        ] {
+            std::fs::write(root.join(name), text).unwrap();
+            std::fs::File::open(root.join(name))
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+                .unwrap();
+        }
+        for suffix in ["schema.yaml", "table.bin", "reverse.bin", "prism.bin"] {
+            let path = root.join(format!("build/xmjd6.{suffix}"));
+            std::fs::write(
+                &path,
+                if suffix == "schema.yaml" {
+                    schema
+                } else {
+                    "compiled"
+                },
+            )
+            .unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000)),
+                )
+                .unwrap();
+        }
+        std::fs::File::open(root.join(source))
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000)),
+            )
+            .unwrap();
+
+        crate::deploy::record_android_result(&core, &root, true).unwrap();
+        assert!(core.state().last_deploy.unwrap().success);
+        let error = crate::upload_bundle::verified_artifacts(&root, None, &["xmjd6".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("不新于源文件"), "{source}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn upload_rechecks_with_the_prepared_shared_directory() {
     let (dir, core, _) = deployed_fixture();
     let root = dir.path().join("rime");

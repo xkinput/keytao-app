@@ -428,6 +428,102 @@ fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
 }
 
 #[tokio::test]
+async fn switching_packages_does_not_retain_removed_package_schemas() {
+    for preserve_modified in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("rime");
+        let core = Core::new(
+            AppEnv {
+                data_dir: dir.path().join("state"),
+                cache_dir: dir.path().join("cache"),
+                resource_dir: dir.path().join("resources"),
+                app_version: "test".into(),
+                platform: Platform::Android,
+            },
+            Arc::new(ProgressSink::default()),
+        )
+        .unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("personal.schema.yaml"),
+            "schema: {schema_id: personal}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: personal\n",
+        )
+        .unwrap();
+        for (index, (key, ids)) in [
+            ("keytao", vec!["keytao"]),
+            ("xmjd", vec!["xmjd6", "english"]),
+            ("keytao", vec!["keytao"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index == 2 && preserve_modified {
+                fs::write(
+                    root.join("english.schema.yaml"),
+                    "schema: {schema_id: english, name: Personal English}\n",
+                )
+                .unwrap();
+            }
+            let archive = dir.path().join("package.zip");
+            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+            let config = format!(
+                "patch:\n  schema_list:\n{}",
+                ids.iter()
+                    .map(|id| format!("    - schema: {id}\n"))
+                    .collect::<String>()
+            );
+            zip.start_file(
+                "default.custom.yaml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(config.as_bytes()).unwrap();
+            for id in &ids {
+                zip.start_file(
+                    format!("{id}.schema.yaml"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+                zip.write_all(format!("schema: {{schema_id: {id}}}\n").as_bytes())
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+            smart_install(
+                &core,
+                archive.to_string_lossy().into_owned(),
+                root.to_string_lossy().into_owned(),
+                #[cfg(target_os = "windows")]
+                |_, _, _, _| Ok(Vec::new()),
+            )
+            .await
+            .unwrap();
+            crate::packages::record_package(&core, key, Some("v1"), true).unwrap();
+            let schemas = crate::scheme_files::parse_schema_list(
+                &fs::read_to_string(root.join("default.custom.yaml")).unwrap(),
+            );
+            let retained = (index == 2 && preserve_modified).then_some("english");
+            assert_eq!(
+                schemas,
+                std::iter::once("personal")
+                    .chain(retained)
+                    .chain(ids.iter().copied())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                schemas
+                    .iter()
+                    .all(|id| root.join(format!("{id}.schema.yaml")).is_file())
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn custom_install_preserves_default_package_and_state() {
     fn write_archive(path: &std::path::Path, version: &str) {
         let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());

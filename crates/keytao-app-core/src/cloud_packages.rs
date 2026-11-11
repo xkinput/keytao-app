@@ -218,9 +218,24 @@ fn validation() -> String {
     }
 }
 
+#[cfg(any(target_os = "android", test))]
+fn prepare_android(
+    core: &Core,
+    scheme_key: &str,
+    root: &Path,
+) -> Result<PreparedUpload, CoreError> {
+    prepare_with_smoke(
+        core,
+        scheme_key,
+        root,
+        Some(&root.join("rime-data")),
+        |_, _| Ok(()),
+    )
+}
+
 fn prepare(core: &Core, scheme_key: &str, root: &Path) -> Result<PreparedUpload, CoreError> {
     #[cfg(target_os = "android")]
-    return prepare_with_smoke(core, scheme_key, root, None, |_, _| Ok(()));
+    return prepare_android(core, scheme_key, root);
     #[cfg(not(target_os = "android"))]
     {
         #[cfg(target_os = "macos")]

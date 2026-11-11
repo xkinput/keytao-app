@@ -23,7 +23,7 @@ struct SchemaFiles {
     dictionaries: BTreeMap<String, bool>,
     prisms: BTreeSet<(String, String)>,
     dictionary_sources: BTreeMap<String, BTreeSet<String>>,
-    reverse_filters: BTreeSet<String>,
+    reverse_lookups: BTreeSet<String>,
 }
 
 struct Collector<'a> {
@@ -259,16 +259,19 @@ impl Collector<'_> {
 
     fn scan(&mut self, schema: &str, value: &Value, discover: bool) -> Result<(), CoreError> {
         if discover {
-            if let Some(filters) = value["engine"]["filters"].as_sequence() {
-                for filter in filters.iter().filter_map(Value::as_str) {
-                    let (kind, namespace) =
-                        filter.split_once('@').unwrap_or((filter, "reverse_lookup"));
-                    if kind == "reverse_lookup_filter" {
-                        self.schemas
-                            .get_mut(schema)
-                            .unwrap()
-                            .reverse_filters
-                            .insert(namespace.into());
+            for components in ["filters", "translators"] {
+                if let Some(items) = value["engine"][components].as_sequence() {
+                    for component in items.iter().filter_map(Value::as_str) {
+                        let (kind, namespace) = component
+                            .split_once('@')
+                            .unwrap_or((component, "reverse_lookup"));
+                        if matches!(kind, "reverse_lookup_filter" | "reverse_lookup_translator") {
+                            self.schemas
+                                .get_mut(schema)
+                                .unwrap()
+                                .reverse_lookups
+                                .insert(namespace.into());
+                        }
                     }
                 }
             }
@@ -347,7 +350,7 @@ impl Collector<'_> {
                         _ => {}
                     }
                     let reverse =
-                        reverse_only || self.schemas[schema].reverse_filters.contains(key);
+                        reverse_only || self.schemas[schema].reverse_lookups.contains(key);
                     self.scan_value(schema, item, discover, reverse)?;
                 }
             }
@@ -736,7 +739,7 @@ pub fn verified(
     schema_ids: &[String],
     mut smoke: impl FnMut(&str, u32) -> Result<(), String>,
 ) -> Result<UploadBundle, CoreError> {
-    checked(root, shared, schema_ids, Some(&mut smoke))
+    checked(root, shared, schema_ids, Some(&mut smoke), true)
 }
 
 pub fn verified_artifacts(
@@ -744,7 +747,15 @@ pub fn verified_artifacts(
     shared: Option<&Path>,
     schema_ids: &[String],
 ) -> Result<UploadBundle, CoreError> {
-    checked(root, shared, schema_ids, None)
+    checked(root, shared, schema_ids, None, true)
+}
+
+pub(crate) fn verify_deploy_artifacts(
+    root: &Path,
+    shared: Option<&Path>,
+    schema_ids: &[String],
+) -> Result<(), CoreError> {
+    checked(root, shared, schema_ids, None, false).map(|_| ())
 }
 
 fn checked(
@@ -752,6 +763,7 @@ fn checked(
     shared: Option<&Path>,
     schema_ids: &[String],
     mut smoke: Option<&mut dyn FnMut(&str, u32) -> Result<(), String>>,
+    require_freshness: bool,
 ) -> Result<UploadBundle, CoreError> {
     let bundle = build(root, shared, schema_ids)?;
     for (id, schema) in &bundle.schemas {
@@ -762,18 +774,43 @@ fn checked(
             .cloned()
             .collect();
         let compiled = format!("build/{id}.schema.yaml");
-        verify_artifact(root, id, &compiled, &configs)?;
+        verify_artifact(root, id, &compiled, &configs, require_freshness)?;
         for (dictionary, table) in &schema.dictionaries {
             let inputs = &schema.dictionary_sources[dictionary];
-            if *table {
-                verify_artifact(root, id, &format!("build/{dictionary}.table.bin"), inputs)?;
+            if inputs.is_empty() {
+                // Shared dictionaries are supplied by the runtime installation.
+                continue;
             }
-            verify_artifact(root, id, &format!("build/{dictionary}.reverse.bin"), inputs)?;
+            if *table {
+                verify_artifact(
+                    root,
+                    id,
+                    &format!("build/{dictionary}.table.bin"),
+                    inputs,
+                    require_freshness,
+                )?;
+            }
+            verify_artifact(
+                root,
+                id,
+                &format!("build/{dictionary}.reverse.bin"),
+                inputs,
+                require_freshness,
+            )?;
         }
         for (prism, dictionary) in &schema.prisms {
+            if schema.dictionary_sources[dictionary].is_empty() {
+                continue;
+            }
             let mut sources = configs.clone();
             sources.extend(schema.dictionary_sources[dictionary].iter().cloned());
-            verify_artifact(root, id, &format!("build/{prism}.prism.bin"), &sources)?;
+            verify_artifact(
+                root,
+                id,
+                &format!("build/{prism}.prism.bin"),
+                &sources,
+                require_freshness,
+            )?;
         }
         let value = yaml(&fs::read(root.join(&compiled))?, &compiled)?;
         if value["schema"]["schema_id"].as_str() != Some(id) {
@@ -798,12 +835,17 @@ fn verify_artifact(
     id: &str,
     artifact: &str,
     sources: &BTreeSet<String>,
+    require_freshness: bool,
 ) -> Result<(), CoreError> {
     let path = crate::packages::safe_path(root, artifact).map_err(failure)?;
     let metadata = fs::metadata(path)
         .map_err(|e| failure(format!("方案 {id}：缺少构建产物 {artifact}: {e}")))?;
     if !metadata.is_file() {
         return Err(failure(format!("方案 {id}：构建产物不是文件 {artifact}")));
+    }
+    if !require_freshness {
+        // librime reuses checksum-identical artifacts even when source mtimes change.
+        return Ok(());
     }
     let built = metadata
         .modified()

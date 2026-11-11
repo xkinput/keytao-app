@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
+import 'package:keytao/src/app/controller.dart'
+    show DeployStep, DeployStepState;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/scheme_page.dart';
 import 'package:keytao/src/ui/theme.dart';
@@ -101,6 +103,38 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets(
+    'an active package with an incomplete build is pending deployment',
+    (tester) async {
+      final c = _PackageController()
+        ..installedPackages = const [
+          InstalledPackageDto(
+            schemeKey: 'keytao',
+            version: 'v1',
+            active: true,
+            hasPackageZip: true,
+          ),
+        ]
+        ..local = const LocalSchemaDto(
+          installed: true,
+          deployed: false,
+          schemas: ['keytao'],
+        );
+      addTearDown(c.dispose);
+      _size(tester, const Size(400, 860));
+      await _pumpRow(tester, c, 'keytao');
+      expect(find.text('使用中'), findsNothing);
+      expect(find.text('待部署'), findsOneWidget);
+      c.deploySteps.add(
+        const DeployStep('Missing english.schema.yaml', DeployStepState.failed),
+      );
+      await _pumpRow(tester, c, 'keytao');
+      expect(find.text('使用中'), findsNothing);
+      expect(find.text('部署失败'), findsOneWidget);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
   testWidgets('package rows expose only applicable actions', (tester) async {
     final c = _PackageController();
     addTearDown(c.dispose);

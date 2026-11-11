@@ -163,7 +163,7 @@ pub fn record_android_deploy(success: bool) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = runtime::state()?;
-        keytao_app_core::deploy::record_result(&state.core, &state.host.user_root()?, success)
+        keytao_app_core::deploy::record_android_result(&state.core, &state.host.user_root()?, success)
             .map_err(|error| error.to_string())
     }
     #[cfg(not(target_os = "android"))]

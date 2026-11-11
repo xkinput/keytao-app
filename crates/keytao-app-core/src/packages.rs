@@ -699,7 +699,32 @@ pub(crate) fn cleanup_previous(
     if Path::new(&meta.root) != actual_root {
         return Ok(Vec::new());
     }
-    cleanup_manifest(root, &meta.manifest, &incoming)
+    let mut logs = cleanup_manifest(root, &meta.manifest, &incoming)?;
+    // Package-owned auxiliary schemas must not survive as user schema references.
+    for name in ["default.custom.yaml", "default-custom.yaml"] {
+        let path = safe_path(root, name)?;
+        if !path.is_file() {
+            continue;
+        }
+        let mut content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let mut changed = false;
+        for id in crate::scheme_files::parse_schema_list(&content) {
+            let source = format!("{id}.schema.yaml");
+            if meta.manifest.contains_key(&source)
+                && !incoming.contains(&source)
+                && !safe_path(root, &source)?.is_file()
+            {
+                content = crate::addon::update_addon_schema_list_content(&content, &id, false)?;
+                logs.push(format!("[REMOVED SCHEMA] {id}"));
+                changed = true;
+            }
+        }
+        if changed {
+            crate::scheme_files::write_file_atomic(&path, content.as_bytes())
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(logs)
 }
 
 pub(crate) fn cleanup_manifest(

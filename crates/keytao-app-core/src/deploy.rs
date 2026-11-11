@@ -44,6 +44,24 @@ pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Resu
     })
 }
 
+pub fn record_android_result(
+    core: &Core,
+    root: &std::path::Path,
+    success: bool,
+) -> Result<(), CoreError> {
+    record_result(core, root, false)?;
+    if !success {
+        return Ok(());
+    }
+    let config = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+        .ok_or_else(|| CoreError::Other("Android RIME 部署缺少方案配置".into()))?;
+    let schemas = crate::scheme_files::parse_schema_list(&config);
+    crate::upload_bundle::verify_deploy_artifacts(root, Some(&root.join("rime-data")), &schemas)?;
+    record_result(core, root, true)
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
     let mut schemas = std::collections::BTreeMap::new();

@@ -226,6 +226,52 @@ fn optional_user_text_tables_are_included_only_when_present() {
 }
 
 #[test]
+fn shared_dictionary_artifacts_need_not_exist_in_user_build() {
+    for shared_build in [false, true] {
+        let user = fixture();
+        let shared = tempfile::tempdir().unwrap();
+        let schema = "schema:\n  schema_id: main\ntranslator:\n  dictionary: luna_pinyin\n";
+        write(user.path(), "main.schema.yaml", schema);
+        compiled(user.path());
+        write(
+            shared.path(),
+            "luna_pinyin.dict.yaml",
+            "name: luna_pinyin\n",
+        );
+        if shared_build {
+            for suffix in ["table.bin", "reverse.bin", "prism.bin"] {
+                write(
+                    shared.path(),
+                    &format!("build/luna_pinyin.{suffix}"),
+                    "compiled",
+                );
+            }
+        }
+        let bundle =
+            verified_artifacts(user.path(), Some(shared.path()), &["main".into()]).unwrap();
+        assert!(!bundle.files.contains(&"luna_pinyin.dict.yaml".into()));
+    }
+}
+
+#[test]
+fn reverse_lookup_translator_only_requires_reverse_bin() {
+    let user = fixture();
+    let schema = "schema:\n  schema_id: main\nengine:\n  translators: [reverse_lookup_translator]\nreverse_lookup:\n  dictionary: lookup\n";
+    write(user.path(), "main.schema.yaml", schema);
+    write(user.path(), "lookup.dict.yaml", "name: lookup\n");
+    compiled(user.path());
+    write(user.path(), "build/lookup.reverse.bin", "compiled");
+    verified_artifacts(user.path(), None, &["main".into()]).unwrap();
+    fs::remove_file(user.path().join("build/lookup.reverse.bin")).unwrap();
+    assert!(
+        verified_artifacts(user.path(), None, &["main".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("lookup.reverse.bin")
+    );
+}
+
+#[test]
 fn shared_dictionary_is_satisfied_without_uploading_it() {
     let user = tempfile::tempdir().unwrap();
     let shared = tempfile::tempdir().unwrap();
@@ -605,6 +651,25 @@ fn reverse_lookup_filter_requires_only_its_reverse_artifact() {
     write(dir.path(), "build/comments.reverse.bin", "compiled");
     let bundle = verified(dir.path(), None, &["main".into()], |_, _| Ok(())).unwrap();
     assert!(bundle.files.contains(&"comments.dict.yaml".into()));
+}
+
+#[test]
+#[ignore = "requires KEYTAO_UPLOAD_FIXTURE pointing at a temporary copy of local Rime data"]
+fn copied_local_liangfen_resolves_shared_reverse_lookup() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("KEYTAO_UPLOAD_FIXTURE").expect("temporary fixture path"),
+    );
+    let shared = std::path::PathBuf::from(
+        std::env::var_os("KEYTAO_UPLOAD_SHARED").expect("shared fixture path"),
+    );
+    let bundle = verified_artifacts(&root, Some(&shared), &["liangfen".into()]).unwrap();
+    assert!(!bundle.files.contains(&"luna_pinyin.dict.yaml".into()));
+    println!(
+        "COPIED_LIANGFEN files={} source_bytes={} zip_bytes={}",
+        bundle.files.len(),
+        bundle.total_size,
+        bundle.bytes.len()
+    );
 }
 
 #[test]
