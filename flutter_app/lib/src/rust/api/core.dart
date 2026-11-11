@@ -149,17 +149,29 @@ Future<AccountUserDto> accountLogin({
   password: password,
 );
 
-/// Revalidates the stored token. Only a server rejection (401/403) clears the
-/// session; network and other errors keep it and are returned as Err.
+/// Refreshes an aging token at startup without prompting for credentials.
 Future<AccountUserDto?> accountRefresh() =>
     RustLib.instance.api.crateApiCoreAccountRefresh();
 
 Future<void> accountLogout() =>
     RustLib.instance.api.crateApiCoreAccountLogout();
 
-/// Writes the user dictionary into the host root without deploying.
+/// Merges the user dictionary in place without deploying.
 Future<UserDictionarySyncDto> accountSyncUserDictionary() =>
     RustLib.instance.api.crateApiCoreAccountSyncUserDictionary();
+
+Future<String> accountPendingWords() =>
+    RustLib.instance.api.crateApiCoreAccountPendingWords();
+
+Future<String> accountPrepareSubmission({required String entriesJson}) =>
+    RustLib.instance.api.crateApiCoreAccountPrepareSubmission(
+      entriesJson: entriesJson,
+    );
+
+Future<String> accountSubmitWords({required String previewJson}) => RustLib
+    .instance
+    .api
+    .crateApiCoreAccountSubmitWords(previewJson: previewJson);
 
 Future<SchemeReleaseDto> fetchSchemeRelease({required String scheme}) =>
     RustLib.instance.api.crateApiCoreFetchSchemeRelease(scheme: scheme);

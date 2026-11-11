@@ -5,6 +5,7 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'color_picker.dart';
+import 'login.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -277,33 +278,12 @@ class SettingsCard extends StatelessWidget {
   }
 }
 
-class AccountCard extends StatefulWidget {
+class AccountCard extends StatelessWidget {
   const AccountCard({super.key, required this.controller});
   final AppController controller;
   @override
-  State<AccountCard> createState() => _AccountCardState();
-}
-
-class _AccountCardState extends State<AccountCard> {
-  final _name = TextEditingController();
-  final _password = TextEditingController();
-
-  @override
-  void dispose() {
-    _name.dispose();
-    _password.dispose();
-    super.dispose();
-  }
-
-  Future<void> _login() async {
-    if (await widget.controller.login(_name.text, _password.text)) {
-      _password.clear();
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final c = widget.controller;
+    final c = controller;
     final name = c.accountName;
     return Section(
       title: AppStrings.account,
@@ -324,25 +304,14 @@ class _AccountCardState extends State<AccountCard> {
           ],
         ),
         if (c.accountUser == null) ...[
-          FTextField(
-            label: const Text(AppStrings.username),
-            control: FTextFieldControl.managed(controller: _name),
-            enabled: !c.loggingIn,
-            autofillHints: const [AutofillHints.username],
-          ),
-          FTextField.password(
-            label: const Text(AppStrings.password),
-            control: FTextFieldControl.managed(controller: _password),
-            enabled: !c.loggingIn,
-            textInputAction: TextInputAction.done,
-            onSubmit: (_) => _login(),
-          ),
           ActionRow(
             children: [
               ActionButton(
-                c.loggingIn ? AppStrings.loggingIn : AppStrings.login,
+                AppStrings.login,
                 primary: true,
-                onPress: c.loggingIn ? null : _login,
+                onPress: c.busy || c.loggingIn
+                    ? null
+                    : () => ensureAccountLogin(context, c),
               ),
             ],
           ),
@@ -352,7 +321,7 @@ class _AccountCardState extends State<AccountCard> {
             children: [
               ActionButton(
                 AppStrings.logout,
-                onPress: c.syncingDictionary ? null : c.logout,
+                onPress: c.busy ? null : c.logout,
               ),
             ],
           ),

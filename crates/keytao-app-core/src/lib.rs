@@ -1,4 +1,5 @@
 pub mod account;
+pub mod submission;
 pub mod addon;
 #[cfg(target_os = "android")]
 pub mod android_jni;

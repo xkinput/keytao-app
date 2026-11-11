@@ -422,6 +422,7 @@ mod tests {
 
 #[derive(serde::Deserialize)]
 pub struct AccountUserDto {
+    pub id: i64,
     pub name: Option<String>,
     pub nickname: Option<String>,
     pub email: Option<String>,

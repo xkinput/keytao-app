@@ -5,11 +5,22 @@ use crate::{
     scheme::{api_error_message, build_client},
 };
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod account_tests;
+
+#[cfg(test)]
+#[path = "account_sync_tests.rs"]
+mod account_sync_tests;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppAuthUser {
@@ -25,15 +36,6 @@ pub struct AppAuthSession {
     pub user: AppAuthUser,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserDictionaryExportResponse {
-    file_name: String,
-    content: String,
-    count: usize,
-    updated_at: String,
-}
-
 #[derive(Serialize, Clone)]
 pub struct UserDictionarySyncResult {
     pub file_name: String,
@@ -45,7 +47,284 @@ pub struct UserDictionarySyncResult {
     pub message: String,
 }
 
-const API_BASE: &str = "https://keytao.rea.ink";
+pub(crate) const API_BASE: &str = "https://keytao.rea.ink";
+
+async fn throttle(api_base: &str) {
+    static REQUESTS: OnceLock<tokio::sync::Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let mut requests = REQUESTS.get_or_init(Default::default).lock().await;
+    if let Some(previous) = requests.get(api_base) {
+        tokio::time::sleep(Duration::from_millis(550).saturating_sub(previous.elapsed())).await;
+    }
+    requests.insert(api_base.into(), Instant::now());
+}
+
+pub(crate) struct ApiClient<'a> {
+    core: &'a Core,
+    api_base: &'a str,
+    account_id: Option<i64>,
+}
+
+impl<'a> ApiClient<'a> {
+    pub(crate) fn new(core: &'a Core, api_base: &'a str) -> Self {
+        Self {
+            core,
+            api_base,
+            account_id: account_id(core),
+        }
+    }
+
+    fn token(&self) -> Result<String, CoreError> {
+        let state = self.core.state();
+        let current_account = state.user.as_ref().and_then(|user| user["id"].as_i64());
+        if self.account_id.is_none() || current_account != self.account_id {
+            return Err(CoreError::Permission("请先登录 KeyTao 账号".into()));
+        }
+        state
+            .auth_token
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| CoreError::Permission("请先登录 KeyTao 账号".into()))
+    }
+
+    pub(crate) async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, CoreError> {
+        let client = build_client(self.core).map_err(CoreError::Other)?;
+        for attempt in 0..2 {
+            let token = self.token()?;
+            throttle(self.api_base).await;
+            self.token()?;
+            let mut request = client
+                .request(method.clone(), format!("{}{path}", self.api_base))
+                .bearer_auth(&token)
+                .timeout(Duration::from_secs(15));
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|error| CoreError::Network(error.to_string()))?;
+            let status = response.status();
+            self.token()?;
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                if attempt == 0 {
+                    self.refresh(&token).await?;
+                    continue;
+                }
+                clear_token(self.core, &token)?;
+                return Err(CoreError::Permission(
+                    api_error_message(response, "请先登录 KeyTao 账号").await,
+                ));
+            }
+            if status.is_success() {
+                return response
+                    .json()
+                    .await
+                    .map_err(|error| CoreError::Other(format!("解析响应失败: {error}")));
+            }
+            let value: Value = response
+                .json()
+                .await
+                .map_err(|error| CoreError::Other(error.to_string()))?;
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && value["requiresConfirmation"].as_bool() == Some(true)
+            {
+                return Ok(value);
+            }
+            let message = value["error"].as_str().unwrap_or("请求失败");
+            return Err(CoreError::Other(format!(
+                "HTTP {}: {message}",
+                status.as_u16()
+            )));
+        }
+        unreachable!()
+    }
+
+    async fn refresh(&self, token: &str) -> Result<(), CoreError> {
+        if token_timing(token).is_none_or(|timing| {
+            timing.exp <= now_seconds() || timing.id <= 0 || Some(timing.id) != self.account_id
+        }) {
+            clear_token(self.core, token)?;
+            return Err(CoreError::Permission("登录已过期，请重新登录".into()));
+        }
+        let result = async {
+            let client = build_client(self.core).map_err(CoreError::Other)?;
+            throttle(self.api_base).await;
+            if self.token()? != token {
+                return Err(CoreError::Permission("登录状态已更改".into()));
+            }
+            if token_timing(token).is_none_or(|timing| {
+                timing.exp <= now_seconds() || timing.id <= 0 || Some(timing.id) != self.account_id
+            }) {
+                return Err(CoreError::Permission("登录已过期，请重新登录".into()));
+            }
+            let response = client
+                .post(format!("{}/api/auth/refresh", self.api_base))
+                .bearer_auth(token)
+                .timeout(Duration::from_secs(12))
+                .send()
+                .await
+                .map_err(|error| CoreError::Network(error.to_string()))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(CoreError::Other(format!(
+                    "HTTP {}: {}",
+                    status.as_u16(),
+                    api_error_message(response, "刷新登录失败").await
+                )));
+            }
+            let value: Value = response
+                .json()
+                .await
+                .map_err(|error| CoreError::Other(format!("解析登录响应失败: {error}")))?;
+            let refreshed = value["token"]
+                .as_str()
+                .filter(|token| {
+                    token.len() <= 4096
+                        && token_timing(token).is_some_and(|timing| {
+                            timing.exp > now_seconds()
+                                && timing.iat <= timing.exp
+                                && timing.id > 0
+                                && Some(timing.id) == self.account_id
+                        })
+                })
+                .ok_or_else(|| CoreError::Other("刷新登录响应格式不正确".into()))?;
+            self.core.update_state(|state| {
+                if state.auth_token.as_deref() == Some(token) {
+                    state.auth_token = Some(refreshed.into());
+                }
+            })?;
+            self.token()?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            clear_token(self.core, token)?;
+        }
+        result
+    }
+}
+
+fn clear_token(core: &Core, token: &str) -> Result<(), CoreError> {
+    core.update_state(|state| {
+        if state.auth_token.as_deref() == Some(token) {
+            state.auth_token = None;
+            state.user = None;
+            state.legacy_imported = true;
+        }
+    })
+}
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Deserialize)]
+struct TokenTiming {
+    id: i64,
+    iat: u64,
+    exp: u64,
+}
+
+fn token_timing(token: &str) -> Option<TokenTiming> {
+    let payload = token.split('.').nth(1)?;
+    let mut bytes = Vec::new();
+    let mut bits = 0u32;
+    let mut count = 0;
+    for byte in payload.bytes().take(4097) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            bytes.push((bits >> count) as u8);
+        }
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn account_id(core: &Core) -> Option<i64> {
+    core.state()
+        .user
+        .as_ref()?
+        .get("id")?
+        .as_i64()
+        .filter(|id| *id > 0)
+}
+
+pub async fn startup_refresh(core: &Core) -> Result<(), CoreError> {
+    startup_refresh_at(core, API_BASE).await
+}
+
+async fn startup_refresh_at(core: &Core, api_base: &str) -> Result<(), CoreError> {
+    let Some(token) = core.state().auth_token else {
+        return Ok(());
+    };
+    let Some(timing) = token_timing(&token) else {
+        return clear_token(core, &token);
+    };
+    let now = now_seconds();
+    if timing.exp <= now {
+        return clear_token(core, &token);
+    }
+    if now.saturating_sub(timing.iat) > 86400 {
+        ApiClient::new(core, api_base).refresh(&token).await?;
+    }
+    Ok(())
+}
+
+fn base_path(core: &Core, account: i64) -> PathBuf {
+    core.env()
+        .data_dir
+        .join(format!("user-dictionary-sync-{account}.json"))
+}
+
+fn save_base(
+    core: &Core,
+    account: i64,
+    entries: &BTreeSet<(String, String)>,
+) -> Result<(), CoreError> {
+    std::fs::create_dir_all(&core.env().data_dir)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&core.env().data_dir)?;
+    temporary.write_all(&serde_json::to_vec(entries)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(base_path(core, account))
+        .map_err(|error| CoreError::Io(error.error))?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RemoteDictionary {
+    entries: Vec<RemoteEntry>,
+    total: usize,
+}
+
+#[derive(Deserialize)]
+struct RemoteEntry {
+    id: i64,
+    #[serde(rename = "userId")]
+    user_id: i64,
+    word: String,
+    code: String,
+    weight: i64,
+    #[serde(rename = "type")]
+    kind: String,
+}
 
 pub async fn keytao_login(
     core: &Core,
@@ -68,6 +347,7 @@ async fn keytao_login_at(
         }
 
         let client = build_client(core)?;
+        throttle(api_base).await;
         let response = client
             .post(format!("{api_base}/api/auth/login"))
             .json(&serde_json::json!({ "name": name, "password": password }))
@@ -102,6 +382,24 @@ async fn keytao_login_at(
 }
 
 pub async fn keytao_me(core: &Core, token: String) -> Result<AppAuthUser, CoreError> {
+    if core.state().auth_token.as_deref() == Some(token.trim()) && account_id(core).is_some() {
+        let api = ApiClient::new(core, API_BASE);
+        let user: AppAuthUser = serde_json::from_value(
+            api.request(reqwest::Method::GET, "/api/auth/me", None)
+                .await?,
+        )?;
+        if Some(user.id) != api.account_id {
+            return Err(CoreError::Permission("账号信息不匹配".into()));
+        }
+        let token = api.token()?;
+        let value = serde_json::to_value(&user)?;
+        core.update_state(|state| {
+            if state.auth_token.as_deref() == Some(&token) {
+                state.user = Some(value);
+            }
+        })?;
+        return Ok(user);
+    }
     keytao_me_at(core, token, API_BASE).await
 }
 
@@ -235,51 +533,177 @@ pub async fn sync_user_dictionary(
     host: &impl ImeHost,
     token: String,
 ) -> Result<UserDictionarySyncResult, CoreError> {
-    let result: Result<_, String> = async {
-        let token = token.trim();
-        if token.is_empty() {
-            return Err("请先登录 KeyTao 账号".into());
-        }
+    sync_user_dictionary_at(core, host, token, API_BASE).await
+}
 
-        let client = build_client(core)?;
-        let response = client
-            .get(format!("{API_BASE}/api/user/dictionary/export"))
-            .bearer_auth(token)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|e| format!("同步用户词库失败: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(api_error_message(response, "同步用户词库失败").await);
-        }
-
-        let export = response
-            .json::<UserDictionaryExportResponse>()
-            .await
-            .map_err(|e| format!("解析用户词库失败: {e}"))?;
-        let root = host.user_root()?;
-        std::fs::create_dir_all(&root).map_err(|e| format!("创建输入法目录失败: {e}"))?;
-
-        let keytao_path = root.join("keytao.user.dict.yaml");
-        std::fs::write(&keytao_path, export.content.as_bytes())
-            .map_err(|e| format!("写入用户词库失败 {}: {e}", keytao_path.display()))?;
-
-        let import_table_patched = ensure_user_dictionary_imports(&root)?;
-        let reload_stamp_path = host.write_reload_stamp(&root)?.map(path_string);
-
-        Ok(UserDictionarySyncResult {
-            file_name: export.file_name,
-            path: path_string(keytao_path),
-            count: export.count,
-            updated_at: export.updated_at,
-            import_table_patched,
-            reload_stamp_path,
-            message: format!("已同步 {} 条用户词条", export.count),
-        })
+async fn sync_user_dictionary_at(
+    core: &Core,
+    host: &impl ImeHost,
+    token: String,
+    api_base: &str,
+) -> Result<UserDictionarySyncResult, CoreError> {
+    let api = ApiClient::new(core, api_base);
+    if api.token()?.trim() != token.trim() {
+        return Err(CoreError::Permission("登录状态已更改".into()));
     }
-    .await;
-    result.map_err(CoreError::Other)
+    let account = api.account_id.unwrap();
+    let remote: RemoteDictionary = serde_json::from_value(
+        api.request(reqwest::Method::GET, "/api/user/dictionary", None)
+            .await?,
+    )?;
+    let ids: BTreeSet<_> = remote.entries.iter().map(|entry| entry.id).collect();
+    if remote.total != remote.entries.len()
+        || ids.len() != remote.entries.len()
+        || remote.entries.iter().any(|entry| {
+            entry.id <= 0
+                || entry.user_id != account
+                || entry.word.trim().is_empty()
+                || entry.word.trim() != entry.word
+                || entry.word.encode_utf16().count() > 100
+                || entry.word.contains(['\t', '\r', '\n'])
+                || entry.code.is_empty()
+                || entry.code.encode_utf16().count() > 64
+                || entry.code.chars().any(char::is_whitespace)
+                || entry.word.starts_with('#')
+                || entry.code.starts_with('#')
+                || !(0..=1_000_000).contains(&entry.weight)
+                || !matches!(
+                    entry.kind.as_str(),
+                    "Single"
+                        | "Phrase"
+                        | "Supplement"
+                        | "Symbol"
+                        | "Link"
+                        | "CSS"
+                        | "CSSSingle"
+                        | "English"
+                )
+        })
+    {
+        return Err(CoreError::Other("用户词库响应格式不正确".into()));
+    }
+    api.token()?;
+    let root = host.user_root().map_err(CoreError::Other)?;
+    let dictionary_existed = root.join("keytao.user.dict.yaml").try_exists()?;
+    let local = crate::user_words::list_user_words(core, "keytao", &root)?;
+    let local_set: BTreeSet<_> = local
+        .iter()
+        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .collect();
+    // Listing may recreate an empty dictionary after a reset; do not infer cloud deletions.
+    let mut base: BTreeSet<(String, String)> = if dictionary_existed && !local_set.is_empty() {
+        match std::fs::read(base_path(core, account)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        BTreeSet::new()
+    };
+    // A reset may already contain new words; require a shared entry to infer cloud deletions.
+    if local_set.is_disjoint(&base) {
+        base.clear();
+    }
+    let mut remote_by_key: BTreeMap<(String, String), Vec<&RemoteEntry>> = BTreeMap::new();
+    for entry in &remote.entries {
+        remote_by_key
+            .entry((entry.word.clone(), entry.code.clone()))
+            .or_default()
+            .push(entry);
+    }
+    let mut resulting = local_set.clone();
+    for key in &local_set {
+        if !remote_by_key.contains_key(key) {
+            if base.contains(key) {
+                resulting.remove(key);
+            } else {
+                let uploaded = api
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/user/dictionary",
+                        Some(serde_json::json!({
+                            "word": key.0,
+                            "code": key.1,
+                            "type": "Phrase",
+                            "replacePublic": false,
+                        })),
+                    )
+                    .await?;
+                let uploaded: RemoteEntry = serde_json::from_value(uploaded["entry"].clone())?;
+                if uploaded.word != key.0
+                    || uploaded.code != key.1
+                    || uploaded.user_id != account
+                    || uploaded.id <= 0
+                    || uploaded.kind != "Phrase"
+                    || !(100..=1_000_000).contains(&uploaded.weight)
+                {
+                    return Err(CoreError::Other("保存用户词条响应格式不正确".into()));
+                }
+            }
+        }
+    }
+    for (key, entries) in &remote_by_key {
+        if !local_set.contains(key) {
+            if base.contains(key) {
+                for entry in entries {
+                    let deleted = api
+                        .request(
+                            reqwest::Method::DELETE,
+                            &format!("/api/user/dictionary/{}", entry.id),
+                            None,
+                        )
+                        .await?;
+                    if deleted["success"].as_bool() != Some(true) {
+                        return Err(CoreError::Other("删除用户词条响应格式不正确".into()));
+                    }
+                }
+            } else {
+                resulting.insert(key.clone());
+            }
+        }
+    }
+    api.token()?;
+    for entry in local
+        .iter()
+        .rev()
+        .filter(|entry| !resulting.contains(&(entry.word.clone(), entry.code.clone())))
+    {
+        crate::user_words::delete_user_word(
+            core,
+            "keytao",
+            &root,
+            entry.id,
+            &entry.word,
+            &entry.code,
+        )?;
+    }
+    for (key, entries) in &remote_by_key {
+        if !local_set.contains(key) && resulting.contains(key) {
+            crate::user_words::add_user_word(
+                core,
+                "keytao",
+                &root,
+                &key.0,
+                &key.1,
+                Some(entries[0].weight.to_string()),
+            )?;
+        }
+    }
+    let import_table_patched = ensure_user_dictionary_imports(&root).map_err(CoreError::Other)?;
+    let reload_stamp_path = host
+        .write_reload_stamp(&root)
+        .map_err(CoreError::Other)?
+        .map(path_string);
+    save_base(core, account, &resulting)?;
+    Ok(UserDictionarySyncResult {
+        file_name: "keytao.user.dict.yaml".into(),
+        path: path_string(root.join("keytao.user.dict.yaml")),
+        count: resulting.len(),
+        updated_at: String::new(),
+        import_table_patched,
+        reload_stamp_path,
+        message: format!("已同步 {} 条用户词条", resulting.len()),
+    })
 }
 
 #[cfg(test)]

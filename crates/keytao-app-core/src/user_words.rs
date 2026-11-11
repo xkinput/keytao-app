@@ -213,6 +213,10 @@ fn package_data(
     core: &Core,
     scheme: &str,
 ) -> Result<Arc<PackageData>, CoreError> {
+    let scheme = match scheme {
+        "keytao-dz" | "keytao-bj" => "keytao",
+        _ => scheme,
+    };
     crate::scheme::validate_scheme_key(scheme).map_err(CoreError::Other)?;
     let store = core.env().data_dir.join("scheme-packages");
     let path = store.join(format!("{scheme}.zip"));
@@ -827,6 +831,19 @@ mod tests {
         )
         .unwrap();
         (dir, core)
+    }
+
+    #[test]
+    fn keytao_variants_share_the_same_user_dictionary() {
+        let (dir, core) = fixture();
+        let root = dir.path().join("rime");
+        add_user_word(&core, "keytao-dz", &root, "自造词", "zici", None).unwrap();
+        let words = list_user_words(&core, "keytao-bj", &root).unwrap();
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].word, "自造词");
+        assert_eq!(list_user_words(&core, "keytao", &root).unwrap(), words);
+        delete_user_word(&core, "keytao-bj", &root, words[0].id, "自造词", "zici").unwrap();
+        assert!(list_user_words(&core, "keytao-dz", &root).unwrap().is_empty());
     }
 
     fn package(core: &Core, scheme: &str, files: &[(&str, &str)]) {

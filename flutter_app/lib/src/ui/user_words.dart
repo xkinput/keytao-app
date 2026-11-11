@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:forui/forui.dart';
@@ -7,10 +8,19 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
+import 'login.dart';
 import 'widgets.dart';
 
 bool _hasConflict(UserWordComparisonDto comparison) =>
     comparison.status == 'code_taken' || comparison.status == 'word_has_code';
+
+bool _isKeytao(String scheme) =>
+    const {'keytao', 'keytao-dz', 'keytao-bj'}.contains(scheme);
+
+String _wordKey(String word, String code) => jsonEncode([word, code]);
+
+List<Map<String, dynamic>> _submissionObjects(Object? value) =>
+    (value as List<dynamic>).cast<Map<String, dynamic>>();
 
 Future<void> openUserWords(
   BuildContext context,
@@ -96,6 +106,15 @@ class _UserWordsPageState extends State<UserWordsPage> {
   List<UserWordComparisonDto> _entries = [];
   bool _loading = true;
   bool _saving = false;
+  bool _comparisonAvailable = false;
+  bool _pendingLoading = false;
+  bool _opening = false;
+  Object? _accountId;
+  Object? _pendingAccountId;
+  final Set<String> _selected = {};
+  final Set<String> _pending = {};
+  final Set<String> _submitted = {};
+  final Set<String> _published = {};
   UserWordDto? _pendingDelete;
   String? _error;
   int _request = 0;
@@ -104,8 +123,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
   @override
   void initState() {
     super.initState();
+    _accountId = widget.controller.accountUser?.id;
     widget.controller.addListener(_controllerChanged);
-    unawaited(_load());
+    unawaited(_openScheme());
   }
 
   @override
@@ -116,12 +136,96 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   void _controllerChanged() {
+    final c = widget.controller;
+    if (_accountId != c.accountUser?.id) {
+      _accountId = c.accountUser?.id;
+      _pendingAccountId = null;
+      setState(() {
+        _pending.clear();
+        _submitted.clear();
+        _selected.clear();
+      });
+      if (_accountId != null && _isKeytao(_scheme)) {
+        c.scheduleUserDictionarySync();
+      }
+    }
     if (!widget.controller.busy &&
         !_loading &&
+        !_saving &&
         _pendingDelete == null &&
         _loadedRevision != widget.controller.userWordsRevision) {
       unawaited(_load());
     }
+    if (_isKeytao(_scheme) &&
+        c.accountUser != null &&
+        _pendingAccountId != c.accountUser?.id &&
+        !c.busy &&
+        !_loading &&
+        !_saving &&
+        !_opening &&
+        !_pendingLoading) {
+      unawaited(_refreshPending());
+    }
+  }
+
+  Future<void> _openScheme() async {
+    _opening = true;
+    try {
+      await _load();
+      if (!mounted || !_isKeytao(_scheme)) return;
+      final c = widget.controller;
+      if (c.accountUser == null) return;
+      if (c.busy) {
+        c.scheduleUserDictionarySync();
+      } else {
+        await _sync(automatic: true);
+      }
+    } finally {
+      _opening = false;
+      if (mounted) _controllerChanged();
+    }
+  }
+
+  Future<void> _refreshPending() async {
+    final c = widget.controller;
+    final account = c.accountUser?.id;
+    if (account == null || _pendingLoading || c.busy) return;
+    setState(() => _pendingLoading = true);
+    _pendingAccountId = account;
+    try {
+      final entries = _submissionObjects(
+        jsonDecode(await core.accountPendingWords()),
+      );
+      if (!mounted || c.accountUser?.id != account) return;
+      setState(() {
+        _pending
+          ..clear()
+          ..addAll([
+            for (final entry in entries)
+              _wordKey(entry['word'] as String, entry['code'] as String),
+          ]);
+        _selected.removeAll(_pending);
+      });
+    } catch (failure) {
+      await c.reloadAccountSession();
+      if (mounted) setState(() => _error = errorText(failure));
+    } finally {
+      if (mounted) {
+        setState(() => _pendingLoading = false);
+        _controllerChanged();
+      }
+    }
+  }
+
+  bool _canSubmit(UserWordComparisonDto comparison) {
+    final entry = comparison.entry;
+    final key = _wordKey(entry.word, entry.code);
+    return _isKeytao(_scheme) &&
+        _comparisonAvailable &&
+        comparison.status != 'identical' &&
+        !_pending.contains(key) &&
+        !_submitted.contains(key) &&
+        !_published.contains(key);
   }
 
   Future<void> _load() async {
@@ -135,6 +239,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
       _loading = true;
       _error = null;
       _entries = [];
+      _comparisonAvailable = false;
     });
     try {
       final words = await core.listUserWords(schemeKey: _scheme);
@@ -148,14 +253,22 @@ class _UserWordsPageState extends State<UserWordsPage> {
           ),
       ];
       String? comparisonError;
+      var comparisonAvailable = false;
       try {
         entries = await core.compareUserWords(schemeKey: _scheme);
+        comparisonAvailable = true;
       } catch (failure) {
         comparisonError = errorText(failure);
       }
       if (mounted && request == _request) {
         setState(() {
           _entries = entries;
+          _comparisonAvailable = comparisonAvailable;
+          _selected.retainAll({
+            for (final comparison in entries)
+              if (_canSubmit(comparison))
+                _wordKey(comparison.entry.word, comparison.entry.code),
+          });
           _error = comparisonError;
         });
       }
@@ -265,12 +378,198 @@ class _UserWordsPageState extends State<UserWordsPage> {
     });
   }
 
+  Future<void> _sync({bool automatic = false}) async {
+    final c = widget.controller;
+    if (_saving || _pendingLoading || c.busy) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      if (!automatic && !await ensureAccountLogin(context, c)) return;
+      if (automatic && c.accountUser == null) return;
+      var synced = await c.syncUserDictionary();
+      if (!synced) {
+        await c.reloadAccountSession();
+        if (!automatic &&
+            mounted &&
+            c.accountUser == null &&
+            await ensureAccountLogin(context, c)) {
+          synced = await c.syncUserDictionary();
+        }
+      }
+      _pendingAccountId = synced ? null : c.accountUser?.id;
+      if (mounted && !synced) setState(() => _error = c.accountError);
+    } catch (failure) {
+      if (mounted) setState(() => _error = errorText(failure));
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+        _controllerChanged();
+      }
+    }
+  }
+
+  Future<bool> _confirmSubmission(Map<String, dynamic> preview) async {
+    final items = _submissionObjects(preview['items']);
+    final conflicts = _submissionObjects(preview['conflicts']);
+    final warnings = _submissionObjects(preview['warnings']);
+    return await showFSheet<bool>(
+          context: context,
+          side: FLayout.btt,
+          mainAxisMaxRatio: 0.9,
+          useSafeArea: true,
+          builder: (sheetContext) => Padding(
+            padding: const EdgeInsets.all(24),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                spacing: 16,
+                children: [
+                  Text(
+                    '提交到加词平台',
+                    style: sheetContext.theme.typography.display.lg,
+                  ),
+                  for (final item in items)
+                    Text('${item['word']} · ${item['code']}'),
+                  if (conflicts.isNotEmpty) ...[
+                    Text('冲突 ${conflicts.length}'),
+                    for (final conflict in conflicts)
+                      _SubmissionDetail(detail: conflict),
+                  ],
+                  if (warnings.isNotEmpty) ...[
+                    Text('警告 ${warnings.length}'),
+                    for (final warning in warnings)
+                      _SubmissionDetail(detail: warning),
+                  ],
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: ActionRow(
+                      children: [
+                        ActionButton(
+                          AppStrings.cancel,
+                          onPress: () => Navigator.pop(sheetContext, false),
+                        ),
+                        ActionButton(
+                          '确认提交',
+                          primary: true,
+                          onPress: conflicts.isEmpty
+                              ? () => Navigator.pop(sheetContext, true)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _submitSelected() async {
+    final c = widget.controller;
+    if (_saving || _pendingLoading || c.busy || _selected.isEmpty) return;
+    var retriedPreparation = false;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final entriesJson = jsonEncode([
+        for (final comparison in _entries)
+          if (_canSubmit(comparison) &&
+              _selected.contains(
+                _wordKey(comparison.entry.word, comparison.entry.code),
+              ))
+            {'word': comparison.entry.word, 'code': comparison.entry.code},
+      ]);
+      if (!await ensureAccountLogin(context, c) || !mounted) return;
+      String previewJson;
+      try {
+        previewJson = await core.accountPrepareSubmission(
+          entriesJson: entriesJson,
+        );
+      } catch (_) {
+        await c.reloadAccountSession();
+        if (c.accountUser != null) rethrow;
+        retriedPreparation = true;
+        if (!mounted || !await ensureAccountLogin(context, c)) return;
+        previewJson = await core.accountPrepareSubmission(
+          entriesJson: entriesJson,
+        );
+      }
+      var preview = jsonDecode(previewJson) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        for (final entry in _submissionObjects(preview['already_published'])) {
+          _published.add(
+            _wordKey(entry['word'] as String, entry['code'] as String),
+          );
+        }
+        for (final entry in _submissionObjects(preview['already_pending'])) {
+          _pending.add(
+            _wordKey(entry['word'] as String, entry['code'] as String),
+          );
+        }
+        _selected
+          ..removeAll(_published)
+          ..removeAll(_pending);
+      });
+      if (_submissionObjects(preview['items']).isEmpty) return;
+      while (mounted && await _confirmSubmission(preview)) {
+        final result = jsonDecode(
+          await core.accountSubmitWords(previewJson: jsonEncode(preview)),
+        ) as Map<String, dynamic>;
+        if (!mounted) return;
+        if (result['confirmation']
+            case final Map<String, dynamic> confirmation) {
+          preview = confirmation;
+          continue;
+        }
+        if (result['status'] != 'Submitted') {
+          throw StateError('${result['status']}');
+        }
+        setState(() {
+          for (final entry in _submissionObjects(result['items'])) {
+            final key = _wordKey(
+              entry['word'] as String,
+              entry['code'] as String,
+            );
+            _submitted.add(key);
+            _pending.add(key);
+            _selected.remove(key);
+          }
+        });
+        break;
+      }
+    } catch (failure) {
+      await c.reloadAccountSession();
+      if (!retriedPreparation && mounted && c.accountUser == null) {
+        await ensureAccountLogin(context, c);
+      }
+      if (mounted) setState(() => _error = errorText(failure));
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+        _controllerChanged();
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      final blocked = c.busy || _loading || _saving || _pendingDelete != null;
+      final blocked =
+          c.busy ||
+          _loading ||
+          _saving ||
+          _pendingLoading ||
+          _pendingDelete != null;
       final query = _search.text.toLowerCase();
       final entries = _entries.where((comparison) {
         final entry = comparison.entry;
@@ -344,8 +643,11 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                   onPress: blocked
                                       ? null
                                       : () {
-                                          setState(() => _scheme = key);
-                                          unawaited(_load());
+                                          setState(() {
+                                            _scheme = key;
+                                            _selected.clear();
+                                          });
+                                          unawaited(_openScheme());
                                         },
                                   child: Text(schemeDisplayName(key)),
                                 ),
@@ -367,6 +669,21 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                 () => _conflictsOnly = !_conflictsOnly,
                               ),
                             ),
+                            if (_isKeytao(_scheme)) ...[
+                              ActionButton(
+                                '同步',
+                                icon: FLucideIcons.refreshCw,
+                                onPress: blocked ? null : _sync,
+                              ),
+                              ActionButton(
+                                _selected.isEmpty
+                                    ? '提交到加词平台'
+                                    : '提交到加词平台 (${_selected.length})',
+                                onPress: blocked || _selected.isEmpty
+                                    ? null
+                                    : _submitSelected,
+                              ),
+                            ],
                             if (c.userWordsAffectActiveScheme(_scheme) &&
                                 c.userWordsPendingDeploy.contains(
                                   c.activeSchemeKey,
@@ -379,6 +696,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
                         ),
                         if (_loading) const FProgress(),
                         if (_error case final error?) ErrorMessage(error),
+                        if (_error == null && _isKeytao(_scheme))
+                          if (c.accountError case final error?)
+                            ErrorMessage(error),
                       ],
                     ),
                   ),
@@ -404,12 +724,29 @@ class _UserWordsPageState extends State<UserWordsPage> {
                             itemBuilder: (context, index) {
                               final comparison = entries[index];
                               final entry = comparison.entry;
+                              final key = _wordKey(entry.word, entry.code);
+                              final canSubmit = _canSubmit(comparison);
                               return Padding(
                                 padding: const EdgeInsets.symmetric(
                                   vertical: 4,
                                 ),
                                 child: Row(
                                   children: [
+                                    if (canSubmit) ...[
+                                      FCheckbox(
+                                        value: _selected.contains(key),
+                                        enabled: !blocked,
+                                        semanticsLabel: '选择 ${entry.word}',
+                                        onChange: (value) => setState(() {
+                                          if (value) {
+                                            _selected.add(key);
+                                          } else {
+                                            _selected.remove(key);
+                                          }
+                                        }),
+                                      ),
+                                      const SizedBox(width: 12),
+                                    ],
                                     Expanded(
                                       child: FTappable(
                                         onPress: blocked
@@ -422,6 +759,25 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                           child: Row(
                                             children: [
                                               Expanded(child: Text(entry.word)),
+                                              if (_isKeytao(_scheme) &&
+                                                  (_pending.contains(key) ||
+                                                      _submitted.contains(
+                                                        key,
+                                                      ) ||
+                                                      canSubmit)) ...[
+                                                FBadge(
+                                                  variant:
+                                                      FBadgeVariant.outline,
+                                                  child: Text(
+                                                    _submitted.contains(key)
+                                                        ? '已提交审核'
+                                                        : _pending.contains(key)
+                                                        ? '审核中'
+                                                        : '可提交',
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 12),
+                                              ],
                                               if (_hasConflict(comparison)) ...[
                                                 FBadge(
                                                   variant:
@@ -478,6 +834,39 @@ class _UserWordsPageState extends State<UserWordsPage> {
       );
     },
   );
+}
+
+class _SubmissionDetail extends StatelessWidget {
+  const _SubmissionDetail({required this.detail});
+  final Map<String, dynamic> detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = detail['currentPhrase'] as Map<String, dynamic>?;
+    final word = detail['word'] as String? ?? current?['word'] as String?;
+    final code = detail['code'] as String?;
+    final messages = <String>{
+      if (detail['message'] case final String message) message,
+      if (detail['impact'] case final String impact) impact,
+      if (detail['suggestions'] case final List<dynamic> suggestions)
+        for (final suggestion in suggestions.cast<Map<String, dynamic>>())
+          if (suggestion['reason'] case final String reason) reason,
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: 4,
+      children: [
+        if (word != null || code != null) Text([?word, ?code].join(' · ')),
+        for (final message in messages)
+          Text(
+            message,
+            style: context.theme.typography.body.sm.copyWith(
+              color: context.theme.colors.mutedForeground,
+            ),
+          ),
+      ],
+    );
+  }
 }
 
 class _UserWordEditor extends StatefulWidget {

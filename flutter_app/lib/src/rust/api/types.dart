@@ -10,20 +10,28 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 class AccountUserDto {
+  final PlatformInt64 id;
   final String? name;
   final String? nickname;
   final String? email;
 
-  const AccountUserDto({this.name, this.nickname, this.email});
+  const AccountUserDto({
+    required this.id,
+    this.name,
+    this.nickname,
+    this.email,
+  });
 
   @override
-  int get hashCode => name.hashCode ^ nickname.hashCode ^ email.hashCode;
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ nickname.hashCode ^ email.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is AccountUserDto &&
           runtimeType == other.runtimeType &&
+          id == other.id &&
           name == other.name &&
           nickname == other.nickname &&
           email == other.email;

@@ -203,6 +203,7 @@ class AppController extends ChangeNotifier {
   AccountUserDto? accountUser;
   bool loggingIn = false;
   bool syncingDictionary = false;
+  Timer? _dictionarySyncDebounce;
   String? accountError;
   String? accountMessage;
   StreamSubscription<BridgeEvent>? _events;
@@ -232,10 +233,15 @@ class AppController extends ChangeNotifier {
       userWordsPendingDeploy.add(activeSchemeKey);
     }
     _changed();
+    if (isKeytaoScheme(key)) scheduleUserDictionarySync();
   }
+
+  bool isKeytaoScheme(String key) =>
+      const {'keytao', 'keytao-dz', 'keytao-bj'}.contains(key);
 
   bool userWordsAffectActiveScheme(String key) =>
       key == activeSchemeKey ||
+      (isKeytaoScheme(key) && isKeytaoScheme(activeSchemeKey)) ||
       (const {'xmjd', 'xmjd-feiding'}.contains(key) &&
           const {'xmjd', 'xmjd-feiding'}.contains(activeSchemeKey));
 
@@ -274,6 +280,9 @@ class AppController extends ChangeNotifier {
         userWordsReport = null;
       }
       userWordsReportError = null;
+      if (report.removed.isNotEmpty && isKeytaoScheme(key)) {
+        scheduleUserDictionarySync();
+      }
     } catch (failure) {
       userWordsReportScheme = key;
       userWordsReport = null;
@@ -1326,12 +1335,20 @@ class AppController extends ChangeNotifier {
     try {
       accountUser = await core.accountSession();
       _changed();
-      // Rust clears the session only when the server rejects the token.
       await core.accountRefresh();
+    } catch (failure) {
+      debugPrint('Account refresh failed: ${errorText(failure)}');
+    } finally {
+      await reloadAccountSession();
+    }
+  }
+
+  Future<void> reloadAccountSession() async {
+    try {
       accountUser = await core.accountSession();
       _changed();
     } catch (failure) {
-      debugPrint('Account refresh failed: ${errorText(failure)}');
+      debugPrint('Account session failed: ${errorText(failure)}');
     }
   }
 
@@ -1354,6 +1371,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    _dictionarySyncDebounce?.cancel();
     accountError = null;
     accountMessage = null;
     try {
@@ -1365,9 +1383,22 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
-  Future<void> syncUserDictionary() async {
-    if (busy || syncingDictionary) return;
-    // Block other install/deploy operations so the follow-up deploy runs.
+  void scheduleUserDictionarySync() {
+    _dictionarySyncDebounce?.cancel();
+    if (_disposed || accountUser == null) return;
+    _dictionarySyncDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (_disposed || accountUser == null) return;
+      if (busy || syncingDictionary) {
+        scheduleUserDictionarySync();
+      } else {
+        unawaited(syncUserDictionary());
+      }
+    });
+  }
+
+  Future<bool> syncUserDictionary() async {
+    if (busy || syncingDictionary || accountUser == null) return false;
+    _dictionarySyncDebounce?.cancel();
     busy = true;
     syncingDictionary = true;
     accountError = null;
@@ -1375,15 +1406,20 @@ class AppController extends ChangeNotifier {
     _changed();
     try {
       accountMessage = (await core.accountSyncUserDictionary()).message;
+      userWordsRevision++;
+      if (isKeytaoScheme(activeSchemeKey)) {
+        userWordsPendingDeploy.add(activeSchemeKey);
+      }
+      return true;
     } catch (failure) {
       accountError = errorText(failure);
+      return false;
     } finally {
+      await reloadAccountSession();
       syncingDictionary = false;
       busy = false;
       _changed();
     }
-    // deploy() re-reads the local schema state after deploying.
-    if (accountError == null) await deploy();
   }
 
   // The bridge holds its install lock while invoking this callback. Never
@@ -1882,6 +1918,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _dictionarySyncDebounce?.cancel();
     if (isWindows && _events != null) {
       _windowsChannel.setMethodCallHandler(null);
     }
