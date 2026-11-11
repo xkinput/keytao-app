@@ -157,7 +157,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('marked package uploads before one debounced profile', (
+  testWidgets('marking a package does not upload before successful deploy', (
     tester,
   ) async {
     api.enabled = true;
@@ -176,7 +176,6 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.pump();
     expect(api.calls.where((call) => call.contains('Upload')).toList(), [
-      'Symbol("crateApiCoreUploadCloudPackage")',
       'Symbol("crateApiCoreUploadSchemeProfile")',
     ]);
     await tester.pump(const Duration(seconds: 2));
@@ -197,5 +196,45 @@ void main() {
     await controller.reloadAccountSession(checkSchemeProfile: false);
     await tester.pump(const Duration(seconds: 2));
     expect(api.calls.where((call) => call.contains('Upload')), isEmpty);
+  });
+
+  testWidgets('successful deploy queues only the active marked package once', (
+    tester,
+  ) async {
+    api.enabled = true;
+    controller.installedPackages = const [
+      InstalledPackageDto(
+        schemeKey: 'keytao',
+        version: '1',
+        active: true,
+        hasPackageZip: true,
+      ),
+    ];
+    controller.local = const LocalSchemaDto(
+      installed: true,
+      deployed: true,
+      schemas: ['keytao'],
+    );
+    await controller.loadSchemeSyncState();
+    await controller.reloadAccountSession();
+    controller.scheduleSchemeProfileSync(
+      packageKey: 'keytao',
+      afterSuccessfulDeploy: true,
+    );
+    controller.scheduleSchemeProfileSync(
+      packageKey: 'keytao',
+      afterSuccessfulDeploy: true,
+    );
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(api.calls.where((call) => call.contains('Upload')).toList(), [
+      'Symbol("crateApiCoreUploadCloudPackage")',
+      'Symbol("crateApiCoreUploadSchemeProfile")',
+    ]);
+    await tester.pump(const Duration(seconds: 2));
+    expect(
+      api.calls.where((call) => call.contains('UploadCloudPackage')),
+      hasLength(1),
+    );
   });
 }

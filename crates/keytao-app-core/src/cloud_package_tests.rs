@@ -57,6 +57,27 @@ fn package(bytes: &[u8]) -> Value {
         "sha256":format!("{:x}", Sha256::digest(bytes)),"createAt":"2026-11-11T00:00:00.000Z"})
 }
 
+fn deployed_fixture() -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
+    let (dir, core, _) = fixture();
+    let root = dir.path().join("rime");
+    std::fs::create_dir_all(root.join("build")).unwrap();
+    let schema = "schema:\n  schema_id: xmjd6\nspeller:\n  alphabet: abc\n";
+    std::fs::write(root.join("xmjd6.schema.yaml"), schema).unwrap();
+    std::fs::File::open(root.join("xmjd6.schema.yaml"))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
+    core.update_state(|state| state.active_scheme = Some("xmjd".into()))
+        .unwrap();
+    crate::deploy::record_result(&core, &root, true).unwrap();
+    let bytes = prepare_with_smoke(&core, "xmjd", &root, None, |_, _| Ok(()))
+        .unwrap()
+        .bundle
+        .bytes;
+    (dir, core, bytes)
+}
+
 struct Response {
     status: &'static str,
     headers: Vec<(String, String)>,
@@ -135,7 +156,7 @@ impl Server {
 
 #[tokio::test]
 async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
-    let (_dir, core, bytes) = fixture();
+    let (dir, core, bytes) = deployed_fixture();
     let ready = package(&bytes);
     let mock=server(|url|vec![
         response("200 OK",json!({"packages":[]})),
@@ -143,7 +164,7 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
         response("200 OK",json!({})), response("200 OK",json!({"id":21,"status":"READY"})),
         response("200 OK",json!({"packages":[ready]})),
     ]).await;
-    let result = upload_at(&core, "xmjd", &mock.url).await;
+    let result = upload_at(&core, "xmjd", &dir.path().join("rime"), &mock.url).await;
     let requests = mock.finish().await;
     assert_eq!(result.unwrap().id, "21");
     let headers: Vec<_> = requests
@@ -186,9 +207,9 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
 
 #[tokio::test]
 async fn upload_reuses_ready_package_with_same_sha_without_creating_upload() {
-    let (_dir, core, bytes) = fixture();
+    let (dir, core, bytes) = deployed_fixture();
     let mock = server(|_| vec![response("200 OK", json!({"packages":[package(&bytes)]}))]).await;
-    let result = upload_at(&core, "xmjd", &mock.url).await;
+    let result = upload_at(&core, "xmjd", &dir.path().join("rime"), &mock.url).await;
     let requests = mock.finish().await;
     assert_eq!(result.unwrap().id, "21");
     assert_eq!(requests.len(), 1);
@@ -294,7 +315,7 @@ async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id
 
 #[tokio::test]
 async fn identical_archive_under_another_scheme_skips_upload_without_changing_cloud_reference() {
-    let (_dir, core, bytes) = fixture();
+    let (dir, core, bytes) = deployed_fixture();
     core.update_state(|state| {
         state.scheme_cloud_ids.insert("xmjd".into(), "19".into());
     })
@@ -302,11 +323,152 @@ async fn identical_archive_under_another_scheme_skips_upload_without_changing_cl
     let mut remote = package(&bytes);
     remote["schemeKey"] = json!("txjx");
     let mock = server(|_| vec![response("200 OK", json!({"packages":[remote]}))]).await;
-    let result = upload_at(&core, "xmjd", &mock.url).await;
+    let result = upload_at(&core, "xmjd", &dir.path().join("rime"), &mock.url).await;
     let requests = mock.finish().await;
     assert_eq!(result.unwrap().id, "21");
     assert_eq!(requests.len(), 1);
     assert_eq!(core.state().scheme_cloud_ids["xmjd"], "19");
+}
+
+#[tokio::test]
+async fn upload_rechecks_with_the_prepared_shared_directory() {
+    let (dir, core, _) = deployed_fixture();
+    let root = dir.path().join("rime");
+    let shared = dir.path().join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("symbols.yaml"), "punctuator: {}\n").unwrap();
+    let schema = "schema:\n  schema_id: xmjd6\nspeller:\n  alphabet: abc\npunctuator:\n  import_preset: symbols\n";
+    std::fs::write(root.join("xmjd6.schema.yaml"), schema).unwrap();
+    std::fs::File::open(root.join("xmjd6.schema.yaml"))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .unwrap();
+    std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
+    let prepared = prepare_with_smoke(&core, "xmjd", &root, Some(&shared), |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(prepared.bundle.files, ["default.custom.yaml", "xmjd6.schema.yaml"]);
+    let ready = package(&prepared.bundle.bytes);
+    let mock = server(|_| vec![response("200 OK", json!({"packages":[ready]}))]).await;
+    let result = upload_prepared_at(&core, "xmjd", &root, prepared, &mock.url).await;
+    let requests = mock.finish().await;
+    assert_eq!(result.unwrap().id, "21");
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn inactive_or_failed_deploy_refuses_before_any_cloud_request() {
+    let (dir, core, _) = deployed_fixture();
+    let root = dir.path().join("rime");
+    let mock = server(|_| Vec::new()).await;
+    core.update_state(|state| state.active_scheme = Some("txjx".into()))
+        .unwrap();
+    let error = upload_at(&core, "xmjd", &root, &mock.url)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("xmjd") && error.contains("不是当前"),
+        "{error}"
+    );
+    core.update_state(|state| state.active_scheme = Some("xmjd".into()))
+        .unwrap();
+    crate::deploy::record_result(&core, &root, false).unwrap();
+    let error = upload_at(&core, "xmjd", &root, &mock.url)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("xmjd") && error.contains("部署未成功"),
+        "{error}"
+    );
+    assert!(mock.finish().await.is_empty());
+}
+
+#[tokio::test]
+async fn installing_into_another_directory_preserves_active_deploy_receipt() {
+    let (dir, core, _) = deployed_fixture();
+    let before = serde_json::to_value(core.state()).unwrap()["last_deploy"].clone();
+    let bytes = crate::packages::stored_archive(&core, "xmjd").unwrap().0;
+    let zip = dir.path().join("other.zip");
+    let dest = dir.path().join("other-rime");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(&zip, bytes).unwrap();
+    crate::install::smart_install(
+        &core,
+        zip.to_string_lossy().into_owned(),
+        dest.to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(core.state()).unwrap()["last_deploy"],
+        before
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn desktop_preview_smokes_a_shared_dictionary_from_a_small_temp_scheme() {
+    let (dir, core, _) = fixture();
+    let root = dir.path().join("rime");
+    let shared = core.env().resource_dir.join("rime-data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("default.yaml"),
+        "config_version: '1'\nschema_list:\n  - schema: xmjd6\nmenu:\n  page_size: 5\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("default.custom.yaml"),
+        "patch:\n  schema_list:\n    - schema: xmjd6\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("xmjd6.schema.yaml"), "schema:\n  schema_id: xmjd6\n  name: Temp fixture\n  version: '1'\nengine:\n  processors: [speller, selector, express_editor]\n  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\nspeller:\n  alphabet: abcdefghijklmnopqrstuvwxyz\ntranslator:\n  dictionary: xmjd6\n  enable_user_dict: false\n").unwrap();
+    std::fs::write(shared.join("xmjd6.dict.yaml"), "---\nname: xmjd6\nversion: '1'\nsort: original\nuse_preset_vocabulary: false\n...\nalpha\ta\n").unwrap();
+    core.update_state(|state| state.active_scheme = Some("xmjd".into()))
+        .unwrap();
+    let runtime = keytao_core::ImeRuntime::with_dirs(&root, shared.to_string_lossy().into_owned());
+    runtime.init().unwrap();
+    crate::deploy::record_result(&core, &root, true).unwrap();
+    let preview = preview(&core, "xmjd", &root).unwrap();
+    assert_eq!(
+        preview.files,
+        [
+            "default.custom.yaml",
+            "xmjd6.schema.yaml"
+        ]
+    );
+    assert!(preview.validation.contains("冒烟检查"));
+}
+
+#[test]
+fn oversized_distribution_can_prepare_a_small_dependency_closure() {
+    let (dir, core, _) = deployed_fixture();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file(
+        "xmjd6.schema.yaml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"schema: xmjd6\n").unwrap();
+    zip.start_file(
+        "other_scheme.bin",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    zip.write_all(&vec![0; 31 * 1024 * 1024]).unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    assert!(bytes.len() as u64 > MAX_PACKAGE_SIZE);
+    crate::packages::stage_install(&core, &bytes, Default::default(), String::new()).unwrap();
+    crate::packages::finalize_pending(&core, "xmjd", Some("v1"), false).unwrap();
+    let prepared =
+        prepare_with_smoke(&core, "xmjd", &dir.path().join("rime"), None, |_, _| Ok(())).unwrap();
+    assert!(prepared.bundle.bytes.len() < 1024);
+    assert_eq!(
+        prepared.bundle.files,
+        ["default.custom.yaml", "xmjd6.schema.yaml"]
+    );
 }
 
 #[tokio::test]

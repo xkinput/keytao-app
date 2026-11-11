@@ -18,6 +18,32 @@ use serde::Serialize;
 #[cfg(target_os = "ios")]
 use std::path::Path;
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeployRecord {
+    pub root: std::path::PathBuf,
+    pub scheme_key: Option<String>,
+    pub success: bool,
+}
+
+pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Result<(), CoreError> {
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error)
+            if !success && error.kind() == std::io::ErrorKind::NotFound && root.is_absolute() =>
+        {
+            root.to_path_buf()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    core.update_state(|state| {
+        state.last_deploy = Some(DeployRecord {
+            root,
+            scheme_key: state.active_scheme.clone(),
+            success,
+        });
+    })
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
     let mut schemas = std::collections::BTreeMap::new();
@@ -56,7 +82,7 @@ pub(crate) fn render_user_schema_logos(user_dir: &std::path::Path) {
 }
 
 #[cfg(target_os = "ios")]
-fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<String> {
+pub(crate) fn ios_app_shared_data_dir(core: &Core, user_root: &Path) -> Option<String> {
     let mut candidates = vec![
         user_root.to_path_buf(),
         user_root.join("rime-data"),
@@ -115,6 +141,7 @@ pub(crate) async fn rime_deploy_default_inner(
 ) -> Result<DeployResult, String> {
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
+    record_result(core, &dest, false).map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "windows"))]
     let user = dest.to_string_lossy().into_owned();
     #[cfg(target_os = "windows")]
@@ -173,6 +200,9 @@ pub(crate) async fn rime_deploy_default_inner(
 
     match deploy_result {
         Ok(Ok(())) => {
+            let root = keytao_core::default_user_data_dir()
+                .ok_or("Cannot determine keytao data directory")?;
+            record_result(core, &root, true).map_err(|e| e.to_string())?;
             core.emit(CoreEvent::DeployProgress("部署完成".into()));
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             match write_keytao_ime_reload_stamp() {
@@ -212,11 +242,17 @@ pub(crate) async fn rime_deploy_default_inner(
 
 #[cfg(target_os = "android")]
 pub async fn rime_deploy_default(
-    _core: &Core,
+    core: &Core,
     host: impl ImeHost,
 ) -> Result<DeployResult, CoreError> {
     let result: Result<_, String> = async {
+        let root = host.user_root()?;
+        record_result(core, &root, false).map_err(|e| e.to_string())?;
         let result: serde_json::Value = host.deploy_ime_data()?;
+        if result["deployed"].as_bool() != Some(true) {
+            return Err("Android Rime deployment did not succeed".into());
+        }
+        record_result(core, &root, true).map_err(|e| e.to_string())?;
         // The Kotlin side owns the data directory (app-specific storage), so there is
         // no path constant to fall back to here.
         let schema_name = result["schemaName"].as_str().unwrap_or("KeyTao");
@@ -240,6 +276,7 @@ pub async fn rime_deploy_default(
 ) -> Result<DeployResult, CoreError> {
     let result: Result<_, String> = async {
         let dest = host.user_root()?;
+        record_result(core, &dest, false).map_err(|e| e.to_string())?;
         let user = dest.to_string_lossy().into_owned();
         let shared = ios_app_shared_data_dir(core, &dest)
             .unwrap_or_else(keytao_core::default_shared_data_dir);
@@ -255,6 +292,7 @@ pub async fn rime_deploy_default(
         .await
         {
             Ok(Ok(())) => {
+                record_result(core, &dest, true).map_err(|e| e.to_string())?;
                 core.emit(CoreEvent::DeployProgress("部署完成".into()));
                 match write_ios_reload_stamp(&dest) {
                     Ok(stamp) => {

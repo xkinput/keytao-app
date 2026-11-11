@@ -134,6 +134,7 @@ pub struct AppState {
     pub synced_schemes: BTreeSet<String>,
     pub last_scheme_sync_at: Option<String>,
     pub scheme_cloud_ids: BTreeMap<String, String>,
+    pub last_deploy: Option<crate::deploy::DeployRecord>,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +158,7 @@ struct StoredAppState {
     last_scheme_sync_at: Option<String>,
     #[serde(default)]
     scheme_cloud_ids: BTreeMap<String, String>,
+    last_deploy: Option<crate::deploy::DeployRecord>,
     installed_scheme: Option<String>,
     installed_scheme_version: Option<String>,
 }
@@ -192,6 +194,7 @@ impl From<StoredAppState> for AppState {
             synced_schemes: state.synced_schemes,
             last_scheme_sync_at: state.last_scheme_sync_at,
             scheme_cloud_ids: state.scheme_cloud_ids,
+            last_deploy: state.last_deploy,
         }
     }
 }

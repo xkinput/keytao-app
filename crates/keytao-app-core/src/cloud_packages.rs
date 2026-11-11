@@ -46,12 +46,12 @@ fn record_reference(
     expected: Option<i64>,
     scheme_key: &str,
     id: &str,
-    sha256: &str,
+    stored_sha256: &str,
 ) -> Result<(), CoreError> {
     if !crate::packages::stored_archive(core, scheme_key)?
         .1
         .zip_sha256
-        .eq_ignore_ascii_case(sha256)
+        .eq_ignore_ascii_case(stored_sha256)
     {
         return Err(CoreError::Other("本地方案包已更新，请重试".into()));
     }
@@ -84,6 +84,187 @@ pub struct CloudPackage {
     pub size: u64,
     pub sha256: String,
     pub create_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub total_size: u64,
+    #[serde(default)]
+    pub validation: String,
+}
+
+#[derive(Serialize)]
+pub struct UploadPreview {
+    pub files: Vec<String>,
+    pub total_size: u64,
+    pub archive_size: u64,
+    pub sha256: String,
+    pub validation: String,
+}
+
+struct PreparedUpload {
+    bundle: crate::upload_bundle::UploadBundle,
+    meta: crate::packages::PackageMeta,
+    ids: Vec<String>,
+    shared: Option<std::path::PathBuf>,
+}
+
+fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError> {
+    let state = core.state();
+    if state.active_scheme.as_deref() != Some(scheme_key) {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 不是当前使用中的方案"
+        )));
+    }
+    let Some(last) = state.last_deploy.as_ref() else {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 没有本地部署成功记录"
+        )));
+    };
+    if !last.success {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 的最后一次本地部署未成功"
+        )));
+    }
+    if last.scheme_key.as_deref() != Some(scheme_key) {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 的最近部署记录属于其他方案"
+        )));
+    }
+    let root = root.canonicalize().map_err(|e| {
+        CoreError::Other(format!(
+            "方案 {scheme_key}：Rime 目录 {}: {e}",
+            root.display()
+        ))
+    })?;
+    if root != last.root {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 的最近部署记录不属于 Rime 目录 {}",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn package_schema_ids(
+    bytes: &[u8],
+    meta: &crate::packages::PackageMeta,
+) -> Result<Vec<String>, CoreError> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| CoreError::Other(e.to_string()))?;
+    let mut fallback = std::collections::BTreeSet::new();
+    for name in meta.manifest.keys() {
+        if !name.contains('/') {
+            if let Some(id) = name.strip_suffix(".schema.yaml") {
+                fallback.insert(id.to_owned());
+            }
+        }
+    }
+    for index in 0..zip.len() {
+        let mut file = zip
+            .by_index(index)
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        let name = file.name().to_owned();
+        if matches!(name.as_str(), "default.custom.yaml" | "default-custom.yaml") {
+            let mut text = String::new();
+            file.read_to_string(&mut text)?;
+            let ids = keytao_core::parse_schema_list(&text);
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+        if !name.contains('/') {
+            if let Some(id) = name.strip_suffix(".schema.yaml") {
+                fallback.insert(id.to_owned());
+            }
+        }
+    }
+    Ok(fallback.into_iter().collect())
+}
+
+fn prepare_with_smoke(
+    core: &Core,
+    scheme_key: &str,
+    root: &Path,
+    shared: Option<&Path>,
+    smoke: impl FnMut(&str, u32) -> Result<(), String>,
+) -> Result<PreparedUpload, CoreError> {
+    eligible(core, scheme_key, root)?;
+    let (stored, meta) = crate::packages::stored_archive(core, scheme_key)?;
+    let ids = package_schema_ids(&stored, &meta)?;
+    let bundle = if cfg!(target_os = "android") {
+        // Android validates Kotlin's deploy result and artifacts, without in-process Rime.
+        crate::upload_bundle::verified_artifacts(root, shared, &ids)?
+    } else {
+        crate::upload_bundle::verified(root, shared, &ids, smoke)?
+    };
+    if bundle.bytes.len() as u64 > MAX_PACKAGE_SIZE {
+        return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
+    }
+    Ok(PreparedUpload {
+        bundle,
+        meta,
+        ids,
+        shared: shared.map(Path::to_path_buf),
+    })
+}
+
+fn validation() -> String {
+    if cfg!(target_os = "android") {
+        // Android's Rime runtime lives in Kotlin/JNI, outside this core process.
+        "Android：已验证部署结果和构建产物，未执行进程内冒烟检查".into()
+    } else {
+        "已验证部署结果、构建产物和逐 schema 输入冒烟检查".into()
+    }
+}
+
+fn prepare(core: &Core, scheme_key: &str, root: &Path) -> Result<PreparedUpload, CoreError> {
+    #[cfg(target_os = "android")]
+    return prepare_with_smoke(core, scheme_key, root, None, |_, _| Ok(()));
+    #[cfg(not(target_os = "android"))]
+    {
+        #[cfg(target_os = "macos")]
+        let shared = crate::ime_status::macos::macos_app_shared_data_dir(core);
+        #[cfg(target_os = "linux")]
+        let shared = crate::ime_status::linux::linux_app_shared_data_dir(core);
+        #[cfg(target_os = "windows")]
+        let shared = crate::ime_status::windows::windows_app_shared_data_dir(core);
+        #[cfg(target_os = "ios")]
+        let shared = crate::deploy::ios_app_shared_data_dir(core, root);
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "ios"
+        )))]
+        let shared: Option<String> = None;
+        let shared = shared.unwrap_or_else(keytao_core::default_shared_data_dir);
+        let runtime = keytao_core::ImeRuntime::with_dirs(root, &shared);
+        let shared = (!shared.is_empty()).then(|| Path::new(&shared));
+        prepare_with_smoke(core, scheme_key, root, shared, |id, key| {
+            runtime.init_without_deploy()?;
+            let session = runtime.create_session()?;
+            session.select_schema(id)?;
+            session
+                .set_ascii_mode(false)
+                .ok_or("Rime session is unavailable")?;
+            session
+                .process_key_result(key, 0)
+                .ok_or("Rime key processing failed")?;
+            Ok(())
+        })
+    }
+}
+
+pub fn preview(core: &Core, scheme_key: &str, root: &Path) -> Result<UploadPreview, CoreError> {
+    let prepared = prepare(core, scheme_key, root)?;
+    Ok(UploadPreview {
+        archive_size: prepared.bundle.bytes.len() as u64,
+        files: prepared.bundle.files,
+        total_size: prepared.bundle.total_size,
+        sha256: prepared.bundle.sha256,
+        validation: validation(),
+    })
 }
 
 fn deserialize_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -130,33 +311,86 @@ pub(crate) async fn list_at(core: &Core, api_base: &str) -> Result<Vec<CloudPack
     Ok(packages)
 }
 
-pub async fn upload(core: &Core, scheme_key: &str) -> Result<CloudPackage, CoreError> {
-    upload_at(core, scheme_key, API_BASE).await
+pub async fn upload(
+    core: &Core,
+    scheme_key: &str,
+    root: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<CloudPackage, CoreError> {
+    let prepared = prepare(core, scheme_key, root)?;
+    if expected_sha256.is_some_and(|expected| expected != prepared.bundle.sha256) {
+        return Err(CoreError::Other(format!(
+            "方案 {scheme_key} 的依赖文件已更改，请重新确认上传清单"
+        )));
+    }
+    upload_prepared_at(core, scheme_key, root, prepared, API_BASE).await
 }
 
+#[cfg(test)]
 pub(crate) async fn upload_at(
     core: &Core,
     scheme_key: &str,
+    root: &Path,
+    api_base: &str,
+) -> Result<CloudPackage, CoreError> {
+    let prepared = prepare_with_smoke(core, scheme_key, root, None, |_, _| Ok(()))?;
+    upload_prepared_at(core, scheme_key, root, prepared, api_base).await
+}
+
+async fn upload_prepared_at(
+    core: &Core,
+    scheme_key: &str,
+    root: &Path,
+    prepared: PreparedUpload,
     api_base: &str,
 ) -> Result<CloudPackage, CoreError> {
     let account = account_id(core);
-    let (bytes, meta) = crate::packages::stored_archive(core, scheme_key)?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_PACKAGE_SIZE {
-        return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
-    }
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
-    if let Some(package) = list_at(core, api_base)
+    let PreparedUpload {
+        bundle,
+        meta,
+        ids,
+        shared,
+    } = prepared;
+    let crate::upload_bundle::UploadBundle {
+        bytes,
+        files,
+        total_size,
+        sha256,
+        ..
+    } = bundle;
+    let archive_size = bytes.len() as u64;
+    let current = || -> Result<(), CoreError> {
+        eligible(core, scheme_key, root)?;
+        if crate::upload_bundle::verified_artifacts(root, shared.as_deref(), &ids)?.sha256 != sha256 {
+            return Err(CoreError::Other(format!(
+                "方案 {scheme_key} 的依赖文件已更改，请重新确认上传清单"
+            )));
+        }
+        Ok(())
+    };
+    if let Some(mut package) = list_at(core, api_base)
         .await?
         .into_iter()
         .find(|package| package.sha256.eq_ignore_ascii_case(&sha256))
     {
         ensure_account(core, account)?;
-        if package.scheme_key == scheme_key {
-            record_reference(core, account, scheme_key, &package.id, &sha256)?;
+        current()?;
+        if package.size != archive_size {
+            return Err(CoreError::Other(format!(
+                "云端方案 {} 的大小与本地 zip 不符",
+                package.id
+            )));
         }
+        if package.scheme_key == scheme_key {
+            record_reference(core, account, scheme_key, &package.id, &meta.zip_sha256)?;
+        }
+        package.files = files;
+        package.total_size = total_size;
+        package.validation = validation();
         return Ok(package);
     }
     ensure_account(core, account)?;
+    current()?;
     let mut body =
         json!({"schemeKey": scheme_key, "name": scheme_key, "size": bytes.len(), "sha256": sha256});
     if let Some(version) = &meta.version {
@@ -176,6 +410,8 @@ pub(crate) async fn upload_at(
             .await
             .map_err(cloud_error)?,
     )?;
+    ensure_account(core, account)?;
+    current()?;
     let client = storage_client()?;
     let mut request = client
         .put(storage_url(&ticket.upload_url)?)
@@ -201,12 +437,25 @@ pub(crate) async fn upload_at(
     )
     .await
     .map_err(cloud_error)?;
-    let package = list_at(core, api_base)
+    let mut package = list_at(core, api_base)
         .await?
         .into_iter()
         .find(|package| package.id == ticket.id)
         .ok_or_else(|| CoreError::Other("上传完成后未找到云端方案".into()))?;
-    record_reference(core, account, scheme_key, &package.id, &sha256)?;
+    if !package.sha256.eq_ignore_ascii_case(&sha256)
+        || package.scheme_key != scheme_key
+        || package.size != archive_size
+    {
+        return Err(CoreError::Other(format!(
+            "云端方案 {} 的标识、大小或 SHA-256 与上传内容不符",
+            package.id
+        )));
+    }
+    current()?;
+    record_reference(core, account, scheme_key, &package.id, &meta.zip_sha256)?;
+    package.files = files;
+    package.total_size = total_size;
+    package.validation = validation();
     Ok(package)
 }
 

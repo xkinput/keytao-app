@@ -1310,6 +1310,7 @@ class AppController extends ChangeNotifier {
       run(() => _deploy(imeActionId: imeActionId));
 
   Future<void> _deploy({int? imeActionId}) async {
+    _pendingCloudPackageUploads.remove(activeSchemeKey);
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
@@ -1324,10 +1325,12 @@ class AppController extends ChangeNotifier {
       final String message;
       if (isAndroid) {
         await _requireStorage();
+        await core.recordAndroidDeploy(success: false);
         final result = await android.deployImeData();
         if (result['deployed'] != true) {
           throw StateError(AppStrings.deployIncomplete);
         }
+        await core.recordAndroidDeploy(success: true);
         message = result['message'] as String? ?? AppStrings.deployDone;
       } else {
         final result = imeActionId == null
@@ -1344,7 +1347,10 @@ class AppController extends ChangeNotifier {
       userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
       progress = message;
-      scheduleSchemeProfileSync();
+      scheduleSchemeProfileSync(
+        packageKey: activeSchemeKey,
+        afterSuccessfulDeploy: true,
+      );
     } catch (failure) {
       progress = AppStrings.deployFailed;
       _deployStep(errorText(failure), DeployStepState.failed);
@@ -1651,9 +1657,15 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
-  void scheduleSchemeProfileSync({String? packageKey}) {
+  void scheduleSchemeProfileSync({
+    String? packageKey,
+    bool afterSuccessfulDeploy = false,
+  }) {
     _schemeProfileDirty = true;
-    if (packageKey != null && syncedSchemes.contains(packageKey)) {
+    if (afterSuccessfulDeploy &&
+        packageKey != null &&
+        packageKey == activeSchemeKey &&
+        syncedSchemes.contains(packageKey)) {
       _pendingCloudPackageUploads.add(packageKey);
     }
     _schemeSyncDebounce?.cancel();
@@ -1683,6 +1695,10 @@ class AppController extends ChangeNotifier {
         Object? packageFailure;
         for (final key in _pendingCloudPackageUploads.toList()) {
           if (!syncedSchemes.contains(key)) {
+            _pendingCloudPackageUploads.remove(key);
+            continue;
+          }
+          if (key != activeSchemeKey || local?.deployed != true) {
             _pendingCloudPackageUploads.remove(key);
             continue;
           }
@@ -1826,13 +1842,27 @@ class AppController extends ChangeNotifier {
         .toList();
   });
 
-  Future<bool> uploadCloudPackage(String key) => _schemeCloudAction(() async {
-    await core.uploadCloudPackage(schemeKey: key);
-    scheduleSchemeProfileSync();
-    cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
-        .map((value) => Map<String, dynamic>.from(value as Map))
-        .toList();
-  });
+  Future<Map<String, dynamic>?> previewCloudPackage(String key) async {
+    Map<String, dynamic>? preview;
+    await _schemeCloudAction(() async {
+      preview = Map<String, dynamic>.from(
+        jsonDecode(await core.previewCloudPackage(schemeKey: key)) as Map,
+      );
+    });
+    return preview;
+  }
+
+  Future<bool> uploadCloudPackage(String key, {String? expectedSha256}) =>
+      _schemeCloudAction(() async {
+        await core.uploadCloudPackage(
+          schemeKey: key,
+          expectedSha256: expectedSha256,
+        );
+        scheduleSchemeProfileSync();
+        cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+            .map((value) => Map<String, dynamic>.from(value as Map))
+            .toList();
+      });
 
   Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
     await core.downloadCloudPackage(id: id);

@@ -266,9 +266,7 @@ pub(crate) fn stored_archive(
     let dir = checked_store_dir(core)?;
     let archive = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
     let metadata = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
-    if fs::metadata(&archive)?.len() > 30 * 1024 * 1024 {
-        return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
-    }
+    // The upload size limit applies to the rebuilt dependency zip, not this distribution.
     let bytes = fs::read(archive)?;
     let meta: PackageMeta = serde_json::from_slice(&fs::read(metadata)?)?;
     if meta.scheme_key != scheme_key || meta.zip_sha256 != format!("{:x}", Sha256::digest(&bytes)) {
@@ -512,6 +510,7 @@ pub fn record_package(
         );
         if active {
             state.active_scheme = Some(scheme_key.into());
+            state.last_deploy = None;
         }
     })?;
     if let Some(root) = installed_root {

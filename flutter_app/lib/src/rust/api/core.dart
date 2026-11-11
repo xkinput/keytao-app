@@ -72,8 +72,20 @@ Future<String> applySchemeProfile({required String profileJson}) => RustLib
 Future<String> listCloudPackages() =>
     RustLib.instance.api.crateApiCoreListCloudPackages();
 
-Future<String> uploadCloudPackage({required String schemeKey}) =>
-    RustLib.instance.api.crateApiCoreUploadCloudPackage(schemeKey: schemeKey);
+Future<String> previewCloudPackage({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCorePreviewCloudPackage(schemeKey: schemeKey);
+
+Future<String> uploadCloudPackage({
+  required String schemeKey,
+  String? expectedSha256,
+}) => RustLib.instance.api.crateApiCoreUploadCloudPackage(
+  schemeKey: schemeKey,
+  expectedSha256: expectedSha256,
+);
+
+/// Records only the result returned by Android's deployImeData channel.
+Future<void> recordAndroidDeploy({required bool success}) =>
+    RustLib.instance.api.crateApiCoreRecordAndroidDeploy(success: success);
 
 Future<void> downloadCloudPackage({required String id}) =>
     RustLib.instance.api.crateApiCoreDownloadCloudPackage(id: id);

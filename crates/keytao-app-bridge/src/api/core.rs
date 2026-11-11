@@ -141,13 +141,33 @@ pub async fn list_cloud_packages() -> Result<String, String> {
     serde_json::to_string(&packages).map_err(|error| error.to_string())
 }
 
-pub async fn upload_cloud_package(scheme_key: String) -> Result<String, String> {
+pub async fn preview_cloud_package(scheme_key: String) -> Result<String, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    let package = keytao_app_core::cloud_packages::upload(&state.core, &scheme_key)
+    let preview = keytao_app_core::cloud_packages::preview(&state.core, &scheme_key, &state.host.user_root()?)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&preview).map_err(|error| error.to_string())
+}
+
+pub async fn upload_cloud_package(scheme_key: String, expected_sha256: Option<String>) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let package = keytao_app_core::cloud_packages::upload(&state.core, &scheme_key, &state.host.user_root()?, expected_sha256.as_deref())
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string(&package).map_err(|error| error.to_string())
+}
+
+/// Records only the result returned by Android's deployImeData channel.
+pub fn record_android_deploy(success: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = runtime::state()?;
+        keytao_app_core::deploy::record_result(&state.core, &state.host.user_root()?, success)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = success; Err("Android deployment result is only available on Android".into()) }
 }
 
 pub async fn download_cloud_package(id: String) -> Result<(), String> {

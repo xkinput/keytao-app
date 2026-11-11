@@ -453,6 +453,12 @@ pub async fn smart_install(
 
         let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         let dest = PathBuf::from(&dest_path);
+        let replacing_root = dest.canonicalize().ok();
+        core.update_state(|state| {
+            if state.last_deploy.as_ref().is_some_and(|last| Some(&last.root) == replacing_root.as_ref()) {
+                state.last_deploy = None;
+            }
+        }).map_err(|e| e.to_string())?;
         // Validate the entire archive and manifest before deleting or writing files.
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
