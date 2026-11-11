@@ -741,12 +741,14 @@ fn wire__crate__api__core__download_scheme_package_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_source = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok =
-                            crate::api::core::download_scheme_package(api_scheme_key).await?;
+                            crate::api::core::download_scheme_package(api_scheme_key, api_source)
+                                .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,

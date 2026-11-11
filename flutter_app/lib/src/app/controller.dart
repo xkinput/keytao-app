@@ -1109,7 +1109,7 @@ class AppController extends ChangeNotifier {
     _invalidateSchemeUpdates();
     _startOperation(OperationKind.install, AppStrings.installing);
     try {
-      await core.downloadSchemePackage(schemeKey: key);
+      await core.downloadSchemePackage(schemeKey: key, source: source);
       _invalidateSchemeUpdates();
       await _readInstalledPackages();
       progress = AppStrings.installDone;
@@ -1159,6 +1159,7 @@ class AppController extends ChangeNotifier {
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
         await _readLocal();
+        await refreshRelease();
       } catch (failure) {
         packageError = errorText(failure);
         rethrow;

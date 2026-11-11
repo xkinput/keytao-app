@@ -137,7 +137,10 @@ abstract class RustLibApi extends BaseApi {
 
   Future<String> crateApiCoreDownloadSchemeArchive({required String url});
 
-  Future<void> crateApiCoreDownloadSchemePackage({required String schemeKey});
+  Future<void> crateApiCoreDownloadSchemePackage({
+    required String schemeKey,
+    required String source,
+  });
 
   Future<ReleaseInfoDto> crateApiCoreFetchLatestRelease();
 
@@ -845,12 +848,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCoreDownloadSchemePackage({required String schemeKey}) {
+  Future<void> crateApiCoreDownloadSchemePackage({
+    required String schemeKey,
+    required String source,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(schemeKey, serializer);
+          sse_encode_String(source, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -863,7 +870,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreDownloadSchemePackageConstMeta,
-        argValues: [schemeKey],
+        argValues: [schemeKey, source],
         apiImpl: this,
       ),
     );
@@ -872,7 +879,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreDownloadSchemePackageConstMeta =>
       const TaskConstMeta(
         debugName: "download_scheme_package",
-        argNames: ["schemeKey"],
+        argNames: ["schemeKey", "source"],
       );
 
   @override

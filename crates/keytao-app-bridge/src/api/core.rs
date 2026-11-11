@@ -72,10 +72,10 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     )
 }
 
-pub async fn download_scheme_package(scheme_key: String) -> Result<(), String> {
+pub async fn download_scheme_package(scheme_key: String, source: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    keytao_app_core::packages::download_scheme_package(&state.core, &scheme_key)
+    keytao_app_core::packages::download_scheme_package(&state.core, &scheme_key, &source)
         .await
         .map_err(|error| error.to_string())
 }

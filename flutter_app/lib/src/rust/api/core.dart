@@ -39,10 +39,13 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
-Future<void> downloadSchemePackage({required String schemeKey}) => RustLib
-    .instance
-    .api
-    .crateApiCoreDownloadSchemePackage(schemeKey: schemeKey);
+Future<void> downloadSchemePackage({
+  required String schemeKey,
+  required String source,
+}) => RustLib.instance.api.crateApiCoreDownloadSchemePackage(
+  schemeKey: schemeKey,
+  source: source,
+);
 
 Future<List<SchemeUpdateDto>> checkSchemeUpdates() =>
     RustLib.instance.api.crateApiCoreCheckSchemeUpdates();

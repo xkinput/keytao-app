@@ -49,6 +49,7 @@ class PackageCore extends FakeCore {
   List<InstalledPackageDto> packages = [keytaoPackage, xmjdPackage];
   List<SchemeUpdateDto> updates = [xmjdUpdate];
   final dismissed = <String, String>{};
+  final downloadedSources = <String>[];
   Completer<void>? activationGate;
   Completer<List<SchemeUpdateDto>>? updateGate;
 
@@ -111,8 +112,10 @@ class PackageCore extends FakeCore {
   @override
   Future<void> crateApiCoreDownloadSchemePackage({
     required String schemeKey,
+    required String source,
   }) async {
     calls.add('packageDownload:$schemeKey');
+    downloadedSources.add(source);
     replacePackage(schemeKey, version: '20261104');
   }
 
@@ -204,6 +207,7 @@ void main() {
       expect(await controller.updateSchemePackage('xmjd'), isTrue);
 
       expect(core.calls, ['packageDownload:xmjd']);
+      expect(core.downloadedSources, ['gitee']);
       expect(core.local, same(activeLocal));
       expect(controller.installedPackageFor('keytao')!.active, isTrue);
       expect(controller.installedPackageFor('xmjd')!.version, '20261104');
@@ -222,6 +226,7 @@ void main() {
       );
       controller.dispose();
       controller = create(mobile: true);
+      controller.selectSource('github');
       android.permission = {'granted': false, 'writable': false};
       await controller.refreshSchemeUpdates();
       final activeLocal = core.local;
@@ -229,6 +234,7 @@ void main() {
       expect(await controller.downloadSchemePackage('xmjd'), isTrue);
 
       expect(core.calls, ['packageDownload:xmjd']);
+      expect(core.downloadedSources, ['github']);
       expect(core.local, same(activeLocal));
       expect(controller.installedPackageFor('xmjd')!.hasPackageZip, isTrue);
       expect(controller.installedPackageFor('xmjd')!.active, isFalse);
@@ -283,7 +289,21 @@ void main() {
 
     core.activationGate!.complete();
     await settle();
-    expect(core.calls, ['activate:xmjd', 'deployDefault']);
+    expect(core.calls, ['activate:xmjd', 'release:xmjd']);
+    expect(controller.busy, isTrue);
+    core.schemeRequests['xmjd']!.complete(
+      const SchemeReleaseDto(
+        scheme: 'xmjd',
+        label: 'xmjd',
+        version: '20261104',
+        name: '',
+        downloadUrl: 'offline-xmjd',
+        assetName: 'xmjd6.zip',
+      ),
+    );
+    await settle();
+    expect(core.calls, ['activate:xmjd', 'release:xmjd', 'deployDefault']);
+    expect(controller.releaseVersion, '20261104');
     expect(controller.busy, isTrue);
     expect(await controller.updateSchemePackage('keytao'), isFalse);
 

@@ -59,6 +59,12 @@ where
 {
     use std::io::Read;
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    if core.state().active_scheme.as_deref() == Some(scheme_key) {
+        return Err(CoreError::Other(
+            "Cannot download the active scheme package; update it through install and deploy"
+                .into(),
+        ));
+    }
     let (version, url) = fetch().await?;
     let archive_path = download(url).await?;
     let result = (|| {
@@ -104,6 +110,7 @@ where
 async fn latest_package_release(
     core: &Core,
     scheme_key: &str,
+    source: &str,
 ) -> Result<(String, String), CoreError> {
     if scheme_key != "keytao" {
         let release = crate::scheme::fetch_scheme_release(core, scheme_key.into()).await?;
@@ -114,7 +121,12 @@ async fn latest_package_release(
         .version
         .strip_prefix('v')
         .unwrap_or(&release.version);
-    let url = [release.github.as_ref(), release.gitee.as_ref()]
+    let sources = if source == "github" {
+        [release.github.as_ref(), release.gitee.as_ref()]
+    } else {
+        [release.gitee.as_ref(), release.github.as_ref()]
+    };
+    let url = sources
         .into_iter()
         .flatten()
         .filter(|source| source.version.strip_prefix('v').unwrap_or(&source.version) == version)
@@ -135,11 +147,15 @@ async fn latest_package_release(
 }
 
 /// Downloads into the package store without installing or changing the active scheme.
-pub async fn download_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreError> {
+pub async fn download_scheme_package(
+    core: &Core,
+    scheme_key: &str,
+    source: &str,
+) -> Result<(), CoreError> {
     download_scheme_package_with(
         core,
         scheme_key,
-        || latest_package_release(core, scheme_key),
+        || latest_package_release(core, scheme_key, source),
         |url| crate::download::download_to_temp(core, url),
     )
     .await
@@ -592,6 +608,73 @@ mod tests {
                 "{installed:?} -> {latest:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn latest_package_release_prefers_selected_source_and_falls_back() {
+        for (source, gitee_url, expected) in [
+            ("gitee", Some("gitee-android"), "gitee-android"),
+            ("gitee", None, "github-android"),
+            ("gitee", Some(""), "github-android"),
+            ("github", Some("gitee-android"), "github-android"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = open_core(dir.path());
+            fs::create_dir_all(&core.env().cache_dir).unwrap();
+            let cache = serde_json::json!({
+                "etag": "",
+                "cached_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                "release": {
+                    "version": "v2", "name": "release", "published_at": "", "body": "",
+                    "github": { "version": "v2", "download_urls": {
+                        "android": "github-android"
+                    } },
+                    "gitee": { "version": "2", "download_urls": {
+                        "android": gitee_url, "macos": "gitee-macos"
+                    } }
+                }
+            });
+            fs::write(
+                core.env().cache_dir.join("release_cache.json"),
+                serde_json::to_vec(&cache).unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                latest_package_release(&core, "keytao", source)
+                    .await
+                    .unwrap(),
+                ("v2".into(), expected.into()),
+                "selected source: {source}, gitee Android asset: {gitee_url:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_scheme_package_refuses_active_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+
+        let error = download_scheme_package_with(
+            &core,
+            "keytao",
+            || async { panic!("Active package download must not fetch a release") },
+            |_| async { panic!("Active package download must not download an archive") },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Cannot download the active scheme package; update it through install and deploy"
+        );
+        assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
+        assert_eq!(
+            core.state().installed_packages["keytao"].version.as_deref(),
+            Some("v1")
+        );
     }
 
     #[tokio::test]
