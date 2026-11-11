@@ -31,6 +31,162 @@ pub struct InstalledPackageInfo {
     pub has_package_zip: bool,
 }
 
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct SchemeUpdateInfo {
+    pub scheme_key: String,
+    pub installed_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+}
+
+fn has_scheme_update(installed: &str, latest: &str) -> bool {
+    let installed = installed.strip_prefix('v').unwrap_or(installed);
+    let latest = latest.strip_prefix('v').unwrap_or(latest);
+    !installed.is_empty() && !latest.is_empty() && installed != latest
+}
+
+async fn download_scheme_package_with<Fetch, FetchFuture, Download, DownloadFuture>(
+    core: &Core,
+    scheme_key: &str,
+    fetch: Fetch,
+    download: Download,
+) -> Result<(), CoreError>
+where
+    Fetch: FnOnce() -> FetchFuture,
+    FetchFuture: std::future::Future<Output = Result<(String, String), CoreError>>,
+    Download: FnOnce(String) -> DownloadFuture,
+    DownloadFuture: std::future::Future<Output = Result<String, CoreError>>,
+{
+    use std::io::Read;
+    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    let (version, url) = fetch().await?;
+    let archive_path = download(url).await?;
+    let result = (|| {
+        let bytes = fs::read(&archive_path)?;
+        let paths = archive_paths(&bytes, &checked_store_dir(core)?).map_err(CoreError::Other)?;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        let mut manifest = BTreeMap::new();
+        for relative in paths {
+            if excluded_from_manifest(&relative) {
+                continue;
+            }
+            let mut content = Vec::new();
+            archive
+                .by_name(&relative)
+                .map_err(|error| CoreError::Other(error.to_string()))?
+                .read_to_end(&mut content)?;
+            manifest.insert(relative, format!("{:x}", Sha256::digest(&content)));
+        }
+        stage_install(core, &bytes, manifest, String::new())?;
+        finalize_pending(core, scheme_key, Some(&version), false)?;
+        core.update_state(|state| {
+            state.installed_packages.insert(
+                scheme_key.into(),
+                crate::state::InstalledPackage {
+                    version: Some(version),
+                },
+            );
+        })?;
+        core.emit(crate::CoreEvent::InstallProgress(
+            crate::events::InstallProgress {
+                stage: "done".into(),
+                percent: 100,
+                message: "下载完成！".into(),
+            },
+        ));
+        Ok(())
+    })();
+    let _ = fs::remove_file(archive_path);
+    result
+}
+
+async fn latest_package_release(
+    core: &Core,
+    scheme_key: &str,
+) -> Result<(String, String), CoreError> {
+    if scheme_key != "keytao" {
+        let release = crate::scheme::fetch_scheme_release(core, scheme_key.into()).await?;
+        return Ok((release.version, release.download_url));
+    }
+    let release = crate::scheme::fetch_latest_release(core).await?;
+    let version = release
+        .version
+        .strip_prefix('v')
+        .unwrap_or(&release.version);
+    let url = [release.github.as_ref(), release.gitee.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|source| source.version.strip_prefix('v').unwrap_or(&source.version) == version)
+        .find_map(|source| {
+            let url = match core.env().platform {
+                crate::Platform::Windows => source.download_urls.windows.clone(),
+                crate::Platform::MacOs => source.download_urls.macos.clone(),
+                crate::Platform::Linux => source.download_urls.linux.clone(),
+                crate::Platform::Android => source.download_urls.android.clone(),
+                crate::Platform::Ios => source.download_urls.ios.clone(),
+            };
+            url.filter(|url| !url.is_empty())
+        })
+        .ok_or_else(|| {
+            CoreError::Other("The latest scheme has no package for this platform".into())
+        })?;
+    Ok((release.version, url))
+}
+
+/// Downloads into the package store without installing or changing the active scheme.
+pub async fn download_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreError> {
+    download_scheme_package_with(
+        core,
+        scheme_key,
+        || latest_package_release(core, scheme_key),
+        |url| crate::download::download_to_temp(core, url),
+    )
+    .await
+}
+
+async fn check_scheme_updates_with<Fetch, FetchFuture>(
+    core: &Core,
+    mut fetch: Fetch,
+) -> Vec<SchemeUpdateInfo>
+where
+    Fetch: FnMut(String) -> FetchFuture,
+    FetchFuture: std::future::Future<Output = Result<String, CoreError>>,
+{
+    let mut updates = Vec::new();
+    for (scheme_key, package) in core.state().installed_packages {
+        if crate::scheme::validate_scheme_key(&scheme_key).is_err() {
+            continue;
+        }
+        match fetch(scheme_key.clone()).await {
+            Ok(latest_version) => {
+                let installed_version = package.version.unwrap_or_default();
+                updates.push(SchemeUpdateInfo {
+                    has_update: has_scheme_update(&installed_version, &latest_version),
+                    scheme_key,
+                    installed_version,
+                    latest_version,
+                });
+            }
+            Err(error) => tracing::warn!(%scheme_key, %error, "Scheme update check failed"),
+        }
+    }
+    updates
+}
+
+pub async fn check_scheme_updates(core: &Core) -> Vec<SchemeUpdateInfo> {
+    check_scheme_updates_with(core, |scheme_key| async move {
+        if scheme_key == "keytao" {
+            Ok(crate::scheme::fetch_latest_release(core).await?.version)
+        } else {
+            Ok(crate::scheme::fetch_scheme_release(core, scheme_key)
+                .await?
+                .version)
+        }
+    })
+    .await
+}
+
 pub(crate) struct PendingPackage {
     archive: tempfile::NamedTempFile,
     manifest: BTreeMap<String, String>,
@@ -389,4 +545,155 @@ pub(crate) fn cleanup_manifest(
         }
     }
     Ok(logs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppEnv, CoreEvent, EventSink, Platform};
+    use std::{io::Write, sync::Arc};
+
+    struct NullSink;
+
+    impl EventSink for NullSink {
+        fn emit(&self, _: CoreEvent) {}
+    }
+
+    fn open_core(path: &Path) -> Arc<Core> {
+        Core::new(
+            AppEnv {
+                data_dir: path.into(),
+                cache_dir: path.join("cache"),
+                resource_dir: path.join("resources"),
+                app_version: "test".into(),
+                platform: Platform::Android,
+            },
+            Arc::new(NullSink),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scheme_update_comparison_accepts_tags_dates_equal_and_empty_versions() {
+        for (installed, latest, expected) in [
+            ("v1.0.0", "1.0.0", false),
+            ("1.0.0", "v1.0.0", false),
+            ("v1.0.0", "v1.0.1", true),
+            ("20261104", "20261105", true),
+            ("20261104", "20261104", false),
+            ("", "v1", false),
+            ("v1", "", false),
+            ("v", "v1", false),
+            ("", "", false),
+        ] {
+            assert_eq!(
+                has_scheme_update(installed, latest),
+                expected,
+                "{installed:?} -> {latest:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_scheme_package_preserves_rime_and_active_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let rime = dir.path().join("rime");
+        fs::create_dir_all(&rime).unwrap();
+        fs::write(rime.join("keytao.schema.yaml"), "active schema").unwrap();
+        fs::write(rime.join("version.txt"), "v1").unwrap();
+        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+        crate::scheme::record_installed_scheme(&core, "xmjd", Some("20261104")).unwrap();
+        crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+        assert!(!list_installed_packages(&core).unwrap()[1].has_package_zip);
+
+        let archive = dir.path().join("local-source.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        zip.start_file(
+            "xmjd6.schema.yaml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"schema: xmjd6\n").unwrap();
+        zip.finish().unwrap();
+        download_scheme_package_with(
+            &core,
+            "xmjd",
+            || std::future::ready(Ok(("20261105".into(), "local-source".into()))),
+            |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(rime.join("keytao.schema.yaml")).unwrap(),
+            "active schema"
+        );
+        assert_eq!(fs::read_to_string(rime.join("version.txt")).unwrap(), "v1");
+        assert_eq!(fs::read_dir(&rime).unwrap().count(), 2);
+        assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
+        let packages = list_installed_packages(&core).unwrap();
+        let updated = packages
+            .iter()
+            .find(|package| package.scheme_key == "xmjd")
+            .unwrap();
+        assert_eq!(updated.version.as_deref(), Some("20261105"));
+        assert!(updated.has_package_zip);
+        assert!(!updated.active);
+        let reopened = open_core(dir.path());
+        assert_eq!(reopened.state().active_scheme.as_deref(), Some("keytao"));
+        assert_eq!(
+            reopened.state().installed_packages["xmjd"]
+                .version
+                .as_deref(),
+            Some("20261105")
+        );
+        let meta: PackageMeta =
+            serde_json::from_slice(&fs::read(store_dir(&core).join("xmjd.json")).unwrap()).unwrap();
+        assert_eq!(meta.version.as_deref(), Some("20261105"));
+        assert_eq!(meta.manifest.len(), 1);
+        assert!(!store_dir(&core).join("active-manifest.json").exists());
+    }
+
+    #[tokio::test]
+    async fn scheme_updates_omit_failed_fetch_and_check_only_installed_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        for (scheme_key, version) in [
+            ("keytao", "v1.0"),
+            ("txjx", "20261104"),
+            ("xmjd", "20261104"),
+        ] {
+            crate::scheme::record_installed_scheme(&core, scheme_key, Some(version)).unwrap();
+        }
+        let mut fetched = Vec::new();
+        let updates = check_scheme_updates_with(&core, |scheme_key| {
+            fetched.push(scheme_key.clone());
+            std::future::ready(match scheme_key.as_str() {
+                "keytao" => Ok("1.0".into()),
+                "txjx" => Err(CoreError::Other("Local source failed".into())),
+                "xmjd" => Ok("20261105".into()),
+                other => panic!("Unexpected source: {other}"),
+            })
+        })
+        .await;
+        assert_eq!(
+            updates,
+            vec![
+                SchemeUpdateInfo {
+                    scheme_key: "keytao".into(),
+                    installed_version: "v1.0".into(),
+                    latest_version: "1.0".into(),
+                    has_update: false
+                },
+                SchemeUpdateInfo {
+                    scheme_key: "xmjd".into(),
+                    installed_version: "20261104".into(),
+                    latest_version: "20261105".into(),
+                    has_update: true
+                },
+            ]
+        );
+        assert_eq!(fetched, ["keytao", "txjx", "xmjd"]);
+    }
 }

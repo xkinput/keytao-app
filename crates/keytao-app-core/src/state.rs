@@ -74,6 +74,35 @@ mod tests {
         assert!(!should_complete_onboarding(false, true));
         assert!(!should_complete_onboarding(false, false));
     }
+
+    #[test]
+    fn dismissed_scheme_versions_survive_save_and_legacy_state_defaults_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"auth_token":null,"user":null,"onboarding_completed":true,"legacy_imported":true,"dismissed_scheme_updates":{"xmjd":"20261105"}}"#,
+        ).unwrap();
+        let state = AppState::load(dir.path()).unwrap();
+        state.save(dir.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            saved["dismissed_scheme_updates"],
+            serde_json::json!({"xmjd":"20261105"})
+        );
+        fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"auth_token":null,"user":null,"onboarding_completed":true,"legacy_imported":true}"#,
+        )
+        .unwrap();
+        AppState::load(dir.path())
+            .unwrap()
+            .save(dir.path())
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["dismissed_scheme_updates"], serde_json::json!({}));
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +123,7 @@ pub struct AppState {
     pub legacy_imported: bool,
     pub installed_packages: BTreeMap<String, InstalledPackage>,
     pub active_scheme: Option<String>,
+    pub dismissed_scheme_updates: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +136,8 @@ struct StoredAppState {
     legacy_imported: bool,
     installed_packages: Option<BTreeMap<String, InstalledPackage>>,
     active_scheme: Option<String>,
+    #[serde(default)]
+    dismissed_scheme_updates: BTreeMap<String, String>,
     installed_scheme: Option<String>,
     installed_scheme_version: Option<String>,
 }
@@ -135,6 +167,7 @@ impl From<StoredAppState> for AppState {
             legacy_imported: state.legacy_imported,
             installed_packages,
             active_scheme,
+            dismissed_scheme_updates: state.dismissed_scheme_updates,
         }
     }
 }

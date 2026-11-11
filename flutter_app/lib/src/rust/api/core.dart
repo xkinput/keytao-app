@@ -39,6 +39,25 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<void> downloadSchemePackage({required String schemeKey}) => RustLib
+    .instance
+    .api
+    .crateApiCoreDownloadSchemePackage(schemeKey: schemeKey);
+
+Future<List<SchemeUpdateDto>> checkSchemeUpdates() =>
+    RustLib.instance.api.crateApiCoreCheckSchemeUpdates();
+
+Future<Map<String, String>> getDismissedSchemeUpdates() =>
+    RustLib.instance.api.crateApiCoreGetDismissedSchemeUpdates();
+
+Future<void> dismissSchemeUpdate({
+  required String schemeKey,
+  required String version,
+}) => RustLib.instance.api.crateApiCoreDismissSchemeUpdate(
+  schemeKey: schemeKey,
+  version: version,
+);
+
 /// Android extraction must return the platform result as JSON and must not
 /// re-enter install/deploy bridge calls while the install lock is held.
 /// Other platforms ignore the callback. Activation does not deploy the IME.

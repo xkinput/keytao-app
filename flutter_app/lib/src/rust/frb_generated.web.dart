@@ -39,6 +39,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Object dco_decode_DartOpaque(dynamic raw);
 
   @protected
+  Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
+
+  @protected
   RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
     dynamic raw,
   );
@@ -166,9 +169,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
+
+  @protected
   List<RuntimeLogFileInfoDto> dco_decode_list_runtime_log_file_info_dto(
     dynamic raw,
   );
+
+  @protected
+  List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
 
   @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
@@ -219,6 +228,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformReleaseDto dco_decode_platform_release_dto(dynamic raw);
 
   @protected
+  (String, String) dco_decode_record_string_string(dynamic raw);
+
+  @protected
   ReleaseInfoDto dco_decode_release_info_dto(dynamic raw);
 
   @protected
@@ -232,6 +244,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw);
+
+  @protected
+  SchemeUpdateDto dco_decode_scheme_update_dto(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -271,6 +286,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Object sse_decode_DartOpaque(SseDeserializer deserializer);
+
+  @protected
+  Map<String, String> sse_decode_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<BridgeEvent> sse_decode_StreamSink_bridge_event_Sse(
@@ -426,7 +446,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<(String, String)> sse_decode_list_record_string_string(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<RuntimeLogFileInfoDto> sse_decode_list_runtime_log_file_info_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<SchemeUpdateDto> sse_decode_list_scheme_update_dto(
     SseDeserializer deserializer,
   );
 
@@ -491,6 +521,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  (String, String) sse_decode_record_string_string(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ReleaseInfoDto sse_decode_release_info_dto(SseDeserializer deserializer);
 
   @protected
@@ -510,6 +545,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer);
+
+  @protected
+  SchemeUpdateDto sse_decode_scheme_update_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -570,6 +608,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_DartOpaque(Object self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_Map_String_String_None(
+    Map<String, String> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_StreamSink_bridge_event_Sse(
@@ -773,8 +817,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_record_string_string(
+    List<(String, String)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_runtime_log_file_info_dto(
     List<RuntimeLogFileInfoDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_scheme_update_dto(
+    List<SchemeUpdateDto> self,
     SseSerializer serializer,
   );
 
@@ -854,6 +910,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_record_string_string(
+    (String, String) self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_release_info_dto(
     ReleaseInfoDto self,
     SseSerializer serializer,
@@ -880,6 +942,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_scheme_release_dto(
     SchemeReleaseDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_scheme_update_dto(
+    SchemeUpdateDto self,
     SseSerializer serializer,
   );
 

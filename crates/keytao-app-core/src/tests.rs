@@ -33,6 +33,7 @@ fn state_round_trip() {
         legacy_imported: true,
         installed_packages: Default::default(),
         active_scheme: None,
+        dismissed_scheme_updates: Default::default(),
     };
     core.update_state(|state| *state = expected.clone())
         .unwrap();

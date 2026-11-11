@@ -130,6 +130,7 @@ class AppController extends ChangeNotifier {
   bool _startupStarted = false;
   bool _logsWhenIdle = false;
   int _releaseRequest = 0;
+  int _schemeUpdatesRequest = 0;
   AppPage activePage = AppPage.input;
   OperationKind? operation;
   bool checkingStorage = false;
@@ -139,6 +140,11 @@ class AppController extends ChangeNotifier {
   bool isOpeningCustomDirectory = false;
   bool onboardingCompleted = false;
   AppUpdateDto? appUpdate;
+  List<InstalledPackageDto> installedPackages = [];
+  List<SchemeUpdateDto> schemeUpdates = [];
+  Map<String, String> dismissedSchemeUpdates = {};
+  bool schemeUpdatesLoading = false;
+  String? packageError;
   String? releaseError;
   String? installError;
   String? addonError;
@@ -197,6 +203,30 @@ class AppController extends ChangeNotifier {
 
   bool get canInstall =>
       !busy && !releaseLoading && downloadUrl?.isNotEmpty == true;
+  InstalledPackageDto? installedPackageFor(String key) {
+    for (final package in installedPackages) {
+      if (package.schemeKey == key) return package;
+    }
+    return null;
+  }
+
+  SchemeUpdateDto? schemeUpdateFor(String key) {
+    for (final update in schemeUpdates) {
+      if (update.schemeKey == key && update.hasUpdate) return update;
+    }
+    return null;
+  }
+
+  bool get hasSchemeUpdates => schemeUpdates.any((update) => update.hasUpdate);
+  List<SchemeUpdateDto> get visibleSchemeUpdates => [
+    for (final update in schemeUpdates)
+      if (update.hasUpdate &&
+          _normalizedVersion(dismissedSchemeUpdates[update.schemeKey] ?? '') !=
+              _normalizedVersion(update.latestVersion))
+        update,
+  ];
+  static String _normalizedVersion(String version) =>
+      version.startsWith('v') ? version.substring(1) : version;
   bool get isInstalling => operation == OperationKind.install;
   bool get canCancelDownload =>
       isInstalling && installProgress?.stage == 'downloading';
@@ -219,7 +249,10 @@ class AppController extends ChangeNotifier {
       ? AppStrings.installing
       : isDeploying
       ? AppStrings.deploying
-      : local?.installed == true
+      : installedPackageFor(scheme) != null ||
+            (local?.installed == true &&
+                installedSchemeKey(local!.schemas, local!.installedScheme) ==
+                    scheme)
       ? AppStrings.updateScheme
       : AppStrings.installScheme;
   String get deployTooltip => local?.installed == true
@@ -368,6 +401,7 @@ class AppController extends ChangeNotifier {
   bool _isInlineError(String? message) => [
     AppStrings.downloadCancelled,
     releaseError,
+    packageError,
     installError,
     addonError,
     wanxiangError,
@@ -390,7 +424,9 @@ class AppController extends ChangeNotifier {
   bool get setupReady {
     if (local?.installed != true || local?.deployed != true) return false;
     if (isAndroid) {
-      return storageReady && ime?['enabled'] == true && ime?['selected'] == true;
+      return storageReady &&
+          ime?['enabled'] == true &&
+          ime?['selected'] == true;
     }
     return isIos || !hasOnboarding || macosIme?.installed == true;
   }
@@ -400,14 +436,17 @@ class AppController extends ChangeNotifier {
   String? get releaseVersion =>
       scheme == 'keytao' ? selectedRelease?.version : schemeRelease?.version;
   String? get downloadUrl => scheme == 'keytao'
-      ? switch (info.platform) {
-          BridgePlatform.android => selectedRelease?.downloadUrls.android,
-          BridgePlatform.ios => selectedRelease?.downloadUrls.ios,
-          BridgePlatform.windows => selectedRelease?.downloadUrls.windows,
-          BridgePlatform.linux => selectedRelease?.downloadUrls.linux,
-          BridgePlatform.macOs => selectedRelease?.downloadUrls.macos,
-        }
+      ? _platformDownloadUrl(selectedRelease)
       : schemeRelease?.downloadUrl;
+
+  String? _platformDownloadUrl(PlatformReleaseDto? release) =>
+      switch (info.platform) {
+        BridgePlatform.android => release?.downloadUrls.android,
+        BridgePlatform.ios => release?.downloadUrls.ios,
+        BridgePlatform.windows => release?.downloadUrls.windows,
+        BridgePlatform.linux => release?.downloadUrls.linux,
+        BridgePlatform.macOs => release?.downloadUrls.macos,
+      };
 
   void _changed() {
     if (!_disposed) notifyListeners();
@@ -550,6 +589,7 @@ class AppController extends ChangeNotifier {
         unawaited(refreshLogs());
       }
     }
+    if (page == AppPage.scheme) unawaited(refreshSchemeUpdates());
     _changed();
   }
 
@@ -656,6 +696,7 @@ class AppController extends ChangeNotifier {
     addon = null;
     await Future.wait([
       read(_readLocal),
+      read(_readInstalledPackages),
       read(() async {
         try {
           wanxiang = await core.wanxiangStatus();
@@ -725,6 +766,7 @@ class AppController extends ChangeNotifier {
       _startupStarted = true;
       unawaited(_loadAccount());
       unawaited(_checkAppUpdate());
+      unawaited(refreshSchemeUpdates());
       unawaited(refreshRelease());
     }
     return result;
@@ -766,6 +808,60 @@ class AppController extends ChangeNotifier {
     }
     _changed();
   }
+
+  Future<void> _readInstalledPackages() async {
+    final request = _schemeUpdatesRequest;
+    final packages = await core.listInstalledPackages();
+    if (_disposed || request != _schemeUpdatesRequest) return;
+    installedPackages = packages;
+    schemeUpdates = [
+      for (final update in schemeUpdates)
+        if (packages.any(
+          (package) =>
+              package.schemeKey == update.schemeKey &&
+              (package.version ?? '') == update.installedVersion,
+        ))
+          update,
+    ];
+  }
+
+  Future<bool> refreshSchemeUpdates() async {
+    if (_disposed || schemeUpdatesLoading) return false;
+    final request = ++_schemeUpdatesRequest;
+    schemeUpdatesLoading = true;
+    _changed();
+    try {
+      await _readInstalledPackages();
+      final dismissed = await core.getDismissedSchemeUpdates();
+      final updates = await core.checkSchemeUpdates();
+      if (_disposed || request != _schemeUpdatesRequest) return false;
+      dismissedSchemeUpdates = dismissed;
+      schemeUpdates = updates;
+      return true;
+    } catch (_) {
+      // Update checks are optional and must not interrupt local package actions.
+      return false;
+    } finally {
+      if (request == _schemeUpdatesRequest) {
+        schemeUpdatesLoading = false;
+        _changed();
+      }
+    }
+  }
+
+  void _invalidateSchemeUpdates() {
+    _schemeUpdatesRequest++;
+    schemeUpdatesLoading = false;
+  }
+
+  Future<bool> dismissSchemeUpdate(SchemeUpdateDto update) => run(() async {
+    await core.dismissSchemeUpdate(
+      schemeKey: update.schemeKey,
+      version: update.latestVersion,
+    );
+    _invalidateSchemeUpdates();
+    dismissedSchemeUpdates[update.schemeKey] = update.latestVersion;
+  });
 
   void onResume() {
     if (busy) {
@@ -887,69 +983,205 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> installAndDeploy() async {
-    if (!await install()) return false;
-    // Deploying clears the verification list, so keep failures on screen.
-    if (verification.any((entry) => !entry.ok)) return false;
-    return deploy();
+    if (!canInstall) return false;
+    final result = await run(() async {
+      await _install();
+      // Deploying clears the verification list, so keep failures on screen.
+      if (verification.every((entry) => entry.ok)) await _deploy();
+    });
+    return result && verification.every((entry) => entry.ok);
   }
 
   Future<bool> install() {
     if (!canInstall) return Future.value(false);
+    return run(_install);
+  }
+
+  Future<void> _install() async {
+    _invalidateSchemeUpdates();
     final url = downloadUrl!;
     final installing = scheme;
     final installingVersion = releaseVersion;
-    return run(() async {
-      _startOperation(OperationKind.install, AppStrings.installing);
-      installError = null;
-      deploySteps.clear();
-      try {
-        if (isAndroid) await _requireStorage(redirect: true);
-        final InstallResultDto result;
-        if (isAndroid) {
-          final zipPath = await core.prepareAndroidInstall(url: url);
-          try {
-            final extracted = await android.smartExtractZipToPrivate(zipPath);
-            result = await core.finishAndroidInstall(
-              resultJson: jsonEncode(extracted),
-              schemeKey: installing,
-              version: installingVersion,
-            );
-          } finally {
-            await core.removeDownloadedArchive(path: zipPath);
-          }
-        } else {
-          result = await core.installSchemeFromUrl(
-            url: url,
+    _startOperation(OperationKind.install, AppStrings.installing);
+    installError = null;
+    deploySteps.clear();
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final InstallResultDto result;
+      if (isAndroid) {
+        final zipPath = await core.prepareAndroidInstall(url: url);
+        try {
+          final extracted = await android.smartExtractZipToPrivate(zipPath);
+          result = await core.finishAndroidInstall(
+            resultJson: jsonEncode(extracted),
             schemeKey: installing,
             version: installingVersion,
           );
+        } finally {
+          await core.removeDownloadedArchive(path: zipPath);
         }
-        _recordInstallResult(result);
-        verification = result.verify;
-        await core.recordInstalledScheme(
-          scheme: installing,
+      } else {
+        result = await core.installSchemeFromUrl(
+          url: url,
+          schemeKey: installing,
           version: installingVersion,
         );
-        await _readLocal();
-        progress = AppStrings.installDone;
-        final broken = [
-          for (final line in result.logs.expand((log) => log.split('\n')))
-            if (line.startsWith('[BROKEN] '))
-              line.substring('[BROKEN] '.length),
-        ];
-        if (broken.isNotEmpty) installError = broken.join('\n');
-      } catch (failure) {
-        final message = errorText(failure);
-        if (message == AppStrings.downloadCancelled) {
-          progress = message;
-        } else {
-          progress = AppStrings.installFailed;
-          installError = message;
-          addOperationLogs(['[ERROR] $installError']);
+      }
+      _recordInstallResult(result);
+      verification = result.verify;
+      await core.recordInstalledScheme(
+        scheme: installing,
+        version: installingVersion,
+      );
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      await _readLocal();
+      progress = AppStrings.installDone;
+      final broken = [
+        for (final line in result.logs.expand((log) => log.split('\n')))
+          if (line.startsWith('[BROKEN] ')) line.substring('[BROKEN] '.length),
+      ];
+      if (broken.isNotEmpty) installError = broken.join('\n');
+    } catch (failure) {
+      final message = errorText(failure);
+      if (message == AppStrings.downloadCancelled) {
+        progress = message;
+      } else {
+        progress = AppStrings.installFailed;
+        installError = message;
+        addOperationLogs(['[ERROR] $installError']);
+      }
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  }
+
+  Future<bool> installSchemePackage(String key) => _installSchemePackage(
+    key,
+    latest: installedPackageFor(key)?.active == true,
+  );
+
+  Future<bool> _installSchemePackage(String key, {required bool latest}) {
+    if (!schemeAssets.containsKey(key)) return Future.value(false);
+    return run(() async {
+      packageError = null;
+      _manuallySelectedScheme = true;
+      scheme = key;
+      if (!await refreshRelease()) {
+        throw StateError(releaseError ?? AppStrings.installFailed);
+      }
+      if (latest && key == 'keytao') {
+        final version = _normalizedVersion(latestRelease!.version);
+        final matching = sourceVersions.entries.where(
+          (entry) =>
+              _normalizedVersion(entry.value) == version &&
+              _platformDownloadUrl(
+                    entry.key == 'github'
+                        ? latestRelease!.github
+                        : latestRelease!.gitee,
+                  )?.isNotEmpty ==
+                  true,
+        );
+        if (matching.isEmpty) throw StateError(AppStrings.installFailed);
+        if (!matching.any((entry) => entry.key == source)) {
+          source = matching.first.key;
         }
+      }
+      if (downloadUrl?.isNotEmpty != true) {
+        throw StateError(AppStrings.installFailed);
+      }
+      await _install();
+      if (verification.every((entry) => entry.ok)) await _deploy();
+    }).then((result) => result && verification.every((entry) => entry.ok));
+  }
+
+  Future<bool> updateSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null) return Future.value(false);
+    return package.active
+        ? _installSchemePackage(key, latest: true)
+        : downloadSchemePackage(key);
+  }
+
+  Future<bool> downloadSchemePackage(String key) => run(() async {
+    packageError = null;
+    _invalidateSchemeUpdates();
+    _startOperation(OperationKind.install, AppStrings.installing);
+    try {
+      await core.downloadSchemePackage(schemeKey: key);
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      progress = AppStrings.installDone;
+    } catch (failure) {
+      final message = errorText(failure);
+      if (message == AppStrings.downloadCancelled) {
+        progress = message;
+      } else {
+        packageError = message;
+        progress = AppStrings.installFailed;
+      }
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> activateSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null || package.active || !package.hasPackageZip) {
+      return Future.value(false);
+    }
+    return run(() async {
+      packageError = null;
+      _invalidateSchemeUpdates();
+      _startOperation(OperationKind.install, AppStrings.installing);
+      try {
+        if (isAndroid) await _requireStorage(redirect: true);
+        final result = await core.activateScheme(
+          schemeKey: key,
+          androidExtract: (archive) async {
+            try {
+              return jsonEncode(
+                await android.smartExtractZipToPrivate(archive),
+              );
+            } catch (failure) {
+              return jsonEncode({'error': errorText(failure)});
+            }
+          },
+        );
+        _recordInstallResult(result);
+        verification = result.verify;
+        _manuallySelectedScheme = true;
+        scheme = key;
+        latestRelease = null;
+        schemeRelease = null;
+        _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+        await _readLocal();
+      } catch (failure) {
+        packageError = errorText(failure);
         rethrow;
       } finally {
         operation = null;
+      }
+      if (verification.every((entry) => entry.ok)) await _deploy();
+    }).then((result) => result && verification.every((entry) => entry.ok));
+  }
+
+  Future<bool> removeSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null || package.active) return Future.value(false);
+    return run(() async {
+      packageError = null;
+      _invalidateSchemeUpdates();
+      try {
+        await core.removeSchemePackage(schemeKey: key);
+        _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+      } catch (failure) {
+        packageError = errorText(failure);
+        rethrow;
       }
     });
   }
@@ -963,7 +1195,10 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  Future<bool> deploy({int? imeActionId}) => run(() async {
+  Future<bool> deploy({int? imeActionId}) =>
+      run(() => _deploy(imeActionId: imeActionId));
+
+  Future<void> _deploy({int? imeActionId}) async {
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
@@ -1005,7 +1240,7 @@ class AppController extends ChangeNotifier {
     } finally {
       operation = null;
     }
-  });
+  }
 
   String? get accountName =>
       accountUser?.nickname ?? accountUser?.name ?? accountUser?.email;

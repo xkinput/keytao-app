@@ -72,6 +72,39 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     )
 }
 
+pub async fn download_scheme_package(scheme_key: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::download_scheme_package(&state.core, &scheme_key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn check_scheme_updates() -> Result<Vec<SchemeUpdateDto>, String> {
+    runtime::dto(keytao_app_core::packages::check_scheme_updates(&runtime::state()?.core).await)
+}
+
+pub fn get_dismissed_scheme_updates() -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(runtime::state()?
+        .core
+        .state()
+        .dismissed_scheme_updates
+        .into_iter()
+        .collect())
+}
+
+pub fn dismiss_scheme_update(scheme_key: String, version: String) -> Result<(), String> {
+    let scheme_key = keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
+    runtime::state()?
+        .core
+        .update_state(|state| {
+            state
+                .dismissed_scheme_updates
+                .insert(scheme_key.into(), version);
+        })
+        .map_err(|error| error.to_string())
+}
+
 /// Android extraction must return the platform result as JSON and must not
 /// re-enter install/deploy bridge calls while the install lock is held.
 /// Other platforms ignore the callback. Activation does not deploy the IME.

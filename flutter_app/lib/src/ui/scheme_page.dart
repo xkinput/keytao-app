@@ -12,6 +12,11 @@ class SchemePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
+    final xmjdScheme = c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd';
+    final schemeKeys = <String>{
+      for (final key in schemes.keys) key == 'xmjd' ? xmjdScheme : key,
+      for (final package in c.installedPackages) package.schemeKey,
+    };
     return AppPageBody(
       controller: c,
       page: AppPage.scheme,
@@ -19,9 +24,32 @@ class SchemePage extends StatelessWidget {
         Section(
           title: AppStrings.schemeTitle,
           icon: FLucideIcons.download,
+          trailing: FTooltip(
+            tipBuilder: (_, _) => const Text(AppStrings.checkUpdate),
+            child: FButton.icon(
+              variant: FButtonVariant.ghost,
+              onPress: c.busy || c.schemeUpdatesLoading
+                  ? null
+                  : c.refreshSchemeUpdates,
+              child: const Icon(
+                FLucideIcons.refreshCw,
+                size: 16,
+                semanticLabel: AppStrings.checkUpdate,
+              ),
+            ),
+          ),
           children: [
-            SchemeSelection(controller: c),
-            VersionPicker(controller: c),
+            ChoiceSetting<String>(
+              label: schemes['xmjd']!,
+              value: xmjdScheme,
+              options: const {'xmjd': '顶功', 'xmjd-feiding': '非顶'},
+              onChanged: c.busy ? null : c.selectScheme,
+            ),
+            for (final key in schemeKeys)
+              SchemePackageRow(controller: c, schemeKey: key),
+            if (c.schemeUpdatesLoading) const FProgress(),
+            if (c.packageError case final error?) ErrorMessage(error),
+            VersionPicker(controller: c, showScheme: true),
             ValueRow(AppStrings.directory, c.defaultDir),
             if (c.localStatusLine case final status?)
               StatusMessage(
@@ -39,12 +67,6 @@ class SchemePage extends StatelessWidget {
               ),
             ActionRow(
               children: [
-                ActionButton(
-                  c.installButtonLabel,
-                  primary: true,
-                  icon: FLucideIcons.download,
-                  onPress: c.canInstall ? c.installAndDeploy : null,
-                ),
                 if (c.canCancelDownload)
                   ActionButton(AppStrings.cancel, onPress: c.cancelDownload),
                 ActionButton(
@@ -89,6 +111,106 @@ class SchemePage extends StatelessWidget {
         ),
         AddonCard(controller: c),
         const FTextField(hint: AppStrings.testInput, minLines: 3, maxLines: 5),
+      ],
+    );
+  }
+}
+
+class SchemePackageRow extends StatelessWidget {
+  const SchemePackageRow({
+    super.key,
+    required this.controller,
+    required this.schemeKey,
+  });
+  final AppController controller;
+  final String schemeKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final package = c.installedPackageFor(schemeKey);
+    final update = c.schemeUpdateFor(schemeKey);
+    final active = package?.active == true;
+    final activeLegacy = active && !package!.hasPackageZip && update == null;
+    return Column(
+      key: ValueKey('scheme-package-$schemeKey'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Semantics(
+              selected: c.scheme == schemeKey,
+              child: FButton(
+                variant: c.scheme == schemeKey
+                    ? FButtonVariant.outline
+                    : FButtonVariant.ghost,
+                onPress: c.busy ? null : () => c.selectScheme(schemeKey),
+                child: Text(schemeDisplayName(schemeKey)),
+              ),
+            ),
+            if (active) FBadge(child: const Text('使用中')),
+            if (package != null)
+              Text(
+                package.version?.trim().isNotEmpty == true
+                    ? package.version!
+                    : '—',
+                style: context.theme.typography.body.sm.copyWith(
+                  color: context.theme.colors.mutedForeground,
+                ),
+              ),
+            if (update != null)
+              FBadge(child: Text('→ ${update.latestVersion}')),
+          ],
+        ),
+        if (package == null || !active || update != null || activeLegacy) ...[
+          const SizedBox(height: 10),
+          ActionRow(
+            children: [
+              if (update != null)
+                ActionButton(
+                  '更新',
+                  primary: true,
+                  icon: FLucideIcons.arrowUpCircle,
+                  onPress: c.busy
+                      ? null
+                      : () => c.updateSchemePackage(schemeKey),
+                ),
+              if (package == null || activeLegacy)
+                ActionButton(
+                  activeLegacy ? '重新下载' : '下载',
+                  primary: true,
+                  icon: FLucideIcons.download,
+                  onPress: c.busy
+                      ? null
+                      : () => c.installSchemePackage(schemeKey),
+                )
+              else if (!active) ...[
+                ActionButton(
+                  package.hasPackageZip ? '启用' : '重新下载',
+                  primary: update == null,
+                  icon: package.hasPackageZip
+                      ? FLucideIcons.play
+                      : FLucideIcons.download,
+                  onPress: c.busy
+                      ? null
+                      : () => package.hasPackageZip
+                            ? c.activateSchemePackage(schemeKey)
+                            : c.downloadSchemePackage(schemeKey),
+                ),
+                ActionButton(
+                  '删除',
+                  icon: FLucideIcons.trash2,
+                  onPress: c.busy
+                      ? null
+                      : () => c.removeSchemePackage(schemeKey),
+                ),
+              ],
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -172,8 +294,13 @@ class SchemeSelection extends StatelessWidget {
 }
 
 class VersionPicker extends StatelessWidget {
-  const VersionPicker({super.key, required this.controller});
+  const VersionPicker({
+    super.key,
+    required this.controller,
+    this.showScheme = false,
+  });
   final AppController controller;
+  final bool showScheme;
   @override
   Widget build(BuildContext context) {
     final c = controller;
@@ -194,7 +321,7 @@ class VersionPicker extends StatelessWidget {
           const SizedBox(height: 12),
         ],
         SettingRow(
-          '最新版本',
+          showScheme ? '${schemeDisplayName(c.scheme)} · 最新版本' : '最新版本',
           child: ActionRow(
             children: [
               if (c.scheme == 'keytao' &&

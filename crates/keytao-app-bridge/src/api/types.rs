@@ -40,6 +40,14 @@ pub struct InstalledPackageDto {
     pub has_package_zip: bool,
 }
 
+#[derive(serde::Deserialize)]
+pub struct SchemeUpdateDto {
+    pub scheme_key: String,
+    pub installed_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+}
+
 pub struct LocalSchemasDto {
     pub has_default_custom: bool,
     pub schemas: Vec<String>,

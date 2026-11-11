@@ -465,6 +465,8 @@ class AppPageBody extends StatelessWidget {
           children: [
             if (controller.appUpdate?.hasUpdate == true)
               AppUpdateBanner(controller: controller),
+            for (final update in controller.visibleSchemeUpdates)
+              SchemeUpdateBanner(controller: controller, update: update),
             if (controller.info.platform != BridgePlatform.macOs &&
                 controller.unhandledError != null)
               ErrorMessage(controller.unhandledError),
@@ -502,6 +504,70 @@ class AppUpdateBanner extends StatelessWidget {
       ],
     );
   }
+}
+
+class SchemeUpdateBanner extends StatelessWidget {
+  const SchemeUpdateBanner({
+    super.key,
+    required this.controller,
+    required this.update,
+  });
+  final AppController controller;
+  final SchemeUpdateDto update;
+
+  @override
+  Widget build(BuildContext context) => FTileGroup(
+    children: [
+      FTile.raw(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(FLucideIcons.arrowUpCircle, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    schemeDisplayName(update.schemeKey),
+                    style: context.theme.typography.body.sm.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                FTooltip(
+                  tipBuilder: (_, _) => const Text(AppStrings.close),
+                  child: FButton.icon(
+                    variant: FButtonVariant.ghost,
+                    onPress: controller.busy
+                        ? null
+                        : () => controller.dismissSchemeUpdate(update),
+                    child: const Icon(
+                      FLucideIcons.x,
+                      size: 16,
+                      semanticLabel: AppStrings.close,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ActionRow(
+              children: [
+                FBadge(child: Text(update.latestVersion)),
+                ActionButton(
+                  '更新',
+                  primary: true,
+                  onPress: controller.busy
+                      ? null
+                      : () => controller.updateSchemePackage(update.schemeKey),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
 }
 
 class AppBrand extends StatelessWidget {

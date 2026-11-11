@@ -979,6 +979,37 @@ class SchemeReleaseDto {
           assetName == other.assetName;
 }
 
+class SchemeUpdateDto {
+  final String schemeKey;
+  final String installedVersion;
+  final String latestVersion;
+  final bool hasUpdate;
+
+  const SchemeUpdateDto({
+    required this.schemeKey,
+    required this.installedVersion,
+    required this.latestVersion,
+    required this.hasUpdate,
+  });
+
+  @override
+  int get hashCode =>
+      schemeKey.hashCode ^
+      installedVersion.hashCode ^
+      latestVersion.hashCode ^
+      hasUpdate.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SchemeUpdateDto &&
+          runtimeType == other.runtimeType &&
+          schemeKey == other.schemeKey &&
+          installedVersion == other.installedVersion &&
+          latestVersion == other.latestVersion &&
+          hasUpdate == other.hasUpdate;
+}
+
 enum UiColorSchemeDto { auto, light, dark }
 
 class UserDictionarySyncDto {

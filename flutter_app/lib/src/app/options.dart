@@ -19,6 +19,11 @@ const xmjdVariantSchemes = {
   'xmjd': 'xmjd6.zip',
   'xmjd-feiding': 'feiding-xmjd6.zip',
 };
+String schemeDisplayName(String key) => switch (key) {
+  'xmjd' => '星猫键道 · 顶功',
+  'xmjd-feiding' => '星猫键道 · 非顶',
+  _ => schemes[key] ?? key,
+};
 const logoAsset = 'assets/logo.png';
 const schemeAssets = {
   'keytao': 'keytao-linux',

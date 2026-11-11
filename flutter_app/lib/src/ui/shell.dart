@@ -20,6 +20,34 @@ extension PageIcon on AppPage {
   };
 }
 
+Widget _navigationIcon(AppPage page, AppController controller) =>
+    page == AppPage.scheme && controller.hasSchemeUpdates
+    ? Semantics(
+        label: AppStrings.checkUpdate,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Icon(page.icon),
+            Positioned(
+              top: -2,
+              right: -3,
+              child: Builder(
+                builder: (context) => Container(
+                  key: const ValueKey('scheme-update-indicator'),
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: context.theme.colors.primary,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      )
+    : Icon(page.icon);
+
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.controller});
   final AppController controller;
@@ -77,7 +105,7 @@ class _AppShellState extends State<AppShell> {
                       for (final page in AppPage.values)
                         FSidebarItem(
                           key: ValueKey('nav-${page.id}'),
-                          icon: Icon(page.icon),
+                          icon: _navigationIcon(page, c),
                           label: Text(page.title),
                           selected: c.activePage == page,
                           onPress: () => select(page.index),
@@ -111,7 +139,7 @@ class _AppShellState extends State<AppShell> {
                         for (final page in AppPage.values)
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
-                            icon: Icon(page.icon),
+                            icon: _navigationIcon(page, c),
                             label: Text(page.title),
                           ),
                       ],
