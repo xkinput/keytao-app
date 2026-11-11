@@ -203,6 +203,8 @@ class AppController extends ChangeNotifier {
   AccountUserDto? accountUser;
   bool loggingIn = false;
   bool syncingDictionary = false;
+  UserDictionarySyncDto? pendingDictionarySync;
+  Object? _pendingDictionarySyncAccountId;
   Timer? _dictionarySyncDebounce;
   String? accountError;
   String? accountMessage;
@@ -1346,6 +1348,10 @@ class AppController extends ChangeNotifier {
   Future<void> reloadAccountSession() async {
     try {
       accountUser = await core.accountSession();
+      if (_pendingDictionarySyncAccountId != accountUser?.id) {
+        pendingDictionarySync = null;
+        _pendingDictionarySyncAccountId = null;
+      }
       _changed();
     } catch (failure) {
       debugPrint('Account session failed: ${errorText(failure)}');
@@ -1360,6 +1366,8 @@ class AppController extends ChangeNotifier {
     _changed();
     try {
       accountUser = await core.accountLogin(name: name, password: password);
+      pendingDictionarySync = null;
+      _pendingDictionarySyncAccountId = null;
       return true;
     } catch (failure) {
       accountError = errorText(failure);
@@ -1377,6 +1385,8 @@ class AppController extends ChangeNotifier {
     try {
       await core.accountLogout();
       accountUser = null;
+      pendingDictionarySync = null;
+      _pendingDictionarySyncAccountId = null;
     } catch (failure) {
       accountError = errorText(failure);
     }
@@ -1385,9 +1395,13 @@ class AppController extends ChangeNotifier {
 
   void scheduleUserDictionarySync() {
     _dictionarySyncDebounce?.cancel();
-    if (_disposed || accountUser == null) return;
+    if (_disposed || accountUser == null || pendingDictionarySync != null) {
+      return;
+    }
     _dictionarySyncDebounce = Timer(const Duration(milliseconds: 800), () {
-      if (_disposed || accountUser == null) return;
+      if (_disposed || accountUser == null || pendingDictionarySync != null) {
+        return;
+      }
       if (busy || syncingDictionary) {
         scheduleUserDictionarySync();
       } else {
@@ -1396,8 +1410,24 @@ class AppController extends ChangeNotifier {
     });
   }
 
-  Future<bool> syncUserDictionary() async {
+  void dismissDictionarySyncConfirmation() {
+    pendingDictionarySync = null;
+    _pendingDictionarySyncAccountId = null;
+    _changed();
+  }
+
+  Future<bool> syncUserDictionary({bool allowDeletions = false}) async {
     if (busy || syncingDictionary || accountUser == null) return false;
+    final pending = pendingDictionarySync;
+    if (allowDeletions &&
+        (pending == null ||
+            !pending.pending ||
+            (pending.localDeletions.isEmpty &&
+                pending.serverDeletions.isEmpty) ||
+            _pendingDictionarySyncAccountId != accountUser?.id)) {
+      return false;
+    }
+    final account = accountUser?.id;
     _dictionarySyncDebounce?.cancel();
     busy = true;
     syncingDictionary = true;
@@ -1405,10 +1435,21 @@ class AppController extends ChangeNotifier {
     accountMessage = null;
     _changed();
     try {
-      accountMessage = (await core.accountSyncUserDictionary()).message;
-      userWordsRevision++;
-      if (isKeytaoScheme(activeSchemeKey)) {
-        userWordsPendingDeploy.add(activeSchemeKey);
+      final result = await core.accountSyncUserDictionary(
+        allowDeletions: allowDeletions,
+      );
+      accountMessage = result.message;
+      pendingDictionarySync = result.pending && accountUser?.id == account
+          ? result
+          : null;
+      _pendingDictionarySyncAccountId = pendingDictionarySync != null
+          ? account
+          : null;
+      if (!result.pending) {
+        userWordsRevision++;
+        if (isKeytaoScheme(activeSchemeKey)) {
+          userWordsPendingDeploy.add(activeSchemeKey);
+        }
       }
       return true;
     } catch (failure) {

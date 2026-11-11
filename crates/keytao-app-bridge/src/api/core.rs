@@ -308,17 +308,41 @@ pub async fn account_logout() -> Result<(), String> {
 }
 
 /// Merges the user dictionary in place without deploying.
-pub async fn account_sync_user_dictionary() -> Result<UserDictionarySyncDto, String> {
+pub async fn account_sync_user_dictionary(
+    allow_deletions: bool,
+) -> Result<UserDictionarySyncDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let token = state.core.state().auth_token.ok_or("未登录")?;
-    let result = keytao_app_core::account::sync_user_dictionary(&state.core, &state.host, token)
-        .await
-        .map_err(|error| error.to_string())?;
+    let result = keytao_app_core::account::sync_user_dictionary(
+        &state.core,
+        &state.host,
+        token,
+        allow_deletions,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(UserDictionarySyncDto {
         file_name: result.file_name,
         count: result.count as u64,
         message: result.message,
+        pending: result.pending,
+        local_deletions: result
+            .local_deletions
+            .into_iter()
+            .map(|entry| UserDictionaryDeletionDto {
+                word: entry.word,
+                code: entry.code,
+            })
+            .collect(),
+        server_deletions: result
+            .server_deletions
+            .into_iter()
+            .map(|entry| UserDictionaryDeletionDto {
+                word: entry.word,
+                code: entry.code,
+            })
+            .collect(),
     })
 }
 

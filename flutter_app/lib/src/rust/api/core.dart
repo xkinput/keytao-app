@@ -157,8 +157,11 @@ Future<void> accountLogout() =>
     RustLib.instance.api.crateApiCoreAccountLogout();
 
 /// Merges the user dictionary in place without deploying.
-Future<UserDictionarySyncDto> accountSyncUserDictionary() =>
-    RustLib.instance.api.crateApiCoreAccountSyncUserDictionary();
+Future<UserDictionarySyncDto> accountSyncUserDictionary({
+  required bool allowDeletions,
+}) => RustLib.instance.api.crateApiCoreAccountSyncUserDictionary(
+  allowDeletions: allowDeletions,
+);
 
 Future<String> accountPendingWords() =>
     RustLib.instance.api.crateApiCoreAccountPendingWords();

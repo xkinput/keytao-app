@@ -45,6 +45,15 @@ pub struct UserDictionarySyncResult {
     pub import_table_patched: bool,
     pub reload_stamp_path: Option<String>,
     pub message: String,
+    pub pending: bool,
+    pub local_deletions: Vec<UserDictionaryDeletion>,
+    pub server_deletions: Vec<UserDictionaryDeletion>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct UserDictionaryDeletion {
+    pub word: String,
+    pub code: String,
 }
 
 pub(crate) const API_BASE: &str = "https://keytao.rea.ink";
@@ -287,24 +296,138 @@ async fn startup_refresh_at(core: &Core, api_base: &str) -> Result<(), CoreError
     Ok(())
 }
 
-fn base_path(core: &Core, account: i64) -> PathBuf {
+fn legacy_base_path(core: &Core, account: i64) -> PathBuf {
     core.env()
         .data_dir
         .join(format!("user-dictionary-sync-{account}.json"))
 }
 
-fn save_base(
+fn base_path(root: &Path, account: i64) -> PathBuf {
+    root.join(format!(".keytao-sync-base-{account}.json"))
+}
+
+#[derive(Serialize, Deserialize)]
+struct DictionaryBase {
+    instance: String,
+    entries: BTreeSet<(String, String)>,
+}
+
+const INSTANCE_PREFIX: &str = "# keytao-sync-instance: ";
+
+fn dictionary_instance(content: &str) -> Option<&str> {
+    let mut instances = content
+        .lines()
+        .filter_map(|line| line.strip_prefix(INSTANCE_PREFIX));
+    let instance = instances.next()?.trim();
+    (!instance.is_empty() && instances.next().is_none()).then_some(instance)
+}
+
+fn load_base(
     core: &Core,
+    root: &Path,
+    account: i64,
+) -> Result<BTreeSet<(String, String)>, CoreError> {
+    match std::fs::read(base_path(root, account)) {
+        Ok(bytes) => {
+            let saved: DictionaryBase = serde_json::from_slice(&bytes)?;
+            let content = std::fs::read_to_string(root.join("keytao.user.dict.yaml"))?;
+            return Ok(
+                if dictionary_instance(&content) == Some(saved.instance.as_str()) {
+                    saved.entries
+                } else {
+                    BTreeSet::new()
+                },
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let legacy = legacy_base_path(core, account);
+    let created = std::fs::metadata(root.join("keytao.user.dict.yaml"))
+        .and_then(|metadata| metadata.created())
+        .ok();
+    let saved = std::fs::metadata(&legacy)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    // Unknown or newer dictionary instances must start with a union.
+    if !created
+        .zip(saved)
+        .is_some_and(|(created, saved)| created <= saved)
+    {
+        return Ok(BTreeSet::new());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(legacy)?)?)
+}
+
+fn save_base(
+    root: &Path,
     account: i64,
     entries: &BTreeSet<(String, String)>,
 ) -> Result<(), CoreError> {
-    std::fs::create_dir_all(&core.env().data_dir)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&core.env().data_dir)?;
-    temporary.write_all(&serde_json::to_vec(entries)?)?;
+    let dictionary = root.join("keytao.user.dict.yaml");
+    let content = std::fs::read_to_string(&dictionary)?;
+    let instance = if let Some(instance) = dictionary_instance(&content) {
+        instance.to_owned()
+    } else {
+        // A comment survives normal atomic edits but is absent from a recreated dictionary.
+        let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+        let instance = format!(
+            "{}-{}",
+            temporary.path().file_name().unwrap().to_string_lossy(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut content: String = content
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with(INSTANCE_PREFIX))
+            .collect();
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        temporary.write_all(content.as_bytes())?;
+        writeln!(temporary, "{INSTANCE_PREFIX}{instance}")?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(dictionary)
+            .map_err(|error| CoreError::Io(error.error))?;
+        instance
+    };
+    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+    temporary.write_all(&serde_json::to_vec(&DictionaryBase {
+        instance,
+        entries: entries.clone(),
+    })?)?;
     temporary.as_file().sync_all()?;
     temporary
-        .persist(base_path(core, account))
+        .persist(base_path(root, account))
         .map_err(|error| CoreError::Io(error.error))?;
+    Ok(())
+}
+
+pub(crate) fn invalidate_dictionary_bases(core: &Core, root: &Path) -> Result<(), CoreError> {
+    for (directory, prefix) in [
+        (root, ".keytao-sync-base-"),
+        (core.env().data_dir.as_path(), "user-dictionary-sync-"),
+    ] {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name().to_str().is_some_and(|name| {
+                name.strip_prefix(prefix)
+                    .and_then(|name| name.strip_suffix(".json"))
+                    .and_then(|account| account.parse::<i64>().ok())
+                    .is_some_and(|account| account > 0)
+            }) {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -532,8 +655,9 @@ pub async fn sync_user_dictionary(
     core: &Core,
     host: &impl ImeHost,
     token: String,
+    allow_deletions: bool,
 ) -> Result<UserDictionarySyncResult, CoreError> {
-    sync_user_dictionary_at(core, host, token, API_BASE).await
+    sync_user_dictionary_at(core, host, token, API_BASE, allow_deletions).await
 }
 
 async fn sync_user_dictionary_at(
@@ -541,6 +665,7 @@ async fn sync_user_dictionary_at(
     host: &impl ImeHost,
     token: String,
     api_base: &str,
+    allow_deletions: bool,
 ) -> Result<UserDictionarySyncResult, CoreError> {
     let api = ApiClient::new(core, api_base);
     if api.token()?.trim() != token.trim() {
@@ -592,11 +717,7 @@ async fn sync_user_dictionary_at(
         .collect();
     // Listing may recreate an empty dictionary after a reset; do not infer cloud deletions.
     let mut base: BTreeSet<(String, String)> = if dictionary_existed && !local_set.is_empty() {
-        match std::fs::read(base_path(core, account)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(error) => return Err(error.into()),
-        }
+        load_base(core, &root, account)?
     } else {
         BTreeSet::new()
     };
@@ -610,6 +731,43 @@ async fn sync_user_dictionary_at(
             .entry((entry.word.clone(), entry.code.clone()))
             .or_default()
             .push(entry);
+    }
+    let local_deletions: Vec<_> = local
+        .iter()
+        .filter(|entry| {
+            let key = (entry.word.clone(), entry.code.clone());
+            base.contains(&key) && !remote_by_key.contains_key(&key)
+        })
+        .map(|entry| UserDictionaryDeletion {
+            word: entry.word.clone(),
+            code: entry.code.clone(),
+        })
+        .collect();
+    let server_deletions: Vec<_> = remote
+        .entries
+        .iter()
+        .filter(|entry| {
+            let key = (entry.word.clone(), entry.code.clone());
+            base.contains(&key) && !local_set.contains(&key)
+        })
+        .map(|entry| UserDictionaryDeletion {
+            word: entry.word.clone(),
+            code: entry.code.clone(),
+        })
+        .collect();
+    if !allow_deletions && (local_deletions.len() > 3 || server_deletions.len() > 3) {
+        return Ok(UserDictionarySyncResult {
+            file_name: "keytao.user.dict.yaml".into(),
+            path: path_string(root.join("keytao.user.dict.yaml")),
+            count: local_set.len(),
+            updated_at: String::new(),
+            import_table_patched: false,
+            reload_stamp_path: None,
+            message: "批量删除需要确认".into(),
+            pending: true,
+            local_deletions,
+            server_deletions,
+        });
     }
     let mut resulting = local_set.clone();
     for key in &local_set {
@@ -694,7 +852,18 @@ async fn sync_user_dictionary_at(
         .write_reload_stamp(&root)
         .map_err(CoreError::Other)?
         .map(path_string);
-    save_base(core, account, &resulting)?;
+    {
+        let _guard = core
+            .user_words
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        save_base(&root, account, &resulting)?;
+    }
+    match std::fs::remove_file(legacy_base_path(core, account)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(UserDictionarySyncResult {
         file_name: "keytao.user.dict.yaml".into(),
         path: path_string(root.join("keytao.user.dict.yaml")),
@@ -703,6 +872,9 @@ async fn sync_user_dictionary_at(
         import_table_patched,
         reload_stamp_path,
         message: format!("已同步 {} 条用户词条", resulting.len()),
+        pending: false,
+        local_deletions: Vec::new(),
+        server_deletions: Vec::new(),
     })
 }
 

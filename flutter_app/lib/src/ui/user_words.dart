@@ -109,6 +109,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
   bool _comparisonAvailable = false;
   bool _pendingLoading = false;
   bool _opening = false;
+  bool _confirmingSync = false;
+  UserDictionarySyncDto? _shownSyncConfirmation;
   Object? _accountId;
   Object? _pendingAccountId;
   final Set<String> _selected = {};
@@ -166,6 +168,22 @@ class _UserWordsPageState extends State<UserWordsPage> {
         !_pendingLoading) {
       unawaited(_refreshPending());
     }
+    final confirmation = c.pendingDictionarySync;
+    if (_isKeytao(_scheme) &&
+        confirmation != null &&
+        !identical(confirmation, _shownSyncConfirmation) &&
+        !c.busy &&
+        !_loading &&
+        !_saving &&
+        !_opening &&
+        !_pendingLoading &&
+        !_confirmingSync) {
+      _shownSyncConfirmation = confirmation;
+      _confirmingSync = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_confirmPendingSync(confirmation));
+      });
+    }
   }
 
   Future<void> _openScheme() async {
@@ -175,6 +193,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
       if (!mounted || !_isKeytao(_scheme)) return;
       final c = widget.controller;
       if (c.accountUser == null) return;
+      if (c.pendingDictionarySync != null) return;
       if (c.busy) {
         c.scheduleUserDictionarySync();
       } else {
@@ -410,6 +429,78 @@ class _UserWordsPageState extends State<UserWordsPage> {
     }
   }
 
+  Future<void> _confirmPendingSync(UserDictionarySyncDto pending) async {
+    final c = widget.controller;
+    final account = c.accountUser?.id;
+    try {
+      final confirmed = await showFSheet<bool>(
+        context: context,
+        side: FLayout.btt,
+        mainAxisMaxRatio: 0.9,
+        useSafeArea: true,
+        builder: (sheetContext) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: 16,
+              children: [
+                Text('确认同步删除', style: sheetContext.theme.typography.display.lg),
+                if (pending.localDeletions.isNotEmpty) ...[
+                  Text('本地删除 ${pending.localDeletions.length} 条'),
+                  for (final entry in pending.localDeletions)
+                    Text('${entry.word} · ${entry.code}'),
+                ],
+                if (pending.serverDeletions.isNotEmpty) ...[
+                  Text('云端删除 ${pending.serverDeletions.length} 条'),
+                  for (final entry in pending.serverDeletions)
+                    Text('${entry.word} · ${entry.code}'),
+                ],
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: ActionRow(
+                    children: [
+                      ActionButton(
+                        AppStrings.cancel,
+                        onPress: () => Navigator.pop(sheetContext, false),
+                      ),
+                      ActionButton(
+                        '确认删除并同步',
+                        primary: true,
+                        onPress:
+                            pending.localDeletions.isEmpty &&
+                                pending.serverDeletions.isEmpty
+                            ? null
+                            : () => Navigator.pop(sheetContext, true),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      if (!mounted ||
+          account == null ||
+          c.accountUser?.id != account ||
+          !identical(c.pendingDictionarySync, pending)) {
+        return;
+      }
+      if (confirmed != true) {
+        c.dismissDictionarySyncConfirmation();
+        return;
+      }
+      if (!await c.syncUserDictionary(allowDeletions: true) && mounted) {
+        setState(() => _error = c.accountError);
+      }
+    } finally {
+      _confirmingSync = false;
+      if (mounted) _controllerChanged();
+    }
+  }
+
   Future<bool> _confirmSubmission(Map<String, dynamic> preview) async {
     final items = _submissionObjects(preview['items']);
     final conflicts = _submissionObjects(preview['conflicts']);
@@ -568,6 +659,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
           c.busy ||
           _loading ||
           _saving ||
+          _confirmingSync ||
           _pendingLoading ||
           _pendingDelete != null;
       final query = _search.text.toLowerCase();

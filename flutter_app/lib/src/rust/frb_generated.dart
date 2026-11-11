@@ -101,7 +101,9 @@ abstract class RustLibApi extends BaseApi {
 
   Future<String> crateApiCoreAccountSubmitWords({required String previewJson});
 
-  Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary();
+  Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary({
+    required bool allowDeletions,
+  });
 
   Future<InstallResultDto> crateApiCoreActivateScheme({
     required String schemeKey,
@@ -529,11 +531,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary() {
+  Future<UserDictionarySyncDto> crateApiCoreAccountSyncUserDictionary({
+    required bool allowDeletions,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(allowDeletions, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -546,7 +551,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreAccountSyncUserDictionaryConstMeta,
-        argValues: [],
+        argValues: [allowDeletions],
         apiImpl: this,
       ),
     );
@@ -555,7 +560,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCoreAccountSyncUserDictionaryConstMeta =>
       const TaskConstMeta(
         debugName: "account_sync_user_dictionary",
-        argNames: [],
+        argNames: ["allowDeletions"],
       );
 
   @override
@@ -3110,6 +3115,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<UserDictionaryDeletionDto> dco_decode_list_user_dictionary_deletion_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_user_dictionary_deletion_dto)
+        .toList();
+  }
+
+  @protected
   List<UserWordComparisonDto> dco_decode_list_user_word_comparison_dto(
     dynamic raw,
   ) {
@@ -3388,15 +3403,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UserDictionaryDeletionDto dco_decode_user_dictionary_deletion_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return UserDictionaryDeletionDto(
+      word: dco_decode_String(arr[0]),
+      code: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
   UserDictionarySyncDto dco_decode_user_dictionary_sync_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return UserDictionarySyncDto(
       fileName: dco_decode_String(arr[0]),
       count: dco_decode_u_64(arr[1]),
       message: dco_decode_String(arr[2]),
+      pending: dco_decode_bool(arr[3]),
+      localDeletions: dco_decode_list_user_dictionary_deletion_dto(arr[4]),
+      serverDeletions: dco_decode_list_user_dictionary_deletion_dto(arr[5]),
     );
   }
 
@@ -4108,6 +4140,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<UserDictionaryDeletionDto> sse_decode_list_user_dictionary_deletion_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <UserDictionaryDeletionDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_user_dictionary_deletion_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<UserWordComparisonDto> sse_decode_list_user_word_comparison_dto(
     SseDeserializer deserializer,
   ) {
@@ -4472,6 +4518,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UserDictionaryDeletionDto sse_decode_user_dictionary_deletion_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_word = sse_decode_String(deserializer);
+    var var_code = sse_decode_String(deserializer);
+    return UserDictionaryDeletionDto(word: var_word, code: var_code);
+  }
+
+  @protected
   UserDictionarySyncDto sse_decode_user_dictionary_sync_dto(
     SseDeserializer deserializer,
   ) {
@@ -4479,10 +4535,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fileName = sse_decode_String(deserializer);
     var var_count = sse_decode_u_64(deserializer);
     var var_message = sse_decode_String(deserializer);
+    var var_pending = sse_decode_bool(deserializer);
+    var var_localDeletions = sse_decode_list_user_dictionary_deletion_dto(
+      deserializer,
+    );
+    var var_serverDeletions = sse_decode_list_user_dictionary_deletion_dto(
+      deserializer,
+    );
     return UserDictionarySyncDto(
       fileName: var_fileName,
       count: var_count,
       message: var_message,
+      pending: var_pending,
+      localDeletions: var_localDeletions,
+      serverDeletions: var_serverDeletions,
     );
   }
 
@@ -5152,6 +5218,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_user_dictionary_deletion_dto(
+    List<UserDictionaryDeletionDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_user_dictionary_deletion_dto(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_user_word_comparison_dto(
     List<UserWordComparisonDto> self,
     SseSerializer serializer,
@@ -5462,6 +5540,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_user_dictionary_deletion_dto(
+    UserDictionaryDeletionDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.word, serializer);
+    sse_encode_String(self.code, serializer);
+  }
+
+  @protected
   void sse_encode_user_dictionary_sync_dto(
     UserDictionarySyncDto self,
     SseSerializer serializer,
@@ -5470,6 +5558,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.fileName, serializer);
     sse_encode_u_64(self.count, serializer);
     sse_encode_String(self.message, serializer);
+    sse_encode_bool(self.pending, serializer);
+    sse_encode_list_user_dictionary_deletion_dto(
+      self.localDeletions,
+      serializer,
+    );
+    sse_encode_list_user_dictionary_deletion_dto(
+      self.serverDeletions,
+      serializer,
+    );
   }
 
   @protected

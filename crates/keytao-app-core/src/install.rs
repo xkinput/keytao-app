@@ -19,7 +19,8 @@ pub fn is_protected_user_file(relative: &str) -> bool {
             || relative == "user.yaml"
             || relative.ends_with(".custom.yaml")
             || relative == "user_dict.txt"
-            || relative.ends_with("_user.txt"))
+            || relative.ends_with("_user.txt")
+            || (relative.starts_with(".keytao-sync-base-") && relative.ends_with(".json")))
 }
 
 #[derive(serde::Serialize)]
@@ -41,6 +42,11 @@ pub fn prepare_protected_file_install(
         log: None,
     };
     if !decision.protected {
+        return decision;
+    }
+    if relative.starts_with(".keytao-sync-base-") {
+        decision.write = false;
+        decision.log = Some(format!("[KEPT] {relative}"));
         return decision;
     }
     let Some(existing) = existing else {

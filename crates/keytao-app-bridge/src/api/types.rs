@@ -432,4 +432,12 @@ pub struct UserDictionarySyncDto {
     pub file_name: String,
     pub count: u64,
     pub message: String,
+    pub pending: bool,
+    pub local_deletions: Vec<UserDictionaryDeletionDto>,
+    pub server_deletions: Vec<UserDictionaryDeletionDto>,
+}
+
+pub struct UserDictionaryDeletionDto {
+    pub word: String,
+    pub code: String,
 }

@@ -369,7 +369,7 @@ pub fn compare_user_words(
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
     let index = package_index(&package)?;
-    let dictionary = Dictionary::parse(&fs::read(user_path(&package, root, true)?)?)?;
+    let dictionary = Dictionary::parse(&fs::read(user_path(core, &package, root, true)?)?)?;
     Ok(dictionary
         .entries()
         .into_iter()
@@ -408,7 +408,7 @@ pub fn reconcile_user_words(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    let path = user_path(&package, root, false)?;
+    let path = user_path(core, &package, root, false)?;
     if !path.try_exists()? {
         return Ok(UserWordsReport::default());
     }
@@ -468,7 +468,12 @@ fn fallback_dict(scheme: &str) -> Result<&'static str, CoreError> {
     })
 }
 
-fn user_path(package: &PackageData, root: &Path, create: bool) -> Result<PathBuf, CoreError> {
+fn user_path(
+    core: &Core,
+    package: &PackageData,
+    root: &Path,
+    create: bool,
+) -> Result<PathBuf, CoreError> {
     let relative = format!("{}.dict.yaml", package.user_name);
     let mut path = root.to_path_buf();
     for component in Path::new(&relative).components() {
@@ -489,6 +494,10 @@ fn user_path(package: &PackageData, root: &Path, create: bool) -> Result<PathBuf
             .into_bytes()
         });
         Dictionary::parse(&bytes)?;
+        if package.user_name == "keytao.user" {
+            // A recreated dictionary cannot authorize deletions from an older instance.
+            crate::account::invalidate_dictionary_bases(core, root)?;
+        }
         let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
         temporary.write_all(&bytes)?;
         temporary.as_file().sync_all()?;
@@ -691,7 +700,7 @@ pub fn list_user_words(core: &Core, scheme: &str, root: &Path) -> Result<Vec<Use
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    Ok(Dictionary::parse(&fs::read(user_path(&package, root, true)?)?)?.entries())
+    Ok(Dictionary::parse(&fs::read(user_path(core, &package, root, true)?)?)?.entries())
 }
 
 pub fn add_user_word(
@@ -708,7 +717,7 @@ pub fn add_user_word(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    let path = user_path(&package, root, true)?;
+    let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
     if dictionary
         .entries()
@@ -758,7 +767,7 @@ pub fn update_user_word(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    let path = user_path(&package, root, true)?;
+    let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
     if !dictionary
         .entries()
@@ -792,7 +801,7 @@ pub fn delete_user_word(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    let path = user_path(&package, root, true)?;
+    let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
     if !dictionary
         .entries()

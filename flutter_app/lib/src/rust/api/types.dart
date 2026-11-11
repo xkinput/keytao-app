@@ -1020,19 +1020,49 @@ class SchemeUpdateDto {
 
 enum UiColorSchemeDto { auto, light, dark }
 
+class UserDictionaryDeletionDto {
+  final String word;
+  final String code;
+
+  const UserDictionaryDeletionDto({required this.word, required this.code});
+
+  @override
+  int get hashCode => word.hashCode ^ code.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserDictionaryDeletionDto &&
+          runtimeType == other.runtimeType &&
+          word == other.word &&
+          code == other.code;
+}
+
 class UserDictionarySyncDto {
   final String fileName;
   final BigInt count;
   final String message;
+  final bool pending;
+  final List<UserDictionaryDeletionDto> localDeletions;
+  final List<UserDictionaryDeletionDto> serverDeletions;
 
   const UserDictionarySyncDto({
     required this.fileName,
     required this.count,
     required this.message,
+    required this.pending,
+    required this.localDeletions,
+    required this.serverDeletions,
   });
 
   @override
-  int get hashCode => fileName.hashCode ^ count.hashCode ^ message.hashCode;
+  int get hashCode =>
+      fileName.hashCode ^
+      count.hashCode ^
+      message.hashCode ^
+      pending.hashCode ^
+      localDeletions.hashCode ^
+      serverDeletions.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1041,7 +1071,10 @@ class UserDictionarySyncDto {
           runtimeType == other.runtimeType &&
           fileName == other.fileName &&
           count == other.count &&
-          message == other.message;
+          message == other.message &&
+          pending == other.pending &&
+          localDeletions == other.localDeletions &&
+          serverDeletions == other.serverDeletions;
 }
 
 class UserWordComparisonDto {

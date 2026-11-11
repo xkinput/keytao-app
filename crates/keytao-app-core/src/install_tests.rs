@@ -28,6 +28,7 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
         "xmjd6.custom.yaml",
         "user_dict.txt",
         "xmjd6_user.txt",
+        ".keytao-sync-base-42.json",
     ] {
         assert!(crate::install::is_protected_user_file(name), "{name}");
         assert!(crate::packages::excluded_from_manifest(name), "{name}");
@@ -40,9 +41,50 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
         "User.yaml",
         "xmjd6_USER.txt",
         "keytao.dict.yaml",
+        "lua/.keytao-sync-base-42.json",
+        ".keytao-sync-base-42.yaml",
     ] {
         assert!(!crate::install::is_protected_user_file(name), "{name}");
     }
+}
+
+#[test]
+fn sync_base_is_never_written_by_package_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = ".keytao-sync-base-42.json";
+    let path = dir.path().join(relative);
+    let mut logs = Vec::new();
+
+    for existing in [
+        Some(b"[\"saved\"]".as_slice()),
+        Some(b"\xff\xfe".as_slice()),
+        None,
+    ] {
+        if let Some(content) = existing {
+            fs::write(&path, content).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        crate::install::write_package_file(dir.path(), relative, b"[]", &mut logs).unwrap();
+        assert_eq!(fs::read(&path).ok().as_deref(), existing);
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn sync_base_is_never_deleted_by_manifest_cleanup() {
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet};
+    let dir = tempfile::tempdir().unwrap();
+    let relative = ".keytao-sync-base-42.json";
+    let content = b"[\"saved\"]";
+    fs::write(dir.path().join(relative), content).unwrap();
+    let manifest = BTreeMap::from([(relative.into(), format!("{:x}", Sha256::digest(content)))]);
+
+    let logs = crate::packages::cleanup_manifest(dir.path(), &manifest, &BTreeSet::new()).unwrap();
+
+    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), content);
+    assert!(logs.is_empty());
 }
 
 #[test]

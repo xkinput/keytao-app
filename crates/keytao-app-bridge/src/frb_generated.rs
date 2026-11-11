@@ -318,11 +318,14 @@ fn wire__crate__api__core__account_sync_user_dictionary_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_allow_deletions = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok = crate::api::core::account_sync_user_dictionary().await?;
+                        let output_ok =
+                            crate::api::core::account_sync_user_dictionary(api_allow_deletions)
+                                .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -3256,6 +3259,20 @@ impl SseDecode for Vec<crate::api::types::SchemeUpdateDto> {
     }
 }
 
+impl SseDecode for Vec<crate::api::types::UserDictionaryDeletionDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::types::UserDictionaryDeletionDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::types::UserWordComparisonDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3637,16 +3654,36 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
+impl SseDecode for crate::api::types::UserDictionaryDeletionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_word = <String>::sse_decode(deserializer);
+        let mut var_code = <String>::sse_decode(deserializer);
+        return crate::api::types::UserDictionaryDeletionDto {
+            word: var_word,
+            code: var_code,
+        };
+    }
+}
+
 impl SseDecode for crate::api::types::UserDictionarySyncDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_fileName = <String>::sse_decode(deserializer);
         let mut var_count = <u64>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
+        let mut var_pending = <bool>::sse_decode(deserializer);
+        let mut var_localDeletions =
+            <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_decode(deserializer);
+        let mut var_serverDeletions =
+            <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_decode(deserializer);
         return crate::api::types::UserDictionarySyncDto {
             file_name: var_fileName,
             count: var_count,
             message: var_message,
+            pending: var_pending,
+            local_deletions: var_localDeletions,
+            server_deletions: var_serverDeletions,
         };
     }
 }
@@ -4809,12 +4846,36 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::UiColorSchemeDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::UserDictionaryDeletionDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.word.into_into_dart().into_dart(),
+            self.code.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::UserDictionaryDeletionDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::UserDictionaryDeletionDto>
+    for crate::api::types::UserDictionaryDeletionDto
+{
+    fn into_into_dart(self) -> crate::api::types::UserDictionaryDeletionDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::types::UserDictionarySyncDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.file_name.into_into_dart().into_dart(),
             self.count.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
+            self.pending.into_into_dart().into_dart(),
+            self.local_deletions.into_into_dart().into_dart(),
+            self.server_deletions.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5435,6 +5496,16 @@ impl SseEncode for Vec<crate::api::types::SchemeUpdateDto> {
     }
 }
 
+impl SseEncode for Vec<crate::api::types::UserDictionaryDeletionDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::types::UserDictionaryDeletionDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::types::UserWordComparisonDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5731,12 +5802,29 @@ impl SseEncode for () {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
 }
 
+impl SseEncode for crate::api::types::UserDictionaryDeletionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.word, serializer);
+        <String>::sse_encode(self.code, serializer);
+    }
+}
+
 impl SseEncode for crate::api::types::UserDictionarySyncDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.file_name, serializer);
         <u64>::sse_encode(self.count, serializer);
         <String>::sse_encode(self.message, serializer);
+        <bool>::sse_encode(self.pending, serializer);
+        <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_encode(
+            self.local_deletions,
+            serializer,
+        );
+        <Vec<crate::api::types::UserDictionaryDeletionDto>>::sse_encode(
+            self.server_deletions,
+            serializer,
+        );
     }
 }
 
