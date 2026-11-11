@@ -164,7 +164,7 @@ pub async fn api_error_message(response: reqwest::Response, fallback: &str) -> S
     }
 }
 
-fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
+pub fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
     match scheme {
         "keytao" => Ok("keytao"),
         "xmjd" => Ok("xmjd"),
@@ -181,11 +181,7 @@ pub fn record_installed_scheme(
     scheme: &str,
     version: Option<&str>,
 ) -> Result<(), CoreError> {
-    let scheme = validate_scheme_key(scheme.trim()).map_err(CoreError::Other)?;
-    core.update_state(|state| {
-        state.installed_scheme = Some(scheme.to_string());
-        state.installed_scheme_version = version.map(str::to_string);
-    })
+    crate::packages::record_package(core, scheme, version, true)
 }
 
 pub async fn fetch_scheme_release(
@@ -301,19 +297,26 @@ mod tests {
         .unwrap();
 
         assert!(record_installed_scheme(&core, "unknown", Some("v1")).is_err());
-        assert!(core.state().installed_scheme.is_none());
-        assert!(core.state().installed_scheme_version.is_none());
+        assert!(core.state().installed_packages.is_empty());
+        assert!(core.state().active_scheme.is_none());
         assert!(!core.env().data_dir.join("app-state.json").exists());
 
         record_installed_scheme(&core, "xmjd-feiding", Some("v1")).unwrap();
-        assert_eq!(core.state().installed_scheme.as_deref(), Some("xmjd-feiding"));
+        assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd-feiding"));
         assert_eq!(
-            core.state().installed_scheme_version.as_deref(),
+            core.state().installed_packages["xmjd-feiding"]
+                .version
+                .as_deref(),
             Some("v1")
         );
         let persisted = crate::AppState::load(&core.env().data_dir).unwrap();
-        assert_eq!(persisted.installed_scheme.as_deref(), Some("xmjd-feiding"));
-        assert_eq!(persisted.installed_scheme_version.as_deref(), Some("v1"));
+        assert_eq!(persisted.active_scheme.as_deref(), Some("xmjd-feiding"));
+        assert_eq!(
+            persisted.installed_packages["xmjd-feiding"]
+                .version
+                .as_deref(),
+            Some("v1")
+        );
     }
 
     #[tokio::test]

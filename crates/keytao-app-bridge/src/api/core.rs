@@ -27,13 +27,18 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         keytao_app_core::scheme::check_local_schema(&state.core, Some(state.host.user_root()?))
             .map_err(|error| error.to_string())?;
     let app_state = state.core.state();
+    let installed_scheme_version = app_state
+        .active_scheme
+        .as_ref()
+        .and_then(|scheme| app_state.installed_packages.get(scheme))
+        .and_then(|package| package.version.clone());
     Ok(LocalSchemaDto {
         installed: local.installed,
         deployed: local.deployed,
         version: local.version,
         schemas: local.schemas,
-        installed_scheme: app_state.installed_scheme,
-        installed_scheme_version: app_state.installed_scheme_version,
+        installed_scheme: app_state.active_scheme,
+        installed_scheme_version,
     })
 }
 
@@ -57,6 +62,54 @@ pub fn record_installed_scheme(scheme: String, version: Option<String>) -> Resul
         version.as_deref(),
     )
     .map_err(|error| error.to_string())
+}
+
+pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::packages::list_installed_packages(&state.core)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+/// Android extraction must return the platform result as JSON and must not
+/// re-enter install/deploy bridge calls while the install lock is held.
+/// Other platforms ignore the callback. Activation does not deploy the IME.
+pub async fn activate_scheme(
+    scheme_key: String,
+    android_extract: impl Fn(String) -> DartFnFuture<String> + Send + Sync + 'static,
+) -> Result<InstallResultDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    #[cfg(not(target_os = "android"))]
+    let _ = android_extract;
+    let result = keytao_app_core::packages::activate_scheme(
+        &state.core,
+        &scheme_key,
+        &root,
+        #[cfg(target_os = "android")]
+        move |archive| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
+        > {
+            let extraction = android_extract(archive);
+            Box::pin(async move {
+                serde_json::from_str(&extraction.await).map_err(|error| error.to_string())
+            })
+        },
+        #[cfg(target_os = "windows")]
+        keytao_app_core::install::finish_windows_scheme_install,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(install_result_dto(result))
+}
+
+pub async fn remove_scheme_package(scheme_key: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key)
+        .map_err(|error| error.to_string())
 }
 
 /// The persisted account, if a token is stored. The token never leaves Rust.
@@ -154,8 +207,8 @@ pub async fn install_latest_scheme(scheme: String) -> Result<InstallResultDto, S
             percent: 0,
             message: "正在获取方案版本...".into(),
         }));
-        let release = fetch_scheme_release(scheme).await?;
-        install_scheme_from_url(release.download_url).await
+        let release = fetch_scheme_release(scheme.clone()).await?;
+        install_scheme_from_url(release.download_url, scheme, Some(release.version)).await
     }
 }
 
@@ -204,7 +257,13 @@ pub fn cancel_scheme_download() -> Result<(), String> {
 
 /// Downloads and smart-installs into the selected filesystem directory without
 /// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
-pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallResultDto, String> {
+pub async fn install_scheme_to_dir(
+    url: String,
+    dir: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let root = runtime::absolute_dir(&dir)?;
@@ -221,9 +280,15 @@ pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallRe
     )
     .await;
     let _ = std::fs::remove_file(archive);
-    Ok(install_result_dto(
-        result.map_err(|error| error.to_string())?,
-    ))
+    let result = result.map_err(|error| error.to_string())?;
+    let active = root
+        .canonicalize()
+        .ok()
+        .zip(state.host.user_root()?.canonicalize().ok())
+        .is_some_and(|(root, default_root)| root == default_root);
+    keytao_app_core::packages::record_package(&state.core, &scheme_key, version.as_deref(), active)
+        .map_err(|error| error.to_string())?;
+    Ok(install_result_dto(result))
 }
 
 /// Android SAF sequence: confirm storage permission, pickDirectory,
@@ -242,9 +307,8 @@ pub async fn download_scheme_archive(url: String) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
-/// files are already clean (Kotlin removes the zip on success). Resolves parent
-/// directories and rejects symlink files before deleting inside the cache.
+/// Cleans up the download after extraction and package recording. Resolves
+/// parent directories and rejects symlink files before deleting inside cache.
 pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -280,10 +344,15 @@ pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
 }
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
-pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, String> {
+pub async fn install_scheme_from_url(
+    url: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     #[cfg(target_os = "android")]
     {
-        let _ = url;
+        let _ = (url, scheme_key, version);
         Err("Use the platform installation flow on Android".into())
     }
     #[cfg(not(target_os = "android"))]
@@ -307,9 +376,15 @@ pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, St
         .await;
         // Core removes the archive on success; also remove failed downloads here.
         let _ = std::fs::remove_file(archive);
-        Ok(install_result_dto(
-            result.map_err(|error| error.to_string())?,
-        ))
+        let result = result.map_err(|error| error.to_string())?;
+        keytao_app_core::packages::record_package(
+            &state.core,
+            &scheme_key,
+            version.as_deref(),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(install_result_dto(result))
     }
 }
 
@@ -353,19 +428,36 @@ pub async fn prepare_android_install(url: String) -> Result<String, String> {
 }
 
 /// Pass jsonEncode of the Android channel's smart-extract result unchanged.
-pub fn finish_android_install(result_json: String) -> Result<InstallResultDto, String> {
+pub fn finish_android_install(
+    result_json: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     #[cfg(target_os = "android")]
     {
         let result: serde_json::Value =
             serde_json::from_str(&result_json).map_err(|error| error.to_string())?;
-        let result =
-            keytao_app_core::install::finish_android_install(&runtime::state()?.core, &result)
-                .map_err(|error| error.to_string())?;
+        let state = runtime::state()?;
+        let active = result["packageRoot"]
+            .as_str()
+            .and_then(|root| std::path::Path::new(root).canonicalize().ok())
+            .zip(state.host.user_root()?.canonicalize().ok())
+            .is_some_and(|(root, default_root)| root == default_root);
+        let result = keytao_app_core::install::finish_android_install(&state.core, &result)
+            .map_err(|error| error.to_string())?;
+        keytao_app_core::packages::record_package(
+            &state.core,
+            &scheme_key,
+            version.as_deref(),
+            active,
+        )
+        .map_err(|error| error.to_string())?;
         Ok(install_result_dto(result))
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = result_json;
+        let _ = (result_json, scheme_key, version);
         Err("Android installation is only available on Android".into())
     }
 }

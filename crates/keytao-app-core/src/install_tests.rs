@@ -19,6 +19,262 @@ impl EventSink for ProgressSink {
     }
 }
 
+#[test]
+fn manifest_cleanup_deletes_only_unchanged_obsolete_files() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["obsolete.lua", "modified.lua", "shared.lua"] {
+        fs::write(dir.path().join(name), "abc").unwrap();
+    }
+    fs::write(dir.path().join("modified.lua"), "user content").unwrap();
+    let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let manifest = BTreeMap::from([
+        ("obsolete.lua".into(), hash.into()),
+        ("modified.lua".into(), hash.into()),
+        ("shared.lua".into(), hash.into()),
+    ]);
+    let logs = crate::packages::cleanup_manifest(
+        dir.path(),
+        &manifest,
+        &BTreeSet::from(["shared.lua".into()]),
+    )
+    .unwrap();
+    assert!(!dir.path().join("obsolete.lua").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("modified.lua")).unwrap(),
+        "user content"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("shared.lua")).unwrap(),
+        "abc"
+    );
+    assert!(logs.iter().any(|line| line.contains("modified.lua")));
+}
+
+#[test]
+fn manifest_cleanup_rejects_unsafe_paths_before_deleting_anything() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rime");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(dir.path().join("outside.lua"), "abc").unwrap();
+    for unsafe_path in [
+        "../outside.lua",
+        "/absolute.lua",
+        "dir/../outside.lua",
+        "C:/outside.lua",
+        "..\\outside.lua",
+    ] {
+        fs::write(root.join("a-safe.lua"), "abc").unwrap();
+        let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let manifest = BTreeMap::from([
+            ("a-safe.lua".into(), hash.into()),
+            (unsafe_path.into(), hash.into()),
+        ]);
+        assert!(
+            crate::packages::cleanup_manifest(&root, &manifest, &BTreeSet::new()).is_err(),
+            "{unsafe_path}"
+        );
+        assert!(root.join("a-safe.lua").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("outside.lua")).unwrap(),
+            "abc"
+        );
+    }
+}
+
+#[tokio::test]
+async fn activation_without_stored_zip_requires_redownload() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "test".into(),
+            platform: Platform::MacOs,
+        },
+        Arc::new(ProgressSink::default()),
+    )
+    .unwrap();
+    crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+    let error = crate::packages::activate_scheme(
+        &core,
+        "keytao",
+        &dir.path().join("rime"),
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .err()
+    .expect("Activation must reject an unavailable stored archive");
+    assert!(error.to_string().contains("re-download"));
+    assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
+}
+
+#[test]
+fn package_cleanup_does_not_apply_active_manifest_to_another_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "test".into(),
+            platform: Platform::MacOs,
+        },
+        Arc::new(ProgressSink::default()),
+    )
+    .unwrap();
+    crate::scheme::record_installed_scheme(&core, "keytao", Some("v1")).unwrap();
+    let store = core.env().data_dir.join("scheme-packages");
+    fs::create_dir_all(&store).unwrap();
+    let active_root = dir.path().join("active");
+    let custom_root = dir.path().join("custom");
+    fs::create_dir_all(&active_root).unwrap();
+    fs::create_dir_all(&custom_root).unwrap();
+    fs::write(custom_root.join("obsolete.lua"), "abc").unwrap();
+    let manifest = serde_json::json!({"obsolete.lua": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"});
+    fs::write(
+        store.join("keytao.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "scheme_key":"keytao", "version":"v1", "installed_at_unix":0,
+            "source":"official", "manifest":manifest,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        store.join("active-manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "root":active_root, "manifest":manifest,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let cursor = std::io::Cursor::new(Vec::new());
+    let zip = zip::ZipWriter::new(cursor).finish().unwrap().into_inner();
+    crate::packages::cleanup_previous(&core, &custom_root, &zip).unwrap();
+    assert_eq!(
+        fs::read_to_string(custom_root.join("obsolete.lua")).unwrap(),
+        "abc"
+    );
+}
+
+#[tokio::test]
+async fn custom_install_preserves_default_package_and_state() {
+    fn write_archive(path: &std::path::Path, version: &str) {
+        let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        for (name, content) in [
+            (
+                "default.custom.yaml",
+                "patch:\n  schema_list:\n    - schema: xmjd6\n",
+            ),
+            ("xmjd6.schema.yaml", "schema: {schema_id: xmjd6}\n"),
+            ("version.txt", version),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    for custom_scheme in ["keytao", "xmjd"] {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(
+            AppEnv {
+                data_dir: dir.path().join("state"),
+                cache_dir: dir.path().join("cache"),
+                resource_dir: dir.path().join("resources"),
+                app_version: "test".into(),
+                platform: Platform::MacOs,
+            },
+            Arc::new(ProgressSink::default()),
+        )
+        .unwrap();
+        let default_root = dir.path().join("rime");
+        let custom_root = dir.path().join("custom");
+        let archive = dir.path().join("package.zip");
+        write_archive(&archive, "v1");
+        smart_install(
+            &core,
+            archive.to_string_lossy().into_owned(),
+            default_root.to_string_lossy().into_owned(),
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        crate::packages::record_package(&core, "keytao", Some("v1"), true).unwrap();
+        let state = core.state();
+        let state_path = core.env().data_dir.join("app-state.json");
+        let saved_state = fs::read(&state_path).unwrap();
+        let store = core.env().data_dir.join("scheme-packages");
+        let saved_store: std::collections::BTreeMap<_, _> = fs::read_dir(&store)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+
+        write_archive(&archive, "v2");
+        smart_install(
+            &core,
+            archive.to_string_lossy().into_owned(),
+            custom_root.to_string_lossy().into_owned(),
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        crate::packages::record_package(&core, custom_scheme, Some("v2"), false).unwrap();
+
+        assert!(core.state() == state, "Custom install changed package state");
+        assert_eq!(fs::read(&state_path).unwrap(), saved_state);
+        let actual_store: std::collections::BTreeMap<_, _> = fs::read_dir(&store)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        assert_eq!(
+            actual_store, saved_store,
+            "Custom install changed the store or left pending files"
+        );
+        assert_eq!(
+            crate::scheme::check_local_schema(&core, Some(default_root.clone()))
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("v1")
+        );
+        assert_eq!(
+            fs::read_to_string(custom_root.join("version.txt")).unwrap(),
+            "v2"
+        );
+        crate::packages::activate_scheme(
+            &core,
+            "keytao",
+            &default_root,
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(default_root.join("version.txt")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            core.state().installed_packages["keytao"].version.as_deref(),
+            Some("v1")
+        );
+    }
+}
+
 #[tokio::test]
 async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progress() {
     let dir = tempfile::tempdir().unwrap();

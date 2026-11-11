@@ -911,12 +911,18 @@ class AppController extends ChangeNotifier {
             final extracted = await android.smartExtractZipToPrivate(zipPath);
             result = await core.finishAndroidInstall(
               resultJson: jsonEncode(extracted),
+              schemeKey: installing,
+              version: installingVersion,
             );
           } finally {
             await core.removeDownloadedArchive(path: zipPath);
           }
         } else {
-          result = await core.installSchemeFromUrl(url: url);
+          result = await core.installSchemeFromUrl(
+            url: url,
+            schemeKey: installing,
+            version: installingVersion,
+          );
         }
         _recordInstallResult(result);
         verification = result.verify;
@@ -1272,6 +1278,8 @@ class AppController extends ChangeNotifier {
   Future<bool> installCustomDirectory() {
     if (!canInstallCustom) return Future.value(false);
     final url = downloadUrl!;
+    final installing = scheme;
+    final installingVersion = releaseVersion;
     return run(() async {
       _startOperation(OperationKind.customDirectory, AppStrings.installing);
       customResult = null;
@@ -1295,6 +1303,8 @@ class AppController extends ChangeNotifier {
             );
             customResult = await core.finishAndroidInstall(
               resultJson: jsonEncode(result),
+              schemeKey: installing,
+              version: installingVersion,
             );
           } finally {
             await core.removeDownloadedArchive(path: archive);
@@ -1303,6 +1313,8 @@ class AppController extends ChangeNotifier {
           customResult = await core.installSchemeToDir(
             url: url,
             dir: selectedDirectory!,
+            schemeKey: installing,
+            version: installingVersion,
           );
         }
         addOperationLogs(customResult!.logs);

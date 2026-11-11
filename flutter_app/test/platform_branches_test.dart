@@ -117,6 +117,8 @@ class PlatformCore extends FakeCore {
   @override
   Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
     required String url,
+    required String schemeKey,
+    String? version,
   }) async {
     calls.add('install:$url');
     local = installedLocal;

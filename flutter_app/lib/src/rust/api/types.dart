@@ -571,6 +571,37 @@ class InstallResultDto {
           verify == other.verify;
 }
 
+class InstalledPackageDto {
+  final String schemeKey;
+  final String? version;
+  final bool active;
+  final bool hasPackageZip;
+
+  const InstalledPackageDto({
+    required this.schemeKey,
+    this.version,
+    required this.active,
+    required this.hasPackageZip,
+  });
+
+  @override
+  int get hashCode =>
+      schemeKey.hashCode ^
+      version.hashCode ^
+      active.hashCode ^
+      hasPackageZip.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InstalledPackageDto &&
+          runtimeType == other.runtimeType &&
+          schemeKey == other.schemeKey &&
+          version == other.version &&
+          active == other.active &&
+          hasPackageZip == other.hasPackageZip;
+}
+
 class LinuxImeStatusDto {
   final bool supported;
   final bool kdeSession;

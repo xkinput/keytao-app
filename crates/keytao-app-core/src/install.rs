@@ -328,6 +328,8 @@ pub async fn smart_install(
 
         let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         let dest = PathBuf::from(&dest_path);
+        // Validate the entire archive and manifest before deleting or writing files.
+        let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
 
         // First pass: collect zip metadata and merge candidates
@@ -414,7 +416,8 @@ pub async fn smart_install(
         let cursor = std::io::Cursor::new(&zip_bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
         let total = archive.len();
-        let mut logs: Vec<String> = Vec::new();
+        let mut logs = std::mem::take(&mut cleanup_logs);
+        let mut manifest = std::collections::BTreeMap::new();
 
         for i in 0..total {
             let (relative, is_dir, content) = {
@@ -460,9 +463,18 @@ pub async fn smart_install(
                     }
                 }
             } else {
-                let out = dest.join(&relative);
+                let out = crate::packages::safe_path(&dest, &relative)?;
                 match write_file_force(&out, &content) {
-                    Ok(tag) => logs.push(format!("[OK]{tag} {relative}")),
+                    Ok(tag) => {
+                        logs.push(format!("[OK]{tag} {relative}"));
+                        if !crate::packages::excluded_from_manifest(&relative) {
+                            use sha2::{Digest, Sha256};
+                            manifest.insert(
+                                relative.clone(),
+                                format!("{:x}", Sha256::digest(&content)),
+                            );
+                        }
+                    }
                     Err(e) => {
                         logs.push(format!("[ERROR] {relative}: {e}"));
                         return Err(e);
@@ -488,9 +500,13 @@ pub async fn smart_install(
 
         // Write renamed user lua files (saved before zip overwrote them)
         for (new_module, bytes) in &renamed_lua_files {
-            let out = dest.join("lua").join(format!("{}.lua", new_module));
+            let relative = format!("lua/{new_module}.lua");
+            let out = crate::packages::safe_path(&dest, &relative)?;
             match write_file_force(&out, bytes) {
-                Ok(tag) => logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua")),
+                Ok(tag) => {
+                    manifest.remove(&relative);
+                    logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua"));
+                }
                 Err(e) => {
                     logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
                     return Err(e);
@@ -515,7 +531,21 @@ pub async fn smart_install(
             &package_dictionary_ids,
             &zip_bytes,
         )?);
-        std::fs::remove_file(&zip_path).ok();
+        crate::packages::stage_install(
+            core,
+            &zip_bytes,
+            manifest,
+            dest.canonicalize()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .map_err(|e| e.to_string())?;
+        // Activation reads the permanent archive through this same pipeline.
+        if !std::path::Path::new(&zip_path).starts_with(core.env().data_dir.join("scheme-packages"))
+        {
+            std::fs::remove_file(&zip_path).ok();
+        }
         emit("done", 100, "安装完成！");
 
         let verify = verify_install(
@@ -551,6 +581,25 @@ pub fn finish_android_install(
     core: &Core,
     result: &serde_json::Value,
 ) -> Result<InstallResult, CoreError> {
+    let archive = result["packageZipPath"].as_str().ok_or_else(|| {
+        CoreError::Other("Android extraction did not return its package archive".into())
+    })?;
+    let manifest: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(result["packageManifest"].clone())?;
+    for relative in manifest.keys() {
+        crate::packages::validate_relative(relative).map_err(CoreError::Other)?;
+    }
+    let manifest = manifest
+        .into_iter()
+        .filter(|(relative, _)| !crate::packages::excluded_from_manifest(relative))
+        .collect();
+    let root = result["packageRoot"].as_str().ok_or_else(|| {
+        CoreError::Other("Android extraction did not return its destination".into())
+    })?;
+    let root = std::fs::canonicalize(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.to_owned());
+    crate::packages::stage_install(core, &std::fs::read(archive)?, manifest, root)?;
     core.emit(CoreEvent::InstallProgress(InstallProgress {
         stage: "done".into(),
         percent: 100,

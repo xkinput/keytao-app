@@ -28,6 +28,8 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -503,6 +505,7 @@ class KeytaoAndroidChannel(
                     ?: return@Thread reply.error("Invalid directory URI")
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
+                val packageManifest = linkedMapOf<String, String>()
 
                 // Cache directories and load their file URIs in one query per directory.
                 val dirCache = mutableMapOf<String, DocumentFile>()
@@ -575,6 +578,7 @@ class KeytaoAndroidChannel(
 
                 JZipFile(zipFile).use { zip ->
                     val allEntries = zip.entries().toList()
+                    allEntries.forEach { validateZipRelativePath(it.name) }
                     val totalFiles = allEntries.count { !it.isDirectory }
                     var processed = 0
                     val emitProgress: (String) -> Unit = { fname ->
@@ -657,7 +661,15 @@ class KeytaoAndroidChannel(
                                     ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
                                 val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
                                 if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
-                                pfd.use { FileOutputStream(it.fileDescriptor).buffered(65536).use { out -> zip.getInputStream(entry).copyTo(out, 65536) } }
+                                val digest = MessageDigest.getInstance("SHA-256")
+                                pfd.use {
+                                    DigestOutputStream(FileOutputStream(it.fileDescriptor), digest).buffered(65536).use { out ->
+                                        zip.getInputStream(entry).use { input -> input.copyTo(out, 65536) }
+                                    }
+                                }
+                                if (isPackageManifestPath(relative)) {
+                                    packageManifest[relative] = digest.digest().joinToString("") { "%02x".format(it) }
+                                }
                                 logs.add("[OK] $relative")
                                 processed++; emitProgress(filename)
                             }
@@ -681,6 +693,7 @@ class KeytaoAndroidChannel(
                             val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
                             if (pfd != null) { pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(bytes) } }; logs.add("[RENAMED] lua/$fname") }
                             else logs.add("[ERROR] openFileDescriptor for renamed: lua/$fname")
+                            packageManifest.remove("lua/$fname")
                         }
                     }
 
@@ -724,11 +737,13 @@ class KeytaoAndroidChannel(
                         else addVerify(relative, false, "文件不存在")
                     }
 
-                    zipFile.delete()
                     reply.success(mapOf(
                         "mergedSchemas" to dcMergeResult?.userSchemas.orEmpty(),
                         "logs" to logs.toList(),
                         "verify" to verifyArray,
+                        "packageZipPath" to zipFile.absolutePath,
+                        "packageManifest" to packageManifest,
+                        "packageRoot" to treeUriString,
                     ))
                 }
             } catch (ex: Exception) {
@@ -758,9 +773,14 @@ class KeytaoAndroidChannel(
                 }
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
+                val packageManifest = linkedMapOf<String, String>()
 
                 JZipFile(zipFile).use { zip ->
                     val allEntries = zip.entries().toList()
+                    allEntries.forEach {
+                        val relative = validateZipRelativePath(it.name)
+                        safePrivateFile(root, relative)
+                    }
                     val zipLuaFilenames = mutableSetOf<String>()
                     var dcEntry: java.util.zip.ZipEntry? = null
                     var rimeLuaEntry: java.util.zip.ZipEntry? = null
@@ -816,10 +836,14 @@ class KeytaoAndroidChannel(
                                 logs.add("[MERGED] $relative")
                             }
                             else -> {
+                                val digest = MessageDigest.getInstance("SHA-256")
                                 zip.getInputStream(entry).use { input ->
-                                    FileOutputStream(output).buffered(65536).use { out ->
+                                    DigestOutputStream(FileOutputStream(output), digest).buffered(65536).use { out ->
                                         input.copyTo(out, 65536)
                                     }
+                                }
+                                if (isPackageManifestPath(relative)) {
+                                    packageManifest[relative] = digest.digest().joinToString("") { "%02x".format(it) }
                                 }
                                 logs.add("[OK] $relative")
                             }
@@ -835,6 +859,7 @@ class KeytaoAndroidChannel(
                         val luaDir = File(root, "lua").apply { mkdirs() }
                         for ((newName, bytes) in renamedLuaFiles) {
                             File(luaDir, "$newName.lua").writeBytes(bytes)
+                            packageManifest.remove("lua/$newName.lua")
                             logs.add("[RENAMED] lua/$newName.lua")
                         }
                     }
@@ -857,6 +882,9 @@ class KeytaoAndroidChannel(
                         put("mergedSchemas", mergedArray)
                         put("logs", logsArray)
                         put("verify", verifyArray)
+                        put("packageZipPath", zipFile.absolutePath)
+                        put("packageManifest", packageManifest)
+                        put("packageRoot", root.absolutePath)
                     })
                 }
             } catch (ex: Exception) {
@@ -968,6 +996,20 @@ class KeytaoAndroidChannel(
         }
         return output
     }
+
+    private fun validateZipRelativePath(entryName: String): String {
+        val relative = entryName.trimEnd('/')
+        if (relative.isEmpty() || relative.startsWith('/') || relative.contains('\\') ||
+            Regex("^[A-Za-z]:").containsMatchIn(relative) ||
+            relative.split('/').any { it.isEmpty() || it == "." || it == ".." }
+        ) {
+            throw Exception("Unsafe zip entry: $entryName")
+        }
+        return relative
+    }
+
+    private fun isPackageManifestPath(relative: String): Boolean =
+        !isDefaultCustom(relative.substringAfterLast('/')) && relative != "rime.lua"
 
     private fun inputMethodManager(): InputMethodManager? {
         return activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager

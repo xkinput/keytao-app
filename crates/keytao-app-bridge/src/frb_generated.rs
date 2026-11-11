@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -220597374;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 465916178;
 
 // Section: executor
 
@@ -211,6 +211,47 @@ fn wire__crate__api__core__account_sync_user_dictionary_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::core::account_sync_user_dictionary().await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__activate_scheme_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "activate_scheme",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_android_extract = decode_DartFn_Inputs_String_Output_String_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::core::activate_scheme(api_scheme_key, api_android_extract)
+                                .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -701,10 +742,16 @@ fn wire__crate__api__core__finish_android_install_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_result_json = <String>::sse_decode(&mut deserializer);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_version = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::core::finish_android_install(api_result_json)?;
+                    let output_ok = crate::api::core::finish_android_install(
+                        api_result_json,
+                        api_scheme_key,
+                        api_version,
+                    )?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1036,11 +1083,18 @@ fn wire__crate__api__core__install_scheme_from_url_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_url = <String>::sse_decode(&mut deserializer);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_version = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok = crate::api::core::install_scheme_from_url(api_url).await?;
+                        let output_ok = crate::api::core::install_scheme_from_url(
+                            api_url,
+                            api_scheme_key,
+                            api_version,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -1073,12 +1127,19 @@ fn wire__crate__api__core__install_scheme_to_dir_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_url = <String>::sse_decode(&mut deserializer);
             let api_dir = <String>::sse_decode(&mut deserializer);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_version = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::core::install_scheme_to_dir(api_url, api_dir).await?;
+                        let output_ok = crate::api::core::install_scheme_to_dir(
+                            api_url,
+                            api_dir,
+                            api_scheme_key,
+                            api_version,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -1179,6 +1240,38 @@ fn wire__crate__api__core__list_dir_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::core::list_dir(api_dir)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__list_installed_packages_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_installed_packages",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::list_installed_packages()?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1494,6 +1587,43 @@ fn wire__crate__api__core__remove_downloaded_archive_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::core::remove_downloaded_archive(api_path).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__remove_scheme_package_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "remove_scheme_package",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::core::remove_scheme_package(api_scheme_key).await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -1934,6 +2064,38 @@ fn wire__crate__api__core__windows_redeploy_ime_action_impl(
 
 // Section: related_funcs
 
+fn decode_DartFn_Inputs_String_Output_String_AnyhowException(
+    dart_opaque: flutter_rust_bridge::DartOpaque,
+) -> impl Fn(String) -> flutter_rust_bridge::DartFnFuture<String> {
+    use flutter_rust_bridge::IntoDart;
+
+    async fn body(dart_opaque: flutter_rust_bridge::DartOpaque, arg0: String) -> String {
+        let args = vec![arg0.into_into_dart().into_dart()];
+        let message = FLUTTER_RUST_BRIDGE_HANDLER
+            .dart_fn_invoke(dart_opaque, args)
+            .await;
+
+        let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+        let action = deserializer.cursor.read_u8().unwrap();
+        let ans = match action {
+            0 => std::result::Result::Ok(<String>::sse_decode(&mut deserializer)),
+            1 => std::result::Result::Err(
+                <flutter_rust_bridge::for_generated::anyhow::Error>::sse_decode(&mut deserializer),
+            ),
+            _ => unreachable!(),
+        };
+        deserializer.end();
+        let ans = ans.expect("Dart throws exception but Rust side assume it is not failable");
+        ans
+    }
+
+    move |arg0: String| {
+        flutter_rust_bridge::for_generated::convert_into_dart_fn_future(body(
+            dart_opaque.clone(),
+            arg0,
+        ))
+    }
+}
 fn decode_DartFn_Inputs__Output_String_AnyhowException(
     dart_opaque: flutter_rust_bridge::DartOpaque,
 ) -> impl Fn() -> flutter_rust_bridge::DartFnFuture<String> {
@@ -2378,6 +2540,22 @@ impl SseDecode for crate::api::types::InstallResultDto {
     }
 }
 
+impl SseDecode for crate::api::types::InstalledPackageDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_schemeKey = <String>::sse_decode(deserializer);
+        let mut var_version = <Option<String>>::sse_decode(deserializer);
+        let mut var_active = <bool>::sse_decode(deserializer);
+        let mut var_hasPackageZip = <bool>::sse_decode(deserializer);
+        return crate::api::types::InstalledPackageDto {
+            scheme_key: var_schemeKey,
+            version: var_version,
+            active: var_active,
+            has_package_zip: var_hasPackageZip,
+        };
+    }
+}
+
 impl SseDecode for isize {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2446,6 +2624,20 @@ impl SseDecode for Vec<crate::api::types::FileItemDto> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::types::FileItemDto>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::types::InstalledPackageDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::types::InstalledPackageDto>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -2919,115 +3111,122 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        6 => wire__crate__api__core__addon_schema_install_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__core__addon_schema_status_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__core__addon_schema_uninstall_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__core__cancel_scheme_download_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
-        16 => {
+        6 => wire__crate__api__core__activate_scheme_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__core__addon_schema_install_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__core__addon_schema_status_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__core__addon_schema_uninstall_impl(port, ptr, rust_vec_len, data_len),
+        10 => {
+            wire__crate__api__core__cancel_scheme_download_impl(port, ptr, rust_vec_len, data_len)
+        }
+        11 => wire__crate__api__core__check_app_update_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__core__check_local_schema_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__core__clear_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__core__complete_onboarding_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__core__core_events_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__core__deploy_default_impl(port, ptr, rust_vec_len, data_len),
+        17 => {
             wire__crate__api__core__download_scheme_archive_impl(port, ptr, rust_vec_len, data_len)
         }
-        17 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
-        19 => {
+        18 => wire__crate__api__core__fetch_latest_release_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__core__fetch_scheme_release_impl(port, ptr, rust_vec_len, data_len),
+        20 => {
             wire__crate__api__core__finish_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        20 => wire__crate__api__core__get_android_ime_input_settings_impl(
+        21 => wire__crate__api__core__get_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => {
+        22 => {
             wire__crate__api__core__get_component_versions_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => {
+        23 => {
             wire__crate__api__core__get_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        24 => {
+        24 => wire__crate__api__core__get_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__core__get_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
-        29 => {
+        26 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
+        30 => {
             wire__crate__api__core__install_scheme_from_url_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        31 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
+        35 => {
+            wire__crate__api__core__list_installed_packages_impl(port, ptr, rust_vec_len, data_len)
+        }
+        36 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
+        39 => {
             wire__crate__api__core__prepare_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        41 => {
+        40 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        43 => {
             wire__crate__api__core__record_installed_scheme_impl(port, ptr, rust_vec_len, data_len)
         }
-        42 => wire__crate__api__core__remove_downloaded_archive_impl(
+        44 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        45 => wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => {
+        47 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        45 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        48 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        47 => {
+        49 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        50 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        51 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        53 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__core__windows_pending_ime_action_impl(
+        54 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        56 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        57 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -3526,6 +3725,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::InstallResultDto>
     for crate::api::types::InstallResultDto
 {
     fn into_into_dart(self) -> crate::api::types::InstallResultDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::InstalledPackageDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.scheme_key.into_into_dart().into_dart(),
+            self.version.into_into_dart().into_dart(),
+            self.active.into_into_dart().into_dart(),
+            self.has_package_zip.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::InstalledPackageDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::InstalledPackageDto>
+    for crate::api::types::InstalledPackageDto
+{
+    fn into_into_dart(self) -> crate::api::types::InstalledPackageDto {
         self
     }
 }
@@ -4254,6 +4476,16 @@ impl SseEncode for crate::api::types::InstallResultDto {
     }
 }
 
+impl SseEncode for crate::api::types::InstalledPackageDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.scheme_key, serializer);
+        <Option<String>>::sse_encode(self.version, serializer);
+        <bool>::sse_encode(self.active, serializer);
+        <bool>::sse_encode(self.has_package_zip, serializer);
+    }
+}
+
 impl SseEncode for isize {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -4303,6 +4535,16 @@ impl SseEncode for Vec<crate::api::types::FileItemDto> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::types::FileItemDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::types::InstalledPackageDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::types::InstalledPackageDto>::sse_encode(item, serializer);
         }
     }
 }

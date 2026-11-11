@@ -28,6 +28,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  FutureOr<String> Function(String)
+  dco_decode_DartFn_Inputs_String_Output_String_AnyhowException(dynamic raw);
+
+  @protected
   FutureOr<String> Function()
   dco_decode_DartFn_Inputs__Output_String_AnyhowException(dynamic raw);
 
@@ -141,6 +145,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallResultDto dco_decode_install_result_dto(dynamic raw);
 
   @protected
+  InstalledPackageDto dco_decode_installed_package_dto(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_isize(dynamic raw);
 
   @protected
@@ -151,6 +158,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<FileItemDto> dco_decode_list_file_item_dto(dynamic raw);
+
+  @protected
+  List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -389,6 +399,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   InstallResultDto sse_decode_install_result_dto(SseDeserializer deserializer);
 
   @protected
+  InstalledPackageDto sse_decode_installed_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64 sse_decode_isize(SseDeserializer deserializer);
 
   @protected
@@ -401,6 +416,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<FileItemDto> sse_decode_list_file_item_dto(SseDeserializer deserializer);
+
+  @protected
+  List<InstalledPackageDto> sse_decode_list_installed_package_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -533,6 +553,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_DartFn_Inputs_String_Output_String_AnyhowException(
+    FutureOr<String> Function(String) self,
     SseSerializer serializer,
   );
 
@@ -711,6 +737,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_installed_package_dto(
+    InstalledPackageDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_isize(PlatformInt64 self, SseSerializer serializer);
 
   @protected
@@ -725,6 +757,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_file_item_dto(
     List<FileItemDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_installed_package_dto(
+    List<InstalledPackageDto> self,
     SseSerializer serializer,
   );
 

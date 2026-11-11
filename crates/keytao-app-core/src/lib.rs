@@ -13,6 +13,7 @@ pub mod ime_settings;
 pub mod ime_status;
 pub mod download;
 pub mod install;
+pub mod packages;
 pub mod scheme;
 pub mod scheme_files;
 pub mod scheme_host;
@@ -46,6 +47,7 @@ pub struct Core {
     state: Mutex<AppState>,
     download_cancel: tokio::sync::watch::Sender<u64>,
     recovered_state_file: Option<PathBuf>,
+    pub(crate) pending_package: Mutex<Option<packages::PendingPackage>>,
 }
 
 impl Core {
@@ -78,6 +80,7 @@ impl Core {
             state: Mutex::new(state),
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file,
+            pending_package: Mutex::new(None),
         }))
     }
 

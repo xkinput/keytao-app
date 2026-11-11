@@ -32,6 +32,14 @@ pub struct LocalSchemaDto {
     pub installed_scheme_version: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct InstalledPackageDto {
+    pub scheme_key: String,
+    pub version: Option<String>,
+    pub active: bool,
+    pub has_package_zip: bool,
+}
+
 pub struct LocalSchemasDto {
     pub has_default_custom: bool,
     pub schemas: Vec<String>,

@@ -1,6 +1,6 @@
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
-use std::{fs, io::ErrorKind, path::Path};
+use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
 
 const STATE_FILE: &str = "app-state.json";
 
@@ -18,6 +18,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_installed_scheme_migrates_and_saves_only_package_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{
+                "auth_token": "test-token",
+                "user": {"id": 7},
+                "onboarding_completed": true,
+                "legacy_imported": true,
+                "installed_scheme": "xmjd-feiding",
+                "installed_scheme_version": "v1"
+            }"#,
+        )
+        .unwrap();
+
+        let state = AppState::load(dir.path()).unwrap();
+        state.save(dir.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            saved["installed_packages"],
+            serde_json::json!({"xmjd-feiding": {"version": "v1"}})
+        );
+        assert_eq!(saved["active_scheme"], "xmjd-feiding");
+        assert!(saved.get("installed_scheme").is_none());
+        assert!(saved.get("installed_scheme_version").is_none());
+        assert_eq!(saved["auth_token"], "test-token");
+        assert_eq!(saved["user"], serde_json::json!({"id": 7}));
+        assert_eq!(saved["onboarding_initialized"], true);
+        assert!(AppState::load(dir.path()).unwrap() == state);
+        assert!(serde_json::from_str::<AppState>("{}").is_err());
+    }
+
+    #[test]
     fn state_without_installed_scheme_deserializes() {
         let state: AppState = serde_json::from_str(
             r#"{
@@ -29,8 +63,8 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(state.installed_scheme.is_none());
-        assert!(state.installed_scheme_version.is_none());
+        assert!(state.installed_packages.is_empty());
+        assert!(state.active_scheme.is_none());
     }
 
     #[test]
@@ -42,7 +76,13 @@ mod tests {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPackage {
+    pub version: Option<String>,
+}
+
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredAppState")]
 pub struct AppState {
     pub auth_token: Option<String>,
     pub user: Option<serde_json::Value>,
@@ -52,10 +92,51 @@ pub struct AppState {
     #[serde(default = "existing_onboarding_initialized")]
     pub onboarding_initialized: bool,
     pub legacy_imported: bool,
-    #[serde(default)]
-    pub installed_scheme: Option<String>,
-    #[serde(default)]
-    pub installed_scheme_version: Option<String>,
+    pub installed_packages: BTreeMap<String, InstalledPackage>,
+    pub active_scheme: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredAppState {
+    auth_token: Option<String>,
+    user: Option<serde_json::Value>,
+    onboarding_completed: bool,
+    #[serde(default = "existing_onboarding_initialized")]
+    onboarding_initialized: bool,
+    legacy_imported: bool,
+    installed_packages: Option<BTreeMap<String, InstalledPackage>>,
+    active_scheme: Option<String>,
+    installed_scheme: Option<String>,
+    installed_scheme_version: Option<String>,
+}
+
+impl From<StoredAppState> for AppState {
+    fn from(state: StoredAppState) -> Self {
+        let (installed_packages, active_scheme) = match state.installed_packages {
+            Some(packages) => (packages, state.active_scheme),
+            None => {
+                let mut packages = BTreeMap::new();
+                if let Some(scheme) = state.installed_scheme.as_ref() {
+                    packages.insert(
+                        scheme.clone(),
+                        InstalledPackage {
+                            version: state.installed_scheme_version,
+                        },
+                    );
+                }
+                (packages, state.installed_scheme)
+            }
+        };
+        Self {
+            auth_token: state.auth_token,
+            user: state.user,
+            onboarding_completed: state.onboarding_completed,
+            onboarding_initialized: state.onboarding_initialized,
+            legacy_imported: state.legacy_imported,
+            installed_packages,
+            active_scheme,
+        }
+    }
 }
 
 fn existing_onboarding_initialized() -> bool {

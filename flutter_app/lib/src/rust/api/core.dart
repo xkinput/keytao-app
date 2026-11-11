@@ -36,6 +36,23 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
       version: version,
     );
 
+Future<List<InstalledPackageDto>> listInstalledPackages() =>
+    RustLib.instance.api.crateApiCoreListInstalledPackages();
+
+/// Android extraction must return the platform result as JSON and must not
+/// re-enter install/deploy bridge calls while the install lock is held.
+/// Other platforms ignore the callback. Activation does not deploy the IME.
+Future<InstallResultDto> activateScheme({
+  required String schemeKey,
+  required FutureOr<String> Function(String) androidExtract,
+}) => RustLib.instance.api.crateApiCoreActivateScheme(
+  schemeKey: schemeKey,
+  androidExtract: androidExtract,
+);
+
+Future<void> removeSchemePackage({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreRemoveSchemePackage(schemeKey: schemeKey);
+
 /// The persisted account, if a token is stored. The token never leaves Rust.
 Future<AccountUserDto?> accountSession() =>
     RustLib.instance.api.crateApiCoreAccountSession();
@@ -91,7 +108,14 @@ Future<void> cancelSchemeDownload() =>
 Future<InstallResultDto> installSchemeToDir({
   required String url,
   required String dir,
-}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(url: url, dir: dir);
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(
+  url: url,
+  dir: dir,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Android SAF sequence: confirm storage permission, pickDirectory,
 /// then listFiles/readLocalSchemas through the platform channel. Download here,
@@ -104,15 +128,21 @@ Future<InstallResultDto> installSchemeToDir({
 Future<String> downloadSchemeArchive({required String url}) =>
     RustLib.instance.api.crateApiCoreDownloadSchemeArchive(url: url);
 
-/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
-/// files are already clean (Kotlin removes the zip on success). Resolves parent
-/// directories and rejects symlink files before deleting inside the cache.
+/// Cleans up the download after extraction and package recording. Resolves
+/// parent directories and rejects symlink files before deleting inside cache.
 Future<void> removeDownloadedArchive({required String path}) =>
     RustLib.instance.api.crateApiCoreRemoveDownloadedArchive(path: path);
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
-Future<InstallResultDto> installSchemeFromUrl({required String url}) =>
-    RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(url: url);
+Future<InstallResultDto> installSchemeFromUrl({
+  required String url,
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(
+  url: url,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Call only after the Android channel confirms storage permission. Dart must
 /// serialize prepare -> smartExtractZipToPrivate -> finish as one installation.
@@ -120,10 +150,15 @@ Future<String> prepareAndroidInstall({required String url}) =>
     RustLib.instance.api.crateApiCorePrepareAndroidInstall(url: url);
 
 /// Pass jsonEncode of the Android channel's smart-extract result unchanged.
-Future<InstallResultDto> finishAndroidInstall({required String resultJson}) =>
-    RustLib.instance.api.crateApiCoreFinishAndroidInstall(
-      resultJson: resultJson,
-    );
+Future<InstallResultDto> finishAndroidInstall({
+  required String resultJson,
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreFinishAndroidInstall(
+  resultJson: resultJson,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Android deployment belongs to the deployImeData platform channel.
 Future<DeployResultDto> deployDefault() =>
