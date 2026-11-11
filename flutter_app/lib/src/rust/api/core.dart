@@ -39,6 +39,68 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<List<UserWordDto>> listUserWords({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreListUserWords(schemeKey: schemeKey);
+
+Future<UserWordMutationDto> addUserWord({
+  required String schemeKey,
+  required String word,
+  required String code,
+  String? weight,
+}) => RustLib.instance.api.crateApiCoreAddUserWord(
+  schemeKey: schemeKey,
+  word: word,
+  code: code,
+  weight: weight,
+);
+
+Future<UserWordMutationDto> updateUserWord({
+  required String schemeKey,
+  required int id,
+  required String expectedWord,
+  required String expectedCode,
+  required String word,
+  required String code,
+  String? weight,
+}) => RustLib.instance.api.crateApiCoreUpdateUserWord(
+  schemeKey: schemeKey,
+  id: id,
+  expectedWord: expectedWord,
+  expectedCode: expectedCode,
+  word: word,
+  code: code,
+  weight: weight,
+);
+
+Future<void> deleteUserWord({
+  required String schemeKey,
+  required int id,
+  required String expectedWord,
+  required String expectedCode,
+}) => RustLib.instance.api.crateApiCoreDeleteUserWord(
+  schemeKey: schemeKey,
+  id: id,
+  expectedWord: expectedWord,
+  expectedCode: expectedCode,
+);
+
+Future<List<UserWordComparisonDto>> compareUserWords({
+  required String schemeKey,
+}) => RustLib.instance.api.crateApiCoreCompareUserWords(schemeKey: schemeKey);
+
+Future<UserWordComparisonDto> lookupUserWord({
+  required String schemeKey,
+  required String word,
+  required String code,
+}) => RustLib.instance.api.crateApiCoreLookupUserWord(
+  schemeKey: schemeKey,
+  word: word,
+  code: code,
+);
+
+Future<UserWordsReportDto> takeUserWordsReport({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreTakeUserWordsReport(schemeKey: schemeKey);
+
 Future<void> downloadSchemePackage({
   required String schemeKey,
   required String source,

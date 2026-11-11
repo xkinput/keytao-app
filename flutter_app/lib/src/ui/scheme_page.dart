@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
+import 'user_words.dart';
 import 'widgets.dart';
 
 class SchemePage extends StatelessWidget {
@@ -21,6 +22,8 @@ class SchemePage extends StatelessWidget {
       controller: c,
       page: AppPage.scheme,
       children: [
+        if (c.userWordsReport != null || c.userWordsReportError != null)
+          UserWordsNotice(controller: c),
         Section(
           title: AppStrings.schemeTitle,
           icon: FLucideIcons.download,
@@ -163,6 +166,14 @@ class SchemePackageRow extends StatelessWidget {
               ),
             if (update != null)
               FBadge(child: Text('→ ${update.latestVersion}')),
+            if (package != null)
+              ActionButton(
+                '自造词',
+                icon: FLucideIcons.bookOpen,
+                onPress: c.busy
+                    ? null
+                    : () => openUserWords(context, c, schemeKey: schemeKey),
+              ),
           ],
         ),
         if (package == null || !active || update != null || activeLegacy) ...[

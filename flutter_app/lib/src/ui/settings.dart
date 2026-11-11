@@ -5,6 +5,7 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'color_picker.dart';
+import 'user_words.dart';
 import 'widgets.dart';
 
 class SettingsCard extends StatelessWidget {
@@ -308,6 +309,20 @@ class _AccountCardState extends State<AccountCard> {
       title: AppStrings.account,
       icon: FLucideIcons.user,
       children: [
+        ActionRow(
+          children: [
+            ActionButton(
+              '自造词',
+              icon: FLucideIcons.bookOpen,
+              onPress:
+                  c.busy ||
+                      (c.installedPackages.isEmpty &&
+                          c.local?.installed != true)
+                  ? null
+                  : () => openUserWords(context, c),
+            ),
+          ],
+        ),
         if (c.accountUser == null) ...[
           FTextField(
             label: const Text(AppStrings.username),
@@ -335,15 +350,6 @@ class _AccountCardState extends State<AccountCard> {
           if (name != null) Text(name),
           ActionRow(
             children: [
-              ActionButton(
-                c.syncingDictionary
-                    ? AppStrings.syncing
-                    : AppStrings.syncUserDictionary,
-                primary: true,
-                onPress: c.busy || c.syncingDictionary
-                    ? null
-                    : c.syncUserDictionary,
-              ),
               ActionButton(
                 AppStrings.logout,
                 onPress: c.syncingDictionary ? null : c.logout,

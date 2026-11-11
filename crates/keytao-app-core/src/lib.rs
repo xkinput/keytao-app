@@ -19,6 +19,7 @@ pub mod scheme_files;
 pub mod scheme_host;
 pub mod scheme_types;
 pub mod update;
+pub mod user_words;
 pub mod wanxiang;
 #[cfg(target_os = "windows")]
 pub mod windows_public_schemas;
@@ -48,6 +49,7 @@ pub struct Core {
     download_cancel: tokio::sync::watch::Sender<u64>,
     recovered_state_file: Option<PathBuf>,
     pub(crate) pending_package: Mutex<Option<packages::PendingPackage>>,
+    pub(crate) user_words: Mutex<user_words::UserWordsState>,
 }
 
 impl Core {
@@ -81,6 +83,7 @@ impl Core {
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file,
             pending_package: Mutex::new(None),
+            user_words: Mutex::new(user_words::UserWordsState::default()),
         }))
     }
 

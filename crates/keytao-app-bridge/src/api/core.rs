@@ -2,7 +2,7 @@ use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime
 use flutter_rust_bridge::DartFnFuture;
 use keytao_app_core::scheme_host::SchemeHost;
 #[cfg(not(target_os = "android"))]
-use keytao_app_core::{events::InstallProgress, CoreEvent};
+use keytao_app_core::{CoreEvent, events::InstallProgress};
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
@@ -72,12 +72,138 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     )
 }
 
+pub async fn list_user_words(scheme_key: String) -> Result<Vec<UserWordDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::list_user_words(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn add_user_word(
+    scheme_key: String,
+    word: String,
+    code: String,
+    weight: Option<String>,
+) -> Result<UserWordMutationDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::add_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            &word,
+            &code,
+            weight,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn update_user_word(
+    scheme_key: String,
+    id: u32,
+    expected_word: String,
+    expected_code: String,
+    word: String,
+    code: String,
+    weight: Option<String>,
+) -> Result<UserWordMutationDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::update_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            id,
+            &expected_word,
+            &expected_code,
+            &word,
+            &code,
+            weight,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn delete_user_word(
+    scheme_key: String,
+    id: u32,
+    expected_word: String,
+    expected_code: String,
+) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::user_words::delete_user_word(
+        &state.core,
+        &scheme_key,
+        &state.host.user_root()?,
+        id,
+        &expected_word,
+        &expected_code,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub async fn compare_user_words(scheme_key: String) -> Result<Vec<UserWordComparisonDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::compare_user_words(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn lookup_user_word(
+    scheme_key: String,
+    word: String,
+    code: String,
+) -> Result<UserWordComparisonDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::lookup_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            &word,
+            &code,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn take_user_words_report(scheme_key: String) -> Result<UserWordsReportDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::take_user_words_report(&state.core, &scheme_key)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
 pub async fn download_scheme_package(scheme_key: String, source: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    keytao_app_core::packages::download_scheme_package(&state.core, &scheme_key, &source)
-        .await
-        .map_err(|error| error.to_string())
+    keytao_app_core::packages::download_scheme_package(
+        &state.core,
+        &scheme_key,
+        &source,
+        &state.host.user_root()?,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 pub async fn check_scheme_updates() -> Result<Vec<SchemeUpdateDto>, String> {

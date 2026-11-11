@@ -178,6 +178,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
 
   @protected
+  List<UserWordComparisonDto> dco_decode_list_user_word_comparison_dto(
+    dynamic raw,
+  );
+
+  @protected
+  List<UserWordDto> dco_decode_list_user_word_dto(dynamic raw);
+
+  @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
 
   @protected
@@ -266,6 +274,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   UserDictionarySyncDto dco_decode_user_dictionary_sync_dto(dynamic raw);
+
+  @protected
+  UserWordComparisonDto dco_decode_user_word_comparison_dto(dynamic raw);
+
+  @protected
+  UserWordDto dco_decode_user_word_dto(dynamic raw);
+
+  @protected
+  UserWordMutationDto dco_decode_user_word_mutation_dto(dynamic raw);
+
+  @protected
+  UserWordsReportDto dco_decode_user_words_report_dto(dynamic raw);
 
   @protected
   BigInt dco_decode_usize(dynamic raw);
@@ -459,6 +479,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<UserWordComparisonDto> sse_decode_list_user_word_comparison_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<UserWordDto> sse_decode_list_user_word_dto(SseDeserializer deserializer);
+
+  @protected
   List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
     SseDeserializer deserializer,
   );
@@ -567,6 +595,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   UserDictionarySyncDto sse_decode_user_dictionary_sync_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordComparisonDto sse_decode_user_word_comparison_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordDto sse_decode_user_word_dto(SseDeserializer deserializer);
+
+  @protected
+  UserWordMutationDto sse_decode_user_word_mutation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordsReportDto sse_decode_user_words_report_dto(
     SseDeserializer deserializer,
   );
 
@@ -833,6 +879,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_user_word_comparison_dto(
+    List<UserWordComparisonDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_user_word_dto(
+    List<UserWordDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_verify_entry_dto(
     List<VerifyEntryDto> self,
     SseSerializer serializer,
@@ -973,6 +1031,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_user_dictionary_sync_dto(
     UserDictionarySyncDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_word_comparison_dto(
+    UserWordComparisonDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_word_dto(UserWordDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_user_word_mutation_dto(
+    UserWordMutationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_words_report_dto(
+    UserWordsReportDto self,
     SseSerializer serializer,
   );
 

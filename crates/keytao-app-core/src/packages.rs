@@ -48,6 +48,7 @@ fn has_scheme_update(installed: &str, latest: &str) -> bool {
 async fn download_scheme_package_with<Fetch, FetchFuture, Download, DownloadFuture>(
     core: &Core,
     scheme_key: &str,
+    user_root: &Path,
     fetch: Fetch,
     download: Download,
 ) -> Result<(), CoreError>
@@ -94,6 +95,7 @@ where
                 },
             );
         })?;
+        crate::user_words::remember_reconciliation(core, scheme_key, user_root, false);
         core.emit(crate::CoreEvent::InstallProgress(
             crate::events::InstallProgress {
                 stage: "done".into(),
@@ -151,10 +153,12 @@ pub async fn download_scheme_package(
     core: &Core,
     scheme_key: &str,
     source: &str,
+    user_root: &Path,
 ) -> Result<(), CoreError> {
     download_scheme_package_with(
         core,
         scheme_key,
+        user_root,
         || latest_package_release(core, scheme_key, source),
         |url| crate::download::download_to_temp(core, url),
     )
@@ -336,6 +340,13 @@ pub fn record_package(
             .unwrap_or_else(|error| error.into_inner()) = None;
         return Ok(());
     }
+    let installed_root = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .filter(|receipt| !receipt.root.is_empty())
+        .map(|receipt| PathBuf::from(&receipt.root));
     finalize_pending(core, scheme_key, version, active)?;
     core.update_state(|state| {
         state.installed_packages.insert(
@@ -347,7 +358,11 @@ pub fn record_package(
         if active {
             state.active_scheme = Some(scheme_key.into());
         }
-    })
+    })?;
+    if let Some(root) = installed_root {
+        crate::user_words::remember_reconciliation(core, scheme_key, &root, true);
+    }
+    Ok(())
 }
 
 pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>, CoreError> {
@@ -660,6 +675,7 @@ mod tests {
         let error = download_scheme_package_with(
             &core,
             "keytao",
+            &dir.path().join("rime"),
             || async { panic!("Active package download must not fetch a release") },
             |_| async { panic!("Active package download must not download an archive") },
         )
@@ -702,6 +718,7 @@ mod tests {
         download_scheme_package_with(
             &core,
             "xmjd",
+            &rime,
             || std::future::ready(Ok(("20261105".into(), "local-source".into()))),
             |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
         )
@@ -736,6 +753,100 @@ mod tests {
         assert_eq!(meta.version.as_deref(), Some("20261105"));
         assert_eq!(meta.manifest.len(), 1);
         assert!(!store_dir(&core).join("active-manifest.json").exists());
+    }
+
+    fn user_words_package() -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (path, content) in [
+            (
+                "txjx.schema.yaml",
+                "translator:\n  dictionary: txjx.extended\n",
+            ),
+            (
+                "txjx.extended.dict.yaml",
+                "---\nname: txjx.extended\nimport_tables: [txjx.phrases, txjx.user]\n...\n",
+            ),
+            (
+                "txjx.phrases.dict.yaml",
+                "---\nname: txjx.phrases\n...\nOfficial\taa\nOther\tbb\n",
+            ),
+            ("txjx.user.dict.yaml", "---\nname: txjx.user\n...\n"),
+        ] {
+            archive
+                .start_file(path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    fn write_reconciliation_words(root: &Path) {
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("txjx.user.dict.yaml"),
+            "---\nname: txjx.user\n...\n# Keep this comment\nOfficial\taa\nCustom\tbb\nMine\tcc\n",
+        )
+        .unwrap();
+    }
+
+    fn assert_reconciliation_report(core: &Core, root: &Path) {
+        assert_eq!(
+            fs::read_to_string(root.join("txjx.user.dict.yaml")).unwrap(),
+            "---\nname: txjx.user\n...\n# Keep this comment\nCustom\tbb\nMine\tcc\n"
+        );
+        let report = crate::user_words::take_user_words_report(core, "txjx").unwrap();
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.removed[0].word, "Official");
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].entry.word, "Custom");
+    }
+
+    #[test]
+    fn active_package_record_reconciles_once_and_retains_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        write_reconciliation_words(&root);
+        stage_install(
+            &core,
+            &user_words_package(),
+            BTreeMap::new(),
+            root.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        record_package(&core, "txjx", Some("v2"), true).unwrap();
+        record_package(&core, "txjx", Some("v2"), true).unwrap();
+        assert_reconciliation_report(&core, &root);
+    }
+
+    #[tokio::test]
+    async fn inactive_package_download_reconciles_without_changing_active_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        record_package(&core, "keytao", Some("v1"), true).unwrap();
+        let root = dir.path().join("rime");
+        write_reconciliation_words(&root);
+        let original = fs::read(root.join("txjx.user.dict.yaml")).unwrap();
+        let archive = dir.path().join("new-package.zip");
+        fs::write(&archive, user_words_package()).unwrap();
+        download_scheme_package_with(
+            &core,
+            "txjx",
+            &root,
+            || std::future::ready(Ok(("v2".into(), "local".into()))),
+            |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(core.state().active_scheme.as_deref(), Some("keytao"));
+        assert_eq!(
+            fs::read(root.join("txjx.user.dict.yaml")).unwrap(),
+            original
+        );
+        let report = crate::user_words::take_user_words_report(&core, "txjx").unwrap();
+        assert!(report.removed.is_empty());
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].entry.word, "Custom");
     }
 
     #[tokio::test]

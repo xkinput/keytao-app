@@ -1036,6 +1036,96 @@ class UserDictionarySyncDto {
           message == other.message;
 }
 
+class UserWordComparisonDto {
+  final UserWordDto entry;
+  final String status;
+  final List<String> words;
+  final List<String> codes;
+
+  const UserWordComparisonDto({
+    required this.entry,
+    required this.status,
+    required this.words,
+    required this.codes,
+  });
+
+  @override
+  int get hashCode =>
+      entry.hashCode ^ status.hashCode ^ words.hashCode ^ codes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordComparisonDto &&
+          runtimeType == other.runtimeType &&
+          entry == other.entry &&
+          status == other.status &&
+          words == other.words &&
+          codes == other.codes;
+}
+
+class UserWordDto {
+  final int id;
+  final String word;
+  final String code;
+  final String? weight;
+
+  const UserWordDto({
+    required this.id,
+    required this.word,
+    required this.code,
+    this.weight,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ word.hashCode ^ code.hashCode ^ weight.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          word == other.word &&
+          code == other.code &&
+          weight == other.weight;
+}
+
+class UserWordMutationDto {
+  final bool alreadyExists;
+
+  const UserWordMutationDto({required this.alreadyExists});
+
+  @override
+  int get hashCode => alreadyExists.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordMutationDto &&
+          runtimeType == other.runtimeType &&
+          alreadyExists == other.alreadyExists;
+}
+
+class UserWordsReportDto {
+  final List<UserWordDto> removed;
+  final List<UserWordComparisonDto> conflicts;
+
+  const UserWordsReportDto({required this.removed, required this.conflicts});
+
+  @override
+  int get hashCode => removed.hashCode ^ conflicts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordsReportDto &&
+          runtimeType == other.runtimeType &&
+          removed == other.removed &&
+          conflicts == other.conflicts;
+}
+
 class VerifyEntryDto {
   final String path;
   final bool ok;

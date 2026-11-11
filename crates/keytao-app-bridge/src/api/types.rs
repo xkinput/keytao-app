@@ -48,6 +48,33 @@ pub struct SchemeUpdateDto {
     pub has_update: bool,
 }
 
+#[derive(serde::Deserialize)]
+pub struct UserWordDto {
+    pub id: u32,
+    pub word: String,
+    pub code: String,
+    pub weight: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordComparisonDto {
+    pub entry: UserWordDto,
+    pub status: String,
+    pub words: Vec<String>,
+    pub codes: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordMutationDto {
+    pub already_exists: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordsReportDto {
+    pub removed: Vec<UserWordDto>,
+    pub conflicts: Vec<UserWordComparisonDto>,
+}
+
 pub struct LocalSchemasDto {
     pub has_default_custom: bool,
     pub schemas: Vec<String>,

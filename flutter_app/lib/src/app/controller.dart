@@ -117,7 +117,8 @@ class AppController extends ChangeNotifier {
   bool get showsEmbeddedComposition =>
       isWindows || info.platform == BridgePlatform.macOs;
   bool _busy = false;
-  bool get busy => _busy || windowsRegistrationBusy;
+  bool get busy =>
+      _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;
   set busy(bool value) => _busy = value;
   bool _platformStarted = false;
   bool _windowsActionRequested = false;
@@ -144,6 +145,12 @@ class AppController extends ChangeNotifier {
   List<SchemeUpdateDto> schemeUpdates = [];
   Map<String, String> dismissedSchemeUpdates = {};
   bool schemeUpdatesLoading = false;
+  final Set<String> userWordsPendingDeploy = {};
+  int userWordsRevision = 0;
+  final Set<String> _pendingUserWordDeletes = {};
+  String? userWordsReportScheme;
+  UserWordsReportDto? userWordsReport;
+  String? userWordsReportError;
   String? packageError;
   String? releaseError;
   String? installError;
@@ -208,6 +215,71 @@ class AppController extends ChangeNotifier {
       if (package.schemeKey == key) return package;
     }
     return null;
+  }
+
+  String get activeSchemeKey {
+    for (final package in installedPackages) {
+      if (package.active) return package.schemeKey;
+    }
+    return local == null
+        ? scheme
+        : installedSchemeKey(local!.schemas, local!.installedScheme) ?? scheme;
+  }
+
+  void markUserWordsChanged(String key) {
+    userWordsRevision++;
+    if (userWordsAffectActiveScheme(key)) {
+      userWordsPendingDeploy.add(activeSchemeKey);
+    }
+    _changed();
+  }
+
+  bool userWordsAffectActiveScheme(String key) =>
+      key == activeSchemeKey ||
+      (const {'xmjd', 'xmjd-feiding'}.contains(key) &&
+          const {'xmjd', 'xmjd-feiding'}.contains(activeSchemeKey));
+
+  void setUserWordDeletePending(String key, bool pending) {
+    if (pending) {
+      _pendingUserWordDeletes.add(key);
+    } else {
+      _pendingUserWordDeletes.remove(key);
+      if (_refreshWhenIdle && !_disposed) {
+        _refreshWhenIdle = false;
+        unawaited(refreshState());
+      } else if (_logsWhenIdle && !_disposed) {
+        _logsWhenIdle = false;
+        if (activePage == AppPage.debug) unawaited(refreshLogs());
+      }
+      unawaited(_handleWindowsAction());
+    }
+    _changed();
+  }
+
+  void dismissUserWordsReport() {
+    userWordsReport = null;
+    userWordsReportScheme = null;
+    userWordsReportError = null;
+    _changed();
+  }
+
+  Future<void> _readUserWordsReport(String key) async {
+    try {
+      final report = await core.takeUserWordsReport(schemeKey: key);
+      if (report.removed.isNotEmpty || report.conflicts.isNotEmpty) {
+        userWordsReportScheme = key;
+        userWordsReport = report;
+      } else {
+        userWordsReportScheme = null;
+        userWordsReport = null;
+      }
+      userWordsReportError = null;
+    } catch (failure) {
+      userWordsReportScheme = key;
+      userWordsReport = null;
+      userWordsReportError = errorText(failure);
+      addOperationLogs(['[WARN] $userWordsReportError']);
+    }
   }
 
   SchemeUpdateDto? schemeUpdateFor(String key) {
@@ -1036,6 +1108,7 @@ class AppController extends ChangeNotifier {
       _invalidateSchemeUpdates();
       await _readInstalledPackages();
       await _readLocal();
+      await _readUserWordsReport(installing);
       progress = AppStrings.installDone;
       final broken = [
         for (final line in result.logs.expand((log) => log.split('\n')))
@@ -1112,6 +1185,7 @@ class AppController extends ChangeNotifier {
       await core.downloadSchemePackage(schemeKey: key, source: source);
       _invalidateSchemeUpdates();
       await _readInstalledPackages();
+      await _readUserWordsReport(key);
       progress = AppStrings.installDone;
     } catch (failure) {
       final message = errorText(failure);
@@ -1159,6 +1233,7 @@ class AppController extends ChangeNotifier {
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
         await _readLocal();
+        await _readUserWordsReport(key);
         await refreshRelease();
       } catch (failure) {
         packageError = errorText(failure);
@@ -1231,6 +1306,7 @@ class AppController extends ChangeNotifier {
         throw StateError(AppStrings.deployCheckFailed);
       }
       _deployStep(message, DeployStepState.ok);
+      userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
       progress = message;
     } catch (failure) {
