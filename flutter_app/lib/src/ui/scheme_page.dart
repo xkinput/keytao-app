@@ -8,12 +8,29 @@ import 'settings.dart' show runCloudAccountAction;
 import 'user_words.dart';
 import 'widgets.dart';
 
-class SchemePage extends StatelessWidget {
+class SchemePage extends StatefulWidget {
   const SchemePage({super.key, required this.controller});
   final AppController controller;
+
+  @override
+  State<SchemePage> createState() => _SchemePageState();
+}
+
+class _SchemePageState extends State<SchemePage> {
+  String? _activatingScheme;
+
+  Future<void> _activate(String key) async {
+    setState(() => _activatingScheme = key);
+    try {
+      await widget.controller.activateSchemePackage(key);
+    } finally {
+      if (mounted) setState(() => _activatingScheme = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final c = controller;
+    final c = widget.controller;
     final xmjdScheme = c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd';
     final schemeKeys = <String>{
       for (final key in schemes.keys) key == 'xmjd' ? xmjdScheme : key,
@@ -44,7 +61,12 @@ class SchemePage extends StatelessWidget {
           ),
           children: [
             for (final key in schemeKeys)
-              SchemePackageRow(controller: c, schemeKey: key),
+              SchemePackageRow(
+                controller: c,
+                schemeKey: key,
+                activating: _activatingScheme == key,
+                onActivate: () => _activate(key),
+              ),
             if (c.schemeUpdatesLoading) const FProgress(),
             if (c.packageError case final error?) ErrorMessage(error),
             if (c.schemeSyncError case final error?) ErrorMessage(error),
@@ -120,9 +142,13 @@ class SchemePackageRow extends StatelessWidget {
     super.key,
     required this.controller,
     required this.schemeKey,
+    this.activating = false,
+    this.onActivate,
   });
   final AppController controller;
   final String schemeKey;
+  final bool activating;
+  final VoidCallback? onActivate;
 
   @override
   Widget build(BuildContext context) {
@@ -131,6 +157,11 @@ class SchemePackageRow extends StatelessWidget {
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
+    final deploying = activating || (active && c.isDeploying);
+    final deployFailed = c.deploySteps.any(
+      (step) => step.state == DeployStepState.failed,
+    );
+    final needsDeploy = active && (deployFailed || c.local?.deployed != true);
     return Column(
       key: ValueKey('scheme-package-$schemeKey'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -156,14 +187,28 @@ class SchemePackageRow extends StatelessWidget {
             runSpacing: 6,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              if (active)
+              if (deploying)
+                Row(
+                  children: [
+                    const SizedBox.square(
+                      dimension: 18,
+                      child: FCircularProgress(),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: InstallProgressView(
+                        active: true,
+                        progress: c.installProgress,
+                        fraction: c.installFraction,
+                        message: c.progress,
+                      ),
+                    ),
+                  ],
+                )
+              else if (active)
                 FBadge(
                   child: Text(
-                    c.isDeploying
-                        ? '部署中'
-                        : c.deploySteps.any(
-                            (step) => step.state == DeployStepState.failed,
-                          )
+                    deployFailed
                         ? '部署失败'
                         : c.local?.deployed == true
                         ? '使用中'
@@ -191,11 +236,38 @@ class SchemePackageRow extends StatelessWidget {
         ],
         if (schemeKey == (c.schemeFamily == 'xmjd' ? c.scheme : 'xmjd')) ...[
           const SizedBox(height: 8),
-          ChoiceSetting<String>(
-            label: schemes['xmjd']!,
-            value: schemeKey,
-            options: const {'xmjd': '顶功', 'xmjd-feiding': '非顶'},
-            onChanged: c.busy ? null : c.selectScheme,
+          Semantics(
+            enabled: !c.busy,
+            child: ExcludeFocus(
+              excluding: c.busy,
+              child: IgnorePointer(
+                ignoring: c.busy,
+                child: Opacity(
+                  opacity: c.busy ? .5 : 1,
+                  child: FTabs(
+                    control: FTabControl.lifted(
+                      index: schemeKey == 'xmjd' ? 0 : 1,
+                      onChange: (index) =>
+                          c.selectScheme(index == 0 ? 'xmjd' : 'xmjd-feiding'),
+                    ),
+                    style: const FTabsStyleDelta.delta(
+                      spacing: 0,
+                      minHeight: 32,
+                    ),
+                    children: const [
+                      FTabEntry(
+                        label: Text('顶功', style: TextStyle(fontSize: 12)),
+                        child: SizedBox.shrink(),
+                      ),
+                      FTabEntry(
+                        label: Text('非顶', style: TextStyle(fontSize: 12)),
+                        child: SizedBox.shrink(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
         const SizedBox(height: 10),
@@ -266,14 +338,14 @@ class SchemePackageRow extends StatelessWidget {
             if (update != null)
               ActionButton(
                 '更新',
-                primary: true,
+                primary: !needsDeploy,
                 icon: FLucideIcons.arrowUpCircle,
                 onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
               ),
             if (package == null || activeLegacy)
               ActionButton(
                 activeLegacy ? '重新下载' : '下载',
-                primary: true,
+                primary: !needsDeploy,
                 icon: FLucideIcons.download,
                 onPress: c.busy
                     ? null
@@ -288,9 +360,9 @@ class SchemePackageRow extends StatelessWidget {
                     : FLucideIcons.download,
                 onPress: c.busy
                     ? null
-                    : () => package.hasPackageZip
-                          ? c.activateSchemePackage(schemeKey)
-                          : c.downloadSchemePackage(schemeKey),
+                    : package.hasPackageZip
+                    ? onActivate ?? () => c.activateSchemePackage(schemeKey)
+                    : () => c.downloadSchemePackage(schemeKey),
               ),
               ActionButton(
                 '删除',
@@ -298,6 +370,13 @@ class SchemePackageRow extends StatelessWidget {
                 onPress: c.busy ? null : () => c.removeSchemePackage(schemeKey),
               ),
             ],
+            if (needsDeploy)
+              ActionButton(
+                AppStrings.deploy,
+                primary: true,
+                icon: FLucideIcons.play,
+                onPress: c.canDeploy ? c.deploy : null,
+              ),
           ],
         ),
         if (package != null) ...[
