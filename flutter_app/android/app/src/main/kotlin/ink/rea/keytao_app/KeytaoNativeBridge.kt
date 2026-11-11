@@ -4,6 +4,13 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class ProtectedFileInstall(
+    val isProtected: Boolean,
+    val write: Boolean,
+    val backupName: String?,
+    val log: String?,
+)
+
 object KeytaoNativeBridge {
     private const val libraryName = "keytao_app_bridge"
 
@@ -73,6 +80,20 @@ object KeytaoNativeBridge {
                 val pair = renames.getJSONArray(index)
                 pair.getString(0) to pair.getString(1)
             },
+        )
+    }
+
+    fun prepareProtectedFileInstall(relative: String, existing: ByteArray?): ProtectedFileInstall {
+        check(loaded) { "KeyTao native bridge is unavailable" }
+        val json = runCatching { nativePrepareProtectedFileInstall(relative, existing) }
+            .getOrElse { throw IllegalStateException("Failed to prepare protected file installation", it) }
+            ?: error("Failed to prepare protected file installation")
+        val result = JSONObject(json)
+        return ProtectedFileInstall(
+            result.getBoolean("protected"),
+            result.getBoolean("write"),
+            if (result.isNull("backup_name")) null else result.getString("backup_name"),
+            if (result.isNull("log")) null else result.getString("log"),
         )
     }
 
@@ -329,6 +350,8 @@ object KeytaoNativeBridge {
         packageContent: String?,
         packageLuaFilenamesJson: String,
     ): String?
+
+    external fun nativePrepareProtectedFileInstall(relative: String, existing: ByteArray?): String?
 
     external fun nativeResolveKeyboardJson(
         defaultKeyboardPath: String?,

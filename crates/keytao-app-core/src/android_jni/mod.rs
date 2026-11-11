@@ -2,7 +2,7 @@
 //! The host owns the cdylib; this module owns the IME runtime and JNI boundary.
 
 use jni::{
-    objects::{JObject, JString},
+    objects::{JByteArray, JObject, JString},
     sys::{jboolean, jint, jlong, jstring},
     JNIEnv,
 };
@@ -555,6 +555,39 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDefault
     android_jni_guard("nativeDefaultKeyboardYaml", std::ptr::null_mut(), || {
         jni_string(&mut env, keytao_theme::default_keyboard_yaml())
     })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareProtectedFileInstall(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    relative: JString<'_>,
+    existing: JByteArray<'_>,
+) -> jstring {
+    android_jni_guard(
+        "nativePrepareProtectedFileInstall",
+        std::ptr::null_mut(),
+        || {
+            let Some(relative) = optional_jni_raw_text(&mut env, relative) else {
+                return std::ptr::null_mut();
+            };
+            let existing = if existing.is_null() {
+                None
+            } else {
+                let Ok(bytes) = env.convert_byte_array(&existing) else {
+                    return std::ptr::null_mut();
+                };
+                Some(bytes)
+            };
+            let decision =
+                crate::install::prepare_protected_file_install(&relative, existing.as_deref());
+            let Ok(json) = serde_json::to_string(&decision) else {
+                return std::ptr::null_mut();
+            };
+            jni_string(&mut env, &json)
+        },
+    )
 }
 
 #[cfg(target_os = "android")]

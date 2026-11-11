@@ -57,6 +57,7 @@ pub(crate) fn excluded_from_manifest(relative: &str) -> bool {
         relative.rsplit('/').next().unwrap_or(relative),
         "default.custom.yaml" | "default-custom.yaml"
     ) || relative == "rime.lua"
+        || crate::install::is_protected_user_file(relative)
 }
 
 pub(crate) fn stage_install(
@@ -370,7 +371,10 @@ pub(crate) fn cleanup_manifest(
         safe_path(root, relative)?;
     }
     for (relative, expected) in manifest {
-        if incoming.contains(relative) || excluded_from_manifest(relative) {
+        if incoming.contains(relative)
+            || excluded_from_manifest(relative)
+            || relative.starts_with("lua/")
+        {
             continue;
         }
         let path = safe_path(root, relative)?;

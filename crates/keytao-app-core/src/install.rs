@@ -2,12 +2,130 @@ use crate::{
     Core, CoreError, CoreEvent, events::InstallProgress, scheme_files::parse_schema_list,
     scheme_types::*,
 };
+use serde::Deserialize;
 #[cfg(any(target_os = "windows", target_os = "android"))]
 use std::path::Path;
 use std::{collections::HashSet, path::PathBuf};
 
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
+}
+
+pub fn is_protected_user_file(relative: &str) -> bool {
+    !relative.contains('/')
+        && !is_default_custom(relative)
+        && (relative.ends_with(".user.dict.yaml")
+            || relative.ends_with(".user.yaml")
+            || relative == "user.yaml"
+            || relative.ends_with(".custom.yaml")
+            || relative == "user_dict.txt"
+            || relative.ends_with("_user.txt"))
+}
+
+#[derive(serde::Serialize)]
+pub struct ProtectedFileInstall {
+    pub protected: bool,
+    pub write: bool,
+    pub backup_name: Option<String>,
+    pub log: Option<String>,
+}
+
+pub fn prepare_protected_file_install(
+    relative: &str,
+    existing: Option<&[u8]>,
+) -> ProtectedFileInstall {
+    let mut decision = ProtectedFileInstall {
+        protected: is_protected_user_file(relative),
+        write: true,
+        backup_name: None,
+        log: None,
+    };
+    if !decision.protected {
+        return decision;
+    }
+    let Some(existing) = existing else {
+        return decision;
+    };
+    let validity = std::str::from_utf8(existing)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            if relative.ends_with(".yaml") {
+                let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+                // Match Rime: only the first document counts (dictionary entries follow
+                // the header's document end) and duplicate keys are not errors.
+                serde_yaml::Deserializer::from_str(text)
+                    .next()
+                    .map(serde::de::IgnoredAny::deserialize)
+                    .transpose()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            }
+        });
+    match validity {
+        Ok(()) => {
+            decision.write = false;
+            decision.log = Some(format!("[KEPT] {relative}"));
+        }
+        Err(error) => {
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let backup_name = format!("{relative}.broken-{seconds}");
+            decision.log = Some(format!(
+                "[BROKEN] {relative}: {error} (backup: {backup_name})"
+            ));
+            decision.backup_name = Some(backup_name);
+        }
+    }
+    decision
+}
+
+pub(crate) fn write_package_file(
+    root: &std::path::Path,
+    relative: &str,
+    content: &[u8],
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    let out = crate::packages::safe_path(root, relative)?;
+    let existing = if is_protected_user_file(relative) {
+        match std::fs::read(&out) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Cannot read {relative}; left untouched: {error}")),
+        }
+    } else {
+        None
+    };
+    let decision = prepare_protected_file_install(relative, existing.as_deref());
+    if let Some(backup_name) = &decision.backup_name {
+        let backup = root.join(backup_name);
+        let renamed = match std::fs::symlink_metadata(&backup) {
+            Ok(_) => Err(format!("backup already exists: {backup_name}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(&out, backup).map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = renamed {
+            logs.push(format!(
+                "{}; backup rename failed: {error}; left untouched",
+                decision.log.as_deref().unwrap_or_default()
+            ));
+            return Ok(());
+        }
+    }
+    if let Some(log) = decision.log {
+        logs.push(log);
+    }
+    if !decision.write {
+        return Ok(());
+    }
+    let tag = write_file_force(&out, content)?;
+    logs.push(format!("[OK]{tag} {relative}"));
+    Ok(())
 }
 
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
@@ -130,6 +248,7 @@ fn verify_install(
                 // Only spot-check key file types (schemas, dicts, lua, opencc)
                 let is_key = filename.ends_with(".schema.yaml")
                     || filename.ends_with(".dict.yaml")
+                    || is_protected_user_file(&relative)
                     || (filename.ends_with(".lua") && !relative.contains('/'))
                     || relative.starts_with("lua/")
                     || relative.starts_with("opencc/");
@@ -463,10 +582,8 @@ pub async fn smart_install(
                     }
                 }
             } else {
-                let out = crate::packages::safe_path(&dest, &relative)?;
-                match write_file_force(&out, &content) {
-                    Ok(tag) => {
-                        logs.push(format!("[OK]{tag} {relative}"));
+                match write_package_file(&dest, &relative, &content, &mut logs) {
+                    Ok(()) => {
                         if !crate::packages::excluded_from_manifest(&relative) {
                             use sha2::{Digest, Sha256};
                             manifest.insert(

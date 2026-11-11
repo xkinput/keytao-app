@@ -20,6 +20,141 @@ impl EventSink for ProgressSink {
 }
 
 #[test]
+fn protected_user_file_matcher_only_matches_top_level_user_files() {
+    for name in [
+        "keytao.user.dict.yaml",
+        "keytao.user.yaml",
+        "user.yaml",
+        "xmjd6.custom.yaml",
+        "user_dict.txt",
+        "xmjd6_user.txt",
+    ] {
+        assert!(crate::install::is_protected_user_file(name), "{name}");
+        assert!(crate::packages::excluded_from_manifest(name), "{name}");
+    }
+    for name in [
+        "default.custom.yaml",
+        "default-custom.yaml",
+        "lua/x.custom.yaml",
+        "lua/keytao.user.dict.yaml",
+        "User.yaml",
+        "xmjd6_USER.txt",
+        "keytao.dict.yaml",
+    ] {
+        assert!(!crate::install::is_protected_user_file(name), "{name}");
+    }
+}
+
+#[test]
+fn protected_file_install_keeps_utf8_bom_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "keytao.user.dict.yaml";
+    let user = b"\xef\xbb\xbf---\nname: k\n...\nword\tabcd\n";
+    fs::write(dir.path().join(relative), user).unwrap();
+    let mut logs = Vec::new();
+
+    crate::install::write_package_file(dir.path(), relative, b"entries: []\n", &mut logs)
+        .unwrap();
+
+    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
+    assert_eq!(logs, ["[KEPT] keytao.user.dict.yaml"]);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn protected_file_install_keeps_duplicate_key_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "x.custom.yaml";
+    let user = b"patch:\n  a: 1\n  a: 2\n";
+    fs::write(dir.path().join(relative), user).unwrap();
+    let mut logs = Vec::new();
+
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
+        .unwrap();
+
+    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
+    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
+}
+
+#[test]
+fn protected_file_install_keeps_utf8_bom_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "x.custom.yaml";
+    let user = b"\xef\xbb\xbfcustomization:\n  v: 1\npatch:\n  a: 1\n";
+    fs::write(dir.path().join(relative), user).unwrap();
+    let mut logs = Vec::new();
+
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
+        .unwrap();
+
+    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
+    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "keytao.user.dict.yaml";
+    let path = dir.path().join(relative);
+    let package = b"entries: []\n";
+    let mut logs = Vec::new();
+
+    crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), package);
+
+    let valid = b"---\nname: keytao.user\nversion: \"1\"\n...\nuser_word\tabcd\t1\n";
+    fs::write(&path, valid).unwrap();
+    logs.clear();
+    crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), valid);
+    assert_eq!(logs, ["[KEPT] keytao.user.dict.yaml"]);
+
+    for broken in [b"entries: [\n".as_slice(), b"\xff\xfe".as_slice()] {
+        fs::write(&path, broken).unwrap();
+        logs.clear();
+        crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), package);
+        let backup = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("keytao.user.dict.yaml.broken-")
+            })
+            .expect("Broken content must be backed up");
+        assert_eq!(fs::read(&backup).unwrap(), broken);
+        let backup_name = backup.file_name().unwrap().to_str().unwrap();
+        assert!(
+            backup_name
+                .strip_prefix("keytao.user.dict.yaml.broken-")
+                .unwrap()
+                .parse::<u64>()
+                .is_ok()
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.starts_with("[BROKEN] keytao.user.dict.yaml: ")
+                    && line.ends_with(&format!("(backup: {backup_name})")))
+        );
+        fs::remove_file(backup).unwrap();
+    }
+
+    let relative = format!("{}.custom.yaml", "x".repeat(240));
+    let path = dir.path().join(&relative);
+    let broken = b"patch: [\n";
+    fs::write(&path, broken).unwrap();
+    logs.clear();
+    crate::install::write_package_file(dir.path(), &relative, package, &mut logs).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), broken);
+    assert!(logs.iter().any(|line| line.starts_with("[BROKEN] ")
+        && line.contains("left untouched")));
+}
+
+#[test]
 fn manifest_cleanup_deletes_only_unchanged_obsolete_files() {
     use std::collections::{BTreeMap, BTreeSet};
     let dir = tempfile::tempdir().unwrap();
@@ -52,6 +187,38 @@ fn manifest_cleanup_deletes_only_unchanged_obsolete_files() {
 }
 
 #[test]
+fn manifest_cleanup_preserves_all_lua_modules() {
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet};
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("lua/ns")).unwrap();
+    let mut manifest = BTreeMap::new();
+    for name in [
+        "lua/a_filter.lua",
+        "lua/ns/b.lua",
+        "symbols.yaml",
+        "keytao.user.dict.yaml",
+        "xmjd6_user.txt",
+    ] {
+        fs::write(dir.path().join(name), b"abc").unwrap();
+        manifest.insert(name.into(), format!("{:x}", Sha256::digest(b"abc")));
+    }
+    let logs = crate::packages::cleanup_manifest(dir.path(), &manifest, &BTreeSet::new()).unwrap();
+    assert_eq!(
+        fs::read(dir.path().join("lua/a_filter.lua")).unwrap(),
+        b"abc"
+    );
+    assert_eq!(fs::read(dir.path().join("lua/ns/b.lua")).unwrap(), b"abc");
+    assert_eq!(
+        fs::read(dir.path().join("keytao.user.dict.yaml")).unwrap(),
+        b"abc"
+    );
+    assert_eq!(fs::read(dir.path().join("xmjd6_user.txt")).unwrap(), b"abc");
+    assert!(!dir.path().join("symbols.yaml").exists());
+    assert_eq!(logs, ["[REMOVED] symbols.yaml"]);
+}
+
+#[test]
 fn manifest_cleanup_rejects_unsafe_paths_before_deleting_anything() {
     use std::collections::{BTreeMap, BTreeSet};
     let dir = tempfile::tempdir().unwrap();
@@ -81,6 +248,63 @@ fn manifest_cleanup_rejects_unsafe_paths_before_deleting_anything() {
             "abc"
         );
     }
+}
+
+#[tokio::test]
+async fn smart_install_keeps_user_dictionary_and_verifies_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("rime");
+    fs::create_dir_all(&dest).unwrap();
+    let user = b"\xef\xbb\xbf---\nname: keytao.user\nversion: \"1\"\n...\nuser_word\tabcd\t1\n";
+    fs::write(dest.join("keytao.user.dict.yaml"), user).unwrap();
+    let zip_path = dir.path().join("package.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+    zip.start_file(
+        "keytao.user.dict.yaml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"name: keytao.user\nentries: []\n").unwrap();
+    zip.finish().unwrap();
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "test".into(),
+            platform: Platform::MacOs,
+        },
+        Arc::new(ProgressSink::default()),
+    )
+    .unwrap();
+    let result = smart_install(
+        &core,
+        zip_path.to_string_lossy().into_owned(),
+        dest.to_string_lossy().into_owned(),
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(dest.join("keytao.user.dict.yaml")).unwrap(), user);
+    assert!(
+        result
+            .logs
+            .iter()
+            .any(|line| line == "[KEPT] keytao.user.dict.yaml")
+    );
+    assert!(
+        result
+            .verify
+            .iter()
+            .any(|entry| entry.path == "keytao.user.dict.yaml" && entry.ok)
+    );
+    crate::packages::record_package(&core, "keytao", Some("v1"), true).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(
+        &fs::read(core.env().data_dir.join("scheme-packages/keytao.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(meta["manifest"].as_object().unwrap().is_empty());
 }
 
 #[tokio::test]

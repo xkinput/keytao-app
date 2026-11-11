@@ -932,6 +932,12 @@ class AppController extends ChangeNotifier {
         );
         await _readLocal();
         progress = AppStrings.installDone;
+        final broken = [
+          for (final line in result.logs.expand((log) => log.split('\n')))
+            if (line.startsWith('[BROKEN] '))
+              line.substring('[BROKEN] '.length),
+        ];
+        if (broken.isNotEmpty) installError = broken.join('\n');
       } catch (failure) {
         final message = errorText(failure);
         if (message == AppStrings.downloadCancelled) {
