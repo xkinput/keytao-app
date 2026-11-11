@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
+import 'settings.dart' show runCloudAccountAction;
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -52,6 +53,7 @@ class SchemePage extends StatelessWidget {
               SchemePackageRow(controller: c, schemeKey: key),
             if (c.schemeUpdatesLoading) const FProgress(),
             if (c.packageError case final error?) ErrorMessage(error),
+            if (c.schemeSyncError case final error?) ErrorMessage(error),
             VersionPicker(controller: c, showScheme: true),
             ValueRow(AppStrings.directory, c.defaultDir),
             if (c.localStatusLine case final status?)
@@ -174,8 +176,29 @@ class SchemePackageRow extends StatelessWidget {
                     ? null
                     : () => openUserWords(context, c, schemeKey: schemeKey),
               ),
+            if (package != null)
+              ActionButton(
+                '上传',
+                onPress: c.busy || !package.hasPackageZip
+                    ? null
+                    : () => runCloudAccountAction(
+                        context,
+                        c,
+                        () => c.uploadCloudPackage(schemeKey),
+                      ),
+              ),
           ],
         ),
+        if (package != null) ...[
+          const SizedBox(height: 10),
+          SwitchSetting(
+            '随账号同步',
+            value: c.syncedSchemes.contains(schemeKey),
+            onChanged: c.busy
+                ? null
+                : (value) => c.setSchemeAccountSync(schemeKey, value),
+          ),
+        ],
         if (package == null || !active || update != null || activeLegacy) ...[
           const SizedBox(height: 10),
           ActionRow(

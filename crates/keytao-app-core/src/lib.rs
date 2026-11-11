@@ -1,4 +1,6 @@
 pub mod account;
+pub mod cloud_packages;
+pub mod scheme_sync;
 pub mod submission;
 pub mod addon;
 #[cfg(target_os = "android")]
@@ -148,6 +150,11 @@ impl Core {
         let mut state = self.lock_state();
         let mut next = state.clone();
         update(&mut next);
+        if state.user.as_ref().and_then(|user| user["id"].as_i64())
+            != next.user.as_ref().and_then(|user| user["id"].as_i64())
+        {
+            next.scheme_cloud_ids.clear();
+        }
         if next != *state {
             next.save(&self.env.data_dir)?;
             *state = next;

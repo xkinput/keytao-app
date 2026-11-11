@@ -157,6 +157,51 @@ impl<'a> ApiClient<'a> {
         unreachable!()
     }
 
+    pub(crate) async fn download_url(&self, path: &str) -> Result<String, CoreError> {
+        let client = reqwest::Client::builder()
+            .user_agent(format!("keytao-app/{}", self.core.env().app_version))
+            .connect_timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        for attempt in 0..2 {
+            let token = self.token()?;
+            throttle(self.api_base).await;
+            self.token()?;
+            let response = client
+                .get(format!("{}{path}", self.api_base))
+                .bearer_auth(&token)
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await
+                .map_err(|error| CoreError::Network(error.to_string()))?;
+            self.token()?;
+            let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                if attempt == 0 {
+                    self.refresh(&token).await?;
+                    continue;
+                }
+                clear_token(self.core, &token)?;
+                return Err(CoreError::Permission("请先登录 KeyTao 账号".into()));
+            }
+            if status == reqwest::StatusCode::FOUND {
+                return response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .ok_or_else(|| CoreError::Other("方案包地址无效".into()));
+            }
+            return Err(CoreError::Other(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                api_error_message(response, "方案包下载失败").await
+            )));
+        }
+        unreachable!()
+    }
+
     async fn refresh(&self, token: &str) -> Result<(), CoreError> {
         if token_timing(token).is_none_or(|timing| {
             timing.exp <= now_seconds() || timing.id <= 0 || Some(timing.id) != self.account_id

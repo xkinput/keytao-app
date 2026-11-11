@@ -9,6 +9,29 @@ import 'login.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
+Future<void> runCloudAccountAction(
+  BuildContext context,
+  AppController controller,
+  Future<bool> Function() action,
+) async {
+  if (!await ensureAccountLogin(context, controller) || !context.mounted) {
+    return;
+  }
+  final succeeded = await action();
+  if (!succeeded &&
+      context.mounted &&
+      controller.accountUser == null &&
+      await ensureAccountLogin(context, controller)) {
+    await action();
+  }
+}
+
+String cloudSyncDate(String? value) {
+  if (value == null) return '—';
+  return DateTime.tryParse(value)?.toLocal().toString().split('.').first ??
+      value;
+}
+
 class SettingsCard extends StatelessWidget {
   const SettingsCard({super.key, required this.controller});
   final AppController controller;
@@ -328,6 +351,85 @@ class AccountCard extends StatelessWidget {
         ],
         if (c.accountMessage case final message?) StatusMessage(message),
         if (c.accountError case final error?) ErrorMessage(error),
+        ActionRow(
+          children: [
+            ActionButton(
+              '上传配置',
+              onPress: c.busy
+                  ? null
+                  : () => runCloudAccountAction(
+                      context,
+                      c,
+                      c.uploadSchemeProfile,
+                    ),
+            ),
+            ActionButton(
+              '从云端下载',
+              onPress: c.busy
+                  ? null
+                  : () =>
+                        runCloudAccountAction(context, c, c.fetchCloudProfile),
+            ),
+          ],
+        ),
+        SwitchSetting(
+          '跟随账号同步',
+          value: c.followAccountSync,
+          onChanged: c.busy ? null : c.setFollowAccountSync,
+        ),
+        ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
+        SettingRow(
+          '云端方案',
+          child: FButton.icon(
+            variant: FButtonVariant.ghost,
+            onPress: c.busy
+                ? null
+                : () =>
+                      runCloudAccountAction(context, c, c.refreshCloudPackages),
+            child: const Icon(FLucideIcons.refreshCw, size: 16),
+          ),
+        ),
+        for (final package in c.cloudPackages)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('${package['name']}'),
+              Text(
+                '${package['version'] ?? '—'} · '
+                '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
+                '${cloudSyncDate(package['createAt'] as String?)}',
+                style: context.theme.typography.body.xs,
+              ),
+              const SizedBox(height: 8),
+              ActionRow(
+                children: [
+                  ActionButton(
+                    '下载',
+                    onPress: c.busy
+                        ? null
+                        : () => runCloudAccountAction(
+                            context,
+                            c,
+                            () =>
+                                c.downloadCloudPackage(package['id'] as String),
+                          ),
+                  ),
+                  ActionButton(
+                    '删除',
+                    onPress: c.busy
+                        ? null
+                        : () => runCloudAccountAction(
+                            context,
+                            c,
+                            () => c.deleteCloudPackage(package['id'] as String),
+                          ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        if (c.schemeSyncBusy) const FProgress(),
+        if (c.schemeSyncError case final error?) ErrorMessage(error),
       ],
     );
   }

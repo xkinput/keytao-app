@@ -1,6 +1,11 @@
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::ErrorKind, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
+    path::Path,
+};
 
 const STATE_FILE: &str = "app-state.json";
 
@@ -124,6 +129,11 @@ pub struct AppState {
     pub installed_packages: BTreeMap<String, InstalledPackage>,
     pub active_scheme: Option<String>,
     pub dismissed_scheme_updates: BTreeMap<String, String>,
+    pub scheme_sync_settings: serde_json::Value,
+    pub follow_account_sync: bool,
+    pub synced_schemes: BTreeSet<String>,
+    pub last_scheme_sync_at: Option<String>,
+    pub scheme_cloud_ids: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +148,15 @@ struct StoredAppState {
     active_scheme: Option<String>,
     #[serde(default)]
     dismissed_scheme_updates: BTreeMap<String, String>,
+    #[serde(default)]
+    scheme_sync_settings: serde_json::Value,
+    #[serde(default)]
+    follow_account_sync: bool,
+    #[serde(default)]
+    synced_schemes: BTreeSet<String>,
+    last_scheme_sync_at: Option<String>,
+    #[serde(default)]
+    scheme_cloud_ids: BTreeMap<String, String>,
     installed_scheme: Option<String>,
     installed_scheme_version: Option<String>,
 }
@@ -168,6 +187,11 @@ impl From<StoredAppState> for AppState {
             installed_packages,
             active_scheme,
             dismissed_scheme_updates: state.dismissed_scheme_updates,
+            scheme_sync_settings: state.scheme_sync_settings,
+            follow_account_sync: state.follow_account_sync,
+            synced_schemes: state.synced_schemes,
+            last_scheme_sync_at: state.last_scheme_sync_at,
+            scheme_cloud_ids: state.scheme_cloud_ids,
         }
     }
 }

@@ -2,7 +2,7 @@ use crate::{api::types::*, frb_generated::StreamSink, host::InstallHost, runtime
 use flutter_rust_bridge::DartFnFuture;
 use keytao_app_core::scheme_host::SchemeHost;
 #[cfg(not(target_os = "android"))]
-use keytao_app_core::{CoreEvent, events::InstallProgress};
+use keytao_app_core::{events::InstallProgress, CoreEvent};
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
@@ -70,6 +70,100 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
         keytao_app_core::packages::list_installed_packages(&state.core)
             .map_err(|error| error.to_string())?,
     )
+}
+
+pub fn get_scheme_sync_state() -> Result<String, String> {
+    Ok(keytao_app_core::scheme_sync::sync_state(&runtime::state()?.core).to_string())
+}
+
+pub fn set_scheme_sync_preferences(
+    follow_account_sync: Option<bool>,
+    scheme_key: Option<String>,
+    sync: Option<bool>,
+    settings_json: Option<String>,
+) -> Result<String, String> {
+    let settings = settings_json
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    keytao_app_core::scheme_sync::set_preferences(
+        &runtime::state()?.core,
+        follow_account_sync,
+        scheme_key.as_deref(),
+        sync,
+        settings,
+    )
+    .map(|value| value.to_string())
+    .map_err(|error| error.to_string())
+}
+
+pub fn export_scheme_profile() -> Result<String, String> {
+    keytao_app_core::scheme_sync::export_profile(&runtime::state()?.core)
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn upload_scheme_profile() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::upload_profile(&state.core)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn fetch_scheme_profile() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::fetch_profile(&state.core)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// Applies preferences and adds missing packages. Activation requires a separate confirmed call.
+pub async fn apply_scheme_profile(profile_json: String) -> Result<String, String> {
+    let profile = serde_json::from_str(&profile_json).map_err(|error| error.to_string())?;
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::apply_profile(&state.core, profile, &state.host.user_root()?)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn list_cloud_packages() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let packages = keytao_app_core::cloud_packages::list(&state.core)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&packages).map_err(|error| error.to_string())
+}
+
+pub async fn upload_cloud_package(scheme_key: String) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let package = keytao_app_core::cloud_packages::upload(&state.core, &scheme_key)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&package).map_err(|error| error.to_string())
+}
+
+pub async fn download_cloud_package(id: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::cloud_packages::download(&state.core, &id, &state.host.user_root()?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn delete_cloud_package(id: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::cloud_packages::delete(&state.core, &id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub async fn list_user_words(scheme_key: String) -> Result<Vec<UserWordDto>, String> {
@@ -302,9 +396,7 @@ pub async fn account_refresh() -> Result<Option<AccountUserDto>, String> {
 pub async fn account_logout() -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
-    state.core
-        .clear_auth()
-        .map_err(|error| error.to_string())
+    state.core.clear_auth().map_err(|error| error.to_string())
 }
 
 /// Merges the user dictionary in place without deploying.

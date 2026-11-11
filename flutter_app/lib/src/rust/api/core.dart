@@ -39,6 +39,48 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<String> getSchemeSyncState() =>
+    RustLib.instance.api.crateApiCoreGetSchemeSyncState();
+
+Future<String> setSchemeSyncPreferences({
+  bool? followAccountSync,
+  String? schemeKey,
+  bool? sync_,
+  String? settingsJson,
+}) => RustLib.instance.api.crateApiCoreSetSchemeSyncPreferences(
+  followAccountSync: followAccountSync,
+  schemeKey: schemeKey,
+  sync_: sync_,
+  settingsJson: settingsJson,
+);
+
+Future<String> exportSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreExportSchemeProfile();
+
+Future<String> uploadSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreUploadSchemeProfile();
+
+Future<String> fetchSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreFetchSchemeProfile();
+
+/// Applies preferences and adds missing packages. Activation requires a separate confirmed call.
+Future<String> applySchemeProfile({required String profileJson}) => RustLib
+    .instance
+    .api
+    .crateApiCoreApplySchemeProfile(profileJson: profileJson);
+
+Future<String> listCloudPackages() =>
+    RustLib.instance.api.crateApiCoreListCloudPackages();
+
+Future<String> uploadCloudPackage({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreUploadCloudPackage(schemeKey: schemeKey);
+
+Future<void> downloadCloudPackage({required String id}) =>
+    RustLib.instance.api.crateApiCoreDownloadCloudPackage(id: id);
+
+Future<void> deleteCloudPackage({required String id}) =>
+    RustLib.instance.api.crateApiCoreDeleteCloudPackage(id: id);
+
 Future<List<UserWordDto>> listUserWords({required String schemeKey}) =>
     RustLib.instance.api.crateApiCoreListUserWords(schemeKey: schemeKey);
 

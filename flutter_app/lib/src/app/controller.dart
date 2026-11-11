@@ -209,6 +209,22 @@ class AppController extends ChangeNotifier {
   Timer? _dictionarySyncDebounce;
   String? accountError;
   String? accountMessage;
+  bool followAccountSync = false;
+  final Set<String> syncedSchemes = {};
+  String? lastSchemeSyncAt;
+  List<Map<String, dynamic>> cloudPackages = [];
+  bool schemeSyncBusy = false;
+  String? schemeSyncError;
+  Map<String, dynamic>? pendingCloudProfile;
+  String? pendingCloudActiveScheme;
+  Timer? _schemeSyncDebounce;
+  final Set<String> _pendingCloudPackageUploads = {};
+  final Set<Object> _checkedSchemeSyncAccounts = {};
+  Object? _readySchemeSyncAccount;
+  Object? _checkingSchemeSyncAccount;
+  bool _applyingCloudProfile = false;
+  bool _schemeProfileDirty = false;
+  Future<void>? _schemeSettingsWrite;
   StreamSubscription<BridgeEvent>? _events;
   StreamSubscription<InstallProgressDto>? _androidProgress;
 
@@ -495,6 +511,7 @@ class AppController extends ChangeNotifier {
     linuxImeError,
     imeUiError,
     debugError,
+    schemeSyncError,
     ...deploySteps.map((step) => step.message),
   ].contains(message);
   String? get unhandledError => _isInlineError(error) ? null : error;
@@ -975,6 +992,7 @@ class AppController extends ChangeNotifier {
     latestRelease = null;
     error = null;
     _changed();
+    unawaited(_persistSchemeSettings());
     unawaited(refreshRelease());
   }
 
@@ -984,6 +1002,7 @@ class AppController extends ChangeNotifier {
     }
     source = value;
     _changed();
+    unawaited(_persistSchemeSettings());
   }
 
   Future<bool> refreshRelease() async {
@@ -1121,6 +1140,7 @@ class AppController extends ChangeNotifier {
       await _readInstalledPackages();
       await _readLocal();
       await _readUserWordsReport(installing);
+      scheduleSchemeProfileSync(packageKey: installing);
       progress = AppStrings.installDone;
       final broken = [
         for (final line in result.logs.expand((log) => log.split('\n')))
@@ -1198,6 +1218,7 @@ class AppController extends ChangeNotifier {
       _invalidateSchemeUpdates();
       await _readInstalledPackages();
       await _readUserWordsReport(key);
+      scheduleSchemeProfileSync(packageKey: key);
       progress = AppStrings.installDone;
     } catch (failure) {
       final message = errorText(failure);
@@ -1244,6 +1265,7 @@ class AppController extends ChangeNotifier {
         schemeRelease = null;
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
+        scheduleSchemeProfileSync();
         await _readLocal();
         await _readUserWordsReport(key);
         await refreshRelease();
@@ -1267,6 +1289,7 @@ class AppController extends ChangeNotifier {
         await core.removeSchemePackage(schemeKey: key);
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
+        scheduleSchemeProfileSync();
       } catch (failure) {
         packageError = errorText(failure);
         rethrow;
@@ -1321,6 +1344,7 @@ class AppController extends ChangeNotifier {
       userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
       progress = message;
+      scheduleSchemeProfileSync();
     } catch (failure) {
       progress = AppStrings.deployFailed;
       _deployStep(errorText(failure), DeployStepState.failed);
@@ -1334,9 +1358,27 @@ class AppController extends ChangeNotifier {
   String? get accountName =>
       accountUser?.nickname ?? accountUser?.name ?? accountUser?.email;
 
+  void _setAccountUser(AccountUserDto? value) {
+    final previous = accountUser?.id;
+    accountUser = value;
+    if (previous == value?.id) return;
+    _schemeSyncDebounce?.cancel();
+    _readySchemeSyncAccount = null;
+    _checkingSchemeSyncAccount = null;
+    _checkedSchemeSyncAccounts.clear();
+    pendingCloudProfile = null;
+    pendingCloudActiveScheme = null;
+    cloudPackages = [];
+    if (previous != null) {
+      _pendingCloudPackageUploads.clear();
+      _schemeProfileDirty = false;
+    }
+  }
+
   Future<void> _loadAccount() async {
+    await loadSchemeSyncState();
     try {
-      accountUser = await core.accountSession();
+      _setAccountUser(await core.accountSession());
       _changed();
       await core.accountRefresh();
     } catch (failure) {
@@ -1346,14 +1388,15 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> reloadAccountSession() async {
+  Future<void> reloadAccountSession({bool checkSchemeProfile = true}) async {
     try {
-      accountUser = await core.accountSession();
+      _setAccountUser(await core.accountSession());
       if (_pendingDictionarySyncAccountId != accountUser?.id) {
         pendingDictionarySync = null;
         _pendingDictionarySyncAccountId = null;
       }
       _changed();
+      if (checkSchemeProfile) await checkCloudProfileAfterLogin();
     } catch (failure) {
       debugPrint('Account session failed: ${errorText(failure)}');
     }
@@ -1366,9 +1409,11 @@ class AppController extends ChangeNotifier {
     accountMessage = null;
     _changed();
     try {
-      accountUser = await core.accountLogin(name: name, password: password);
+      _setAccountUser(await core.accountLogin(name: name, password: password));
       pendingDictionarySync = null;
       _pendingDictionarySyncAccountId = null;
+      await loadSchemeSyncState();
+      await checkCloudProfileAfterLogin();
       return true;
     } catch (failure) {
       accountError = errorText(failure);
@@ -1381,18 +1426,425 @@ class AppController extends ChangeNotifier {
 
   Future<void> logout() async {
     _dictionarySyncDebounce?.cancel();
+    _schemeSyncDebounce?.cancel();
     accountError = null;
     accountMessage = null;
     try {
       await core.accountLogout();
-      accountUser = null;
+      _setAccountUser(null);
       pendingDictionarySync = null;
       _pendingDictionarySyncAccountId = null;
+      pendingCloudProfile = null;
+      pendingCloudActiveScheme = null;
+      _readySchemeSyncAccount = null;
+      cloudPackages = [];
     } catch (failure) {
       accountError = errorText(failure);
     }
     _changed();
   }
+
+  void _readSchemeSyncState(String value) {
+    final state = jsonDecode(value) as Map<String, dynamic>;
+    followAccountSync = state['follow_account_sync'] == true;
+    syncedSchemes
+      ..clear()
+      ..addAll((state['synced_schemes'] as List? ?? []).cast<String>());
+    lastSchemeSyncAt = state['last_sync_at'] as String?;
+    _schemeSettings = Map<String, dynamic>.from(
+      state['settings'] as Map? ?? const {},
+    );
+    if (_schemeSettings['download_source'] case final String value) {
+      source = value;
+    }
+    if (_schemeSettings['selected_scheme'] case final String value) {
+      scheme = value;
+      _manuallySelectedScheme = true;
+    }
+  }
+
+  Map<String, dynamic> _schemeSettings = {};
+
+  Future<void> loadSchemeSyncState() async {
+    try {
+      _readSchemeSyncState(await core.getSchemeSyncState());
+      _changed();
+    } catch (failure) {
+      schemeSyncError = errorText(failure);
+      _changed();
+    }
+  }
+
+  Map<String, dynamic> _schemeSettingsSnapshot() {
+    final input = androidSettings;
+    final ui = uiSettings;
+    return {
+      ..._schemeSettings,
+      'download_source': source,
+      'selected_scheme': scheme,
+      if (input != null)
+        'android': {
+          'haptics_enabled': input.hapticsEnabled,
+          'haptic_intensity': input.hapticIntensity,
+          'enter_key_behavior': input.enterKeyBehavior,
+          'key_preview_enabled': input.keyPreviewEnabled,
+          'long_press_delay_ms': input.longPressDelayMs,
+          'keyboard_height_scale': input.keyboardHeightScale,
+          'delete_speed': input.deleteSpeed,
+          'english_mode': input.englishMode,
+          'backspace_gesture_mode': input.backspaceGestureMode,
+          'keyboard_height_dp': input.keyboardHeightDp,
+          'candidate_bar_height_dp': input.candidateBarHeightDp,
+          'swipe_threshold_dp': input.swipeThresholdDp,
+          'key_sound_enabled': input.keySoundEnabled,
+          'key_sound_volume': input.keySoundVolume,
+          'key_hint_visible': input.keyHintVisible,
+          'flick_keys_enabled': input.flickKeysEnabled,
+          'number_row_enabled': input.numberRowEnabled,
+          'candidate_font_scale': input.candidateFontScale,
+          'double_space_period_enabled': input.doubleSpacePeriodEnabled,
+          'floating_portrait_enabled': input.floatingPortraitEnabled,
+          'floating_portrait_scale': input.floatingPortraitScale,
+          'floating_landscape_enabled': input.floatingLandscapeEnabled,
+          'floating_landscape_scale': input.floatingLandscapeScale,
+        },
+      if (ui != null)
+        'ime_ui': {
+          'color_scheme': ui.colorScheme.name,
+          'orientation': ui.orientation.name,
+          'accent_color': ui.accentColor,
+          'font_size': ui.fontSize,
+          'embedded_composition': ui.embeddedComposition,
+        },
+      'desktop_english_mode': desktopEnglishMode.name,
+    };
+  }
+
+  Future<void> _persistSchemeSettings({bool schedule = true}) {
+    if (_applyingCloudProfile || _disposed) return Future.value();
+    final snapshot = _schemeSettingsSnapshot();
+    final write = (_schemeSettingsWrite ?? Future<void>.value()).then((
+      _,
+    ) async {
+      try {
+        _readSchemeSyncState(
+          await core.setSchemeSyncPreferences(
+            settingsJson: jsonEncode(snapshot),
+          ),
+        );
+        if (schedule) scheduleSchemeProfileSync();
+      } catch (failure) {
+        schemeSyncError = errorText(failure);
+      }
+      _changed();
+    });
+    _schemeSettingsWrite = write;
+    return write;
+  }
+
+  Future<bool> setFollowAccountSync(bool enabled) async {
+    final result = await _schemeCloudAction(() async {
+      _readSchemeSyncState(
+        await core.setSchemeSyncPreferences(followAccountSync: enabled),
+      );
+    });
+    if (!enabled) _schemeSyncDebounce?.cancel();
+    if (result && enabled) {
+      await checkCloudProfileAfterLogin();
+      scheduleSchemeProfileSync();
+    }
+    return result;
+  }
+
+  Future<bool> setSchemeAccountSync(String key, bool enabled) async {
+    final result = await _schemeCloudAction(() async {
+      _readSchemeSyncState(
+        await core.setSchemeSyncPreferences(schemeKey: key, sync_: enabled),
+      );
+    });
+    if (result) {
+      if (!enabled) _pendingCloudPackageUploads.remove(key);
+      scheduleSchemeProfileSync(packageKey: enabled ? key : null);
+    }
+    return result;
+  }
+
+  String _comparableProfile(Object? value) {
+    Object? sorted(Object? item) {
+      if (item is num) return item.toDouble();
+      if (item is Map) {
+        final keys = item.keys.cast<String>().toList()..sort();
+        return {for (final key in keys) key: sorted(item[key])};
+      }
+      if (item is List) {
+        final result = item.map(sorted).toList();
+        if (result.every(
+          (entry) => entry is Map && entry['scheme_key'] != null,
+        )) {
+          result.sort(
+            (a, b) => '${(a as Map)['scheme_key']}'.compareTo(
+              '${(b as Map)['scheme_key']}',
+            ),
+          );
+        }
+        return result;
+      }
+      return item;
+    }
+
+    return jsonEncode(sorted(value));
+  }
+
+  Future<void> checkCloudProfileAfterLogin() async {
+    final account = accountUser?.id;
+    if (_disposed ||
+        account == null ||
+        _checkedSchemeSyncAccounts.contains(account) ||
+        _checkingSchemeSyncAccount == account) {
+      return;
+    }
+    _checkingSchemeSyncAccount = account;
+    _schemeSyncDebounce?.cancel();
+    try {
+      final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
+      final profile = envelope['profile'];
+      await _persistSchemeSettings(schedule: false);
+      final local = jsonDecode(await core.exportSchemeProfile());
+      if (accountUser?.id != account || _disposed) return;
+      _readySchemeSyncAccount = account;
+      _checkedSchemeSyncAccounts.add(account);
+      if (envelope['updateAt'] case final String time) lastSchemeSyncAt = time;
+      if (profile is Map &&
+          _comparableProfile(profile) != _comparableProfile(local)) {
+        pendingCloudProfile = Map<String, dynamic>.from(profile);
+      }
+      schemeSyncError = null;
+      try {
+        final packages = (jsonDecode(await core.listCloudPackages()) as List)
+            .map((value) => Map<String, dynamic>.from(value as Map))
+            .toList();
+        if (accountUser?.id == account) cloudPackages = packages;
+      } catch (failure) {
+        if (accountUser?.id == account) schemeSyncError = errorText(failure);
+      }
+    } catch (failure) {
+      schemeSyncError = errorText(failure);
+    } finally {
+      if (_checkingSchemeSyncAccount == account) {
+        _checkingSchemeSyncAccount = null;
+      }
+      _changed();
+      if (pendingCloudProfile == null && _schemeProfileDirty) {
+        scheduleSchemeProfileSync();
+      }
+    }
+  }
+
+  void dismissCloudProfileOffer() {
+    pendingCloudProfile = null;
+    _changed();
+    if (_schemeProfileDirty) scheduleSchemeProfileSync();
+  }
+
+  void dismissCloudActiveScheme() {
+    pendingCloudActiveScheme = null;
+    _changed();
+  }
+
+  void scheduleSchemeProfileSync({String? packageKey}) {
+    _schemeProfileDirty = true;
+    if (packageKey != null && syncedSchemes.contains(packageKey)) {
+      _pendingCloudPackageUploads.add(packageKey);
+    }
+    _schemeSyncDebounce?.cancel();
+    if (_disposed ||
+        !followAccountSync ||
+        accountUser == null ||
+        _readySchemeSyncAccount != accountUser?.id ||
+        _checkingSchemeSyncAccount != null ||
+        pendingCloudProfile != null ||
+        _applyingCloudProfile) {
+      return;
+    }
+    _schemeSyncDebounce = Timer(const Duration(milliseconds: 800), () async {
+      if (busy || schemeSyncBusy) {
+        scheduleSchemeProfileSync();
+        return;
+      }
+      if (_disposed ||
+          !followAccountSync ||
+          accountUser == null ||
+          _readySchemeSyncAccount != accountUser?.id ||
+          _checkingSchemeSyncAccount != null ||
+          pendingCloudProfile != null) {
+        return;
+      }
+      await _schemeCloudAction(() async {
+        Object? packageFailure;
+        for (final key in _pendingCloudPackageUploads.toList()) {
+          if (!syncedSchemes.contains(key)) {
+            _pendingCloudPackageUploads.remove(key);
+            continue;
+          }
+          if (installedPackageFor(key)?.hasPackageZip != true) continue;
+          try {
+            await core.uploadCloudPackage(schemeKey: key);
+            _pendingCloudPackageUploads.remove(key);
+          } catch (failure) {
+            packageFailure ??= failure;
+          }
+        }
+        await _uploadSchemeProfile();
+        if (packageFailure != null) throw packageFailure;
+      });
+    });
+  }
+
+  Future<bool> _schemeCloudAction(Future<void> Function() action) async {
+    if (schemeSyncBusy) return false;
+    return run(() async {
+      schemeSyncBusy = true;
+      schemeSyncError = null;
+      try {
+        await action();
+      } catch (failure) {
+        schemeSyncError = errorText(failure);
+        await reloadAccountSession(checkSchemeProfile: false);
+        rethrow;
+      } finally {
+        schemeSyncBusy = false;
+      }
+    });
+  }
+
+  Future<void> _uploadSchemeProfile() async {
+    await _persistSchemeSettings(schedule: false);
+    final envelope = jsonDecode(await core.uploadSchemeProfile()) as Map;
+    lastSchemeSyncAt = envelope['updateAt'] as String?;
+    _schemeProfileDirty = false;
+  }
+
+  Future<bool> uploadSchemeProfile() =>
+      _schemeCloudAction(_uploadSchemeProfile);
+
+  Future<bool> fetchCloudProfile() => _schemeCloudAction(() async {
+    final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
+    if (envelope['profile'] is! Map) throw StateError('云端暂无配置');
+    pendingCloudProfile = Map<String, dynamic>.from(envelope['profile'] as Map);
+    if (envelope['updateAt'] case final String time) lastSchemeSyncAt = time;
+  });
+
+  Future<void> _applyCloudSettings(Map<String, dynamic> settings) async {
+    if (settings['download_source'] case final String value) source = value;
+    if (settings['selected_scheme'] case final String value) {
+      scheme = value;
+      _manuallySelectedScheme = true;
+    }
+    if (isMobile && settings['android'] is Map) {
+      if (isAndroid) await _requireStorage();
+      final input = settings['android'] as Map;
+      final patch = <String, Object>{};
+      for (final key in androidDefaults.keys) {
+        final snakeKey = key.replaceAllMapped(
+          RegExp('[A-Z]'),
+          (match) => '_${match[0]!.toLowerCase()}',
+        );
+        if (input[snakeKey] case final Object value) patch[key] = value;
+      }
+      androidSettings = await core.setAndroidImeInputSettings(
+        settings: patchAndroidSettings(
+          await core.getAndroidImeInputSettings(),
+          patch,
+        ),
+      );
+    }
+    if (!isMobile && settings['ime_ui'] is Map) {
+      final ui = settings['ime_ui'] as Map;
+      final current = await core.getImeUiSettings();
+      uiSettings = await core.setImeUiSettings(
+        colorScheme: UiColorSchemeDto.values.firstWhere(
+          (value) => value.name == ui['color_scheme'],
+          orElse: () => current.colorScheme,
+        ),
+        orientation: PanelOrientationDto.values.firstWhere(
+          (value) => value.name == ui['orientation'],
+          orElse: () => current.orientation,
+        ),
+        accentColor: ui['accent_color'] as String? ?? current.accentColor,
+        fontSize: (ui['font_size'] as num?)?.toDouble() ?? current.fontSize,
+      );
+      if (ui['embedded_composition'] case final bool value) {
+        uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+      }
+    }
+    if (settings['desktop_english_mode'] case final String mode
+        when !isMobile) {
+      desktopEnglishMode = await core.setDesktopEnglishMode(
+        mode: EnglishModeDto.values.firstWhere(
+          (value) => value.name == mode,
+          orElse: () => desktopEnglishMode,
+        ),
+      );
+    }
+    _changed();
+  }
+
+  Future<bool> applyCloudProfile() {
+    final profile = pendingCloudProfile;
+    if (profile == null) return Future.value(false);
+    return _schemeCloudAction(() async {
+      _applyingCloudProfile = true;
+      _schemeSyncDebounce?.cancel();
+      try {
+        _schemeSettings = Map<String, dynamic>.from(
+          profile['settings'] as Map? ?? const {},
+        );
+        await _applyCloudSettings(_schemeSettings);
+        final result = jsonDecode(
+          await core.applySchemeProfile(profileJson: jsonEncode(profile)),
+        ) as Map;
+        _schemeSettings = Map<String, dynamic>.from(
+          result['settings'] as Map? ?? const {},
+        );
+        await _readInstalledPackages();
+        final active = result['active_scheme'] as String?;
+        pendingCloudActiveScheme = active != null && active != activeSchemeKey
+            ? active
+            : null;
+        pendingCloudProfile = null;
+        _pendingCloudPackageUploads.clear();
+        _schemeProfileDirty = false;
+      } finally {
+        _applyingCloudProfile = false;
+      }
+    });
+  }
+
+  Future<bool> refreshCloudPackages() => _schemeCloudAction(() async {
+    cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+        .map((value) => Map<String, dynamic>.from(value as Map))
+        .toList();
+  });
+
+  Future<bool> uploadCloudPackage(String key) => _schemeCloudAction(() async {
+    await core.uploadCloudPackage(schemeKey: key);
+    scheduleSchemeProfileSync();
+    cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+        .map((value) => Map<String, dynamic>.from(value as Map))
+        .toList();
+  });
+
+  Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
+    await core.downloadCloudPackage(id: id);
+    await _readInstalledPackages();
+    scheduleSchemeProfileSync();
+  });
+
+  Future<bool> deleteCloudPackage(String id) => _schemeCloudAction(() async {
+    await core.deleteCloudPackage(id: id);
+    cloudPackages.removeWhere((package) => package['id'] == id);
+    scheduleSchemeProfileSync();
+  });
 
   void scheduleUserDictionarySync() {
     _dictionarySyncDebounce?.cancel();
@@ -1776,6 +2228,7 @@ class AppController extends ChangeNotifier {
     androidSettings = await core.setAndroidImeInputSettings(
       settings: patchAndroidSettings(current, patch),
     );
+    await _persistSchemeSettings();
   });
 
   Future<bool> saveUi({
@@ -1797,11 +2250,13 @@ class AppController extends ChangeNotifier {
         accentColor: normalizedAccent ?? current.accentColor,
         fontSize: (fontSize ?? current.fontSize).clamp(10, 36),
       );
+      await _persistSchemeSettings();
     });
   }
 
   Future<bool> saveEmbedded(bool value) => run(() async {
     uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+    await _persistSchemeSettings();
   });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {
     await _readLocal();
@@ -1809,6 +2264,7 @@ class AppController extends ChangeNotifier {
       throw StateError(AppStrings.englishNotReady);
     }
     desktopEnglishMode = await core.setDesktopEnglishMode(mode: value);
+    await _persistSchemeSettings();
   });
 
   Future<bool> open(String value) => run(() => _open(value));
@@ -1995,6 +2451,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _dictionarySyncDebounce?.cancel();
+    _schemeSyncDebounce?.cancel();
     if (isWindows && _events != null) {
       _windowsChannel.setMethodCallHandler(null);
     }

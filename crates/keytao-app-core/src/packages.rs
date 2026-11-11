@@ -228,6 +228,151 @@ fn checked_store_dir(core: &Core) -> Result<PathBuf, CoreError> {
     Ok(dir)
 }
 
+pub(crate) fn stored_metadata(
+    core: &Core,
+    scheme_key: &str,
+) -> Result<Option<PackageMeta>, CoreError> {
+    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    let _store_guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let metadata = safe_path(&checked_store_dir(core)?, &format!("{scheme_key}.json"))
+        .map_err(CoreError::Other)?;
+    let bytes = match fs::read(metadata) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta: PackageMeta = serde_json::from_slice(&bytes)?;
+    if meta.scheme_key != scheme_key
+        || meta.zip_sha256.len() != 64
+        || !meta.zip_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CoreError::Other("本地方案包信息无效".into()));
+    }
+    Ok(Some(meta))
+}
+
+pub(crate) fn stored_archive(
+    core: &Core,
+    scheme_key: &str,
+) -> Result<(Vec<u8>, PackageMeta), CoreError> {
+    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    let _store_guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let dir = checked_store_dir(core)?;
+    let archive = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
+    let metadata = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
+    if fs::metadata(&archive)?.len() > 30 * 1024 * 1024 {
+        return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
+    }
+    let bytes = fs::read(archive)?;
+    let meta: PackageMeta = serde_json::from_slice(&fs::read(metadata)?)?;
+    if meta.scheme_key != scheme_key || meta.zip_sha256 != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err(CoreError::Other("本地方案包校验失败".into()));
+    }
+    Ok((bytes, meta))
+}
+
+pub(crate) fn store_cloud_archive(
+    core: &Core,
+    scheme_key: &str,
+    version: Option<&str>,
+    zip_bytes: &[u8],
+    user_root: &Path,
+) -> Result<(), CoreError> {
+    use std::io::{Read, Write};
+    let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
+    let dir = checked_store_dir(core)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let mut manifest = BTreeMap::new();
+    let mut expanded = 0u64;
+    if archive.len() > 10_000 {
+        return Err(CoreError::Other("方案包文件过多".into()));
+    }
+    let paths = archive_paths(zip_bytes, user_root).map_err(CoreError::Other)?;
+    let mut read_bytes = 0u64;
+    for relative in paths {
+        let mut file = archive
+            .by_name(&relative)
+            .map_err(|error| CoreError::Other(error.to_string()))?;
+        expanded = expanded.saturating_add(file.size());
+        if expanded > 512 * 1024 * 1024 {
+            return Err(CoreError::Other("方案包解压后过大".into()));
+        }
+        if excluded_from_manifest(&relative) {
+            continue;
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            read_bytes = read_bytes.saturating_add(read as u64);
+            if read_bytes > 512 * 1024 * 1024 {
+                return Err(CoreError::Other("方案包解压后过大".into()));
+            }
+            digest.update(&buffer[..read]);
+        }
+        manifest.insert(relative, format!("{:x}", digest.finalize()));
+    }
+    let meta = PackageMeta {
+        scheme_key: scheme_key.into(),
+        version: version.map(str::to_owned),
+        installed_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        source: "cloud".into(),
+        manifest,
+        zip_sha256: format!("{:x}", Sha256::digest(zip_bytes)),
+    };
+    // Serialize store replacements without modifying the official install's pending receipt.
+    let store_guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if core.state().active_scheme.as_deref() == Some(scheme_key) {
+        return Err(CoreError::Other("请先切换到其他方案".into()));
+    }
+    fs::create_dir_all(&dir)?;
+    let archive_path = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
+    let meta_path = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
+    let mut stored = tempfile::Builder::new()
+        .prefix(".cloud-")
+        .tempfile_in(&dir)?;
+    stored.write_all(zip_bytes)?;
+    stored.as_file().sync_all()?;
+    let mut metadata = tempfile::Builder::new()
+        .prefix(".meta-")
+        .tempfile_in(&dir)?;
+    serde_json::to_writer_pretty(metadata.as_file_mut(), &meta)?;
+    metadata.as_file().sync_all()?;
+    stored
+        .persist(archive_path)
+        .map_err(|error| CoreError::from(error.error))?;
+    metadata
+        .persist(meta_path)
+        .map_err(|error| CoreError::from(error.error))?;
+    core.update_state(|state| {
+        state.installed_packages.insert(
+            scheme_key.into(),
+            crate::state::InstalledPackage {
+                version: version.map(str::to_owned),
+            },
+        );
+    })?;
+    drop(store_guard);
+    crate::user_words::remember_reconciliation(core, scheme_key, user_root, false);
+    Ok(())
+}
+
 pub(crate) fn excluded_from_manifest(relative: &str) -> bool {
     matches!(
         relative.rsplit('/').next().unwrap_or(relative),
@@ -276,6 +421,11 @@ pub(crate) fn finalize_pending(
         return Ok(());
     };
     let dir = checked_store_dir(core)?;
+    let previous = fs::read(dir.join(format!("{scheme_key}.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
+        .filter(|meta| meta.zip_sha256 == receipt.zip_sha256);
+    let preserve_cloud_id = previous.is_some();
     let meta = PackageMeta {
         scheme_key: scheme_key.into(),
         version: version.map(str::to_owned),
@@ -283,7 +433,7 @@ pub(crate) fn finalize_pending(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        source: "official".into(),
+        source: previous.map_or_else(|| "official".into(), |meta| meta.source),
         manifest: receipt.manifest.clone(),
         zip_sha256: receipt.zip_sha256.clone(),
     };
@@ -322,6 +472,11 @@ pub(crate) fn finalize_pending(
             .map_err(|error| CoreError::from(error.error))?;
     }
     *pending = None;
+    if !preserve_cloud_id && core.state().scheme_cloud_ids.contains_key(scheme_key) {
+        core.update_state(|state| {
+            state.scheme_cloud_ids.remove(scheme_key);
+        })?;
+    }
     Ok(())
 }
 

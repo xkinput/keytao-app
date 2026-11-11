@@ -56,10 +56,75 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
+  bool _cloudDialogOpen = false;
+
   @override
   void initState() {
     super.initState();
     widget.controller.setWindowTitle();
+    widget.controller.addListener(_cloudSyncChanged);
+    _cloudSyncChanged();
+  }
+
+  @override
+  void didUpdateWidget(covariant AppShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_cloudSyncChanged);
+      widget.controller.addListener(_cloudSyncChanged);
+      _cloudSyncChanged();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_cloudSyncChanged);
+    super.dispose();
+  }
+
+  void _cloudSyncChanged() {
+    final c = widget.controller;
+    if (_cloudDialogOpen ||
+        c.busy ||
+        c.loggingIn ||
+        (c.pendingCloudProfile == null && c.pendingCloudActiveScheme == null)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || _cloudDialogOpen || c.busy || c.loggingIn) return;
+      final profile = c.pendingCloudProfile;
+      final active = c.pendingCloudActiveScheme;
+      if (profile == null && active == null) return;
+      _cloudDialogOpen = true;
+      final confirmed = await showFDialog<bool>(
+        context: context,
+        builder: (context, _, animation) => AppDialog(
+          title: profile != null ? '从云端下载' : '启用${schemeDisplayName(active!)}？',
+          animation: animation,
+          actions: [
+            ActionButton(
+              AppStrings.cancel,
+              onPress: () => Navigator.pop(context, false),
+            ),
+            ActionButton(
+              profile != null ? '应用' : '启用',
+              primary: true,
+              onPress: () => Navigator.pop(context, true),
+            ),
+          ],
+          child: const SizedBox.shrink(),
+        ),
+      );
+      if (profile != null) {
+        if (confirmed == true) await c.applyCloudProfile();
+        c.dismissCloudProfileOffer();
+      } else {
+        c.dismissCloudActiveScheme();
+        if (confirmed == true) await c.activateSchemePackage(active!);
+      }
+      _cloudDialogOpen = false;
+      if (mounted) _cloudSyncChanged();
+    });
   }
 
   @override

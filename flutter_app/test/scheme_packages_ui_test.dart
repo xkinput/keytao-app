@@ -97,6 +97,7 @@ Future<void> _pumpRow(
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
+    .where((label) => const {'下载', '重新下载', '更新', '启用', '删除'}.contains(label))
     .toList();
 
 void main() {

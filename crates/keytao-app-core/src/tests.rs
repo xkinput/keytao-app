@@ -34,6 +34,7 @@ fn state_round_trip() {
         installed_packages: Default::default(),
         active_scheme: None,
         dismissed_scheme_updates: Default::default(),
+        ..Default::default()
     };
     core.update_state(|state| *state = expected.clone())
         .unwrap();

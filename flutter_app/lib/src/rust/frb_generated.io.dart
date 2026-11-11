@@ -72,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_box_autoadd_android_ime_input_settings_dto(dynamic raw);
 
   @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
   BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
 
   @protected
@@ -217,6 +220,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AccountUserDto? dco_decode_opt_box_autoadd_account_user_dto(dynamic raw);
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
 
   @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
@@ -374,6 +380,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   sse_decode_box_autoadd_android_ime_input_settings_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
   BridgeConfig sse_decode_box_autoadd_bridge_config(
@@ -553,6 +562,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AccountUserDto? sse_decode_opt_box_autoadd_account_user_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
@@ -761,6 +773,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AndroidImeInputSettingsDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_bridge_config(
@@ -998,6 +1013,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     AccountUserDto? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_debug_log_file_dto(
