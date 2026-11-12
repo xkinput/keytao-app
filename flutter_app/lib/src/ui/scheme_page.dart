@@ -299,7 +299,7 @@ class SchemePackageRow extends StatelessWidget {
                     ? null
                     : () => openUserWords(context, c, schemeKey: schemeKey),
               ),
-            if (package != null && c.accountUser != null)
+            if (package != null && active && c.accountUser != null)
               ActionButton(
                 '上传',
                 onPress: c.busy || !package.hasPackageZip
