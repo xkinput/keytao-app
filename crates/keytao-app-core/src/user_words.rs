@@ -408,6 +408,9 @@ pub fn reconcile_user_words(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
+    if package.main.is_none() {
+        return Ok(UserWordsReport::default());
+    }
     let path = user_path(core, &package, root, false)?;
     if !path.try_exists()? {
         return Ok(UserWordsReport::default());
@@ -1475,6 +1478,38 @@ mod tests {
             UserWordsReport::default()
         );
         assert!(!dir.path().join("keytao.user.dict.yaml").exists());
+    }
+
+    #[test]
+    fn reconciliation_skips_packages_without_a_main_dictionary() {
+        let (dir, core) = fixture();
+        let scheme = "local-mytest";
+        package(
+            &core,
+            scheme,
+            &[(
+                "local-mytest.schema.yaml",
+                "schema:\n  schema_id: local-mytest\n  name: My Test\n",
+            )],
+        );
+        let path = dir.path().join("keytao.user.dict.yaml");
+        let original = "---\nname: keytao.user\n...\ncustom\tabc\n";
+        fs::write(&path, original).unwrap();
+
+        for remove in [false, true] {
+            remember_reconciliation(&core, scheme, dir.path(), remove);
+            assert_eq!(
+                take_user_words_report(&core, scheme).unwrap(),
+                UserWordsReport::default()
+            );
+            assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+        }
+        assert!(
+            compare_user_words(&core, scheme, dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("Stored package has no main dictionary; comparison is unavailable")
+        );
     }
 
     #[test]
