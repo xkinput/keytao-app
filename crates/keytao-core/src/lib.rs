@@ -4613,12 +4613,11 @@ fn legacy_schema_artifacts_complete(build: &Path, schema: &str) -> bool {
         let prism = translator
             .get("prism")
             .and_then(Value::as_str)
-            .unwrap_or(schema);
+            .unwrap_or(dictionary);
         Some(
             build.join(format!("{dictionary}.table.bin")).is_file()
-                && (build.join(format!("{schema}.prism.bin")).is_file()
-                    || (valid_rime_build_id(prism)
-                        && build.join(format!("{prism}.prism.bin")).is_file())),
+                && valid_rime_build_id(prism)
+                && build.join(format!("{prism}.prism.bin")).is_file(),
         )
     };
     read().unwrap_or(false)

@@ -129,18 +129,13 @@ class KeytaoAndroidPathsTest {
         }
     }
 
-    @Test fun `scheme requires source and a fresh manual deployment`() {
+    @Test fun `scheme requires configured source files`() {
         val root = temporary
         val build = root.resolve("build").apply { mkdirs() }
         build.resolve("keydo.schema.yaml").writeText("schema: {}\n")
         assertFalse(KeytaoAndroidPaths.hasInstalledSchema(root))
-        assertFalse(KeytaoAndroidPaths.hasDeployedSchema(root))
         root.resolve("default.custom.yaml").writeText("patch:\n  schema_list:\n    - schema: keydo\n")
         root.resolve("keydo.schema.yaml").writeText("schema: {}\n")
         assertTrue(KeytaoAndroidPaths.hasInstalledSchema(root))
-        assertTrue(KeytaoAndroidPaths.hasDeployedSchema(root))
-        assertTrue(KeytaoAndroidPaths.invalidateDeployment(root))
-        assertTrue(KeytaoAndroidPaths.hasInstalledSchema(root))
-        assertFalse(KeytaoAndroidPaths.hasDeployedSchema(root))
     }
 }

@@ -36,7 +36,7 @@ fn compiled_schema(dir: &Path) {
     )
     .unwrap();
     fs::write(dir.join("build/keytao_dict.table.bin"), b"table").unwrap();
-    fs::write(dir.join("build/keytao.prism.bin"), b"prism").unwrap();
+    fs::write(dir.join("build/keytao_dict.prism.bin"), b"prism").unwrap();
 }
 
 #[test]
@@ -98,6 +98,31 @@ fn schema_install_state_upgrades_complete_legacy_build_once() {
 }
 
 #[test]
+fn legacy_upgrade_defaults_prism_to_dictionary_name() {
+    let dir = installed_schema();
+    fs::write(
+        dir.join("keytao.schema.yaml"),
+        "schema:\n  schema_id: keytao\ntranslator:\n  dictionary: keytao.extended\n",
+    )
+    .unwrap();
+    fs::copy(
+        dir.join("keytao.schema.yaml"),
+        dir.join("build/keytao.schema.yaml"),
+    )
+    .unwrap();
+    fs::write(dir.join("build/keytao.extended.table.bin"), b"table").unwrap();
+    fs::write(dir.join("build/keytao.extended.prism.bin"), b"prism").unwrap();
+    assert!(!dir.join("build/keytao.prism.bin").exists());
+    assert!(!dir.join("build/.keytao-deploying").exists());
+    assert!(!dir.join("build/.keytao-deployed").exists());
+    assert!(schema_install_state(&dir).deployed);
+    let marker: Vec<String> =
+        serde_json::from_slice(&fs::read(dir.join("build/.keytao-deployed")).unwrap()).unwrap();
+    assert_eq!(marker, ["keytao"]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn legacy_upgrade_stays_ready_when_marker_write_fails() {
     let dir = installed_schema();
     compiled_schema(&dir);
@@ -148,7 +173,7 @@ fn legacy_upgrade_requires_dictionary_and_custom_prism_artifacts() {
     )
     .unwrap();
     compiled_schema(&dir);
-    fs::remove_file(dir.join("build/keytao.prism.bin")).unwrap();
+    fs::write(dir.join("build/keytao.prism.bin"), b"prism").unwrap();
     assert!(!schema_install_state(&dir).deployed);
     fs::write(dir.join("build/keytao_custom.prism.bin"), b"prism").unwrap();
     fs::remove_file(dir.join("build/keytao_dict.table.bin")).unwrap();
