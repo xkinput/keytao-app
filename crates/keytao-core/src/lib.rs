@@ -4486,7 +4486,7 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
         .map(|content| parse_schema_list(&content))
         .unwrap_or_default()
         .into_iter()
-        .filter(|schema| valid_rime_build_id(schema) && is_keytao_managed_schema(schema))
+        .filter(|schema| valid_rime_build_id(schema))
         .collect::<Vec<_>>();
 
     let installed = !schemas.is_empty()

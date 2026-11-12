@@ -72,6 +72,22 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     )
 }
 
+pub async fn import_local_scheme(
+    directory_path: String,
+    display_name: String,
+    scheme_key: Option<String>,
+) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::import_local_scheme(
+        &state.core,
+        std::path::Path::new(&directory_path),
+        &display_name,
+        scheme_key.as_deref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub fn get_scheme_sync_state() -> Result<String, String> {
     Ok(keytao_app_core::scheme_sync::sync_state(&runtime::state()?.core).to_string())
 }

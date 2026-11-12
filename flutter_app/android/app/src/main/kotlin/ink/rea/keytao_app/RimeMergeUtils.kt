@@ -1,5 +1,7 @@
 package ink.rea.keytao_app
 
+import org.json.JSONArray
+
 data class MergeResult(val mergedContent: String, val userSchemas: List<String>)
 data class RimeLuaMergeResult(val mergedContent: String, val renames: List<Pair<String, String>>)
 
@@ -13,6 +15,10 @@ fun isManagedSchema(schema: String) =
     managedSchemaPrefixes.any { schema.startsWith(it) }
 
 fun isAddonSchema(schema: String) = schema in addonSchemaIds
+
+fun isSafeSchemaId(schema: String) =
+    schema.isNotEmpty() && schema != "." && schema != ".." &&
+        schema.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "_.-" }
 
 private fun dedupeSchemas(schemas: List<String>): List<String> {
     val seen = linkedSetOf<String>()
@@ -34,7 +40,9 @@ fun extractLuaRequire(line: String): String? {
     return content.substring(0, end)
 }
 
-fun parseSchemas(content: String): List<String> {
+fun parseSchemas(content: String): List<String> = parseSchemas(content, decodeQuoted = true)
+
+private fun parseSchemas(content: String, decodeQuoted: Boolean): List<String> {
     val schemas = mutableListOf<String>()
     var inList = false
     for (line in content.lines()) {
@@ -42,9 +50,28 @@ fun parseSchemas(content: String): List<String> {
         when {
             t.contains("schema_list:") -> inList = true
             inList -> {
-                val m = Regex("^- schema:\\s*(\\S+)").find(t)
+                val m = if (decodeQuoted) {
+                    Regex("^- schema:\\s*(.+)$").find(t)
+                } else {
+                    Regex("^- schema:\\s*(\\S+)").find(t)
+                }
                 if (m != null) {
-                    schemas.add(m.groupValues[1])
+                    val raw = m.groupValues[1].trim()
+                    val schema = when {
+                        !decodeQuoted -> raw
+                        raw.startsWith('"') -> {
+                            val quoted = Regex("""^("(?:[^"\\]|\\.)*")(?:\s+#.*)?$""").find(raw)
+                            quoted?.let {
+                                runCatching { JSONArray("[${it.groupValues[1]}]").getString(0) }.getOrNull()
+                            }
+                        }
+                        raw.startsWith('\'') -> Regex("""^'((?:[^']|'')*)'(?:\s+#.*)?$""")
+                            .find(raw)?.groupValues?.get(1)?.replace("''", "'")
+                        else -> raw.substringBefore(" #").trim().takeIf { value ->
+                            value.none(Char::isWhitespace)
+                        }
+                    }
+                    if (schema != null) schemas.add(schema)
                 } else if (t.isNotEmpty() && !t.startsWith('#') && !t.startsWith('-')) {
                     inList = false
                 }
@@ -113,8 +140,8 @@ fun mergeRimeLua(
 }
 
 fun mergeDefaultCustom(existing: String?, zipContent: String): MergeResult {
-    val packageSchemas = parseSchemas(zipContent)
-    val existingSchemas = existing?.let(::parseSchemas).orEmpty()
+    val packageSchemas = parseSchemas(zipContent, decodeQuoted = false)
+    val existingSchemas = existing?.let { parseSchemas(it, decodeQuoted = false) }.orEmpty()
     val userSchemas = existingSchemas.filter { !isManagedSchema(it) && !isAddonSchema(it) }
     val addonSchemas = (existingSchemas + packageSchemas).filter(::isAddonSchema)
     val allSchemas = dedupeSchemas(

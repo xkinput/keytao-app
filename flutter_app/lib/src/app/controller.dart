@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -75,6 +76,7 @@ String? schemeKeyFromSchemas(List<String> schemas) {
 }
 
 String? installedSchemeKey(List<String> schemas, String? installedScheme) {
+  if (installedScheme?.startsWith('local-') == true) return installedScheme;
   final family = schemeKeyFromSchemas(schemas);
   return family == 'xmjd' && installedScheme == 'xmjd-feiding'
       ? 'xmjd-feiding'
@@ -90,6 +92,7 @@ String? displayedSchemeVersion(
   String? installedScheme,
   String? installedVersion,
 ) {
+  if (installedScheme?.startsWith('local-') == true) return installedVersion;
   final family = schemeKeyFromSchemas(schemas);
   if (family == 'keytao') return fileVersion;
   final installedFamily = installedScheme == 'xmjd-feiding'
@@ -236,6 +239,8 @@ class AppController extends ChangeNotifier {
     }
     return null;
   }
+
+  bool isLocalScheme(String key) => installedPackageFor(key)?.source == 'local';
 
   String get activeSchemeKey {
     for (final package in installedPackages) {
@@ -983,7 +988,9 @@ class AppController extends ChangeNotifier {
 
   void selectScheme(String value) {
     final known =
-        schemes.containsKey(value) || xmjdVariantSchemes.containsKey(value);
+        schemes.containsKey(value) ||
+        xmjdVariantSchemes.containsKey(value) ||
+        installedPackageFor(value) != null;
     if (busy || !known) return;
     _manuallySelectedScheme = true;
     if (value == scheme) return;
@@ -1013,6 +1020,11 @@ class AppController extends ChangeNotifier {
     releaseError = null;
     latestRelease = null;
     schemeRelease = null;
+    if (isLocalScheme(selected)) {
+      releaseLoading = false;
+      _changed();
+      return true;
+    }
     _changed();
     try {
       if (selected == 'keytao') {
@@ -1234,49 +1246,113 @@ class AppController extends ChangeNotifier {
     }
   });
 
+  Future<bool> importLocalScheme({String? schemeKey}) async {
+    final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
+    String? importedKey;
+    final result = await run(() async {
+      packageError = null;
+      String? temporaryDirectory;
+      try {
+        final String directoryPath;
+        final String displayName;
+        if (isMobile) {
+          final selected = await MethodChannel(
+            isAndroid ? 'keytao/android' : 'keytao/ios',
+          ).invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
+          if (selected == null) return;
+          directoryPath = selected['path'] as String;
+          temporaryDirectory = directoryPath;
+          displayName = selected['name'] as String;
+        } else {
+          final selected = await getDirectoryPath();
+          if (selected == null) return;
+          directoryPath = selected;
+          final segments = selected
+              .split(RegExp(r'[/\\]'))
+              .where((segment) => segment.isNotEmpty);
+          displayName = segments.isEmpty ? 'local-scheme' : segments.last;
+        }
+        final key = await core.importLocalScheme(
+          directoryPath: directoryPath,
+          displayName: displayName,
+          schemeKey: schemeKey,
+        );
+        importedKey = key;
+        _pendingCloudPackageUploads.remove(key);
+        _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+        await _readLocal();
+        _manuallySelectedScheme = true;
+        scheme = key;
+        await refreshRelease();
+        await _persistSchemeSettings(schedule: false);
+        if (wasActive) {
+          await _activateSchemePackage(key);
+        } else {
+          scheduleSchemeProfileSync();
+        }
+      } catch (failure) {
+        packageError = errorText(failure);
+        rethrow;
+      } finally {
+        if (temporaryDirectory != null) {
+          try {
+            await Directory(temporaryDirectory).delete(recursive: true);
+          } on FileSystemException catch (failure) {
+            addOperationLogs(['[WARN] ${errorText(failure)}']);
+          }
+        }
+      }
+    });
+    return result &&
+        importedKey != null &&
+        (!wasActive || verification.every((entry) => entry.ok));
+  }
+
   Future<bool> activateSchemePackage(String key) {
     final package = installedPackageFor(key);
     if (package == null || package.active || !package.hasPackageZip) {
       return Future.value(false);
     }
-    return run(() async {
-      packageError = null;
+    return run(() => _activateSchemePackage(key))
+        .then((result) => result && verification.every((entry) => entry.ok));
+  }
+
+  Future<void> _activateSchemePackage(String key) async {
+    packageError = null;
+    _invalidateSchemeUpdates();
+    _startOperation(OperationKind.install, AppStrings.installing);
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final result = await core.activateScheme(
+        schemeKey: key,
+        androidExtract: (archive) async {
+          try {
+            return jsonEncode(await android.smartExtractZipToPrivate(archive));
+          } catch (failure) {
+            return jsonEncode({'error': errorText(failure)});
+          }
+        },
+      );
+      _recordInstallResult(result);
+      verification = result.verify;
+      _manuallySelectedScheme = true;
+      scheme = key;
+      latestRelease = null;
+      schemeRelease = null;
       _invalidateSchemeUpdates();
-      _startOperation(OperationKind.install, AppStrings.installing);
-      try {
-        if (isAndroid) await _requireStorage(redirect: true);
-        final result = await core.activateScheme(
-          schemeKey: key,
-          androidExtract: (archive) async {
-            try {
-              return jsonEncode(
-                await android.smartExtractZipToPrivate(archive),
-              );
-            } catch (failure) {
-              return jsonEncode({'error': errorText(failure)});
-            }
-          },
-        );
-        _recordInstallResult(result);
-        verification = result.verify;
-        _manuallySelectedScheme = true;
-        scheme = key;
-        latestRelease = null;
-        schemeRelease = null;
-        _invalidateSchemeUpdates();
-        await _readInstalledPackages();
-        scheduleSchemeProfileSync();
-        await _readLocal();
-        await _readUserWordsReport(key);
-        await refreshRelease();
-      } catch (failure) {
-        packageError = errorText(failure);
-        rethrow;
-      } finally {
-        operation = null;
-      }
-      if (verification.every((entry) => entry.ok)) await _deploy();
-    }).then((result) => result && verification.every((entry) => entry.ok));
+      await _readInstalledPackages();
+      scheduleSchemeProfileSync();
+      await _readLocal();
+      await _readUserWordsReport(key);
+      await refreshRelease();
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    } finally {
+      operation = null;
+    }
+    if (verification.every((entry) => entry.ok)) await _deploy();
   }
 
   Future<bool> removeSchemePackage(String key) {
@@ -1289,6 +1365,17 @@ class AppController extends ChangeNotifier {
         await core.removeSchemePackage(schemeKey: key);
         _invalidateSchemeUpdates();
         await _readInstalledPackages();
+        if (package.source == 'local' && scheme == key) {
+          _manuallySelectedScheme = true;
+          scheme =
+              installedPackages
+                  .where((package) => package.active)
+                  .firstOrNull
+                  ?.schemeKey ??
+              'keytao';
+          await refreshRelease();
+          await _persistSchemeSettings(schedule: false);
+        }
         scheduleSchemeProfileSync();
       } catch (failure) {
         packageError = errorText(failure);

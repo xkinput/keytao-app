@@ -1,11 +1,13 @@
 import Flutter
 import UIKit
+import UniformTypeIdentifiers
 
 @main
-@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
   private var iosChannel: FlutterMethodChannel?
   private let pathsQueue = DispatchQueue(label: "ink.rea.keytao-app.paths")
   private var preparedPaths: [String: String]?
+  private var pendingDirectoryImport: FlutterResult?
 
   override func application(
     _ application: UIApplication,
@@ -58,9 +60,102 @@ import UIKit
             code: "OPEN_SETTINGS_FAILED", message: "Cannot open app Settings.", details: nil
           ))
         }
+      case "importLocalSchemeDirectory":
+        importLocalSchemeDirectory(result)
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+  }
+
+  private func importLocalSchemeDirectory(_ result: @escaping FlutterResult) {
+    guard pendingDirectoryImport == nil else {
+      result(FlutterError(code: "DIRECTORY_PICKER_OPEN", message: "目录选择器已打开", details: nil))
+      return
+    }
+    guard var presenter = UIApplication.shared.connectedScenes
+      .compactMap({ $0 as? UIWindowScene })
+      .filter({ $0.activationState == .foregroundActive })
+      .flatMap({ $0.windows })
+      .first(where: { $0.isKeyWindow })?.rootViewController
+    else {
+      result(FlutterError(code: "DIRECTORY_PICKER_UNAVAILABLE", message: "无法打开目录选择器", details: nil))
+      return
+    }
+    while let presented = presenter.presentedViewController {
+      presenter = presented
+    }
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+    picker.delegate = self
+    picker.allowsMultipleSelection = false
+    pendingDirectoryImport = result
+    presenter.present(picker, animated: true)
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    let result = pendingDirectoryImport
+    pendingDirectoryImport = nil
+    result?(nil)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    guard let result = pendingDirectoryImport else { return }
+    guard let source = urls.first else {
+      pendingDirectoryImport = nil
+      result(nil)
+      return
+    }
+    pathsQueue.async {
+      let response: Any
+      do {
+        response = try Self.copyLocalSchemeDirectory(source)
+      } catch {
+        response = FlutterError(
+          code: "DIRECTORY_IMPORT_FAILED", message: error.localizedDescription, details: nil
+        )
+      }
+      DispatchQueue.main.async {
+        self.pendingDirectoryImport = nil
+        result(response)
+      }
+    }
+  }
+
+  private static func copyLocalSchemeDirectory(_ source: URL) throws -> [String: String] {
+    let scoped = source.startAccessingSecurityScopedResource()
+    defer {
+      if scoped { source.stopAccessingSecurityScopedResource() }
+    }
+    let manager = FileManager.default
+    let name = source.lastPathComponent
+    guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
+      try source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+    else {
+      throw NSError(domain: "keytao/ios", code: 3, userInfo: [
+        NSLocalizedDescriptionKey: "无法读取所选目录"
+      ])
+    }
+    let temporaryRoot = manager.temporaryDirectory
+      .appendingPathComponent("local-scheme-\(UUID().uuidString)", isDirectory: true)
+    let destination = temporaryRoot.appendingPathComponent(name, isDirectory: true)
+    do {
+      try manager.createDirectory(at: temporaryRoot, withIntermediateDirectories: false)
+      var coordinationError: NSError?
+      var copyError: Error?
+      NSFileCoordinator().coordinate(readingItemAt: source, options: [], error: &coordinationError) {
+        coordinatedSource in
+        do {
+          try manager.copyItem(at: coordinatedSource, to: destination)
+        } catch {
+          copyError = error
+        }
+      }
+      if let error = coordinationError { throw error }
+      if let error = copyError { throw error }
+      return ["path": destination.path, "name": name]
+    } catch {
+      try? manager.removeItem(at: temporaryRoot)
+      throw error
     }
   }
 

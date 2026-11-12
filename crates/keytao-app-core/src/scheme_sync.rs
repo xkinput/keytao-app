@@ -37,6 +37,8 @@ pub fn export_profile(core: &Core) -> Result<Value, CoreError> {
                 && meta.source == "cloud"
             {
                 format!("cloud-sha256:{}", meta.zip_sha256)
+            } else if crate::scheme::is_local_scheme_key(&scheme_key) {
+                "local".into()
             } else {
                 "official".into()
             };
@@ -208,6 +210,8 @@ fn checked_profile(profile: Value) -> Result<SchemeProfile, CoreError> {
         if !keys.insert(&package.scheme_key)
             || (!cloud_id_valid
                 && !cloud_sha_valid
+                && !(package.source == "local"
+                    && crate::scheme::is_local_scheme_key(&package.scheme_key))
                 && !matches!(package.source.as_str(), "official" | "github" | "gitee"))
         {
             return Err(CoreError::Other("云端方案来源无效".into()));
@@ -256,6 +260,8 @@ pub async fn apply_profile_at(
                 })
                 .ok_or_else(|| CoreError::Other("云端方案来源不匹配，请先上传方案包".into()))?;
             crate::cloud_packages::download_at(core, &cloud.id, user_root, api_base).await?;
+        } else if crate::scheme::is_local_scheme_key(&package.scheme_key) {
+            return Err(CoreError::Other("请先上传本地方案包".into()));
         } else {
             let source = profile.settings["download_source"]
                 .as_str()

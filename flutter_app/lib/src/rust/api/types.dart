@@ -584,12 +584,16 @@ class InstalledPackageDto {
   final String? version;
   final bool active;
   final bool hasPackageZip;
+  final String? source;
+  final String? displayName;
 
   const InstalledPackageDto({
     required this.schemeKey,
     this.version,
     required this.active,
     required this.hasPackageZip,
+    this.source,
+    this.displayName,
   });
 
   @override
@@ -597,7 +601,9 @@ class InstalledPackageDto {
       schemeKey.hashCode ^
       version.hashCode ^
       active.hashCode ^
-      hasPackageZip.hashCode;
+      hasPackageZip.hashCode ^
+      source.hashCode ^
+      displayName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -607,7 +613,9 @@ class InstalledPackageDto {
           schemeKey == other.schemeKey &&
           version == other.version &&
           active == other.active &&
-          hasPackageZip == other.hasPackageZip;
+          hasPackageZip == other.hasPackageZip &&
+          source == other.source &&
+          displayName == other.displayName;
 }
 
 class LinuxImeStatusDto {

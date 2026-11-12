@@ -36,6 +36,7 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipEntry
@@ -49,6 +50,7 @@ class KeytaoAndroidChannel(
     // Both legacy permission flows share one dialog without losing pending replies.
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
     private var pendingDirectoryPick: Reply? = null
+    private var pendingDirectoryImport = false
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = Reply(result, mainHandler)
@@ -61,6 +63,7 @@ class KeytaoAndroidChannel(
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
                 "showInputMethodPicker" -> showInputMethodPicker(reply)
                 "pickDirectory" -> pickDirectory(reply)
+                "importLocalSchemeDirectory" -> pickDirectory(reply, importLocalScheme = true)
                 "listFiles" -> listFiles(call, reply)
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
@@ -412,15 +415,17 @@ class KeytaoAndroidChannel(
         }
     }
 
-    private fun pickDirectory(reply: Reply) {
+    private fun pickDirectory(reply: Reply, importLocalScheme: Boolean = false) {
         if (pendingDirectoryPick != null) {
             return reply.error("Directory picker is already open")
         }
         pendingDirectoryPick = reply
+        pendingDirectoryImport = importLocalScheme
         try {
             activity.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), directoryPickRequestCode)
         } catch (ex: Exception) {
             pendingDirectoryPick = null
+            pendingDirectoryImport = false
             throw ex
         }
     }
@@ -428,13 +433,77 @@ class KeytaoAndroidChannel(
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != directoryPickRequestCode) return false
         val reply = pendingDirectoryPick ?: return false
+        val importLocalScheme = pendingDirectoryImport
         pendingDirectoryPick = null
+        pendingDirectoryImport = false
         try {
-            handleDirectoryPicked(reply, resultCode, data)
+            if (importLocalScheme) {
+                importLocalSchemeDirectory(reply, resultCode, data)
+            } else {
+                handleDirectoryPicked(reply, resultCode, data)
+            }
         } catch (ex: Exception) {
             reply.error(ex.message ?: "Failed to pick directory")
         }
         return true
+    }
+
+    private fun importLocalSchemeDirectory(reply: Reply, resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK) return reply.success(null)
+        val uri = data?.data ?: return reply.error("未返回所选目录")
+        Thread {
+            val temporaryRoot = File(activity.cacheDir, "local-scheme-${UUID.randomUUID()}")
+            try {
+                val root = DocumentFile.fromTreeUri(activity, uri)
+                    ?: throw IllegalStateException("无法读取所选目录")
+                val name = root.name ?: throw IllegalStateException("无法读取目录名称")
+                validateDirectoryEntryName(name)
+                check(temporaryRoot.mkdir()) { "无法创建临时目录" }
+                val destination = safePrivateFile(temporaryRoot, name)
+                check(destination.mkdir()) { "无法创建临时目录" }
+                copyTreeDirectory(uri, DocumentsContract.getTreeDocumentId(uri), destination, mutableSetOf())
+                reply.success(mapOf("path" to destination.absolutePath, "name" to name))
+            } catch (ex: Exception) {
+                temporaryRoot.deleteRecursively()
+                reply.error(ex.message ?: "无法导入所选目录")
+            }
+        }.start()
+    }
+
+    private fun copyTreeDirectory(treeUri: Uri, documentId: String, destination: File, visited: MutableSet<String>) {
+        check(visited.add(documentId)) { "所选目录包含循环引用" }
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+        val resolver = activity.contentResolver
+        val cursor = resolver.query(children, arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        ), null, null, null) ?: throw IllegalStateException("无法读取所选目录")
+        cursor.use {
+            while (cursor.moveToNext()) {
+                val childId = cursor.getString(0) ?: throw IllegalStateException("无法读取目录项")
+                val name = cursor.getString(1) ?: throw IllegalStateException("无法读取目录项名称")
+                validateDirectoryEntryName(name)
+                val output = safePrivateFile(destination, name)
+                if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    check(output.mkdir()) { "无法创建目录：$name" }
+                    copyTreeDirectory(treeUri, childId, output, visited)
+                } else {
+                    check(output.createNewFile()) { "目录中存在重名文件：$name" }
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                    val input = resolver.openInputStream(childUri)
+                        ?: throw IllegalStateException("无法读取文件：$name")
+                    input.use { source -> output.outputStream().use { target -> source.copyTo(target) } }
+                }
+            }
+        }
+    }
+
+    private fun validateDirectoryEntryName(name: String) {
+        require(name.isNotEmpty() && name != "." && name != ".." &&
+            !name.contains('/') && !name.contains('\\') && !name.contains('\u0000')) {
+            "目录中存在无效文件名"
+        }
     }
 
     private fun handleDirectoryPicked(reply: Reply, resultCode: Int, data: Intent?) {
@@ -834,7 +903,11 @@ class KeytaoAndroidChannel(
                         val zipContent = zip.getInputStream(entry).bufferedReader().readText()
                         val existing = readPrivateText(root, "default.custom.yaml")
                             ?: readPrivateText(root, "default-custom.yaml")
-                        mergeDefaultCustom(existing, zipContent)
+                        if (zipFile.name.startsWith("local-")) {
+                            KeytaoNativeBridge.mergeLocalDefaultCustom(existing, zipContent)
+                        } else {
+                            mergeDefaultCustom(existing, zipContent)
+                        }
                     }
 
                     val zipRimeLuaContent = rimeLuaEntry?.let { entry ->

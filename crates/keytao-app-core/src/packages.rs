@@ -7,12 +7,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "local_import.rs"]
+mod local_import;
+pub use local_import::import_local_scheme;
+
 #[derive(Serialize, Deserialize)]
 pub struct PackageMeta {
     pub scheme_key: String,
     pub version: Option<String>,
     pub installed_at_unix: u64,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub manifest: BTreeMap<String, String>,
     pub zip_sha256: String,
 }
@@ -29,6 +35,8 @@ pub struct InstalledPackageInfo {
     pub version: Option<String>,
     pub active: bool,
     pub has_package_zip: bool,
+    pub source: String,
+    pub display_name: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -175,7 +183,9 @@ where
 {
     let mut updates = Vec::new();
     for (scheme_key, package) in core.state().installed_packages {
-        if crate::scheme::validate_scheme_key(&scheme_key).is_err() {
+        if crate::scheme::validate_scheme_key(&scheme_key).is_err()
+            || crate::scheme::is_local_scheme_key(&scheme_key)
+        {
             continue;
         }
         match fetch(scheme_key.clone()).await {
@@ -279,6 +289,7 @@ pub(crate) fn store_cloud_archive(
     core: &Core,
     scheme_key: &str,
     version: Option<&str>,
+    display_name: Option<&str>,
     zip_bytes: &[u8],
     user_root: &Path,
 ) -> Result<(), CoreError> {
@@ -327,7 +338,13 @@ pub(crate) fn store_cloud_archive(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        source: "cloud".into(),
+        source: if crate::scheme::is_local_scheme_key(scheme_key) {
+            "local"
+        } else {
+            "cloud"
+        }
+        .into(),
+        display_name: display_name.map(str::to_owned),
         manifest,
         zip_sha256: format!("{:x}", Sha256::digest(zip_bytes)),
     };
@@ -424,6 +441,7 @@ pub(crate) fn finalize_pending(
         .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
         .filter(|meta| meta.zip_sha256 == receipt.zip_sha256);
     let preserve_cloud_id = previous.is_some();
+    let display_name = previous.as_ref().and_then(|meta| meta.display_name.clone());
     let meta = PackageMeta {
         scheme_key: scheme_key.into(),
         version: version.map(str::to_owned),
@@ -432,6 +450,7 @@ pub(crate) fn finalize_pending(
             .unwrap_or_default()
             .as_secs(),
         source: previous.map_or_else(|| "official".into(), |meta| meta.source),
+        display_name,
         manifest: receipt.manifest.clone(),
         zip_sha256: receipt.zip_sha256.clone(),
     };
@@ -529,14 +548,24 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
             let has_package_zip = crate::scheme::validate_scheme_key(&scheme_key).is_ok()
                 && fs::symlink_metadata(dir.join(format!("{scheme_key}.zip")))
                     .is_ok_and(|meta| meta.is_file());
-            InstalledPackageInfo {
+            let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
+                stored_metadata(core, &scheme_key)?
+            } else {
+                None
+            };
+            Ok(InstalledPackageInfo {
                 active: state.active_scheme.as_deref() == Some(&scheme_key),
                 scheme_key,
                 version: package.version,
                 has_package_zip,
-            }
+                source: meta
+                    .as_ref()
+                    .map(|meta| meta.source.clone())
+                    .unwrap_or_else(|| "official".into()),
+                display_name: meta.and_then(|meta| meta.display_name),
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, CoreError>>()?)
 }
 
 pub fn remove_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreError> {
@@ -626,10 +655,11 @@ pub async fn activate_scheme(
         ));
     }
     #[cfg(not(target_os = "android"))]
-    let result = crate::install::smart_install(
+    let result = crate::install::smart_install_preserving_settings(
         core,
         archive.to_string_lossy().into_owned(),
         root.to_string_lossy().into_owned(),
+        meta.source == "local",
         #[cfg(target_os = "windows")]
         finish_windows,
     )

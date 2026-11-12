@@ -39,6 +39,16 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<String> importLocalScheme({
+  required String directoryPath,
+  required String displayName,
+  String? schemeKey,
+}) => RustLib.instance.api.crateApiCoreImportLocalScheme(
+  directoryPath: directoryPath,
+  displayName: displayName,
+  schemeKey: schemeKey,
+);
+
 Future<String> getSchemeSyncState() =>
     RustLib.instance.api.crateApiCoreGetSchemeSyncState();
 

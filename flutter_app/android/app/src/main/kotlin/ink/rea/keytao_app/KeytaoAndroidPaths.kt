@@ -201,7 +201,7 @@ object KeytaoAndroidPaths {
             .map { File(root, it) }
             .firstOrNull { it.isFile }
             ?: return emptyList()
-        return runCatching { parseSchemas(config.readText()).filter(::isManagedSchema) }
+        return runCatching { parseSchemas(config.readText()).filter(::isSafeSchemaId) }
             .getOrDefault(emptyList())
     }
 

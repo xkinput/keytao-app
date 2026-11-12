@@ -164,7 +164,19 @@ pub async fn api_error_message(response: reqwest::Response, fallback: &str) -> S
     }
 }
 
-pub fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
+pub fn is_local_scheme_key(scheme: &str) -> bool {
+    scheme.strip_prefix("local-").is_some_and(|slug| {
+        !slug.is_empty()
+            && slug.len() <= 100
+            && !slug.starts_with('-')
+            && !slug.ends_with('-')
+            && slug
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
+pub fn validate_scheme_key(scheme: &str) -> Result<&str, String> {
     match scheme {
         "keytao" => Ok("keytao"),
         "xmjd" => Ok("xmjd"),
@@ -172,6 +184,7 @@ pub fn validate_scheme_key(scheme: &str) -> Result<&'static str, String> {
         "xmjd-feiding" => Ok("xmjd-feiding"),
         "txjx" => Ok("txjx"),
         "keydo" => Ok("keydo"),
+        _ if is_local_scheme_key(scheme) => Ok(scheme),
         _ => Err("不支持的方案".into()),
     }
 }
@@ -190,6 +203,9 @@ pub async fn fetch_scheme_release(
 ) -> Result<SchemeReleaseInfo, CoreError> {
     let result: Result<_, String> = async {
         let scheme = validate_scheme_key(scheme.trim())?;
+        if is_local_scheme_key(scheme) {
+            return Err("本地方案请重新导入".into());
+        }
         let client = build_client(core)?;
         let url = format!("{API_BASE}/api/practice/scheme-release?scheme={scheme}");
         let response = client

@@ -592,6 +592,37 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepare
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMergeLocalDefaultCustom(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    existing: JString<'_>,
+    package_content: JString<'_>,
+) -> jstring {
+    android_jni_guard(
+        "nativeMergeLocalDefaultCustom",
+        std::ptr::null_mut(),
+        || {
+            let has_existing = !existing.is_null();
+            let existing = optional_jni_raw_text(&mut env, existing);
+            if has_existing && existing.is_none() {
+                return std::ptr::null_mut();
+            }
+            let Some(package) = optional_jni_raw_text(&mut env, package_content) else {
+                return std::ptr::null_mut();
+            };
+            let Ok((merged, schemas)) =
+                crate::install::merge_local_default_custom(existing.as_deref(), &package)
+            else {
+                return std::ptr::null_mut();
+            };
+            let json = serde_json::json!({"mergedContent": merged, "userSchemas": schemas});
+            jni_string(&mut env, &json.to_string())
+        },
+    )
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareRimeLuaInstall(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

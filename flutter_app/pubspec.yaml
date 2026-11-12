@@ -9,6 +9,7 @@ environment:
 dependencies:
   code_assets: ^1.2.1
   cupertino_icons: ^1.0.9
+  file_selector: ^1.1.0
   flutter:
     sdk: flutter
   flutter_localizations:

@@ -184,6 +184,33 @@ pub fn merge_default_custom(
     })
 }
 
+pub(crate) fn merge_local_default_custom(
+    existing: Option<&str>,
+    package: &str,
+) -> Result<(String, Vec<String>), String> {
+    let Some(existing) = existing else {
+        return Ok(merge_default_custom(None, package));
+    };
+    let mut incoming: serde_yaml::Value =
+        serde_yaml::from_str(package).map_err(|error| format!("方案配置无效：{error}"))?;
+    let current: serde_yaml::Value = serde_yaml::from_str(existing)
+        .map_err(|error| format!("default.custom.yaml 无效：{error}"))?;
+    let patch = incoming
+        .get_mut("patch")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or("方案配置缺少 patch")?;
+    // A local package chooses schemas without resetting the user's other settings.
+    if let Some(current_patch) = current.get("patch").and_then(serde_yaml::Value::as_mapping) {
+        for (key, value) in current_patch {
+            if key.as_str() != Some("schema_list") {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let incoming = serde_yaml::to_string(&incoming).map_err(|error| error.to_string())?;
+    Ok(merge_default_custom(Some(existing), &incoming))
+}
+
 /// After extraction, verify key files were written correctly.
 /// - default.custom.yaml / rime.lua: read back and compare byte-for-byte with expected content
 /// - dict / schema / lua files: just check existence
@@ -440,6 +467,24 @@ pub async fn smart_install(
     dest_path: String,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
+    smart_install_preserving_settings(
+        core,
+        zip_path,
+        dest_path,
+        false,
+        #[cfg(target_os = "windows")]
+        finish_windows,
+    )
+    .await
+}
+
+pub(crate) async fn smart_install_preserving_settings(
+    core: &Core,
+    zip_path: String,
+    dest_path: String,
+    preserve_default_settings: bool,
+    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
+) -> Result<InstallResult, CoreError> {
     let result: Result<_, String> = async {
         let emit = |stage: &str, percent: u32, message: &str| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -517,7 +562,11 @@ pub async fn smart_install(
                     let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
                         .ok()
                         .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
-                    let (merged, user) = merge_default_custom(existing.as_deref(), &content);
+                    let (merged, user) = if preserve_default_settings {
+                        merge_local_default_custom(existing.as_deref(), &content)?
+                    } else {
+                        merge_default_custom(existing.as_deref(), &content)
+                    };
                     (Some(path), Some(merged), user)
                 } else {
                     (None, None, Vec::new())

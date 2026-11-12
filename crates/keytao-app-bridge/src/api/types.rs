@@ -38,6 +38,8 @@ pub struct InstalledPackageDto {
     pub version: Option<String>,
     pub active: bool,
     pub has_package_zip: bool,
+    pub source: Option<String>,
+    pub display_name: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

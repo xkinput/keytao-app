@@ -60,6 +60,15 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ),
           children: [
+            ActionRow(
+              children: [
+                ActionButton(
+                  '添加本地方案',
+                  icon: FLucideIcons.folderOpen,
+                  onPress: c.busy ? null : c.importLocalScheme,
+                ),
+              ],
+            ),
             for (final key in schemeKeys)
               SchemePackageRow(
                 controller: c,
@@ -70,7 +79,8 @@ class _SchemePageState extends State<SchemePage> {
             if (c.schemeUpdatesLoading) const FProgress(),
             if (c.packageError case final error?) ErrorMessage(error),
             if (c.schemeSyncError case final error?) ErrorMessage(error),
-            VersionPicker(controller: c, showScheme: true),
+            if (!c.isLocalScheme(c.scheme))
+              VersionPicker(controller: c, showScheme: true),
             ValueRow(AppStrings.directory, c.defaultDir),
             if (c.localStatusLine case final status?)
               StatusMessage(
@@ -154,6 +164,7 @@ class SchemePackageRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = controller;
     final package = c.installedPackageFor(schemeKey);
+    final isLocal = package?.source == 'local';
     final update = c.schemeUpdateFor(schemeKey);
     final active = package?.active == true;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
@@ -178,7 +189,7 @@ class SchemePackageRow extends StatelessWidget {
               ),
             ),
             onPress: c.busy ? null : () => c.selectScheme(schemeKey),
-            child: Text(schemeDisplayName(schemeKey)),
+            child: Text(package?.displayName ?? schemeDisplayName(schemeKey)),
           ),
         ),
         if (package != null || update != null) ...[
@@ -348,7 +359,15 @@ class SchemePackageRow extends StatelessWidget {
                 icon: FLucideIcons.arrowUpCircle,
                 onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
               ),
-            if (package == null || activeLegacy)
+            if (isLocal)
+              ActionButton(
+                '重新导入',
+                icon: FLucideIcons.folderOpen,
+                onPress: c.busy
+                    ? null
+                    : () => c.importLocalScheme(schemeKey: schemeKey),
+              ),
+            if (!isLocal && (package == null || activeLegacy))
               ActionButton(
                 activeLegacy ? '重新下载' : '下载',
                 primary: !needsDeploy,
@@ -357,25 +376,28 @@ class SchemePackageRow extends StatelessWidget {
                     ? null
                     : () => c.installSchemePackage(schemeKey),
               )
-            else if (!active) ...[
-              ActionButton(
-                package.hasPackageZip ? '启用' : '重新下载',
-                primary: update == null,
-                icon: package.hasPackageZip
-                    ? FLucideIcons.play
-                    : FLucideIcons.download,
-                onPress: c.busy
-                    ? null
-                    : package.hasPackageZip
-                    ? onActivate ?? () => c.activateSchemePackage(schemeKey)
-                    : () => c.downloadSchemePackage(schemeKey),
-              ),
+            else if (package != null && !active) ...[
+              if (package.hasPackageZip || !isLocal)
+                ActionButton(
+                  package.hasPackageZip ? '启用' : '重新下载',
+                  primary: update == null,
+                  icon: package.hasPackageZip
+                      ? FLucideIcons.play
+                      : FLucideIcons.download,
+                  onPress: c.busy
+                      ? null
+                      : package.hasPackageZip
+                      ? onActivate ?? () => c.activateSchemePackage(schemeKey)
+                      : () => c.downloadSchemePackage(schemeKey),
+                ),
               ActionButton(
                 '删除',
                 icon: FLucideIcons.trash2,
                 onPress: c.busy ? null : () => c.removeSchemePackage(schemeKey),
               ),
             ],
+            if (isLocal && active)
+              ActionButton('删除', icon: FLucideIcons.trash2),
             if (needsDeploy)
               ActionButton(
                 AppStrings.deploy,

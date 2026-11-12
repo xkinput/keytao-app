@@ -406,8 +406,9 @@ async fn upload_prepared_at(
     }
     ensure_account(core, account)?;
     current()?;
-    let mut body =
-        json!({"schemeKey": scheme_key, "name": scheme_key, "size": bytes.len(), "sha256": sha256});
+    let mut body = json!({"schemeKey": scheme_key,
+        "name": meta.display_name.as_deref().unwrap_or(scheme_key),
+        "size": bytes.len(), "sha256": sha256});
     if let Some(version) = &meta.version {
         body["version"] = json!(version);
     }
@@ -553,6 +554,7 @@ pub(crate) async fn download_at(
         core,
         &package.scheme_key,
         package.version.as_deref(),
+        Some(&package.name),
         &bytes,
         user_root,
     )?;
