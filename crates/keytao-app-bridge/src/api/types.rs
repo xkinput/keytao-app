@@ -131,12 +131,20 @@ pub enum BridgeEventKind {
     DeployProgress,
     WindowsImeStatus,
     WindowsImeAction,
+    CloudTransferProgress,
 }
 
 pub struct InstallProgressDto {
     pub stage: String,
     pub percent: u32,
     pub message: String,
+}
+
+pub struct CloudTransferProgressDto {
+    pub direction: String,
+    pub scheme_key: String,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -166,6 +174,7 @@ pub struct WindowsImeStatusDto {
 pub struct BridgeEvent {
     pub kind: BridgeEventKind,
     pub install_progress: Option<InstallProgressDto>,
+    pub cloud_transfer_progress: Option<CloudTransferProgressDto>,
     pub deploy_progress: Option<String>,
     pub windows_ime_status: Option<WindowsImeStatusDto>,
 }

@@ -117,6 +117,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
   final Set<String> _submitted = {};
   final Set<String> _published = {};
   UserWordDto? _pendingDelete;
+  Future<bool>? _deleteCommit;
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _deleteSnackBar;
+  ScaffoldMessengerState? _deleteMessenger;
   String? _error;
   int _request = 0;
   int _loadedRevision = -1;
@@ -132,6 +135,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   @override
   void dispose() {
     widget.controller.removeListener(_controllerChanged);
+    unawaited(_commitPendingDelete());
     _search.dispose();
     super.dispose();
   }
@@ -307,6 +311,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   Future<void> _edit([UserWordDto? entry]) async {
+    if (!await _commitPendingDelete() || !mounted) return;
     final scheme = _scheme;
     final editor = _UserWordEditor(
       controller: widget.controller,
@@ -345,30 +350,64 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   Future<void> _delete(UserWordDto entry) async {
+    if (!await _commitPendingDelete() || !mounted) return;
     final c = widget.controller;
     final scheme = _scheme;
-    var undone = false;
     setState(() => _pendingDelete = entry);
     c.setUserWordDeletePending(scheme, true);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.removeCurrentSnackBar();
+    late final ScaffoldFeatureController<SnackBar, SnackBarClosedReason>
+    snackbar;
+    snackbar = messenger.showSnackBar(
+      SnackBar(
+        content: Text('已删除 ${entry.word}'),
+        persist: false,
+        duration: const Duration(seconds: 4),
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () {
+            if (_deleteCommit != null ||
+                !identical(_deleteSnackBar, snackbar) ||
+                !identical(_pendingDelete, entry)) {
+              return;
+            }
+            setState(() => _pendingDelete = null);
+            _deleteSnackBar = null;
+            _deleteMessenger = null;
+            c.setUserWordDeletePending(scheme, false);
+          },
+        ),
+      ),
+    );
+    _deleteSnackBar = snackbar;
+    _deleteMessenger = messenger;
+    await snackbar.closed;
+    if (!identical(_deleteSnackBar, snackbar)) return;
+    _deleteSnackBar = null;
+    _deleteMessenger = null;
+    if (identical(_pendingDelete, entry)) await _commitPendingDelete();
+  }
+
+  Future<bool> _commitPendingDelete() {
+    final entry = _pendingDelete;
+    if (entry == null) return Future.value(true);
+    return _deleteCommit ??= _persistDelete(entry, _scheme);
+  }
+
+  Future<bool> _persistDelete(UserWordDto entry, String scheme) async {
+    final c = widget.controller;
+    _deleteMessenger?.removeCurrentSnackBar();
     String? failureMessage;
     try {
-      final snackbar = ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('已删除 ${entry.word}'),
-          action: SnackBarAction(label: '撤销', onPressed: () => undone = true),
-        ),
+      // Defer the write until undo expires, or flush before the next action.
+      await core.deleteUserWord(
+        schemeKey: scheme,
+        id: entry.id,
+        expectedWord: entry.word,
+        expectedCode: entry.code,
       );
-      // Commit after undo expires so unknown columns remain intact on undo.
-      await snackbar.closed;
-      if (!undone) {
-        await core.deleteUserWord(
-          schemeKey: scheme,
-          id: entry.id,
-          expectedWord: entry.word,
-          expectedCode: entry.code,
-        );
-        c.markUserWordsChanged(scheme);
-      }
+      c.markUserWordsChanged(scheme);
     } catch (failure) {
       final message = errorText(failure);
       failureMessage = message.contains('Stale user word')
@@ -379,16 +418,22 @@ class _UserWordsPageState extends State<UserWordsPage> {
     } finally {
       c.setUserWordDeletePending(scheme, false);
     }
+    _pendingDelete = null;
+    _deleteSnackBar = null;
+    _deleteMessenger = null;
     if (mounted) {
-      setState(() => _pendingDelete = null);
-      if (!undone) await _load();
+      setState(() {});
+      await _load();
       if (mounted && failureMessage != null) {
         setState(() => _error = failureMessage);
       }
     }
+    _deleteCommit = null;
+    return failureMessage == null;
   }
 
   Future<void> _deploy() async {
+    if (!await _commitPendingDelete() || !mounted) return;
     setState(() => _saving = true);
     final result = await widget.controller.deploy();
     if (!mounted) return;
@@ -399,6 +444,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   Future<void> _sync({bool automatic = false}) async {
+    if (!await _commitPendingDelete() || !mounted) return;
     final c = widget.controller;
     if (_saving || _pendingLoading || c.busy || c.accountUser == null) return;
     setState(() {
@@ -423,6 +469,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   Future<void> _confirmPendingSync(UserDictionarySyncDto pending) async {
+    if (!await _commitPendingDelete() || !mounted) return;
     final c = widget.controller;
     final account = c.accountUser?.id;
     try {
@@ -554,6 +601,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   }
 
   Future<void> _submitSelected() async {
+    if (!await _commitPendingDelete() || !mounted) return;
     final c = widget.controller;
     if (_saving ||
         _pendingLoading ||
@@ -639,12 +687,12 @@ class _UserWordsPageState extends State<UserWordsPage> {
     builder: (context, _) {
       final c = widget.controller;
       final blocked =
-          c.busy ||
+          c.busyWithoutPendingUserWordDeletes ||
           _loading ||
           _saving ||
           _confirmingSync ||
           _pendingLoading ||
-          _pendingDelete != null;
+          _deleteCommit != null;
       final query = _search.text.toLowerCase();
       final entries = _entries.where((comparison) {
         final entry = comparison.entry;
@@ -717,7 +765,11 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                       : FButtonVariant.ghost,
                                   onPress: blocked
                                       ? null
-                                      : () {
+                                      : () async {
+                                          if (!await _commitPendingDelete() ||
+                                              !mounted) {
+                                            return;
+                                          }
                                           setState(() {
                                             _scheme = key;
                                             _selected.clear();

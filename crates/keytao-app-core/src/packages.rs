@@ -346,11 +346,12 @@ pub(crate) fn store_cloud_archive(
             || dir.join(format!("{key}.json")).exists()
     };
     let mut key = scheme_key.to_owned();
+    let existing = fs::read(dir.join(format!("{scheme_key}.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
+        .filter(|meta| meta.zip_sha256.eq_ignore_ascii_case(&digest));
     if crate::scheme::is_local_scheme_key(scheme_key) && occupied(scheme_key) {
-        let existing = fs::read(dir.join(format!("{scheme_key}.json")))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok());
-        if !existing.is_some_and(|meta| meta.zip_sha256.eq_ignore_ascii_case(&digest)) {
+        if existing.is_none() {
             let mut number = 2u64;
             while occupied(&key) {
                 let suffix = format!("-{number}");
@@ -374,7 +375,14 @@ pub(crate) fn store_cloud_archive(
             "cloud"
         }
         .into(),
-        display_name: display_name.map(str::to_owned),
+        display_name: if crate::scheme::is_local_scheme_key(scheme_key) {
+            existing
+                .and_then(|meta| meta.display_name)
+                .or_else(|| display_name.map(str::to_owned))
+        } else {
+            // Built-in names and variants resolve through the UI catalogue.
+            None
+        },
         manifest,
         zip_sha256: digest,
     };

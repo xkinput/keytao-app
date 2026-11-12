@@ -15,6 +15,7 @@ Future<void> showAccountDialog(
   if (!context.mounted) return;
   if (_activeAccountDialog case final active?) return active;
   controller.accountError = null;
+  FocusManager.instance.primaryFocus?.unfocus();
   final result = showFDialog<void>(
     context: context,
     builder: (_, _, animation) =>

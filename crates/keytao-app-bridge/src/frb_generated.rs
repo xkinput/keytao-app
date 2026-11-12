@@ -3333,12 +3333,15 @@ impl SseDecode for crate::api::types::BridgeEvent {
         let mut var_kind = <crate::api::types::BridgeEventKind>::sse_decode(deserializer);
         let mut var_installProgress =
             <Option<crate::api::types::InstallProgressDto>>::sse_decode(deserializer);
+        let mut var_cloudTransferProgress =
+            <Option<crate::api::types::CloudTransferProgressDto>>::sse_decode(deserializer);
         let mut var_deployProgress = <Option<String>>::sse_decode(deserializer);
         let mut var_windowsImeStatus =
             <Option<crate::api::types::WindowsImeStatusDto>>::sse_decode(deserializer);
         return crate::api::types::BridgeEvent {
             kind: var_kind,
             install_progress: var_installProgress,
+            cloud_transfer_progress: var_cloudTransferProgress,
             deploy_progress: var_deployProgress,
             windows_ime_status: var_windowsImeStatus,
         };
@@ -3355,6 +3358,7 @@ impl SseDecode for crate::api::types::BridgeEventKind {
             2 => crate::api::types::BridgeEventKind::DeployProgress,
             3 => crate::api::types::BridgeEventKind::WindowsImeStatus,
             4 => crate::api::types::BridgeEventKind::WindowsImeAction,
+            5 => crate::api::types::BridgeEventKind::CloudTransferProgress,
             _ => unreachable!("Invalid variant for BridgeEventKind: {}", inner),
         };
     }
@@ -3385,6 +3389,22 @@ impl SseDecode for crate::api::types::BridgePlatform {
             3 => crate::api::types::BridgePlatform::Android,
             4 => crate::api::types::BridgePlatform::Ios,
             _ => unreachable!("Invalid variant for BridgePlatform: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::types::CloudTransferProgressDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_direction = <String>::sse_decode(deserializer);
+        let mut var_schemeKey = <String>::sse_decode(deserializer);
+        let mut var_bytesTransferred = <u64>::sse_decode(deserializer);
+        let mut var_totalBytes = <u64>::sse_decode(deserializer);
+        return crate::api::types::CloudTransferProgressDto {
+            direction: var_direction,
+            scheme_key: var_schemeKey,
+            bytes_transferred: var_bytesTransferred,
+            total_bytes: var_totalBytes,
         };
     }
 }
@@ -3889,6 +3909,19 @@ impl SseDecode for Option<bool> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<bool>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::types::CloudTransferProgressDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::types::CloudTransferProgressDto>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -4696,6 +4729,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::BridgeEvent {
         [
             self.kind.into_into_dart().into_dart(),
             self.install_progress.into_into_dart().into_dart(),
+            self.cloud_transfer_progress.into_into_dart().into_dart(),
             self.deploy_progress.into_into_dart().into_dart(),
             self.windows_ime_status.into_into_dart().into_dart(),
         ]
@@ -4722,6 +4756,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::BridgeEventKind {
             Self::DeployProgress => 2.into_dart(),
             Self::WindowsImeStatus => 3.into_dart(),
             Self::WindowsImeAction => 4.into_dart(),
+            Self::CloudTransferProgress => 5.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4777,6 +4812,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::BridgePlatform>
     for crate::api::types::BridgePlatform
 {
     fn into_into_dart(self) -> crate::api::types::BridgePlatform {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::CloudTransferProgressDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.direction.into_into_dart().into_dart(),
+            self.scheme_key.into_into_dart().into_dart(),
+            self.bytes_transferred.into_into_dart().into_dart(),
+            self.total_bytes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::CloudTransferProgressDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::CloudTransferProgressDto>
+    for crate::api::types::CloudTransferProgressDto
+{
+    fn into_into_dart(self) -> crate::api::types::CloudTransferProgressDto {
         self
     }
 }
@@ -5745,6 +5803,10 @@ impl SseEncode for crate::api::types::BridgeEvent {
             self.install_progress,
             serializer,
         );
+        <Option<crate::api::types::CloudTransferProgressDto>>::sse_encode(
+            self.cloud_transfer_progress,
+            serializer,
+        );
         <Option<String>>::sse_encode(self.deploy_progress, serializer);
         <Option<crate::api::types::WindowsImeStatusDto>>::sse_encode(
             self.windows_ime_status,
@@ -5763,6 +5825,7 @@ impl SseEncode for crate::api::types::BridgeEventKind {
                 crate::api::types::BridgeEventKind::DeployProgress => 2,
                 crate::api::types::BridgeEventKind::WindowsImeStatus => 3,
                 crate::api::types::BridgeEventKind::WindowsImeAction => 4,
+                crate::api::types::BridgeEventKind::CloudTransferProgress => 5,
                 _ => {
                     unimplemented!("");
                 }
@@ -5797,6 +5860,16 @@ impl SseEncode for crate::api::types::BridgePlatform {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::types::CloudTransferProgressDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.direction, serializer);
+        <String>::sse_encode(self.scheme_key, serializer);
+        <u64>::sse_encode(self.bytes_transferred, serializer);
+        <u64>::sse_encode(self.total_bytes, serializer);
     }
 }
 
@@ -6168,6 +6241,16 @@ impl SseEncode for Option<bool> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <bool>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::types::CloudTransferProgressDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::types::CloudTransferProgressDto>::sse_encode(value, serializer);
         }
     }
 }

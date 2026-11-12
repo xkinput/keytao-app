@@ -7,6 +7,14 @@ pub struct InstallProgress {
     pub message: String,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CloudTransferProgress {
+    pub direction: String,
+    pub scheme_key: String,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Serialize, Clone)]
 pub struct WindowsImeStatus {
     pub supported: bool,
@@ -31,6 +39,7 @@ pub struct WindowsImeStatus {
 
 pub enum CoreEvent {
     InstallProgress(InstallProgress),
+    CloudTransferProgress(CloudTransferProgress),
     DeployProgress(String),
     WindowsImeStatus(WindowsImeStatus),
     WindowsImeAction(()),

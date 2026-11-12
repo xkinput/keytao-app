@@ -11,8 +11,8 @@ import 'types.dart';
 
 // These functions are ignored because they are not marked as `pub`: `install_result_dto`
 
-/// Creates the process-wide Core. Every subsequent call returns an error,
-/// including calls with identical config. Restart the process to change roots.
+/// Creates the process-wide Core, or returns its existing info when the resolved
+/// directories, platform and user root match. Restart the process to change them.
 Future<BridgeInfo> initCore({required BridgeConfig config}) =>
     RustLib.instance.api.crateApiCoreInitCore(config: config);
 

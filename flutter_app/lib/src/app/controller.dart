@@ -122,6 +122,8 @@ class AppController extends ChangeNotifier {
   bool _busy = false;
   bool get busy =>
       _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;
+  bool get busyWithoutPendingUserWordDeletes =>
+      _busy || windowsRegistrationBusy;
   set busy(bool value) => _busy = value;
   bool _platformStarted = false;
   bool _windowsActionRequested = false;
@@ -218,6 +220,8 @@ class AppController extends ChangeNotifier {
   List<Map<String, dynamic>> cloudPackages = [];
   bool schemeSyncBusy = false;
   String? schemeSyncError;
+  String? cloudTransferError;
+  CloudTransferProgressDto? cloudTransferProgress;
   Map<String, dynamic>? pendingCloudProfile;
   String? pendingCloudActiveScheme;
   Timer? _schemeSyncDebounce;
@@ -517,6 +521,7 @@ class AppController extends ChangeNotifier {
     imeUiError,
     debugError,
     schemeSyncError,
+    cloudTransferError,
     ...deploySteps.map((step) => step.message),
   ].contains(message);
   String? get unhandledError => _isInlineError(error) ? null : error;
@@ -584,6 +589,11 @@ class AppController extends ChangeNotifier {
         }
         if (event.installProgress case final value?) {
           _receiveInstallProgress(value);
+          return;
+        }
+        if (event.cloudTransferProgress case final value?) {
+          cloudTransferProgress = value;
+          _changed();
           return;
         }
         if (event.deployProgress case final value? when isDeploying) {
@@ -1805,15 +1815,26 @@ class AppController extends ChangeNotifier {
     });
   }
 
-  Future<bool> _schemeCloudAction(Future<void> Function() action) async {
+  Future<bool> _schemeCloudAction(
+    Future<void> Function() action, {
+    bool modal = false,
+  }) async {
     if (schemeSyncBusy) return false;
     return run(() async {
       schemeSyncBusy = true;
       schemeSyncError = null;
+      if (modal) {
+        cloudTransferError = null;
+        cloudTransferProgress = null;
+      }
       try {
         await action();
       } catch (failure) {
-        schemeSyncError = errorText(failure);
+        if (modal) {
+          cloudTransferError = errorText(failure);
+        } else {
+          schemeSyncError = errorText(failure);
+        }
         await reloadAccountSession(checkSchemeProfile: false);
         rethrow;
       } finally {
@@ -1937,7 +1958,7 @@ class AppController extends ChangeNotifier {
       preview = Map<String, dynamic>.from(
         jsonDecode(await core.previewCloudPackage(schemeKey: key)) as Map,
       );
-    });
+    }, modal: true);
     return preview;
   }
 
@@ -1951,13 +1972,13 @@ class AppController extends ChangeNotifier {
         cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
             .map((value) => Map<String, dynamic>.from(value as Map))
             .toList();
-      });
+      }, modal: true);
 
   Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
     await core.downloadCloudPackage(id: id);
     await _readInstalledPackages();
     scheduleSchemeProfileSync();
-  });
+  }, modal: true);
 
   Future<bool> deleteCloudPackage(String id) => _schemeCloudAction(() async {
     await core.deleteCloudPackage(id: id);

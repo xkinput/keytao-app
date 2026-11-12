@@ -4,7 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
-import 'settings.dart' show runCloudAccountAction;
+import 'settings.dart' show showCloudPackageTransfer;
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -20,6 +20,7 @@ class _SchemePageState extends State<SchemePage> {
   String? _activatingScheme;
 
   Future<void> _activate(String key) async {
+    FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _activatingScheme = key);
     try {
       await widget.controller.activateSchemePackage(key);
@@ -303,54 +304,11 @@ class SchemePackageRow extends StatelessWidget {
                 '上传',
                 onPress: c.busy || !package.hasPackageZip
                     ? null
-                    : () => runCloudAccountAction(context, c, () async {
-                        final preview = await c.previewCloudPackage(schemeKey);
-                        if (preview == null || !context.mounted) return false;
-                        final files = (preview['files'] as List).cast<String>();
-                        final size =
-                            (preview['archive_size'] as num) / (1024 * 1024);
-                        final confirmed = await showFDialog<bool>(
-                          context: context,
-                          builder: (context, _, animation) => AppDialog(
-                            title: '上传方案',
-                            animation: animation,
-                            actions: [
-                              ActionButton(
-                                '取消',
-                                onPress: () => Navigator.pop(context, false),
-                              ),
-                              ActionButton(
-                                '确认上传',
-                                primary: true,
-                                onPress: () => Navigator.pop(context, true),
-                              ),
-                            ],
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${files.length} 个文件 · ${size.toStringAsFixed(2)} MB',
-                                ),
-                                const SizedBox(height: 8),
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxHeight: 280,
-                                  ),
-                                  child: SingleChildScrollView(
-                                    child: SelectableText(files.join('\n')),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                        if (confirmed != true) return false;
-                        return c.uploadCloudPackage(
-                          schemeKey,
-                          expectedSha256: preview['sha256'] as String,
-                        );
-                      }),
+                    : () => showCloudPackageTransfer(
+                        context,
+                        c,
+                        schemeKey: schemeKey,
+                      ),
               ),
             if (update != null)
               ActionButton(

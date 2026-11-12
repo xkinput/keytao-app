@@ -104,6 +104,7 @@ impl BridgeEvents {
         sink.add(BridgeEvent {
             kind: BridgeEventKind::Ready,
             install_progress: None,
+            cloud_transfer_progress: None,
             deploy_progress: None,
             windows_ime_status: None,
         })
@@ -129,6 +130,7 @@ impl From<CoreEvent> for BridgeEvent {
         let mut dto = Self {
             kind: BridgeEventKind::WindowsImeAction,
             install_progress: None,
+            cloud_transfer_progress: None,
             deploy_progress: None,
             windows_ime_status: None,
         };
@@ -139,6 +141,15 @@ impl From<CoreEvent> for BridgeEvent {
                     stage: progress.stage,
                     percent: progress.percent,
                     message: progress.message,
+                });
+            }
+            CoreEvent::CloudTransferProgress(progress) => {
+                dto.kind = BridgeEventKind::CloudTransferProgress;
+                dto.cloud_transfer_progress = Some(CloudTransferProgressDto {
+                    direction: progress.direction,
+                    scheme_key: progress.scheme_key,
+                    bytes_transferred: progress.bytes_transferred,
+                    total_bytes: progress.total_bytes,
                 });
             }
             CoreEvent::DeployProgress(message) => {
@@ -171,5 +182,31 @@ impl From<CoreEvent> for BridgeEvent {
             CoreEvent::WindowsImeAction(()) => {}
         }
         dto
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_transfer_progress_forwards_byte_counts_and_scheme() {
+        let event: BridgeEvent =
+            CoreEvent::CloudTransferProgress(keytao_app_core::events::CloudTransferProgress {
+                direction: "upload".into(),
+                scheme_key: "xmjd-feiding".into(),
+                bytes_transferred: 65_536,
+                total_bytes: 90_000,
+            })
+            .into();
+        assert_eq!(event.kind, BridgeEventKind::CloudTransferProgress);
+        let progress = event.cloud_transfer_progress.unwrap();
+        assert_eq!(progress.direction, "upload");
+        assert_eq!(progress.scheme_key, "xmjd-feiding");
+        assert_eq!(progress.bytes_transferred, 65_536);
+        assert_eq!(progress.total_bytes, 90_000);
+        assert!(event.install_progress.is_none());
+        assert!(event.deploy_progress.is_none());
+        assert!(event.windows_ime_status.is_none());
     }
 }

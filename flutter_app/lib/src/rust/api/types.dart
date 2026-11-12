@@ -264,12 +264,14 @@ class BridgeConfig {
 class BridgeEvent {
   final BridgeEventKind kind;
   final InstallProgressDto? installProgress;
+  final CloudTransferProgressDto? cloudTransferProgress;
   final String? deployProgress;
   final WindowsImeStatusDto? windowsImeStatus;
 
   const BridgeEvent({
     required this.kind,
     this.installProgress,
+    this.cloudTransferProgress,
     this.deployProgress,
     this.windowsImeStatus,
   });
@@ -278,6 +280,7 @@ class BridgeEvent {
   int get hashCode =>
       kind.hashCode ^
       installProgress.hashCode ^
+      cloudTransferProgress.hashCode ^
       deployProgress.hashCode ^
       windowsImeStatus.hashCode;
 
@@ -288,6 +291,7 @@ class BridgeEvent {
           runtimeType == other.runtimeType &&
           kind == other.kind &&
           installProgress == other.installProgress &&
+          cloudTransferProgress == other.cloudTransferProgress &&
           deployProgress == other.deployProgress &&
           windowsImeStatus == other.windowsImeStatus;
 }
@@ -299,6 +303,7 @@ enum BridgeEventKind {
   deployProgress,
   windowsImeStatus,
   windowsImeAction,
+  cloudTransferProgress,
 }
 
 class BridgeInfo {
@@ -327,6 +332,37 @@ class BridgeInfo {
 }
 
 enum BridgePlatform { windows, macOs, linux, android, ios }
+
+class CloudTransferProgressDto {
+  final String direction;
+  final String schemeKey;
+  final BigInt bytesTransferred;
+  final BigInt totalBytes;
+
+  const CloudTransferProgressDto({
+    required this.direction,
+    required this.schemeKey,
+    required this.bytesTransferred,
+    required this.totalBytes,
+  });
+
+  @override
+  int get hashCode =>
+      direction.hashCode ^
+      schemeKey.hashCode ^
+      bytesTransferred.hashCode ^
+      totalBytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloudTransferProgressDto &&
+          runtimeType == other.runtimeType &&
+          direction == other.direction &&
+          schemeKey == other.schemeKey &&
+          bytesTransferred == other.bytesTransferred &&
+          totalBytes == other.totalBytes;
+}
 
 class ComponentVersionsDto {
   final String appVersion;

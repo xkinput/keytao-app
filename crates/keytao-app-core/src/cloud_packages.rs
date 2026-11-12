@@ -1,5 +1,5 @@
 use crate::account::{API_BASE, ApiClient};
-use crate::{Core, CoreError};
+use crate::{Core, CoreError, CoreEvent, events::CloudTransferProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -374,6 +374,13 @@ async fn upload_prepared_at(
         ..
     } = bundle;
     let archive_size = bytes.len() as u64;
+    let mut progress = CloudTransferProgress {
+        direction: "upload".into(),
+        scheme_key: scheme_key.into(),
+        bytes_transferred: 0,
+        total_bytes: archive_size,
+    };
+    core.emit(CoreEvent::CloudTransferProgress(progress.clone()));
     let current = || -> Result<(), CoreError> {
         eligible(core, scheme_key, root)?;
         if crate::upload_bundle::verified_artifacts(root, shared.as_deref(), &ids)?.sha256 != sha256 {
@@ -402,6 +409,8 @@ async fn upload_prepared_at(
         package.files = files;
         package.total_size = total_size;
         package.validation = validation();
+        progress.bytes_transferred = archive_size;
+        core.emit(CoreEvent::CloudTransferProgress(progress));
         return Ok(package);
     }
     ensure_account(core, account)?;
@@ -433,10 +442,31 @@ async fn upload_prepared_at(
         .put(storage_url(&ticket.upload_url)?)
         .timeout(Duration::from_secs(120));
     for (name, value) in ticket.headers {
+        if name.eq_ignore_ascii_case(reqwest::header::CONTENT_LENGTH.as_str()) {
+            continue;
+        }
         request = request.header(name, value);
     }
+    let sink = core.sink.clone();
+    let stream = futures_util::stream::unfold(
+        (bytes, 0, progress),
+        move |(bytes, offset, mut progress)| {
+            let sink = sink.clone();
+            async move {
+                if offset == bytes.len() {
+                    return None;
+                }
+                let end = (offset + 64 * 1024).min(bytes.len());
+                let chunk = bytes[offset..end].to_vec();
+                progress.bytes_transferred = end as u64;
+                sink.emit(CoreEvent::CloudTransferProgress(progress.clone()));
+                Some((Ok::<_, std::io::Error>(chunk), (bytes, end, progress)))
+            }
+        },
+    );
     let response = request
-        .body(bytes)
+        .header(reqwest::header::CONTENT_LENGTH, archive_size)
+        .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await
         .map_err(|error| CoreError::Network(error.to_string()))?;
@@ -515,6 +545,13 @@ pub(crate) async fn download_at(
     {
         return Err(CoreError::Other("请先切换到其他方案".into()));
     }
+    let mut progress = CloudTransferProgress {
+        direction: "download".into(),
+        scheme_key: package.scheme_key.clone(),
+        bytes_transferred: 0,
+        total_bytes: package.size,
+    };
+    core.emit(CoreEvent::CloudTransferProgress(progress.clone()));
     let url = ApiClient::new(core, api_base)
         .download_url(&format!("{PACKAGES_PATH}/{id}"))
         .await
@@ -545,6 +582,8 @@ pub(crate) async fn download_at(
             return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
         }
         bytes.extend_from_slice(&chunk);
+        progress.bytes_transferred = bytes.len() as u64;
+        core.emit(CoreEvent::CloudTransferProgress(progress.clone()));
     }
     if bytes.len() as u64 != package.size
         || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(&package.sha256)

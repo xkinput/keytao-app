@@ -78,6 +78,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
 
   @protected
+  CloudTransferProgressDto dco_decode_box_autoadd_cloud_transfer_progress_dto(
+    dynamic raw,
+  );
+
+  @protected
   DebugLogFileDto dco_decode_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
@@ -112,6 +117,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgePlatform dco_decode_bridge_platform(dynamic raw);
+
+  @protected
+  CloudTransferProgressDto dco_decode_cloud_transfer_progress_dto(dynamic raw);
 
   @protected
   ComponentVersionsDto dco_decode_component_versions_dto(dynamic raw);
@@ -223,6 +231,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
+  CloudTransferProgressDto?
+  dco_decode_opt_box_autoadd_cloud_transfer_progress_dto(dynamic raw);
 
   @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
@@ -390,6 +402,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CloudTransferProgressDto sse_decode_box_autoadd_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DebugLogFileDto sse_decode_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
@@ -432,6 +449,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgePlatform sse_decode_bridge_platform(SseDeserializer deserializer);
+
+  @protected
+  CloudTransferProgressDto sse_decode_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ComponentVersionsDto sse_decode_component_versions_dto(
@@ -565,6 +587,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  CloudTransferProgressDto?
+  sse_decode_opt_box_autoadd_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
@@ -784,6 +812,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_cloud_transfer_progress_dto(
+    CloudTransferProgressDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_debug_log_file_dto(
     DebugLogFileDto self,
     SseSerializer serializer,
@@ -834,6 +868,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_bridge_platform(
     BridgePlatform self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_cloud_transfer_progress_dto(
+    CloudTransferProgressDto self,
     SseSerializer serializer,
   );
 
@@ -1016,6 +1056,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_cloud_transfer_progress_dto(
+    CloudTransferProgressDto? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_debug_log_file_dto(

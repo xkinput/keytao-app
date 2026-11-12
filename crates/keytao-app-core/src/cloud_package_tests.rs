@@ -14,7 +14,22 @@ impl EventSink for Sink {
     fn emit(&self, _: CoreEvent) {}
 }
 
+#[derive(Default)]
+struct RecordingSink(std::sync::Mutex<Vec<crate::events::CloudTransferProgress>>);
+
+impl EventSink for RecordingSink {
+    fn emit(&self, event: CoreEvent) {
+        if let CoreEvent::CloudTransferProgress(progress) = event {
+            self.0.lock().unwrap().push(progress);
+        }
+    }
+}
+
 fn fixture() -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
+    fixture_with_sink(Arc::new(Sink))
+}
+
+fn fixture_with_sink(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::new(
         AppEnv {
@@ -24,7 +39,7 @@ fn fixture() -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
             app_version: "test".into(),
             platform: Platform::MacOs,
         },
-        Arc::new(Sink),
+        sink,
     )
     .unwrap();
     core.import_legacy_state(Some("fixture-token".into()), Some(json!({"id":7})), false)
@@ -58,16 +73,30 @@ fn package(bytes: &[u8]) -> Value {
 }
 
 fn deployed_fixture() -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
-    let (dir, core, _) = fixture();
+    deployed_fixture_with_sink(Arc::new(Sink), 0)
+}
+
+fn deployed_fixture_with_sink(
+    sink: Arc<dyn EventSink>,
+    padding: usize,
+) -> (tempfile::TempDir, Arc<Core>, Vec<u8>) {
+    let (dir, core, _) = fixture_with_sink(sink);
     let root = dir.path().join("rime");
     std::fs::create_dir_all(root.join("build")).unwrap();
-    let schema = "schema:\n  schema_id: xmjd6\nspeller:\n  alphabet: abc\n";
-    std::fs::write(root.join("xmjd6.schema.yaml"), schema).unwrap();
+    let mut schema = "schema:\n  schema_id: xmjd6\nspeller:\n  alphabet: abc\n#".to_owned();
+    let mut seed = 0x9e37_79b9u32;
+    for _ in 0..padding {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        schema.push(char::from(b'!' + (seed >> 24) as u8 % 94));
+    }
+    std::fs::write(root.join("xmjd6.schema.yaml"), &schema).unwrap();
     std::fs::File::open(root.join("xmjd6.schema.yaml"))
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
         .unwrap();
-    std::fs::write(root.join("build/xmjd6.schema.yaml"), schema).unwrap();
+    std::fs::write(root.join("build/xmjd6.schema.yaml"), &schema).unwrap();
     core.update_state(|state| state.active_scheme = Some("xmjd".into()))
         .unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
@@ -156,7 +185,9 @@ impl Server {
 
 #[tokio::test]
 async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
-    let (dir, core, bytes) = deployed_fixture();
+    let sink = Arc::new(RecordingSink::default());
+    let (dir, core, bytes) = deployed_fixture_with_sink(sink.clone(), 200_000);
+    assert!(bytes.len() > 64 * 1024);
     let ready = package(&bytes);
     let mock=server(|url|vec![
         response("200 OK",json!({"packages":[]})),
@@ -181,6 +212,12 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
     assert!(headers[1].starts_with("POST /api/user/scheme-packages HTTP/1.1"));
     assert!(headers[2].starts_with("PUT /storage HTTP/1.1"));
     assert!(headers[3].starts_with("POST /api/user/scheme-packages/21/complete HTTP/1.1"));
+    let storage_headers = headers[2].to_ascii_lowercase();
+    let content_lengths: Vec<_> = storage_headers
+        .lines()
+        .filter(|line| line.starts_with("content-length:"))
+        .collect();
+    assert_eq!(content_lengths, [format!("content-length: {}", bytes.len())]);
     assert!(
         headers[2]
             .to_ascii_lowercase()
@@ -194,6 +231,21 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
         .unwrap()
         + 4;
     assert_eq!(&requests[2][body..], bytes.as_slice());
+    let progress = sink.0.lock().unwrap();
+    assert!(progress.iter().filter(|event| event.bytes_transferred > 0).count() > 1);
+    assert_eq!(progress.first().unwrap().bytes_transferred, 0);
+    assert_eq!(
+        progress.last().unwrap().bytes_transferred,
+        bytes.len() as u64
+    );
+    assert!(progress.iter().all(|event| event.direction == "upload"
+        && event.scheme_key == "xmjd"
+        && event.total_bytes == bytes.len() as u64));
+    assert!(
+        progress
+            .windows(2)
+            .all(|pair| pair[0].bytes_transferred <= pair[1].bytes_transferred)
+    );
     let json_body = requests[1]
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -301,6 +353,7 @@ async fn downloading_conflicting_local_package_preserves_existing_content_and_ac
         .unwrap();
         let mut remote = package(&bytes);
         remote["schemeKey"] = json!(own);
+        remote["name"] = json!("Cloud package");
         let mock = server(|url| {
             vec![
                 response("200 OK", json!({"packages":[remote]})),
@@ -327,6 +380,14 @@ async fn downloading_conflicting_local_package_preserves_existing_content_and_ac
         assert_eq!(
             crate::packages::stored_archive(&core, "local-rime-3")
                 .unwrap()
+                .1
+                .display_name
+                .as_deref(),
+            Some("Cloud package")
+        );
+        assert_eq!(
+            crate::packages::stored_archive(&core, "local-rime-3")
+                .unwrap()
                 .0,
             bytes
         );
@@ -339,8 +400,15 @@ async fn downloading_identical_local_package_reuses_key() {
     let (dir, core, bytes) = fixture();
     let root = dir.path().join("rime");
     assert_eq!(
-        crate::packages::store_cloud_archive(&core, "local-rime", Some("v1"), None, &bytes, &root)
-            .unwrap(),
+        crate::packages::store_cloud_archive(
+            &core,
+            "local-rime",
+            Some("v1"),
+            Some("Stored name"),
+            &bytes,
+            &root
+        )
+        .unwrap(),
         "local-rime"
     );
     let mut remote = package(&bytes);
@@ -365,6 +433,14 @@ async fn downloading_identical_local_package_reuses_key() {
     assert_eq!(mock.finish().await.len(), 3);
     assert_eq!(core.state().scheme_cloud_ids["local-rime"], "21");
     assert!(!core.state().installed_packages.contains_key("local-rime-2"));
+    assert_eq!(
+        crate::packages::stored_archive(&core, "local-rime")
+            .unwrap()
+            .1
+            .display_name
+            .as_deref(),
+        Some("Stored name")
+    );
     assert_eq!(
         crate::packages::stored_archive(&core, "local-rime")
             .unwrap()
@@ -403,6 +479,53 @@ async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id
     assert_eq!(meta.source, "cloud");
     assert_eq!(core.state().scheme_cloud_ids["xmjd"], "21");
     assert_eq!(core.state().active_scheme.as_deref(), Some("xmjd"));
+}
+
+#[tokio::test]
+async fn cloud_download_uses_catalogue_names_for_builtin_scheme_variants() {
+    for scheme_key in ["keytao", "xmjd-feiding"] {
+        let sink = Arc::new(RecordingSink::default());
+        let (dir, core, bytes) = fixture_with_sink(sink.clone());
+        let mut remote = package(&bytes);
+        remote["schemeKey"] = json!(scheme_key);
+        remote["name"] = json!(scheme_key);
+        let mock = server(|url| {
+            vec![
+                response("200 OK", json!({"packages":[remote]})),
+                Response {
+                    status: "302 Found",
+                    headers: vec![("Location".into(), format!("{url}/storage"))],
+                    body: vec![],
+                },
+                Response {
+                    status: "200 OK",
+                    headers: vec![],
+                    body: bytes.clone(),
+                },
+            ]
+        })
+        .await;
+        download_at(&core, "21", &dir.path().join("rime"), &mock.url)
+            .await
+            .unwrap();
+        mock.finish().await;
+        let meta = crate::packages::stored_archive(&core, scheme_key)
+            .unwrap()
+            .1;
+        assert_eq!(meta.scheme_key, scheme_key);
+        assert_eq!(meta.display_name, None);
+        assert_eq!(meta.version.as_deref(), Some("v1"));
+        let progress = sink.0.lock().unwrap();
+        assert!(progress.len() >= 2);
+        assert_eq!(progress.first().unwrap().bytes_transferred, 0);
+        assert_eq!(
+            progress.last().unwrap().bytes_transferred,
+            bytes.len() as u64
+        );
+        assert!(progress.iter().all(|event| event.direction == "download"
+            && event.scheme_key == scheme_key
+            && event.total_bytes == bytes.len() as u64));
+    }
 }
 
 #[tokio::test]

@@ -3221,6 +3221,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  CloudTransferProgressDto dco_decode_box_autoadd_cloud_transfer_progress_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_cloud_transfer_progress_dto(raw);
+  }
+
+  @protected
   DebugLogFileDto dco_decode_box_autoadd_debug_log_file_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_debug_log_file_dto(raw);
@@ -3281,14 +3289,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeEvent dco_decode_bridge_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return BridgeEvent(
       kind: dco_decode_bridge_event_kind(arr[0]),
       installProgress: dco_decode_opt_box_autoadd_install_progress_dto(arr[1]),
-      deployProgress: dco_decode_opt_String(arr[2]),
+      cloudTransferProgress:
+          dco_decode_opt_box_autoadd_cloud_transfer_progress_dto(arr[2]),
+      deployProgress: dco_decode_opt_String(arr[3]),
       windowsImeStatus: dco_decode_opt_box_autoadd_windows_ime_status_dto(
-        arr[3],
+        arr[4],
       ),
     );
   }
@@ -3316,6 +3326,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgePlatform dco_decode_bridge_platform(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return BridgePlatform.values[raw as int];
+  }
+
+  @protected
+  CloudTransferProgressDto dco_decode_cloud_transfer_progress_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return CloudTransferProgressDto(
+      direction: dco_decode_String(arr[0]),
+      schemeKey: dco_decode_String(arr[1]),
+      bytesTransferred: dco_decode_u_64(arr[2]),
+      totalBytes: dco_decode_u_64(arr[3]),
+    );
   }
 
   @protected
@@ -3674,6 +3698,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool? dco_decode_opt_box_autoadd_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_bool(raw);
+  }
+
+  @protected
+  CloudTransferProgressDto?
+  dco_decode_opt_box_autoadd_cloud_transfer_progress_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_cloud_transfer_progress_dto(raw);
   }
 
   @protected
@@ -4211,6 +4244,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  CloudTransferProgressDto sse_decode_box_autoadd_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_cloud_transfer_progress_dto(deserializer));
+  }
+
+  @protected
   DebugLogFileDto sse_decode_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   ) {
@@ -4283,12 +4324,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_installProgress = sse_decode_opt_box_autoadd_install_progress_dto(
       deserializer,
     );
+    var var_cloudTransferProgress =
+        sse_decode_opt_box_autoadd_cloud_transfer_progress_dto(deserializer);
     var var_deployProgress = sse_decode_opt_String(deserializer);
     var var_windowsImeStatus =
         sse_decode_opt_box_autoadd_windows_ime_status_dto(deserializer);
     return BridgeEvent(
       kind: var_kind,
       installProgress: var_installProgress,
+      cloudTransferProgress: var_cloudTransferProgress,
       deployProgress: var_deployProgress,
       windowsImeStatus: var_windowsImeStatus,
     );
@@ -4319,6 +4363,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return BridgePlatform.values[inner];
+  }
+
+  @protected
+  CloudTransferProgressDto sse_decode_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_direction = sse_decode_String(deserializer);
+    var var_schemeKey = sse_decode_String(deserializer);
+    var var_bytesTransferred = sse_decode_u_64(deserializer);
+    var var_totalBytes = sse_decode_u_64(deserializer);
+    return CloudTransferProgressDto(
+      direction: var_direction,
+      schemeKey: var_schemeKey,
+      bytesTransferred: var_bytesTransferred,
+      totalBytes: var_totalBytes,
+    );
   }
 
   @protected
@@ -4794,6 +4855,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_bool(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  CloudTransferProgressDto?
+  sse_decode_opt_box_autoadd_cloud_transfer_progress_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_cloud_transfer_progress_dto(deserializer));
     } else {
       return null;
     }
@@ -5418,6 +5493,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_cloud_transfer_progress_dto(
+    CloudTransferProgressDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_cloud_transfer_progress_dto(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_debug_log_file_dto(
     DebugLogFileDto self,
     SseSerializer serializer,
@@ -5487,6 +5571,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       self.installProgress,
       serializer,
     );
+    sse_encode_opt_box_autoadd_cloud_transfer_progress_dto(
+      self.cloudTransferProgress,
+      serializer,
+    );
     sse_encode_opt_String(self.deployProgress, serializer);
     sse_encode_opt_box_autoadd_windows_ime_status_dto(
       self.windowsImeStatus,
@@ -5518,6 +5606,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_cloud_transfer_progress_dto(
+    CloudTransferProgressDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.direction, serializer);
+    sse_encode_String(self.schemeKey, serializer);
+    sse_encode_u_64(self.bytesTransferred, serializer);
+    sse_encode_u_64(self.totalBytes, serializer);
   }
 
   @protected
@@ -5909,6 +6009,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_bool(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_cloud_transfer_progress_dto(
+    CloudTransferProgressDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_cloud_transfer_progress_dto(self, serializer);
     }
   }
 

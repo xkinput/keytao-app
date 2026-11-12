@@ -6,7 +6,9 @@ import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart'
     show DeployStep, DeployStepState;
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/login.dart' show showAccountDialog;
 import 'package:keytao/src/ui/scheme_page.dart';
+import 'package:keytao/src/ui/settings.dart' show showCloudPackageTransfer;
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
@@ -20,7 +22,7 @@ const _update = SchemeUpdateDto(
 );
 
 class _PackageController extends ViewController {
-  _PackageController() : super(BridgePlatform.macOs) {
+  _PackageController([super.platform = BridgePlatform.macOs]) {
     appUpdate = null;
   }
 
@@ -65,6 +67,23 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<Map<String, dynamic>?> previewCloudPackage(String key) async => {
+    'files': ['keytao.schema.yaml'],
+    'archive_size': 1024,
+    'sha256': 'preview',
+  };
+
+  @override
+  Future<bool> uploadCloudPackage(String key, {String? expectedSha256}) async =>
+      true;
+
+  @override
+  Future<bool> downloadCloudPackage(String id) async => true;
+
+  @override
+  Future<void> reloadAccountSession({bool checkSchemeProfile = true}) async {}
+
+  @override
   Future<bool> dismissSchemeUpdate(SchemeUpdateDto update) async {
     actions.add('dismiss:${update.schemeKey}');
     dismissedSchemeUpdates[update.schemeKey] = update.latestVersion;
@@ -103,6 +122,121 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets('scheme busy transitions preserve the page scroll offset', (
+    tester,
+  ) async {
+    final c = _PackageController(BridgePlatform.android);
+    addTearDown(c.dispose);
+    _size(tester, const Size(360, 800));
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(
+          child: ListenableBuilder(
+            listenable: c,
+            builder: (_, _) => SchemePage(controller: c),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final scrollable = find
+        .descendant(
+          of: find.byKey(const PageStorageKey('scheme')),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    final position = tester.state<ScrollableState>(scrollable).position;
+    final source = find.widgetWithText(ChoiceSetting<String>, '下载来源');
+    final tab = find.descendant(of: source, matching: find.byType(FTabs));
+    final label = find.descendant(of: tab, matching: find.byType(Text)).first;
+    Focus.of(tester.element(label)).requestFocus();
+    await tester.pumpAndSettle();
+    position.jumpTo(60);
+    await tester.pumpAndSettle();
+    for (final busy in [true, false, true, false]) {
+      c.busy = busy;
+      c.schemeSyncError = busy ? '上传失败' : null;
+      c.rebuild();
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(60, 0.01));
+    }
+    final input = find.byType(EditableText).last;
+    final inputFocus = tester.widget<EditableText>(input).focusNode;
+    await tester.ensureVisible(input);
+    await tester.showKeyboard(input);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpAndSettle();
+    position.jumpTo(60);
+    await tester.pumpAndSettle();
+    expect(inputFocus.hasFocus, isTrue);
+    for (final busy in [true, false]) {
+      c.busy = busy;
+      c.rebuild();
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(60, 0.01));
+    }
+    final transfer = showCloudPackageTransfer(
+      tester.element(find.byType(SchemePage)),
+      c,
+      schemeKey: 'keytao',
+    );
+    await tester.pumpAndSettle();
+    expect(position.pixels, closeTo(60, 0.01));
+    expect(inputFocus.hasFocus, isFalse);
+    await tester.tap(find.widgetWithText(ActionButton, '确认上传'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    await transfer;
+    expect(inputFocus.hasFocus, isFalse);
+    expect(position.pixels, closeTo(60, 0.01));
+    await tester.showKeyboard(input);
+    await tester.pumpAndSettle();
+    position.jumpTo(60);
+    await tester.pumpAndSettle();
+    final account = showAccountDialog(
+      tester.element(find.byType(SchemePage)),
+      c,
+    );
+    await tester.pumpAndSettle();
+    final download = showCloudPackageTransfer(
+      tester.element(find.byType(AppDialog)),
+      c,
+      schemeKey: 'keytao',
+      packageId: 'cloud-keytao',
+      totalBytes: 1024,
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    await download;
+    Navigator.of(tester.element(find.byType(AppDialog))).pop();
+    await tester.pumpAndSettle();
+    await account;
+    expect(inputFocus.hasFocus, isFalse);
+    expect(position.pixels, closeTo(60, 0.01));
+    c.installedPackages = const [
+      InstalledPackageDto(
+        schemeKey: 'keytao',
+        active: false,
+        hasPackageZip: true,
+      ),
+    ];
+    c.rebuild();
+    await tester.pumpAndSettle();
+    await tester.showKeyboard(input);
+    await tester.pumpAndSettle();
+    position.jumpTo(60);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ActionButton, '启用').first);
+    await tester.pumpAndSettle();
+    expect(inputFocus.hasFocus, isFalse);
+    expect(position.pixels, closeTo(60, 0.01));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'an active package with an incomplete build is pending deployment',
     (tester) async {
@@ -324,7 +458,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd')),
-        matching: find.byType(ChoiceSetting<String>),
+        matching: find.byType(FTabs),
       ),
       findsOneWidget,
     );
@@ -339,7 +473,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('scheme-package-xmjd-feiding')),
-        matching: find.byType(ChoiceSetting<String>),
+        matching: find.byType(FTabs),
       ),
       findsOneWidget,
     );
