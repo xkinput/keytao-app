@@ -132,6 +132,16 @@ object KeytaoNativeBridge {
         return KeytaoRimeDeployStepResult.fromJson(json)
     }
 
+    fun hasDeployedSchema(userDir: String): Boolean {
+        if (!loaded) return false
+        return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
+    }
+
+    fun completeDeployment(userDir: String): Boolean {
+        if (!loaded) return false
+        return runCatching { nativeCompleteDeployment(userDir) }.getOrDefault(false)
+    }
+
     fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
         if (!loaded) return false
         return runCatching { nativeInit(userDir, sharedDir, deploy) }.getOrDefault(false).also {
@@ -378,6 +388,10 @@ object KeytaoNativeBridge {
     external fun nativeEngineAvailable(): Boolean
 
     external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String
+
+    external fun nativeHasDeployedSchema(userDir: String): Boolean
+
+    external fun nativeCompleteDeployment(userDir: String): Boolean
 
     external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
 

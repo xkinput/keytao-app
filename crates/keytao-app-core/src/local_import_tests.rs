@@ -191,6 +191,7 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
     assert_eq!(engine_state.schemas, ["example"]);
     fs::create_dir_all(root.join("build")).unwrap();
     fs::write(root.join("build/example.schema.yaml"), "schema: {}\n").unwrap();
+    fs::write(root.join("build/.keytao-deployed"), r#"["example"]"#).unwrap();
     assert!(
         crate::scheme::check_local_schema(&core, Some(root.clone()))
             .unwrap()

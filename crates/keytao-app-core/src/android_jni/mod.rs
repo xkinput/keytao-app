@@ -696,6 +696,42 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDeployedSchema(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeHasDeployedSchema", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        keytao_core::schema_install_state(&user_dir).deployed as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCompleteDeployment(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeCompleteDeployment", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        match keytao_core::complete_deployment(&user_dir) {
+            Ok(()) => 1,
+            Err(error) => {
+                android_log::error(&format!("complete deployment: {error}"));
+                0
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployStep(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,

@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
+import android.os.Process
 import android.os.UserManager
 import java.io.File
 import org.json.JSONObject
@@ -25,6 +26,8 @@ enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSIN
 object KeytaoAndroidPaths {
     private const val rootDirectoryName = "keytao"
     private const val reloadStampFileName = "keytao-ime.reload"
+    private const val deployingSentinelFileName = ".keytao-deploying"
+    private const val deployedMarkerFileName = ".keytao-deployed"
     private const val failedRootRetryNs = 500_000_000L
 
     @Volatile
@@ -185,18 +188,27 @@ object KeytaoAndroidPaths {
         return schemas.isNotEmpty() && schemas.all { File(root, "$it.schema.yaml").isFile }
     }
 
-    fun hasDeployedSchema(root: File): Boolean {
-        val schemas = configuredSchemas(root)
+    fun hasDeployedSchema(root: File): Boolean =
+        KeytaoNativeBridge.hasDeployedSchema(root.absolutePath)
+
+    fun beginDeployment(root: File) {
         val build = File(root, "build")
-        return schemas.isNotEmpty() &&
-            schemas.all { File(root, "$it.schema.yaml").isFile } &&
-            schemas.all { File(build, "$it.schema.yaml").isFile }
+        check(build.isDirectory || build.mkdirs()) { "Failed to create Android RIME build directory" }
+        File(build, deployingSentinelFileName).writeText("${System.currentTimeMillis()}/${Process.myPid()}")
+        val marker = File(build, deployedMarkerFileName)
+        check(!marker.exists() || marker.delete()) { "Failed to remove Android RIME deployment marker" }
     }
 
-    fun invalidateDeployment(root: File): Boolean {
+    fun invalidateDeployment(root: File): Boolean = runCatching {
+        beginDeployment(root)
         val build = File(root, "build")
-        return !build.exists() || build.deleteRecursively()
-    }
+        val children = build.listFiles() ?: return@runCatching false
+        var cleared = true
+        for (child in children) {
+            if (child.name != deployingSentinelFileName && !child.deleteRecursively()) cleared = false
+        }
+        cleared
+    }.getOrDefault(false)
 
     private fun configuredSchemas(root: File): List<String> {
         val config = sequenceOf("default.custom.yaml", "default-custom.yaml")
