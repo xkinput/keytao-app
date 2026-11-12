@@ -36,6 +36,171 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
       version: version,
     );
 
+Future<List<InstalledPackageDto>> listInstalledPackages() =>
+    RustLib.instance.api.crateApiCoreListInstalledPackages();
+
+Future<String> importLocalScheme({
+  required String directoryPath,
+  required String displayName,
+  String? schemeKey,
+}) => RustLib.instance.api.crateApiCoreImportLocalScheme(
+  directoryPath: directoryPath,
+  displayName: displayName,
+  schemeKey: schemeKey,
+);
+
+Future<String> getSchemeSyncState() =>
+    RustLib.instance.api.crateApiCoreGetSchemeSyncState();
+
+Future<String> setSchemeSyncPreferences({
+  bool? followAccountSync,
+  String? schemeKey,
+  bool? sync_,
+  String? settingsJson,
+}) => RustLib.instance.api.crateApiCoreSetSchemeSyncPreferences(
+  followAccountSync: followAccountSync,
+  schemeKey: schemeKey,
+  sync_: sync_,
+  settingsJson: settingsJson,
+);
+
+Future<String> exportSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreExportSchemeProfile();
+
+Future<String> uploadSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreUploadSchemeProfile();
+
+Future<String> fetchSchemeProfile() =>
+    RustLib.instance.api.crateApiCoreFetchSchemeProfile();
+
+/// Applies preferences and adds missing packages. Activation requires a separate confirmed call.
+Future<String> applySchemeProfile({required String profileJson}) => RustLib
+    .instance
+    .api
+    .crateApiCoreApplySchemeProfile(profileJson: profileJson);
+
+Future<String> listCloudPackages() =>
+    RustLib.instance.api.crateApiCoreListCloudPackages();
+
+Future<String> previewCloudPackage({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCorePreviewCloudPackage(schemeKey: schemeKey);
+
+Future<String> uploadCloudPackage({
+  required String schemeKey,
+  String? expectedSha256,
+}) => RustLib.instance.api.crateApiCoreUploadCloudPackage(
+  schemeKey: schemeKey,
+  expectedSha256: expectedSha256,
+);
+
+/// Records only the result returned by Android's deployImeData channel.
+Future<void> recordAndroidDeploy({required bool success}) =>
+    RustLib.instance.api.crateApiCoreRecordAndroidDeploy(success: success);
+
+Future<void> downloadCloudPackage({required String id}) =>
+    RustLib.instance.api.crateApiCoreDownloadCloudPackage(id: id);
+
+Future<void> deleteCloudPackage({required String id}) =>
+    RustLib.instance.api.crateApiCoreDeleteCloudPackage(id: id);
+
+Future<List<UserWordDto>> listUserWords({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreListUserWords(schemeKey: schemeKey);
+
+Future<UserWordMutationDto> addUserWord({
+  required String schemeKey,
+  required String word,
+  required String code,
+  String? weight,
+}) => RustLib.instance.api.crateApiCoreAddUserWord(
+  schemeKey: schemeKey,
+  word: word,
+  code: code,
+  weight: weight,
+);
+
+Future<UserWordMutationDto> updateUserWord({
+  required String schemeKey,
+  required int id,
+  required String expectedWord,
+  required String expectedCode,
+  required String word,
+  required String code,
+  String? weight,
+}) => RustLib.instance.api.crateApiCoreUpdateUserWord(
+  schemeKey: schemeKey,
+  id: id,
+  expectedWord: expectedWord,
+  expectedCode: expectedCode,
+  word: word,
+  code: code,
+  weight: weight,
+);
+
+Future<void> deleteUserWord({
+  required String schemeKey,
+  required int id,
+  required String expectedWord,
+  required String expectedCode,
+}) => RustLib.instance.api.crateApiCoreDeleteUserWord(
+  schemeKey: schemeKey,
+  id: id,
+  expectedWord: expectedWord,
+  expectedCode: expectedCode,
+);
+
+Future<List<UserWordComparisonDto>> compareUserWords({
+  required String schemeKey,
+}) => RustLib.instance.api.crateApiCoreCompareUserWords(schemeKey: schemeKey);
+
+Future<UserWordComparisonDto> lookupUserWord({
+  required String schemeKey,
+  required String word,
+  required String code,
+}) => RustLib.instance.api.crateApiCoreLookupUserWord(
+  schemeKey: schemeKey,
+  word: word,
+  code: code,
+);
+
+Future<UserWordsReportDto> takeUserWordsReport({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreTakeUserWordsReport(schemeKey: schemeKey);
+
+Future<void> downloadSchemePackage({
+  required String schemeKey,
+  required String source,
+}) => RustLib.instance.api.crateApiCoreDownloadSchemePackage(
+  schemeKey: schemeKey,
+  source: source,
+);
+
+Future<List<SchemeUpdateDto>> checkSchemeUpdates() =>
+    RustLib.instance.api.crateApiCoreCheckSchemeUpdates();
+
+Future<Map<String, String>> getDismissedSchemeUpdates() =>
+    RustLib.instance.api.crateApiCoreGetDismissedSchemeUpdates();
+
+Future<void> dismissSchemeUpdate({
+  required String schemeKey,
+  required String version,
+}) => RustLib.instance.api.crateApiCoreDismissSchemeUpdate(
+  schemeKey: schemeKey,
+  version: version,
+);
+
+/// Android extraction must return the platform result as JSON and must not
+/// re-enter install/deploy bridge calls while the install lock is held.
+/// Other platforms ignore the callback. Activation does not deploy the IME.
+Future<InstallResultDto> activateScheme({
+  required String schemeKey,
+  required FutureOr<String> Function(String) androidExtract,
+}) => RustLib.instance.api.crateApiCoreActivateScheme(
+  schemeKey: schemeKey,
+  androidExtract: androidExtract,
+);
+
+Future<void> removeSchemePackage({required String schemeKey}) =>
+    RustLib.instance.api.crateApiCoreRemoveSchemePackage(schemeKey: schemeKey);
+
 /// The persisted account, if a token is stored. The token never leaves Rust.
 Future<AccountUserDto?> accountSession() =>
     RustLib.instance.api.crateApiCoreAccountSession();
@@ -48,17 +213,32 @@ Future<AccountUserDto> accountLogin({
   password: password,
 );
 
-/// Revalidates the stored token. Only a server rejection (401/403) clears the
-/// session; network and other errors keep it and are returned as Err.
+/// Refreshes an aging token at startup without prompting for credentials.
 Future<AccountUserDto?> accountRefresh() =>
     RustLib.instance.api.crateApiCoreAccountRefresh();
 
 Future<void> accountLogout() =>
     RustLib.instance.api.crateApiCoreAccountLogout();
 
-/// Writes the user dictionary into the host root without deploying.
-Future<UserDictionarySyncDto> accountSyncUserDictionary() =>
-    RustLib.instance.api.crateApiCoreAccountSyncUserDictionary();
+/// Merges the user dictionary in place without deploying.
+Future<UserDictionarySyncDto> accountSyncUserDictionary({
+  UserDictionaryDeletionConfirmationDto? confirmedDeletions,
+}) => RustLib.instance.api.crateApiCoreAccountSyncUserDictionary(
+  confirmedDeletions: confirmedDeletions,
+);
+
+Future<String> accountPendingWords() =>
+    RustLib.instance.api.crateApiCoreAccountPendingWords();
+
+Future<String> accountPrepareSubmission({required String entriesJson}) =>
+    RustLib.instance.api.crateApiCoreAccountPrepareSubmission(
+      entriesJson: entriesJson,
+    );
+
+Future<String> accountSubmitWords({required String previewJson}) => RustLib
+    .instance
+    .api
+    .crateApiCoreAccountSubmitWords(previewJson: previewJson);
 
 Future<SchemeReleaseDto> fetchSchemeRelease({required String scheme}) =>
     RustLib.instance.api.crateApiCoreFetchSchemeRelease(scheme: scheme);
@@ -91,7 +271,14 @@ Future<void> cancelSchemeDownload() =>
 Future<InstallResultDto> installSchemeToDir({
   required String url,
   required String dir,
-}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(url: url, dir: dir);
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreInstallSchemeToDir(
+  url: url,
+  dir: dir,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Android SAF sequence: confirm storage permission, pickDirectory,
 /// then listFiles/readLocalSchemas through the platform channel. Download here,
@@ -104,15 +291,21 @@ Future<InstallResultDto> installSchemeToDir({
 Future<String> downloadSchemeArchive({required String url}) =>
     RustLib.instance.api.crateApiCoreDownloadSchemeArchive(url: url);
 
-/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
-/// files are already clean (Kotlin removes the zip on success). Resolves parent
-/// directories and rejects symlink files before deleting inside the cache.
+/// Cleans up the download after extraction and package recording. Resolves
+/// parent directories and rejects symlink files before deleting inside cache.
 Future<void> removeDownloadedArchive({required String path}) =>
     RustLib.instance.api.crateApiCoreRemoveDownloadedArchive(path: path);
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
-Future<InstallResultDto> installSchemeFromUrl({required String url}) =>
-    RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(url: url);
+Future<InstallResultDto> installSchemeFromUrl({
+  required String url,
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreInstallSchemeFromUrl(
+  url: url,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Call only after the Android channel confirms storage permission. Dart must
 /// serialize prepare -> smartExtractZipToPrivate -> finish as one installation.
@@ -120,10 +313,15 @@ Future<String> prepareAndroidInstall({required String url}) =>
     RustLib.instance.api.crateApiCorePrepareAndroidInstall(url: url);
 
 /// Pass jsonEncode of the Android channel's smart-extract result unchanged.
-Future<InstallResultDto> finishAndroidInstall({required String resultJson}) =>
-    RustLib.instance.api.crateApiCoreFinishAndroidInstall(
-      resultJson: resultJson,
-    );
+Future<InstallResultDto> finishAndroidInstall({
+  required String resultJson,
+  required String schemeKey,
+  String? version,
+}) => RustLib.instance.api.crateApiCoreFinishAndroidInstall(
+  resultJson: resultJson,
+  schemeKey: schemeKey,
+  version: version,
+);
 
 /// Android deployment belongs to the deployImeData platform channel.
 Future<DeployResultDto> deployDefault() =>

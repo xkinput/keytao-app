@@ -32,6 +32,51 @@ pub struct LocalSchemaDto {
     pub installed_scheme_version: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct InstalledPackageDto {
+    pub scheme_key: String,
+    pub version: Option<String>,
+    pub active: bool,
+    pub has_package_zip: bool,
+    pub source: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SchemeUpdateDto {
+    pub scheme_key: String,
+    pub installed_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordDto {
+    pub id: u32,
+    pub word: String,
+    pub code: String,
+    pub weight: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordComparisonDto {
+    pub entry: UserWordDto,
+    pub status: String,
+    pub words: Vec<String>,
+    pub codes: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordMutationDto {
+    pub already_exists: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserWordsReportDto {
+    pub removed: Vec<UserWordDto>,
+    pub conflicts: Vec<UserWordComparisonDto>,
+}
+
 pub struct LocalSchemasDto {
     pub has_default_custom: bool,
     pub schemas: Vec<String>,
@@ -379,6 +424,7 @@ mod tests {
 
 #[derive(serde::Deserialize)]
 pub struct AccountUserDto {
+    pub id: i64,
     pub name: Option<String>,
     pub nickname: Option<String>,
     pub email: Option<String>,
@@ -388,4 +434,17 @@ pub struct UserDictionarySyncDto {
     pub file_name: String,
     pub count: u64,
     pub message: String,
+    pub pending: bool,
+    pub local_deletions: Vec<UserDictionaryDeletionDto>,
+    pub server_deletions: Vec<UserDictionaryDeletionDto>,
+}
+
+pub struct UserDictionaryDeletionDto {
+    pub word: String,
+    pub code: String,
+}
+
+pub struct UserDictionaryDeletionConfirmationDto {
+    pub local_deletions: Vec<UserDictionaryDeletionDto>,
+    pub server_deletions: Vec<UserDictionaryDeletionDto>,
 }

@@ -12,9 +12,9 @@ mkdir -p "$BUNDLE_DIR" "$PROJECT_DIR/dist"
 echo '==> Building Flutter Linux builder image'
 tar -C "$PROJECT_DIR" -cf - scripts/Dockerfile.linux-builder \
   scripts/build-linux-librime.sh scripts/librime-versions.env rust-toolchain.toml \
-  | docker build -f scripts/Dockerfile.linux-builder -t "$IMAGE" -
+  | docker build --network=host -f scripts/Dockerfile.linux-builder -t "$IMAGE" -
 echo '==> Building daemon, Flutter release bundle, deb and rpm'
-docker run --rm --pull=never \
+docker run --rm --pull=never --network=host \
   -v "$PROJECT_DIR":/app:ro -v "$BUNDLE_DIR":/out \
   -v keytao-app-cargo:/root/.cargo/registry \
   -v keytao-app-cargo-git:/root/.cargo/git \

@@ -28,7 +28,7 @@ abstract final class AppStrings {
   static const repairing = '正在修复';
   static const checkingRegistration = '正在检测';
   static const repairFailed = '修复失败';
-  static const registrationFailed = '注册失败';
+  static const registrationFailed = '未就绪';
   static const registered = '已注册';
   static const partiallyRegistered = '部分注册';
   static const runtimeMissing = '运行时缺失';

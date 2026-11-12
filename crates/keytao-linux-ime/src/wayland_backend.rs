@@ -1248,7 +1248,7 @@ delegate_noop!(App: ignore ZwpVirtualKeyboardV1);
 
 /// Returns Ok(()) when the Wayland input-method slot is unavailable (e.g. KDE
 /// virtual keyboard is active) so the caller can keep IBus/XIM threads alive.
-pub fn run(engine: CoreEngine) -> Result<(), String> {
+pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<(), String> {
     let session = engine
         .create_session()
         .map_err(|e| format!("failed to create Wayland Rime session: {e}"))?;
@@ -1294,7 +1294,14 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
 
     app.setup_ime(&qh);
     app.setup_virtual_keyboard(&qh);
-    queue.roundtrip(&mut app).expect("initial roundtrip");
+    queue
+        .roundtrip(&mut app)
+        .map_err(|e| format!("initial Wayland roundtrip: {e}"))?;
+    if app.wayland_unavailable {
+        tracing::warn!("Wayland input-method slot unavailable; backend stopped");
+        return Ok(());
+    }
+    frontend.connected();
 
     let reload_signal = reload_bus::subscribe();
 
@@ -1341,8 +1348,11 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             app.fire_key_repeat(&qh);
         }
 
-        if let Err(e) = queue.flush() {
-            tracing::warn!("Wayland flush error: {e}");
+        match queue.flush() {
+            Ok(()) => {}
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(format!("Wayland flush: {e}")),
         }
         let timeout_ms = app.poll_timeout_ms();
         let mut pfds = vec![libc::pollfd {
@@ -1362,7 +1372,7 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
         if ready < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() != std::io::ErrorKind::Interrupted {
-                tracing::warn!("Wayland poll failed: {err}");
+                return Err(format!("Wayland poll failed: {err}"));
             }
             continue;
         }
@@ -1370,6 +1380,12 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
             if signal.take() {
                 app.handle_reload();
             }
+        }
+        if pfds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(format!(
+                "Wayland socket disconnected: {:#x}",
+                pfds[0].revents
+            ));
         }
         if pfds[0].revents & libc::POLLIN != 0 {
             if let Err(e) = queue.blocking_dispatch(&mut app) {

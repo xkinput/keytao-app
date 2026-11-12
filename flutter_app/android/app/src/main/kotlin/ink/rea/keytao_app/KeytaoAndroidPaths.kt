@@ -6,8 +6,10 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
+import android.os.Process
 import android.os.UserManager
 import java.io.File
+import org.json.JSONObject
 
 enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSING }
 
@@ -24,6 +26,8 @@ enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSIN
 object KeytaoAndroidPaths {
     private const val rootDirectoryName = "keytao"
     private const val reloadStampFileName = "keytao-ime.reload"
+    private const val deployingSentinelFileName = ".keytao-deploying"
+    private const val deployedMarkerFileName = ".keytao-deployed"
     private const val failedRootRetryNs = 500_000_000L
 
     @Volatile
@@ -95,6 +99,7 @@ object KeytaoAndroidPaths {
             root
         }
         events.forEach { (event, elapsed) -> KeytaoRuntimeLog.event("lifecycle", event, elapsed) }
+        result?.let { restoreLegacyLocalManifest(appContext.dataDir, it) }
         return result
     }
 
@@ -183,26 +188,73 @@ object KeytaoAndroidPaths {
         return schemas.isNotEmpty() && schemas.all { File(root, "$it.schema.yaml").isFile }
     }
 
-    fun hasDeployedSchema(root: File): Boolean {
-        val schemas = configuredSchemas(root)
+    fun hasDeployedSchema(root: File): Boolean =
+        KeytaoNativeBridge.hasDeployedSchema(root.absolutePath)
+
+    fun beginDeployment(root: File) {
         val build = File(root, "build")
-        return schemas.isNotEmpty() &&
-            schemas.all { File(root, "$it.schema.yaml").isFile } &&
-            schemas.all { File(build, "$it.schema.yaml").isFile }
+        check(build.isDirectory || build.mkdirs()) { "Failed to create Android RIME build directory" }
+        File(build, deployingSentinelFileName).writeText("${System.currentTimeMillis()}/${Process.myPid()}")
+        val marker = File(build, deployedMarkerFileName)
+        check(!marker.exists() || marker.delete()) { "Failed to remove Android RIME deployment marker" }
     }
 
-    fun invalidateDeployment(root: File): Boolean {
+    fun invalidateDeployment(root: File): Boolean = runCatching {
+        beginDeployment(root)
         val build = File(root, "build")
-        return !build.exists() || build.deleteRecursively()
-    }
+        val children = build.listFiles() ?: return@runCatching false
+        var cleared = true
+        for (child in children) {
+            if (child.name != deployingSentinelFileName && !child.deleteRecursively()) cleared = false
+        }
+        cleared
+    }.getOrDefault(false)
 
     private fun configuredSchemas(root: File): List<String> {
         val config = sequenceOf("default.custom.yaml", "default-custom.yaml")
             .map { File(root, it) }
             .firstOrNull { it.isFile }
             ?: return emptyList()
-        return runCatching { parseSchemas(config.readText()).filter(::isManagedSchema) }
+        val localSchemas = runCatching {
+            val manifest = JSONObject(File(root, ".keytao-active-scheme.json").readText())
+            if (!manifest.getString("scheme_key").startsWith("local-") ||
+                File(manifest.getString("root")) != root.canonicalFile) {
+                emptySet()
+            } else {
+                manifest.getJSONObject("manifest").keys().asSequence()
+                    .filter { it.endsWith(".schema.yaml") }
+                    .map { it.removeSuffix(".schema.yaml") }
+                    .filter(::isSafeSchemaId)
+                    .toSet()
+            }
+        }.getOrDefault(emptySet())
+        return runCatching {
+            parseSchemas(config.readText()).filter {
+                isSafeSchemaId(it) && (isManagedSchema(it) || it in localSchemas)
+            }
+        }
             .getOrDefault(emptyList())
+    }
+
+    private fun restoreLegacyLocalManifest(dataDir: File, root: File) {
+        val marker = File(root, ".keytao-active-scheme.json")
+        if (marker.exists()) return
+        runCatching {
+            val state = JSONObject(File(dataDir, "app-state.json").readText())
+            val key = state.getString("active_scheme")
+            if (!key.startsWith("local-") || !state.getJSONObject("installed_packages").has(key)) return
+            val manifest = JSONObject(File(dataDir, "scheme-packages/active-manifest.json").readText())
+            if (File(manifest.getString("root")) != root.canonicalFile) return
+            if (manifest.has("scheme_key") && manifest.getString("scheme_key") != key) return
+            manifest.put("scheme_key", key)
+            val temporary = File.createTempFile(".active-", ".json", root)
+            try {
+                temporary.writeText(manifest.toString())
+                if (!marker.exists()) check(temporary.renameTo(marker))
+            } finally {
+                temporary.delete()
+            }
+        }
     }
 
     fun isWritable(root: File): Boolean {

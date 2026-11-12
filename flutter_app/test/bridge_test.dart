@@ -75,14 +75,8 @@ void main() {
         await File('${config.dataDir}/app-state.json').readAsString(),
       ) as Map<String, dynamic>;
       expect(persisted['onboarding_completed'], isTrue);
-      await expectLater(
-        initCore(config: config),
-        throwsA(
-          predicate(
-            (error) => error.toString().contains('already initialized'),
-          ),
-        ),
-      );
+      final again = await initCore(config: config);
+      expect(again.userRoot, config.userRootOverride);
     },
   );
 }

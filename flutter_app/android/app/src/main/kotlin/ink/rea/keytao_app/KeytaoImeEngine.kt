@@ -100,7 +100,7 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun ensureReady(): Boolean {
-        if (nativeReady) return true
+        if (nativeReady && session != 0L) return true
         warmUpIfStorageReady()
         if (!warmupComplete) return false
         if (!hasInstalledSchema()) return false
@@ -128,8 +128,8 @@ class KeytaoImeEngine(context: Context) {
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         if (!hasInstalledSchema()) return Readiness.NOT_INSTALLED
         if (!hasDeployedSchema()) return Readiness.NOT_DEPLOYED
-        if (!nativeReady) ensureReady()
-        return if (nativeReady) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
+        reloadIfNeeded()
+        return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
     }
 
     @Synchronized
@@ -143,6 +143,7 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun processKey(keyCode: Int, modifiers: Int): KeytaoImeState {
+        if (!nativeReady || session == 0L) return KeytaoImeState.empty(asciiMode = lastState.asciiMode)
         val state = KeytaoNativeBridge.processKey(session, keyCode, modifiers)
             ?.let { stableSchemaState(it) }
             ?: return KeytaoImeState.empty(asciiMode = lastState.asciiMode)
@@ -279,7 +280,7 @@ class KeytaoImeEngine(context: Context) {
     /** Blocking: reloading finalizes librime, so keep it off the main thread. */
     @Synchronized
     fun reloadIfNeeded(): Boolean {
-        if (!nativeReady) return ensureReady()
+        if (!nativeReady || session == 0L) return ensureReady()
         val signature = reloadStampSignature() ?: return false
         if (signature == reloadStampSignature) return false
         return reload()
@@ -373,6 +374,7 @@ class KeytaoImeEngine(context: Context) {
 
     @Synchronized
     fun close() {
+        nativeReady = false
         KeytaoNativeBridge.destroySession(session)
         session = 0L
         backgroundExecutor.shutdownNow()
@@ -380,6 +382,7 @@ class KeytaoImeEngine(context: Context) {
     }
 
     private fun initializeRuntime(deploy: Boolean, reinitialize: Boolean = false): Boolean {
+        nativeReady = false
         warmUpIfStorageReady()
         if (!warmupComplete) return false
         val root = userDir ?: return false
@@ -404,8 +407,7 @@ class KeytaoImeEngine(context: Context) {
             } else {
                 KeytaoNativeBridge.init(root.absolutePath, sharedDir.absolutePath, deploy)
             }
-            nativeReady = KeytaoNativeBridge.engineAvailable() && initialized
-            if (!nativeReady) {
+            if (!KeytaoNativeBridge.engineAvailable() || !initialized) {
                 lastState = lastState.withoutTransientCommit()
                 return false
             }
@@ -568,7 +570,7 @@ class KeytaoImeEngine(context: Context) {
      * keytao-core owns the reload signature format; computing our own here is how
      * the IME and the app used to disagree about whether a deployment happened.
      */
-    private fun reloadStampSignature(): String? {
+    fun reloadStampSignature(): String? {
         val root = userDir ?: return null
         return KeytaoNativeBridge.reloadStampSignature(root.absolutePath)
     }

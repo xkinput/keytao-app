@@ -31,8 +31,10 @@ fn state_round_trip() {
         onboarding_completed: true,
         onboarding_initialized: true,
         legacy_imported: true,
-        installed_scheme: None,
-        installed_scheme_version: None,
+        installed_packages: Default::default(),
+        active_scheme: None,
+        dismissed_scheme_updates: Default::default(),
+        ..Default::default()
     };
     core.update_state(|state| *state = expected.clone())
         .unwrap();

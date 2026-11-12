@@ -1,4 +1,8 @@
 pub mod account;
+pub mod cloud_packages;
+pub mod upload_bundle;
+pub mod scheme_sync;
+pub mod submission;
 pub mod addon;
 #[cfg(target_os = "android")]
 pub mod android_jni;
@@ -13,11 +17,13 @@ pub mod ime_settings;
 pub mod ime_status;
 pub mod download;
 pub mod install;
+pub mod packages;
 pub mod scheme;
 pub mod scheme_files;
 pub mod scheme_host;
 pub mod scheme_types;
 pub mod update;
+pub mod user_words;
 pub mod wanxiang;
 #[cfg(target_os = "windows")]
 pub mod windows_public_schemas;
@@ -46,6 +52,8 @@ pub struct Core {
     state: Mutex<AppState>,
     download_cancel: tokio::sync::watch::Sender<u64>,
     recovered_state_file: Option<PathBuf>,
+    pub(crate) pending_package: Mutex<Option<packages::PendingPackage>>,
+    pub(crate) user_words: Mutex<user_words::UserWordsState>,
 }
 
 impl Core {
@@ -78,6 +86,8 @@ impl Core {
             state: Mutex::new(state),
             download_cancel: tokio::sync::watch::channel(0).0,
             recovered_state_file,
+            pending_package: Mutex::new(None),
+            user_words: Mutex::new(user_words::UserWordsState::default()),
         }))
     }
 
@@ -141,6 +151,14 @@ impl Core {
         let mut state = self.lock_state();
         let mut next = state.clone();
         update(&mut next);
+        if next.active_scheme != state.active_scheme {
+            next.last_deploy = None;
+        }
+        if state.user.as_ref().and_then(|user| user["id"].as_i64())
+            != next.user.as_ref().and_then(|user| user["id"].as_i64())
+        {
+            next.scheme_cloud_ids.clear();
+        }
         if next != *state {
             next.save(&self.env.data_dir)?;
             *state = next;

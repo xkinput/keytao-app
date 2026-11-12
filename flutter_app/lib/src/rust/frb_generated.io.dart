@@ -26,11 +26,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  FutureOr<String> Function(String)
+  dco_decode_DartFn_Inputs_String_Output_String_AnyhowException(dynamic raw);
+
+  @protected
   FutureOr<String> Function()
   dco_decode_DartFn_Inputs__Output_String_AnyhowException(dynamic raw);
 
   @protected
   Object dco_decode_DartOpaque(dynamic raw);
+
+  @protected
+  Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
 
   @protected
   RustStreamSink<BridgeEvent> dco_decode_StreamSink_bridge_event_Sse(
@@ -65,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_box_autoadd_android_ime_input_settings_dto(dynamic raw);
 
   @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
   BridgeConfig dco_decode_box_autoadd_bridge_config(dynamic raw);
 
   @protected
@@ -78,6 +88,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(dynamic raw);
 
   @protected
   WindowsImeStatusDto dco_decode_box_autoadd_windows_ime_status_dto(
@@ -130,6 +144,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
   ImeUiSettingsDto dco_decode_ime_ui_settings_dto(dynamic raw);
 
   @protected
@@ -137,6 +154,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   InstallResultDto dco_decode_install_result_dto(dynamic raw);
+
+  @protected
+  InstalledPackageDto dco_decode_installed_package_dto(dynamic raw);
 
   @protected
   PlatformInt64 dco_decode_isize(dynamic raw);
@@ -151,12 +171,34 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<FileItemDto> dco_decode_list_file_item_dto(dynamic raw);
 
   @protected
+  List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
 
   @protected
   List<RuntimeLogFileInfoDto> dco_decode_list_runtime_log_file_info_dto(
     dynamic raw,
   );
+
+  @protected
+  List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
+
+  @protected
+  List<UserDictionaryDeletionDto> dco_decode_list_user_dictionary_deletion_dto(
+    dynamic raw,
+  );
+
+  @protected
+  List<UserWordComparisonDto> dco_decode_list_user_word_comparison_dto(
+    dynamic raw,
+  );
+
+  @protected
+  List<UserWordDto> dco_decode_list_user_word_dto(dynamic raw);
 
   @protected
   List<VerifyEntryDto> dco_decode_list_verify_entry_dto(dynamic raw);
@@ -180,6 +222,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AccountUserDto? dco_decode_opt_box_autoadd_account_user_dto(dynamic raw);
 
   @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
   DebugLogFileDto? dco_decode_opt_box_autoadd_debug_log_file_dto(dynamic raw);
 
   @protected
@@ -196,6 +241,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  dco_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    dynamic raw,
+  );
+
+  @protected
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
@@ -205,6 +256,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformReleaseDto dco_decode_platform_release_dto(dynamic raw);
+
+  @protected
+  (String, String) dco_decode_record_string_string(dynamic raw);
 
   @protected
   ReleaseInfoDto dco_decode_release_info_dto(dynamic raw);
@@ -220,6 +274,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw);
+
+  @protected
+  SchemeUpdateDto dco_decode_scheme_update_dto(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -240,7 +297,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  UserDictionaryDeletionConfirmationDto
+  dco_decode_user_dictionary_deletion_confirmation_dto(dynamic raw);
+
+  @protected
+  UserDictionaryDeletionDto dco_decode_user_dictionary_deletion_dto(
+    dynamic raw,
+  );
+
+  @protected
   UserDictionarySyncDto dco_decode_user_dictionary_sync_dto(dynamic raw);
+
+  @protected
+  UserWordComparisonDto dco_decode_user_word_comparison_dto(dynamic raw);
+
+  @protected
+  UserWordDto dco_decode_user_word_dto(dynamic raw);
+
+  @protected
+  UserWordMutationDto dco_decode_user_word_mutation_dto(dynamic raw);
+
+  @protected
+  UserWordsReportDto dco_decode_user_words_report_dto(dynamic raw);
 
   @protected
   BigInt dco_decode_usize(dynamic raw);
@@ -259,6 +337,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Object sse_decode_DartOpaque(SseDeserializer deserializer);
+
+  @protected
+  Map<String, String> sse_decode_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<BridgeEvent> sse_decode_StreamSink_bridge_event_Sse(
@@ -299,6 +382,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
   BridgeConfig sse_decode_box_autoadd_bridge_config(
     SseDeserializer deserializer,
   );
@@ -320,6 +406,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   WindowsImeStatusDto sse_decode_box_autoadd_windows_ime_status_dto(
@@ -376,6 +468,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
   ImeUiSettingsDto sse_decode_ime_ui_settings_dto(SseDeserializer deserializer);
 
   @protected
@@ -385,6 +480,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   InstallResultDto sse_decode_install_result_dto(SseDeserializer deserializer);
+
+  @protected
+  InstalledPackageDto sse_decode_installed_package_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PlatformInt64 sse_decode_isize(SseDeserializer deserializer);
@@ -401,12 +501,40 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<FileItemDto> sse_decode_list_file_item_dto(SseDeserializer deserializer);
 
   @protected
+  List<InstalledPackageDto> sse_decode_list_installed_package_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<(String, String)> sse_decode_list_record_string_string(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<RuntimeLogFileInfoDto> sse_decode_list_runtime_log_file_info_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<SchemeUpdateDto> sse_decode_list_scheme_update_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<UserDictionaryDeletionDto> sse_decode_list_user_dictionary_deletion_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<UserWordComparisonDto> sse_decode_list_user_word_comparison_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<UserWordDto> sse_decode_list_user_word_dto(SseDeserializer deserializer);
 
   @protected
   List<VerifyEntryDto> sse_decode_list_verify_entry_dto(
@@ -436,6 +564,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
   DebugLogFileDto? sse_decode_opt_box_autoadd_debug_log_file_dto(
     SseDeserializer deserializer,
   );
@@ -454,6 +585,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  UserDictionaryDeletionConfirmationDto?
+  sse_decode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
     SseDeserializer deserializer,
   );
@@ -465,6 +602,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformReleaseDto sse_decode_platform_release_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  (String, String) sse_decode_record_string_string(
     SseDeserializer deserializer,
   );
 
@@ -490,6 +632,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer);
 
   @protected
+  SchemeUpdateDto sse_decode_scheme_update_dto(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_16(SseDeserializer deserializer);
 
   @protected
@@ -508,7 +653,36 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  UserDictionaryDeletionConfirmationDto
+  sse_decode_user_dictionary_deletion_confirmation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserDictionaryDeletionDto sse_decode_user_dictionary_deletion_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   UserDictionarySyncDto sse_decode_user_dictionary_sync_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordComparisonDto sse_decode_user_word_comparison_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordDto sse_decode_user_word_dto(SseDeserializer deserializer);
+
+  @protected
+  UserWordMutationDto sse_decode_user_word_mutation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UserWordsReportDto sse_decode_user_words_report_dto(
     SseDeserializer deserializer,
   );
 
@@ -535,6 +709,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_DartFn_Inputs_String_Output_String_AnyhowException(
+    FutureOr<String> Function(String) self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_DartFn_Inputs__Output_String_AnyhowException(
     FutureOr<String> Function() self,
     SseSerializer serializer,
@@ -542,6 +722,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_DartOpaque(Object self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_Map_String_String_None(
+    Map<String, String> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_StreamSink_bridge_event_Sse(
@@ -589,6 +775,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_bridge_config(
     BridgeConfig self,
     SseSerializer serializer,
@@ -614,6 +803,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_windows_ime_status_dto(
@@ -691,6 +886,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_ime_ui_settings_dto(
     ImeUiSettingsDto self,
     SseSerializer serializer,
@@ -705,6 +903,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_install_result_dto(
     InstallResultDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_installed_package_dto(
+    InstalledPackageDto self,
     SseSerializer serializer,
   );
 
@@ -727,14 +931,50 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_installed_package_dto(
+    List<InstalledPackageDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_list_record_string_string(
+    List<(String, String)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_runtime_log_file_info_dto(
     List<RuntimeLogFileInfoDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_scheme_update_dto(
+    List<SchemeUpdateDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_user_dictionary_deletion_dto(
+    List<UserDictionaryDeletionDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_user_word_comparison_dto(
+    List<UserWordComparisonDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_user_word_dto(
+    List<UserWordDto> self,
     SseSerializer serializer,
   );
 
@@ -775,6 +1015,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_debug_log_file_dto(
     DebugLogFileDto? self,
     SseSerializer serializer,
@@ -796,6 +1039,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
     SseSerializer serializer,
@@ -810,6 +1059,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_platform_release_dto(
     PlatformReleaseDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_record_string_string(
+    (String, String) self,
     SseSerializer serializer,
   );
 
@@ -844,6 +1099,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_scheme_update_dto(
+    SchemeUpdateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_u_16(int self, SseSerializer serializer);
 
   @protected
@@ -865,8 +1126,41 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
+  void sse_encode_user_dictionary_deletion_confirmation_dto(
+    UserDictionaryDeletionConfirmationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_dictionary_deletion_dto(
+    UserDictionaryDeletionDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_user_dictionary_sync_dto(
     UserDictionarySyncDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_word_comparison_dto(
+    UserWordComparisonDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_word_dto(UserWordDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_user_word_mutation_dto(
+    UserWordMutationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_user_words_report_dto(
+    UserWordsReportDto self,
     SseSerializer serializer,
   );
 

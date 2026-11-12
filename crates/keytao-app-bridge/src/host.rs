@@ -42,8 +42,12 @@ where
 
     async fn deploy(&self) -> Result<(), String> {
         if let Some(deploy) = &self.android_deploy {
+            keytao_app_core::deploy::record_result(&self.host.core, &self.host.root, false)
+                .map_err(|error| error.to_string())?;
             let error = deploy().await;
             if error.is_empty() {
+                keytao_app_core::deploy::record_result(&self.host.core, &self.host.root, true)
+                    .map_err(|error| error.to_string())?;
                 Ok(())
             } else {
                 Err(error)
@@ -149,6 +153,17 @@ impl BridgeHost {
     pub(crate) async fn deploy_default(
         &self,
     ) -> Result<keytao_app_core::deploy::DeployResult, String> {
+        keytao_app_core::deploy::record_result(&self.core, &self.root, false)
+            .map_err(|error| error.to_string())?;
+        let result = self.deploy_default_inner().await;
+        if result.as_ref().is_ok_and(|result| result.success) {
+            keytao_app_core::deploy::record_result(&self.core, &self.root, true)
+                .map_err(|error| error.to_string())?;
+        }
+        result
+    }
+
+    async fn deploy_default_inner(&self) -> Result<keytao_app_core::deploy::DeployResult, String> {
         #[cfg(target_os = "windows")]
         {
             self.require_default_windows_root()?;
@@ -299,6 +314,7 @@ mod tests {
             Arc::new(crate::runtime::BridgeEvents::default()),
         )
         .unwrap();
+        std::fs::create_dir_all(temp.path().join("user")).unwrap();
         let host = BridgeHost::new(core, temp.path().join("user"));
         for message in ["platform deploy failed", ""] {
             // Select the Android delegate on host builds without invoking an IME.

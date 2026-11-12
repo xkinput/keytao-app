@@ -18,6 +18,9 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.Settings
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.view.inputmethod.InputMethodInfo
 import android.view.inputmethod.InputMethodManager
 import androidx.core.app.ActivityCompat
@@ -28,9 +31,12 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipEntry
@@ -44,6 +50,7 @@ class KeytaoAndroidChannel(
     // Both legacy permission flows share one dialog without losing pending replies.
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
     private var pendingDirectoryPick: Reply? = null
+    private var pendingDirectoryImport = false
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = Reply(result, mainHandler)
@@ -56,6 +63,7 @@ class KeytaoAndroidChannel(
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
                 "showInputMethodPicker" -> showInputMethodPicker(reply)
                 "pickDirectory" -> pickDirectory(reply)
+                "importLocalSchemeDirectory" -> pickDirectory(reply, importLocalScheme = true)
                 "listFiles" -> listFiles(call, reply)
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
@@ -407,15 +415,17 @@ class KeytaoAndroidChannel(
         }
     }
 
-    private fun pickDirectory(reply: Reply) {
+    private fun pickDirectory(reply: Reply, importLocalScheme: Boolean = false) {
         if (pendingDirectoryPick != null) {
             return reply.error("Directory picker is already open")
         }
         pendingDirectoryPick = reply
+        pendingDirectoryImport = importLocalScheme
         try {
             activity.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), directoryPickRequestCode)
         } catch (ex: Exception) {
             pendingDirectoryPick = null
+            pendingDirectoryImport = false
             throw ex
         }
     }
@@ -423,13 +433,107 @@ class KeytaoAndroidChannel(
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != directoryPickRequestCode) return false
         val reply = pendingDirectoryPick ?: return false
+        val importLocalScheme = pendingDirectoryImport
         pendingDirectoryPick = null
+        pendingDirectoryImport = false
         try {
-            handleDirectoryPicked(reply, resultCode, data)
+            if (importLocalScheme) {
+                importLocalSchemeDirectory(reply, resultCode, data)
+            } else {
+                handleDirectoryPicked(reply, resultCode, data)
+            }
         } catch (ex: Exception) {
             reply.error(ex.message ?: "Failed to pick directory")
         }
         return true
+    }
+
+    private fun importLocalSchemeDirectory(reply: Reply, resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK) return reply.success(null)
+        val uri = data?.data ?: return reply.error("未返回所选目录")
+        Thread {
+            val temporaryRoot = File(activity.cacheDir, "local-scheme-${UUID.randomUUID()}")
+            try {
+                val root = DocumentFile.fromTreeUri(activity, uri)
+                    ?: throw IllegalStateException("无法读取所选目录")
+                val name = root.name ?: throw IllegalStateException("无法读取目录名称")
+                validateDirectoryEntryName(name)
+                check(temporaryRoot.mkdir()) { "无法创建临时目录" }
+                val destination = safePrivateFile(temporaryRoot, name)
+                check(destination.mkdir()) { "无法创建临时目录" }
+                copyTreeDirectory(uri, DocumentsContract.getTreeDocumentId(uri), destination, mutableSetOf())
+                reply.success(mapOf(
+                    "path" to destination.absolutePath,
+                    "name" to name,
+                    "temporaryDirectory" to temporaryRoot.absolutePath,
+                ))
+            } catch (ex: Exception) {
+                temporaryRoot.deleteRecursively()
+                reply.error(ex.message ?: "无法导入所选目录")
+            }
+        }.start()
+    }
+
+    private fun copyTreeDirectory(
+        treeUri: Uri,
+        documentId: String,
+        destination: File,
+        visited: MutableSet<String>,
+        totalBytes: Long = 0,
+        topLevel: Boolean = true,
+    ): Long {
+        var copiedBytes = totalBytes
+        check(visited.add(documentId)) { "所选目录包含循环引用" }
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+        val resolver = activity.contentResolver
+        val cursor = resolver.query(children, arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        ), null, null, null) ?: throw IllegalStateException("无法读取所选目录")
+        cursor.use {
+            while (cursor.moveToNext()) {
+                val childId = cursor.getString(0) ?: throw IllegalStateException("无法读取目录项")
+                val name = cursor.getString(1) ?: throw IllegalStateException("无法读取目录项名称")
+                validateDirectoryEntryName(name)
+                if ((topLevel && name in setOf("build", "sync", "installation.yaml", "user.yaml")) ||
+                    name in setOf(".git", ".DS_Store", "default-custom.yaml", "user_dict.txt", ".keytao-active-scheme.json") ||
+                    name.endsWith(".userdb") || name.endsWith(".custom.yaml") ||
+                    name.endsWith(".user.dict.yaml") || name.endsWith(".user.yaml") ||
+                    name.endsWith("_user.txt") ||
+                    (name.startsWith(".keytao-sync-base-") && name.endsWith(".json"))) continue
+                val output = safePrivateFile(destination, name)
+                if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    check(output.mkdir()) { "无法创建目录：$name" }
+                    copiedBytes = copyTreeDirectory(treeUri, childId, output, visited, copiedBytes, false)
+                } else {
+                    check(output.createNewFile()) { "目录中存在重名文件：$name" }
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                    val input = resolver.openInputStream(childUri)
+                        ?: throw IllegalStateException("无法读取文件：$name")
+                    input.use { source ->
+                        output.outputStream().use { target ->
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val count = source.read(buffer)
+                                if (count < 0) break
+                                check(count.toLong() <= 512L * 1024 * 1024 - copiedBytes) { "方案包解压后过大" }
+                                copiedBytes += count
+                                target.write(buffer, 0, count)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return copiedBytes
+    }
+
+    private fun validateDirectoryEntryName(name: String) {
+        require(name.isNotEmpty() && name != "." && name != ".." &&
+            !name.contains('/') && !name.contains('\\') && !name.contains('\u0000')) {
+            "目录中存在无效文件名"
+        }
     }
 
     private fun handleDirectoryPicked(reply: Reply, resultCode: Int, data: Intent?) {
@@ -503,6 +607,8 @@ class KeytaoAndroidChannel(
                     ?: return@Thread reply.error("Invalid directory URI")
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
+                val packageManifest = linkedMapOf<String, String>()
+                val protectedPaths = linkedSetOf<String>()
 
                 // Cache directories and load their file URIs in one query per directory.
                 val dirCache = mutableMapOf<String, DocumentFile>()
@@ -515,14 +621,15 @@ class KeytaoAndroidChannel(
                         else
                             DocumentsContract.getDocumentId(dir.uri)
                         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
-                        activity.contentResolver.query(
+                        val cursor = activity.contentResolver.query(
                             childrenUri,
                             arrayOf(
                                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                                 DocumentsContract.Document.COLUMN_MIME_TYPE
                             ), null, null, null
-                        )?.use { cursor ->
+                        ) ?: throw Exception("Failed to list directory: ${dir.name}")
+                        cursor.use {
                             while (cursor.moveToNext()) {
                                 val childDocId = cursor.getString(0) ?: continue
                                 val name = cursor.getString(1) ?: continue
@@ -575,6 +682,7 @@ class KeytaoAndroidChannel(
 
                 JZipFile(zipFile).use { zip ->
                     val allEntries = zip.entries().toList()
+                    allEntries.forEach { validateZipRelativePath(it.name) }
                     val totalFiles = allEntries.count { !it.isDirectory }
                     var processed = 0
                     val emitProgress: (String) -> Unit = { fname ->
@@ -653,11 +761,48 @@ class KeytaoAndroidChannel(
                                     logs.add("[ERROR] mkdir for $relative: ${e.message}")
                                     return@Thread reply.error("Failed to create directory for: $relative")
                                 }
+                                val decision = preparePackageFileWrite(relative, logs, existingBytes = {
+                                    val existingUri = getCachedFileMap(dir)[filename]
+                                        ?: dir.findFile(filename)?.uri
+                                    existingUri?.let {
+                                        activity.contentResolver.openInputStream(it)?.use { input -> input.readBytes() }
+                                            ?: throw Exception("Failed to read: $relative")
+                                    }
+                                }, backup = { backupName ->
+                                    val files = getCachedFileMap(dir)
+                                    check(!files.containsKey(backupName) && dir.findFile(backupName) == null) {
+                                        "Backup already exists: $backupName"
+                                    }
+                                    val existingUri = files[filename] ?: dir.findFile(filename)?.uri
+                                        ?: error("File no longer exists: $relative")
+                                    val backupUri = try {
+                                        DocumentsContract.renameDocument(activity.contentResolver, existingUri, backupName)
+                                            ?: error("Failed to rename: $relative")
+                                    } catch (error: Exception) {
+                                        fileUriCache.remove(dir.uri.toString())
+                                        throw error
+                                    }
+                                    files.remove(filename)
+                                    files[backupName] = backupUri
+                                })
+                                if (decision.isProtected) protectedPaths.add(relative)
+                                if (!decision.write) {
+                                    processed++; emitProgress(filename)
+                                    continue
+                                }
                                 val outUri = getOrCreateFileUri(dir, filename)
                                     ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
                                 val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
                                 if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
-                                pfd.use { FileOutputStream(it.fileDescriptor).buffered(65536).use { out -> zip.getInputStream(entry).copyTo(out, 65536) } }
+                                val digest = MessageDigest.getInstance("SHA-256")
+                                pfd.use {
+                                    DigestOutputStream(FileOutputStream(it.fileDescriptor), digest).buffered(65536).use { out ->
+                                        zip.getInputStream(entry).use { input -> input.copyTo(out, 65536) }
+                                    }
+                                }
+                                if (!decision.isProtected && isPackageManifestPath(relative)) {
+                                    packageManifest[relative] = digest.digest().joinToString("") { "%02x".format(it) }
+                                }
                                 logs.add("[OK] $relative")
                                 processed++; emitProgress(filename)
                             }
@@ -681,6 +826,7 @@ class KeytaoAndroidChannel(
                             val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
                             if (pfd != null) { pfd.use { FileOutputStream(it.fileDescriptor).use { out -> out.write(bytes) } }; logs.add("[RENAMED] lua/$fname") }
                             else logs.add("[ERROR] openFileDescriptor for renamed: lua/$fname")
+                            packageManifest.remove("lua/$fname")
                         }
                     }
 
@@ -716,7 +862,7 @@ class KeytaoAndroidChannel(
                             || (filename.endsWith(".lua") && !relative.contains('/'))
                             || relative.startsWith("lua/")
                             || relative.startsWith("opencc/")
-                        if (!isKey || isDefaultCustom(filename) || filename == "rime.lua") continue
+                        if ((!isKey && relative !in protectedPaths) || isDefaultCustom(filename) || filename == "rime.lua") continue
                         val dirPart = relative.substringBeforeLast('/', "")
                         val dir = if (dirPart.isEmpty()) root else dirCache[dirPart]
                         val exists = dir != null && (fileUriCache[dir.uri.toString()]?.containsKey(filename) == true || dir.findFile(filename) != null)
@@ -724,11 +870,13 @@ class KeytaoAndroidChannel(
                         else addVerify(relative, false, "文件不存在")
                     }
 
-                    zipFile.delete()
                     reply.success(mapOf(
                         "mergedSchemas" to dcMergeResult?.userSchemas.orEmpty(),
                         "logs" to logs.toList(),
                         "verify" to verifyArray,
+                        "packageZipPath" to zipFile.absolutePath,
+                        "packageManifest" to packageManifest,
+                        "packageRoot" to treeUriString,
                     ))
                 }
             } catch (ex: Exception) {
@@ -758,9 +906,15 @@ class KeytaoAndroidChannel(
                 }
                 val zipFile = File(zipPath)
                 val logs = mutableListOf<String>()
+                val packageManifest = linkedMapOf<String, String>()
+                val protectedPaths = linkedSetOf<String>()
 
                 JZipFile(zipFile).use { zip ->
                     val allEntries = zip.entries().toList()
+                    allEntries.forEach {
+                        val relative = validateZipRelativePath(it.name)
+                        safePrivateFile(root, relative)
+                    }
                     val zipLuaFilenames = mutableSetOf<String>()
                     var dcEntry: java.util.zip.ZipEntry? = null
                     var rimeLuaEntry: java.util.zip.ZipEntry? = null
@@ -779,7 +933,11 @@ class KeytaoAndroidChannel(
                         val zipContent = zip.getInputStream(entry).bufferedReader().readText()
                         val existing = readPrivateText(root, "default.custom.yaml")
                             ?: readPrivateText(root, "default-custom.yaml")
-                        mergeDefaultCustom(existing, zipContent)
+                        if (zipFile.name.startsWith("local-")) {
+                            KeytaoNativeBridge.mergeLocalDefaultCustom(existing, zipContent)
+                        } else {
+                            mergeDefaultCustom(existing, zipContent)
+                        }
                     }
 
                     val zipRimeLuaContent = rimeLuaEntry?.let { entry ->
@@ -816,10 +974,23 @@ class KeytaoAndroidChannel(
                                 logs.add("[MERGED] $relative")
                             }
                             else -> {
+                                val decision = preparePackageFileWrite(relative, logs, existingBytes = {
+                                    if (output.exists()) output.readBytes() else null
+                                }, backup = { backupName ->
+                                    val backup = File(output.parentFile, backupName)
+                                    check(!backupPathExists(backup)) { "Backup already exists: $backupName" }
+                                    check(output.renameTo(backup)) { "Failed to rename: $relative" }
+                                })
+                                if (decision.isProtected) protectedPaths.add(relative)
+                                if (!decision.write) continue
+                                val digest = MessageDigest.getInstance("SHA-256")
                                 zip.getInputStream(entry).use { input ->
-                                    FileOutputStream(output).buffered(65536).use { out ->
+                                    DigestOutputStream(FileOutputStream(output), digest).buffered(65536).use { out ->
                                         input.copyTo(out, 65536)
                                     }
+                                }
+                                if (!decision.isProtected && isPackageManifestPath(relative)) {
+                                    packageManifest[relative] = digest.digest().joinToString("") { "%02x".format(it) }
                                 }
                                 logs.add("[OK] $relative")
                             }
@@ -835,6 +1006,7 @@ class KeytaoAndroidChannel(
                         val luaDir = File(root, "lua").apply { mkdirs() }
                         for ((newName, bytes) in renamedLuaFiles) {
                             File(luaDir, "$newName.lua").writeBytes(bytes)
+                            packageManifest.remove("lua/$newName.lua")
                             logs.add("[RENAMED] lua/$newName.lua")
                         }
                     }
@@ -852,11 +1024,18 @@ class KeytaoAndroidChannel(
                         verifyArray.add(mapOf("path" to path, "ok" to ok, "note" to note))
                     }
                     addVerify("*.schema.yaml", root.listFiles()?.any { it.isFile && it.name.endsWith(".schema.yaml") } == true, "Rime schema")
+                    for (relative in protectedPaths) {
+                        val exists = safePrivateFile(root, relative).isFile
+                        addVerify(relative, exists, if (exists) "文件存在" else "文件不存在")
+                    }
 
                     reply.success(mutableMapOf<String, Any?>().apply {
                         put("mergedSchemas", mergedArray)
                         put("logs", logsArray)
                         put("verify", verifyArray)
+                        put("packageZipPath", zipFile.absolutePath)
+                        put("packageManifest", packageManifest)
+                        put("packageRoot", root.absolutePath)
                     })
                 }
             } catch (ex: Exception) {
@@ -884,9 +1063,18 @@ class KeytaoAndroidChannel(
                     "easy_en.custom.yaml" to "easy_en.custom.yaml",
                     "lua/easy_en.lua" to "lua/easy_en.lua",
                 )
+                val logs = mutableListOf<String>()
                 files.forEach { (assetRelative, destinationRelative) ->
                     val destination = File(root, destinationRelative)
                     destination.parentFile?.mkdirs()
+                    val decision = preparePackageFileWrite(destinationRelative, logs, existingBytes = {
+                        if (destination.exists()) destination.readBytes() else null
+                    }, backup = { backupName ->
+                        val backup = File(destination.parentFile, backupName)
+                        check(!backupPathExists(backup)) { "Backup already exists: $backupName" }
+                        check(destination.renameTo(backup)) { "Failed to rename: $destinationRelative" }
+                    })
+                    if (!decision.write) return@forEach
                     val temporary = File(destination.parentFile, ".${destination.name}.${System.nanoTime()}.tmp")
                     try {
                         activity.assets.open("addon-schemas/$id/$assetRelative").use { input ->
@@ -903,7 +1091,11 @@ class KeytaoAndroidChannel(
                         temporary.delete()
                     }
                 }
-                reply.success(mutableMapOf<String, Any?>().apply { put("copied", files.size) })
+                logs.forEach { android.util.Log.i("KeytaoAndroidChannel", it) }
+                reply.success(mutableMapOf<String, Any?>().apply {
+                    put("copied", files.size)
+                    put("logs", logs.toList())
+                })
             } catch (ex: Exception) {
                 reply.error(ex.message ?: "Failed to copy add-on schema assets")
             }
@@ -960,6 +1152,38 @@ class KeytaoAndroidChannel(
         }
     }
 
+    private fun preparePackageFileWrite(
+        relative: String,
+        logs: MutableList<String>,
+        existingBytes: () -> ByteArray?,
+        backup: (String) -> Unit,
+    ): ProtectedFileInstall {
+        val initial = KeytaoNativeBridge.prepareProtectedFileInstall(relative, null)
+        if (!initial.isProtected) return initial
+        val existing = existingBytes()
+        var decision = if (existing == null) initial else KeytaoNativeBridge.prepareProtectedFileInstall(relative, existing)
+        decision.backupName?.let { backupName ->
+            try {
+                backup(backupName)
+            } catch (error: Exception) {
+                decision = decision.copy(
+                    write = false,
+                    log = "${decision.log}; backup rename failed: ${error.message}; left untouched",
+                )
+            }
+        }
+        decision.log?.let { logs.add(it) }
+        return decision
+    }
+
+    private fun backupPathExists(backup: File): Boolean = try {
+        Os.lstat(backup.path)
+        true
+    } catch (error: ErrnoException) {
+        if (error.errno != OsConstants.ENOENT) throw error
+        false
+    }
+
     private fun safePrivateFile(root: File, relativePath: String): File {
         val rootPath = root.canonicalFile.toPath()
         val output = File(root, relativePath).canonicalFile
@@ -968,6 +1192,20 @@ class KeytaoAndroidChannel(
         }
         return output
     }
+
+    private fun validateZipRelativePath(entryName: String): String {
+        val relative = entryName.trimEnd('/')
+        if (relative.isEmpty() || relative.startsWith('/') || relative.contains('\\') ||
+            Regex("^[A-Za-z]:").containsMatchIn(relative) ||
+            relative.split('/').any { it.isEmpty() || it == "." || it == ".." }
+        ) {
+            throw Exception("Unsafe zip entry: $entryName")
+        }
+        return relative
+    }
+
+    private fun isPackageManifestPath(relative: String): Boolean =
+        !isDefaultCustom(relative.substringAfterLast('/')) && relative != "rime.lua"
 
     private fun inputMethodManager(): InputMethodManager? {
         return activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager

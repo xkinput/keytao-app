@@ -2,7 +2,7 @@
 //! The host owns the cdylib; this module owns the IME runtime and JNI boundary.
 
 use jni::{
-    objects::{JObject, JString},
+    objects::{JByteArray, JObject, JString},
     sys::{jboolean, jint, jlong, jstring},
     JNIEnv,
 };
@@ -559,6 +559,70 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDefault
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareProtectedFileInstall(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    relative: JString<'_>,
+    existing: JByteArray<'_>,
+) -> jstring {
+    android_jni_guard(
+        "nativePrepareProtectedFileInstall",
+        std::ptr::null_mut(),
+        || {
+            let Some(relative) = optional_jni_raw_text(&mut env, relative) else {
+                return std::ptr::null_mut();
+            };
+            let existing = if existing.is_null() {
+                None
+            } else {
+                let Ok(bytes) = env.convert_byte_array(&existing) else {
+                    return std::ptr::null_mut();
+                };
+                Some(bytes)
+            };
+            let decision =
+                crate::install::prepare_protected_file_install(&relative, existing.as_deref());
+            let Ok(json) = serde_json::to_string(&decision) else {
+                return std::ptr::null_mut();
+            };
+            jni_string(&mut env, &json)
+        },
+    )
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMergeLocalDefaultCustom(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    existing: JString<'_>,
+    package_content: JString<'_>,
+) -> jstring {
+    android_jni_guard(
+        "nativeMergeLocalDefaultCustom",
+        std::ptr::null_mut(),
+        || {
+            let has_existing = !existing.is_null();
+            let existing = optional_jni_raw_text(&mut env, existing);
+            if has_existing && existing.is_none() {
+                return std::ptr::null_mut();
+            }
+            let Some(package) = optional_jni_raw_text(&mut env, package_content) else {
+                return std::ptr::null_mut();
+            };
+            let Ok((merged, schemas)) =
+                crate::install::merge_local_default_custom(existing.as_deref(), &package)
+            else {
+                return std::ptr::null_mut();
+            };
+            let json = serde_json::json!({"mergedContent": merged, "userSchemas": schemas});
+            jni_string(&mut env, &json.to_string())
+        },
+    )
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepareRimeLuaInstall(
     mut env: JNIEnv<'_>,
     _receiver: JObject<'_>,
@@ -628,6 +692,42 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeEngineA
     _receiver: JObject<'_>,
 ) -> jboolean {
     android_jni_guard("nativeEngineAvailable", 0, || 1)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeHasDeployedSchema(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeHasDeployedSchema", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        keytao_core::schema_install_state(&user_dir).deployed as jboolean
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeCompleteDeployment(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    user_dir: JString<'_>,
+) -> jboolean {
+    android_jni_guard("nativeCompleteDeployment", 0, || {
+        let Some(user_dir) = optional_jni_path(&mut env, user_dir) else {
+            return 0;
+        };
+        match keytao_core::complete_deployment(&user_dir) {
+            Ok(()) => 1,
+            Err(error) => {
+                android_log::error(&format!("complete deployment: {error}"));
+                0
+            }
+        }
+    })
 }
 
 #[cfg(target_os = "android")]

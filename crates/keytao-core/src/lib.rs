@@ -2,6 +2,8 @@
 //! Every consumer (the Flutter app via keytao-app-bridge, the C FFI and the
 //! platform IMEs) links against this crate as its rime back-end.
 
+#[cfg(test)]
+mod deployment_state_tests;
 pub mod english_mode;
 #[cfg(all(
     test,
@@ -780,6 +782,7 @@ mod desktop {
         );
         let result = (|| {
             let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+            begin_deployment(Path::new(&user_data_dir))?;
             let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
             #[cfg(target_os = "windows")]
@@ -788,12 +791,12 @@ mod desktop {
             #[cfg(target_os = "android")]
             {
                 setup_only(user_data_dir.clone(), shared_data_dir)?;
-                return deploy_android_staged(&user_data_dir).map_err(|error| {
+                deploy_android_staged(&user_data_dir).map_err(|error| {
                     format!(
                         "Rime deployment failed: {error}. See librime logs in {}",
                         log_dir.display()
                     )
-                });
+                })?;
             }
 
             #[cfg(not(target_os = "android"))]
@@ -818,8 +821,9 @@ mod desktop {
                         "Rime deployment validation failed: {error}. See librime logs in {}",
                         log_dir.display()
                     )
-                })
+                })?;
             }
+            complete_deployment(Path::new(&user_data_dir))
         })();
         if let Some(started) = started {
             crate::rt_log!(
@@ -843,6 +847,7 @@ mod desktop {
         let user_dir = Path::new(&user_data_dir);
         runtime_log::init_for_engine(user_dir);
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        begin_deployment(user_dir)?;
         {
             let _rime = rime_api_lock();
             if *lock_ignore_poison(&RIME_SETUP_COMPLETE) || *lock_ignore_poison(&RIME_INITIALIZED) {
@@ -869,7 +874,8 @@ mod desktop {
                 rime_log_dir(user_dir).display()
             ));
         }
-        validate_deployed_schema_files(user_dir).map(|_| ())
+        validate_deployed_schema_files(user_dir)?;
+        complete_deployment(user_dir)
     }
 
     #[cfg(target_os = "android")]
@@ -879,6 +885,7 @@ mod desktop {
     ) -> Result<Vec<String>, String> {
         runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        begin_deployment(Path::new(&user_data_dir))?;
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         deploy_config_file("default.yaml", "config_version")?;
         let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
@@ -4479,15 +4486,145 @@ pub struct SchemaInstallState {
     pub schemas: Vec<String>,
 }
 
-pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
-    let schemas = ["default.custom.yaml", "default-custom.yaml"]
+pub const ACTIVE_SCHEME_MANIFEST: &str = ".keytao-active-scheme.json";
+
+fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data_dir.join("app-state.json")).ok()?).ok()?;
+    let key = state["active_scheme"].as_str()?;
+    if !key.starts_with("local-") || !state["installed_packages"].as_object()?.contains_key(key) {
+        return None;
+    }
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(data_dir.join("scheme-packages/active-manifest.json")).ok()?,
+    )
+    .ok()?;
+    if manifest["scheme_key"].as_str().is_some_and(|actual| actual != key) {
+        return None;
+    }
+    manifest.as_object_mut()?.insert("scheme_key".into(), key.into());
+    Some(manifest)
+}
+
+fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
+    let read = || -> Option<HashSet<String>> {
+        let manifest = match std::fs::read(user_data_dir.join(ACTIVE_SCHEME_MANIFEST)) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                legacy_active_local_manifest(&dirs::data_local_dir()?.join("ink.rea.keytao-app"))?
+            }
+            Err(_) => return None,
+        };
+        if !manifest["scheme_key"].as_str()?.starts_with("local-")
+            || Path::new(manifest["root"].as_str()?) != user_data_dir.canonicalize().ok()?
+        {
+            return None;
+        }
+        Some(
+            manifest["manifest"]
+                .as_object()?
+                .keys()
+                .filter_map(|name| name.strip_suffix(".schema.yaml"))
+                .filter(|id| valid_rime_build_id(id))
+                .map(str::to_owned)
+                .collect(),
+        )
+    };
+    read().unwrap_or_default()
+}
+
+const DEPLOYING_FILE: &str = ".keytao-deploying";
+const DEPLOYED_FILE: &str = ".keytao-deployed";
+
+fn managed_primary_schemas(user_data_dir: &Path) -> Vec<String> {
+    let local_schemas = active_local_schema_ids(user_data_dir);
+    ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
         .map(|content| parse_schema_list(&content))
         .unwrap_or_default()
         .into_iter()
-        .filter(|schema| valid_rime_build_id(schema) && is_keytao_managed_schema(schema))
-        .collect::<Vec<_>>();
+        .filter(|schema| valid_rime_build_id(schema))
+        .filter(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema))
+        .collect()
+}
+
+fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
+    let build = user_data_dir.join("build");
+    std::fs::create_dir_all(&build)
+        .map_err(|error| format!("create {}: {error}", build.display()))?;
+    let sentinel = build.join(DEPLOYING_FILE);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::fs::write(&sentinel, format!("{timestamp}/{}\n", std::process::id()))
+        .map_err(|error| format!("write {}: {error}", sentinel.display()))?;
+    let marker = build.join(DEPLOYED_FILE);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove {}: {error}", marker.display())),
+    }
+}
+
+fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(), String> {
+    let build = user_data_dir.join("build");
+    let temporary = build.join(format!("{DEPLOYED_FILE}.{}.tmp", std::process::id()));
+    let content = serde_json::to_vec(schemas).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, content)
+        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, build.join(DEPLOYED_FILE))
+        .map_err(|error| format!("publish deployment marker: {error}"))
+}
+
+/// Publish readiness only after every deployment step has succeeded.
+pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
+    let schemas = managed_primary_schemas(user_data_dir);
+    if schemas.is_empty()
+        || !schemas.iter().all(|schema| {
+            user_data_dir.join(format!("{schema}.schema.yaml")).is_file()
+                && user_data_dir
+                    .join("build")
+                    .join(format!("{schema}.schema.yaml"))
+                    .is_file()
+        })
+    {
+        return Err("managed primary schemas are not deployed".into());
+    }
+    write_deployed_marker(user_data_dir, &schemas)?;
+    let sentinel = user_data_dir.join("build").join(DEPLOYING_FILE);
+    match std::fs::remove_file(&sentinel) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove {}: {error}", sentinel.display())),
+    }
+}
+
+fn legacy_schema_artifacts_complete(build: &Path, schema: &str) -> bool {
+    let read = || -> Option<bool> {
+        let content = std::fs::read_to_string(build.join(format!("{schema}.schema.yaml"))).ok()?;
+        let value: Value = serde_yaml::from_str(&content).ok()?;
+        let translator = value.get("translator")?;
+        let dictionary = translator.get("dictionary")?.as_str()?;
+        if !valid_rime_build_id(dictionary) {
+            return Some(false);
+        }
+        let prism = translator
+            .get("prism")
+            .and_then(Value::as_str)
+            .unwrap_or(dictionary);
+        Some(
+            build.join(format!("{dictionary}.table.bin")).is_file()
+                && valid_rime_build_id(prism)
+                && build.join(format!("{prism}.prism.bin")).is_file(),
+        )
+    };
+    read().unwrap_or(false)
+}
+
+pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
+    let schemas = managed_primary_schemas(user_data_dir);
 
     let installed = !schemas.is_empty()
         && schemas.iter().all(|schema| {
@@ -4495,13 +4632,29 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
         });
+    let build = user_data_dir.join("build");
     let deployed = installed
         && schemas.iter().all(|schema| {
             user_data_dir
                 .join("build")
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
-        });
+        })
+        && !build.join(DEPLOYING_FILE).exists()
+        && match std::fs::read(build.join(DEPLOYED_FILE)) {
+            Ok(content) => serde_json::from_slice::<Vec<String>>(&content)
+                .is_ok_and(|deployed| schemas.iter().all(|schema| deployed.contains(schema))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let complete = schemas
+                    .iter()
+                    .all(|schema| legacy_schema_artifacts_complete(&build, schema));
+                if complete {
+                    let _ = write_deployed_marker(user_data_dir, &schemas);
+                }
+                complete
+            }
+            Err(_) => false,
+        };
 
     SchemaInstallState {
         installed,
@@ -5937,12 +6090,113 @@ mod tests {
         assert_eq!(source_only.schemas, vec!["keydo"]);
 
         std::fs::write(build.join("keydo.schema.yaml"), "schema: {}\n").unwrap();
+        super::complete_deployment(&dir).unwrap();
         let ready = schema_install_state(&dir);
         assert!(ready.installed);
         assert!(ready.deployed);
         assert_eq!(ready.schemas, vec!["keydo"]);
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn schema_install_state_accepts_legacy_installed_local_manifest() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-legacy-local-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("scheme-packages")).unwrap();
+        let mut state = serde_json::json!({
+            "active_scheme": "local-example", "installed_packages": {"local-example": {}}
+        });
+        let state_path = dir.join("app-state.json");
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        let manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "manifest": {"example.schema.yaml": "hash"}
+        });
+        std::fs::write(dir.join("scheme-packages/active-manifest.json"), manifest.to_string()).unwrap();
+        let restored = super::legacy_active_local_manifest(&dir).unwrap();
+        assert_eq!(restored["scheme_key"], "local-example");
+        std::fs::write(dir.join(super::ACTIVE_SCHEME_MANIFEST), restored.to_string()).unwrap();
+        std::fs::write(dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: example\n").unwrap();
+        std::fs::write(dir.join("example.schema.yaml"), "schema: {}\n").unwrap();
+        assert!(schema_install_state(&dir).installed);
+        state["installed_packages"] = serde_json::json!({});
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert!(super::legacy_active_local_manifest(&dir).is_none());
+        state["active_scheme"] = serde_json::json!("keytao");
+        state["installed_packages"] = serde_json::json!({"keytao": {}});
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert!(super::legacy_active_local_manifest(&dir).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema_install_state_ignores_shared_and_stale_user_schemas() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-shared-schema-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("shared/luna_pinyin.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(dir.join("keytao.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(dir.join("build/keytao.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao\n    - schema: luna_pinyin\n    - schema: stale\n",
+        ).unwrap();
+        super::complete_deployment(&dir).unwrap();
+        let state = schema_install_state(&dir);
+        assert!(state.installed);
+        assert!(state.deployed);
+        assert_eq!(state.schemas, ["keytao"]);
+        std::fs::remove_file(dir.join("keytao.schema.yaml")).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema_install_state_counts_only_installed_active_local_package_schemas() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-local-schema-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: example\n    - schema: auxiliary\n    - schema: luna_pinyin\n    - schema: stale\n",
+        ).unwrap();
+        std::fs::write(dir.join("example.schema.yaml"), "schema: {}\n").unwrap();
+        let mut manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "scheme_key": "local-example",
+            "manifest": {"example.schema.yaml": "hash", "auxiliary.schema.yaml": "hash", "nested/stale.schema.yaml": "hash"}
+        });
+        let marker = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        let incomplete = schema_install_state(&dir);
+        assert_eq!(incomplete.schemas, ["example", "auxiliary"]);
+        assert!(!incomplete.installed);
+        std::fs::write(dir.join("auxiliary.schema.yaml"), "schema: {}\n").unwrap();
+        let installed = schema_install_state(&dir);
+        assert!(installed.installed);
+        assert!(!installed.deployed);
+        for id in ["example", "auxiliary"] {
+            std::fs::write(dir.join(format!("build/{id}.schema.yaml")), "schema: {}\n").unwrap();
+        }
+        super::complete_deployment(&dir).unwrap();
+        assert!(schema_install_state(&dir).deployed);
+        manifest["scheme_key"] = serde_json::json!("keytao");
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        manifest["scheme_key"] = serde_json::json!("local-example");
+        manifest["root"] = serde_json::json!(dir.join("other"));
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::write(&marker, "invalid json").unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

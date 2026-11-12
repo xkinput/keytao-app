@@ -10,20 +10,28 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 class AccountUserDto {
+  final PlatformInt64 id;
   final String? name;
   final String? nickname;
   final String? email;
 
-  const AccountUserDto({this.name, this.nickname, this.email});
+  const AccountUserDto({
+    required this.id,
+    this.name,
+    this.nickname,
+    this.email,
+  });
 
   @override
-  int get hashCode => name.hashCode ^ nickname.hashCode ^ email.hashCode;
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ nickname.hashCode ^ email.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is AccountUserDto &&
           runtimeType == other.runtimeType &&
+          id == other.id &&
           name == other.name &&
           nickname == other.nickname &&
           email == other.email;
@@ -571,6 +579,45 @@ class InstallResultDto {
           verify == other.verify;
 }
 
+class InstalledPackageDto {
+  final String schemeKey;
+  final String? version;
+  final bool active;
+  final bool hasPackageZip;
+  final String? source;
+  final String? displayName;
+
+  const InstalledPackageDto({
+    required this.schemeKey,
+    this.version,
+    required this.active,
+    required this.hasPackageZip,
+    this.source,
+    this.displayName,
+  });
+
+  @override
+  int get hashCode =>
+      schemeKey.hashCode ^
+      version.hashCode ^
+      active.hashCode ^
+      hasPackageZip.hashCode ^
+      source.hashCode ^
+      displayName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InstalledPackageDto &&
+          runtimeType == other.runtimeType &&
+          schemeKey == other.schemeKey &&
+          version == other.version &&
+          active == other.active &&
+          hasPackageZip == other.hasPackageZip &&
+          source == other.source &&
+          displayName == other.displayName;
+}
+
 class LinuxImeStatusDto {
   final bool supported;
   final bool kdeSession;
@@ -948,21 +995,103 @@ class SchemeReleaseDto {
           assetName == other.assetName;
 }
 
+class SchemeUpdateDto {
+  final String schemeKey;
+  final String installedVersion;
+  final String latestVersion;
+  final bool hasUpdate;
+
+  const SchemeUpdateDto({
+    required this.schemeKey,
+    required this.installedVersion,
+    required this.latestVersion,
+    required this.hasUpdate,
+  });
+
+  @override
+  int get hashCode =>
+      schemeKey.hashCode ^
+      installedVersion.hashCode ^
+      latestVersion.hashCode ^
+      hasUpdate.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SchemeUpdateDto &&
+          runtimeType == other.runtimeType &&
+          schemeKey == other.schemeKey &&
+          installedVersion == other.installedVersion &&
+          latestVersion == other.latestVersion &&
+          hasUpdate == other.hasUpdate;
+}
+
 enum UiColorSchemeDto { auto, light, dark }
+
+class UserDictionaryDeletionConfirmationDto {
+  final List<UserDictionaryDeletionDto> localDeletions;
+  final List<UserDictionaryDeletionDto> serverDeletions;
+
+  const UserDictionaryDeletionConfirmationDto({
+    required this.localDeletions,
+    required this.serverDeletions,
+  });
+
+  @override
+  int get hashCode => localDeletions.hashCode ^ serverDeletions.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserDictionaryDeletionConfirmationDto &&
+          runtimeType == other.runtimeType &&
+          localDeletions == other.localDeletions &&
+          serverDeletions == other.serverDeletions;
+}
+
+class UserDictionaryDeletionDto {
+  final String word;
+  final String code;
+
+  const UserDictionaryDeletionDto({required this.word, required this.code});
+
+  @override
+  int get hashCode => word.hashCode ^ code.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserDictionaryDeletionDto &&
+          runtimeType == other.runtimeType &&
+          word == other.word &&
+          code == other.code;
+}
 
 class UserDictionarySyncDto {
   final String fileName;
   final BigInt count;
   final String message;
+  final bool pending;
+  final List<UserDictionaryDeletionDto> localDeletions;
+  final List<UserDictionaryDeletionDto> serverDeletions;
 
   const UserDictionarySyncDto({
     required this.fileName,
     required this.count,
     required this.message,
+    required this.pending,
+    required this.localDeletions,
+    required this.serverDeletions,
   });
 
   @override
-  int get hashCode => fileName.hashCode ^ count.hashCode ^ message.hashCode;
+  int get hashCode =>
+      fileName.hashCode ^
+      count.hashCode ^
+      message.hashCode ^
+      pending.hashCode ^
+      localDeletions.hashCode ^
+      serverDeletions.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -971,7 +1100,100 @@ class UserDictionarySyncDto {
           runtimeType == other.runtimeType &&
           fileName == other.fileName &&
           count == other.count &&
-          message == other.message;
+          message == other.message &&
+          pending == other.pending &&
+          localDeletions == other.localDeletions &&
+          serverDeletions == other.serverDeletions;
+}
+
+class UserWordComparisonDto {
+  final UserWordDto entry;
+  final String status;
+  final List<String> words;
+  final List<String> codes;
+
+  const UserWordComparisonDto({
+    required this.entry,
+    required this.status,
+    required this.words,
+    required this.codes,
+  });
+
+  @override
+  int get hashCode =>
+      entry.hashCode ^ status.hashCode ^ words.hashCode ^ codes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordComparisonDto &&
+          runtimeType == other.runtimeType &&
+          entry == other.entry &&
+          status == other.status &&
+          words == other.words &&
+          codes == other.codes;
+}
+
+class UserWordDto {
+  final int id;
+  final String word;
+  final String code;
+  final String? weight;
+
+  const UserWordDto({
+    required this.id,
+    required this.word,
+    required this.code,
+    this.weight,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ word.hashCode ^ code.hashCode ^ weight.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          word == other.word &&
+          code == other.code &&
+          weight == other.weight;
+}
+
+class UserWordMutationDto {
+  final bool alreadyExists;
+
+  const UserWordMutationDto({required this.alreadyExists});
+
+  @override
+  int get hashCode => alreadyExists.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordMutationDto &&
+          runtimeType == other.runtimeType &&
+          alreadyExists == other.alreadyExists;
+}
+
+class UserWordsReportDto {
+  final List<UserWordDto> removed;
+  final List<UserWordComparisonDto> conflicts;
+
+  const UserWordsReportDto({required this.removed, required this.conflicts});
+
+  @override
+  int get hashCode => removed.hashCode ^ conflicts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UserWordsReportDto &&
+          runtimeType == other.runtimeType &&
+          removed == other.removed &&
+          conflicts == other.conflicts;
 }
 
 class VerifyEntryDto {

@@ -6,6 +6,7 @@ import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'settings.dart';
 import 'progress.dart';
+import 'user_words.dart';
 import 'widgets.dart';
 
 class InputPage extends StatelessWidget {
@@ -16,6 +17,9 @@ class InputPage extends StatelessWidget {
     controller: controller,
     page: AppPage.input,
     children: [
+      if (controller.userWordsReport != null ||
+          controller.userWordsReportError != null)
+        UserWordsNotice(controller: controller),
       if (controller.isAndroid) ...[
         AppBrand(version: controller.info.appVersion),
         AndroidImeCard(controller: controller),

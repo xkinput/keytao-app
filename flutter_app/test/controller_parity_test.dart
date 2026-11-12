@@ -92,6 +92,14 @@ class FakeCore implements RustLibApi {
   @override
   Future<LocalSchemaDto> crateApiCoreCheckLocalSchema() async => local;
   @override
+  Future<List<InstalledPackageDto>> crateApiCoreListInstalledPackages() async =>
+      [];
+  @override
+  Future<List<SchemeUpdateDto>> crateApiCoreCheckSchemeUpdates() async => [];
+  @override
+  Future<Map<String, String>> crateApiCoreGetDismissedSchemeUpdates() async =>
+      {};
+  @override
   Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaStatus({
     required String id,
   }) async => const AddonSchemaStatusDto(
@@ -178,6 +186,8 @@ class FakeCore implements RustLibApi {
   @override
   Future<InstallResultDto> crateApiCoreFinishAndroidInstall({
     required String resultJson,
+    required String schemeKey,
+    String? version,
   }) async {
     calls.add('finish');
     expect(jsonDecode(resultJson), extracted);
@@ -188,6 +198,8 @@ class FakeCore implements RustLibApi {
   Future<InstallResultDto> crateApiCoreInstallSchemeToDir({
     required String url,
     required String dir,
+    required String schemeKey,
+    String? version,
   }) async {
     calls.add('installTo:$url:$dir');
     return result;
@@ -196,6 +208,8 @@ class FakeCore implements RustLibApi {
   @override
   Future<InstallResultDto> crateApiCoreInstallSchemeFromUrl({
     required String url,
+    required String schemeKey,
+    String? version,
   }) async {
     calls.add('install:$url');
     if (installFailure != null) throw StateError(installFailure!);

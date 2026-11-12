@@ -175,6 +175,18 @@ jobs:
           # Keep --locked builds valid when the requested version differs.
           cargo update --workspace
 
+      - name: Point Docker at the runner DNS
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          # Containers otherwise fall back to public resolvers, which the runner network can reject.
+          dns=$(resolvectl dns | grep -oE '[0-9]+(\.[0-9]+){3}' | sort -u | jq -R . | jq -sc .)
+          [[ "$dns" != "[]" ]] || { resolvectl dns; exit 1; }
+          conf=/etc/docker/daemon.json
+          { sudo cat "$conf" 2>/dev/null || echo '{}'; } | jq --argjson dns "$dns" '.dns = $dns' | sudo tee "$conf.new"
+          sudo mv "$conf.new" "$conf"
+          sudo systemctl restart docker
+
       - name: Build Linux packages
         if: matrix.os_name == 'linux'
         shell: bash

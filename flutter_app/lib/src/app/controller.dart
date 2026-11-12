@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -75,6 +76,7 @@ String? schemeKeyFromSchemas(List<String> schemas) {
 }
 
 String? installedSchemeKey(List<String> schemas, String? installedScheme) {
+  if (installedScheme?.startsWith('local-') == true) return installedScheme;
   final family = schemeKeyFromSchemas(schemas);
   return family == 'xmjd' && installedScheme == 'xmjd-feiding'
       ? 'xmjd-feiding'
@@ -90,6 +92,7 @@ String? displayedSchemeVersion(
   String? installedScheme,
   String? installedVersion,
 ) {
+  if (installedScheme?.startsWith('local-') == true) return installedVersion;
   final family = schemeKeyFromSchemas(schemas);
   if (family == 'keytao') return fileVersion;
   final installedFamily = installedScheme == 'xmjd-feiding'
@@ -117,7 +120,8 @@ class AppController extends ChangeNotifier {
   bool get showsEmbeddedComposition =>
       isWindows || info.platform == BridgePlatform.macOs;
   bool _busy = false;
-  bool get busy => _busy || windowsRegistrationBusy;
+  bool get busy =>
+      _busy || windowsRegistrationBusy || _pendingUserWordDeletes.isNotEmpty;
   set busy(bool value) => _busy = value;
   bool _platformStarted = false;
   bool _windowsActionRequested = false;
@@ -130,6 +134,7 @@ class AppController extends ChangeNotifier {
   bool _startupStarted = false;
   bool _logsWhenIdle = false;
   int _releaseRequest = 0;
+  int _schemeUpdatesRequest = 0;
   AppPage activePage = AppPage.input;
   OperationKind? operation;
   bool checkingStorage = false;
@@ -139,6 +144,17 @@ class AppController extends ChangeNotifier {
   bool isOpeningCustomDirectory = false;
   bool onboardingCompleted = false;
   AppUpdateDto? appUpdate;
+  List<InstalledPackageDto> installedPackages = [];
+  List<SchemeUpdateDto> schemeUpdates = [];
+  Map<String, String> dismissedSchemeUpdates = {};
+  bool schemeUpdatesLoading = false;
+  final Set<String> userWordsPendingDeploy = {};
+  int userWordsRevision = 0;
+  final Set<String> _pendingUserWordDeletes = {};
+  String? userWordsReportScheme;
+  UserWordsReportDto? userWordsReport;
+  String? userWordsReportError;
+  String? packageError;
   String? releaseError;
   String? installError;
   String? addonError;
@@ -190,13 +206,132 @@ class AppController extends ChangeNotifier {
   AccountUserDto? accountUser;
   bool loggingIn = false;
   bool syncingDictionary = false;
+  UserDictionarySyncDto? pendingDictionarySync;
+  Object? _pendingDictionarySyncAccountId;
+  final Map<Object, Set<String>> _cancelledDictionarySyncDeletions = {};
+  Timer? _dictionarySyncDebounce;
   String? accountError;
   String? accountMessage;
+  bool followAccountSync = false;
+  final Set<String> syncedSchemes = {};
+  String? lastSchemeSyncAt;
+  List<Map<String, dynamic>> cloudPackages = [];
+  bool schemeSyncBusy = false;
+  String? schemeSyncError;
+  Map<String, dynamic>? pendingCloudProfile;
+  String? pendingCloudActiveScheme;
+  Timer? _schemeSyncDebounce;
+  final Set<String> _pendingCloudPackageUploads = {};
+  final Set<Object> _checkedSchemeSyncAccounts = {};
+  Object? _readySchemeSyncAccount;
+  Object? _checkingSchemeSyncAccount;
+  bool _applyingCloudProfile = false;
+  bool _schemeProfileDirty = false;
+  Future<void>? _schemeSettingsWrite;
   StreamSubscription<BridgeEvent>? _events;
   StreamSubscription<InstallProgressDto>? _androidProgress;
 
   bool get canInstall =>
       !busy && !releaseLoading && downloadUrl?.isNotEmpty == true;
+  InstalledPackageDto? installedPackageFor(String key) {
+    for (final package in installedPackages) {
+      if (package.schemeKey == key) return package;
+    }
+    return null;
+  }
+
+  bool isLocalScheme(String key) => installedPackageFor(key)?.source == 'local';
+
+  String get activeSchemeKey {
+    for (final package in installedPackages) {
+      if (package.active) return package.schemeKey;
+    }
+    return local == null
+        ? scheme
+        : installedSchemeKey(local!.schemas, local!.installedScheme) ?? scheme;
+  }
+
+  void markUserWordsChanged(String key) {
+    userWordsRevision++;
+    if (userWordsAffectActiveScheme(key)) {
+      userWordsPendingDeploy.add(activeSchemeKey);
+    }
+    _changed();
+    if (isKeytaoScheme(key)) scheduleUserDictionarySync();
+  }
+
+  bool isKeytaoScheme(String key) =>
+      const {'keytao', 'keytao-dz', 'keytao-bj'}.contains(key);
+
+  bool userWordsAffectActiveScheme(String key) =>
+      key == activeSchemeKey ||
+      (isKeytaoScheme(key) && isKeytaoScheme(activeSchemeKey)) ||
+      (const {'xmjd', 'xmjd-feiding'}.contains(key) &&
+          const {'xmjd', 'xmjd-feiding'}.contains(activeSchemeKey));
+
+  void setUserWordDeletePending(String key, bool pending) {
+    if (pending) {
+      _pendingUserWordDeletes.add(key);
+    } else {
+      _pendingUserWordDeletes.remove(key);
+      if (_refreshWhenIdle && !_disposed) {
+        _refreshWhenIdle = false;
+        unawaited(refreshState());
+      } else if (_logsWhenIdle && !_disposed) {
+        _logsWhenIdle = false;
+        if (activePage == AppPage.debug) unawaited(refreshLogs());
+      }
+      unawaited(_handleWindowsAction());
+    }
+    _changed();
+  }
+
+  void dismissUserWordsReport() {
+    userWordsReport = null;
+    userWordsReportScheme = null;
+    userWordsReportError = null;
+    _changed();
+  }
+
+  Future<void> _readUserWordsReport(String key) async {
+    try {
+      final report = await core.takeUserWordsReport(schemeKey: key);
+      if (report.removed.isNotEmpty || report.conflicts.isNotEmpty) {
+        userWordsReportScheme = key;
+        userWordsReport = report;
+      } else {
+        userWordsReportScheme = null;
+        userWordsReport = null;
+      }
+      userWordsReportError = null;
+      if (report.removed.isNotEmpty && isKeytaoScheme(key)) {
+        scheduleUserDictionarySync();
+      }
+    } catch (failure) {
+      userWordsReportScheme = key;
+      userWordsReport = null;
+      userWordsReportError = errorText(failure);
+      addOperationLogs(['[WARN] $userWordsReportError']);
+    }
+  }
+
+  SchemeUpdateDto? schemeUpdateFor(String key) {
+    for (final update in schemeUpdates) {
+      if (update.schemeKey == key && update.hasUpdate) return update;
+    }
+    return null;
+  }
+
+  bool get hasSchemeUpdates => schemeUpdates.any((update) => update.hasUpdate);
+  List<SchemeUpdateDto> get visibleSchemeUpdates => [
+    for (final update in schemeUpdates)
+      if (update.hasUpdate &&
+          _normalizedVersion(dismissedSchemeUpdates[update.schemeKey] ?? '') !=
+              _normalizedVersion(update.latestVersion))
+        update,
+  ];
+  static String _normalizedVersion(String version) =>
+      version.startsWith('v') ? version.substring(1) : version;
   bool get isInstalling => operation == OperationKind.install;
   bool get canCancelDownload =>
       isInstalling && installProgress?.stage == 'downloading';
@@ -219,7 +354,10 @@ class AppController extends ChangeNotifier {
       ? AppStrings.installing
       : isDeploying
       ? AppStrings.deploying
-      : local?.installed == true
+      : installedPackageFor(scheme) != null ||
+            (local?.installed == true &&
+                installedSchemeKey(local!.schemas, local!.installedScheme) ==
+                    scheme)
       ? AppStrings.updateScheme
       : AppStrings.installScheme;
   String get deployTooltip => local?.installed == true
@@ -368,6 +506,7 @@ class AppController extends ChangeNotifier {
   bool _isInlineError(String? message) => [
     AppStrings.downloadCancelled,
     releaseError,
+    packageError,
     installError,
     addonError,
     wanxiangError,
@@ -377,6 +516,7 @@ class AppController extends ChangeNotifier {
     linuxImeError,
     imeUiError,
     debugError,
+    schemeSyncError,
     ...deploySteps.map((step) => step.message),
   ].contains(message);
   String? get unhandledError => _isInlineError(error) ? null : error;
@@ -390,7 +530,9 @@ class AppController extends ChangeNotifier {
   bool get setupReady {
     if (local?.installed != true || local?.deployed != true) return false;
     if (isAndroid) {
-      return storageReady && ime?['enabled'] == true && ime?['selected'] == true;
+      return storageReady &&
+          ime?['enabled'] == true &&
+          ime?['selected'] == true;
     }
     return isIos || !hasOnboarding || macosIme?.installed == true;
   }
@@ -400,14 +542,17 @@ class AppController extends ChangeNotifier {
   String? get releaseVersion =>
       scheme == 'keytao' ? selectedRelease?.version : schemeRelease?.version;
   String? get downloadUrl => scheme == 'keytao'
-      ? switch (info.platform) {
-          BridgePlatform.android => selectedRelease?.downloadUrls.android,
-          BridgePlatform.ios => selectedRelease?.downloadUrls.ios,
-          BridgePlatform.windows => selectedRelease?.downloadUrls.windows,
-          BridgePlatform.linux => selectedRelease?.downloadUrls.linux,
-          BridgePlatform.macOs => selectedRelease?.downloadUrls.macos,
-        }
+      ? _platformDownloadUrl(selectedRelease)
       : schemeRelease?.downloadUrl;
+
+  String? _platformDownloadUrl(PlatformReleaseDto? release) =>
+      switch (info.platform) {
+        BridgePlatform.android => release?.downloadUrls.android,
+        BridgePlatform.ios => release?.downloadUrls.ios,
+        BridgePlatform.windows => release?.downloadUrls.windows,
+        BridgePlatform.linux => release?.downloadUrls.linux,
+        BridgePlatform.macOs => release?.downloadUrls.macos,
+      };
 
   void _changed() {
     if (!_disposed) notifyListeners();
@@ -550,6 +695,7 @@ class AppController extends ChangeNotifier {
         unawaited(refreshLogs());
       }
     }
+    if (page == AppPage.scheme) unawaited(refreshSchemeUpdates());
     _changed();
   }
 
@@ -656,6 +802,7 @@ class AppController extends ChangeNotifier {
     addon = null;
     await Future.wait([
       read(_readLocal),
+      read(_readInstalledPackages),
       read(() async {
         try {
           wanxiang = await core.wanxiangStatus();
@@ -725,6 +872,7 @@ class AppController extends ChangeNotifier {
       _startupStarted = true;
       unawaited(_loadAccount());
       unawaited(_checkAppUpdate());
+      unawaited(refreshSchemeUpdates());
       unawaited(refreshRelease());
     }
     return result;
@@ -767,6 +915,60 @@ class AppController extends ChangeNotifier {
     _changed();
   }
 
+  Future<void> _readInstalledPackages() async {
+    final request = _schemeUpdatesRequest;
+    final packages = await core.listInstalledPackages();
+    if (_disposed || request != _schemeUpdatesRequest) return;
+    installedPackages = packages;
+    schemeUpdates = [
+      for (final update in schemeUpdates)
+        if (packages.any(
+          (package) =>
+              package.schemeKey == update.schemeKey &&
+              (package.version ?? '') == update.installedVersion,
+        ))
+          update,
+    ];
+  }
+
+  Future<bool> refreshSchemeUpdates() async {
+    if (_disposed || schemeUpdatesLoading) return false;
+    final request = ++_schemeUpdatesRequest;
+    schemeUpdatesLoading = true;
+    _changed();
+    try {
+      await _readInstalledPackages();
+      final dismissed = await core.getDismissedSchemeUpdates();
+      final updates = await core.checkSchemeUpdates();
+      if (_disposed || request != _schemeUpdatesRequest) return false;
+      dismissedSchemeUpdates = dismissed;
+      schemeUpdates = updates;
+      return true;
+    } catch (_) {
+      // Update checks are optional and must not interrupt local package actions.
+      return false;
+    } finally {
+      if (request == _schemeUpdatesRequest) {
+        schemeUpdatesLoading = false;
+        _changed();
+      }
+    }
+  }
+
+  void _invalidateSchemeUpdates() {
+    _schemeUpdatesRequest++;
+    schemeUpdatesLoading = false;
+  }
+
+  Future<bool> dismissSchemeUpdate(SchemeUpdateDto update) => run(() async {
+    await core.dismissSchemeUpdate(
+      schemeKey: update.schemeKey,
+      version: update.latestVersion,
+    );
+    _invalidateSchemeUpdates();
+    dismissedSchemeUpdates[update.schemeKey] = update.latestVersion;
+  });
+
   void onResume() {
     if (busy) {
       _refreshWhenIdle = true;
@@ -786,7 +988,9 @@ class AppController extends ChangeNotifier {
 
   void selectScheme(String value) {
     final known =
-        schemes.containsKey(value) || xmjdVariantSchemes.containsKey(value);
+        schemes.containsKey(value) ||
+        xmjdVariantSchemes.containsKey(value) ||
+        installedPackageFor(value) != null;
     if (busy || !known) return;
     _manuallySelectedScheme = true;
     if (value == scheme) return;
@@ -795,6 +999,7 @@ class AppController extends ChangeNotifier {
     latestRelease = null;
     error = null;
     _changed();
+    unawaited(_persistSchemeSettings());
     unawaited(refreshRelease());
   }
 
@@ -804,6 +1009,7 @@ class AppController extends ChangeNotifier {
     }
     source = value;
     _changed();
+    unawaited(_persistSchemeSettings());
   }
 
   Future<bool> refreshRelease() async {
@@ -814,6 +1020,11 @@ class AppController extends ChangeNotifier {
     releaseError = null;
     latestRelease = null;
     schemeRelease = null;
+    if (isLocalScheme(selected)) {
+      releaseLoading = false;
+      _changed();
+      return true;
+    }
     _changed();
     try {
       if (selected == 'keytao') {
@@ -887,57 +1098,290 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> installAndDeploy() async {
-    if (!await install()) return false;
-    // Deploying clears the verification list, so keep failures on screen.
-    if (verification.any((entry) => !entry.ok)) return false;
-    return deploy();
+    if (!canInstall) return false;
+    final result = await run(() async {
+      await _install();
+      // Deploying clears the verification list, so keep failures on screen.
+      if (verification.every((entry) => entry.ok)) await _deploy();
+    });
+    return result && verification.every((entry) => entry.ok);
   }
 
   Future<bool> install() {
     if (!canInstall) return Future.value(false);
+    return run(_install);
+  }
+
+  Future<void> _install() async {
+    _invalidateSchemeUpdates();
     final url = downloadUrl!;
     final installing = scheme;
     final installingVersion = releaseVersion;
-    return run(() async {
-      _startOperation(OperationKind.install, AppStrings.installing);
-      installError = null;
-      deploySteps.clear();
-      try {
-        if (isAndroid) await _requireStorage(redirect: true);
-        final InstallResultDto result;
-        if (isAndroid) {
-          final zipPath = await core.prepareAndroidInstall(url: url);
-          try {
-            final extracted = await android.smartExtractZipToPrivate(zipPath);
-            result = await core.finishAndroidInstall(
-              resultJson: jsonEncode(extracted),
-            );
-          } finally {
-            await core.removeDownloadedArchive(path: zipPath);
-          }
-        } else {
-          result = await core.installSchemeFromUrl(url: url);
+    _startOperation(OperationKind.install, AppStrings.installing);
+    installError = null;
+    deploySteps.clear();
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final InstallResultDto result;
+      if (isAndroid) {
+        final zipPath = await core.prepareAndroidInstall(url: url);
+        try {
+          final extracted = await android.smartExtractZipToPrivate(zipPath);
+          result = await core.finishAndroidInstall(
+            resultJson: jsonEncode(extracted),
+            schemeKey: installing,
+            version: installingVersion,
+          );
+        } finally {
+          await core.removeDownloadedArchive(path: zipPath);
         }
-        _recordInstallResult(result);
-        verification = result.verify;
-        await core.recordInstalledScheme(
-          scheme: installing,
+      } else {
+        result = await core.installSchemeFromUrl(
+          url: url,
+          schemeKey: installing,
           version: installingVersion,
         );
-        await _readLocal();
-        progress = AppStrings.installDone;
-      } catch (failure) {
-        final message = errorText(failure);
-        if (message == AppStrings.downloadCancelled) {
-          progress = message;
-        } else {
-          progress = AppStrings.installFailed;
-          installError = message;
-          addOperationLogs(['[ERROR] $installError']);
+      }
+      _recordInstallResult(result);
+      verification = result.verify;
+      await core.recordInstalledScheme(
+        scheme: installing,
+        version: installingVersion,
+      );
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      await _readLocal();
+      await _readUserWordsReport(installing);
+      scheduleSchemeProfileSync(packageKey: installing);
+      progress = AppStrings.installDone;
+      final broken = [
+        for (final line in result.logs.expand((log) => log.split('\n')))
+          if (line.startsWith('[BROKEN] ')) line.substring('[BROKEN] '.length),
+      ];
+      if (broken.isNotEmpty) installError = broken.join('\n');
+    } catch (failure) {
+      final message = errorText(failure);
+      if (message == AppStrings.downloadCancelled) {
+        progress = message;
+      } else {
+        progress = AppStrings.installFailed;
+        installError = message;
+        addOperationLogs(['[ERROR] $installError']);
+      }
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  }
+
+  Future<bool> installSchemePackage(String key) => _installSchemePackage(
+    key,
+    latest: installedPackageFor(key)?.active == true,
+  );
+
+  Future<bool> _installSchemePackage(String key, {required bool latest}) {
+    if (!schemeAssets.containsKey(key)) return Future.value(false);
+    return run(() async {
+      packageError = null;
+      _manuallySelectedScheme = true;
+      scheme = key;
+      if (!await refreshRelease()) {
+        throw StateError(releaseError ?? AppStrings.installFailed);
+      }
+      if (latest && key == 'keytao') {
+        final version = _normalizedVersion(latestRelease!.version);
+        final matching = sourceVersions.entries.where(
+          (entry) =>
+              _normalizedVersion(entry.value) == version &&
+              _platformDownloadUrl(
+                    entry.key == 'github'
+                        ? latestRelease!.github
+                        : latestRelease!.gitee,
+                  )?.isNotEmpty ==
+                  true,
+        );
+        if (matching.isEmpty) throw StateError(AppStrings.installFailed);
+        if (!matching.any((entry) => entry.key == source)) {
+          source = matching.first.key;
         }
+      }
+      if (downloadUrl?.isNotEmpty != true) {
+        throw StateError(AppStrings.installFailed);
+      }
+      await _install();
+      if (verification.every((entry) => entry.ok)) await _deploy();
+    }).then((result) => result && verification.every((entry) => entry.ok));
+  }
+
+  Future<bool> updateSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null) return Future.value(false);
+    return package.active
+        ? _installSchemePackage(key, latest: true)
+        : downloadSchemePackage(key);
+  }
+
+  Future<bool> downloadSchemePackage(String key) => run(() async {
+    packageError = null;
+    _invalidateSchemeUpdates();
+    _startOperation(OperationKind.install, AppStrings.installing);
+    try {
+      await core.downloadSchemePackage(schemeKey: key, source: source);
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      await _readUserWordsReport(key);
+      scheduleSchemeProfileSync(packageKey: key);
+      progress = AppStrings.installDone;
+    } catch (failure) {
+      final message = errorText(failure);
+      if (message == AppStrings.downloadCancelled) {
+        progress = message;
+      } else {
+        packageError = message;
+        progress = AppStrings.installFailed;
+      }
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<bool> importLocalScheme({String? schemeKey}) async {
+    final wasActive = installedPackageFor(schemeKey ?? '')?.active == true;
+    String? importedKey;
+    final result = await run(() async {
+      packageError = null;
+      String? temporaryDirectory;
+      try {
+        final String directoryPath;
+        final String displayName;
+        if (isMobile) {
+          final selected = await MethodChannel(
+            isAndroid ? 'keytao/android' : 'keytao/ios',
+          ).invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
+          if (selected == null) return;
+          temporaryDirectory =
+              selected['temporaryDirectory'] as String? ??
+              selected['path'] as String;
+          directoryPath = selected['path'] as String;
+          displayName = selected['name'] as String;
+        } else {
+          final selected = await getDirectoryPath();
+          if (selected == null) return;
+          directoryPath = selected;
+          final segments = selected
+              .split(RegExp(r'[/\\]'))
+              .where((segment) => segment.isNotEmpty);
+          displayName = segments.isEmpty ? 'local-scheme' : segments.last;
+        }
+        final key = await core.importLocalScheme(
+          directoryPath: directoryPath,
+          displayName: displayName,
+          schemeKey: schemeKey,
+        );
+        importedKey = key;
+        _pendingCloudPackageUploads.remove(key);
+        _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+        await _readLocal();
+        _manuallySelectedScheme = true;
+        scheme = key;
+        await refreshRelease();
+        await _persistSchemeSettings(schedule: false);
+        if (wasActive) {
+          await _activateSchemePackage(key);
+        } else {
+          scheduleSchemeProfileSync();
+        }
+      } catch (failure) {
+        packageError = errorText(failure);
         rethrow;
       } finally {
-        operation = null;
+        if (temporaryDirectory != null) {
+          try {
+            await Directory(temporaryDirectory).delete(recursive: true);
+          } on FileSystemException catch (failure) {
+            addOperationLogs(['[WARN] ${errorText(failure)}']);
+          }
+        }
+      }
+    });
+    return result &&
+        importedKey != null &&
+        (!wasActive || verification.every((entry) => entry.ok));
+  }
+
+  Future<bool> activateSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null || package.active || !package.hasPackageZip) {
+      return Future.value(false);
+    }
+    return run(() => _activateSchemePackage(key))
+        .then((result) => result && verification.every((entry) => entry.ok));
+  }
+
+  Future<void> _activateSchemePackage(String key) async {
+    packageError = null;
+    _invalidateSchemeUpdates();
+    _startOperation(OperationKind.install, AppStrings.installing);
+    try {
+      if (isAndroid) await _requireStorage(redirect: true);
+      final result = await core.activateScheme(
+        schemeKey: key,
+        androidExtract: (archive) async {
+          try {
+            return jsonEncode(await android.smartExtractZipToPrivate(archive));
+          } catch (failure) {
+            return jsonEncode({'error': errorText(failure)});
+          }
+        },
+      );
+      _recordInstallResult(result);
+      verification = result.verify;
+      _manuallySelectedScheme = true;
+      scheme = key;
+      latestRelease = null;
+      schemeRelease = null;
+      _invalidateSchemeUpdates();
+      await _readInstalledPackages();
+      scheduleSchemeProfileSync();
+      await _readLocal();
+      await _readUserWordsReport(key);
+      await refreshRelease();
+    } catch (failure) {
+      packageError = errorText(failure);
+      rethrow;
+    } finally {
+      operation = null;
+    }
+    if (verification.every((entry) => entry.ok)) await _deploy();
+  }
+
+  Future<bool> removeSchemePackage(String key) {
+    final package = installedPackageFor(key);
+    if (package == null || package.active) return Future.value(false);
+    return run(() async {
+      packageError = null;
+      _invalidateSchemeUpdates();
+      try {
+        await core.removeSchemePackage(schemeKey: key);
+        _invalidateSchemeUpdates();
+        await _readInstalledPackages();
+        if (package.source == 'local' && scheme == key) {
+          _manuallySelectedScheme = true;
+          scheme =
+              installedPackages
+                  .where((package) => package.active)
+                  .firstOrNull
+                  ?.schemeKey ??
+              'keytao';
+          await refreshRelease();
+          await _persistSchemeSettings(schedule: false);
+        }
+        scheduleSchemeProfileSync();
+      } catch (failure) {
+        packageError = errorText(failure);
+        rethrow;
       }
     });
   }
@@ -951,7 +1395,11 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  Future<bool> deploy({int? imeActionId}) => run(() async {
+  Future<bool> deploy({int? imeActionId}) =>
+      run(() => _deploy(imeActionId: imeActionId));
+
+  Future<void> _deploy({int? imeActionId}) async {
+    _pendingCloudPackageUploads.remove(activeSchemeKey);
     _startOperation(OperationKind.deploy, AppStrings.deployingLibrime);
     deploySteps.clear();
     try {
@@ -966,10 +1414,12 @@ class AppController extends ChangeNotifier {
       final String message;
       if (isAndroid) {
         await _requireStorage();
+        await core.recordAndroidDeploy(success: false);
         final result = await android.deployImeData();
         if (result['deployed'] != true) {
           throw StateError(AppStrings.deployIncomplete);
         }
+        await core.recordAndroidDeploy(success: true);
         message = result['message'] as String? ?? AppStrings.deployDone;
       } else {
         final result = imeActionId == null
@@ -983,8 +1433,13 @@ class AppController extends ChangeNotifier {
         throw StateError(AppStrings.deployCheckFailed);
       }
       _deployStep(message, DeployStepState.ok);
+      userWordsPendingDeploy.removeWhere(userWordsAffectActiveScheme);
       addOperationLogs(['[DEPLOY] $message']);
       progress = message;
+      scheduleSchemeProfileSync(
+        packageKey: activeSchemeKey,
+        afterSuccessfulDeploy: true,
+      );
     } catch (failure) {
       progress = AppStrings.deployFailed;
       _deployStep(errorText(failure), DeployStepState.failed);
@@ -993,21 +1448,52 @@ class AppController extends ChangeNotifier {
     } finally {
       operation = null;
     }
-  });
+  }
 
   String? get accountName =>
       accountUser?.nickname ?? accountUser?.name ?? accountUser?.email;
 
+  void _setAccountUser(AccountUserDto? value) {
+    final previous = accountUser?.id;
+    accountUser = value;
+    if (previous == value?.id) return;
+    _schemeSyncDebounce?.cancel();
+    _readySchemeSyncAccount = null;
+    _checkingSchemeSyncAccount = null;
+    _checkedSchemeSyncAccounts.clear();
+    pendingCloudProfile = null;
+    pendingCloudActiveScheme = null;
+    cloudPackages = [];
+    if (previous != null) {
+      _pendingCloudPackageUploads.clear();
+      _schemeProfileDirty = false;
+    }
+  }
+
   Future<void> _loadAccount() async {
+    await loadSchemeSyncState();
     try {
-      accountUser = await core.accountSession();
+      _setAccountUser(await core.accountSession());
       _changed();
-      // Rust clears the session only when the server rejects the token.
       await core.accountRefresh();
-      accountUser = await core.accountSession();
-      _changed();
     } catch (failure) {
       debugPrint('Account refresh failed: ${errorText(failure)}');
+    } finally {
+      await reloadAccountSession();
+    }
+  }
+
+  Future<void> reloadAccountSession({bool checkSchemeProfile = true}) async {
+    try {
+      _setAccountUser(await core.accountSession());
+      if (_pendingDictionarySyncAccountId != accountUser?.id) {
+        pendingDictionarySync = null;
+        _pendingDictionarySyncAccountId = null;
+      }
+      _changed();
+      if (checkSchemeProfile) await checkCloudProfileAfterLogin();
+    } catch (failure) {
+      debugPrint('Account session failed: ${errorText(failure)}');
     }
   }
 
@@ -1018,7 +1504,11 @@ class AppController extends ChangeNotifier {
     accountMessage = null;
     _changed();
     try {
-      accountUser = await core.accountLogin(name: name, password: password);
+      _setAccountUser(await core.accountLogin(name: name, password: password));
+      pendingDictionarySync = null;
+      _pendingDictionarySyncAccountId = null;
+      await loadSchemeSyncState();
+      await checkCloudProfileAfterLogin();
       return true;
     } catch (failure) {
       accountError = errorText(failure);
@@ -1030,36 +1520,553 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    _dictionarySyncDebounce?.cancel();
+    _schemeSyncDebounce?.cancel();
     accountError = null;
     accountMessage = null;
     try {
       await core.accountLogout();
-      accountUser = null;
+      _setAccountUser(null);
+      pendingDictionarySync = null;
+      _pendingDictionarySyncAccountId = null;
+      pendingCloudProfile = null;
+      pendingCloudActiveScheme = null;
+      _readySchemeSyncAccount = null;
+      cloudPackages = [];
     } catch (failure) {
       accountError = errorText(failure);
     }
     _changed();
   }
 
-  Future<void> syncUserDictionary() async {
-    if (busy || syncingDictionary) return;
-    // Block other install/deploy operations so the follow-up deploy runs.
+  void _readSchemeSyncState(String value) {
+    final state = jsonDecode(value) as Map<String, dynamic>;
+    followAccountSync = state['follow_account_sync'] == true;
+    syncedSchemes
+      ..clear()
+      ..addAll((state['synced_schemes'] as List? ?? []).cast<String>());
+    lastSchemeSyncAt = state['last_sync_at'] as String?;
+    _schemeSettings = Map<String, dynamic>.from(
+      state['settings'] as Map? ?? const {},
+    );
+    if (_schemeSettings['download_source'] case final String value) {
+      source = value;
+    }
+    if (_schemeSettings['selected_scheme'] case final String value) {
+      scheme = value;
+      _manuallySelectedScheme = true;
+    }
+  }
+
+  Map<String, dynamic> _schemeSettings = {};
+
+  Future<void> loadSchemeSyncState() async {
+    try {
+      _readSchemeSyncState(await core.getSchemeSyncState());
+      _changed();
+    } catch (failure) {
+      schemeSyncError = errorText(failure);
+      _changed();
+    }
+  }
+
+  Map<String, dynamic> _schemeSettingsSnapshot() {
+    final input = androidSettings;
+    final ui = uiSettings;
+    return {
+      ..._schemeSettings,
+      'download_source': source,
+      'selected_scheme': scheme,
+      if (input != null)
+        'android': {
+          'haptics_enabled': input.hapticsEnabled,
+          'haptic_intensity': input.hapticIntensity,
+          'enter_key_behavior': input.enterKeyBehavior,
+          'key_preview_enabled': input.keyPreviewEnabled,
+          'long_press_delay_ms': input.longPressDelayMs,
+          'keyboard_height_scale': input.keyboardHeightScale,
+          'delete_speed': input.deleteSpeed,
+          'english_mode': input.englishMode,
+          'backspace_gesture_mode': input.backspaceGestureMode,
+          'keyboard_height_dp': input.keyboardHeightDp,
+          'candidate_bar_height_dp': input.candidateBarHeightDp,
+          'swipe_threshold_dp': input.swipeThresholdDp,
+          'key_sound_enabled': input.keySoundEnabled,
+          'key_sound_volume': input.keySoundVolume,
+          'key_hint_visible': input.keyHintVisible,
+          'flick_keys_enabled': input.flickKeysEnabled,
+          'number_row_enabled': input.numberRowEnabled,
+          'candidate_font_scale': input.candidateFontScale,
+          'double_space_period_enabled': input.doubleSpacePeriodEnabled,
+          'floating_portrait_enabled': input.floatingPortraitEnabled,
+          'floating_portrait_scale': input.floatingPortraitScale,
+          'floating_landscape_enabled': input.floatingLandscapeEnabled,
+          'floating_landscape_scale': input.floatingLandscapeScale,
+        },
+      if (ui != null)
+        'ime_ui': {
+          'color_scheme': ui.colorScheme.name,
+          'orientation': ui.orientation.name,
+          'accent_color': ui.accentColor,
+          'font_size': ui.fontSize,
+          'embedded_composition': ui.embeddedComposition,
+        },
+      'desktop_english_mode': desktopEnglishMode.name,
+    };
+  }
+
+  Future<void> _persistSchemeSettings({bool schedule = true}) {
+    if (_applyingCloudProfile || _disposed) return Future.value();
+    final snapshot = _schemeSettingsSnapshot();
+    final write = (_schemeSettingsWrite ?? Future<void>.value()).then((
+      _,
+    ) async {
+      try {
+        _readSchemeSyncState(
+          await core.setSchemeSyncPreferences(
+            settingsJson: jsonEncode(snapshot),
+          ),
+        );
+        if (schedule) scheduleSchemeProfileSync();
+      } catch (failure) {
+        schemeSyncError = errorText(failure);
+      }
+      _changed();
+    });
+    _schemeSettingsWrite = write;
+    return write;
+  }
+
+  Future<bool> setFollowAccountSync(bool enabled) async {
+    final result = await _schemeCloudAction(() async {
+      _readSchemeSyncState(
+        await core.setSchemeSyncPreferences(followAccountSync: enabled),
+      );
+    });
+    if (!enabled) _schemeSyncDebounce?.cancel();
+    if (result && enabled) {
+      await checkCloudProfileAfterLogin();
+      scheduleSchemeProfileSync();
+    }
+    return result;
+  }
+
+  Future<bool> setSchemeAccountSync(String key, bool enabled) async {
+    final result = await _schemeCloudAction(() async {
+      _readSchemeSyncState(
+        await core.setSchemeSyncPreferences(schemeKey: key, sync_: enabled),
+      );
+    });
+    if (result) {
+      if (!enabled) _pendingCloudPackageUploads.remove(key);
+      scheduleSchemeProfileSync(packageKey: enabled ? key : null);
+    }
+    return result;
+  }
+
+  String _comparableProfile(Object? value) {
+    Object? sorted(Object? item) {
+      if (item is num) return item.toDouble();
+      if (item is Map) {
+        final keys = item.keys.cast<String>().toList()..sort();
+        return {for (final key in keys) key: sorted(item[key])};
+      }
+      if (item is List) {
+        final result = item.map(sorted).toList();
+        if (result.every(
+          (entry) => entry is Map && entry['scheme_key'] != null,
+        )) {
+          result.sort(
+            (a, b) => '${(a as Map)['scheme_key']}'.compareTo(
+              '${(b as Map)['scheme_key']}',
+            ),
+          );
+        }
+        return result;
+      }
+      return item;
+    }
+
+    return jsonEncode(sorted(value));
+  }
+
+  Future<void> checkCloudProfileAfterLogin() async {
+    final account = accountUser?.id;
+    if (_disposed ||
+        account == null ||
+        _checkedSchemeSyncAccounts.contains(account) ||
+        _checkingSchemeSyncAccount == account) {
+      return;
+    }
+    _checkingSchemeSyncAccount = account;
+    _schemeSyncDebounce?.cancel();
+    try {
+      final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
+      final profile = envelope['profile'];
+      await _persistSchemeSettings(schedule: false);
+      final local = jsonDecode(await core.exportSchemeProfile());
+      if (accountUser?.id != account || _disposed) return;
+      _readySchemeSyncAccount = account;
+      _checkedSchemeSyncAccounts.add(account);
+      if (envelope['updateAt'] case final String time) lastSchemeSyncAt = time;
+      if (profile is Map &&
+          _comparableProfile(profile) != _comparableProfile(local)) {
+        pendingCloudProfile = Map<String, dynamic>.from(profile);
+      }
+      schemeSyncError = null;
+      try {
+        final packages = (jsonDecode(await core.listCloudPackages()) as List)
+            .map((value) => Map<String, dynamic>.from(value as Map))
+            .toList();
+        if (accountUser?.id == account) cloudPackages = packages;
+      } catch (failure) {
+        if (accountUser?.id == account) schemeSyncError = errorText(failure);
+      }
+    } catch (failure) {
+      schemeSyncError = errorText(failure);
+    } finally {
+      if (_checkingSchemeSyncAccount == account) {
+        _checkingSchemeSyncAccount = null;
+      }
+      _changed();
+      if (pendingCloudProfile == null && _schemeProfileDirty) {
+        scheduleSchemeProfileSync();
+      }
+    }
+  }
+
+  void dismissCloudProfileOffer() {
+    pendingCloudProfile = null;
+    _changed();
+    if (_schemeProfileDirty) scheduleSchemeProfileSync();
+  }
+
+  void dismissCloudActiveScheme() {
+    pendingCloudActiveScheme = null;
+    _changed();
+  }
+
+  void scheduleSchemeProfileSync({
+    String? packageKey,
+    bool afterSuccessfulDeploy = false,
+  }) {
+    _schemeProfileDirty = true;
+    if (afterSuccessfulDeploy &&
+        packageKey != null &&
+        packageKey == activeSchemeKey &&
+        syncedSchemes.contains(packageKey)) {
+      _pendingCloudPackageUploads.add(packageKey);
+    }
+    _schemeSyncDebounce?.cancel();
+    if (_disposed ||
+        !followAccountSync ||
+        accountUser == null ||
+        _readySchemeSyncAccount != accountUser?.id ||
+        _checkingSchemeSyncAccount != null ||
+        pendingCloudProfile != null ||
+        _applyingCloudProfile) {
+      return;
+    }
+    _schemeSyncDebounce = Timer(const Duration(milliseconds: 800), () async {
+      if (busy || schemeSyncBusy) {
+        scheduleSchemeProfileSync();
+        return;
+      }
+      if (_disposed ||
+          !followAccountSync ||
+          accountUser == null ||
+          _readySchemeSyncAccount != accountUser?.id ||
+          _checkingSchemeSyncAccount != null ||
+          pendingCloudProfile != null) {
+        return;
+      }
+      await _schemeCloudAction(() async {
+        Object? packageFailure;
+        for (final key in _pendingCloudPackageUploads.toList()) {
+          if (!syncedSchemes.contains(key)) {
+            _pendingCloudPackageUploads.remove(key);
+            continue;
+          }
+          if (key != activeSchemeKey || local?.deployed != true) {
+            _pendingCloudPackageUploads.remove(key);
+            continue;
+          }
+          if (installedPackageFor(key)?.hasPackageZip != true) continue;
+          try {
+            await core.uploadCloudPackage(schemeKey: key);
+            _pendingCloudPackageUploads.remove(key);
+          } catch (failure) {
+            packageFailure ??= failure;
+          }
+        }
+        await _uploadSchemeProfile();
+        if (packageFailure != null) throw packageFailure;
+      });
+    });
+  }
+
+  Future<bool> _schemeCloudAction(Future<void> Function() action) async {
+    if (schemeSyncBusy) return false;
+    return run(() async {
+      schemeSyncBusy = true;
+      schemeSyncError = null;
+      try {
+        await action();
+      } catch (failure) {
+        schemeSyncError = errorText(failure);
+        await reloadAccountSession(checkSchemeProfile: false);
+        rethrow;
+      } finally {
+        schemeSyncBusy = false;
+      }
+    });
+  }
+
+  Future<void> _uploadSchemeProfile() async {
+    await _persistSchemeSettings(schedule: false);
+    final envelope = jsonDecode(await core.uploadSchemeProfile()) as Map;
+    lastSchemeSyncAt = envelope['updateAt'] as String?;
+    _schemeProfileDirty = false;
+  }
+
+  Future<bool> uploadSchemeProfile() =>
+      _schemeCloudAction(_uploadSchemeProfile);
+
+  Future<bool> fetchCloudProfile() => _schemeCloudAction(() async {
+    final envelope = jsonDecode(await core.fetchSchemeProfile()) as Map;
+    if (envelope['profile'] is! Map) throw StateError('云端暂无配置');
+    pendingCloudProfile = Map<String, dynamic>.from(envelope['profile'] as Map);
+    if (envelope['updateAt'] case final String time) lastSchemeSyncAt = time;
+  });
+
+  Future<void> _applyCloudSettings(Map<String, dynamic> settings) async {
+    if (settings['download_source'] case final String value) source = value;
+    if (settings['selected_scheme'] case final String value) {
+      scheme = value;
+      _manuallySelectedScheme = true;
+    }
+    if (isMobile && settings['android'] is Map) {
+      if (isAndroid) await _requireStorage();
+      final input = settings['android'] as Map;
+      final patch = <String, Object>{};
+      for (final key in androidDefaults.keys) {
+        final snakeKey = key.replaceAllMapped(
+          RegExp('[A-Z]'),
+          (match) => '_${match[0]!.toLowerCase()}',
+        );
+        if (input[snakeKey] case final Object value) patch[key] = value;
+      }
+      androidSettings = await core.setAndroidImeInputSettings(
+        settings: patchAndroidSettings(
+          await core.getAndroidImeInputSettings(),
+          patch,
+        ),
+      );
+    }
+    if (!isMobile && settings['ime_ui'] is Map) {
+      final ui = settings['ime_ui'] as Map;
+      final current = await core.getImeUiSettings();
+      uiSettings = await core.setImeUiSettings(
+        colorScheme: UiColorSchemeDto.values.firstWhere(
+          (value) => value.name == ui['color_scheme'],
+          orElse: () => current.colorScheme,
+        ),
+        orientation: PanelOrientationDto.values.firstWhere(
+          (value) => value.name == ui['orientation'],
+          orElse: () => current.orientation,
+        ),
+        accentColor: ui['accent_color'] as String? ?? current.accentColor,
+        fontSize: (ui['font_size'] as num?)?.toDouble() ?? current.fontSize,
+      );
+      if (ui['embedded_composition'] case final bool value) {
+        uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+      }
+    }
+    if (settings['desktop_english_mode'] case final String mode
+        when !isMobile) {
+      desktopEnglishMode = await core.setDesktopEnglishMode(
+        mode: EnglishModeDto.values.firstWhere(
+          (value) => value.name == mode,
+          orElse: () => desktopEnglishMode,
+        ),
+      );
+    }
+    _changed();
+  }
+
+  Future<bool> applyCloudProfile() {
+    final profile = pendingCloudProfile;
+    if (profile == null) return Future.value(false);
+    return _schemeCloudAction(() async {
+      _applyingCloudProfile = true;
+      _schemeSyncDebounce?.cancel();
+      try {
+        _schemeSettings = Map<String, dynamic>.from(
+          profile['settings'] as Map? ?? const {},
+        );
+        await _applyCloudSettings(_schemeSettings);
+        final result = jsonDecode(
+          await core.applySchemeProfile(profileJson: jsonEncode(profile)),
+        ) as Map;
+        _schemeSettings = Map<String, dynamic>.from(
+          result['settings'] as Map? ?? const {},
+        );
+        await _readInstalledPackages();
+        final active = result['active_scheme'] as String?;
+        pendingCloudActiveScheme = active != null && active != activeSchemeKey
+            ? active
+            : null;
+        pendingCloudProfile = null;
+        _pendingCloudPackageUploads.clear();
+        _schemeProfileDirty = false;
+      } finally {
+        _applyingCloudProfile = false;
+      }
+    });
+  }
+
+  Future<bool> refreshCloudPackages() => _schemeCloudAction(() async {
+    cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+        .map((value) => Map<String, dynamic>.from(value as Map))
+        .toList();
+  });
+
+  Future<Map<String, dynamic>?> previewCloudPackage(String key) async {
+    Map<String, dynamic>? preview;
+    await _schemeCloudAction(() async {
+      preview = Map<String, dynamic>.from(
+        jsonDecode(await core.previewCloudPackage(schemeKey: key)) as Map,
+      );
+    });
+    return preview;
+  }
+
+  Future<bool> uploadCloudPackage(String key, {String? expectedSha256}) =>
+      _schemeCloudAction(() async {
+        await core.uploadCloudPackage(
+          schemeKey: key,
+          expectedSha256: expectedSha256,
+        );
+        scheduleSchemeProfileSync();
+        cloudPackages = (jsonDecode(await core.listCloudPackages()) as List)
+            .map((value) => Map<String, dynamic>.from(value as Map))
+            .toList();
+      });
+
+  Future<bool> downloadCloudPackage(String id) => _schemeCloudAction(() async {
+    await core.downloadCloudPackage(id: id);
+    await _readInstalledPackages();
+    scheduleSchemeProfileSync();
+  });
+
+  Future<bool> deleteCloudPackage(String id) => _schemeCloudAction(() async {
+    await core.deleteCloudPackage(id: id);
+    cloudPackages.removeWhere((package) => package['id'] == id);
+    scheduleSchemeProfileSync();
+  });
+
+  void scheduleUserDictionarySync() {
+    _dictionarySyncDebounce?.cancel();
+    if (_disposed || accountUser == null || pendingDictionarySync != null) {
+      return;
+    }
+    _dictionarySyncDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (_disposed || accountUser == null || pendingDictionarySync != null) {
+        return;
+      }
+      if (busy || syncingDictionary) {
+        scheduleUserDictionarySync();
+      } else {
+        unawaited(syncUserDictionary(automatic: true));
+      }
+    });
+  }
+
+  void dismissDictionarySyncConfirmation() {
+    final pending = pendingDictionarySync;
+    final account = accountUser?.id;
+    if (pending != null &&
+        account != null &&
+        _pendingDictionarySyncAccountId == account) {
+      (_cancelledDictionarySyncDeletions[account] ??= {}).add(
+        _dictionarySyncDeletionKey(pending),
+      );
+    }
+    pendingDictionarySync = null;
+    _pendingDictionarySyncAccountId = null;
+    _changed();
+  }
+
+  String _dictionarySyncDeletionKey(UserDictionarySyncDto sync) => jsonEncode([
+    for (final entries in [sync.localDeletions, sync.serverDeletions])
+      (entries
+          .map((entry) => jsonEncode([entry.word, entry.code]))
+          .toSet()
+          .toList()
+        ..sort()),
+  ]);
+
+  Future<bool> syncUserDictionary({
+    UserDictionarySyncDto? confirmedDeletions,
+    bool automatic = false,
+  }) async {
+    if (busy || syncingDictionary || accountUser == null) return false;
+    final pending = pendingDictionarySync;
+    if (confirmedDeletions != null &&
+        (pending == null ||
+            !identical(confirmedDeletions, pending) ||
+            !pending.pending ||
+            (pending.localDeletions.isEmpty &&
+                pending.serverDeletions.isEmpty) ||
+            _pendingDictionarySyncAccountId != accountUser?.id)) {
+      return false;
+    }
+    final account = accountUser?.id;
+    _dictionarySyncDebounce?.cancel();
     busy = true;
     syncingDictionary = true;
     accountError = null;
     accountMessage = null;
     _changed();
     try {
-      accountMessage = (await core.accountSyncUserDictionary()).message;
+      final result = await core.accountSyncUserDictionary(
+        confirmedDeletions: confirmedDeletions == null
+            ? null
+            : UserDictionaryDeletionConfirmationDto(
+                localDeletions: List.of(confirmedDeletions.localDeletions),
+                serverDeletions: List.of(confirmedDeletions.serverDeletions),
+              ),
+      );
+      accountMessage = result.message;
+      pendingDictionarySync =
+          result.pending &&
+              accountUser?.id == account &&
+              !(automatic &&
+                  (_cancelledDictionarySyncDeletions[account]?.contains(
+                        _dictionarySyncDeletionKey(result),
+                      ) ??
+                      false))
+          ? result
+          : null;
+      _pendingDictionarySyncAccountId = pendingDictionarySync != null
+          ? account
+          : null;
+      if (!result.pending) {
+        userWordsRevision++;
+        if (isKeytaoScheme(activeSchemeKey)) {
+          userWordsPendingDeploy.add(activeSchemeKey);
+        }
+      }
+      return true;
     } catch (failure) {
       accountError = errorText(failure);
+      return false;
     } finally {
+      await reloadAccountSession();
       syncingDictionary = false;
       busy = false;
       _changed();
     }
-    // deploy() re-reads the local schema state after deploying.
-    if (accountError == null) await deploy();
   }
 
   // The bridge holds its install lock while invoking this callback. Never
@@ -1272,6 +2279,8 @@ class AppController extends ChangeNotifier {
   Future<bool> installCustomDirectory() {
     if (!canInstallCustom) return Future.value(false);
     final url = downloadUrl!;
+    final installing = scheme;
+    final installingVersion = releaseVersion;
     return run(() async {
       _startOperation(OperationKind.customDirectory, AppStrings.installing);
       customResult = null;
@@ -1295,6 +2304,8 @@ class AppController extends ChangeNotifier {
             );
             customResult = await core.finishAndroidInstall(
               resultJson: jsonEncode(result),
+              schemeKey: installing,
+              version: installingVersion,
             );
           } finally {
             await core.removeDownloadedArchive(path: archive);
@@ -1303,6 +2314,8 @@ class AppController extends ChangeNotifier {
           customResult = await core.installSchemeToDir(
             url: url,
             dir: selectedDirectory!,
+            schemeKey: installing,
+            version: installingVersion,
           );
         }
         addOperationLogs(customResult!.logs);
@@ -1334,6 +2347,7 @@ class AppController extends ChangeNotifier {
     androidSettings = await core.setAndroidImeInputSettings(
       settings: patchAndroidSettings(current, patch),
     );
+    await _persistSchemeSettings();
   });
 
   Future<bool> saveUi({
@@ -1355,11 +2369,13 @@ class AppController extends ChangeNotifier {
         accentColor: normalizedAccent ?? current.accentColor,
         fontSize: (fontSize ?? current.fontSize).clamp(10, 36),
       );
+      await _persistSchemeSettings();
     });
   }
 
   Future<bool> saveEmbedded(bool value) => run(() async {
     uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+    await _persistSchemeSettings();
   });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {
     await _readLocal();
@@ -1367,6 +2383,7 @@ class AppController extends ChangeNotifier {
       throw StateError(AppStrings.englishNotReady);
     }
     desktopEnglishMode = await core.setDesktopEnglishMode(mode: value);
+    await _persistSchemeSettings();
   });
 
   Future<bool> open(String value) => run(() => _open(value));
@@ -1552,6 +2569,8 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _dictionarySyncDebounce?.cancel();
+    _schemeSyncDebounce?.cancel();
     if (isWindows && _events != null) {
       _windowsChannel.setMethodCallHandler(null);
     }

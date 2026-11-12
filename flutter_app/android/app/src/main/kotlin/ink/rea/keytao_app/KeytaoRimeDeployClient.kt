@@ -79,6 +79,12 @@ object KeytaoRimeDeployClient {
 
         fun start() {
             startedNs = System.nanoTime()
+            try {
+                KeytaoAndroidPaths.beginDeployment(userRoot)
+            } catch (error: Throwable) {
+                finish(Result(success = false, error = error.message ?: "Android RIME 部署失败"))
+                return
+            }
             KeytaoRuntimeLog.event("rime", "deploy_start")
             handler.postDelayed(timeout, timeoutMs)
             startStep(null)
@@ -173,28 +179,23 @@ object KeytaoRimeDeployClient {
                 startStep(schema)
                 return
             }
-            if (!KeytaoAndroidPaths.hasDeployedSchema(userRoot)) {
-                finish(Result(success = false, error = "Android RIME 部署未生成方案产物"))
-                return
-            }
             startStep(null, renderLogos = true)
         }
 
         private fun completeDeployment() {
-            if (!KeytaoAndroidPaths.hasDeployedSchema(userRoot)) {
-                finish(Result(success = false, error = "Android RIME 部署未生成方案产物"))
-                return
-            }
             try {
                 val stamp = KeytaoAndroidPaths.reloadStampFile(context)
-                stamp.parentFile?.mkdirs()
-                stamp.writeText(System.nanoTime().toString())
                 val schemaId = initialSchemas.first()
                 val schemaName = RimeSchemaNameResolver.resolveDisplayName(
                     userRoot,
                     KeytaoAndroidPaths.rimeDataDir(context),
                     schemaId,
                 )
+                check(KeytaoNativeBridge.completeDeployment(userRoot.absolutePath)) {
+                    "Android RIME 部署未生成方案产物"
+                }
+                stamp.parentFile?.mkdirs()
+                stamp.writeText(System.nanoTime().toString())
                 finish(
                     Result(
                         success = true,
@@ -204,6 +205,7 @@ object KeytaoRimeDeployClient {
                     )
                 )
             } catch (error: Throwable) {
+                runCatching { KeytaoAndroidPaths.beginDeployment(userRoot) }
                 finish(Result(success = false, error = error.message ?: "Android RIME 部署失败"))
             }
         }

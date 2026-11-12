@@ -2,12 +2,137 @@ use crate::{
     Core, CoreError, CoreEvent, events::InstallProgress, scheme_files::parse_schema_list,
     scheme_types::*,
 };
+use serde::Deserialize;
 #[cfg(any(target_os = "windows", target_os = "android"))]
 use std::path::Path;
 use std::{collections::HashSet, path::PathBuf};
 
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
+}
+
+pub fn is_protected_user_file(relative: &str) -> bool {
+    !relative.contains('/')
+        && !is_default_custom(relative)
+        && (relative.ends_with(".user.dict.yaml")
+            || relative.ends_with(".user.yaml")
+            || relative == "user.yaml"
+            || relative.ends_with(".custom.yaml")
+            || relative == "user_dict.txt"
+            || relative == keytao_core::ACTIVE_SCHEME_MANIFEST
+            || relative.ends_with("_user.txt")
+            || (relative.starts_with(".keytao-sync-base-") && relative.ends_with(".json")))
+}
+
+#[derive(serde::Serialize)]
+pub struct ProtectedFileInstall {
+    pub protected: bool,
+    pub write: bool,
+    pub backup_name: Option<String>,
+    pub log: Option<String>,
+}
+
+pub fn prepare_protected_file_install(
+    relative: &str,
+    existing: Option<&[u8]>,
+) -> ProtectedFileInstall {
+    let mut decision = ProtectedFileInstall {
+        protected: is_protected_user_file(relative),
+        write: true,
+        backup_name: None,
+        log: None,
+    };
+    if !decision.protected {
+        return decision;
+    }
+    if relative.starts_with(".keytao-sync-base-") {
+        decision.write = false;
+        decision.log = Some(format!("[KEPT] {relative}"));
+        return decision;
+    }
+    let Some(existing) = existing else {
+        return decision;
+    };
+    let validity = std::str::from_utf8(existing)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            if relative.ends_with(".yaml") {
+                let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+                // Match Rime: only the first document counts (dictionary entries follow
+                // the header's document end) and duplicate keys are not errors.
+                serde_yaml::Deserializer::from_str(text)
+                    .next()
+                    .map(serde::de::IgnoredAny::deserialize)
+                    .transpose()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            }
+        });
+    match validity {
+        Ok(()) => {
+            decision.write = false;
+            decision.log = Some(format!("[KEPT] {relative}"));
+        }
+        Err(error) => {
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let backup_name = format!("{relative}.broken-{seconds}");
+            decision.log = Some(format!(
+                "[BROKEN] {relative}: {error} (backup: {backup_name})"
+            ));
+            decision.backup_name = Some(backup_name);
+        }
+    }
+    decision
+}
+
+pub(crate) fn write_package_file(
+    root: &std::path::Path,
+    relative: &str,
+    content: &[u8],
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    let out = crate::packages::safe_path(root, relative)?;
+    let existing = if is_protected_user_file(relative) {
+        match std::fs::read(&out) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Cannot read {relative}; left untouched: {error}")),
+        }
+    } else {
+        None
+    };
+    let decision = prepare_protected_file_install(relative, existing.as_deref());
+    if let Some(backup_name) = &decision.backup_name {
+        let backup = root.join(backup_name);
+        let renamed = match std::fs::symlink_metadata(&backup) {
+            Ok(_) => Err(format!("backup already exists: {backup_name}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(&out, backup).map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = renamed {
+            logs.push(format!(
+                "{}; backup rename failed: {error}; left untouched",
+                decision.log.as_deref().unwrap_or_default()
+            ));
+            return Ok(());
+        }
+    }
+    if let Some(log) = decision.log {
+        logs.push(log);
+    }
+    if !decision.write {
+        return Ok(());
+    }
+    let tag = write_file_force(&out, content)?;
+    logs.push(format!("[OK]{tag} {relative}"));
+    Ok(())
 }
 
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
@@ -58,6 +183,33 @@ pub fn merge_default_custom(
             .unwrap_or_default();
         (zip_content.to_string(), user)
     })
+}
+
+pub(crate) fn merge_local_default_custom(
+    existing: Option<&str>,
+    package: &str,
+) -> Result<(String, Vec<String>), String> {
+    let Some(existing) = existing else {
+        return Ok(merge_default_custom(None, package));
+    };
+    let mut incoming: serde_yaml::Value =
+        serde_yaml::from_str(package).map_err(|error| format!("方案配置无效：{error}"))?;
+    let current: serde_yaml::Value = serde_yaml::from_str(existing)
+        .map_err(|error| format!("default.custom.yaml 无效：{error}"))?;
+    let patch = incoming
+        .get_mut("patch")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or("方案配置缺少 patch")?;
+    // A local package chooses schemas without resetting the user's other settings.
+    if let Some(current_patch) = current.get("patch").and_then(serde_yaml::Value::as_mapping) {
+        for (key, value) in current_patch {
+            if key.as_str() != Some("schema_list") {
+                patch.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let incoming = serde_yaml::to_string(&incoming).map_err(|error| error.to_string())?;
+    Ok(merge_default_custom(Some(existing), &incoming))
 }
 
 /// After extraction, verify key files were written correctly.
@@ -130,6 +282,7 @@ fn verify_install(
                 // Only spot-check key file types (schemas, dicts, lua, opencc)
                 let is_key = filename.ends_with(".schema.yaml")
                     || filename.ends_with(".dict.yaml")
+                    || is_protected_user_file(&relative)
                     || (filename.ends_with(".lua") && !relative.contains('/'))
                     || relative.starts_with("lua/")
                     || relative.starts_with("opencc/");
@@ -315,6 +468,24 @@ pub async fn smart_install(
     dest_path: String,
     #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
 ) -> Result<InstallResult, CoreError> {
+    smart_install_preserving_settings(
+        core,
+        zip_path,
+        dest_path,
+        false,
+        #[cfg(target_os = "windows")]
+        finish_windows,
+    )
+    .await
+}
+
+pub(crate) async fn smart_install_preserving_settings(
+    core: &Core,
+    zip_path: String,
+    dest_path: String,
+    preserve_default_settings: bool,
+    #[cfg(target_os = "windows")] finish_windows: WindowsInstallFinish,
+) -> Result<InstallResult, CoreError> {
     let result: Result<_, String> = async {
         let emit = |stage: &str, percent: u32, message: &str| {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
@@ -328,6 +499,14 @@ pub async fn smart_install(
 
         let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         let dest = PathBuf::from(&dest_path);
+        let replacing_root = dest.canonicalize().ok();
+        core.update_state(|state| {
+            if state.last_deploy.as_ref().is_some_and(|last| Some(&last.root) == replacing_root.as_ref()) {
+                state.last_deploy = None;
+            }
+        }).map_err(|e| e.to_string())?;
+        // Validate the entire archive and manifest before deleting or writing files.
+        let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
 
         // First pass: collect zip metadata and merge candidates
@@ -384,7 +563,11 @@ pub async fn smart_install(
                     let existing = std::fs::read_to_string(dest.join("default.custom.yaml"))
                         .ok()
                         .or_else(|| std::fs::read_to_string(dest.join("default-custom.yaml")).ok());
-                    let (merged, user) = merge_default_custom(existing.as_deref(), &content);
+                    let (merged, user) = if preserve_default_settings {
+                        merge_local_default_custom(existing.as_deref(), &content)?
+                    } else {
+                        merge_default_custom(existing.as_deref(), &content)
+                    };
                     (Some(path), Some(merged), user)
                 } else {
                     (None, None, Vec::new())
@@ -414,7 +597,8 @@ pub async fn smart_install(
         let cursor = std::io::Cursor::new(&zip_bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("解压失败: {e}"))?;
         let total = archive.len();
-        let mut logs: Vec<String> = Vec::new();
+        let mut logs = std::mem::take(&mut cleanup_logs);
+        let mut manifest = std::collections::BTreeMap::new();
 
         for i in 0..total {
             let (relative, is_dir, content) = {
@@ -460,9 +644,16 @@ pub async fn smart_install(
                     }
                 }
             } else {
-                let out = dest.join(&relative);
-                match write_file_force(&out, &content) {
-                    Ok(tag) => logs.push(format!("[OK]{tag} {relative}")),
+                match write_package_file(&dest, &relative, &content, &mut logs) {
+                    Ok(()) => {
+                        if !crate::packages::excluded_from_manifest(&relative) {
+                            use sha2::{Digest, Sha256};
+                            manifest.insert(
+                                relative.clone(),
+                                format!("{:x}", Sha256::digest(&content)),
+                            );
+                        }
+                    }
                     Err(e) => {
                         logs.push(format!("[ERROR] {relative}: {e}"));
                         return Err(e);
@@ -488,9 +679,13 @@ pub async fn smart_install(
 
         // Write renamed user lua files (saved before zip overwrote them)
         for (new_module, bytes) in &renamed_lua_files {
-            let out = dest.join("lua").join(format!("{}.lua", new_module));
+            let relative = format!("lua/{new_module}.lua");
+            let out = crate::packages::safe_path(&dest, &relative)?;
             match write_file_force(&out, bytes) {
-                Ok(tag) => logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua")),
+                Ok(tag) => {
+                    manifest.remove(&relative);
+                    logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua"));
+                }
                 Err(e) => {
                     logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
                     return Err(e);
@@ -515,7 +710,21 @@ pub async fn smart_install(
             &package_dictionary_ids,
             &zip_bytes,
         )?);
-        std::fs::remove_file(&zip_path).ok();
+        crate::packages::stage_install(
+            core,
+            &zip_bytes,
+            manifest,
+            dest.canonicalize()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .map_err(|e| e.to_string())?;
+        // Activation reads the permanent archive through this same pipeline.
+        if !std::path::Path::new(&zip_path).starts_with(core.env().data_dir.join("scheme-packages"))
+        {
+            std::fs::remove_file(&zip_path).ok();
+        }
         emit("done", 100, "安装完成！");
 
         let verify = verify_install(
@@ -551,6 +760,25 @@ pub fn finish_android_install(
     core: &Core,
     result: &serde_json::Value,
 ) -> Result<InstallResult, CoreError> {
+    let archive = result["packageZipPath"].as_str().ok_or_else(|| {
+        CoreError::Other("Android extraction did not return its package archive".into())
+    })?;
+    let manifest: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(result["packageManifest"].clone())?;
+    for relative in manifest.keys() {
+        crate::packages::validate_relative(relative).map_err(CoreError::Other)?;
+    }
+    let manifest = manifest
+        .into_iter()
+        .filter(|(relative, _)| !crate::packages::excluded_from_manifest(relative))
+        .collect();
+    let root = result["packageRoot"].as_str().ok_or_else(|| {
+        CoreError::Other("Android extraction did not return its destination".into())
+    })?;
+    let root = std::fs::canonicalize(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.to_owned());
+    crate::packages::stage_install(core, &std::fs::read(archive)?, manifest, root)?;
     core.emit(CoreEvent::InstallProgress(InstallProgress {
         stage: "done".into(),
         percent: 100,

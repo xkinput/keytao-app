@@ -9,8 +9,8 @@ pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
 }
 
-/// Creates the process-wide Core. Every subsequent call returns an error,
-/// including calls with identical config. Restart the process to change roots.
+/// Creates the process-wide Core, or returns its existing info when the resolved
+/// directories, platform and user root match. Restart the process to change them.
 pub fn init_core(config: BridgeConfig) -> Result<BridgeInfo, String> {
     runtime::initialize(config)
 }
@@ -27,13 +27,18 @@ pub fn check_local_schema() -> Result<LocalSchemaDto, String> {
         keytao_app_core::scheme::check_local_schema(&state.core, Some(state.host.user_root()?))
             .map_err(|error| error.to_string())?;
     let app_state = state.core.state();
+    let installed_scheme_version = app_state
+        .active_scheme
+        .as_ref()
+        .and_then(|scheme| app_state.installed_packages.get(scheme))
+        .and_then(|package| package.version.clone());
     Ok(LocalSchemaDto {
         installed: local.installed,
         deployed: local.deployed,
         version: local.version,
         schemas: local.schemas,
-        installed_scheme: app_state.installed_scheme,
-        installed_scheme_version: app_state.installed_scheme_version,
+        installed_scheme: app_state.active_scheme,
+        installed_scheme_version,
     })
 }
 
@@ -59,6 +64,343 @@ pub fn record_installed_scheme(scheme: String, version: Option<String>) -> Resul
     .map_err(|error| error.to_string())
 }
 
+pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::packages::list_installed_packages(&state.core)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn import_local_scheme(
+    directory_path: String,
+    display_name: String,
+    scheme_key: Option<String>,
+) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::import_local_scheme(
+        &state.core,
+        std::path::Path::new(&directory_path),
+        &display_name,
+        scheme_key.as_deref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn get_scheme_sync_state() -> Result<String, String> {
+    Ok(keytao_app_core::scheme_sync::sync_state(&runtime::state()?.core).to_string())
+}
+
+pub fn set_scheme_sync_preferences(
+    follow_account_sync: Option<bool>,
+    scheme_key: Option<String>,
+    sync: Option<bool>,
+    settings_json: Option<String>,
+) -> Result<String, String> {
+    let settings = settings_json
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    keytao_app_core::scheme_sync::set_preferences(
+        &runtime::state()?.core,
+        follow_account_sync,
+        scheme_key.as_deref(),
+        sync,
+        settings,
+    )
+    .map(|value| value.to_string())
+    .map_err(|error| error.to_string())
+}
+
+pub fn export_scheme_profile() -> Result<String, String> {
+    keytao_app_core::scheme_sync::export_profile(&runtime::state()?.core)
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn upload_scheme_profile() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::upload_profile(&state.core)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn fetch_scheme_profile() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::fetch_profile(&state.core)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// Applies preferences and adds missing packages. Activation requires a separate confirmed call.
+pub async fn apply_scheme_profile(profile_json: String) -> Result<String, String> {
+    let profile = serde_json::from_str(&profile_json).map_err(|error| error.to_string())?;
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::scheme_sync::apply_profile(&state.core, profile, &state.host.user_root()?)
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+pub async fn list_cloud_packages() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let packages = keytao_app_core::cloud_packages::list(&state.core)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&packages).map_err(|error| error.to_string())
+}
+
+pub async fn preview_cloud_package(scheme_key: String) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let preview = keytao_app_core::cloud_packages::preview(&state.core, &scheme_key, &state.host.user_root()?)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&preview).map_err(|error| error.to_string())
+}
+
+pub async fn upload_cloud_package(scheme_key: String, expected_sha256: Option<String>) -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let package = keytao_app_core::cloud_packages::upload(&state.core, &scheme_key, &state.host.user_root()?, expected_sha256.as_deref())
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&package).map_err(|error| error.to_string())
+}
+
+/// Records only the result returned by Android's deployImeData channel.
+pub fn record_android_deploy(success: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = runtime::state()?;
+        keytao_app_core::deploy::record_android_result(&state.core, &state.host.user_root()?, success)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = success; Err("Android deployment result is only available on Android".into()) }
+}
+
+pub async fn download_cloud_package(id: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::cloud_packages::download(&state.core, &id, &state.host.user_root()?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn delete_cloud_package(id: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::cloud_packages::delete(&state.core, &id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn list_user_words(scheme_key: String) -> Result<Vec<UserWordDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::list_user_words(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn add_user_word(
+    scheme_key: String,
+    word: String,
+    code: String,
+    weight: Option<String>,
+) -> Result<UserWordMutationDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::add_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            &word,
+            &code,
+            weight,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn update_user_word(
+    scheme_key: String,
+    id: u32,
+    expected_word: String,
+    expected_code: String,
+    word: String,
+    code: String,
+    weight: Option<String>,
+) -> Result<UserWordMutationDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::update_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            id,
+            &expected_word,
+            &expected_code,
+            &word,
+            &code,
+            weight,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn delete_user_word(
+    scheme_key: String,
+    id: u32,
+    expected_word: String,
+    expected_code: String,
+) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::user_words::delete_user_word(
+        &state.core,
+        &scheme_key,
+        &state.host.user_root()?,
+        id,
+        &expected_word,
+        &expected_code,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub async fn compare_user_words(scheme_key: String) -> Result<Vec<UserWordComparisonDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::compare_user_words(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn lookup_user_word(
+    scheme_key: String,
+    word: String,
+    code: String,
+) -> Result<UserWordComparisonDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::lookup_user_word(
+            &state.core,
+            &scheme_key,
+            &state.host.user_root()?,
+            &word,
+            &code,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn take_user_words_report(scheme_key: String) -> Result<UserWordsReportDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::take_user_words_report(&state.core, &scheme_key)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn download_scheme_package(scheme_key: String, source: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::download_scheme_package(
+        &state.core,
+        &scheme_key,
+        &source,
+        &state.host.user_root()?,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub async fn check_scheme_updates() -> Result<Vec<SchemeUpdateDto>, String> {
+    runtime::dto(keytao_app_core::packages::check_scheme_updates(&runtime::state()?.core).await)
+}
+
+pub fn get_dismissed_scheme_updates() -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(runtime::state()?
+        .core
+        .state()
+        .dismissed_scheme_updates
+        .into_iter()
+        .collect())
+}
+
+pub fn dismiss_scheme_update(scheme_key: String, version: String) -> Result<(), String> {
+    let scheme_key = keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
+    runtime::state()?
+        .core
+        .update_state(|state| {
+            state
+                .dismissed_scheme_updates
+                .insert(scheme_key.into(), version);
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// Android extraction must return the platform result as JSON and must not
+/// re-enter install/deploy bridge calls while the install lock is held.
+/// Other platforms ignore the callback. Activation does not deploy the IME.
+pub async fn activate_scheme(
+    scheme_key: String,
+    android_extract: impl Fn(String) -> DartFnFuture<String> + Send + Sync + 'static,
+) -> Result<InstallResultDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    #[cfg(not(target_os = "android"))]
+    let _ = android_extract;
+    let result = keytao_app_core::packages::activate_scheme(
+        &state.core,
+        &scheme_key,
+        &root,
+        #[cfg(target_os = "android")]
+        move |archive| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
+        > {
+            let extraction = android_extract(archive);
+            Box::pin(async move {
+                serde_json::from_str(&extraction.await).map_err(|error| error.to_string())
+            })
+        },
+        #[cfg(target_os = "windows")]
+        keytao_app_core::install::finish_windows_scheme_install,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(install_result_dto(result))
+}
+
+pub async fn remove_scheme_package(scheme_key: String) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::packages::remove_scheme_package(&state.core, &scheme_key)
+        .map_err(|error| error.to_string())
+}
+
 /// The persisted account, if a token is stored. The token never leaves Rust.
 pub fn account_session() -> Result<Option<AccountUserDto>, String> {
     let state = runtime::state()?.core.state();
@@ -69,57 +411,116 @@ pub fn account_session() -> Result<Option<AccountUserDto>, String> {
 }
 
 pub async fn account_login(name: String, password: String) -> Result<AccountUserDto, String> {
-    let session = keytao_app_core::account::keytao_login(&runtime::state()?.core, name, password)
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let session = keytao_app_core::account::keytao_login(&state.core, name, password)
         .await
         .map_err(|error| error.to_string())?;
     runtime::dto(session.user)
 }
 
-/// Revalidates the stored token. Only a server rejection (401/403) clears the
-/// session; network and other errors keep it and are returned as Err.
+/// Refreshes an aging token at startup without prompting for credentials.
 pub async fn account_refresh() -> Result<Option<AccountUserDto>, String> {
-    let core = &runtime::state()?.core;
-    let Some(token) = core.state().auth_token else {
-        return Ok(None);
-    };
-    match keytao_app_core::account::keytao_me(core, token.clone()).await {
-        Ok(user) => Ok(Some(runtime::dto(user)?)),
-        Err(keytao_app_core::CoreError::Permission(_)) => {
-            // Compare under the state lock: a login that finished meanwhile wins.
-            core.update_state(|state| {
-                if state.auth_token.as_deref() == Some(token.as_str()) {
-                    state.auth_token = None;
-                    state.user = None;
-                    state.legacy_imported = true;
-                }
-            })
-            .map_err(|error| error.to_string())?;
-            Ok(None)
-        }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-pub fn account_logout() -> Result<(), String> {
-    runtime::state()?
-        .core
-        .clear_auth()
-        .map_err(|error| error.to_string())
-}
-
-/// Writes the user dictionary into the host root without deploying.
-pub async fn account_sync_user_dictionary() -> Result<UserDictionarySyncDto, String> {
     let state = runtime::state()?;
-    let token = state.core.state().auth_token.ok_or("未登录")?;
     let _guard = state.install_lock.lock().await;
-    let result = keytao_app_core::account::sync_user_dictionary(&state.core, &state.host, token)
+    keytao_app_core::account::startup_refresh(&state.core)
         .await
         .map_err(|error| error.to_string())?;
+    account_session()
+}
+
+pub async fn account_logout() -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    state.core.clear_auth().map_err(|error| error.to_string())
+}
+
+/// Merges the user dictionary in place without deploying.
+pub async fn account_sync_user_dictionary(
+    confirmed_deletions: Option<UserDictionaryDeletionConfirmationDto>,
+) -> Result<UserDictionarySyncDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let token = state.core.state().auth_token.ok_or("未登录")?;
+    let result = keytao_app_core::account::sync_user_dictionary(
+        &state.core,
+        &state.host,
+        token,
+        confirmed_deletions.map(|confirmed| {
+            keytao_app_core::account::UserDictionaryDeletionConfirmation {
+                local_deletions: confirmed
+                    .local_deletions
+                    .into_iter()
+                    .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
+                        word: entry.word,
+                        code: entry.code,
+                    })
+                    .collect(),
+                server_deletions: confirmed
+                    .server_deletions
+                    .into_iter()
+                    .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
+                        word: entry.word,
+                        code: entry.code,
+                    })
+                    .collect(),
+            }
+        }),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(UserDictionarySyncDto {
         file_name: result.file_name,
         count: result.count as u64,
         message: result.message,
+        pending: result.pending,
+        local_deletions: result
+            .local_deletions
+            .into_iter()
+            .map(|entry| UserDictionaryDeletionDto {
+                word: entry.word,
+                code: entry.code,
+            })
+            .collect(),
+        server_deletions: result
+            .server_deletions
+            .into_iter()
+            .map(|entry| UserDictionaryDeletionDto {
+                word: entry.word,
+                code: entry.code,
+            })
+            .collect(),
     })
+}
+
+pub async fn account_pending_words() -> Result<String, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let words = keytao_app_core::submission::pending_user_words(&state.core)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&words).map_err(|error| error.to_string())
+}
+
+pub async fn account_prepare_submission(entries_json: String) -> Result<String, String> {
+    let entries: Vec<keytao_app_core::submission::SubmissionWord> =
+        serde_json::from_str(&entries_json).map_err(|error| error.to_string())?;
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let preview = keytao_app_core::submission::prepare_submission(&state.core, entries)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&preview).map_err(|error| error.to_string())
+}
+
+pub async fn account_submit_words(preview_json: String) -> Result<String, String> {
+    let preview = serde_json::from_str(&preview_json).map_err(|error| error.to_string())?;
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let result = keytao_app_core::submission::submit(&state.core, preview)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&result).map_err(|error| error.to_string())
 }
 
 pub async fn fetch_scheme_release(scheme: String) -> Result<SchemeReleaseDto, String> {
@@ -154,8 +555,8 @@ pub async fn install_latest_scheme(scheme: String) -> Result<InstallResultDto, S
             percent: 0,
             message: "正在获取方案版本...".into(),
         }));
-        let release = fetch_scheme_release(scheme).await?;
-        install_scheme_from_url(release.download_url).await
+        let release = fetch_scheme_release(scheme.clone()).await?;
+        install_scheme_from_url(release.download_url, scheme, Some(release.version)).await
     }
 }
 
@@ -204,7 +605,13 @@ pub fn cancel_scheme_download() -> Result<(), String> {
 
 /// Downloads and smart-installs into the selected filesystem directory without
 /// deploying. Android SAF uses download_scheme_archive and smartExtractZip.
-pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallResultDto, String> {
+pub async fn install_scheme_to_dir(
+    url: String,
+    dir: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let root = runtime::absolute_dir(&dir)?;
@@ -221,9 +628,15 @@ pub async fn install_scheme_to_dir(url: String, dir: String) -> Result<InstallRe
     )
     .await;
     let _ = std::fs::remove_file(archive);
-    Ok(install_result_dto(
-        result.map_err(|error| error.to_string())?,
-    ))
+    let result = result.map_err(|error| error.to_string())?;
+    let active = root
+        .canonicalize()
+        .ok()
+        .zip(state.host.user_root()?.canonicalize().ok())
+        .is_some_and(|(root, default_root)| root == default_root);
+    keytao_app_core::packages::record_package(&state.core, &scheme_key, version.as_deref(), active)
+        .map_err(|error| error.to_string())?;
+    Ok(install_result_dto(result))
 }
 
 /// Android SAF sequence: confirm storage permission, pickDirectory,
@@ -242,9 +655,8 @@ pub async fn download_scheme_archive(url: String) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Cleans up the SAF download after smartExtractZip succeeds or fails. Missing
-/// files are already clean (Kotlin removes the zip on success). Resolves parent
-/// directories and rejects symlink files before deleting inside the cache.
+/// Cleans up the download after extraction and package recording. Resolves
+/// parent directories and rejects symlink files before deleting inside cache.
 pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -280,10 +692,15 @@ pub async fn remove_downloaded_archive(path: String) -> Result<(), String> {
 }
 
 /// Installs a selected GitHub/Gitee or scheme release URL without deploying.
-pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, String> {
+pub async fn install_scheme_from_url(
+    url: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     #[cfg(target_os = "android")]
     {
-        let _ = url;
+        let _ = (url, scheme_key, version);
         Err("Use the platform installation flow on Android".into())
     }
     #[cfg(not(target_os = "android"))]
@@ -307,9 +724,15 @@ pub async fn install_scheme_from_url(url: String) -> Result<InstallResultDto, St
         .await;
         // Core removes the archive on success; also remove failed downloads here.
         let _ = std::fs::remove_file(archive);
-        Ok(install_result_dto(
-            result.map_err(|error| error.to_string())?,
-        ))
+        let result = result.map_err(|error| error.to_string())?;
+        keytao_app_core::packages::record_package(
+            &state.core,
+            &scheme_key,
+            version.as_deref(),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(install_result_dto(result))
     }
 }
 
@@ -353,19 +776,36 @@ pub async fn prepare_android_install(url: String) -> Result<String, String> {
 }
 
 /// Pass jsonEncode of the Android channel's smart-extract result unchanged.
-pub fn finish_android_install(result_json: String) -> Result<InstallResultDto, String> {
+pub fn finish_android_install(
+    result_json: String,
+    scheme_key: String,
+    version: Option<String>,
+) -> Result<InstallResultDto, String> {
+    keytao_app_core::scheme::validate_scheme_key(&scheme_key)?;
     #[cfg(target_os = "android")]
     {
         let result: serde_json::Value =
             serde_json::from_str(&result_json).map_err(|error| error.to_string())?;
-        let result =
-            keytao_app_core::install::finish_android_install(&runtime::state()?.core, &result)
-                .map_err(|error| error.to_string())?;
+        let state = runtime::state()?;
+        let active = result["packageRoot"]
+            .as_str()
+            .and_then(|root| std::path::Path::new(root).canonicalize().ok())
+            .zip(state.host.user_root()?.canonicalize().ok())
+            .is_some_and(|(root, default_root)| root == default_root);
+        let result = keytao_app_core::install::finish_android_install(&state.core, &result)
+            .map_err(|error| error.to_string())?;
+        keytao_app_core::packages::record_package(
+            &state.core,
+            &scheme_key,
+            version.as_deref(),
+            active,
+        )
+        .map_err(|error| error.to_string())?;
         Ok(install_result_dto(result))
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = result_json;
+        let _ = (result_json, scheme_key, version);
         Err("Android installation is only available on Android".into())
     }
 }
@@ -783,27 +1223,86 @@ pub async fn clear_runtime_log() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(test, any(target_os = "android", target_os = "ios")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn android_settings_change_one_field_preserves_the_other_22() {
-        let temp = tempfile::tempdir().unwrap();
+    fn config() -> BridgeConfig {
+        // All tests share the process-wide Core and keep its directories alive.
+        static TEMP: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let temp = TEMP.get_or_init(|| tempfile::tempdir().unwrap());
         let root = temp.path().join("user");
-        init_core(BridgeConfig {
+        BridgeConfig {
             data_dir: temp.path().join("state").to_string_lossy().into_owned(),
             cache_dir: temp.path().join("cache").to_string_lossy().into_owned(),
             resource_dir: temp.path().join("resources").to_string_lossy().into_owned(),
             app_version: "test".into(),
             platform: if cfg!(target_os = "android") {
                 BridgePlatform::Android
-            } else {
+            } else if cfg!(target_os = "ios") {
                 BridgePlatform::Ios
+            } else if cfg!(target_os = "windows") {
+                BridgePlatform::Windows
+            } else if cfg!(target_os = "macos") {
+                BridgePlatform::MacOs
+            } else {
+                BridgePlatform::Linux
             },
             user_root_override: Some(root.to_string_lossy().into_owned()),
-        })
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn init_core_reuses_same_config() {
+        let first = init_core(config()).unwrap();
+        complete_onboarding().unwrap();
+        let second = init_core(config()).unwrap();
+        assert_eq!(second.user_root, first.user_root);
+        assert_eq!(second.platform, first.platform);
+        assert_eq!(second.app_version, first.app_version);
+        assert!(onboarding().unwrap().completed);
+
+        let mut updated_version = config();
+        updated_version.app_version = "new-engine".into();
+        let existing = init_core(updated_version).unwrap();
+        assert_eq!(existing.app_version, first.app_version);
+
+        let mut equivalent_root = config();
+        equivalent_root.user_root_override.as_mut().unwrap().push('/');
+        let existing = init_core(equivalent_root).unwrap();
+        assert_eq!(existing.user_root, first.user_root);
+    }
+
+    #[test]
+    fn init_core_rejects_changed_config() {
+        init_core(config()).unwrap();
+        for field in ["data_dir", "cache_dir", "resource_dir", "platform", "user_root"] {
+            let mut changed = config();
+            match field {
+                "data_dir" => changed.data_dir.push_str("-other"),
+                "cache_dir" => changed.cache_dir.push_str("-other"),
+                "resource_dir" => changed.resource_dir.push_str("-other"),
+                "platform" => {
+                    changed.platform = if changed.platform == BridgePlatform::Android {
+                        BridgePlatform::Ios
+                    } else {
+                        BridgePlatform::Android
+                    };
+                }
+                "user_root" => changed.user_root_override.as_mut().unwrap().push_str("-other"),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(init_core(changed), Err(error) if error.contains("already initialized")),
+                "changing {field} must require a process restart"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[tokio::test]
+    async fn android_settings_change_one_field_preserves_the_other_22() {
+        init_core(config()).unwrap();
         let before = get_android_ime_input_settings().await.unwrap();
         let mut edited = before.clone();
         edited.haptics_enabled = !edited.haptics_enabled;

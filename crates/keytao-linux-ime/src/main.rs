@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "linux")]
 mod engine;
+mod frontend;
 #[cfg(target_os = "linux")]
 mod gnome_ibus_engine;
 #[cfg(target_os = "linux")]
@@ -167,6 +168,14 @@ const LEGACY_LOG_DIR: &str = "/tmp";
 const LOG_PREFIX: &str = "keytao-ime.log";
 #[cfg(target_os = "linux")]
 const LOG_RETENTION_DAYS: usize = 3;
+
+#[cfg(target_os = "linux")]
+static STOP_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+extern "C" fn request_stop(_: libc::c_int) {
+    STOP_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[cfg(target_os = "linux")]
 fn remove_legacy_kde_env_file() {
@@ -335,6 +344,29 @@ fn main() {
             });
         }
 
+        let Some(runtime_dir) = dirs::runtime_dir() else {
+            tracing::error!("cannot publish readiness: XDG_RUNTIME_DIR is not set");
+            std::process::exit(1);
+        };
+        let ready_path = runtime_dir.join(if kwin_socket {
+            "keytao-ime-kwin.ready"
+        } else {
+            "keytao-ime.ready"
+        });
+        if let Err(error) = std::fs::remove_file(&ready_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!(
+                    "cannot clear readiness file {}: {error}",
+                    ready_path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+        unsafe {
+            libc::signal(libc::SIGTERM, request_stop as libc::sighandler_t);
+            libc::signal(libc::SIGINT, request_stop as libc::sighandler_t);
+        }
+
         let upgrade = match upgrade_deploy::prepare() {
             Ok(upgrade) => upgrade,
             Err(error) => {
@@ -403,22 +435,35 @@ fn main() {
             std::process::exit(1);
         }
 
+        let (frontend_tx, frontend_rx) = frontend::channel();
+        let backend_count = [
+            selected.xim,
+            selected.ibus,
+            selected.ibus_engine,
+            selected.wayland,
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+
         if selected.xim {
             let engine_xim = engine.clone();
+            let frontend = frontend::Frontend::new("xim", &frontend_tx);
             std::thread::spawn(move || {
                 tracing::info!("X11/XIM backend started for XWayland apps");
-                x11_backend::run(engine_xim);
+                x11_backend::run(engine_xim, frontend);
                 tracing::warn!("X11/XIM backend exited");
             });
         }
 
         if selected.ibus {
             let engine_ibus = engine.clone();
+            let frontend = frontend::Frontend::new("ibus", &frontend_tx);
             std::thread::spawn(move || {
                 tracing::info!("IBus D-Bus backend started for Chromium/CEF apps");
                 tokio::runtime::Runtime::new()
                     .expect("tokio runtime")
-                    .block_on(ibus_backend::run(engine_ibus));
+                    .block_on(ibus_backend::run(engine_ibus, frontend));
                 tracing::warn!("IBus D-Bus backend exited");
             });
         }
@@ -443,26 +488,39 @@ fn main() {
                  Activate via GNOME Settings → Keyboard → Input Sources → Add (Other → Chinese → KeyTao), \
                  or via ibus-setup."
             );
-            tokio::runtime::Runtime::new()
-                .expect("tokio runtime")
-                .block_on(gnome_ibus_engine::run(engine));
-            return;
+            let engine_ibus = engine.clone();
+            let frontend = frontend::Frontend::new("ibus-engine", &frontend_tx);
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new()
+                    .expect("tokio runtime")
+                    .block_on(gnome_ibus_engine::run(engine_ibus, frontend));
+                tracing::warn!("IBus engine backend exited");
+            });
         }
 
         if selected.wayland {
-            let result = if kwin_socket {
-                wayland_backend_kde::run(engine)
-            } else {
-                wayland_backend::run(engine)
-            };
-            match result {
-                Ok(()) => {}
-                Err(e) => {
+            let frontend = frontend::Frontend::new("wayland", &frontend_tx);
+            std::thread::spawn(move || {
+                let result = if kwin_socket {
+                    wayland_backend_kde::run(engine, frontend)
+                } else {
+                    wayland_backend::run(engine, frontend)
+                };
+                if let Err(e) = result {
                     tracing::warn!("Wayland backend stopped: {e}");
                 }
-            }
+            });
         }
-        wait_for_backend_threads(kwin_socket);
+        drop(frontend_tx);
+        if let Err(error) =
+            frontend::wait_for_frontends(ready_path, frontend_rx, backend_count, || {
+                STOP_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+            })
+        {
+            tracing::error!("{error}; exiting keytao-ime");
+            wait_for_backend_threads(kwin_socket);
+        }
+        tracing::info!("keytao-ime stopping; readiness removed");
     }
 }
 
@@ -483,10 +541,7 @@ fn wait_for_backend_threads(kwin_socket: bool) -> ! {
         }
         std::process::exit(1);
     }
-    // Keep the process alive so IBus/XIM threads can serve apps.
-    loop {
-        std::thread::park();
-    }
+    std::process::exit(1);
 }
 
 /// Directory holding the rolling daemon log.
@@ -610,6 +665,37 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::ReloadStampGate;
     use keytao_core::ReloadStamp;
+
+    #[test]
+    fn a_stopped_non_kwin_backend_exits_nonzero() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "KEYTAO_TEST_NO_FRONTEND_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::wait_for_backend_threads(false);
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_stopped_non_kwin_backend_exits_nonzero"])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(1));
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("all input backends stopped but the daemon kept running");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn a_stopped_kwin_backend_exits_by_signal_for_compositor_recovery() {

@@ -4,6 +4,13 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class ProtectedFileInstall(
+    val isProtected: Boolean,
+    val write: Boolean,
+    val backupName: String?,
+    val log: String?,
+)
+
 object KeytaoNativeBridge {
     private const val libraryName = "keytao_app_bridge"
 
@@ -76,6 +83,33 @@ object KeytaoNativeBridge {
         )
     }
 
+    fun mergeLocalDefaultCustom(existing: String?, packageContent: String): MergeResult {
+        check(loaded) { "KeyTao native bridge is unavailable" }
+        val json = runCatching { nativeMergeLocalDefaultCustom(existing, packageContent) }
+            .getOrElse { throw IllegalStateException("Failed to merge local scheme configuration", it) }
+            ?: error("Failed to merge local scheme configuration")
+        val result = JSONObject(json)
+        val userSchemas = result.getJSONArray("userSchemas")
+        return MergeResult(
+            result.getString("mergedContent"),
+            (0 until userSchemas.length()).map { userSchemas.getString(it) },
+        )
+    }
+
+    fun prepareProtectedFileInstall(relative: String, existing: ByteArray?): ProtectedFileInstall {
+        check(loaded) { "KeyTao native bridge is unavailable" }
+        val json = runCatching { nativePrepareProtectedFileInstall(relative, existing) }
+            .getOrElse { throw IllegalStateException("Failed to prepare protected file installation", it) }
+            ?: error("Failed to prepare protected file installation")
+        val result = JSONObject(json)
+        return ProtectedFileInstall(
+            result.getBoolean("protected"),
+            result.getBoolean("write"),
+            if (result.isNull("backup_name")) null else result.getString("backup_name"),
+            if (result.isNull("log")) null else result.getString("log"),
+        )
+    }
+
     fun resolveKeyboardJson(
         defaultKeyboardPath: String?,
         userKeyboardPath: String?,
@@ -96,6 +130,16 @@ object KeytaoNativeBridge {
         val json = runCatching { nativeDeployStep(userDir, sharedDir, schemaId) }.getOrNull()
         KeytaoRuntimeLog.nativeInitialized()
         return KeytaoRimeDeployStepResult.fromJson(json)
+    }
+
+    fun hasDeployedSchema(userDir: String): Boolean {
+        if (!loaded) return false
+        return runCatching { nativeHasDeployedSchema(userDir) }.getOrDefault(false)
+    }
+
+    fun completeDeployment(userDir: String): Boolean {
+        if (!loaded) return false
+        return runCatching { nativeCompleteDeployment(userDir) }.getOrDefault(false)
     }
 
     fun init(userDir: String, sharedDir: String?, deploy: Boolean): Boolean {
@@ -330,6 +374,10 @@ object KeytaoNativeBridge {
         packageLuaFilenamesJson: String,
     ): String?
 
+    external fun nativePrepareProtectedFileInstall(relative: String, existing: ByteArray?): String?
+
+    external fun nativeMergeLocalDefaultCustom(existing: String?, packageContent: String): String?
+
     external fun nativeResolveKeyboardJson(
         defaultKeyboardPath: String?,
         userKeyboardPath: String?,
@@ -340,6 +388,10 @@ object KeytaoNativeBridge {
     external fun nativeEngineAvailable(): Boolean
 
     external fun nativeDeployStep(userDir: String, sharedDir: String?, schemaId: String?): String
+
+    external fun nativeHasDeployedSchema(userDir: String): Boolean
+
+    external fun nativeCompleteDeployment(userDir: String): Boolean
 
     external fun nativeInit(userDir: String, sharedDir: String?, deploy: Boolean): Boolean
 

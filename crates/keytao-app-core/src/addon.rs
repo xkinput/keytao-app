@@ -182,13 +182,27 @@ fn install_addon_schema_files(core: &Core, root: &Path, id: &str) -> Result<(), 
     for (source_relative, destination_relative) in addon_schema_source_files(id) {
         let bytes = std::fs::read(source.join(source_relative))
             .map_err(|error| format!("读取附加方案资源 {source_relative} 失败: {error}"))?;
-        let destination = root.join(destination_relative);
+        let destination = root.join(&destination_relative);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
         }
-        write_file_atomic(&destination, &bytes)
-            .map_err(|error| format!("写入 {} 失败: {error}", destination.display()))?;
+        if crate::install::is_protected_user_file(&destination_relative) {
+            let mut logs = Vec::new();
+            let result = crate::install::write_package_file(
+                root,
+                &destination_relative,
+                &bytes,
+                &mut logs,
+            );
+            for log in logs {
+                tracing::info!("{log}");
+            }
+            result?;
+        } else {
+            write_file_atomic(&destination, &bytes)
+                .map_err(|error| format!("写入 {} 失败: {error}", destination.display()))?;
+        }
     }
     Ok(())
 }

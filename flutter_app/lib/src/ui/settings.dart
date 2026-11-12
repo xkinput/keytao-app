@@ -5,7 +5,28 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'color_picker.dart';
+import 'user_words.dart';
 import 'widgets.dart';
+
+Future<void> runCloudAccountAction(
+  BuildContext context,
+  AppController controller,
+  Future<bool> Function() action,
+) async {
+  if (controller.accountUser == null || !context.mounted) {
+    return;
+  }
+  final succeeded = await action();
+  if (!succeeded) {
+    await controller.reloadAccountSession();
+  }
+}
+
+String cloudSyncDate(String? value) {
+  if (value == null) return '—';
+  return DateTime.tryParse(value)?.toLocal().toString().split('.').first ??
+      value;
+}
 
 class SettingsCard extends StatelessWidget {
   const SettingsCard({super.key, required this.controller});
@@ -276,83 +297,121 @@ class SettingsCard extends StatelessWidget {
   }
 }
 
-class AccountCard extends StatefulWidget {
+class AccountCard extends StatelessWidget {
   const AccountCard({super.key, required this.controller});
   final AppController controller;
   @override
-  State<AccountCard> createState() => _AccountCardState();
-}
-
-class _AccountCardState extends State<AccountCard> {
-  final _name = TextEditingController();
-  final _password = TextEditingController();
-
-  @override
-  void dispose() {
-    _name.dispose();
-    _password.dispose();
-    super.dispose();
-  }
-
-  Future<void> _login() async {
-    if (await widget.controller.login(_name.text, _password.text)) {
-      _password.clear();
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final c = widget.controller;
-    final name = c.accountName;
+    final c = controller;
     return Section(
-      title: AppStrings.account,
-      icon: FLucideIcons.user,
+      title: '数据管理',
+      icon: FLucideIcons.database,
       children: [
-        if (c.accountUser == null) ...[
-          FTextField(
-            label: const Text(AppStrings.username),
-            control: FTextFieldControl.managed(controller: _name),
-            enabled: !c.loggingIn,
-            autofillHints: const [AutofillHints.username],
-          ),
-          FTextField.password(
-            label: const Text(AppStrings.password),
-            control: FTextFieldControl.managed(controller: _password),
-            enabled: !c.loggingIn,
-            textInputAction: TextInputAction.done,
-            onSubmit: (_) => _login(),
-          ),
+        ActionRow(
+          children: [
+            ActionButton(
+              '自造词',
+              icon: FLucideIcons.bookOpen,
+              onPress:
+                  c.busy ||
+                      (c.installedPackages.isEmpty &&
+                          c.local?.installed != true)
+                  ? null
+                  : () => openUserWords(context, c),
+            ),
+          ],
+        ),
+        if (c.accountUser != null) ...[
+          if (c.accountMessage case final message?) StatusMessage(message),
+          if (c.accountError case final error?) ErrorMessage(error),
           ActionRow(
             children: [
               ActionButton(
-                c.loggingIn ? AppStrings.loggingIn : AppStrings.login,
-                primary: true,
-                onPress: c.loggingIn ? null : _login,
-              ),
-            ],
-          ),
-        ] else ...[
-          if (name != null) Text(name),
-          ActionRow(
-            children: [
-              ActionButton(
-                c.syncingDictionary
-                    ? AppStrings.syncing
-                    : AppStrings.syncUserDictionary,
-                primary: true,
-                onPress: c.busy || c.syncingDictionary
+                '上传配置',
+                onPress: c.busy
                     ? null
-                    : c.syncUserDictionary,
+                    : () => runCloudAccountAction(
+                        context,
+                        c,
+                        c.uploadSchemeProfile,
+                      ),
               ),
               ActionButton(
-                AppStrings.logout,
-                onPress: c.syncingDictionary ? null : c.logout,
+                '从云端下载',
+                onPress: c.busy
+                    ? null
+                    : () => runCloudAccountAction(
+                        context,
+                        c,
+                        c.fetchCloudProfile,
+                      ),
               ),
             ],
           ),
+          SwitchSetting(
+            '跟随账号同步',
+            value: c.followAccountSync,
+            onChanged: c.busy ? null : c.setFollowAccountSync,
+          ),
+          ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
+          SettingRow(
+            '云端方案',
+            child: FButton.icon(
+              variant: FButtonVariant.ghost,
+              onPress: c.busy
+                  ? null
+                  : () => runCloudAccountAction(
+                      context,
+                      c,
+                      c.refreshCloudPackages,
+                    ),
+              child: const Icon(FLucideIcons.refreshCw, size: 16),
+            ),
+          ),
+          for (final package in c.cloudPackages)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('${package['name']}'),
+                Text(
+                  '${package['version'] ?? '—'} · '
+                  '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
+                  '${cloudSyncDate(package['createAt'] as String?)}',
+                  style: context.theme.typography.body.xs,
+                ),
+                const SizedBox(height: 8),
+                ActionRow(
+                  children: [
+                    ActionButton(
+                      '下载',
+                      onPress: c.busy
+                          ? null
+                          : () => runCloudAccountAction(
+                              context,
+                              c,
+                              () => c.downloadCloudPackage(
+                                package['id'] as String,
+                              ),
+                            ),
+                    ),
+                    ActionButton(
+                      '删除',
+                      onPress: c.busy
+                          ? null
+                          : () => runCloudAccountAction(
+                              context,
+                              c,
+                              () =>
+                                  c.deleteCloudPackage(package['id'] as String),
+                            ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          if (c.schemeSyncBusy) const FProgress(),
+          if (c.schemeSyncError case final error?) ErrorMessage(error),
         ],
-        if (c.accountMessage case final message?) StatusMessage(message),
-        if (c.accountError case final error?) ErrorMessage(error),
       ],
     );
   }
