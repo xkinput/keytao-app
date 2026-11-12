@@ -5,27 +5,26 @@ import '../app/controller.dart';
 import '../app/strings.dart';
 import 'widgets.dart';
 
-Future<bool>? _activeLogin;
+Future<void>? _activeAccountDialog;
 
-Future<bool> ensureAccountLogin(
+Future<void> showAccountDialog(
   BuildContext context,
   AppController controller,
 ) async {
-  await controller.reloadAccountSession();
-  if (controller.accountUser != null) return true;
-  if (!context.mounted) return false;
-  if (_activeLogin case final active?) return active;
+  await controller.reloadAccountSession(checkSchemeProfile: false);
+  if (!context.mounted) return;
+  if (_activeAccountDialog case final active?) return active;
   controller.accountError = null;
-  final result = showFDialog<bool>(
+  final result = showFDialog<void>(
     context: context,
     builder: (_, _, animation) =>
         _LoginDialog(controller: controller, animation: animation),
-  ).then((value) => value == true);
-  _activeLogin = result;
+  );
+  _activeAccountDialog = result;
   try {
     return await result;
   } finally {
-    _activeLogin = null;
+    _activeAccountDialog = null;
   }
 }
 
@@ -52,7 +51,14 @@ class _LoginDialogState extends State<_LoginDialog> {
   Future<void> _submit() async {
     if (widget.controller.loggingIn) return;
     final success = await widget.controller.login(_name.text, _password.text);
-    if (mounted && success) Navigator.pop(context, true);
+    if (mounted && success) Navigator.pop(context);
+  }
+
+  Future<void> _logout() async {
+    await widget.controller.logout();
+    if (mounted && widget.controller.accountUser == null) {
+      Navigator.pop(context);
+    }
   }
 
   @override
@@ -60,6 +66,19 @@ class _LoginDialogState extends State<_LoginDialog> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
+      if (c.accountUser != null) {
+        return AppDialog(
+          title: '账号',
+          animation: widget.animation,
+          actions: [
+            ActionButton(
+              '退出登录',
+              onPress: c.busy || c.loggingIn ? null : _logout,
+            ),
+          ],
+          child: SizedBox(width: 360, child: Text(c.accountName ?? '账号')),
+        );
+      }
       return PopScope(
         canPop: !c.loggingIn,
         child: AppDialog(
@@ -68,7 +87,7 @@ class _LoginDialogState extends State<_LoginDialog> {
           actions: [
             ActionButton(
               AppStrings.cancel,
-              onPress: c.loggingIn ? null : () => Navigator.pop(context, false),
+              onPress: c.loggingIn ? null : () => Navigator.pop(context),
             ),
             ActionButton(
               c.loggingIn ? AppStrings.loggingIn : AppStrings.login,

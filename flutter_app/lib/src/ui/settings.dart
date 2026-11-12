@@ -5,7 +5,6 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
 import 'color_picker.dart';
-import 'login.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
@@ -14,15 +13,12 @@ Future<void> runCloudAccountAction(
   AppController controller,
   Future<bool> Function() action,
 ) async {
-  if (!await ensureAccountLogin(context, controller) || !context.mounted) {
+  if (controller.accountUser == null || !context.mounted) {
     return;
   }
   final succeeded = await action();
-  if (!succeeded &&
-      context.mounted &&
-      controller.accountUser == null &&
-      await ensureAccountLogin(context, controller)) {
-    await action();
+  if (!succeeded) {
+    await controller.reloadAccountSession();
   }
 }
 
@@ -307,10 +303,9 @@ class AccountCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final name = c.accountName;
     return Section(
-      title: AppStrings.account,
-      icon: FLucideIcons.user,
+      title: '数据管理',
+      icon: FLucideIcons.database,
       children: [
         ActionRow(
           children: [
@@ -326,110 +321,97 @@ class AccountCard extends StatelessWidget {
             ),
           ],
         ),
-        if (c.accountUser == null) ...[
+        if (c.accountUser != null) ...[
+          if (c.accountMessage case final message?) StatusMessage(message),
+          if (c.accountError case final error?) ErrorMessage(error),
           ActionRow(
             children: [
               ActionButton(
-                AppStrings.login,
-                primary: true,
-                onPress: c.busy || c.loggingIn
+                '上传配置',
+                onPress: c.busy
                     ? null
-                    : () => ensureAccountLogin(context, c),
+                    : () => runCloudAccountAction(
+                        context,
+                        c,
+                        c.uploadSchemeProfile,
+                      ),
               ),
-            ],
-          ),
-        ] else ...[
-          if (name != null) Text(name),
-          ActionRow(
-            children: [
               ActionButton(
-                AppStrings.logout,
-                onPress: c.busy ? null : c.logout,
+                '从云端下载',
+                onPress: c.busy
+                    ? null
+                    : () => runCloudAccountAction(
+                        context,
+                        c,
+                        c.fetchCloudProfile,
+                      ),
               ),
             ],
           ),
-        ],
-        if (c.accountMessage case final message?) StatusMessage(message),
-        if (c.accountError case final error?) ErrorMessage(error),
-        ActionRow(
-          children: [
-            ActionButton(
-              '上传配置',
+          SwitchSetting(
+            '跟随账号同步',
+            value: c.followAccountSync,
+            onChanged: c.busy ? null : c.setFollowAccountSync,
+          ),
+          ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
+          SettingRow(
+            '云端方案',
+            child: FButton.icon(
+              variant: FButtonVariant.ghost,
               onPress: c.busy
                   ? null
                   : () => runCloudAccountAction(
                       context,
                       c,
-                      c.uploadSchemeProfile,
+                      c.refreshCloudPackages,
                     ),
+              child: const Icon(FLucideIcons.refreshCw, size: 16),
             ),
-            ActionButton(
-              '从云端下载',
-              onPress: c.busy
-                  ? null
-                  : () =>
-                        runCloudAccountAction(context, c, c.fetchCloudProfile),
+          ),
+          for (final package in c.cloudPackages)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('${package['name']}'),
+                Text(
+                  '${package['version'] ?? '—'} · '
+                  '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
+                  '${cloudSyncDate(package['createAt'] as String?)}',
+                  style: context.theme.typography.body.xs,
+                ),
+                const SizedBox(height: 8),
+                ActionRow(
+                  children: [
+                    ActionButton(
+                      '下载',
+                      onPress: c.busy
+                          ? null
+                          : () => runCloudAccountAction(
+                              context,
+                              c,
+                              () => c.downloadCloudPackage(
+                                package['id'] as String,
+                              ),
+                            ),
+                    ),
+                    ActionButton(
+                      '删除',
+                      onPress: c.busy
+                          ? null
+                          : () => runCloudAccountAction(
+                              context,
+                              c,
+                              () =>
+                                  c.deleteCloudPackage(package['id'] as String),
+                            ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-          ],
-        ),
-        SwitchSetting(
-          '跟随账号同步',
-          value: c.followAccountSync,
-          onChanged: c.busy ? null : c.setFollowAccountSync,
-        ),
-        ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
-        SettingRow(
-          '云端方案',
-          child: FButton.icon(
-            variant: FButtonVariant.ghost,
-            onPress: c.busy
-                ? null
-                : () =>
-                      runCloudAccountAction(context, c, c.refreshCloudPackages),
-            child: const Icon(FLucideIcons.refreshCw, size: 16),
-          ),
-        ),
-        for (final package in c.cloudPackages)
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text('${package['name']}'),
-              Text(
-                '${package['version'] ?? '—'} · '
-                '${formatLogBytes(BigInt.from((package['size'] as num?)?.toInt() ?? 0))} · '
-                '${cloudSyncDate(package['createAt'] as String?)}',
-                style: context.theme.typography.body.xs,
-              ),
-              const SizedBox(height: 8),
-              ActionRow(
-                children: [
-                  ActionButton(
-                    '下载',
-                    onPress: c.busy
-                        ? null
-                        : () => runCloudAccountAction(
-                            context,
-                            c,
-                            () =>
-                                c.downloadCloudPackage(package['id'] as String),
-                          ),
-                  ),
-                  ActionButton(
-                    '删除',
-                    onPress: c.busy
-                        ? null
-                        : () => runCloudAccountAction(
-                            context,
-                            c,
-                            () => c.deleteCloudPackage(package['id'] as String),
-                          ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        if (c.schemeSyncBusy) const FProgress(),
-        if (c.schemeSyncError case final error?) ErrorMessage(error),
+          if (c.schemeSyncBusy) const FProgress(),
+          if (c.schemeSyncError case final error?) ErrorMessage(error),
+        ],
       ],
     );
   }

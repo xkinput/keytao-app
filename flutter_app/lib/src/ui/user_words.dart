@@ -8,7 +8,6 @@ import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/core.dart' as core;
 import '../rust/api/types.dart';
-import 'login.dart';
 import 'widgets.dart';
 
 bool _hasConflict(UserWordComparisonDto comparison) =>
@@ -239,7 +238,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
   bool _canSubmit(UserWordComparisonDto comparison) {
     final entry = comparison.entry;
     final key = _wordKey(entry.word, entry.code);
-    return _isKeytao(_scheme) &&
+    return widget.controller.accountUser != null &&
+        _isKeytao(_scheme) &&
         _comparisonAvailable &&
         comparison.status != 'identical' &&
         !_pending.contains(key) &&
@@ -400,23 +400,15 @@ class _UserWordsPageState extends State<UserWordsPage> {
 
   Future<void> _sync({bool automatic = false}) async {
     final c = widget.controller;
-    if (_saving || _pendingLoading || c.busy) return;
+    if (_saving || _pendingLoading || c.busy || c.accountUser == null) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      if (!automatic && !await ensureAccountLogin(context, c)) return;
-      if (automatic && c.accountUser == null) return;
-      var synced = await c.syncUserDictionary(automatic: automatic);
+      final synced = await c.syncUserDictionary(automatic: automatic);
       if (!synced) {
         await c.reloadAccountSession();
-        if (!automatic &&
-            mounted &&
-            c.accountUser == null &&
-            await ensureAccountLogin(context, c)) {
-          synced = await c.syncUserDictionary();
-        }
       }
       _pendingAccountId = synced ? null : c.accountUser?.id;
       if (mounted && !synced) setState(() => _error = c.accountError);
@@ -563,8 +555,13 @@ class _UserWordsPageState extends State<UserWordsPage> {
 
   Future<void> _submitSelected() async {
     final c = widget.controller;
-    if (_saving || _pendingLoading || c.busy || _selected.isEmpty) return;
-    var retriedPreparation = false;
+    if (_saving ||
+        _pendingLoading ||
+        c.busy ||
+        c.accountUser == null ||
+        _selected.isEmpty) {
+      return;
+    }
     setState(() {
       _saving = true;
       _error = null;
@@ -578,21 +575,9 @@ class _UserWordsPageState extends State<UserWordsPage> {
               ))
             {'word': comparison.entry.word, 'code': comparison.entry.code},
       ]);
-      if (!await ensureAccountLogin(context, c) || !mounted) return;
-      String previewJson;
-      try {
-        previewJson = await core.accountPrepareSubmission(
-          entriesJson: entriesJson,
-        );
-      } catch (_) {
-        await c.reloadAccountSession();
-        if (c.accountUser != null) rethrow;
-        retriedPreparation = true;
-        if (!mounted || !await ensureAccountLogin(context, c)) return;
-        previewJson = await core.accountPrepareSubmission(
-          entriesJson: entriesJson,
-        );
-      }
+      final previewJson = await core.accountPrepareSubmission(
+        entriesJson: entriesJson,
+      );
       var preview = jsonDecode(previewJson) as Map<String, dynamic>;
       if (!mounted) return;
       setState(() {
@@ -639,9 +624,6 @@ class _UserWordsPageState extends State<UserWordsPage> {
       }
     } catch (failure) {
       await c.reloadAccountSession();
-      if (!retriedPreparation && mounted && c.accountUser == null) {
-        await ensureAccountLogin(context, c);
-      }
       if (mounted) setState(() => _error = errorText(failure));
     } finally {
       if (mounted) {
@@ -762,7 +744,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                 () => _conflictsOnly = !_conflictsOnly,
                               ),
                             ),
-                            if (_isKeytao(_scheme)) ...[
+                            if (_isKeytao(_scheme) &&
+                                c.accountUser != null) ...[
                               ActionButton(
                                 '同步',
                                 icon: FLucideIcons.refreshCw,

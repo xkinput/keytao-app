@@ -287,7 +287,7 @@ class SchemePackageRow extends StatelessWidget {
                     ? null
                     : () => openUserWords(context, c, schemeKey: schemeKey),
               ),
-            if (package != null)
+            if (package != null && c.accountUser != null)
               ActionButton(
                 '上传',
                 onPress: c.busy || !package.hasPackageZip
@@ -385,7 +385,7 @@ class SchemePackageRow extends StatelessWidget {
               ),
           ],
         ),
-        if (package != null) ...[
+        if (package != null && c.accountUser != null) ...[
           const SizedBox(height: 10),
           SwitchSetting(
             '随账号同步',

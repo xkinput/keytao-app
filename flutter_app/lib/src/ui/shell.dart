@@ -7,6 +7,7 @@ import 'about_page.dart';
 import 'debug_page.dart';
 import 'extension_page.dart';
 import 'input_page.dart';
+import 'login.dart';
 import 'scheme_page.dart';
 import 'widgets.dart';
 
@@ -182,14 +183,28 @@ class _AppShellState extends State<AppShell> {
               bottom: false,
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    c.activePage.title,
-                    style: context.theme.typography.display.xl2.copyWith(
-                      fontWeight: FontWeight.w600,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        c.activePage.title,
+                        style: context.theme.typography.display.xl2.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
+                    FTooltip(
+                      tipBuilder: (_, _) => const Text('账号'),
+                      child: FButton.icon(
+                        variant: FButtonVariant.ghost,
+                        onPress: () => showAccountDialog(context, c),
+                        child: const Icon(
+                          FLucideIcons.user,
+                          semanticLabel: '账号',
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
