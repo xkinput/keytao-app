@@ -35,6 +35,7 @@ use windows::{
 use crate::{
     candidate_ui::CandidateUiManager,
     edit_session::with_write_session,
+    engine_status,
     globals::DllActivityGuard,
     input_context::{
         inspect_context, merge_probe_failed_state, ContextInputState, ContextProbe,
@@ -47,7 +48,6 @@ use crate::{
     panel_anchor::PanelAnchor,
 };
 
-const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
 /// How often the key path may stat the reload stamp. Focus changes always
 /// force a fresh read, so a schema update is still picked up before the first
@@ -119,6 +119,7 @@ pub struct TsfState {
     pub engine_building: bool,
     pub engine_error: Option<String>,
     engine_retry_after: Option<Instant>,
+    engine_failures: u32,
     pub thread_mgr: Option<ITfThreadMgr>,
     pub thread_mgr_sink: Option<ITfThreadMgrEventSink>,
     pub thread_mgr_sink_cookie: Option<u32>,
@@ -328,6 +329,7 @@ impl TsfState {
             engine_building: false,
             engine_error: None,
             engine_retry_after: None,
+            engine_failures: 0,
             thread_mgr: None,
             thread_mgr_sink: None,
             thread_mgr_sink_cookie: None,
@@ -399,6 +401,19 @@ impl TsfState {
     }
 
     pub(crate) fn build_engine() -> Result<EngineBundle, String> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::try_build_engine().map(|bundle| {
+                let schema = bundle.session.state().schema_id;
+                (bundle, schema)
+            })
+        }))
+        .unwrap_or_else(|_| Err("engine initialization panicked".into()));
+        let schema = result.as_ref().ok().map(|(_, schema)| schema.as_str());
+        record_engine_status(result.as_ref().err().map(String::as_str), schema);
+        result.map(|(bundle, _)| bundle)
+    }
+
+    fn try_build_engine() -> Result<EngineBundle, String> {
         let sandboxed = crate::appcontainer::is_appcontainer()
             .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
         let _init_guard = EngineInitGuard::acquire(sandboxed)?;
@@ -470,6 +485,8 @@ impl TsfState {
         self.engine_building = false;
         self.engine_error = None;
         self.engine_retry_after = None;
+        self.engine_failures = 0;
+        self.reload_retry_after = None;
     }
 
     pub(crate) fn engine_ready(&self) -> bool {
@@ -495,19 +512,25 @@ impl TsfState {
     pub(crate) fn finish_engine_build_error(&mut self, error: String) {
         self.engine_building = false;
         self.engine_error = Some(error);
-        self.engine_retry_after = Some(Instant::now() + ENGINE_RETRY_DELAY);
+        self.engine_failures = self.engine_failures.saturating_add(1);
+        self.engine_retry_after =
+            Some(Instant::now() + engine_status::retry_delay(self.engine_failures));
     }
 
     pub(crate) fn begin_reload_if_changed(&mut self) -> bool {
-        if self.reload_in_progress || !self.reload_needed() {
+        if self.engine_building || self.reload_in_progress || !self.reload_needed() {
             return false;
         }
         if self.reload_stamp_path.is_none() {
             return false;
         }
+        let now = Instant::now();
         if self
-            .reload_retry_after
-            .is_some_and(|retry_after| Instant::now() < retry_after)
+            .engine_retry_after
+            .is_some_and(|retry_after| now < retry_after)
+            || self
+                .reload_retry_after
+                .is_some_and(|retry_after| now < retry_after)
         {
             return false;
         }
@@ -568,8 +591,8 @@ impl TsfState {
                 self.reload_retry_after = None;
             }
             Err(error) => {
-                self.engine_error = Some(error);
-                self.reload_retry_after = Some(Instant::now() + ENGINE_RETRY_DELAY);
+                self.finish_engine_build_error(error);
+                self.reload_retry_after = self.engine_retry_after;
             }
         }
     }
@@ -655,6 +678,17 @@ pub(crate) fn append_diagnostic(message: impl AsRef<str>) {
     keytao_core::rt_log!(Level::Verbose, "ui", "tsf", msg = message.as_ref());
 }
 
+fn record_engine_status(error: Option<&str>, schema: Option<&str>) {
+    let result = default_user_data_dir()
+        .ok_or_else(|| "cannot determine engine status directory".to_string())
+        .and_then(|dir| {
+            engine_status::write_status(&dir, error, schema).map_err(|error| error.to_string())
+        });
+    if let Err(error) = result {
+        keytao_core::rt_log!(Level::Info, "error", "engine_status_write", msg = error);
+    }
+}
+
 pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
     let mailbox = {
         let mut st = shared_state.borrow_mut();
@@ -700,6 +734,7 @@ pub(crate) fn start_engine_warmup(shared_state: &SharedState) {
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine warmup thread: {error}");
+        record_engine_status(Some(&message), None);
         keytao_core::rt_log!(
             Level::Info,
             "error",
@@ -764,6 +799,7 @@ pub(crate) fn start_reload_if_needed(shared_state: &SharedState) -> bool {
         });
     if let Err(error) = spawn_result {
         let message = format!("start engine reload thread: {error}");
+        record_engine_status(Some(&message), None);
         keytao_core::rt_log!(
             Level::Info,
             "error",
@@ -2133,6 +2169,45 @@ mod tests {
         assert!(state.begin_engine_build());
         assert!(state.engine_error.is_none());
         assert!(!state.begin_engine_build());
+    }
+
+    #[test]
+    fn reload_failure_cannot_bypass_engine_backoff() {
+        let mut state = super::TsfState::new();
+        state.reload_in_progress = true;
+        state.finish_reload(Err("engine initialization timed out".into()));
+        assert!(!state.reload_in_progress);
+        assert_eq!(state.reload_retry_after, state.engine_retry_after);
+        assert!(!state.begin_engine_build());
+        assert_eq!(state.engine_failures, 1);
+        state.engine_retry_after = Some(Instant::now());
+        assert!(state.begin_engine_build());
+        state.finish_engine_build_error("still unavailable".into());
+        assert_eq!(state.engine_failures, 2);
+        assert!(!state.begin_engine_build());
+    }
+
+    #[test]
+    fn warmup_prevents_a_concurrent_reload() {
+        let mut state = super::TsfState::new();
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-warmup-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        state.reload_stamp_path = Some(keytao_core::ReloadStamp::write(&dir).unwrap());
+        assert!(state.reload_needed());
+        assert!(state.begin_engine_build());
+        assert!(!state.begin_reload_if_changed());
+        assert!(!state.reload_in_progress);
+        state.finish_engine_build_error("warmup failed after reload failure".into());
+        state.reload_retry_after = Some(Instant::now());
+        assert!(!state.begin_reload_if_changed());
+        assert!(!state.reload_in_progress);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

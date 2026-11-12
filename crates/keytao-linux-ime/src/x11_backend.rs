@@ -780,7 +780,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn run(engine: CoreEngine) {
+pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     // XWayland starts lazily in niri: DISPLAY may be set in the environment but
     // the actual server socket may not exist yet.  Retry until it is available.
     let (conn, screen_num) = loop {
@@ -813,6 +813,7 @@ pub fn run(engine: CoreEngine) {
 
     tracing::info!("X11 XIM server running as @server=keytao");
     tracing::info!("Set XMODIFIERS=@im=keytao in your session to use this IME");
+    frontend.connected();
 
     loop {
         // Drain everything XCB already buffered before going back to sleep,

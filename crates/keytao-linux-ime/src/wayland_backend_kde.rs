@@ -1064,7 +1064,7 @@ delegate_noop!(App: ignore ZwpInputPanelV1);
 delegate_noop!(App: ignore ZwpInputPanelSurfaceV1);
 delegate_noop!(App: ignore WlRegion);
 
-pub fn run(engine: CoreEngine) -> Result<(), String> {
+pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<(), String> {
     let session = engine
         .create_session()
         .map_err(|e| format!("failed to create KDE Wayland Rime session: {e}"))?;
@@ -1107,6 +1107,7 @@ pub fn run(engine: CoreEngine) -> Result<(), String> {
     }
 
     tracing::info!("KDE Wayland IME running (input-method-v1)");
+    frontend.connected();
     run_event_loop(&conn, &mut queue, &mut app, &kimpanel_runtime)
 }
 

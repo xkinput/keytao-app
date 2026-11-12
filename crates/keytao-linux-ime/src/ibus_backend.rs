@@ -685,7 +685,7 @@ pub(crate) fn wayland_display_number() -> Option<u32> {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub async fn run(engine: CoreEngine) {
+pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     tracing::info!("IBus D-Bus backend starting");
 
     let builder = match connection::Builder::session() {
@@ -772,7 +772,7 @@ pub async fn run(engine: CoreEngine) {
         .object_server()
         .remove::<IBusBus, _>("/org/freedesktop/IBus")
         .await;
-    let _ = conn
+    if let Err(e) = conn
         .object_server()
         .at(
             "/org/freedesktop/IBus",
@@ -784,7 +784,11 @@ pub async fn run(engine: CoreEngine) {
                 theme_resolver: theme_resolver_clone,
             },
         )
-        .await;
+        .await
+    {
+        tracing::error!("IBus: failed to register bus object: {e}");
+        return;
+    }
 
     // Notify any already-connected IBus clients that the keytao engine is active.
     // Chromium/CEF clients that connected before this signal can use GetGlobalEngine instead.
@@ -795,11 +799,16 @@ pub async fn run(engine: CoreEngine) {
     }
 
     tracing::info!("IBus D-Bus backend ready ({})", dbus_address);
-    let _conn = conn; // keep connection alive
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    frontend.connected();
+    use zbus::export::futures_util::StreamExt;
+    let mut messages = zbus::MessageStream::from(&conn);
+    while let Some(message) = messages.next().await {
+        if let Err(error) = message {
+            tracing::error!("IBus D-Bus connection lost: {error}");
+            return;
+        }
     }
+    tracing::warn!("IBus D-Bus connection closed");
 }
 
 #[cfg(test)]

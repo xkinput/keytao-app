@@ -44,12 +44,34 @@ pub fn stop_managed_ime_helper(host: &impl ImeHost) {
     };
     if let Some(mut child) = child_slot.take() {
         let pid = child.id();
-        if let Err(e) = child.kill() {
-            tracing::warn!("failed to kill managed keytao-ime pid={pid}: {e}");
-        }
-        let _ = child.wait();
+        stop_ime_child(&mut child);
         tracing::info!("managed keytao-ime pid={pid} stopped");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_ime_child(child: &mut std::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.id();
+    if std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        for _ in 0..20 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Err(_) => break,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+    if let Err(error) = child.kill() {
+        tracing::warn!("failed to kill keytao-ime pid={pid}: {error}");
+    }
+    let _ = child.wait();
 }
 
 #[cfg(target_os = "linux")]
@@ -190,6 +212,9 @@ fn linux_ime_status_with_message(
     let (_, command) = resolve_keytao_ime_command(core);
     let managed_pid = refresh_managed_ime_helper(host);
     let process_entries = keytao_ime_process_entries();
+    let running = [false, true]
+        .into_iter()
+        .any(|kde_native| ready_keytao_ime_pid(&process_entries, kde_native).is_some());
     let kde_native_processes = process_entries.iter().filter(|p| p.kde_native).count();
     let fallback_processes = process_entries.iter().filter(|p| !p.kde_native).count();
     let processes = process_entries.into_iter().map(|p| p.line).collect();
@@ -199,7 +224,7 @@ fn linux_ime_status_with_message(
         supported: true,
         kde_session: is_kde_session(),
         kde_configured: is_kde_input_method_configured(),
-        running: kde_native_processes + fallback_processes > 0,
+        running,
         managed_pid,
         daemon_owner_pid: linux_ime_daemon_owner_pid(),
         command,
@@ -359,34 +384,68 @@ fn resolve_keytao_ime_command(core: &Core) -> (std::process::Command, String) {
 }
 
 #[cfg(target_os = "linux")]
-fn is_same_keytao_ime_running(expected: &str) -> bool {
-    if expected == "keytao-ime" {
-        return is_any_keytao_ime_running();
+fn keytao_ime_ready_path(kde_native: bool) -> Option<PathBuf> {
+    dirs::runtime_dir().map(|dir| {
+        dir.join(if kde_native {
+            "keytao-ime-kwin.ready"
+        } else {
+            "keytao-ime.ready"
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn matching_ready_pid(
+    content: &str,
+    processes: &[KeytaoImeProcess],
+    kde_native: bool,
+) -> Option<u32> {
+    let mut fields = content.split_whitespace();
+    let pid = fields.next()?.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+    let backends = fields.next()?;
+    if fields.next().is_some()
+        || !backends
+            .split(',')
+            .all(|backend| matches!(backend, "wayland" | "xim" | "ibus" | "ibus-engine"))
+    {
+        return None;
     }
-
-    keytao_ime_process_lines()
-        .into_iter()
-        .any(|line| line.contains(expected))
+    processes
+        .iter()
+        .find(|process| process.pid == pid && process.kde_native == kde_native)
+        .map(|process| process.pid)
 }
 
 #[cfg(target_os = "linux")]
-fn is_any_keytao_ime_running() -> bool {
-    !keytao_ime_process_lines().is_empty()
+fn ready_keytao_ime_pid(processes: &[KeytaoImeProcess], kde_native: bool) -> Option<u32> {
+    let content = std::fs::read_to_string(keytao_ime_ready_path(kde_native)?).ok()?;
+    let pid = matching_ready_pid(&content, processes, kde_native)?;
+    is_keytao_ime_executable(pid).then_some(pid)
 }
 
 #[cfg(target_os = "linux")]
-fn is_fallback_keytao_ime_running() -> bool {
-    keytao_ime_process_entries()
-        .into_iter()
-        .any(|process| !process.kde_native)
-}
+fn keytao_ime_launch_failure(reason: String) -> String {
+    use std::io::{Read, Seek, SeekFrom};
 
-#[cfg(target_os = "linux")]
-fn keytao_ime_process_lines() -> Vec<String> {
-    keytao_ime_process_entries()
-        .into_iter()
-        .map(|process| process.line)
-        .collect()
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")));
+    let last_line = state_dir.and_then(|dir| {
+        let mut file = std::fs::File::open(dir.join("keytao/log/keytao-ime.log")).ok()?;
+        let len = file.metadata().ok()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(8192))).ok()?;
+        let mut tail = Vec::new();
+        file.take(8192).read_to_end(&mut tail).ok()?;
+        String::from_utf8_lossy(&tail)
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_owned())
+    });
+    match last_line {
+        Some(line) => format!("{reason}；最后日志：{line}"),
+        None => reason,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -512,33 +571,63 @@ pub fn launch_keytao_ime(
     cleanup_kde_legacy_ime_files();
     let (mut ime_cmd, ime_display) = resolve_keytao_ime_command(core);
 
-    if restart {
-        stop_managed_ime_helper(host);
-        stop_external_keytao_ime_processes(false);
-    } else if is_fallback_keytao_ime_running() {
-        let message = if is_same_keytao_ime_running(&ime_display) {
-            format!("keytao-ime XIM+IBUS 已在运行：{ime_display}")
+    let ready_path =
+        keytao_ime_ready_path(false).ok_or("启动 keytao-ime 失败：无法确定运行时目录")?;
+    let processes = keytao_ime_process_entries();
+    let ready_pid = ready_keytao_ime_pid(&processes, false);
+    if !restart && ready_pid.is_some() {
+        let same_binary = ime_display == "keytao-ime"
+            || processes.iter().any(|process| {
+                Some(process.pid) == ready_pid && process.line.contains(&ime_display)
+            });
+        let message = if same_binary {
+            format!("keytao-ime 已在运行：{ime_display}")
         } else {
-            format!("已有其他 keytao-ime XIM+IBUS 进程在运行，当前 app 期望使用：{ime_display}")
+            format!("已有其他 keytao-ime 进程在运行，当前 app 期望使用：{ime_display}")
         };
         return Ok(linux_ime_status_with_message(core, host, message));
     }
+    if restart || processes.iter().any(|process| !process.kde_native) {
+        stop_managed_ime_helper(host);
+        stop_external_keytao_ime_processes(false);
+    }
+    if let Err(error) = std::fs::remove_file(&ready_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("无法清除 keytao-ime 就绪状态：{error}"));
+        }
+    }
 
-    let child = ime_cmd
+    let mut child = ime_cmd
         .spawn()
         .map_err(|e| format!("启动 keytao-ime 失败（{ime_display}）：{e}"))?;
     let pid = child.id();
-    if let Ok(mut slot) = host.managed_helper().0.lock() {
-        *slot = Some(child);
-    }
     tracing::info!("keytao-ime spawned from {ime_display} pid={pid}");
 
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    Ok(linux_ime_status_with_message(
-        core,
-        host,
-        format!("已启动 keytao-ime pid={pid}"),
-    ))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let failure = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break format!("启动 keytao-ime 失败（pid={pid}）：{status}"),
+            Err(error) => break format!("无法检查 keytao-ime（pid={pid}）：{error}"),
+            Ok(None) => {}
+        }
+        if ready_keytao_ime_pid(&keytao_ime_process_entries(), false) == Some(pid) {
+            match host.managed_helper().0.lock() {
+                Ok(mut slot) => *slot = Some(child),
+                Err(_) => break format!("无法管理 keytao-ime（pid={pid}）"),
+            }
+            return Ok(linux_ime_status_with_message(
+                core,
+                host,
+                format!("已启动 keytao-ime pid={pid}"),
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            break format!("启动 keytao-ime 超时（pid={pid}）");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    stop_ime_child(&mut child);
+    Err(keytao_ime_launch_failure(failure))
 }
 #[cfg(target_os = "linux")]
 pub fn linux_ime_status(core: &Core, host: &impl ImeHost) -> LinuxImeStatus {
@@ -547,7 +636,51 @@ pub fn linux_ime_status(core: &Core, host: &impl ImeHost) -> LinuxImeStatus {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::is_upgrade_deploy_command_line;
+    use super::{KeytaoImeProcess, is_upgrade_deploy_command_line, matching_ready_pid};
+
+    #[test]
+    fn ready_record_requires_matching_process_and_backend_role() {
+        let processes = [KeytaoImeProcess {
+            pid: 42,
+            line: "42 /usr/bin/keytao-ime".into(),
+            kde_native: false,
+        }];
+        assert_eq!(
+            matching_ready_pid("42 wayland\n", &processes, false),
+            Some(42)
+        );
+        assert_eq!(
+            matching_ready_pid("42 xim,ibus\n", &processes, false),
+            Some(42)
+        );
+        assert_eq!(matching_ready_pid("42 wayland\n", &processes, true), None);
+        assert_eq!(matching_ready_pid("43 wayland\n", &processes, false), None);
+        assert_eq!(matching_ready_pid("42 wayland\n", &[], false), None);
+    }
+
+    #[test]
+    fn ready_record_rejects_incomplete_or_invalid_data() {
+        let processes = [KeytaoImeProcess {
+            pid: 42,
+            line: String::new(),
+            kde_native: false,
+        }];
+        for content in [
+            "",
+            "42",
+            "0 wayland",
+            "-1 wayland",
+            "42 unknown",
+            "42 xim,",
+            "42 xim extra",
+        ] {
+            assert_eq!(
+                matching_ready_pid(content, &processes, false),
+                None,
+                "{content}"
+            );
+        }
+    }
 
     #[test]
     fn upgrade_deploy_process_filter_matches_exact_argument() {

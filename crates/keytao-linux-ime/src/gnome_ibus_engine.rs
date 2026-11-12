@@ -198,6 +198,7 @@ fn ibus_component() -> zvariant::OwnedValue {
     default_path = "/org/freedesktop/IBus"
 )]
 trait IBusBusDaemon {
+    async fn list_active_engines(&self) -> zbus::Result<Vec<zvariant::OwnedValue>>;
     async fn register_component(&self, component: &zvariant::Value<'_>) -> zbus::Result<()>;
 }
 
@@ -722,7 +723,7 @@ async fn ibus_panel_available(conn: &zbus::Connection) -> bool {
 
 /// Connect to the running IBus daemon (GNOME's ibus-daemon) and register as an
 /// IBus engine.  Blocks until the connection drops or the process exits.
-pub async fn run(engine: CoreEngine) {
+pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     tracing::info!("IBus engine backend starting (GNOME mode)");
 
     let address = ibus_bus_address();
@@ -753,6 +754,26 @@ pub async fn run(engine: CoreEngine) {
             return;
         }
     };
+
+    let daemon = match IBusBusDaemonProxy::new(&conn).await {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            tracing::error!("IBus daemon proxy failed: {error}");
+            return;
+        }
+    };
+    let mut owner_changes = match daemon.inner().receive_owner_changed().await {
+        Ok(changes) => changes,
+        Err(error) => {
+            tracing::error!("IBus daemon owner watch failed: {error}");
+            return;
+        }
+    };
+    // A session bus connection alone does not establish an IBus frontend.
+    if let Err(error) = daemon.list_active_engines().await {
+        tracing::error!("IBus daemon is unavailable: {error}");
+        return;
+    }
 
     // GNOME renders the lookup table itself.  Only fall back to the X11 overlay
     // when no panel owns the name, otherwise every candidate shows up twice.
@@ -801,14 +822,11 @@ pub async fn run(engine: CoreEngine) {
     // without an installed component XML still see the "keytao" engine.
     let component_ov = ibus_component();
     match zvariant::Value::try_from(&component_ov) {
-        Ok(component_v) => match IBusBusDaemonProxy::new(&conn).await {
-            Ok(proxy) => match proxy.register_component(&component_v).await {
-                Ok(()) => tracing::info!("IBus component registered with daemon"),
-                Err(e) => tracing::warn!(
-                    "IBus RegisterComponent failed (the installed component XML takes over): {e}"
-                ),
-            },
-            Err(e) => tracing::warn!("IBus daemon proxy failed: {e}"),
+        Ok(component_v) => match daemon.register_component(&component_v).await {
+            Ok(()) => tracing::info!("IBus component registered with daemon"),
+            Err(e) => tracing::warn!(
+                "IBus RegisterComponent failed (the installed component XML takes over): {e}"
+            ),
         },
         Err(e) => tracing::warn!("Failed to serialize IBus component: {e}"),
     }
@@ -816,7 +834,10 @@ pub async fn run(engine: CoreEngine) {
     // ibus-daemon looks the factory up by the component's bus name.
     match conn.request_name(IBUS_COMPONENT_BUS_NAME).await {
         Ok(()) => tracing::info!("IBus component name {IBUS_COMPONENT_BUS_NAME} acquired"),
-        Err(e) => tracing::error!("IBus engine backend: cannot own {IBUS_COMPONENT_BUS_NAME}: {e}"),
+        Err(e) => {
+            tracing::error!("IBus engine backend: cannot own {IBUS_COMPONENT_BUS_NAME}: {e}");
+            return;
+        }
     }
 
     tracing::info!(
@@ -825,9 +846,27 @@ pub async fn run(engine: CoreEngine) {
          and add 'KeyTao' (Other → Chinese → KeyTao)."
     );
 
-    let _conn = conn;
+    frontend.connected();
+    use zbus::export::futures_util::StreamExt;
+    let mut messages = zbus::MessageStream::from(&conn);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        tokio::select! {
+            _ = owner_changes.next() => {
+                tracing::warn!("IBus daemon owner changed; engine backend stopped");
+                return;
+            }
+            message = messages.next() => match message {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    tracing::error!("IBus engine connection lost: {error}");
+                    return;
+                }
+                None => {
+                    tracing::warn!("IBus engine connection closed");
+                    return;
+                }
+            }
+        }
     }
 }
 

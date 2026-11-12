@@ -1,4 +1,6 @@
+#[cfg(target_os = "windows")]
 use crate::{Core, CoreError, CoreEvent, events::WindowsImeStatus, ime_paths::*};
+#[cfg(target_os = "windows")]
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -6,7 +8,142 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+#[cfg(target_os = "windows")]
 use time::OffsetDateTime;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(serde::Deserialize)]
+struct WindowsImeEngineStatus {
+    ok: bool,
+    error: Option<String>,
+    ts: Option<u64>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_ime_engine_error(status_path: &std::path::Path, deployed: bool) -> Option<String> {
+    let bytes = match std::fs::read(status_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (!deployed).then(|| "输入法方案尚未部署".into());
+        }
+        Err(error) => return Some(format!("读取输入法引擎状态失败：{error}")),
+    };
+    match serde_json::from_slice::<WindowsImeEngineStatus>(&bytes) {
+        Ok(status) if status.ok => None,
+        Ok(status) => {
+            let reload_ts = status_path
+                .parent()
+                .and_then(|dir| std::fs::read_to_string(keytao_core::ReloadStamp::path(dir)).ok())
+                .and_then(|stamp| stamp.trim().parse::<u128>().ok())
+                .map(|stamp| stamp / 1_000_000);
+            if status
+                .ts
+                .zip(reload_ts)
+                .is_some_and(|(ts, reload_ts)| u128::from(ts) < reload_ts)
+            {
+                return (!deployed).then(|| "输入法方案尚未部署".into());
+            }
+            Some(
+                status
+                    .error
+                    .filter(|error| !error.trim().is_empty())
+                    .unwrap_or_else(|| "输入法引擎初始化失败".into()),
+            )
+        }
+        Err(error) => Some(format!("输入法引擎状态无效：{error}")),
+    }
+}
+
+#[cfg(test)]
+mod engine_status_tests {
+    use super::windows_ime_engine_error;
+
+    #[test]
+    fn missing_status_requires_deployed_schemas() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keytao-ime-engine.json");
+        assert_eq!(windows_ime_engine_error(&path, true), None);
+        assert_eq!(
+            windows_ime_engine_error(&path, false).as_deref(),
+            Some("输入法方案尚未部署")
+        );
+    }
+
+    #[test]
+    fn latest_engine_result_controls_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keytao-ime-engine.json");
+        std::fs::write(
+            &path,
+            br#"{"ok":false,"error":"engine init timeout","schema":null,"ts":1,"pid":42}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            windows_ime_engine_error(&path, true).as_deref(),
+            Some("engine init timeout")
+        );
+        std::fs::write(
+            &path,
+            br#"{"ok":true,"error":null,"schema":"keytao","ts":2,"pid":42}"#,
+        )
+        .unwrap();
+        assert_eq!(windows_ime_engine_error(&path, true), None);
+        assert_eq!(windows_ime_engine_error(&path, false), None);
+        std::fs::write(&path, br#"{"ok":false,"error":"   "}"#).unwrap();
+        assert_eq!(
+            windows_ime_engine_error(&path, true).as_deref(),
+            Some("输入法引擎初始化失败")
+        );
+    }
+
+    #[test]
+    fn reload_stamp_invalidates_only_older_engine_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keytao-ime-engine.json");
+        std::fs::write(
+            &path,
+            br#"{"ok":false,"error":"engine init timeout","ts":1000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            windows_ime_engine_error(&path, true).as_deref(),
+            Some("engine init timeout")
+        );
+        let stamp = keytao_core::ReloadStamp::path(dir.path());
+        for timestamp in [999_000_000_u128, 1_000_000_000, 1_000_999_999] {
+            std::fs::write(&stamp, format!("{timestamp}\n")).unwrap();
+            assert_eq!(
+                windows_ime_engine_error(&path, true).as_deref(),
+                Some("engine init timeout")
+            );
+        }
+        std::fs::write(&stamp, "1001000000\n").unwrap();
+        assert_eq!(windows_ime_engine_error(&path, true), None);
+        assert_eq!(
+            windows_ime_engine_error(&path, false).as_deref(),
+            Some("输入法方案尚未部署")
+        );
+    }
+
+    #[test]
+    fn malformed_or_unreadable_status_is_not_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keytao-ime-engine.json");
+        for contents in ["{", "{}", r#"{"ok":"true"}"#] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(
+                windows_ime_engine_error(&path, true)
+                    .unwrap()
+                    .starts_with("输入法引擎状态无效：")
+            );
+        }
+        assert!(
+            windows_ime_engine_error(dir.path(), true)
+                .unwrap()
+                .starts_with("读取输入法引擎状态失败：")
+        );
+    }
+}
 
 #[cfg(target_os = "windows")]
 const WINDOWS_TEXT_SERVICE_CLSID: &str = "{4A5C6D7E-8F90-1A2B-3C4D-5E6F7A8B9C0D}";
@@ -802,9 +939,18 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
             "；x86 COM 尚未注册"
         });
     }
-    let registered = registered_dll && profile_enabled;
+    let engine_error = match keytao_core::default_user_data_dir() {
+        Some(user_dir) => windows_ime_engine_error(
+            &user_dir.join("keytao-ime-engine.json"),
+            keytao_core::schema_install_state(&user_dir).deployed,
+        ),
+        None => Some("无法确定输入法数据目录".into()),
+    };
+    let registered = registered_dll && profile_enabled && engine_error.is_none();
     let registration_state = if !packaged {
         "missing_runtime"
+    } else if engine_error.is_some() {
+        "failed"
     } else if registered {
         "registered"
     } else if registered_dll || profile_enabled {
@@ -816,6 +962,10 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
     let (shared_data_dir, shared_data_source) =
         shared_data_status(windows_app_shared_data_dir(core));
     let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
+    let message = engine_error
+        .as_ref()
+        .map(|error| format!("Windows 输入法未就绪：{error}"))
+        .unwrap_or(message);
 
     WindowsImeStatus {
         supported: true,
@@ -825,7 +975,7 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
         profile_enabled,
         registration_busy: false,
         registration_state,
-        registration_error: None,
+        registration_error: engine_error,
         runtime_dir: runtime_dir.map(|p| windows_normal_path(&p)),
         dll_path: dll_path.map(|p| windows_normal_path(&p)),
         registered_path,
@@ -872,8 +1022,10 @@ fn windows_ime_repairing_status(core: &Core) -> WindowsImeStatus {
 
 #[cfg(target_os = "windows")]
 fn windows_ime_repair_failed_status(core: &Core, error: String) -> WindowsImeStatus {
-    let mut status =
-        windows_ime_status_with_message(core, format!("Windows 输入法词典修复失败：{error}"));
+    let message = format!("Windows 输入法词典修复失败：{error}");
+    let mut status = windows_ime_status_with_message(core, message.clone());
+    status.registered = false;
+    status.message = message;
     status.registration_state = "repair_failed".into();
     status.registration_error = Some(error);
     status
@@ -1192,7 +1344,7 @@ fn windows_register_ime_blocking(core: &Core) -> Result<WindowsImeStatus, String
     run_regsvr32_elevated(&targets, false)?;
     windows_enable_ime_for_current_user()?;
     let status = windows_ime_status_with_message(core, "已注册 KeyTao Windows IME".into());
-    if status.registered {
+    if status.registered_dll && status.profile_enabled {
         Ok(status)
     } else {
         Err("regsvr32 已结束，但 x64/x86 COM 注册或 TSF profile 仍不完整；请确认 UAC 已同意，并查看是否有安全软件拦截注册表写入".into())
@@ -1211,12 +1363,14 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
         if !status.packaged {
             return Ok(status);
         }
-        if status.registered {
+        if status.registered_dll && status.profile_enabled {
             if windows_ime_data_repair_required() {
                 return Ok(start_windows_ime_data_repair(&core));
             }
             let mut ready = status;
-            ready.message = "KeyTao Windows IME 已就绪".into();
+            if ready.registered {
+                ready.message = "KeyTao Windows IME 已就绪".into();
+            }
             return Ok(ready);
         }
 
