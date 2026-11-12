@@ -26,6 +26,8 @@ pub struct PackageMeta {
 #[derive(Serialize, Deserialize)]
 struct ActiveManifest {
     root: String,
+    #[serde(default)]
+    scheme_key: String,
     manifest: BTreeMap<String, String>,
 }
 
@@ -292,7 +294,7 @@ pub(crate) fn store_cloud_archive(
     display_name: Option<&str>,
     zip_bytes: &[u8],
     user_root: &Path,
-) -> Result<(), CoreError> {
+) -> Result<String, CoreError> {
     use std::io::{Read, Write};
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     let dir = checked_store_dir(core)?;
@@ -331,6 +333,34 @@ pub(crate) fn store_cloud_archive(
         }
         manifest.insert(relative, format!("{:x}", digest.finalize()));
     }
+    let digest = format!("{:x}", Sha256::digest(zip_bytes));
+    // Allocate under the store lock so concurrent downloads cannot claim the same key.
+    let store_guard = core
+        .pending_package
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let state = core.state();
+    let occupied = |key: &str| {
+        state.installed_packages.contains_key(key)
+            || dir.join(format!("{key}.zip")).exists()
+            || dir.join(format!("{key}.json")).exists()
+    };
+    let mut key = scheme_key.to_owned();
+    if crate::scheme::is_local_scheme_key(scheme_key) && occupied(scheme_key) {
+        let existing = fs::read(dir.join(format!("{scheme_key}.json")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok());
+        if !existing.is_some_and(|meta| meta.zip_sha256.eq_ignore_ascii_case(&digest)) {
+            let mut number = 2u64;
+            while occupied(&key) {
+                let suffix = format!("-{number}");
+                let base = &scheme_key[..scheme_key.len().min(106 - suffix.len())];
+                key = format!("{base}{suffix}");
+                number += 1;
+            }
+        }
+    }
+    let scheme_key = key.as_str();
     let meta = PackageMeta {
         scheme_key: scheme_key.into(),
         version: version.map(str::to_owned),
@@ -346,13 +376,8 @@ pub(crate) fn store_cloud_archive(
         .into(),
         display_name: display_name.map(str::to_owned),
         manifest,
-        zip_sha256: format!("{:x}", Sha256::digest(zip_bytes)),
+        zip_sha256: digest,
     };
-    // Serialize store replacements without modifying the official install's pending receipt.
-    let store_guard = core
-        .pending_package
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
     if core.state().active_scheme.as_deref() == Some(scheme_key) {
         return Err(CoreError::Other("请先切换到其他方案".into()));
     }
@@ -385,7 +410,7 @@ pub(crate) fn store_cloud_archive(
     })?;
     drop(store_guard);
     crate::user_words::remember_reconciliation(core, scheme_key, user_root, false);
-    Ok(())
+    Ok(key)
 }
 
 pub(crate) fn excluded_from_manifest(relative: &str) -> bool {
@@ -473,16 +498,26 @@ pub(crate) fn finalize_pending(
         .persist(dir.join(format!("{scheme_key}.json")))
         .map_err(|error| CoreError::from(error.error))?;
     if active {
+        let active_manifest = ActiveManifest {
+            root: receipt.root.clone(),
+            scheme_key: scheme_key.into(),
+            manifest: receipt.manifest.clone(),
+        };
+        if !receipt.root.is_empty() {
+            let root = Path::new(&receipt.root);
+            let mut marker = tempfile::Builder::new()
+                .prefix(".active-")
+                .tempfile_in(root)?;
+            serde_json::to_writer_pretty(marker.as_file_mut(), &active_manifest)?;
+            marker.as_file().sync_all()?;
+            marker
+                .persist(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST))
+                .map_err(|error| CoreError::from(error.error))?;
+        }
         let mut temporary = tempfile::Builder::new()
             .prefix(".active-")
             .tempfile_in(&dir)?;
-        serde_json::to_writer_pretty(
-            temporary.as_file_mut(),
-            &ActiveManifest {
-                root: receipt.root.clone(),
-                manifest: receipt.manifest.clone(),
-            },
-        )?;
+        serde_json::to_writer_pretty(temporary.as_file_mut(), &active_manifest)?;
         temporary.as_file().sync_all()?;
         temporary
             .persist(dir.join("active-manifest.json"))
@@ -544,16 +579,22 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
     Ok(state
         .installed_packages
         .into_iter()
-        .map(|(scheme_key, package)| {
+        .filter_map(|(scheme_key, package)| {
             let has_package_zip = crate::scheme::validate_scheme_key(&scheme_key).is_ok()
                 && fs::symlink_metadata(dir.join(format!("{scheme_key}.zip")))
                     .is_ok_and(|meta| meta.is_file());
             let meta = if crate::scheme::validate_scheme_key(&scheme_key).is_ok() {
-                stored_metadata(core, &scheme_key)?
+                match stored_metadata(core, &scheme_key) {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        tracing::warn!(%scheme_key, %error, "Skipping unreadable package metadata");
+                        return None;
+                    }
+                }
             } else {
                 None
             };
-            Ok(InstalledPackageInfo {
+            Some(InstalledPackageInfo {
                 active: state.active_scheme.as_deref() == Some(&scheme_key),
                 scheme_key,
                 version: package.version,
@@ -565,7 +606,7 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
                 display_name: meta.and_then(|meta| meta.display_name),
             })
         })
-        .collect::<Result<Vec<_>, CoreError>>()?)
+        .collect())
 }
 
 pub fn remove_scheme_package(core: &Core, scheme_key: &str) -> Result<(), CoreError> {
@@ -811,6 +852,28 @@ mod tests {
             Arc::new(NullSink),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn list_packages_skips_corrupt_and_unreadable_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let store = checked_store_dir(&core).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("local-corrupt.json"), "invalid json").unwrap();
+        fs::create_dir(store.join("local-unreadable.json")).unwrap();
+        core.update_state(|state| {
+            for key in ["local-corrupt", "local-unreadable", "keytao"] {
+                state
+                    .installed_packages
+                    .insert(key.into(), crate::state::InstalledPackage { version: None });
+            }
+        })
+        .unwrap();
+        let packages = list_installed_packages(&core).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].scheme_key, "keytao");
+        assert_eq!(core.state().installed_packages.len(), 3);
     }
 
     #[test]

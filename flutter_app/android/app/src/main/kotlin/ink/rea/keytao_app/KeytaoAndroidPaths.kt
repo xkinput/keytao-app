@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.UserManager
 import java.io.File
+import org.json.JSONObject
 
 enum class StorageStatus { READY, NOT_UNLOCKED_OR_NOT_MOUNTED, PERMISSION_MISSING }
 
@@ -95,6 +96,7 @@ object KeytaoAndroidPaths {
             root
         }
         events.forEach { (event, elapsed) -> KeytaoRuntimeLog.event("lifecycle", event, elapsed) }
+        result?.let { restoreLegacyLocalManifest(appContext.dataDir, it) }
         return result
     }
 
@@ -201,8 +203,46 @@ object KeytaoAndroidPaths {
             .map { File(root, it) }
             .firstOrNull { it.isFile }
             ?: return emptyList()
-        return runCatching { parseSchemas(config.readText()).filter(::isSafeSchemaId) }
+        val localSchemas = runCatching {
+            val manifest = JSONObject(File(root, ".keytao-active-scheme.json").readText())
+            if (!manifest.getString("scheme_key").startsWith("local-") ||
+                File(manifest.getString("root")) != root.canonicalFile) {
+                emptySet()
+            } else {
+                manifest.getJSONObject("manifest").keys().asSequence()
+                    .filter { it.endsWith(".schema.yaml") }
+                    .map { it.removeSuffix(".schema.yaml") }
+                    .filter(::isSafeSchemaId)
+                    .toSet()
+            }
+        }.getOrDefault(emptySet())
+        return runCatching {
+            parseSchemas(config.readText()).filter {
+                isSafeSchemaId(it) && (isManagedSchema(it) || it in localSchemas)
+            }
+        }
             .getOrDefault(emptyList())
+    }
+
+    private fun restoreLegacyLocalManifest(dataDir: File, root: File) {
+        val marker = File(root, ".keytao-active-scheme.json")
+        if (marker.exists()) return
+        runCatching {
+            val state = JSONObject(File(dataDir, "app-state.json").readText())
+            val key = state.getString("active_scheme")
+            if (!key.startsWith("local-") || !state.getJSONObject("installed_packages").has(key)) return
+            val manifest = JSONObject(File(dataDir, "scheme-packages/active-manifest.json").readText())
+            if (File(manifest.getString("root")) != root.canonicalFile) return
+            if (manifest.has("scheme_key") && manifest.getString("scheme_key") != key) return
+            manifest.put("scheme_key", key)
+            val temporary = File.createTempFile(".active-", ".json", root)
+            try {
+                temporary.writeText(manifest.toString())
+                if (!marker.exists()) check(temporary.renameTo(marker))
+            } finally {
+                temporary.delete()
+            }
+        }
     }
 
     fun isWritable(root: File): Boolean {

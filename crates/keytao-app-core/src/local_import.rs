@@ -9,15 +9,15 @@ use std::{
 };
 
 fn excluded(relative: &str) -> bool {
-    relative.split('/').any(|part| {
-        matches!(
-            part,
-            "build" | ".git" | "sync" | "installation.yaml" | "user.yaml" | ".DS_Store"
-        ) || part.ends_with(".userdb")
-            || part.ends_with(".custom.yaml")
-            || part == "default-custom.yaml"
-            || crate::install::is_protected_user_file(part)
-    })
+    let top = relative.split('/').next().unwrap_or(relative);
+    matches!(top, "build" | "sync" | "installation.yaml" | "user.yaml")
+        || relative.split('/').any(|part| {
+            matches!(part, ".git" | ".DS_Store")
+                || part.ends_with(".userdb")
+                || part.ends_with(".custom.yaml")
+                || part == "default-custom.yaml"
+                || (part != "user.yaml" && crate::install::is_protected_user_file(part))
+        })
 }
 
 fn collect(

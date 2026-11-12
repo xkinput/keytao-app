@@ -462,7 +462,11 @@ class KeytaoAndroidChannel(
                 val destination = safePrivateFile(temporaryRoot, name)
                 check(destination.mkdir()) { "无法创建临时目录" }
                 copyTreeDirectory(uri, DocumentsContract.getTreeDocumentId(uri), destination, mutableSetOf())
-                reply.success(mapOf("path" to destination.absolutePath, "name" to name))
+                reply.success(mapOf(
+                    "path" to destination.absolutePath,
+                    "name" to name,
+                    "temporaryDirectory" to temporaryRoot.absolutePath,
+                ))
             } catch (ex: Exception) {
                 temporaryRoot.deleteRecursively()
                 reply.error(ex.message ?: "无法导入所选目录")
@@ -470,7 +474,15 @@ class KeytaoAndroidChannel(
         }.start()
     }
 
-    private fun copyTreeDirectory(treeUri: Uri, documentId: String, destination: File, visited: MutableSet<String>) {
+    private fun copyTreeDirectory(
+        treeUri: Uri,
+        documentId: String,
+        destination: File,
+        visited: MutableSet<String>,
+        totalBytes: Long = 0,
+        topLevel: Boolean = true,
+    ): Long {
+        var copiedBytes = totalBytes
         check(visited.add(documentId)) { "所选目录包含循环引用" }
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
         val resolver = activity.contentResolver
@@ -484,19 +496,37 @@ class KeytaoAndroidChannel(
                 val childId = cursor.getString(0) ?: throw IllegalStateException("无法读取目录项")
                 val name = cursor.getString(1) ?: throw IllegalStateException("无法读取目录项名称")
                 validateDirectoryEntryName(name)
+                if ((topLevel && name in setOf("build", "sync", "installation.yaml", "user.yaml")) ||
+                    name in setOf(".git", ".DS_Store", "default-custom.yaml", "user_dict.txt", ".keytao-active-scheme.json") ||
+                    name.endsWith(".userdb") || name.endsWith(".custom.yaml") ||
+                    name.endsWith(".user.dict.yaml") || name.endsWith(".user.yaml") ||
+                    name.endsWith("_user.txt") ||
+                    (name.startsWith(".keytao-sync-base-") && name.endsWith(".json"))) continue
                 val output = safePrivateFile(destination, name)
                 if (cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
                     check(output.mkdir()) { "无法创建目录：$name" }
-                    copyTreeDirectory(treeUri, childId, output, visited)
+                    copiedBytes = copyTreeDirectory(treeUri, childId, output, visited, copiedBytes, false)
                 } else {
                     check(output.createNewFile()) { "目录中存在重名文件：$name" }
                     val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
                     val input = resolver.openInputStream(childUri)
                         ?: throw IllegalStateException("无法读取文件：$name")
-                    input.use { source -> output.outputStream().use { target -> source.copyTo(target) } }
+                    input.use { source ->
+                        output.outputStream().use { target ->
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val count = source.read(buffer)
+                                if (count < 0) break
+                                check(count.toLong() <= 512L * 1024 * 1024 - copiedBytes) { "方案包解压后过大" }
+                                copiedBytes += count
+                                target.write(buffer, 0, count)
+                            }
+                        }
+                    }
                 }
             }
         }
+        return copiedBytes
     }
 
     private fun validateDirectoryEntryName(name: String) {

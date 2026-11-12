@@ -510,7 +510,9 @@ pub(crate) async fn download_at(
         .ok_or_else(|| CoreError::Other("云端方案不存在".into()))?;
     crate::scheme::validate_scheme_key(&package.scheme_key).map_err(CoreError::Other)?;
     ensure_account(core, account)?;
-    if core.state().active_scheme.as_deref() == Some(&package.scheme_key) {
+    if !crate::scheme::is_local_scheme_key(&package.scheme_key)
+        && core.state().active_scheme.as_deref() == Some(&package.scheme_key)
+    {
         return Err(CoreError::Other("请先切换到其他方案".into()));
     }
     let url = ApiClient::new(core, api_base)
@@ -550,7 +552,7 @@ pub(crate) async fn download_at(
         return Err(CoreError::Other("方案包 SHA-256 校验失败".into()));
     }
     ensure_account(core, account)?;
-    crate::packages::store_cloud_archive(
+    let scheme_key = crate::packages::store_cloud_archive(
         core,
         &package.scheme_key,
         package.version.as_deref(),
@@ -558,7 +560,7 @@ pub(crate) async fn download_at(
         &bytes,
         user_root,
     )?;
-    record_reference(core, account, &package.scheme_key, id, &package.sha256)?;
+    record_reference(core, account, &scheme_key, id, &package.sha256)?;
     Ok(())
 }
 

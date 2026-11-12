@@ -282,6 +282,98 @@ async fn storage_unavailable_is_short_error_and_preserves_login_and_profile_stat
 }
 
 #[tokio::test]
+async fn downloading_conflicting_local_package_preserves_existing_content_and_active_scheme() {
+    for active in [false, true] {
+        let (dir, core, bytes) = fixture();
+        let source = dir.path().join("rime");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("own.schema.yaml"), "schema: {schema_id: own}\n").unwrap();
+        let own = crate::packages::import_local_scheme(&core, &source, "Own", None).unwrap();
+        assert_eq!(own, "local-rime");
+        crate::packages::import_local_scheme(&core, &source, "Other", None).unwrap();
+        let before = crate::packages::stored_archive(&core, &own).unwrap();
+        core.update_state(|state| {
+            state.scheme_cloud_ids.insert(own.clone(), "19".into());
+            if active {
+                state.active_scheme = Some(own.clone());
+            }
+        })
+        .unwrap();
+        let mut remote = package(&bytes);
+        remote["schemeKey"] = json!(own);
+        let mock = server(|url| {
+            vec![
+                response("200 OK", json!({"packages":[remote]})),
+                Response {
+                    status: "302 Found",
+                    headers: vec![("Location".into(), format!("{url}/storage"))],
+                    body: vec![],
+                },
+                Response {
+                    status: "200 OK",
+                    headers: vec![],
+                    body: bytes.clone(),
+                },
+            ]
+        })
+        .await;
+        download_at(&core, "21", &source, &mock.url).await.unwrap();
+        assert_eq!(mock.finish().await.len(), 3);
+        let after = crate::packages::stored_archive(&core, &own).unwrap();
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1.zip_sha256, before.1.zip_sha256);
+        assert_eq!(core.state().scheme_cloud_ids[&own], "19");
+        assert_eq!(core.state().scheme_cloud_ids["local-rime-3"], "21");
+        assert_eq!(
+            crate::packages::stored_archive(&core, "local-rime-3")
+                .unwrap()
+                .0,
+            bytes
+        );
+        assert_eq!(core.state().active_scheme, active.then_some(own));
+    }
+}
+
+#[tokio::test]
+async fn downloading_identical_local_package_reuses_key() {
+    let (dir, core, bytes) = fixture();
+    let root = dir.path().join("rime");
+    assert_eq!(
+        crate::packages::store_cloud_archive(&core, "local-rime", Some("v1"), None, &bytes, &root)
+            .unwrap(),
+        "local-rime"
+    );
+    let mut remote = package(&bytes);
+    remote["schemeKey"] = json!("local-rime");
+    let mock = server(|url| {
+        vec![
+            response("200 OK", json!({"packages":[remote]})),
+            Response {
+                status: "302 Found",
+                headers: vec![("Location".into(), format!("{url}/storage"))],
+                body: vec![],
+            },
+            Response {
+                status: "200 OK",
+                headers: vec![],
+                body: bytes.clone(),
+            },
+        ]
+    })
+    .await;
+    download_at(&core, "21", &root, &mock.url).await.unwrap();
+    assert_eq!(mock.finish().await.len(), 3);
+    assert_eq!(core.state().scheme_cloud_ids["local-rime"], "21");
+    assert!(!core.state().installed_packages.contains_key("local-rime-2"));
+    assert_eq!(
+        crate::packages::stored_archive(&core, "local-rime")
+            .unwrap()
+            .0,
+        bytes
+    );
+}
+
+#[tokio::test]
 async fn downloaded_cloud_package_can_activate_without_losing_cloud_source_or_id() {
     let (dir, core, bytes) = fixture();
     let mock = server(|url| {

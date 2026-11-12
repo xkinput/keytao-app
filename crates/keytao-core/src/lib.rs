@@ -4479,7 +4479,55 @@ pub struct SchemaInstallState {
     pub schemas: Vec<String>,
 }
 
+pub const ACTIVE_SCHEME_MANIFEST: &str = ".keytao-active-scheme.json";
+
+fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data_dir.join("app-state.json")).ok()?).ok()?;
+    let key = state["active_scheme"].as_str()?;
+    if !key.starts_with("local-") || !state["installed_packages"].as_object()?.contains_key(key) {
+        return None;
+    }
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(data_dir.join("scheme-packages/active-manifest.json")).ok()?,
+    )
+    .ok()?;
+    if manifest["scheme_key"].as_str().is_some_and(|actual| actual != key) {
+        return None;
+    }
+    manifest.as_object_mut()?.insert("scheme_key".into(), key.into());
+    Some(manifest)
+}
+
+fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
+    let read = || -> Option<HashSet<String>> {
+        let manifest = match std::fs::read(user_data_dir.join(ACTIVE_SCHEME_MANIFEST)) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                legacy_active_local_manifest(&dirs::data_local_dir()?.join("ink.rea.keytao-app"))?
+            }
+            Err(_) => return None,
+        };
+        if !manifest["scheme_key"].as_str()?.starts_with("local-")
+            || Path::new(manifest["root"].as_str()?) != user_data_dir.canonicalize().ok()?
+        {
+            return None;
+        }
+        Some(
+            manifest["manifest"]
+                .as_object()?
+                .keys()
+                .filter_map(|name| name.strip_suffix(".schema.yaml"))
+                .filter(|id| valid_rime_build_id(id))
+                .map(str::to_owned)
+                .collect(),
+        )
+    };
+    read().unwrap_or_default()
+}
+
 pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
+    let local_schemas = active_local_schema_ids(user_data_dir);
     let schemas = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(user_data_dir.join(name)).ok())
@@ -4487,6 +4535,7 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
         .unwrap_or_default()
         .into_iter()
         .filter(|schema| valid_rime_build_id(schema))
+        .filter(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema))
         .collect::<Vec<_>>();
 
     let installed = !schemas.is_empty()
@@ -5943,6 +5992,104 @@ mod tests {
         assert_eq!(ready.schemas, vec!["keydo"]);
 
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn schema_install_state_accepts_legacy_installed_local_manifest() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-legacy-local-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("scheme-packages")).unwrap();
+        let mut state = serde_json::json!({
+            "active_scheme": "local-example", "installed_packages": {"local-example": {}}
+        });
+        let state_path = dir.join("app-state.json");
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        let manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "manifest": {"example.schema.yaml": "hash"}
+        });
+        std::fs::write(dir.join("scheme-packages/active-manifest.json"), manifest.to_string()).unwrap();
+        let restored = super::legacy_active_local_manifest(&dir).unwrap();
+        assert_eq!(restored["scheme_key"], "local-example");
+        std::fs::write(dir.join(super::ACTIVE_SCHEME_MANIFEST), restored.to_string()).unwrap();
+        std::fs::write(dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: example\n").unwrap();
+        std::fs::write(dir.join("example.schema.yaml"), "schema: {}\n").unwrap();
+        assert!(schema_install_state(&dir).installed);
+        state["installed_packages"] = serde_json::json!({});
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert!(super::legacy_active_local_manifest(&dir).is_none());
+        state["active_scheme"] = serde_json::json!("keytao");
+        state["installed_packages"] = serde_json::json!({"keytao": {}});
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert!(super::legacy_active_local_manifest(&dir).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema_install_state_ignores_shared_and_stale_user_schemas() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-shared-schema-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("shared/luna_pinyin.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(dir.join("keytao.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(dir.join("build/keytao.schema.yaml"), "schema: {}\n").unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: keytao\n    - schema: luna_pinyin\n    - schema: stale\n",
+        ).unwrap();
+        let state = schema_install_state(&dir);
+        assert!(state.installed);
+        assert!(state.deployed);
+        assert_eq!(state.schemas, ["keytao"]);
+        std::fs::remove_file(dir.join("keytao.schema.yaml")).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema_install_state_counts_only_installed_active_local_package_schemas() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-local-schema-state-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: example\n    - schema: auxiliary\n    - schema: luna_pinyin\n    - schema: stale\n",
+        ).unwrap();
+        std::fs::write(dir.join("example.schema.yaml"), "schema: {}\n").unwrap();
+        let mut manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "scheme_key": "local-example",
+            "manifest": {"example.schema.yaml": "hash", "auxiliary.schema.yaml": "hash", "nested/stale.schema.yaml": "hash"}
+        });
+        let marker = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        let incomplete = schema_install_state(&dir);
+        assert_eq!(incomplete.schemas, ["example", "auxiliary"]);
+        assert!(!incomplete.installed);
+        std::fs::write(dir.join("auxiliary.schema.yaml"), "schema: {}\n").unwrap();
+        let installed = schema_install_state(&dir);
+        assert!(installed.installed);
+        assert!(!installed.deployed);
+        for id in ["example", "auxiliary"] {
+            std::fs::write(dir.join(format!("build/{id}.schema.yaml")), "schema: {}\n").unwrap();
+        }
+        assert!(schema_install_state(&dir).deployed);
+        manifest["scheme_key"] = serde_json::json!("keytao");
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        manifest["scheme_key"] = serde_json::json!("local-example");
+        manifest["root"] = serde_json::json!(dir.join("other"));
+        std::fs::write(&marker, manifest.to_string()).unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::write(&marker, "invalid json").unwrap();
+        assert!(!schema_install_state(&dir).installed);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -235,6 +235,7 @@ pub async fn apply_profile_at(
 ) -> Result<Value, CoreError> {
     let profile = checked_profile(profile)?;
     core.update_state(|state| state.scheme_sync_settings = profile.settings.clone())?;
+    let mut skipped = Vec::new();
     for package in profile.packages {
         if core
             .state()
@@ -261,7 +262,8 @@ pub async fn apply_profile_at(
                 .ok_or_else(|| CoreError::Other("云端方案来源不匹配，请先上传方案包".into()))?;
             crate::cloud_packages::download_at(core, &cloud.id, user_root, api_base).await?;
         } else if crate::scheme::is_local_scheme_key(&package.scheme_key) {
-            return Err(CoreError::Other("请先上传本地方案包".into()));
+            tracing::warn!(scheme_key = %package.scheme_key, "Skipping local package that has not been uploaded");
+            skipped.push(package.scheme_key);
         } else {
             let source = profile.settings["download_source"]
                 .as_str()
@@ -270,7 +272,7 @@ pub async fn apply_profile_at(
                 .await?;
         }
     }
-    Ok(json!({"active_scheme":profile.active_scheme,"settings":profile.settings}))
+    Ok(json!({"active_scheme":profile.active_scheme,"settings":profile.settings,"skipped":skipped}))
 }
 
 pub async fn upload_profile(core: &Core) -> Result<Value, CoreError> {

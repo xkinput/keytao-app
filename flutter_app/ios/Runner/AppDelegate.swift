@@ -152,7 +152,7 @@ import UniformTypeIdentifiers
       }
       if let error = coordinationError { throw error }
       if let error = copyError { throw error }
-      return ["path": destination.path, "name": name]
+      return ["path": destination.path, "name": name, "temporaryDirectory": temporaryRoot.path]
     } catch {
       try? manager.removeItem(at: temporaryRoot)
       throw error

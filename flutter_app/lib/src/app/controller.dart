@@ -1260,8 +1260,10 @@ class AppController extends ChangeNotifier {
             isAndroid ? 'keytao/android' : 'keytao/ios',
           ).invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
           if (selected == null) return;
+          temporaryDirectory =
+              selected['temporaryDirectory'] as String? ??
+              selected['path'] as String;
           directoryPath = selected['path'] as String;
-          temporaryDirectory = directoryPath;
           displayName = selected['name'] as String;
         } else {
           final selected = await getDirectoryPath();

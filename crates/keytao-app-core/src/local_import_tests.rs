@@ -99,7 +99,7 @@ fn local_import_allocates_unique_slugs_and_deterministic_content_versions() {
 }
 
 #[test]
-fn local_import_excludes_junk_and_protected_files_recursively() {
+fn local_import_excludes_top_level_junk_and_recursive_private_files() {
     let directory = tempfile::tempdir().unwrap();
     let core = open_core(directory.path());
     let path = source(directory.path(), "source");
@@ -109,6 +109,7 @@ fn local_import_excludes_junk_and_protected_files_recursively() {
         "sync/device/data",
         "example.userdb/CURRENT",
         "nested/example.userdb/CURRENT",
+        "nested/.git/config",
         "installation.yaml",
         "user.yaml",
         "example.user.yaml",
@@ -129,6 +130,16 @@ fn local_import_excludes_junk_and_protected_files_recursively() {
     }
     fs::create_dir_all(path.join("lua/nested")).unwrap();
     fs::write(path.join("lua/nested/helper.lua"), "return true").unwrap();
+    let nested = [
+        "nested/build/data",
+        "nested/sync/data",
+        "nested/installation.yaml",
+        "nested/user.yaml",
+    ];
+    for name in nested {
+        fs::create_dir_all(path.join(name).parent().unwrap()).unwrap();
+        fs::write(path.join(name), "package data").unwrap();
+    }
     let key = import_local_scheme(&core, &path, "Example", None).unwrap();
     let files = archive_files(&core, &key);
     assert_eq!(
@@ -136,14 +147,21 @@ fn local_import_excludes_junk_and_protected_files_recursively() {
         vec![
             "default.custom.yaml",
             "example.schema.yaml",
-            "lua/nested/helper.lua"
+            "lua/nested/helper.lua",
+            "nested/build/data",
+            "nested/installation.yaml",
+            "nested/sync/data",
+            "nested/user.yaml",
         ]
     );
     let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
     assert_eq!(keytao_core::parse_schema_list(config), ["example"]);
     assert!(!config.contains("private content"));
     let (_, meta) = crate::packages::stored_archive(&core, &key).unwrap();
-    assert_eq!(meta.manifest.len(), 2);
+    assert_eq!(meta.manifest.len(), 6);
+    for name in nested {
+        assert_eq!(files[name], b"package data");
+    }
 }
 
 #[tokio::test]
@@ -168,6 +186,9 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
     assert!(installed.installed);
     assert!(!installed.deployed);
     assert_eq!(installed.schemas, ["example"]);
+    let engine_state = keytao_core::schema_install_state(&root);
+    assert!(engine_state.installed);
+    assert_eq!(engine_state.schemas, ["example"]);
     fs::create_dir_all(root.join("build")).unwrap();
     fs::write(root.join("build/example.schema.yaml"), "schema: {}\n").unwrap();
     assert!(
