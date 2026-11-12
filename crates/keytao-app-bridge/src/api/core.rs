@@ -9,8 +9,8 @@ pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
 }
 
-/// Creates the process-wide Core. Every subsequent call returns an error,
-/// including calls with identical config. Restart the process to change roots.
+/// Creates the process-wide Core, or returns its existing info when the resolved
+/// directories, platform and user root match. Restart the process to change them.
 pub fn init_core(config: BridgeConfig) -> Result<BridgeInfo, String> {
     runtime::initialize(config)
 }
@@ -1223,27 +1223,86 @@ pub async fn clear_runtime_log() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(test, any(target_os = "android", target_os = "ios")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn android_settings_change_one_field_preserves_the_other_22() {
-        let temp = tempfile::tempdir().unwrap();
+    fn config() -> BridgeConfig {
+        // All tests share the process-wide Core and keep its directories alive.
+        static TEMP: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let temp = TEMP.get_or_init(|| tempfile::tempdir().unwrap());
         let root = temp.path().join("user");
-        init_core(BridgeConfig {
+        BridgeConfig {
             data_dir: temp.path().join("state").to_string_lossy().into_owned(),
             cache_dir: temp.path().join("cache").to_string_lossy().into_owned(),
             resource_dir: temp.path().join("resources").to_string_lossy().into_owned(),
             app_version: "test".into(),
             platform: if cfg!(target_os = "android") {
                 BridgePlatform::Android
-            } else {
+            } else if cfg!(target_os = "ios") {
                 BridgePlatform::Ios
+            } else if cfg!(target_os = "windows") {
+                BridgePlatform::Windows
+            } else if cfg!(target_os = "macos") {
+                BridgePlatform::MacOs
+            } else {
+                BridgePlatform::Linux
             },
             user_root_override: Some(root.to_string_lossy().into_owned()),
-        })
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn init_core_reuses_same_config() {
+        let first = init_core(config()).unwrap();
+        complete_onboarding().unwrap();
+        let second = init_core(config()).unwrap();
+        assert_eq!(second.user_root, first.user_root);
+        assert_eq!(second.platform, first.platform);
+        assert_eq!(second.app_version, first.app_version);
+        assert!(onboarding().unwrap().completed);
+
+        let mut updated_version = config();
+        updated_version.app_version = "new-engine".into();
+        let existing = init_core(updated_version).unwrap();
+        assert_eq!(existing.app_version, first.app_version);
+
+        let mut equivalent_root = config();
+        equivalent_root.user_root_override.as_mut().unwrap().push('/');
+        let existing = init_core(equivalent_root).unwrap();
+        assert_eq!(existing.user_root, first.user_root);
+    }
+
+    #[test]
+    fn init_core_rejects_changed_config() {
+        init_core(config()).unwrap();
+        for field in ["data_dir", "cache_dir", "resource_dir", "platform", "user_root"] {
+            let mut changed = config();
+            match field {
+                "data_dir" => changed.data_dir.push_str("-other"),
+                "cache_dir" => changed.cache_dir.push_str("-other"),
+                "resource_dir" => changed.resource_dir.push_str("-other"),
+                "platform" => {
+                    changed.platform = if changed.platform == BridgePlatform::Android {
+                        BridgePlatform::Ios
+                    } else {
+                        BridgePlatform::Android
+                    };
+                }
+                "user_root" => changed.user_root_override.as_mut().unwrap().push_str("-other"),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(init_core(changed), Err(error) if error.contains("already initialized")),
+                "changing {field} must require a process restart"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[tokio::test]
+    async fn android_settings_change_one_field_preserves_the_other_22() {
+        init_core(config()).unwrap();
         let before = get_android_ime_input_settings().await.unwrap();
         let mut edited = before.clone();
         edited.haptics_enabled = !edited.haptics_enabled;

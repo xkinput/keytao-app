@@ -1,4 +1,5 @@
 use crate::{api::types::*, frb_generated::StreamSink, host::BridgeHost};
+use keytao_app_core::scheme_host::SchemeHost;
 use keytao_app_core::{AppEnv, Core, CoreEvent, EventSink, Platform};
 use std::{
     path::PathBuf,
@@ -25,9 +26,6 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
     let _guard = INIT_LOCK
         .lock()
         .map_err(|_| "Core initialization lock poisoned")?;
-    if STATE.get().is_some() {
-        return Err("Core is already initialized; restart the process to change config".into());
-    }
     let root = BridgeHost::resolve_root(config.user_root_override.as_deref())?;
     let platform = match config.platform {
         BridgePlatform::Windows => Platform::Windows,
@@ -36,18 +34,32 @@ pub(crate) fn initialize(config: BridgeConfig) -> Result<BridgeInfo, String> {
         BridgePlatform::Android => Platform::Android,
         BridgePlatform::Ios => Platform::Ios,
     };
+    let env = AppEnv {
+        data_dir: absolute_dir(&config.data_dir)?,
+        cache_dir: absolute_dir(&config.cache_dir)?,
+        resource_dir: absolute_dir(&config.resource_dir)?,
+        app_version: config.app_version.clone(),
+        platform,
+    };
+    if let Some(state) = STATE.get() {
+        let current = state.core.env();
+        let current_root = state.host.user_root()?;
+        if current.data_dir != env.data_dir
+            || current.cache_dir != env.cache_dir
+            || current.resource_dir != env.resource_dir
+            || current.platform != env.platform
+            || current_root != root
+        {
+            return Err("Core is already initialized; restart the process to change config".into());
+        }
+        return Ok(BridgeInfo {
+            platform: config.platform,
+            app_version: current.app_version.clone(),
+            user_root: current_root.to_string_lossy().into_owned(),
+        });
+    }
     let events = Arc::new(BridgeEvents::default());
-    let core = Core::new(
-        AppEnv {
-            data_dir: absolute_dir(&config.data_dir)?,
-            cache_dir: absolute_dir(&config.cache_dir)?,
-            resource_dir: absolute_dir(&config.resource_dir)?,
-            app_version: config.app_version.clone(),
-            platform,
-        },
-        events.clone(),
-    )
-    .map_err(|error| error.to_string())?;
+    let core = Core::new(env, events.clone()).map_err(|error| error.to_string())?;
     core.initialize_onboarding(Some(root.clone()))
         .map_err(|error| error.to_string())?;
     let info = BridgeInfo {
