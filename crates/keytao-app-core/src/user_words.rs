@@ -702,8 +702,19 @@ pub fn list_user_words(core: &Core, scheme: &str, root: &Path) -> Result<Vec<Use
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
-    Ok(Dictionary::parse(&fs::read(user_path(core, &package, root, true)?)?)?.entries())
+    read_user_words_locked(core, &mut state, scheme, root).map(|(_, entries)| entries)
+}
+
+pub(crate) fn read_user_words_locked(
+    core: &Core,
+    state: &mut UserWordsState,
+    scheme: &str,
+    root: &Path,
+) -> Result<(Vec<u8>, Vec<UserWord>), CoreError> {
+    let package = package_data(state, core, scheme)?;
+    let content = fs::read(user_path(core, &package, root, true)?)?;
+    let entries = Dictionary::parse(&content)?.entries();
+    Ok((content, entries))
 }
 
 pub fn add_user_word(
@@ -714,12 +725,24 @@ pub fn add_user_word(
     code: &str,
     weight: Option<String>,
 ) -> Result<UserWordMutation, CoreError> {
-    validate_input(word, code, weight.as_deref())?;
     let mut state = core
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
+    add_user_word_locked(core, &mut state, scheme, root, word, code, weight)
+}
+
+pub(crate) fn add_user_word_locked(
+    core: &Core,
+    state: &mut UserWordsState,
+    scheme: &str,
+    root: &Path,
+    word: &str,
+    code: &str,
+    weight: Option<String>,
+) -> Result<UserWordMutation, CoreError> {
+    validate_input(word, code, weight.as_deref())?;
+    let package = package_data(state, core, scheme)?;
     let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
     if dictionary
@@ -803,7 +826,27 @@ pub fn delete_user_word(
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let package = package_data(&mut state, core, scheme)?;
+    delete_user_word_locked(
+        core,
+        &mut state,
+        scheme,
+        root,
+        id,
+        expected_word,
+        expected_code,
+    )
+}
+
+pub(crate) fn delete_user_word_locked(
+    core: &Core,
+    state: &mut UserWordsState,
+    scheme: &str,
+    root: &Path,
+    id: u32,
+    expected_word: &str,
+    expected_code: &str,
+) -> Result<(), CoreError> {
+    let package = package_data(state, core, scheme)?;
     let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
     if !dictionary
