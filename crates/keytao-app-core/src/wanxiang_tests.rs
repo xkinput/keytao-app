@@ -200,30 +200,50 @@ fn archive_at(path: &Path, entries: &[(&str, &str)]) {
 }
 
 fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<InstalledFile> {
+    stage_variant_fixture(receipt, extra, "base")
+}
+
+fn stage_variant_fixture(
+    receipt: &InstallReceipt,
+    extra: &[(&str, &str)],
+    variant: &str,
+) -> Vec<InstalledFile> {
+    let source = variant_source(variant).unwrap();
+    let suffix = match source {
+        "wanxiang_pro" | "wanxiang_pure" => ".pro",
+        "wanxiang_lite" => ".lite",
+        _ => "",
+    };
     let dictionaries: Vec<_> = DICTIONARIES
         .iter()
-        .map(|name| format!("dicts/{name}.dict.yaml"))
+        .map(|name| format!("dicts/{name}{suffix}.dict.yaml"))
         .collect();
     let dictionary = format!(
-        "---\nname: wanxiang\nimport_tables:\n{}...\n",
+        "---\nname: {source}\nimport_tables:\n{}...\n",
         DICTIONARIES
             .iter()
-            .map(|name| format!("  - dicts/{name}\n"))
+            .map(|name| format!("  - dicts/{name}{suffix}\n"))
             .collect::<String>()
     );
-    let mut entries: Vec<_> = REQUIRED
-        .iter()
-        .map(|name| {
-            (
-                *name,
-                if *name == "wanxiang.dict.yaml" {
-                    dictionary.as_str()
-                } else {
-                    "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
-                },
-            )
-        })
-        .collect();
+    let schema_name = format!("{source}.schema.yaml");
+    let dictionary_name = format!("{source}.dict.yaml");
+    let mut entries: Vec<_> = [
+        schema_name.as_str(),
+        dictionary_name.as_str(),
+        "wanxiang_algebra.yaml",
+    ]
+    .into_iter()
+    .map(|name| {
+        (
+            name,
+            if name == dictionary_name {
+                dictionary.as_str()
+            } else {
+                "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
+            },
+        )
+    })
+    .collect();
     entries.extend(
         dictionaries
             .iter()
@@ -236,9 +256,188 @@ fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<Instal
         &archive,
         &receipt.work.join("files"),
         &fixture_package(),
-        "base",
+        variant,
     )
     .unwrap()
+}
+
+fn install_variant_fixture(root: &Path, variant: &str) -> InstallReceipt {
+    let mut receipt = InstallReceipt::new(root).unwrap();
+    let files = stage_variant_fixture(&receipt, &[], variant);
+    commit_files(
+        &mut receipt,
+        files,
+        &fixture_package(),
+        DOWNLOAD_SHA256.into(),
+        variant,
+    )
+    .unwrap();
+    receipt
+}
+
+#[test]
+fn flypy_installs_own_double_pinyin_patch_transactionally() {
+    let root = TestRoot::new();
+    let custom_path = root.path.join("keytao_wanxiang_flypy.yaml");
+    let receipt = install_variant_fixture(&root.path, "flypy");
+    let custom = fs::read_to_string(&custom_path).unwrap();
+    let patch: serde_yaml::Value = serde_yaml::from_str(&custom).unwrap();
+    assert_eq!(
+        patch["patch"]["speller/algebra"]["__patch"],
+        serde_yaml::to_value([
+            "wanxiang_algebra:/pro/小鹤双拼",
+            "wanxiang_algebra:/pro/直接辅助",
+        ])
+        .unwrap()
+    );
+    let schema: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(schema["__patch"], "keytao_wanxiang_flypy:/patch?");
+    drop(receipt);
+    assert!(!custom_path.exists());
+    assert!(!root.path.join(MANIFEST).exists());
+
+    install_variant_fixture(&root.path, "flypy")
+        .finish()
+        .unwrap();
+    let removal = uninstall(&root.path).unwrap();
+    assert!(!custom_path.exists());
+    removal.rollback().unwrap();
+    assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
+    uninstall(&root.path).unwrap().finish().unwrap();
+    assert!(!custom_path.exists());
+}
+
+#[test]
+fn non_flypy_variants_do_not_install_a_layout_patch() {
+    for variant in [
+        "base", "pure", "lite", "hanxin", "moqi", "shouyou", "shyplus", "tiger", "wubi", "wx",
+        "zrm",
+    ] {
+        let root = TestRoot::new();
+        install_variant_fixture(&root.path, variant)
+            .finish()
+            .unwrap();
+        assert!(!root.path.join("wanxiang_pro.custom.yaml").exists());
+        assert!(!root.path.join("keytao_wanxiang_flypy.yaml").exists());
+        let schema: serde_yaml::Value = serde_yaml::from_str(
+            &fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert!(schema.get("__patch").is_none(), "variant: {variant}");
+        assert!(status_at(&root.path).installed);
+    }
+}
+
+#[test]
+fn switching_flypy_to_zrm_removes_owned_patch_and_rolls_back_on_failure() {
+    let root = TestRoot::new();
+    install_variant_fixture(&root.path, "flypy")
+        .finish()
+        .unwrap();
+    let custom_path = root.path.join("keytao_wanxiang_flypy.yaml");
+    let custom = fs::read(&custom_path).unwrap();
+    let schema_path = root.path.join("wanxiang.schema.yaml");
+    let schema = fs::read(&schema_path).unwrap();
+    let manifest = fs::read(root.path.join(MANIFEST)).unwrap();
+    let receipt = install_variant_fixture(&root.path, "zrm");
+    assert!(!custom_path.exists());
+    drop(receipt);
+    assert_eq!(fs::read(&custom_path).unwrap(), custom);
+    assert_eq!(fs::read(&schema_path).unwrap(), schema);
+    assert_eq!(fs::read(root.path.join(MANIFEST)).unwrap(), manifest);
+
+    install_variant_fixture(&root.path, "zrm").finish().unwrap();
+    assert!(!custom_path.exists());
+    assert_eq!(status_at(&root.path).variant, "zrm");
+}
+
+#[test]
+fn user_pro_custom_is_preserved_across_install_update_switch_and_uninstall() {
+    let user_custom = "# User settings\npatch: {menu/page_size: 9}\n";
+    for (modified_after_install, custom) in [
+        (false, user_custom),
+        (true, user_custom),
+        (false, FLYPY_CUSTOM),
+        (
+            false,
+            "patch:\n  speller/algebra:\n    __patch: wanxiang_algebra:/pro/自然码\n",
+        ),
+        (false, "patch: {translator/dictionary: wanxiang_pro}\n"),
+    ] {
+        let root = TestRoot::new();
+        if modified_after_install {
+            install_variant_fixture(&root.path, "flypy")
+                .finish()
+                .unwrap();
+        }
+        let custom_path = root.path.join("wanxiang_pro.custom.yaml");
+        fs::write(&custom_path, custom).unwrap();
+        for variant in ["flypy", "flypy", "zrm", "base"] {
+            install_variant_fixture(&root.path, variant)
+                .finish()
+                .unwrap();
+            assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
+            let schema = fs::read_to_string(root.path.join("wanxiang.schema.yaml")).unwrap();
+            assert!(!schema.contains("wanxiang_pro.custom"));
+            let schema: serde_yaml::Value = serde_yaml::from_str(&schema).unwrap();
+            if variant == "flypy" {
+                assert_eq!(schema["__patch"], "keytao_wanxiang_flypy:/patch?");
+                assert_eq!(
+                    fs::read_to_string(root.path.join("keytao_wanxiang_flypy.yaml")).unwrap(),
+                    FLYPY_CUSTOM
+                );
+            } else {
+                assert!(schema.get("__patch").is_none());
+                assert!(!root.path.join("keytao_wanxiang_flypy.yaml").exists());
+            }
+            assert!(
+                read_manifest(&root.path)
+                    .unwrap()
+                    .unwrap()
+                    .files
+                    .iter()
+                    .all(|file| file.path != "wanxiang_pro.custom.yaml")
+            );
+        }
+        uninstall(&root.path).unwrap().finish().unwrap();
+        assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
+    }
+}
+
+#[test]
+fn conflicting_flypy_patch_prevents_all_commit_writes() {
+    for installed in [false, true] {
+        let root = TestRoot::new();
+        if installed {
+            install_variant_fixture(&root.path, "flypy")
+                .finish()
+                .unwrap();
+        }
+        let custom_path = root.path.join("keytao_wanxiang_flypy.yaml");
+        let custom = "patch: {translator/dictionary: private}\n";
+        fs::write(&custom_path, custom).unwrap();
+        let schema_path = root.path.join("wanxiang.schema.yaml");
+        let schema = fs::read(&schema_path).ok();
+        let manifest_path = root.path.join(MANIFEST);
+        let manifest = fs::read(&manifest_path).ok();
+        let mut receipt = InstallReceipt::new(&root.path).unwrap();
+        let files = stage_variant_fixture(&receipt, &[], "flypy");
+        let error = commit_files(
+            &mut receipt,
+            files,
+            &fixture_package(),
+            DOWNLOAD_SHA256.into(),
+            "flypy",
+        )
+        .unwrap_err();
+        assert!(error.contains("keytao_wanxiang_flypy.yaml"), "{error}");
+        assert!(receipt.changes.is_empty());
+        assert_eq!(fs::read_to_string(&custom_path).unwrap(), custom);
+        assert_eq!(fs::read(&schema_path).ok(), schema);
+        assert_eq!(fs::read(&manifest_path).ok(), manifest);
+    }
 }
 
 #[test]
@@ -870,14 +1069,21 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
     runtime.init().unwrap();
     let session = runtime.create_session().unwrap();
     session.select_schema(SCHEMA_ID).unwrap();
-    let mut inputs = if variant_source(&variant).unwrap() == "wanxiang_pro" {
+    let mut inputs = if variant == "flypy" {
+        vec![
+            ("nihc", "你好"),
+            ("vsgo", "中国"),
+            ("wjan", "晚安"),
+            ("xnhe", "小鹤"),
+        ]
+    } else if variant_source(&variant).unwrap() == "wanxiang_pro" {
         vec![("nihk", "你好"), ("vsgo", "中国"), ("wjan", "晚安")]
     } else {
         vec![("nihao", "你好"), ("zhongguo", "中国"), ("wanan", "晚安")]
     };
     match variant.as_str() {
         "pure" => inputs.push(("ni/re", "你")),
-        "flypy" => inputs.push(("vsll", "中")),
+        "flypy" => inputs.push(("vsll/", "中")),
         "moqi" => inputs.push(("vskl", "中")),
         _ => {}
     }
