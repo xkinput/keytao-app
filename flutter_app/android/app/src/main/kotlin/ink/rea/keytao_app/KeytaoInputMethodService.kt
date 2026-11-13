@@ -2363,13 +2363,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun scheduleAvailabilityRefresh(pollReloadStamp: Boolean = false) {
         if (serviceDestroyed || !::engine.isInitialized || availabilityRefreshPending) return
         val retryableReadiness = when (lastReadiness) {
-            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.NATIVE_UNAVAILABLE -> true
+            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
             else -> false
         }
         if (pollReloadStamp && (!inputViewShown || !retryableReadiness)) return
         availabilityRefreshPending = true
         val reloadPresentation = presentationLoadedWithoutRoot
-        val retryReadiness = readinessRetryCount < 30 && retryableReadiness
+        val retryReadiness = retryableReadiness &&
+            (lastReadiness == Readiness.DEPLOYING || readinessRetryCount < 30)
         if (pollReloadStamp && retryReadiness) readinessRetryCount++
         engine.runInBackground {
             val signature = runCatching { engine.reloadStampSignature() }.getOrNull()
@@ -2413,6 +2414,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             Readiness.UNWRITABLE -> "无法写入 KeyTao 数据目录，请重新安装 KeyTao"
             Readiness.NOT_INSTALLED -> defaultUnavailableMessage
             Readiness.NOT_DEPLOYED -> "请先在 KeyTao App 部署方案"
+            Readiness.DEPLOYING -> "正在部署方案…"
             Readiness.NATIVE_UNAVAILABLE -> "RIME 运行库未就绪，请重新安装 KeyTao"
             Readiness.READY -> ""
         }
@@ -2426,7 +2428,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun scheduleReadinessRetry() {
         mainHandler.removeCallbacks(readinessRetry)
         val retryableReadiness = when (lastReadiness) {
-            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.NATIVE_UNAVAILABLE -> true
+            Readiness.STORAGE_NOT_READY, Readiness.NOT_DEPLOYED, Readiness.DEPLOYING, Readiness.NATIVE_UNAVAILABLE -> true
             else -> false
         }
         if (inputViewShown && !serviceDestroyed && retryableReadiness) {

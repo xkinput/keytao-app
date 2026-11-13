@@ -14,6 +14,7 @@ enum class Readiness {
     UNWRITABLE,
     NOT_INSTALLED,
     NOT_DEPLOYED,
+    DEPLOYING,
     NATIVE_UNAVAILABLE,
     READY,
 }
@@ -147,8 +148,11 @@ class KeytaoImeEngine(context: Context) {
                     appContext,
                     timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(schemas),
                 ) { }
+                return Readiness.DEPLOYING
             }
-            return Readiness.NOT_DEPLOYED
+            return if (KeytaoAndroidPaths.isDeploymentInProgress(root)) {
+                Readiness.DEPLOYING
+            } else Readiness.NOT_DEPLOYED
         }
         reloadIfNeeded()
         return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
@@ -612,7 +616,7 @@ class KeytaoImeEngine(context: Context) {
         @Synchronized
         internal fun claimUpgradeDeployment(root: File, version: String, schemas: List<String>): Boolean {
             val build = File(root, "build")
-            if (File(build, ".keytao-deploying").exists()) return false
+            if (KeytaoAndroidPaths.isDeploymentInProgress(root)) return false
             val previouslyDeployed = File(build, ".keytao-deployed").isFile ||
                 schemas.any { File(build, "$it.schema.yaml").isFile }
             return previouslyDeployed && upgradeDeploymentAttempts.add(root.absolutePath to version)

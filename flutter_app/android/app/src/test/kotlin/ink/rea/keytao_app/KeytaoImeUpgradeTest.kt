@@ -7,6 +7,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -80,12 +81,38 @@ class KeytaoImeUpgradeTest {
         assertTrue(KeytaoImeEngine.claimUpgradeDeployment(root, "3/newer", schemas))
     }
 
-    @Test fun `deployment marker is sufficient but a sentinel defers the attempt`() {
+    @Test fun `deployment marker is sufficient but a fresh live sentinel defers the attempt`() {
+        assumeTrue("Live PID checks require procfs", File("/proc/${ProcessHandle.current().pid()}").isDirectory)
         val build = root.resolve("build").apply { mkdirs() }
         build.resolve(".keytao-deployed").writeText("keydo\n")
-        val sentinel = build.resolve(".keytao-deploying").apply { writeText("deploying") }
+        val sentinel = build.resolve(".keytao-deploying").apply {
+            writeText("${System.currentTimeMillis()}/${ProcessHandle.current().pid()}")
+        }
         assertFalse(KeytaoImeEngine.claimUpgradeDeployment(root, "2/new", schemas))
         assertTrue(sentinel.delete())
+        assertTrue(KeytaoImeEngine.claimUpgradeDeployment(root, "2/new", schemas))
+    }
+
+    @Test fun `sentinel from a dead process allows an automatic upgrade`() {
+        val build = root.resolve("build").apply { mkdirs() }
+        build.resolve(".keytao-deployed").writeText("keydo\n")
+        build.resolve(".keytao-deploying").writeText("${System.currentTimeMillis()}/${Long.MAX_VALUE}")
+        assertTrue(KeytaoImeEngine.claimUpgradeDeployment(root, "2/new", schemas))
+    }
+
+    @Test fun `sentinel older than ten minutes allows an automatic upgrade`() {
+        assumeTrue("Live PID checks require procfs", File("/proc/${ProcessHandle.current().pid()}").isDirectory)
+        val build = root.resolve("build").apply { mkdirs() }
+        build.resolve(".keytao-deployed").writeText("keydo\n")
+        val startedAt = System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(11)
+        build.resolve(".keytao-deploying").writeText("$startedAt/${ProcessHandle.current().pid()}")
+        assertTrue(KeytaoImeEngine.claimUpgradeDeployment(root, "2/new", schemas))
+    }
+
+    @Test fun `unparsable sentinel allows an automatic upgrade`() {
+        val build = root.resolve("build").apply { mkdirs() }
+        build.resolve(".keytao-deployed").writeText("keydo\n")
+        build.resolve(".keytao-deploying").writeText("deploying")
         assertTrue(KeytaoImeEngine.claimUpgradeDeployment(root, "2/new", schemas))
     }
 

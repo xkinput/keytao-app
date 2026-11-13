@@ -191,6 +191,14 @@ object KeytaoAndroidPaths {
     fun hasDeployedSchema(root: File): Boolean =
         KeytaoNativeBridge.hasDeployedSchema(root.absolutePath)
 
+    fun isDeploymentInProgress(root: File): Boolean = runCatching {
+        val parts = File(root, "build/$deployingSentinelFileName").readText().trim().split('/')
+        if (parts.size != 2) return@runCatching false
+        val startedAt = parts[0].toLongOrNull() ?: return@runCatching false
+        val pid = parts[1].toLongOrNull() ?: return@runCatching false
+        System.currentTimeMillis() - startedAt <= 10 * 60 * 1000L && File("/proc/$pid").exists()
+    }.getOrDefault(false)
+
     fun beginDeployment(root: File) {
         val build = File(root, "build")
         check(build.isDirectory || build.mkdirs()) { "Failed to create Android RIME build directory" }
