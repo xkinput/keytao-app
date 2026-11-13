@@ -1,22 +1,28 @@
 package ink.rea.keytao_app
 
 internal class KeytaoVoiceInput {
+    enum class State { IDLE, RECORDING, TRANSCRIBING }
+
     private var generation = 0L
-    var listening = false
+    var state = State.IDLE
         private set
 
     fun start(): Long {
-        listening = true
+        state = State.RECORDING
         return ++generation
+    }
+
+    fun transcribe() {
+        if (state == State.RECORDING) state = State.TRANSCRIBING
     }
 
     fun cancel() {
         generation++
-        listening = false
+        state = State.IDLE
     }
 
     fun runIfCurrent(token: Long, action: () -> Unit) {
-        if (listening && token == generation) action()
+        if (state != State.IDLE && token == generation) action()
     }
 
     companion object {

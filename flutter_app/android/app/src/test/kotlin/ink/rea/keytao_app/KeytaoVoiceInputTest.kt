@@ -34,16 +34,53 @@ class KeytaoVoiceInputTest {
     }
 
     @Test
+    fun `voice moves from recording through transcribing to idle`() {
+        val voice = KeytaoVoiceInput()
+        assertEquals(KeytaoVoiceInput.State.IDLE, voice.state)
+        voice.transcribe()
+        assertEquals(KeytaoVoiceInput.State.IDLE, voice.state)
+        voice.start()
+        assertEquals(KeytaoVoiceInput.State.RECORDING, voice.state)
+        voice.transcribe()
+        assertEquals(KeytaoVoiceInput.State.TRANSCRIBING, voice.state)
+        voice.cancel()
+        assertEquals(KeytaoVoiceInput.State.IDLE, voice.state)
+    }
+
+    @Test
+    fun `current callbacks can finish while transcribing`() {
+        val voice = KeytaoVoiceInput()
+        val committed = mutableListOf<String>()
+        val token = voice.start()
+        voice.runIfCurrent(token) { voice.transcribe() }
+        assertEquals(KeytaoVoiceInput.State.TRANSCRIBING, voice.state)
+        voice.runIfCurrent(token) {
+            voice.cancel()
+            committed.add("final result")
+        }
+        assertEquals(KeytaoVoiceInput.State.IDLE, voice.state)
+        voice.runIfCurrent(token) { committed.add("duplicate result") }
+        assertEquals(listOf("final result"), committed)
+    }
+
+    @Test
     fun `late callbacks cannot commit after cancellation or a new session`() {
         val voice = KeytaoVoiceInput()
         val committed = mutableListOf<String>()
         val oldToken = voice.start()
-        assertTrue(voice.listening)
+        assertEquals(KeytaoVoiceInput.State.RECORDING, voice.state)
         voice.cancel()
-        assertFalse(voice.listening)
-        voice.runIfCurrent(oldToken) { committed.add("late result") }
+        voice.runIfCurrent(oldToken) {
+            voice.transcribe()
+            committed.add("late result")
+        }
+        assertEquals(KeytaoVoiceInput.State.IDLE, voice.state)
         val token = voice.start()
-        voice.runIfCurrent(oldToken) { committed.add("previous field") }
+        voice.runIfCurrent(oldToken) {
+            voice.transcribe()
+            committed.add("previous field")
+        }
+        assertEquals(KeytaoVoiceInput.State.RECORDING, voice.state)
         voice.runIfCurrent(token) {
             voice.cancel()
             committed.add("final result")

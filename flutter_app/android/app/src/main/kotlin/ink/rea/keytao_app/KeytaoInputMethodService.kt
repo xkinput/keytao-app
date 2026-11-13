@@ -2472,7 +2472,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onUserInteraction() {
-        if (voiceInput.listening) cancelVoiceInput()
+        if (voiceInput.state != KeytaoVoiceInput.State.IDLE) cancelVoiceInput()
     }
 
     private fun refreshVoiceInput() {
@@ -2480,7 +2480,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             available = voiceRecognitionAvailable && inputViewShown && !serviceDestroyed,
             privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
             permanentlyDenied = KeytaoVoicePermissionActivity.isPermanentlyDenied(this),
-            listening = voiceInput.listening,
+            voiceState = voiceInput.state,
         )
     }
 
@@ -2494,7 +2494,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onVoiceInputRequested(): Boolean {
-        if (voiceInput.listening || !inputViewShown || serviceDestroyed || currentInputConnection == null) return false
+        if (voiceInput.state != KeytaoVoiceInput.State.IDLE || !inputViewShown || serviceDestroyed || currentInputConnection == null) return false
         if (!KeytaoVoiceInput.isOffered(
                 recognitionAvailable = voiceRecognitionAvailable,
                 privacyAllowed = !directInputEditor && privacyMode.allowsComposing && privacyMode.allowsLearning,
@@ -2520,9 +2520,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             recognizer.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) = voiceInput.runIfCurrent(token) { }
                 override fun onBeginningOfSpeech() = voiceInput.runIfCurrent(token) { }
-                override fun onRmsChanged(rmsdB: Float) = voiceInput.runIfCurrent(token) { }
+                override fun onRmsChanged(rmsdB: Float) = voiceInput.runIfCurrent(token) {
+                    keyboardView?.updateVoiceLevel(rmsdB)
+                }
                 override fun onBufferReceived(buffer: ByteArray?) = voiceInput.runIfCurrent(token) { }
-                override fun onEndOfSpeech() = voiceInput.runIfCurrent(token) { }
+                override fun onEndOfSpeech() = voiceInput.runIfCurrent(token) {
+                    voiceInput.transcribe()
+                    refreshVoiceInput()
+                }
                 override fun onPartialResults(partialResults: Bundle?) = voiceInput.runIfCurrent(token) { }
                 override fun onEvent(eventType: Int, params: Bundle?) = voiceInput.runIfCurrent(token) { }
 

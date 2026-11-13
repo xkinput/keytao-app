@@ -233,16 +233,41 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var voiceRecognitionAvailable = false
     private var voicePrivacyAllowed = false
     private var voicePermanentlyDenied = false
-    private var voiceListening = false
+    private var voiceState = KeytaoVoiceInput.State.IDLE
     private var voiceLongPressSuppressed = false
+    private val voiceLevels = FloatArray(24)
+    private var voiceLevelIndex = 0
+    private var voiceLevelRedrawAtMs = 0L
+    private var voiceOverlayTouchActive = false
 
-    fun updateVoiceInput(available: Boolean, privacyAllowed: Boolean, permanentlyDenied: Boolean, listening: Boolean) {
+    internal fun updateVoiceInput(
+        available: Boolean,
+        privacyAllowed: Boolean,
+        permanentlyDenied: Boolean,
+        voiceState: KeytaoVoiceInput.State,
+    ) {
         voiceRecognitionAvailable = available
         voicePrivacyAllowed = privacyAllowed
         voicePermanentlyDenied = permanentlyDenied
-        voiceListening = listening
+        if (this.voiceState != voiceState && voiceState != KeytaoVoiceInput.State.TRANSCRIBING) {
+            voiceLevels.fill(0f)
+            voiceLevelIndex = 0
+            voiceLevelRedrawAtMs = 0L
+        }
+        this.voiceState = voiceState
         refreshAccessibilityNodes()
         invalidate()
+    }
+
+    fun updateVoiceLevel(rmsdB: Float) {
+        if (voiceState != KeytaoVoiceInput.State.RECORDING || !rmsdB.isFinite()) return
+        voiceLevels[voiceLevelIndex] = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+        voiceLevelIndex = (voiceLevelIndex + 1) % voiceLevels.size
+        val now = SystemClock.uptimeMillis()
+        if (now - voiceLevelRedrawAtMs >= 33L) {
+            voiceLevelRedrawAtMs = now
+            invalidate()
+        }
     }
 
     private fun isVoiceInputOffered(key: KeySpec): Boolean {
@@ -793,6 +818,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 drawKeyFeedbackOverlays(canvas)
             }
             drawFloatingInteractionHints(canvas)
+            drawVoiceInputOverlay(canvas)
             refreshAccessibilityNodes()
             if (
                 !emptyFrameRecoveryAttempted && width > 0 && height > 0 &&
@@ -992,7 +1018,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             append(voiceRecognitionAvailable).append('|')
             append(voicePrivacyAllowed).append('|')
             append(voicePermanentlyDenied).append('|')
-            append(voiceListening).append('|')
+            append(voiceState).append('|')
             append(config.keyboardHeightScale).append('|')
             append(keyRects.size).append('|')
             append(candidateRects.size).append('|')
@@ -1009,6 +1035,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun accessibilityTargets(): List<AccessibilityTarget> {
+        if (voiceState != KeytaoVoiceInput.State.IDLE) {
+            return listOf(
+                AccessibilityTarget(accessibilityVoiceCloseNodeId, "停止语音输入", voiceCloseRect()) {
+                    listener?.onUserInteraction()
+                },
+            )
+        }
         val targets = mutableListOf<AccessibilityTarget>()
         candidateExpandRect?.let { rect ->
             targets.add(
@@ -1055,8 +1088,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             targets.add(
                 AccessibilityTarget(
                     accessibilityKeyNodeBase + index,
-                    if (voiceListening && isSpaceKey(key.spec)) "正在听…"
-                    else if (isVoiceInputOffered(key.spec)) "空格，长按语音输入"
+                    if (isVoiceInputOffered(key.spec)) "空格，长按语音输入"
                     else displayLabel(key.spec).ifBlank { key.spec.label }.ifBlank { "按键" },
                     key.rect,
                 ) { activateKey(key) }
@@ -1138,8 +1170,28 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) voiceOverlayTouchActive = false
+        if (
+            !voiceOverlayTouchActive && voiceState != KeytaoVoiceInput.State.IDLE &&
+            (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN)
+        ) {
+            val index = event.actionIndex
+            val x = event.getX(index)
+            val y = event.getY(index)
+            if (voiceOverlayRect().contains(x, y)) {
+                voiceOverlayTouchActive = true
+                clearActiveKeyTouches()
+                if (voiceCloseRect().contains(x, y)) listener?.onUserInteraction()
+            }
+        }
+        if (voiceOverlayTouchActive) {
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                voiceOverlayTouchActive = false
+            }
+            return true
+        }
         if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
-            voiceLongPressSuppressed = voiceListening ||
+            voiceLongPressSuppressed = voiceState != KeytaoVoiceInput.State.IDLE ||
                 (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN && voiceLongPressSuppressed)
             listener?.onUserInteraction()
         }
@@ -3972,6 +4024,75 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
     }
 
+    private fun voiceOverlayRect(): RectF {
+        val margin = min(dp(8f), min(width, height) / 4f)
+        val availableHeight = min(height.toFloat(), dp(config.candidateBarHeightDp + config.effectiveKeyboardHeightDp * 0.5f))
+        val cardWidth = min(dp(280f), width - margin * 2f).coerceAtLeast(0f)
+        val cardHeight = min(dp(128f), availableHeight - margin * 2f).coerceAtLeast(0f)
+        val left = (width - cardWidth) / 2f
+        val top = (availableHeight - cardHeight) / 2f
+        return RectF(left, top, left + cardWidth, top + cardHeight)
+    }
+
+    private fun voiceCloseRect(): RectF {
+        val card = voiceOverlayRect()
+        val size = min(dp(48f), min(card.width(), card.height()))
+        return RectF(card.right - size, card.top, card.right, card.top + size)
+    }
+
+    private fun drawVoiceInputOverlay(canvas: Canvas) {
+        if (voiceState == KeytaoVoiceInput.State.IDLE) return
+        val card = voiceOverlayRect()
+        val radius = min(dp(18f), card.height() / 2f)
+        drawSurfaceShadow(canvas, card, pressed = false)
+        paint.style = Paint.Style.FILL
+        val background = panelBackgroundColor()
+        paint.color = Color.rgb(Color.red(background), Color.green(background), Color.blue(background))
+        canvas.drawRoundRect(card, radius, radius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(1f, dp(1f))
+        paint.color = theme.panelBorder.toArgb()
+        canvas.drawRoundRect(card, radius, radius, paint)
+
+        val close = voiceCloseRect()
+        val crossRadius = min(dp(5f), close.width() / 6f)
+        val previousCap = paint.strokeCap
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = dp(2f)
+        paint.color = theme.keyForeground.toArgb()
+        canvas.drawLine(close.centerX() - crossRadius, close.centerY() - crossRadius,
+            close.centerX() + crossRadius, close.centerY() + crossRadius, paint)
+        canvas.drawLine(close.centerX() + crossRadius, close.centerY() - crossRadius,
+            close.centerX() - crossRadius, close.centerY() + crossRadius, paint)
+
+        paint.color = theme.accentColor.toArgb()
+        val centerY = card.top + card.height() * 0.65f
+        if (voiceState == KeytaoVoiceInput.State.TRANSCRIBING) {
+            val spinnerRadius = min(dp(12f), card.height() * 0.13f)
+            paint.strokeWidth = dp(3f)
+            val angle = (SystemClock.uptimeMillis() % 1_000L) * 0.36f
+            canvas.drawArc(card.centerX() - spinnerRadius, centerY - spinnerRadius,
+                card.centerX() + spinnerRadius, centerY + spinnerRadius, angle, 250f, false, paint)
+            postInvalidateOnAnimation()
+        } else {
+            paint.style = Paint.Style.FILL
+            val waveformWidth = card.width() * 0.72f
+            val spacing = waveformWidth / voiceLevels.size
+            val barWidth = min(dp(5f), spacing * 0.55f)
+            val maxHeight = card.height() * 0.36f
+            val minHeight = min(dp(4f), maxHeight)
+            for (index in voiceLevels.indices) {
+                val level = voiceLevels[(voiceLevelIndex + index) % voiceLevels.size]
+                val barHeight = minHeight + level * (maxHeight - minHeight)
+                val x = card.centerX() - waveformWidth / 2f + spacing * (index + 0.5f)
+                canvas.drawRoundRect(x - barWidth / 2f, centerY - barHeight / 2f,
+                    x + barWidth / 2f, centerY + barHeight / 2f, barWidth / 2f, barWidth / 2f, paint)
+            }
+        }
+        paint.strokeCap = previousCap
+        paint.style = Paint.Style.FILL
+    }
+
     private fun previewText(touch: KeyTouch): String? {
         if (!config.keyPreviewEnabled || touch.longPressConsumed || keyboardDragging || functionPanelActive) return null
         val deltaY = touch.currentY - touch.downY
@@ -4165,7 +4286,6 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     }
 
     private fun displayLabel(key: KeySpec): String {
-        if (voiceListening && isSpaceKey(key)) return "正在听…"
         if (key.action.type == KeyCommandTypes.SHIFT) {
             return if (shiftState == ShiftState.LOCKED) "⇪" else key.label
         }
@@ -6907,6 +7027,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
         /** Virtual accessibility node id ranges, one block per hit-test list. */
         private const val accessibilityExpandNodeId = 1
+        private const val accessibilityVoiceCloseNodeId = 2
         private const val accessibilityToolbarNodeBase = 1_000
         private const val accessibilityCandidateNodeBase = 2_000
         private const val accessibilityExpandedNodeBase = 3_000
