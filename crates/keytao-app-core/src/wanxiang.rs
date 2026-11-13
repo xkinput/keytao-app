@@ -24,7 +24,7 @@ use tokio::{
 };
 
 pub const SCHEMA_ID: &str = "wanxiang";
-const RELEASE_API: &str = "https://api.github.com/repos/amzxyz/rime-wanxiang/releases/latest";
+const RELEASE_LATEST: &str = "https://github.com/amzxyz/rime-wanxiang/releases/latest";
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MANIFEST: &str = ".keytao-wanxiang.json";
 const NOTICE: &str = "wanxiang-NOTICE.txt";
@@ -415,18 +415,19 @@ impl Drop for InstallReceipt {
     }
 }
 
-fn client(timeout: Duration) -> Result<reqwest::Client, String> {
+fn client(timeout: Duration, redirects: reqwest::redirect::Policy) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("KeyTao-Addon-Installer")
         .connect_timeout(Duration::from_secs(30))
         .timeout(timeout)
         .https_only(true)
+        .redirect(redirects)
         .build()
         .map_err(|e| e.to_string())
 }
 
-pub(crate) async fn github_metadata(url: &str) -> Result<serde_json::Value, String> {
-    let response = client(Duration::from_secs(30))?
+pub(crate) async fn github_text(url: &str) -> Result<String, String> {
+    let response = client(Duration::from_secs(30), reqwest::redirect::Policy::limited(10))?
         .get(url)
         .send()
         .await
@@ -442,40 +443,71 @@ pub(crate) async fn github_metadata(url: &str) -> Result<serde_json::Value, Stri
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|e| format!("附加方案版本信息无效：{e}"))
+    String::from_utf8(bytes).map_err(|e| format!("附加方案版本信息无效：{e}"))
 }
 
-fn release_package(release: &serde_json::Value) -> Result<RemotePackage, String> {
-    let version = release["tag_name"]
-        .as_str()
-        .filter(|tag| !tag.is_empty())
-        .ok_or("万象发布信息缺少版本号")?;
-    let asset = release["assets"]
-        .as_array()
-        .and_then(|assets| {
-            assets
-                .iter()
-                .find(|asset| asset["name"] == "rime-wanxiang-base.zip")
-        })
-        .ok_or("最新万象发布缺少基础词库")?;
-    let download_url = asset["browser_download_url"]
-        .as_str()
-        .filter(|url| url.starts_with("https://"))
-        .ok_or("万象发布下载地址无效")?;
-    let size = asset["size"]
-        .as_u64()
-        .filter(|size| *size > 0 && *size <= MAX_DOWNLOAD_BYTES)
-        .ok_or("万象发布包大小超出限制")?;
-    Ok(RemotePackage {
+fn release_tag_from_location(location: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(RELEASE_LATEST)
+        .and_then(|base| base.join(location))
+        .map_err(|e| format!("万象发布地址无效：{e}"))?;
+    let tag = url
+        .path()
+        .strip_prefix("/amzxyz/rime-wanxiang/releases/tag/")
+        .filter(|tag| !tag.is_empty() && !tag.contains('/'))
+        .ok_or("万象发布地址缺少版本号")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("万象发布地址无效".into());
+    }
+    Ok(tag.into())
+}
+
+fn release_package(version: &str) -> RemotePackage {
+    RemotePackage {
         version: version.into(),
         source: format!("https://github.com/amzxyz/rime-wanxiang/releases/tag/{version}"),
-        download_url: download_url.into(),
-        download_bytes: Some(size),
-    })
+        download_url: format!(
+            "https://github.com/amzxyz/rime-wanxiang/releases/download/{version}/rime-wanxiang-base.zip"
+        ),
+        download_bytes: None,
+    }
 }
 
 async fn latest_package() -> Result<RemotePackage, String> {
-    release_package(&github_metadata(RELEASE_API).await?)
+    let response = client(Duration::from_secs(30), reqwest::redirect::Policy::none())?
+        .get(RELEASE_LATEST)
+        .send()
+        .await
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
+    if !response.status().is_redirection() {
+        return Err("万象发布地址未返回重定向".into());
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or("万象发布地址缺少重定向位置")?;
+    Ok(release_package(&release_tag_from_location(location)?))
+}
+
+fn package_for_install(latest: Result<RemotePackage, String>) -> RemotePackage {
+    latest.unwrap_or_else(|error| {
+        tracing::warn!(%error, "Wanxiang version lookup failed; installing the latest archive");
+        RemotePackage {
+            version: String::new(),
+            source: RELEASE_LATEST.into(),
+            download_url: format!("{RELEASE_LATEST}/download/rime-wanxiang-base.zip"),
+            download_bytes: None,
+        }
+    })
 }
 
 pub async fn latest_version() -> Result<String, String> {
@@ -487,7 +519,10 @@ pub(crate) async fn download(
     path: &Path,
     progress: &(impl Fn(u8, &str) + Send + Sync),
 ) -> Result<(), String> {
-    let client = client(Duration::from_secs(15 * 60))?;
+    let client = client(
+        Duration::from_secs(15 * 60),
+        reqwest::redirect::Policy::limited(10),
+    )?;
     let response = client
         .get(&package.download_url)
         .send()
@@ -723,7 +758,7 @@ pub async fn install(
     let receipt = InstallReceipt::new(root)?;
     // Detect an invalid ownership record before spending bandwidth.
     read_manifest(&receipt.root)?;
-    let package = latest_package().await?;
+    let package = package_for_install(latest_package().await);
     progress(5, "正在下载万象拼音基础词库（不含语法模型）…");
     let archive = receipt.work.join("download.zip");
     download(&package, &archive, &progress).await?;

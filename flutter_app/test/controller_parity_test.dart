@@ -628,17 +628,20 @@ void main() {
     controller.dispose();
     controller = create(mobile: false);
     core.addonStatus = installedAddon;
+    core.wanxiangStatus = installedAddon;
     core.addonUpdateFails = true;
     expect(await controller.refreshState(), isTrue);
     expect(await controller.refreshState(), isTrue);
     await settle();
     expect(
       core.calls.where((call) => call.startsWith('addonUpdate:')),
-      ['addonUpdate:easy_en'],
+      ['addonUpdate:easy_en', 'addonUpdate:wanxiang'],
     );
     expect(controller.error, isNull);
     expect(controller.addonError, isNull);
+    expect(controller.wanxiangError, isNull);
     expect(controller.addonLatestVersion, isNull);
+    expect(controller.wanxiangLatestVersion, isNull);
   });
 
   test('add-on update checks discard results across install and uninstall', () async {

@@ -10,7 +10,10 @@ pub const EASY_EN_ADDON_ID: &str = "easy_en";
 const MANIFEST: &str = ".keytao-easy-en.json";
 const LICENSE: &str = "easy_en-LICENSE";
 const CUSTOM: &str = "# KeyTao add-on defaults: no external word-splitter on mobile/desktop.\npatch:\n  easy_en/split_sentence: false\n";
-const REPOSITORY_API: &str = "https://api.github.com/repos/BlindingDark/rime-easy-en";
+const COMMITS_ATOM: &str = "https://github.com/BlindingDark/rime-easy-en/commits/master.atom";
+const BRANCH_SOURCE: &str = "https://github.com/BlindingDark/rime-easy-en/tree/master";
+const BRANCH_ARCHIVE: &str =
+    "https://codeload.github.com/BlindingDark/rime-easy-en/zip/refs/heads/master";
 // Ownership fingerprints for the former bundled package, not download pins.
 const LEGACY_FILES: &[(&str, &str)] = &[
     (
@@ -83,11 +86,10 @@ fn is_package_file(path: &str) -> bool {
             .any(|(_, relative)| relative == path)
 }
 
-fn package_from_commit(commit: &serde_json::Value) -> Result<RemotePackage, String> {
-    let sha = commit["sha"]
-        .as_str()
-        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or("English 上游版本无效")?;
+fn package_from_commit(sha: &str) -> Result<RemotePackage, String> {
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("English 上游版本无效".into());
+    }
     Ok(RemotePackage {
         version: sha[..12].into(),
         source: format!("https://github.com/BlindingDark/rime-easy-en/commit/{sha}"),
@@ -96,17 +98,54 @@ fn package_from_commit(commit: &serde_json::Value) -> Result<RemotePackage, Stri
     })
 }
 
+fn commit_sha_from_atom(feed: &str) -> Result<&str, String> {
+    let entry = feed
+        .split_once("<entry>")
+        .and_then(|(_, rest)| rest.split_once("</entry>"))
+        .map(|(entry, _)| entry)
+        .ok_or("English 上游提交信息无效")?;
+    let id = entry
+        .split_once("<id>")
+        .and_then(|(_, rest)| rest.split_once("</id>"))
+        .and_then(|(id, _)| id.trim().split_once("Grit::Commit/"))
+        .map(|(_, sha)| sha);
+    let link = entry.split("<link").skip(1).find_map(|link| {
+        let tag = link.split_once('>')?.0;
+        let href = tag.split_once("href=")?.1;
+        let quote = href.chars().next()?;
+        if !matches!(quote, '\'' | '"') {
+            return None;
+        }
+        href[1..]
+            .split(quote)
+            .next()?
+            .split_once("/commit/")
+            .map(|(_, sha)| sha)
+    });
+    [id, link]
+        .into_iter()
+        .flatten()
+        .find(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| "English 上游版本无效".into())
+}
+
 async fn latest_package() -> Result<RemotePackage, String> {
-    let repository = wanxiang::github_metadata(REPOSITORY_API).await?;
-    let branch = repository["default_branch"]
-        .as_str()
-        .filter(|branch| !branch.is_empty())
-        .ok_or("English 上游缺少默认分支")?;
-    let mut url = reqwest::Url::parse(REPOSITORY_API).map_err(|e| e.to_string())?;
-    url.path_segments_mut()
-        .map_err(|_| "English 上游地址无效")?
-        .extend(["commits", branch]);
-    package_from_commit(&wanxiang::github_metadata(url.as_str()).await?)
+    let feed = wanxiang::github_text(COMMITS_ATOM).await?;
+    package_from_commit(commit_sha_from_atom(&feed)?)
+}
+
+fn package_for_install(latest: Result<RemotePackage, String>) -> RemotePackage {
+    let mut package = latest.unwrap_or_else(|error| {
+        tracing::warn!(%error, "English version lookup failed; installing the default branch");
+        RemotePackage {
+            version: String::new(),
+            source: BRANCH_SOURCE.into(),
+            download_url: BRANCH_ARCHIVE.into(),
+            download_bytes: None,
+        }
+    });
+    package.download_url = BRANCH_ARCHIVE.into();
+    package
 }
 
 pub async fn latest_version() -> Result<String, String> {
@@ -374,7 +413,7 @@ async fn install_package(
 ) -> Result<InstallReceipt, String> {
     let receipt = InstallReceipt::new(root)?;
     read_manifest(&receipt.root)?;
-    let package = latest_package().await?;
+    let package = package_for_install(latest_package().await);
     let archive = receipt.work.join("download.zip");
     wanxiang::download(&package, &archive, &progress).await?;
     tokio::task::spawn_blocking(move || {
@@ -446,13 +485,18 @@ pub(crate) async fn prepare_public_package(root: &Path, cache: &Path) -> Result<
         return Ok(());
     }
     let package = if let Some(manifest) = installed {
-        let sha = manifest
+        if let Some(sha) = manifest
             .source
             .strip_prefix("https://github.com/BlindingDark/rime-easy-en/commit/")
-            .ok_or("English 上游来源无效")?;
-        package_from_commit(&serde_json::json!({"sha": sha}))?
+        {
+            package_from_commit(sha)?
+        } else if manifest.source == BRANCH_SOURCE {
+            package_for_install(Err("English installed without version metadata".into()))
+        } else {
+            return Err("English 上游来源无效".into());
+        }
     } else {
-        latest_package().await?
+        package_for_install(latest_package().await)
     };
     let receipt = InstallReceipt::new(root)?;
     let archive = receipt.work.join("download.zip");
@@ -802,7 +846,7 @@ mod tests {
         let archive = receipt.work.join("fixture.zip");
         fixture_archive(&archive, content, &[]);
         let sha = sha.to_string().repeat(40);
-        let package = package_from_commit(&serde_json::json!({"sha": sha})).unwrap();
+        let package = package_from_commit(&sha).unwrap();
         commit_package(&mut receipt, &archive, &package).unwrap();
         write_schema_list_transaction(&mut receipt, true).unwrap();
         receipt
@@ -1022,7 +1066,7 @@ mod tests {
         let mut receipt = InstallReceipt::new(root.path()).unwrap();
         let archive = receipt.work.join("fixture.zip");
         fixture_archive(&archive, "updated upstream", &[]);
-        let package = package_from_commit(&serde_json::json!({"sha": "b".repeat(40)})).unwrap();
+        let package = package_from_commit(&"b".repeat(40)).unwrap();
         assert!(
             commit_package(&mut receipt, &archive, &package)
                 .unwrap_err()
@@ -1160,11 +1204,62 @@ mod tests {
     #[test]
     fn metadata_requires_a_full_hex_commit_and_pins_the_archive_to_it() {
         for sha in ["", "short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
-            assert!(package_from_commit(&serde_json::json!({"sha": sha})).is_err());
+            assert!(package_from_commit(sha).is_err());
         }
         let sha = "a".repeat(40);
-        let package = package_from_commit(&serde_json::json!({"sha": sha})).unwrap();
+        let package = package_from_commit(&sha).unwrap();
         assert!(package.download_url.ends_with(&sha));
         assert_eq!(package.version, sha[..12]);
+    }
+
+    #[test]
+    fn atom_uses_the_first_entry_commit_id_or_link() {
+        let first = "a".repeat(40);
+        let second = "b".repeat(40);
+        let feed = format!(
+            "<feed><id>feed-id</id><entry><id>tag:github.com,2008:Grit::Commit/{first}</id></entry><entry><id>Grit::Commit/{second}</id></entry></feed>"
+        );
+        assert_eq!(commit_sha_from_atom(&feed).unwrap(), first);
+        for quote in ['\'', '"'] {
+            let feed = format!(
+                "<feed><entry><link href={quote}https://github.com/BlindingDark/rime-easy-en/commit/{first}{quote}/></entry></feed>"
+            );
+            assert_eq!(commit_sha_from_atom(&feed).unwrap(), first);
+        }
+    }
+
+    #[test]
+    fn atom_rejects_missing_invalid_or_later_entry_commits() {
+        for sha in ["", "short", &"g".repeat(40), &"a".repeat(41)] {
+            let feed = format!("<feed><entry><id>Grit::Commit/{sha}</id></entry></feed>");
+            assert!(commit_sha_from_atom(&feed).is_err());
+        }
+        assert!(commit_sha_from_atom("<feed/>").is_err());
+        assert!(commit_sha_from_atom(&format!(
+            "<feed><entry><id>invalid</id></entry><entry><id>Grit::Commit/{}</id></entry></feed>",
+            "a".repeat(40)
+        )).is_err());
+    }
+
+    #[test]
+    fn install_uses_master_and_survives_a_failed_version_lookup() {
+        let known = package_for_install(package_from_commit(&"a".repeat(40)));
+        assert_eq!(known.download_url, BRANCH_ARCHIVE);
+        assert_eq!(known.version, "aaaaaaaaaaaa");
+
+        let package = package_for_install(Err("version lookup unavailable".into()));
+        assert_eq!(package.download_url, BRANCH_ARCHIVE);
+        assert_eq!(package.source, BRANCH_SOURCE);
+        assert!(package.version.is_empty());
+        let root = TestRoot::new();
+        let mut receipt = InstallReceipt::new(root.path()).unwrap();
+        let archive = receipt.work.join("fixture.zip");
+        fixture_archive(&archive, "upstream", &[]);
+        commit_package(&mut receipt, &archive, &package).unwrap();
+        write_schema_list_transaction(&mut receipt, true).unwrap();
+        receipt.finish().unwrap();
+        let status = addon_schema_status_at(root.path(), EASY_EN_ADDON_ID);
+        assert!(status.installed);
+        assert!(status.version.is_empty());
     }
 }

@@ -32,14 +32,63 @@ fn download_requires_complete_bounded_bytes_without_pinning_a_release_hash() {
 }
 
 #[test]
-fn latest_release_selects_base_asset_and_preserves_upstream_tag() {
-    let package = release_package(&serde_json::json!({"tag_name": "v99.1", "assets": [
-        {"name": "other.zip", "browser_download_url": "https://example.invalid/other", "size": 1},
-        {"name": "rime-wanxiang-base.zip", "browser_download_url": "https://example.invalid/base", "size": 42}
-    ]})).unwrap();
-    assert_eq!(package.version, "v99.1");
-    assert_eq!(package.download_url, "https://example.invalid/base");
-    assert_eq!(package.download_bytes, Some(42));
+fn latest_release_redirect_preserves_upstream_tag_and_selects_base_asset() {
+    for location in [
+        "https://github.com/amzxyz/rime-wanxiang/releases/tag/v99.1",
+        "/amzxyz/rime-wanxiang/releases/tag/v99.1",
+    ] {
+        let tag = release_tag_from_location(location).unwrap();
+        let package = release_package(&tag);
+        assert_eq!(package.version, "v99.1");
+        assert_eq!(
+            package.source,
+            "https://github.com/amzxyz/rime-wanxiang/releases/tag/v99.1"
+        );
+        assert_eq!(
+            package.download_url,
+            "https://github.com/amzxyz/rime-wanxiang/releases/download/v99.1/rime-wanxiang-base.zip"
+        );
+        assert_eq!(package.download_bytes, None);
+    }
+}
+
+#[test]
+fn latest_release_redirect_rejects_missing_tags_and_unexpected_targets() {
+    for location in [
+        "",
+        "https://github.com/amzxyz/rime-wanxiang/releases/tag/",
+        "https://github.com/amzxyz/rime-wanxiang/releases/tag/v1/extra",
+        "https://github.com/other/repository/releases/tag/v1",
+        "https://example.invalid/amzxyz/rime-wanxiang/releases/tag/v1",
+        "http://github.com/amzxyz/rime-wanxiang/releases/tag/v1",
+        "https://user@github.com/amzxyz/rime-wanxiang/releases/tag/v1",
+        "https://github.com/amzxyz/rime-wanxiang/releases/tag/v1?query=1",
+        "https://github.com/amzxyz/rime-wanxiang/releases/tag/v1#fragment",
+    ] {
+        assert!(
+            release_tag_from_location(location).is_err(),
+            "accepted {location}"
+        );
+    }
+}
+
+#[test]
+fn install_survives_a_failed_version_lookup_and_records_an_unknown_version() {
+    let package = package_for_install(Err("version lookup unavailable".into()));
+    assert!(package.version.is_empty());
+    assert_eq!(package.source, RELEASE_LATEST);
+    assert_eq!(
+        package.download_url,
+        "https://github.com/amzxyz/rime-wanxiang/releases/latest/download/rime-wanxiang-base.zip"
+    );
+    let root = TestRoot::new();
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    let files = stage_fixture(&receipt, &[]);
+    commit_files(&mut receipt, files, &package, DOWNLOAD_SHA256.into()).unwrap();
+    receipt.finish().unwrap();
+    let status = status_at(&root.path);
+    assert!(status.installed);
+    assert!(status.version.is_empty());
 }
 
 struct TestRoot {
