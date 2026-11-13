@@ -44,7 +44,10 @@ impl Compositor {
         let registry = conn.display().get_registry(&registry_queue.handle(), ());
         let queue = conn.new_event_queue::<App>();
         let input_method = registry.bind::<ZwpInputMethodV1, _, _>(1, 1, &queue.handle(), ());
-        let mut app = App::new(engine.create_session().expect("Rime session"), None);
+        let mut app = App::new(
+            crate::engine::create_session(engine).expect("Rime session"),
+            None,
+        );
         app.renderer = None;
         app.input_method = Some(input_method.clone());
         let mut compositor = Self {

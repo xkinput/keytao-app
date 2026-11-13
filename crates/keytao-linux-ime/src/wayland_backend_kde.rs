@@ -1065,8 +1065,7 @@ delegate_noop!(App: ignore ZwpInputPanelSurfaceV1);
 delegate_noop!(App: ignore WlRegion);
 
 pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<(), String> {
-    let session = engine
-        .create_session()
+    let session = crate::engine::create_session(&engine)
         .map_err(|e| format!("failed to create KDE Wayland Rime session: {e}"))?;
     let conn = Connection::connect_to_env().map_err(|e| format!("KDE Wayland connection: {e}"))?;
     let (globals, mut queue) =
@@ -1119,7 +1118,9 @@ fn run_event_loop(
 ) -> Result<(), String> {
     let qh = queue.handle();
     let reload_signal = reload_bus::subscribe();
+    let mut activity = Some(crate::hot_update::activity());
     loop {
+        activity.get_or_insert_with(crate::hot_update::activity);
         queue
             .dispatch_pending(app)
             .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;
@@ -1153,7 +1154,10 @@ fn run_event_loop(
             continue;
         };
         let write_blocked = match queue.flush() {
-            Ok(()) => false,
+            Ok(()) => {
+                drop(activity.take());
+                false
+            }
             Err(wayland_client::backend::WaylandError::Io(e))
                 if e.kind() == std::io::ErrorKind::WouldBlock =>
             {
@@ -1201,6 +1205,7 @@ fn run_event_loop(
         }
         // Handle deactivate before a simultaneous reload can clear preedit
         // through a context KWin has just deleted.
+        activity.get_or_insert_with(crate::hot_update::activity);
         queue
             .dispatch_pending(app)
             .map_err(|e| format!("KDE Wayland dispatch: {e}"))?;

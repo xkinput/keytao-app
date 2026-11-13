@@ -5,6 +5,8 @@ mod engine;
 mod frontend;
 #[cfg(target_os = "linux")]
 mod gnome_ibus_engine;
+#[cfg(any(target_os = "linux", test))]
+mod hot_update;
 #[cfg(target_os = "linux")]
 mod ibus_backend;
 #[cfg(target_os = "linux")]
@@ -269,6 +271,7 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
                 };
 
                 tracing::info!("reload stamp changed: {}", gate.path().display());
+                let _activity = hot_update::activity();
                 match engine.reload_without_deploy() {
                     Ok(()) => {
                         gate.commit(requested);
@@ -326,6 +329,8 @@ fn main() {
             return;
         }
 
+        let startup_activity = hot_update::activity();
+
         // KWin launches the configured Virtual Keyboard with a private
         // WAYLAND_SOCKET. On KDE this socket advertises input-method-v1, not the
         // input-method-v2 manager used by wlroots-style compositors.
@@ -333,6 +338,7 @@ fn main() {
             .ok()
             .and_then(|s| s.parse::<i32>().ok())
             .is_some();
+        hot_update::start(kwin_socket);
 
         if !kwin_socket {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -512,6 +518,7 @@ fn main() {
             });
         }
         drop(frontend_tx);
+        drop(startup_activity);
         if let Err(error) =
             frontend::wait_for_frontends(ready_path, frontend_rx, backend_count, || {
                 STOP_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)

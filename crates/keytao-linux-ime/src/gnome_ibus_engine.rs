@@ -222,9 +222,7 @@ impl IBusFactory {
         tracing::info!("IBus Factory: CreateEngine({engine_name})");
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         let path = format!("/org/freedesktop/IBus/engines/keytao{n}");
-        let session = self
-            .engine
-            .create_session()
+        let session = crate::engine::create_session(&self.engine)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         let signal_ctxt = SignalContext::new(connection, path.clone()).ok();
         server
@@ -404,18 +402,21 @@ impl IBusEngine {
     }
 
     async fn select_candidate_at(&self, index: usize, ctxt: &SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::select_candidate(&self.session, index) {
             self.apply_ime_state(ime_state, ctxt).await;
         }
     }
 
     async fn change_page(&self, backward: bool, ctxt: &SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::change_page(&self.session, backward) {
             self.apply_ime_state(ime_state, ctxt).await;
         }
     }
 
     async fn process_navigation_key(&self, keyval: u32, ctxt: &SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         if let Some(ime_state) = ibus_shared::navigation_key(&self.session, keyval) {
             self.apply_ime_state(ime_state, ctxt).await;
         }
@@ -424,6 +425,7 @@ impl IBusEngine {
     /// Apply an IBus content-type: password and PIN fields stop composing so
     /// that no secret ever reaches librime or the user dictionary.
     async fn apply_content_type(&self, purpose: u32, hints: u32) {
+        let _activity = crate::hot_update::activity();
         let change = self.content_type.set(purpose, hints);
         self.session.set_input_policy(change.policy);
         if change.turned_sensitive {
@@ -503,7 +505,8 @@ impl IBusEngine {
         _keycode: u32,
         state: u32,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
-    ) -> bool {
+    ) -> crate::hot_update::KeyReply {
+        let activity = crate::hot_update::activity();
         let started = Instant::now();
         // The decision is shared with the standalone IBus shim; this object only
         // publishes the outcome over org.freedesktop.IBus.Engine.
@@ -517,7 +520,7 @@ impl IBusEngine {
                 runtime_log::record_keystroke(started.elapsed().as_secs_f64() * 1000.0);
             }
         }
-        accepted
+        crate::hot_update::KeyReply::new(accepted, activity)
     }
 
     async fn focus_in(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
@@ -526,12 +529,14 @@ impl IBusEngine {
     }
 
     async fn focus_out(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
         runtime_log::drain_key_stats();
     }
 
     async fn reset(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
     }
@@ -542,6 +547,7 @@ impl IBusEngine {
     }
 
     async fn disable(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) {
+        let _activity = crate::hot_update::activity();
         self.session.clear_composition();
         self.clear_ui(&ctxt).await;
         runtime_log::drain_key_stats();
@@ -625,6 +631,7 @@ impl IBusEngineService {
         #[zbus(object_server)] server: &zbus::ObjectServer,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
+        let _activity = crate::hot_update::activity();
         tracing::info!("IBus Engine: Destroy {}", ctxt.path());
         runtime_log::drain_key_stats();
         self.session.clear_composition();

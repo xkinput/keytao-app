@@ -15,7 +15,7 @@
 从 [Releases](https://github.com/xkinput/keytao-app/releases) 下载对应平台的安装包。
 
 - Linux：见 [docs/linux-install.md](docs/linux-install.md)。
-- macOS：安装 pkg，按安装器提示注销并重新登录，让系统发现输入法。
+- macOS：安装 pkg，安装后即可在输入法列表中选择 KeyTao。
 - Windows：运行 setup.exe，安装包说明见 [packaging/windows/README.md](packaging/windows/README.md)。
 - Android：安装 APK；首次打开会先进入系统输入法启用/切换引导，KeyTao 启用并选中后进入主界面。
 - iOS / iPadOS：IPA 未签名，签名与安装见 [docs/ios-install.md](docs/ios-install.md)。

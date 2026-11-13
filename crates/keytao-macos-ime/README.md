@@ -149,7 +149,7 @@ scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-<version>-macos.p
 sudo installer -pkg target/keytao-macos-pkg/keytao-app-<version>-macos.pkg -target /
 ```
 
-安装器会提示注销；重新登录 macOS 后，再打开 KeyTao 手动安装方案并点击“部署”。随后可继续检查：
+安装后无需注销；打开 KeyTao 手动安装方案并点击“部署”。随后可继续检查：
 
 ```sh
 test -d "/Applications/KeyTao.app"
@@ -165,7 +165,7 @@ crates/keytao-macos-ime/build.sh --skip-pkg
 crates/keytao-macos-ime/install.sh --release
 ```
 
-正式发行走仓库根目录的 `scripts/build-macos.sh`，产物是 pkg，不产出 dmg。pkg 同时安装主 App 和系统输入法 bundle，标记安装完成后需要注销，并保证两者都带完整 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
+正式发行走仓库根目录的 `scripts/build-macos.sh`，产物是 pkg，不产出 dmg。pkg 同时安装主 App 和系统输入法 bundle，安装完成后无需注销，并保证两者都带完整 `librime`、OpenCC 数据、`rime-plugins` 和基础 `rime-data`。
 
 常用路径：
 

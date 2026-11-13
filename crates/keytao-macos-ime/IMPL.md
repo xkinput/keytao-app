@@ -64,9 +64,9 @@ macOS IME 不默认读取 `~/Library/Rime`。那个目录属于鼠须管，KeyTa
 6. 重签主 App 及 dylib。
 7. 打包 `/Applications/KeyTao.app` 和 `/Library/Input Methods/KeyTao.app`。
 8. `postinstall` 结束 `KeyTaoIME` / `imklaunchagent` / `TextInputMenuAgent`，运行 `lsregister`、清理 quarantine/provenance xattr、注册/启用/选择输入源。
-9. PackageInfo 使用 `postinstall-action="logout"`，让 Installer 在完成页要求注销当前用户会话。
+9. PackageInfo 不要求注销；运行中的 IME 在输入会话停用且所有上下文空闲时检查可执行文件，发现替换后退出，由 macOS 在下次激活时启动新程序。
 
-安装脚本**不得**执行 `killall cfprefsd`。`cfprefsd` 是系统级 CFPreferences 守护进程，以 root 结束它会连带终止其它用户/系统实例并丢弃在途偏好写入；输入源注册走 TIS API，本来就通过它正常落盘，加上 `postinstall-action="logout"` 已经保证配置生效。`scripts/verify-macos-pkg.sh` 会检查 postinstall 里没有这行，并校验 IME bundle 版本与 pkg 版本一致。
+安装脚本**不得**执行 `killall cfprefsd`。`cfprefsd` 是系统级 CFPreferences 守护进程，以 root 结束它会连带终止其它用户/系统实例并丢弃在途偏好写入；输入源注册走 TIS API，通过它正常落盘。`scripts/verify-macos-pkg.sh` 会检查 postinstall 里没有这行、安装器不要求注销，并校验 IME bundle 版本与 pkg 版本一致。
 
 本地完整打包和离线验证命令：
 
@@ -89,7 +89,7 @@ crates/keytao-macos-ime/build.sh --release --skip-pkg
 crates/keytao-macos-ime/smoke.sh /tmp/keytao-smoke-user
 ```
 
-安装后必须先注销并重新登录 macOS，再执行方案安装、手动部署和输入验证：
+安装后无需注销，可直接执行方案安装、手动部署和输入验证：
 
 ```sh
 test -d "/Applications/KeyTao.app"

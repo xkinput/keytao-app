@@ -211,7 +211,10 @@ grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --registe
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --disable-legacy-input-sources' "$POSTINSTALL"
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --enable-input-source' "$POSTINSTALL"
 grep -Fq '"/Library/Input Methods/KeyTao.app/Contents/MacOS/KeyTaoIME" --select-input-source' "$POSTINSTALL"
-grep -Fq 'postinstall-action="logout"' "$PACKAGE_INFO"
+if grep -Eq 'postinstall-action="(logout|restart|shutdown)"' "$PACKAGE_INFO"; then
+    echo "ERROR: the macOS installer must not require logout or restart" >&2
+    exit 1
+fi
 
 check_external_links "$MAIN_APP" "main app" "$TMP_DIR/main-otool.txt"
 check_external_links "$IME_APP" "IME app" "$TMP_DIR/ime-otool.txt"

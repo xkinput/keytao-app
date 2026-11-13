@@ -1249,8 +1249,7 @@ delegate_noop!(App: ignore ZwpVirtualKeyboardV1);
 /// Returns Ok(()) when the Wayland input-method slot is unavailable (e.g. KDE
 /// virtual keyboard is active) so the caller can keep IBus/XIM threads alive.
 pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<(), String> {
-    let session = engine
-        .create_session()
+    let session = crate::engine::create_session(&engine)
         .map_err(|e| format!("failed to create Wayland Rime session: {e}"))?;
 
     let conn = Connection::connect_to_env().map_err(|e| format!("Wayland connection: {e}"))?;
@@ -1306,7 +1305,9 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
     let reload_signal = reload_bus::subscribe();
 
     tracing::info!("Wayland IME running (popup-surface positioning)");
+    let mut activity = Some(crate::hot_update::activity());
     loop {
+        activity.get_or_insert_with(crate::hot_update::activity);
         if app.wayland_unavailable {
             tracing::info!("Wayland IME exiting gracefully (slot unavailable)");
             return Ok(());
@@ -1348,16 +1349,22 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
             app.fire_key_repeat(&qh);
         }
 
-        match queue.flush() {
-            Ok(()) => {}
+        let write_blocked = match queue.flush() {
+            Ok(()) => {
+                drop(activity.take());
+                false
+            }
             Err(wayland_client::backend::WaylandError::Io(e))
-                if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                if e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                true
+            }
             Err(e) => return Err(format!("Wayland flush: {e}")),
-        }
+        };
         let timeout_ms = app.poll_timeout_ms();
         let mut pfds = vec![libc::pollfd {
             fd: conn.as_fd().as_raw_fd(),
-            events: libc::POLLIN,
+            events: libc::POLLIN | if write_blocked { libc::POLLOUT } else { 0 },
             revents: 0,
         }];
         if let Some(signal) = &reload_signal {
@@ -1378,6 +1385,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
         }
         if let Some(signal) = &reload_signal {
             if signal.take() {
+                activity.get_or_insert_with(crate::hot_update::activity);
                 app.handle_reload();
             }
         }
@@ -1388,6 +1396,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
             ));
         }
         if pfds[0].revents & libc::POLLIN != 0 {
+            activity.get_or_insert_with(crate::hot_update::activity);
             if let Err(e) = queue.blocking_dispatch(&mut app) {
                 tracing::warn!("Wayland dispatch error: {e}");
                 return Err(format!("Wayland connection closed: {e}"));

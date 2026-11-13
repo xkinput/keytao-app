@@ -553,10 +553,7 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         style: InputStyle,
     ) -> Result<IcData, ServerError> {
         tracing::info!("XIM NewICData style={style:?}");
-        let session = self
-            .engine
-            .create_session()
-            .map_err(ServerError::Internal)?;
+        let session = crate::engine::create_session(&self.engine).map_err(ServerError::Internal)?;
         Ok(IcData {
             session,
             last_state: None,
@@ -821,6 +818,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
         loop {
             match conn.poll_for_event() {
                 Ok(Some(event)) => {
+                    let _activity = crate::hot_update::activity();
                     if let Err(e) = server.filter_event(&event, &mut connections, &mut handler) {
                         tracing::error!("XIM error: {e}");
                     }

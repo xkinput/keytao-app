@@ -23,6 +23,9 @@ private let chordModifiers: NSEvent.ModifierFlags = [.command, .control, .option
 /// macOS creates one controller per client context and routes key events here.
 final class KeyTaoInputController: IMKInputController {
 
+    private static let controllers = NSHashTable<KeyTaoInputController>.weakObjects()
+    private static var keyHandlingDepth = 0
+
     private var session: UnsafeMutableRawPointer?
     private var candidatePanel: CandidatePanel?
     private var modeIndicatorPanel: ModeIndicatorPanel?
@@ -41,6 +44,7 @@ final class KeyTaoInputController: IMKInputController {
 
     override init!(server: IMKServer!, delegate: Any!, client: Any!) {
         super.init(server: server, delegate: delegate, client: client)
+        Self.controllers.add(self)
         KeyTaoRuntime.shared.start()
         // Null until the runtime is up; ensureSession() picks it up later
         // instead of blocking this callback on librime initialization.
@@ -96,6 +100,16 @@ final class KeyTaoInputController: IMKInputController {
         hideModeIndicator()
         lastModifierFlags = []
         shiftPressedWithoutKey = false
+        // Wait until IMKit's callback returns, including any reentrant key handling.
+        DispatchQueue.main.async {
+            guard Self.keyHandlingDepth == 0,
+                  !Self.controllers.allObjects.contains(where: {
+                      $0.isActive || $0.hasComposition || $0.hasMarkedText
+                  }),
+                  KeyTaoExecutableUpdateGuard.shared.hasChanged else { return }
+            NSLog("KeyTao: executable replaced; exiting for relaunch")
+            NSApp.terminate(nil)
+        }
     }
 
     /// The system asks for every visible piece of input method UI to go away.
@@ -109,6 +123,8 @@ final class KeyTaoInputController: IMKInputController {
 
     /// Called for key events in the client app. Return true only when librime consumes it.
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+        Self.keyHandlingDepth += 1
+        defer { Self.keyHandlingDepth -= 1 }
         guard let event else { return false }
 
         if event.type == .flagsChanged {

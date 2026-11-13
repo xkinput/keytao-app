@@ -3,8 +3,18 @@
 //! Linux protocol backends should not manage librime sessions directly.  They
 //! create sessions through `CoreEngine` and send normalized X11 keysym events.
 
-pub use keytao_core::{ImeRuntime as CoreEngine, ImeRuntimeSession as ImeSession};
+pub use keytao_core::ImeRuntime as CoreEngine;
 use keytao_core::{ImeState, InputContextPolicy};
+use std::sync::Arc;
+
+pub type ImeSession = Arc<keytao_core::ImeRuntimeSession>;
+
+pub fn create_session(engine: &CoreEngine) -> Result<ImeSession, String> {
+    let _activity = crate::hot_update::activity();
+    let session = Arc::new(engine.create_session()?);
+    crate::hot_update::register_session(&session);
+    Ok(session)
+}
 
 /// Text fallback for a Wayland grab without a virtual keyboard. Shortcut
 /// chords must not turn into literal characters in the document.
