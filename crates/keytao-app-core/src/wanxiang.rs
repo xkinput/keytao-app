@@ -4,7 +4,7 @@
 //! caller updates the schema list and runs the existing Rime deploy pipeline,
 //! then calls `finish`; dropping the receipt rolls the source files back.
 //! The portable basic schema uses only built-in Rime components, retaining
-//! upstream's dictionary and full-pinyin algebra without Lua or a grammar model.
+//! upstream's dictionary and spelling algebra without Lua or a grammar model.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -61,12 +61,39 @@ const DICTIONARIES: &[&str] = &[
 ];
 const BASIC_SCHEMA: &str = include_str!("wanxiang-basic.schema.yaml");
 
-fn required_files(archive: &Path) -> Result<Vec<String>, String> {
+fn variant_source(variant: &str) -> Result<&'static str, String> {
+    match variant {
+        "base" => Ok("wanxiang"),
+        "pure" => Ok("wanxiang_pure"),
+        "lite" => Ok("wanxiang_lite"),
+        "flypy" | "hanxin" | "moqi" | "shouyou" | "shyplus" | "tiger" | "wubi" | "wx" | "zrm" => {
+            Ok("wanxiang_pro")
+        }
+        _ => Err(format!("不支持的万象版本：{variant}")),
+    }
+}
+
+fn variant_asset(variant: &str) -> Result<String, String> {
+    let source = variant_source(variant)?;
+    let suffix = if source == "wanxiang_pro" {
+        "-fuzhu"
+    } else {
+        ""
+    };
+    Ok(format!("rime-wanxiang-{variant}{suffix}.zip"))
+}
+
+fn default_variant() -> String {
+    "base".into()
+}
+
+fn required_files(archive: &Path, variant: &str) -> Result<Vec<String>, String> {
     let mut archive = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
         .map_err(|e| format!("无法读取万象压缩包：{e}"))?;
+    let name = format!("{}.dict.yaml", variant_source(variant)?);
     let dictionary = archive
-        .by_name("wanxiang.dict.yaml")
-        .map_err(|_| "万象发布包缺少必要文件：wanxiang.dict.yaml".to_string())?;
+        .by_name(&name)
+        .map_err(|_| format!("万象发布包缺少必要文件：{name}"))?;
     let header = serde_yaml::Deserializer::from_reader(dictionary)
         .next()
         .ok_or("wanxiang.dict.yaml is empty")?;
@@ -93,6 +120,7 @@ pub struct Status {
     pub installed: bool,
     pub deployed: bool,
     pub version: String,
+    pub variant: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +141,8 @@ pub(crate) struct RemotePackage {
 struct Manifest {
     format: u32,
     version: String,
+    #[serde(default = "default_variant")]
+    variant: String,
     source: String,
     archive_sha256: String,
     includes_grammar: bool,
@@ -134,7 +164,10 @@ pub fn status_at(root: &Path) -> Status {
         deployed: installed
             && root.join("build/wanxiang.schema.yaml").is_file()
             && root.join("build/wanxiang.table.bin").is_file(),
-        version: manifest.map_or_else(String::new, |m| m.version),
+        version: manifest
+            .as_ref()
+            .map_or_else(String::new, |m| m.version.clone()),
+        variant: manifest.map_or_else(default_variant, |m| m.variant),
     }
 }
 
@@ -157,6 +190,7 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
     if manifest.format != 1 || manifest.files.len() > MAX_FILES {
         return Err("无法识别万象安装记录".into());
     }
+    variant_source(&manifest.variant)?;
     let mut seen = BTreeSet::new();
     for file in &manifest.files {
         validate_relative(&file.path)?;
@@ -237,17 +271,30 @@ fn installable(name: &str) -> bool {
         || name
             .strip_prefix("wanxiang-dicts/")
             .and_then(|s| s.strip_suffix(".dict.yaml"))
-            .is_some_and(|stem| DICTIONARIES.contains(&stem))
+            .is_some_and(dictionary_stem)
+}
+
+fn dictionary_stem(stem: &str) -> bool {
+    let stem = stem
+        .strip_suffix(".pro")
+        .or_else(|| stem.strip_suffix(".lite"))
+        .unwrap_or(stem);
+    DICTIONARIES.contains(&stem)
 }
 
 fn package_destination(name: &str) -> Option<String> {
     if REQUIRED.contains(&name) {
         return Some(name.into());
     }
+    for source in ["wanxiang_pro", "wanxiang_pure", "wanxiang_lite"] {
+        if let Some(extension) = name.strip_prefix(source)
+            && matches!(extension, ".schema.yaml" | ".dict.yaml")
+        {
+            return Some(format!("wanxiang{extension}"));
+        }
+    }
     let stem = name.strip_prefix("dicts/")?.strip_suffix(".dict.yaml")?;
-    DICTIONARIES
-        .contains(&stem)
-        .then(|| format!("wanxiang-dicts/{stem}.dict.yaml"))
+    dictionary_stem(stem).then(|| format!("wanxiang-dicts/{stem}.dict.yaml"))
 }
 
 pub(crate) fn fingerprint(path: &Path) -> Result<(String, u64), String> {
@@ -434,7 +481,10 @@ impl Drop for InstallReceipt {
     }
 }
 
-fn client(timeout: Duration, redirects: reqwest::redirect::Policy) -> Result<reqwest::Client, String> {
+fn client(
+    timeout: Duration,
+    redirects: reqwest::redirect::Policy,
+) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("KeyTao-Addon-Installer")
         .connect_timeout(Duration::from_secs(30))
@@ -446,13 +496,16 @@ fn client(timeout: Duration, redirects: reqwest::redirect::Policy) -> Result<req
 }
 
 pub(crate) async fn github_text(url: &str) -> Result<String, String> {
-    let response = client(Duration::from_secs(30), reqwest::redirect::Policy::limited(10))?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("查询附加方案更新失败：{e}"))?
-        .error_for_status()
-        .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
+    let response = client(
+        Duration::from_secs(30),
+        reqwest::redirect::Policy::limited(10),
+    )?
+    .get(url)
+    .send()
+    .await
+    .map_err(|e| format!("查询附加方案更新失败：{e}"))?
+    .error_for_status()
+    .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -487,18 +540,19 @@ fn release_tag_from_location(location: &str) -> Result<String, String> {
     Ok(tag.into())
 }
 
-fn release_package(version: &str) -> RemotePackage {
-    RemotePackage {
+fn release_package(version: &str, variant: &str) -> Result<RemotePackage, String> {
+    let asset = variant_asset(variant)?;
+    Ok(RemotePackage {
         version: version.into(),
         source: format!("https://github.com/amzxyz/rime-wanxiang/releases/tag/{version}"),
         download_url: format!(
-            "https://github.com/amzxyz/rime-wanxiang/releases/download/{version}/rime-wanxiang-base.zip"
+            "https://github.com/amzxyz/rime-wanxiang/releases/download/{version}/{asset}"
         ),
         download_bytes: None,
-    }
+    })
 }
 
-async fn latest_package() -> Result<RemotePackage, String> {
+async fn latest_package(variant: &str) -> Result<RemotePackage, String> {
     let response = client(Duration::from_secs(30), reqwest::redirect::Policy::none())?
         .get(RELEASE_LATEST)
         .send()
@@ -514,23 +568,27 @@ async fn latest_package() -> Result<RemotePackage, String> {
         .get(reqwest::header::LOCATION)
         .and_then(|value| value.to_str().ok())
         .ok_or("万象发布地址缺少重定向位置")?;
-    Ok(release_package(&release_tag_from_location(location)?))
+    release_package(&release_tag_from_location(location)?, variant)
 }
 
-fn package_for_install(latest: Result<RemotePackage, String>) -> RemotePackage {
-    latest.unwrap_or_else(|error| {
+fn package_for_install(
+    latest: Result<RemotePackage, String>,
+    variant: &str,
+) -> Result<RemotePackage, String> {
+    let asset = variant_asset(variant)?;
+    Ok(latest.unwrap_or_else(|error| {
         tracing::warn!(%error, "Wanxiang version lookup failed; installing the latest archive");
         RemotePackage {
             version: String::new(),
             source: RELEASE_LATEST.into(),
-            download_url: format!("{RELEASE_LATEST}/download/rime-wanxiang-base.zip"),
+            download_url: format!("{RELEASE_LATEST}/download/{asset}"),
             download_bytes: None,
         }
-    })
+    }))
 }
 
 pub async fn latest_version() -> Result<String, String> {
-    Ok(latest_package().await?.version)
+    Ok(latest_package("base").await?.version)
 }
 
 pub(crate) async fn download(
@@ -656,9 +714,13 @@ fn extract(
     archive: &Path,
     stage: &Path,
     package: &RemotePackage,
+    variant: &str,
 ) -> Result<Vec<InstalledFile>, String> {
-    let mut files = extract_package(archive, stage, package_destination, adapt_source)?;
-    for required in required_files(archive)? {
+    variant_source(variant)?;
+    let mut files = extract_package(archive, stage, package_destination, |name, path| {
+        adapt_source(name, path, variant)
+    })?;
+    for required in required_files(archive, variant)? {
         if !safe_target(stage, &required)?.is_file() {
             return Err(format!("万象发布包缺少必要文件：{required}"));
         }
@@ -672,7 +734,7 @@ fn extract(
          Full upstream license: https://github.com/amzxyz/rime-wanxiang/blob/{version}/LICENSE\n\
          Provided AS IS, without warranties; see the linked license for terms.\n\
          KeyTao integration changes: a portable schema uses built-in Rime components\n\
-         with upstream's full-pinyin algebra and dictionary; dictionary tables are\n\
+         with upstream's spelling algebra and dictionary; dictionary tables are\n\
          relocated from dicts/ to wanxiang-dicts/ to avoid other schemes' files.\n\
          The separate grammar model, Lua extensions, host appearance settings and\n\
          unrelated auxiliary schemas are not included.\n\
@@ -688,12 +750,35 @@ fn extract(
     Ok(files)
 }
 
-fn adapt_source(name: &str, path: &Path) -> Result<(), String> {
+fn adapt_source(name: &str, path: &Path, variant: &str) -> Result<(), String> {
     if name == "wanxiang.schema.yaml" {
-        fs::write(path, BASIC_SCHEMA).map_err(|e| e.to_string())?;
+        let algebra = match variant_source(variant)? {
+            "wanxiang_lite" => "wanxiang_algebra:/lite/全拼",
+            "wanxiang_pure" => "wanxiang_algebra:/pro/全拼\n      - wanxiang_algebra:/pro/间接辅助",
+            "wanxiang_pro" => {
+                "wanxiang_algebra:/pro/自然码\n      - wanxiang_algebra:/pro/直接辅助"
+            }
+            _ => "wanxiang_algebra:/base/全拼",
+        };
+        let schema = BASIC_SCHEMA.replace("wanxiang_algebra:/base/全拼", algebra);
+        let schema = if matches!(variant_source(variant)?, "wanxiang_pro" | "wanxiang_pure") {
+            schema.replace(
+                "alphabet: zyxwvutsrqponmlkjihgfedcba",
+                "alphabet: zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA7890/;",
+            )
+        } else {
+            schema
+        };
+        fs::write(path, schema).map_err(|e| e.to_string())?;
     } else if name == "wanxiang.dict.yaml" {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        fs::write(path, content.replace("dicts/", "wanxiang-dicts/")).map_err(|e| e.to_string())?;
+        let content = content
+            .replace(
+                &format!("name: {}", variant_source(variant)?),
+                "name: wanxiang",
+            )
+            .replace("dicts/", "wanxiang-dicts/");
+        fs::write(path, content).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -703,7 +788,9 @@ fn commit_files(
     files: Vec<InstalledFile>,
     package: &RemotePackage,
     archive_sha256: String,
+    variant: &str,
 ) -> Result<(), String> {
+    variant_source(variant)?;
     #[cfg(windows)]
     {
         receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
@@ -740,6 +827,15 @@ fn commit_files(
         owned.push(file.clone());
         to_replace.push(file);
     }
+    for (name, old) in &previous {
+        if owned.iter().any(|file| file.path == *name) {
+            continue;
+        }
+        let path = safe_target(&receipt.root, name)?;
+        if path.is_file() && fingerprint(&path)?.0 == old.sha256 {
+            receipt.move_original(name)?;
+        }
+    }
     for file in to_replace {
         let source = receipt.work.join("files").join(&file.path);
         #[cfg(windows)]
@@ -755,6 +851,7 @@ fn commit_files(
     let manifest = Manifest {
         format: 1,
         version: package.version.clone(),
+        variant: variant.into(),
         source: package.source.clone(),
         archive_sha256,
         includes_grammar: false,
@@ -772,21 +869,30 @@ fn commit_files(
 
 pub async fn install(
     root: &Path,
+    variant: &str,
     progress: impl Fn(u8, &str) + Send + Sync + 'static,
 ) -> Result<InstallReceipt, String> {
+    variant_source(variant)?;
+    let variant = variant.to_owned();
     let receipt = InstallReceipt::new(root)?;
     // Detect an invalid ownership record before spending bandwidth.
     read_manifest(&receipt.root)?;
-    let package = package_for_install(latest_package().await);
-    progress(5, "正在下载万象拼音基础词库（不含语法模型）…");
+    let package = package_for_install(latest_package(&variant).await, &variant)?;
+    progress(5, "正在下载万象拼音词库…");
     let archive = receipt.work.join("download.zip");
     download(&package, &archive, &progress).await?;
     progress(52, "正在校验并解压万象拼音词库…");
     tokio::task::spawn_blocking(move || {
         let mut receipt = receipt;
-        let files = extract(&archive, &receipt.work.join("files"), &package)?;
+        let files = extract(&archive, &receipt.work.join("files"), &package, &variant)?;
         progress(60, "正在安装万象拼音词库…");
-        commit_files(&mut receipt, files, &package, fingerprint(&archive)?.0)?;
+        commit_files(
+            &mut receipt,
+            files,
+            &package,
+            fingerprint(&archive)?.0,
+            &variant,
+        )?;
         Ok(receipt)
     })
     .await
@@ -820,9 +926,11 @@ use crate::{
 pub async fn manage_wanxiang(
     core: &std::sync::Arc<Core>,
     installed: bool,
+    variant: String,
     host: &impl SchemeHost,
 ) -> Result<Status, CoreError> {
     let result: Result<_, String> = async {
+    variant_source(&variant)?;
     let root = host.user_root()?;
     let config_path = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
@@ -832,7 +940,7 @@ pub async fn manage_wanxiang(
     let previous_config = std::fs::read(&config_path).map_err(|e| e.to_string())?;
     let receipt = if installed {
         let progress_core = core.clone();
-        install(&root, move |percent, message| {
+        install(&root, &variant, move |percent, message| {
             progress_core.emit(CoreEvent::InstallProgress(InstallProgress {
                 stage: "wanxiang-download".into(),
                 percent: u32::from(percent),
@@ -882,7 +990,7 @@ pub async fn manage_wanxiang(
     core.emit(CoreEvent::InstallProgress(InstallProgress {
         stage: "done".into(),
         percent: 100,
-        message: if installed { "万象拼音基础词库已安装并部署" } else { "万象拼音已卸载，保留用户自定义和学习记录" }.into(),
+        message: if installed { "万象拼音已安装并部署" } else { "万象拼音已卸载，保留用户自定义和学习记录" }.into(),
     }));
     Ok(status_at(&root))
     }.await;

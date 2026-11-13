@@ -67,11 +67,27 @@ abstract final class AppStrings {
   static const reading = '读取中...';
   static const customInstallDone = '安装完成，请手动重新部署输入法';
   static const easyEnglish = 'Easy English · 英文单词输入';
-  static const wanxiang = '万象拼音 · 基础词库';
+  static const wanxiang = '万象拼音';
+  static const wanxiangVariant = '万象拼音版本';
+  static const wanxiangVariants = {
+    'base': '基础版',
+    'pure': '纯净',
+    'lite': '精简',
+    'flypy': '小鹤',
+    'hanxin': '汉心',
+    'moqi': '墨奇',
+    'shouyou': '首右',
+    'shyplus': '首右+',
+    'tiger': '虎码',
+    'wubi': '五笔',
+    'wx': '万象',
+    'zrm': '自然码',
+  };
   static const checking = '检测中';
   static const notInstalled = '未安装';
   static const installedNotDeployed = '已安装 · 未部署';
   static const install = '安装';
+  static const replace = '替换';
   static const installScheme = '安装方案';
   static const updateScheme = '更新方案';
   static const update = '更新';
@@ -89,7 +105,7 @@ abstract final class AppStrings {
   static const installKeytaoFirst = '请先安装键道方案';
   static const installMainFirst = '请先安装主方案';
   static const installEnglishTooltip = '安装并部署 Easy English';
-  static const installWanxiangTooltip = '安装并部署万象拼音基础词库';
+  static const installWanxiangTooltip = '安装并部署万象拼音';
   static const noSchemeForDeploy = '未安装方案，请先安装';
   static const componentMissing = '系统组件缺失';
   static const schemeMissing = '未安装方案';
@@ -124,9 +140,6 @@ abstract final class AppStrings {
   static const auto = '自动';
   static const light = '白天';
   static const dark = '夜间';
-  static const followSystem = '跟随系统';
-  static const fixedDark = '固定夜间';
-  static const fixedLight = '固定白天';
   static const horizontal = '横排';
   static const vertical = '竖排';
   static const candidateFontSize = '候选字号';
@@ -204,7 +217,7 @@ abstract final class AppStrings {
   static const platform = '平台';
   static const keytaoDirectory = '键道目录';
   static const easyEnglishRemoved = '[ADDON] Easy English 已卸载';
-  static const wanxiangInstalled = '[ADDON] 万象拼音基础词库已安装并部署';
+  static const wanxiangInstalled = '[ADDON] 万象拼音已安装并部署';
   static const wanxiangRemoved = '[ADDON] 万象拼音已卸载';
 
   // Existing Flutter fallbacks retained for callers of the original controller.

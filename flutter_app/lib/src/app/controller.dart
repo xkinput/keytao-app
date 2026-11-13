@@ -168,11 +168,13 @@ class AppController extends ChangeNotifier {
   String? debugError;
   String? debugNotice;
   InstallProgressDto? installProgress;
+  String? installingSchemeKey;
   InstallProgressDto? addonProgress;
   InstallProgressDto? wanxiangProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
   core.AddonStatusDto? wanxiang;
+  String? _selectedWanxiangVariant;
   String? wanxiangLatestVersion;
   String? addonLatestVersion;
   final _addonUpdateChecks = <String, Object>{};
@@ -350,6 +352,10 @@ class AppController extends ChangeNotifier {
   bool get canInstallWanxiang => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
+  String get installedWanxiangVariant =>
+      wanxiang?.installed == true ? wanxiang?.variant ?? 'base' : 'base';
+  String get selectedWanxiangVariant =>
+      _selectedWanxiangVariant ?? installedWanxiangVariant;
   bool get addonHasUpdate =>
       addon?.installed == true &&
       (addon!.version.isEmpty ||
@@ -390,15 +396,28 @@ class AppController extends ChangeNotifier {
       : addon?.installed == true
       ? AppStrings.redeploy
       : AppStrings.install;
-  String get wanxiangButtonLabel => wanxiangHasUpdate
+  String get wanxiangButtonLabel =>
+      wanxiang?.installed == true &&
+          selectedWanxiangVariant != installedWanxiangVariant
+      ? AppStrings.replace
+      : wanxiangHasUpdate
       ? AppStrings.update
       : wanxiang?.installed == true
       ? AppStrings.redeploy
       : AppStrings.install;
   String get addonStatusText =>
       _addonStatus(addon?.installed, addon?.deployed, addon?.version);
-  String get wanxiangStatusText =>
-      _addonStatus(wanxiang?.installed, wanxiang?.deployed, wanxiang?.version);
+  String get wanxiangStatusText {
+    final status = _addonStatus(
+      wanxiang?.installed,
+      wanxiang?.deployed,
+      wanxiang?.version,
+    );
+    return wanxiang?.installed == true
+        ? '$status · ${AppStrings.wanxiangVariants[installedWanxiangVariant] ?? installedWanxiangVariant}'
+        : status;
+  }
+
   String _addonStatus(bool? installed, bool? deployed, String? version) =>
       installed == null
       ? AppStrings.checking
@@ -484,12 +503,6 @@ class AppController extends ChangeNotifier {
     };
   }
 
-  String get themeBadge =>
-      switch (uiSettings?.colorScheme ?? UiColorSchemeDto.auto) {
-        UiColorSchemeDto.auto => AppStrings.followSystem,
-        UiColorSchemeDto.dark => AppStrings.fixedDark,
-        UiColorSchemeDto.light => AppStrings.fixedLight,
-      };
   String get defaultDir => info.userRoot;
   String get dictionaryManagerUrl => Uri(
     scheme: 'rime-dict',
@@ -1070,6 +1083,17 @@ class AppController extends ChangeNotifier {
     unawaited(_persistSchemeSettings());
   }
 
+  void selectWanxiangVariant(String? value) {
+    if (busy ||
+        value == null ||
+        value == selectedWanxiangVariant ||
+        !AppStrings.wanxiangVariants.containsKey(value)) {
+      return;
+    }
+    _selectedWanxiangVariant = value;
+    _changed();
+  }
+
   Future<bool> refreshRelease() async {
     if (_disposed) return false;
     final request = ++_releaseRequest;
@@ -1240,34 +1264,39 @@ class AppController extends ChangeNotifier {
   Future<bool> _installSchemePackage(String key, {required bool latest}) {
     if (!schemeAssets.containsKey(key)) return Future.value(false);
     return run(() async {
-      packageError = null;
-      _manuallySelectedScheme = true;
-      scheme = key;
-      if (!await refreshRelease()) {
-        throw StateError(releaseError ?? AppStrings.installFailed);
-      }
-      if (latest && key == 'keytao') {
-        final version = _normalizedVersion(latestRelease!.version);
-        final matching = sourceVersions.entries.where(
-          (entry) =>
-              _normalizedVersion(entry.value) == version &&
-              _platformDownloadUrl(
-                    entry.key == 'github'
-                        ? latestRelease!.github
-                        : latestRelease!.gitee,
-                  )?.isNotEmpty ==
-                  true,
-        );
-        if (matching.isEmpty) throw StateError(AppStrings.installFailed);
-        if (!matching.any((entry) => entry.key == source)) {
-          source = matching.first.key;
+      installingSchemeKey = key;
+      try {
+        packageError = null;
+        _manuallySelectedScheme = true;
+        scheme = key;
+        if (!await refreshRelease()) {
+          throw StateError(releaseError ?? AppStrings.installFailed);
         }
+        if (latest && key == 'keytao') {
+          final version = _normalizedVersion(latestRelease!.version);
+          final matching = sourceVersions.entries.where(
+            (entry) =>
+                _normalizedVersion(entry.value) == version &&
+                _platformDownloadUrl(
+                      entry.key == 'github'
+                          ? latestRelease!.github
+                          : latestRelease!.gitee,
+                    )?.isNotEmpty ==
+                    true,
+          );
+          if (matching.isEmpty) throw StateError(AppStrings.installFailed);
+          if (!matching.any((entry) => entry.key == source)) {
+            source = matching.first.key;
+          }
+        }
+        if (downloadUrl?.isNotEmpty != true) {
+          throw StateError(AppStrings.installFailed);
+        }
+        await _install();
+        if (verification.every((entry) => entry.ok)) await _deploy();
+      } finally {
+        installingSchemeKey = null;
       }
-      if (downloadUrl?.isNotEmpty != true) {
-        throw StateError(AppStrings.installFailed);
-      }
-      await _install();
-      if (verification.every((entry) => entry.ok)) await _deploy();
     }).then((result) => result && verification.every((entry) => entry.ok));
   }
 
@@ -1280,6 +1309,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> downloadSchemePackage(String key) => run(() async {
+    installingSchemeKey = key;
     packageError = null;
     _invalidateSchemeUpdates();
     _startOperation(OperationKind.install, AppStrings.installing);
@@ -1300,6 +1330,7 @@ class AppController extends ChangeNotifier {
       }
       rethrow;
     } finally {
+      installingSchemeKey = null;
       operation = null;
     }
   });
@@ -2220,6 +2251,7 @@ class AppController extends ChangeNotifier {
       if (isAndroid) await _requireStorage();
       wanxiang = await core.manageWanxiang(
         installed: installed,
+        variant: selectedWanxiangVariant,
         androidDeploy: _androidDeploy,
       );
       if (installed) wanxiangLatestVersion = wanxiang!.version;
