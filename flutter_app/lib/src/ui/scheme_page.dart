@@ -61,23 +61,40 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ),
           children: [
-            ActionRow(
-              children: [
-                ActionButton(
-                  '添加本地方案',
-                  icon: FLucideIcons.folderOpen,
-                  onPress: c.busy ? null : c.importLocalScheme,
-                ),
-              ],
-            ),
             for (final key in schemeKeys)
-              SchemePackageRow(
-                controller: c,
-                schemeKey: key,
-                activating: _activatingScheme == key,
-                onActivate: () => _activate(key),
-              ),
+              if (!c.isLocalScheme(key))
+                SchemePackageRow(
+                  controller: c,
+                  schemeKey: key,
+                  activating: _activatingScheme == key,
+                  onActivate: () => _activate(key),
+                ),
             if (c.schemeUpdatesLoading) const FProgress(),
+          ],
+        ),
+        Section(
+          title: AppStrings.localSchemeTitle,
+          icon: FLucideIcons.folderOpen,
+          trailing: ActionButton(
+            '添加本地方案',
+            icon: FLucideIcons.plus,
+            onPress: c.busy ? null : c.importLocalScheme,
+          ),
+          children: [
+            for (final key in schemeKeys)
+              if (c.isLocalScheme(key))
+                SchemePackageRow(
+                  controller: c,
+                  schemeKey: key,
+                  activating: _activatingScheme == key,
+                  onActivate: () => _activate(key),
+                ),
+          ],
+        ),
+        Section(
+          title: AppStrings.deploy,
+          icon: FLucideIcons.play,
+          children: [
             if (c.packageError case final error?) ErrorMessage(error),
             if (c.schemeSyncError case final error?) ErrorMessage(error),
             if (!c.isLocalScheme(c.scheme))
@@ -291,39 +308,12 @@ class SchemePackageRow extends StatelessWidget {
         const SizedBox(height: 10),
         ActionRow(
           children: [
-            if (package != null)
-              ActionButton(
-                '自造词',
-                icon: FLucideIcons.bookOpen,
-                onPress: c.busy
-                    ? null
-                    : () => openUserWords(context, c, schemeKey: schemeKey),
-              ),
-            if (package != null && active && c.accountUser != null)
-              ActionButton(
-                '上传',
-                onPress: c.busy || !package.hasPackageZip
-                    ? null
-                    : () => showCloudPackageTransfer(
-                        context,
-                        c,
-                        schemeKey: schemeKey,
-                      ),
-              ),
             if (update != null)
               ActionButton(
                 '更新',
                 primary: !needsDeploy,
                 icon: FLucideIcons.arrowUpCircle,
                 onPress: c.busy ? null : () => c.updateSchemePackage(schemeKey),
-              ),
-            if (isLocal)
-              ActionButton(
-                '重新导入',
-                icon: FLucideIcons.folderOpen,
-                onPress: c.busy
-                    ? null
-                    : () => c.importLocalScheme(schemeKey: schemeKey),
               ),
             if (!isLocal && (package == null || activeLegacy))
               ActionButton(
@@ -334,28 +324,21 @@ class SchemePackageRow extends StatelessWidget {
                     ? null
                     : () => c.installSchemePackage(schemeKey),
               )
-            else if (package != null && !active) ...[
-              if (package.hasPackageZip || !isLocal)
-                ActionButton(
-                  package.hasPackageZip ? '启用' : '重新下载',
-                  primary: update == null,
-                  icon: package.hasPackageZip
-                      ? FLucideIcons.play
-                      : FLucideIcons.download,
-                  onPress: c.busy
-                      ? null
-                      : package.hasPackageZip
-                      ? onActivate ?? () => c.activateSchemePackage(schemeKey)
-                      : () => c.downloadSchemePackage(schemeKey),
-                ),
+            else if (package != null &&
+                !active &&
+                (package.hasPackageZip || !isLocal))
               ActionButton(
-                '删除',
-                icon: FLucideIcons.trash2,
-                onPress: c.busy ? null : () => c.removeSchemePackage(schemeKey),
+                package.hasPackageZip ? '启用' : '重新下载',
+                primary: update == null,
+                icon: package.hasPackageZip
+                    ? FLucideIcons.play
+                    : FLucideIcons.download,
+                onPress: c.busy
+                    ? null
+                    : package.hasPackageZip
+                    ? onActivate ?? () => c.activateSchemePackage(schemeKey)
+                    : () => c.downloadSchemePackage(schemeKey),
               ),
-            ],
-            if (isLocal && active)
-              ActionButton('删除', icon: FLucideIcons.trash2),
             if (needsDeploy)
               ActionButton(
                 AppStrings.deploy,
@@ -363,18 +346,97 @@ class SchemePackageRow extends StatelessWidget {
                 icon: FLucideIcons.play,
                 onPress: c.canDeploy ? c.deploy : null,
               ),
+            if (package != null)
+              FPopoverMenu(
+                menuAnchor: Alignment.topRight,
+                childAnchor: Alignment.bottomRight,
+                menuBuilder: (_, popover, _) => [
+                  FItemGroup(
+                    enabled: !c.busy,
+                    children: [
+                      FItem(
+                        title: const Text('自造词'),
+                        prefix: const Icon(FLucideIcons.bookOpen),
+                        onPress: c.busy
+                            ? null
+                            : () {
+                                popover.hide();
+                                openUserWords(context, c, schemeKey: schemeKey);
+                              },
+                      ),
+                      if (active && c.accountUser != null)
+                        FItem(
+                          title: const Text('上传'),
+                          prefix: const Icon(FLucideIcons.upload),
+                          enabled: !c.busy && package.hasPackageZip,
+                          onPress: c.busy || !package.hasPackageZip
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  showCloudPackageTransfer(
+                                    context,
+                                    c,
+                                    schemeKey: schemeKey,
+                                  );
+                                },
+                        ),
+                      if (isLocal)
+                        FItem(
+                          title: const Text('重新导入'),
+                          prefix: const Icon(FLucideIcons.folderOpen),
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  c.importLocalScheme(schemeKey: schemeKey);
+                                },
+                        ),
+                      if (c.accountUser != null)
+                        FItem(
+                          title: const Text('随账号同步'),
+                          semanticsChecked: c.syncedSchemes.contains(schemeKey),
+                          suffix: c.syncedSchemes.contains(schemeKey)
+                              ? const Icon(FLucideIcons.check)
+                              : null,
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  c.setSchemeAccountSync(
+                                    schemeKey,
+                                    !c.syncedSchemes.contains(schemeKey),
+                                  );
+                                },
+                        ),
+                      if (!active)
+                        FItem(
+                          title: const Text('删除'),
+                          variant: FItemVariant.destructive,
+                          prefix: const Icon(FLucideIcons.trash2),
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  c.removeSchemePackage(schemeKey);
+                                },
+                        ),
+                    ],
+                  ),
+                ],
+                builder: (_, popover, _) => FTooltip(
+                  tipBuilder: (_, _) => const Text('更多操作'),
+                  child: FButton.icon(
+                    variant: FButtonVariant.ghost,
+                    onPress: c.busy ? null : popover.toggle,
+                    child: const Icon(
+                      FLucideIcons.ellipsis,
+                      semanticLabel: '更多操作',
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
-        if (package != null && c.accountUser != null) ...[
-          const SizedBox(height: 10),
-          SwitchSetting(
-            '随账号同步',
-            value: c.syncedSchemes.contains(schemeKey),
-            onChanged: c.busy
-                ? null
-                : (value) => c.setSchemeAccountSync(schemeKey, value),
-          ),
-        ],
       ],
     );
   }

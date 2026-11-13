@@ -67,6 +67,24 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> importLocalScheme({String? schemeKey}) async {
+    actions.add('import:$schemeKey');
+    return true;
+  }
+
+  @override
+  Future<bool> setSchemeAccountSync(String key, bool enabled) async {
+    actions.add('sync:$key:$enabled');
+    if (enabled) {
+      syncedSchemes.add(key);
+    } else {
+      syncedSchemes.remove(key);
+    }
+    notifyListeners();
+    return true;
+  }
+
+  @override
   Future<Map<String, dynamic>?> previewCloudPackage(String key) async => {
     'files': ['keytao.schema.yaml'],
     'archive_size': 1024,
@@ -376,7 +394,12 @@ void main() {
         find.descendant(of: row, matching: find.byType(ActionRow)),
         findsOneWidget,
       );
-      expect(_actionLabels(tester), entry.labels);
+      expect(
+        _actionLabels(tester),
+        entry.labels.where((label) => label != '删除'),
+      );
+      expect(find.text('自造词'), findsNothing);
+      expect(find.text('删除'), findsNothing);
       expect(
         find.text('使用中'),
         entry.package?.active == true ? findsOneWidget : findsNothing,
@@ -402,10 +425,24 @@ void main() {
         );
       }
       for (final label in entry.labels) {
-        await tester.tap(find.widgetWithText(ActionButton, label));
-        await tester.pump();
+        if (label == '删除') {
+          await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+          await tester.pumpAndSettle();
+          await tester.tap(find.widgetWithText(FItem, label));
+        } else {
+          await tester.tap(find.widgetWithText(ActionButton, label));
+        }
+        await tester.pumpAndSettle();
       }
       expect(c.actions, entry.calls);
+      if (entry.package?.active == true) {
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+        expect(find.text('自造词'), findsOneWidget);
+        expect(find.text('删除'), findsNothing);
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+      }
       c.busy = true;
       await _pumpRow(tester, c, 'keytao');
       expect(
@@ -414,9 +451,148 @@ void main() {
           isA<ActionButton>().having((b) => b.onPress, 'onPress', null),
         ),
       );
+      if (entry.package != null) {
+        expect(
+          tester
+              .widget<FButton>(
+                find.widgetWithIcon(FButton, FLucideIcons.ellipsis),
+              )
+              .onPress,
+          isNull,
+        );
+      }
       expect(tester.takeException(), isNull);
     }
     await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('scheme sections separate local packages and deployment', (
+    tester,
+  ) async {
+    final c = _PackageController()
+      ..installedPackages = const [
+        InstalledPackageDto(
+          schemeKey: 'keytao',
+          source: 'cloud',
+          active: false,
+          hasPackageZip: true,
+        ),
+        InstalledPackageDto(
+          schemeKey: 'local-custom',
+          source: 'local',
+          displayName: 'Custom scheme',
+          active: true,
+          hasPackageZip: true,
+        ),
+      ];
+    addTearDown(c.dispose);
+    _size(tester, const Size(360, 800));
+    await tester.pumpWidget(
+      KeyTaoTheme(
+        platform: c.info.platform,
+        home: FScaffold(
+          child: ListenableBuilder(
+            listenable: c,
+            builder: (_, _) => SchemePage(controller: c),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final catalogue = find.widgetWithText(Section, '键道方案');
+    final local = find.widgetWithText(Section, '本地方案');
+    final deployment = find.byWidgetPredicate(
+      (widget) => widget is Section && widget.title == '部署',
+    );
+    expect(
+      find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
+      findsNWidgets(4),
+    );
+    expect(
+      find.descendant(of: local, matching: find.text('Custom scheme')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: local, matching: find.text('使用中')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: deployment, matching: find.byType(VersionPicker)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: deployment, matching: find.text('检查本地')),
+      findsOneWidget,
+    );
+    final add = find.widgetWithText(ActionButton, '添加本地方案');
+    expect(find.descendant(of: local, matching: add), findsOneWidget);
+    await tester.ensureVisible(add);
+    await tester.tap(add);
+    expect(c.actions, ['import:null']);
+    c.installedPackages = [];
+    c.rebuild();
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: local, matching: find.byType(SchemePackageRow)),
+      findsNothing,
+    );
+    expect(find.descendant(of: local, matching: add), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('local package menu hides delete while active', (tester) async {
+    final c = _PackageController()..accountUser = const AccountUserDto(id: 1);
+    addTearDown(c.dispose);
+    _size(tester, const Size(360, 800));
+    for (final active in [true, false]) {
+      c.installedPackages = [
+        InstalledPackageDto(
+          schemeKey: 'local-custom',
+          source: 'local',
+          active: active,
+          hasPackageZip: true,
+        ),
+      ];
+      c.actions.clear();
+      c.syncedSchemes.clear();
+      await _pumpRow(tester, c, 'local-custom');
+      expect(find.text('重新导入'), findsNothing);
+      expect(find.text('随账号同步'), findsNothing);
+      expect(find.text('删除'), findsNothing);
+      final more = find.byIcon(FLucideIcons.ellipsis);
+      await tester.tap(more);
+      await tester.pumpAndSettle();
+      expect(find.text('上传'), active ? findsOneWidget : findsNothing);
+      expect(find.text('删除'), active ? findsNothing : findsOneWidget);
+      expect(
+        tester
+            .widget<FItem>(find.widgetWithText(FItem, '随账号同步'))
+            .semanticsChecked,
+        isFalse,
+      );
+      await tester.tap(find.widgetWithText(FItem, '随账号同步'));
+      await tester.pumpAndSettle();
+      expect(c.actions, ['sync:local-custom:true']);
+      await tester.tap(more);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<FItem>(find.widgetWithText(FItem, '随账号同步'))
+            .semanticsChecked,
+        isTrue,
+      );
+      await tester.tap(find.widgetWithText(FItem, '重新导入'));
+      await tester.pumpAndSettle();
+      expect(c.actions.last, 'import:local-custom');
+      if (!active) {
+        await tester.tap(more);
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FItem, '删除'));
+        await tester.pumpAndSettle();
+        expect(c.actions.last, 'remove:local-custom');
+      }
+      expect(tester.takeException(), isNull);
+    }
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('both installed xmjd variants remain distinct in one list', (

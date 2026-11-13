@@ -10,6 +10,7 @@ abstract final class AppStrings {
   static const about = '关于';
   static const debug = '调试';
   static const schemeTitle = '键道方案';
+  static const localSchemeTitle = '本地方案';
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';
   static const account = 'KeyTao 账号';
