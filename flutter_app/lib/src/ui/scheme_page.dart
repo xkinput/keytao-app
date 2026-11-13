@@ -334,7 +334,7 @@ class SchemePackageRow extends StatelessWidget {
           children: [
             if (schemeKey == 'keytao')
               SizedBox(
-                width: 132,
+                width: 180,
                 child: Semantics(
                   key: const ValueKey('scheme-source'),
                   label: '下载来源',
@@ -364,6 +364,8 @@ class SchemePackageRow extends StatelessWidget {
                               FTabEntry(
                                 label: Text(
                                   label,
+                                  maxLines: 1,
+                                  softWrap: false,
                                   style: const TextStyle(fontSize: 12),
                                 ),
                                 child: const SizedBox.shrink(),
