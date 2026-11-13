@@ -4536,6 +4536,26 @@ fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
 const DEPLOYING_FILE: &str = ".keytao-deploying";
 const DEPLOYED_FILE: &str = ".keytao-deployed";
 
+#[derive(Serialize, Deserialize)]
+struct DeploymentMarker {
+    fingerprint: String,
+    schemas: Vec<String>,
+}
+
+fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
+    // Android publishes the APK version only after refreshing its shared assets.
+    let bundled_version =
+        match std::fs::read_to_string(user_data_dir.join("rime-data/.bundled-version")) {
+            Ok(version) => version,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read bundled version: {error}")),
+        };
+    Ok(format!(
+        "keytao-core/{};bundled/{bundled_version}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn managed_primary_schemas(user_data_dir: &Path) -> Vec<String> {
     let local_schemas = active_local_schema_ids(user_data_dir);
     ["default.custom.yaml", "default-custom.yaml"]
@@ -4571,7 +4591,11 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
 fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(), String> {
     let build = user_data_dir.join("build");
     let temporary = build.join(format!("{DEPLOYED_FILE}.{}.tmp", std::process::id()));
-    let content = serde_json::to_vec(schemas).map_err(|error| error.to_string())?;
+    let marker = DeploymentMarker {
+        fingerprint: deployment_fingerprint(user_data_dir)?,
+        schemas: schemas.to_vec(),
+    };
+    let content = serde_json::to_vec(&marker).map_err(|error| error.to_string())?;
     std::fs::write(&temporary, content)
         .map_err(|error| format!("write {}: {error}", temporary.display()))?;
     std::fs::rename(&temporary, build.join(DEPLOYED_FILE))
@@ -4583,7 +4607,9 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     let schemas = managed_primary_schemas(user_data_dir);
     if schemas.is_empty()
         || !schemas.iter().all(|schema| {
-            user_data_dir.join(format!("{schema}.schema.yaml")).is_file()
+            user_data_dir
+                .join(format!("{schema}.schema.yaml"))
+                .is_file()
                 && user_data_dir
                     .join("build")
                     .join(format!("{schema}.schema.yaml"))
@@ -4599,28 +4625,6 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("remove {}: {error}", sentinel.display())),
     }
-}
-
-fn legacy_schema_artifacts_complete(build: &Path, schema: &str) -> bool {
-    let read = || -> Option<bool> {
-        let content = std::fs::read_to_string(build.join(format!("{schema}.schema.yaml"))).ok()?;
-        let value: Value = serde_yaml::from_str(&content).ok()?;
-        let translator = value.get("translator")?;
-        let dictionary = translator.get("dictionary")?.as_str()?;
-        if !valid_rime_build_id(dictionary) {
-            return Some(false);
-        }
-        let prism = translator
-            .get("prism")
-            .and_then(Value::as_str)
-            .unwrap_or(dictionary);
-        Some(
-            build.join(format!("{dictionary}.table.bin")).is_file()
-                && valid_rime_build_id(prism)
-                && build.join(format!("{prism}.prism.bin")).is_file(),
-        )
-    };
-    read().unwrap_or(false)
 }
 
 pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
@@ -4642,16 +4646,12 @@ pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
         })
         && !build.join(DEPLOYING_FILE).exists()
         && match std::fs::read(build.join(DEPLOYED_FILE)) {
-            Ok(content) => serde_json::from_slice::<Vec<String>>(&content)
-                .is_ok_and(|deployed| schemas.iter().all(|schema| deployed.contains(schema))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let complete = schemas
-                    .iter()
-                    .all(|schema| legacy_schema_artifacts_complete(&build, schema));
-                if complete {
-                    let _ = write_deployed_marker(user_data_dir, &schemas);
-                }
-                complete
+            Ok(content) => {
+                serde_json::from_slice::<DeploymentMarker>(&content).is_ok_and(|marker| {
+                    deployment_fingerprint(user_data_dir)
+                        .is_ok_and(|current| marker.fingerprint == current)
+                        && schemas.iter().all(|schema| marker.schemas.contains(schema))
+                })
             }
             Err(_) => false,
         };

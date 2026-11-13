@@ -3,6 +3,7 @@ package ink.rea.keytao_app
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -31,6 +32,17 @@ data class KeytaoRimeOptionsState(
 
 class KeytaoImeEngine(context: Context) {
     private val appContext = context.applicationContext
+    private val bundledVersion by lazy {
+        @Suppress("DEPRECATION")
+        val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        @Suppress("DEPRECATION")
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            info.versionCode.toLong()
+        }
+        "$versionCode/${info.versionName.orEmpty()}"
+    }
 
     /** A failed resolution is retried; only the shared external root is cached. */
     val userDir: File? get() = KeytaoAndroidPaths.userRootOrNull(appContext)
@@ -78,9 +90,9 @@ class KeytaoImeEngine(context: Context) {
     private fun warmUpIfStorageReady() {
         if (warmupComplete) return
         userDir ?: return
-        warmupComplete = true
         val started = System.nanoTime()
         val bundledDataOk = runCatching { ensureBundledSharedData(appContext) }.isSuccess
+        warmupComplete = bundledDataOk
         // Materialise keyboard.yaml and warm the configuration and theme caches
         // off the main thread, including when storage first appears on a retry.
         val defaultsOk = runCatching { KeytaoAndroidImeConfig.ensureDefaults(appContext) }.isSuccess
@@ -127,7 +139,17 @@ class KeytaoImeEngine(context: Context) {
         warmUpIfStorageReady()
         if (!KeytaoAndroidPaths.isWritable(root)) return Readiness.UNWRITABLE
         if (!hasInstalledSchema()) return Readiness.NOT_INSTALLED
-        if (!hasDeployedSchema()) return Readiness.NOT_DEPLOYED
+        if (!warmupComplete) return Readiness.NOT_DEPLOYED
+        if (!hasDeployedSchema()) {
+            val schemas = KeytaoAndroidPaths.configuredSchemas(root)
+            if (KeytaoNativeBridge.loaded && claimUpgradeDeployment(root, bundledVersion, schemas)) {
+                KeytaoRimeDeployClient.deploy(
+                    appContext,
+                    timeoutMs = KeytaoRimeDeployClient.timeoutMsForSchemas(schemas),
+                ) { }
+            }
+            return Readiness.NOT_DEPLOYED
+        }
         reloadIfNeeded()
         return if (nativeReady && session != 0L) Readiness.READY else Readiness.NATIVE_UNAVAILABLE
     }
@@ -537,15 +559,12 @@ class KeytaoImeEngine(context: Context) {
     }
 
     private fun ensureBundledSharedData(context: Context) {
-        val root = userDir ?: return
+        val root = userDir ?: error("KeyTao storage is unavailable")
         val target = File(root, "rime-data")
-        val marker = File(target, "default.yaml")
-        if (marker.isFile) return
-        val children = runCatching {
-            context.assets.list(bundledRimeDataAssetPath)
-        }.getOrNull()
-        if (children.isNullOrEmpty()) return
-        runCatching {
+        refreshBundledSharedData(target, bundledVersion) {
+            check(context.assets.list(bundledRimeDataAssetPath)?.contains("default.yaml") == true) {
+                "Missing bundled RIME shared data"
+            }
             copyAssetTree(context, bundledRimeDataAssetPath, target)
         }
     }
@@ -577,5 +596,26 @@ class KeytaoImeEngine(context: Context) {
 
     companion object {
         private const val bundledRimeDataAssetPath = "keytao-rime-data"
+        private val upgradeDeploymentAttempts = mutableSetOf<Pair<String, String>>()
+
+        @Synchronized
+        internal fun refreshBundledSharedData(target: File, version: String, copy: () -> Unit) {
+            val stamp = File(target, ".bundled-version")
+            if (File(target, "default.yaml").isFile &&
+                runCatching { stamp.readText() }.getOrNull() == version) return
+            check(!stamp.exists() || stamp.delete()) { "Failed to invalidate bundled RIME version" }
+            copy()
+            check(File(target, "default.yaml").isFile) { "Missing rime-data/default.yaml" }
+            stamp.writeText(version)
+        }
+
+        @Synchronized
+        internal fun claimUpgradeDeployment(root: File, version: String, schemas: List<String>): Boolean {
+            val build = File(root, "build")
+            if (File(build, ".keytao-deploying").exists()) return false
+            val previouslyDeployed = File(build, ".keytao-deployed").isFile ||
+                schemas.any { File(build, "$it.schema.yaml").isFile }
+            return previouslyDeployed && upgradeDeploymentAttempts.add(root.absolutePath to version)
+        }
     }
 }

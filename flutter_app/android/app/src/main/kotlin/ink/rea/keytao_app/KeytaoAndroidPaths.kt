@@ -210,7 +210,7 @@ object KeytaoAndroidPaths {
         cleared
     }.getOrDefault(false)
 
-    private fun configuredSchemas(root: File): List<String> {
+    internal fun configuredSchemas(root: File): List<String> {
         val config = sequenceOf("default.custom.yaml", "default-custom.yaml")
             .map { File(root, it) }
             .firstOrNull { it.isFile }
