@@ -4,8 +4,7 @@
 use crate::{
     Core, CoreEvent,
     addon::{
-        EASY_EN_ADDON_ID, addon_schema_source_files, addon_schema_status_at,
-        bundled_addon_schema_dir,
+        EASY_EN_ADDON_ID, addon_schema_status_at, official_source_files, prepare_public_package,
     },
     events::InstallProgress,
     scheme::{build_client, fetch_scheme_release},
@@ -80,6 +79,7 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
     }
     publish_package(&bytes)?;
     if addon_schema_status_at(&root, EASY_EN_ADDON_ID).installed {
+        prepare_public_package(&root, &core.env().data_dir.join("easy-en-public")).await?;
         publish_english_addon(core)?;
     }
     publish_english_settings(
@@ -95,15 +95,7 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
 }
 
 pub fn publish_english_addon(core: &Core) -> Result<(), String> {
-    let source = bundled_addon_schema_dir(core, EASY_EN_ADDON_ID)?;
-    let files = addon_schema_source_files(EASY_EN_ADDON_ID)
-        .into_iter()
-        .map(|(source_relative, destination)| {
-            std::fs::read(source.join(source_relative))
-                .map(|bytes| (PathBuf::from(destination), bytes))
-                .map_err(|e| e.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let files = official_source_files(&core.env().data_dir.join("easy-en-public"))?;
     publish_files(&files)
 }
 

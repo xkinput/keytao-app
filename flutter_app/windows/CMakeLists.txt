@@ -131,8 +131,10 @@ foreach(ARCH current x86 arm64x)
   install(DIRECTORY "${KEYTAO_RUNTIME}/${ARCH}"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/keytao-windows-ime-runtime" COMPONENT Runtime)
 endforeach()
+install(CODE "
+  file(REMOVE_RECURSE \"${CMAKE_INSTALL_PREFIX}/addon-schemas/easy_en\")
+  " COMPONENT Runtime)
 install(DIRECTORY "${KEYTAO_RUNTIME}/current/rime-data"
-  "${KEYTAO_ROOT}/resources/addon-schemas"
   DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 install(DIRECTORY "${KEYTAO_ROOT}/target/keytao-windows-app-runtime/"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime

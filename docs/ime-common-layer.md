@@ -67,13 +67,13 @@ App installs schema/dict/lua/opencc files
   -> ImeRuntimeSession refreshes internal Engine lazily
 ```
 
-附加方案走同一条部署链路。内置英文 add-on id 是 `easy_en`：Flutter 各平台打包链将固定版本的 `resources/addon-schemas/easy_en` 打入桌面资源目录、Android assets 和 iOS containing app bundle；`addon_schema_install` 把四个运行文件复制到平台用户目录，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
+附加方案走同一条部署链路。英文 add-on id 是 `easy_en`：各平台安装时从 [BlindingDark/rime-easy-en](https://github.com/BlindingDark/rime-easy-en) 下载上游归档，仅提取 `easy_en.schema.yaml`、`easy_en.dict.yaml`、`lua/easy_en.lua` 和 LGPL-3.0 `LICENSE`，再生成禁用外部分词器的 `easy_en.custom.yaml`。安装器分阶段提取并记录版本与文件清单，把 `easy_en` 追加到 `default.custom.yaml` 的包内方案之后，再执行平台原有 deploy；部署失败时回滚。`addon_schema_uninstall` 删除源码、`build/easy_en.*` 与 `easy_en.userdb*`，重新部署剩余方案并写 reload stamp。旧版从内置资源安装、没有清单的 `easy_en` 仍可识别、更新和卸载。Android 和 iOS 的主方案 readiness 仍只统计 KeyTao managed schemas，不能让 add-on 掩盖主方案缺失或部署失败。
 
 `easy_en` 的 14,566,541 B 词典在 macOS Apple Silicon 上增量部署实测为 4,328 ms，生成 28,216,820 B（table 15,784,108 B、prism 6,320,444 B、reverse 6,112,268 B）编译产物。中低端 Android 可能慢一个数量级以上；含 `easy_en` 的 staged deploy 总预算因此由 180 s 提高到 300 s，未含 add-on 的部署仍保持 180 s。以上不是 Android 真机耗时证据，合并前仍需在目标中低端真机记录完整 staged deploy 用时。
 
 键道包重装时，`keytao-core` 和 Android ZIP 合并器都按 `用户自定义方案 -> 当前包方案 -> add-on` 排序并去重。启动方案选择会跳过 add-on，因此即使列表只剩 `easy_en` 也不会把它当作默认中文方案。移动端仅在 `easy_en` 已安装且已有 `build/easy_en.schema.yaml` 时允许选择 `englishMode: "schema"`；卸载会将该设置原子地恢复为 `ascii`。
 
-可选的 `wanxiang` 使用同一平台用户目录和部署入口。App 下载固定版本的万象官方基础包并校验 SHA256，只安装万象主词库、全拼拼写规则和基于 Rime 内建组件的基础方案，不包含 Lua 扩展或独立语法模型。词表放在 `wanxiang-dicts/`，避免覆盖其他方案的 `dicts/`。安装清单记录文件 hash；部署失败回滚源文件与方案列表，卸载保留个人修改、custom 和学习词库。Windows、macOS、Linux、Android、iOS 共用 Rust 安装器，平台保留各自部署流程。
+可选的 `wanxiang` 使用同一平台用户目录和部署入口。App 通过 HTTPS 下载 [amzxyz/rime-wanxiang](https://github.com/amzxyz/rime-wanxiang) 最新 release 的 `rime-wanxiang-base.zip` 并校验归档内容，只安装万象主词库、全拼拼写规则和基于 Rime 内建组件的基础方案，不包含 Lua 扩展或独立语法模型。词表放在 `wanxiang-dicts/`，避免覆盖其他方案的 `dicts/`。安装清单记录版本和文件 hash；部署失败回滚源文件与方案列表，卸载保留个人修改、custom 和学习词库。Windows、macOS、Linux、Android、iOS 共用 Rust 安装器，平台保留各自部署流程。附加方案页面显示已安装版本；检查上游版本后可手动更新，检查失败不影响页面和已有方案。
 
 桌面“英文模式”与移动端一样可选择 ASCII 或 English 词库。桌面偏好保存到 `keytao-ime.json` 的 `englishMode` 字段，修改后使用现有 reload stamp 通知输入法。`ImeRuntimeSession::set_english_mode()` 在词库模式切换 schema，并保存/恢复中文方案和选项；`ImeState::is_english_mode()` 用于中英指示，原始 `ascii_mode` 仍只表示透传，英文候选方案保持它为 false。移动端已有的 schema 切换继续使用原始 ASCII API。
 

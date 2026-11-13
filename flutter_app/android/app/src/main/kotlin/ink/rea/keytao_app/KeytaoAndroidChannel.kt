@@ -68,7 +68,6 @@ class KeytaoAndroidChannel(
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
-                "copyAddonSchemaAssets" -> copyAddonSchemaAssets(call, reply)
                 "deployImeData" -> deployImeData(reply)
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
@@ -1044,64 +1043,6 @@ class KeytaoAndroidChannel(
         }.start()
     }
 
-    private fun copyAddonSchemaAssets(call: MethodCall, reply: Reply) {
-        val id = call.argument<String>("id")
-            ?: return reply.error("Missing add-on schema id")
-        if (id != easyEnglishAddonId) {
-            return reply.error("Unsupported add-on schema: $id")
-        }
-
-        Thread {
-            try {
-                val root = KeytaoAndroidPaths.requireRoot(activity)
-                if (!KeytaoAndroidPaths.isWritable(root)) {
-                    return@Thread reply.error("无法写入 ${root.absolutePath}，请检查设备存储空间后重试")
-                }
-                val files = listOf(
-                    "easy_en.schema.yaml" to "easy_en.schema.yaml",
-                    "easy_en.dict.yaml" to "easy_en.dict.yaml",
-                    "easy_en.custom.yaml" to "easy_en.custom.yaml",
-                    "lua/easy_en.lua" to "lua/easy_en.lua",
-                )
-                val logs = mutableListOf<String>()
-                files.forEach { (assetRelative, destinationRelative) ->
-                    val destination = File(root, destinationRelative)
-                    destination.parentFile?.mkdirs()
-                    val decision = preparePackageFileWrite(destinationRelative, logs, existingBytes = {
-                        if (destination.exists()) destination.readBytes() else null
-                    }, backup = { backupName ->
-                        val backup = File(destination.parentFile, backupName)
-                        check(!backupPathExists(backup)) { "Backup already exists: $backupName" }
-                        check(destination.renameTo(backup)) { "Failed to rename: $destinationRelative" }
-                    })
-                    if (!decision.write) return@forEach
-                    val temporary = File(destination.parentFile, ".${destination.name}.${System.nanoTime()}.tmp")
-                    try {
-                        activity.assets.open("addon-schemas/$id/$assetRelative").use { input ->
-                            temporary.outputStream().use { output -> input.copyTo(output) }
-                        }
-                        if (destination.exists() && !destination.delete()) {
-                            throw IllegalStateException("Cannot replace ${destination.absolutePath}")
-                        }
-                        if (!temporary.renameTo(destination)) {
-                            temporary.copyTo(destination, overwrite = true)
-                            temporary.delete()
-                        }
-                    } finally {
-                        temporary.delete()
-                    }
-                }
-                logs.forEach { android.util.Log.i("KeytaoAndroidChannel", it) }
-                reply.success(mutableMapOf<String, Any?>().apply {
-                    put("copied", files.size)
-                    put("logs", logs.toList())
-                })
-            } catch (ex: Exception) {
-                reply.error(ex.message ?: "Failed to copy add-on schema assets")
-            }
-        }.start()
-    }
-
     private fun deployImeData(reply: Reply) {
         Thread {
             try {
@@ -1139,7 +1080,6 @@ class KeytaoAndroidChannel(
     }
 
     companion object {
-        private const val easyEnglishAddonId = "easy_en"
         private const val storagePermissionRequestCode = 0x4B54
         private const val directoryPickRequestCode = 0x4B55
     }

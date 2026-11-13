@@ -7,6 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AddonSchemaStatusDto`, `WanxiangStatusDto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 class AccountUserDto {
@@ -35,37 +36,6 @@ class AccountUserDto {
           name == other.name &&
           nickname == other.nickname &&
           email == other.email;
-}
-
-class AddonSchemaStatusDto {
-  final bool installed;
-  final bool deployed;
-  final String version;
-  final bool englishAvailable;
-
-  const AddonSchemaStatusDto({
-    required this.installed,
-    required this.deployed,
-    required this.version,
-    required this.englishAvailable,
-  });
-
-  @override
-  int get hashCode =>
-      installed.hashCode ^
-      deployed.hashCode ^
-      version.hashCode ^
-      englishAvailable.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AddonSchemaStatusDto &&
-          runtimeType == other.runtimeType &&
-          installed == other.installed &&
-          deployed == other.deployed &&
-          version == other.version &&
-          englishAvailable == other.englishAvailable;
 }
 
 class AndroidImeInputSettingsDto {
@@ -1254,30 +1224,6 @@ class VerifyEntryDto {
           path == other.path &&
           ok == other.ok &&
           note == other.note;
-}
-
-class WanxiangStatusDto {
-  final bool installed;
-  final bool deployed;
-  final String version;
-
-  const WanxiangStatusDto({
-    required this.installed,
-    required this.deployed,
-    required this.version,
-  });
-
-  @override
-  int get hashCode => installed.hashCode ^ deployed.hashCode ^ version.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is WanxiangStatusDto &&
-          runtimeType == other.runtimeType &&
-          installed == other.installed &&
-          deployed == other.deployed &&
-          version == other.version;
 }
 
 class WindowsImeStatusDto {

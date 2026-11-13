@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
+import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -50,6 +51,25 @@ const result = InstallResultDto(
   ],
 );
 const emptyLog = DebugLogFileDto(lines: [], truncated: false);
+const missingAddon = AddonStatusDto(
+  englishAvailable: false,
+  installed: false,
+  deployed: false,
+  version: '1',
+);
+const installedAddon = AddonStatusDto(
+  englishAvailable: true,
+  installed: true,
+  deployed: true,
+  version: '1',
+);
+const addonUpdate = AddonStatusDto(
+  englishAvailable: true,
+  installed: true,
+  deployed: true,
+  version: '1',
+  latestVersion: '2',
+);
 
 // Only the external contract is mocked: no native libraries, HTTP or live roots.
 class FakeCore implements RustLibApi {
@@ -58,6 +78,11 @@ class FakeCore implements RustLibApi {
   LocalSchemaDto local = installedLocal;
   final latestRequests = <Completer<ReleaseInfoDto>>[];
   final schemeRequests = <String, Completer<SchemeReleaseDto>>{};
+  final addonUpdateRequests = <String, Completer<AddonStatusDto>>{};
+  AddonStatusDto addonStatus = missingAddon;
+  AddonStatusDto wanxiangStatus = missingAddon;
+  bool delayAddonUpdates = false;
+  bool addonUpdateFails = false;
   bool delayReleases = false;
   bool updateFails = false;
   bool addonDeployProgress = false;
@@ -100,17 +125,23 @@ class FakeCore implements RustLibApi {
   Future<Map<String, String>> crateApiCoreGetDismissedSchemeUpdates() async =>
       {};
   @override
-  Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaStatus({
+  Future<AddonStatusDto> crateApiCoreAddonSchemaStatus({
     required String id,
-  }) async => const AddonSchemaStatusDto(
-    englishAvailable: false,
-    installed: false,
-    deployed: false,
-    version: '1',
-  );
+  }) async => addonStatus;
   @override
-  Future<WanxiangStatusDto> crateApiCoreWanxiangStatus() async =>
-      const WanxiangStatusDto(installed: false, deployed: false, version: '1');
+  Future<AddonStatusDto> crateApiCoreWanxiangStatus() async =>
+      wanxiangStatus;
+  @override
+  Future<AddonStatusDto> crateApiCoreCheckAddonUpdate({required String id}) async {
+    calls.add('addonUpdate:$id');
+    if (addonUpdateFails) throw StateError('offline add-on update');
+    if (delayAddonUpdates) {
+      final request = Completer<AddonStatusDto>();
+      addonUpdateRequests[id] = request;
+      return request.future;
+    }
+    return addonUpdate;
+  }
   @override
   Future<MacosImeStatusDto> crateApiCoreMacosImeStatus() async =>
       const MacosImeStatusDto(
@@ -225,7 +256,7 @@ class FakeCore implements RustLibApi {
   }) async =>
       const LocalSchemasDto(hasDefaultCustom: true, schemas: ['custom']);
   @override
-  Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaInstall({
+  Future<AddonStatusDto> crateApiCoreAddonSchemaInstall({
     required String id,
     required FutureOr<String> Function() androidDeploy,
   }) async {
@@ -234,27 +265,22 @@ class FakeCore implements RustLibApi {
     final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
-    return const AddonSchemaStatusDto(
-      englishAvailable: true,
-      installed: true,
-      deployed: true,
-      version: '1',
-    );
+    return addonStatus = installedAddon;
   }
 
   @override
-  Future<AddonSchemaStatusDto> crateApiCoreAddonSchemaUninstall({
+  Future<AddonStatusDto> crateApiCoreAddonSchemaUninstall({
     required String id,
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('addonUninstall:$id');
     await emitAddonDeployProgress();
     english = EnglishModeDto.ascii;
-    return crateApiCoreAddonSchemaStatus(id: id);
+    return addonStatus = missingAddon;
   }
 
   @override
-  Future<WanxiangStatusDto> crateApiCoreManageWanxiang({
+  Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
     required FutureOr<String> Function() androidDeploy,
   }) async {
@@ -263,10 +289,11 @@ class FakeCore implements RustLibApi {
     final failure = await androidDeploy();
     calls.add('callback:$failure');
     if (failure.isNotEmpty) throw StateError(failure);
-    return WanxiangStatusDto(
+    return AddonStatusDto(
       installed: installed,
       deployed: installed,
       version: '1',
+      englishAvailable: false,
     );
   }
 
@@ -364,12 +391,6 @@ class FakeAndroid extends AndroidHost {
   Future<Map<String, dynamic>> smartExtractZip(String zipPath, String treeUri) {
     calls.add('extract:$zipPath:$treeUri');
     return extraction?.future ?? Future.value(extracted);
-  }
-
-  @override
-  Future<Map<String, dynamic>> copyAddonSchemaAssets(String id) async {
-    calls.add('copy:$id');
-    return {};
   }
 
   @override
@@ -571,6 +592,79 @@ void main() {
     },
   );
 
+  test('add-on update checks skip uninstalled schemes', () async {
+    await controller.refreshState();
+    await controller.refreshState();
+    await settle();
+    expect(core.calls.where((call) => call.startsWith('addonUpdate:')), isEmpty);
+  });
+
+  test('add-on update checks run once per installed scheme per session', () async {
+    core.addonStatus = installedAddon;
+    core.delayAddonUpdates = true;
+    await controller.refreshState();
+    final request = core.addonUpdateRequests['easy_en']!;
+    await controller.refreshState();
+    expect(
+      core.calls.where((call) => call.startsWith('addonUpdate:')),
+      ['addonUpdate:easy_en'],
+    );
+    request.complete(addonUpdate);
+    await settle();
+    expect(controller.addonLatestVersion, '2');
+    core.wanxiangStatus = installedAddon;
+    await controller.refreshState();
+    core.addonUpdateRequests['wanxiang']!.complete(addonUpdate);
+    await settle();
+    await controller.refreshState();
+    expect(
+      core.calls.where((call) => call.startsWith('addonUpdate:')),
+      ['addonUpdate:easy_en', 'addonUpdate:wanxiang'],
+    );
+    expect(controller.wanxiangLatestVersion, '2');
+  });
+
+  test('add-on update check failures remain nonblocking for the session', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    core.addonStatus = installedAddon;
+    core.addonUpdateFails = true;
+    expect(await controller.refreshState(), isTrue);
+    expect(await controller.refreshState(), isTrue);
+    await settle();
+    expect(
+      core.calls.where((call) => call.startsWith('addonUpdate:')),
+      ['addonUpdate:easy_en'],
+    );
+    expect(controller.error, isNull);
+    expect(controller.addonError, isNull);
+    expect(controller.addonLatestVersion, isNull);
+  });
+
+  test('add-on update checks discard results across install and uninstall', () async {
+    for (final installed in [true, false]) {
+      controller.dispose();
+      controller = create(mobile: false);
+      core.addonStatus = installedAddon;
+      core.wanxiangStatus = installedAddon;
+      core.delayAddonUpdates = true;
+      await controller.refreshState();
+      final easyEnRequest = core.addonUpdateRequests['easy_en']!;
+      final wanxiangRequest = core.addonUpdateRequests['wanxiang']!;
+      expect(
+        await (installed
+            ? controller.installAddon()
+            : controller.uninstallAddon()),
+        isTrue,
+      );
+      easyEnRequest.complete(addonUpdate);
+      wanxiangRequest.complete(addonUpdate);
+      await settle();
+      expect(controller.addonLatestVersion, installed ? '1' : null);
+      expect(controller.wanxiangLatestVersion, '2');
+    }
+  });
+
   test('cancelled installs stay inline and never deploy, allowing retry', () async {
     controller.dispose();
     controller = create(mobile: false)
@@ -697,7 +791,7 @@ void main() {
     },
   );
 
-  test('add-ons gate main scheme, copy before bridge, and return callback failures as text', () async {
+  test('add-ons gate main scheme and return callback failures as text', () async {
     expect(await controller.installAddon(), isFalse);
     expect(controller.addonError, '请先安装键道方案');
     expect(await controller.manageWanxiang(true), isFalse);
@@ -709,7 +803,6 @@ void main() {
       core.calls,
       containsAllInOrder([
         'permission',
-        'copy:easy_en',
         'addonInstall:easy_en',
         'deployImeData',
         'callback:',

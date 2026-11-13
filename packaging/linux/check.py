@@ -40,10 +40,7 @@ def check_layout(root):
     assert os.readlink(app / 'rime-data') == 'runtime/rime-data'
     assert not (root / 'usr/lib/keytao-app').exists(), 'Wrong historical prefix'
     assert not (root / 'DEBIAN/postinst').exists(), 'Unexpected postinst'
-    for source in (PROJECT / 'resources/addon-schemas').rglob('*'):
-        if source.is_file():
-            target = app / 'addon-schemas' / source.relative_to(PROJECT / 'resources/addon-schemas')
-            assert target.read_bytes() == source.read_bytes(), target
+    assert not (app / 'addon-schemas').exists(), 'Unexpected bundled add-on schemas'
     entry = desktop(root / 'usr/share/applications/KeyTao.desktop')
     assert dict(entry) == {
         'Categories': '', 'Comment': 'KeyTao input method app', 'Exec': 'keytao-app',

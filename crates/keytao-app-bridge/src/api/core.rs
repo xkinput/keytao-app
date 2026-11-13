@@ -947,7 +947,17 @@ pub async fn set_desktop_english_mode(mode: EnglishModeDto) -> Result<EnglishMod
     )
 }
 
-pub fn addon_schema_status(id: String) -> Result<AddonSchemaStatusDto, String> {
+#[derive(serde::Deserialize)]
+pub struct AddonStatusDto {
+    pub installed: bool,
+    pub deployed: bool,
+    pub version: String,
+    #[serde(default)]
+    pub english_available: bool,
+    pub latest_version: Option<String>,
+}
+
+pub fn addon_schema_status(id: String) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     runtime::dto(
         keytao_app_core::addon::addon_schema_status(&state.core, || state.host.user_root(), id)
@@ -955,16 +965,14 @@ pub fn addon_schema_status(id: String) -> Result<AddonSchemaStatusDto, String> {
     )
 }
 
-/// Android: await copyAddonSchemaAssets(id) through the platform channel first;
-/// this call's host treats copy_addon_assets as already complete. android_deploy
-/// must await deployImeData and return "" on success or error text on failure,
+/// android_deploy must await deployImeData and return "" on success or error text on failure,
 /// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
 /// the callback: the install lock is held. macOS ignores the callback and uses
 /// the existing bridge deploy. InstallProgress continues through core_events.
 pub async fn addon_schema_install(
     id: String,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
-) -> Result<AddonSchemaStatusDto, String> {
+) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let host = InstallHost::new(state.host.clone(), android_deploy);
@@ -975,12 +983,12 @@ pub async fn addon_schema_install(
     )
 }
 
-/// Uses the same per-call deploy contract as addon_schema_install; no asset copy
-/// is needed. Core owns schema removal, English-mode reset and progress events.
+/// Uses the same per-call deploy contract as addon_schema_install.
+/// Core owns schema removal, English-mode reset and progress events.
 pub async fn addon_schema_uninstall(
     id: String,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
-) -> Result<AddonSchemaStatusDto, String> {
+) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let host = InstallHost::new(state.host.clone(), android_deploy);
@@ -991,12 +999,26 @@ pub async fn addon_schema_uninstall(
     )
 }
 
-pub fn wanxiang_status() -> Result<WanxiangStatusDto, String> {
+pub fn wanxiang_status() -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     runtime::dto(
         keytao_app_core::wanxiang::wanxiang_status(&state.core, &state.host.user_root()?)
             .map_err(|error| error.to_string())?,
     )
+}
+
+/// A failed upstream check leaves the locally installed status available.
+pub async fn check_addon_update(id: String) -> Result<AddonStatusDto, String> {
+    let mut status = match id.as_str() {
+        "easy_en" => addon_schema_status(id.clone())?,
+        "wanxiang" => wanxiang_status()?,
+        _ => return Err(format!("Unsupported add-on: {id}")),
+    };
+    status.latest_version = match id.as_str() {
+        "easy_en" => keytao_app_core::addon::latest_version().await.ok(),
+        _ => keytao_app_core::wanxiang::latest_version().await.ok(),
+    };
+    Ok(status)
 }
 
 /// Uses addon_schema_install's deploy contract. Core keeps its receipt/rollback
@@ -1005,7 +1027,7 @@ pub fn wanxiang_status() -> Result<WanxiangStatusDto, String> {
 pub async fn manage_wanxiang(
     installed: bool,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
-) -> Result<WanxiangStatusDto, String> {
+) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let host = InstallHost::new(state.host.clone(), android_deploy);

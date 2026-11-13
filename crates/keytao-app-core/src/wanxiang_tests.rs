@@ -1,25 +1,45 @@
 use super::*;
 use std::{
     io::{Cursor, Write},
-    sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard},
+    sync::MutexGuard as StdMutexGuard,
 };
-use zip::{write::SimpleFileOptions, ZipWriter};
+use zip::{ZipWriter, write::SimpleFileOptions};
 
-static SERIAL: StdMutex<()> = StdMutex::new(());
+const VERSION: &str = "fixture-version";
+const SOURCE_URL: &str = "https://github.com/amzxyz/rime-wanxiang/releases/tag/fixture-version";
+const DOWNLOAD_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn fixture_package() -> RemotePackage {
+    RemotePackage {
+        version: VERSION.into(),
+        source: SOURCE_URL.into(),
+        download_url: "https://example.invalid/package.zip".into(),
+        download_bytes: None,
+    }
+}
+
+fn commit_fixture(receipt: &mut InstallReceipt, files: Vec<InstalledFile>) -> Result<(), String> {
+    commit_files(receipt, files, &fixture_package(), DOWNLOAD_SHA256.into())
+}
 
 #[test]
-fn download_integrity_requires_both_expected_size_and_sha256() {
-    assert!(verify_download(DOWNLOAD_BYTES, DOWNLOAD_SHA256).is_ok());
-    for (size, hash) in [
-        (DOWNLOAD_BYTES - 1, DOWNLOAD_SHA256.to_string()),
-        (DOWNLOAD_BYTES + 1, DOWNLOAD_SHA256.to_string()),
-        (DOWNLOAD_BYTES, "0".repeat(64)),
-    ] {
-        assert_eq!(
-            verify_download(size, &hash).unwrap_err(),
-            "万象词库完整性校验失败，未修改已安装方案"
-        );
+fn download_requires_complete_bounded_bytes_without_pinning_a_release_hash() {
+    assert!(verify_download(42, Some(42)).is_ok());
+    assert!(verify_download(42, None).is_ok());
+    for size in [0, 41, 43, MAX_DOWNLOAD_BYTES + 1] {
+        assert!(verify_download(size, Some(42)).is_err());
     }
+}
+
+#[test]
+fn latest_release_selects_base_asset_and_preserves_upstream_tag() {
+    let package = release_package(&serde_json::json!({"tag_name": "v99.1", "assets": [
+        {"name": "other.zip", "browser_download_url": "https://example.invalid/other", "size": 1},
+        {"name": "rime-wanxiang-base.zip", "browser_download_url": "https://example.invalid/base", "size": 42}
+    ]})).unwrap();
+    assert_eq!(package.version, "v99.1");
+    assert_eq!(package.download_url, "https://example.invalid/base");
+    assert_eq!(package.download_bytes, Some(42));
 }
 
 struct TestRoot {
@@ -30,7 +50,7 @@ struct TestRoot {
 
 impl TestRoot {
     fn new() -> Self {
-        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!(
             "keytao-wanxiang-test-{}-{}",
             std::process::id(),
@@ -72,14 +92,15 @@ fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<Instal
         .iter()
         .map(|name| format!("dicts/{name}.dict.yaml"))
         .collect();
-    let mut entries: Vec<_> =
-        REQUIRED
-            .iter()
-            .map(|name| {
-                (*name,
-        "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n")
-            })
-            .collect();
+    let mut entries: Vec<_> = REQUIRED
+        .iter()
+        .map(|name| {
+            (
+                *name,
+                "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n",
+            )
+        })
+        .collect();
     entries.extend(
         dictionaries
             .iter()
@@ -88,7 +109,7 @@ fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<Instal
     entries.extend(extra.iter().copied());
     let archive = receipt.work.join("fixture.zip");
     archive_at(&archive, &entries);
-    extract(&archive, &receipt.work.join("files")).unwrap()
+    extract(&archive, &receipt.work.join("files"), &fixture_package()).unwrap()
 }
 
 #[test]
@@ -117,9 +138,11 @@ fn extraction_rejects_traversal_even_in_excluded_files() {
     let root = TestRoot::new();
     let archive = root.path.join("fixture.zip");
     archive_at(&archive, &[("../outside.txt", "bad")]);
-    assert!(extract(&archive, &root.path.join("stage"))
-        .unwrap_err()
-        .contains("不安全路径"));
+    assert!(
+        extract(&archive, &root.path.join("stage"), &fixture_package())
+            .unwrap_err()
+            .contains("不安全路径")
+    );
     assert!(!root.path.join("outside.txt").exists());
 }
 
@@ -131,9 +154,11 @@ fn extraction_rejects_case_insensitive_duplicate_files() {
         &archive,
         &[("wanxiang.schema.yaml", "a"), ("WANXIANG.schema.yaml", "b")],
     );
-    assert!(extract(&archive, &root.path.join("stage"))
-        .unwrap_err()
-        .contains("重复路径"));
+    assert!(
+        extract(&archive, &root.path.join("stage"), &fixture_package())
+            .unwrap_err()
+            .contains("重复路径")
+    );
 }
 
 #[test]
@@ -148,9 +173,11 @@ fn extraction_rejects_symlinks() {
     )
     .unwrap();
     fs::write(&archive, zip.finish().unwrap().into_inner()).unwrap();
-    assert!(extract(&archive, &root.path.join("stage"))
-        .unwrap_err()
-        .contains("符号链接"));
+    assert!(
+        extract(&archive, &root.path.join("stage"), &fixture_package())
+            .unwrap_err()
+            .contains("符号链接")
+    );
 }
 
 #[test]
@@ -176,7 +203,7 @@ fn install_preserves_host_configuration_and_customizations() {
             ("wanxiang.custom.yaml", "upstream"),
         ],
     );
-    commit_files(&mut receipt, files).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     receipt.finish().unwrap();
     assert!(status_at(&root.path).installed);
     assert!(!status_at(&root.path).deployed);
@@ -204,7 +231,7 @@ fn dropping_receipt_rolls_back_all_installed_sources() {
     fs::write(root.path.join("default.custom.yaml"), "user-owned").unwrap();
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     let files = stage_fixture(&receipt, &[]);
-    commit_files(&mut receipt, files).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     assert!(status_at(&root.path).installed);
     drop(receipt);
     assert!(!root.path.join(MANIFEST).exists());
@@ -226,9 +253,11 @@ fn conflicting_existing_file_prevents_all_commit_writes() {
     .unwrap();
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     let files = stage_fixture(&receipt, &[]);
-    assert!(commit_files(&mut receipt, files)
-        .unwrap_err()
-        .contains("冲突"));
+    assert!(
+        commit_fixture(&mut receipt, files)
+            .unwrap_err()
+            .contains("冲突")
+    );
     drop(receipt);
     assert!(!root.path.join("wanxiang.schema.yaml").exists());
     assert_eq!(
@@ -244,7 +273,7 @@ fn uninstall_preserves_modified_files_and_learned_vocabulary() {
     fs::write(root.path.join("custom_phrase.dict.yaml"), "private phrases").unwrap();
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     let files = stage_fixture(&receipt, &[("wanxiang.custom.yaml", "patch: {}")]);
-    commit_files(&mut receipt, files).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     receipt.finish().unwrap();
     fs::write(
         root.path.join("wanxiang-dicts/jichu.dict.yaml"),
@@ -273,7 +302,7 @@ fn failed_uninstall_can_restore_previous_installation() {
     let root = TestRoot::new();
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     let files = stage_fixture(&receipt, &[]);
-    commit_files(&mut receipt, files).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     receipt.finish().unwrap();
     let removal = uninstall(&root.path).unwrap();
     assert!(!status_at(&root.path).installed);
@@ -320,33 +349,31 @@ fn public_sources_contain_official_content_instead_of_private_override() {
     .unwrap();
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
     let files = stage_fixture(&receipt, &[("wanxiang.custom.yaml", "patch: {}")]);
-    commit_files(&mut receipt, files).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     let public = receipt.public_source_files();
     let (_, source) = public
         .iter()
         .find(|(p, _)| *p == PathBuf::from("wanxiang.schema.yaml"))
         .unwrap();
     assert_eq!(fs::read_to_string(source).unwrap(), BASIC_SCHEMA);
-    assert!(!public
-        .iter()
-        .any(|(p, _)| *p == PathBuf::from("wanxiang.custom.yaml")));
+    assert!(
+        !public
+            .iter()
+            .any(|(p, _)| *p == PathBuf::from("wanxiang.custom.yaml"))
+    );
     assert_eq!(
         fs::read_to_string(root.path.join("wanxiang.custom.yaml")).unwrap(),
         "private customization"
     );
 }
 
-/// Opt-in integration check using a locally cached, hash-verified upstream ZIP.
+/// Opt-in integration check using a locally cached upstream ZIP.
 /// All Rime files, logs and learned dictionaries stay in a fresh temporary root.
 #[test]
 #[ignore = "requires the official archive and a local librime SDK"]
 fn official_package_deploys_and_inputs_without_grammar_model() {
     let archive = PathBuf::from(std::env::var("KEYTAO_WANXIANG_SMOKE_ARCHIVE").unwrap());
     let shared = std::env::var("KEYTAO_WANXIANG_SMOKE_SHARED").unwrap();
-    assert_eq!(
-        fingerprint(&archive).unwrap(),
-        (DOWNLOAD_SHA256.into(), DOWNLOAD_BYTES)
-    );
     let mut root = TestRoot::new();
     // librime deliberately keeps its process-global runtime/log handles alive
     // after ImeRuntime drops. Retain this opt-in smoke's evidence for inspection
@@ -354,8 +381,8 @@ fn official_package_deploys_and_inputs_without_grammar_model() {
     root.cleanup = false;
     println!("wanxiang_smoke_root={}", root.path.display());
     let mut receipt = InstallReceipt::new(&root.path).unwrap();
-    let files = extract(&archive, &receipt.work.join("files")).unwrap();
-    commit_files(&mut receipt, files).unwrap();
+    let files = extract(&archive, &receipt.work.join("files"), &fixture_package()).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
     fs::write(
         root.path.join("default.custom.yaml"),
         "patch:\n  schema_list:\n    - schema: wanxiang\n",

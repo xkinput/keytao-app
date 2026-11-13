@@ -244,7 +244,6 @@ function Require-MatchingTree([string]$Source, [string]$Destination) {
     }
 }
 
-Require-MatchingTree (Join-Path $repoRoot "resources\addon-schemas") (Join-Path $ReleaseDir "addon-schemas")
 Require-MatchingTree (Join-Path $repoRoot "target\keytao-windows-ime-runtime\current\rime-data") (Join-Path $ReleaseDir "rime-data")
 foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $repoRoot "target\keytao-windows-app-runtime") -Filter "*.dll" -File) {
     $copy = Join-Path $ReleaseDir $dll.Name

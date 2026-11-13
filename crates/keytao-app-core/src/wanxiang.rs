@@ -24,12 +24,8 @@ use tokio::{
 };
 
 pub const SCHEMA_ID: &str = "wanxiang";
-pub const VERSION: &str = "18.0.5";
-pub const DOWNLOAD_BYTES: u64 = 35_216_559;
-pub const SOURCE_URL: &str = "https://github.com/amzxyz/rime-wanxiang/releases/tag/v18.0.5";
-const DOWNLOAD_URL: &str =
-    "https://github.com/amzxyz/rime-wanxiang/releases/download/v18.0.5/rime-wanxiang-base.zip";
-const DOWNLOAD_SHA256: &str = "9d3a1d26213c3d2c59e6cf2325678f14dedd7182149644e18675f764ab7393c1";
+const RELEASE_API: &str = "https://api.github.com/repos/amzxyz/rime-wanxiang/releases/latest";
+const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MANIFEST: &str = ".keytao-wanxiang.json";
 const NOTICE: &str = "wanxiang-NOTICE.txt";
 const MAX_FILES: usize = 4096;
@@ -37,6 +33,8 @@ const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 static OPERATION: Mutex<()> = Mutex::const_new(());
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const REQUIRED: &[&str] = &[
     "wanxiang.schema.yaml",
@@ -83,10 +81,17 @@ pub struct Status {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct InstalledFile {
-    path: String,
-    sha256: String,
-    size: u64,
+pub(crate) struct InstalledFile {
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
+}
+
+pub(crate) struct RemotePackage {
+    pub(crate) version: String,
+    pub(crate) source: String,
+    pub(crate) download_url: String,
+    pub(crate) download_bytes: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,7 +115,7 @@ pub fn status_at(root: &Path) -> Status {
         deployed: installed
             && root.join("build/wanxiang.schema.yaml").is_file()
             && root.join("build/wanxiang.table.bin").is_file(),
-        version: manifest.map_or_else(|| VERSION.into(), |m| m.version),
+        version: manifest.map_or_else(String::new, |m| m.version),
     }
 }
 
@@ -184,8 +189,14 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn safe_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
     validate_relative(relative)?;
+    if fs::symlink_metadata(root).is_ok_and(|metadata| is_link(&metadata)) {
+        return Err(format!(
+            "附加方案安装目录不能是符号链接：{}",
+            root.display()
+        ));
+    }
     let mut path = root.to_path_buf();
     for component in relative.split('/') {
         path.push(component);
@@ -220,7 +231,7 @@ fn package_destination(name: &str) -> Option<String> {
         .then(|| format!("wanxiang-dicts/{stem}.dict.yaml"))
 }
 
-fn fingerprint(path: &Path) -> Result<(String, u64), String> {
+pub(crate) fn fingerprint(path: &Path) -> Result<(String, u64), String> {
     let mut file = File::open(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
     let mut hash = Sha256::new();
     let mut size = 0;
@@ -245,20 +256,20 @@ struct Change {
 /// Must survive until deployment succeeds. An unfinished receipt restores the
 /// old source files, including on async command cancellation/unwinding.
 pub struct InstallReceipt {
-    root: PathBuf,
-    work: PathBuf,
+    pub(crate) root: PathBuf,
+    pub(crate) work: PathBuf,
     changes: Vec<Change>,
     pending: bool,
     #[cfg(windows)]
-    public_sources: Vec<String>,
+    pub(crate) public_sources: Vec<String>,
     _operation: MutexGuard<'static, ()>,
 }
 
 impl InstallReceipt {
-    fn new(root: &Path) -> Result<Self, String> {
+    pub(crate) fn new(root: &Path) -> Result<Self, String> {
         let operation = OPERATION
             .try_lock()
-            .map_err(|_| "万象安装或卸载正在进行中")?;
+            .map_err(|_| "附加方案安装或卸载正在进行中")?;
         fs::create_dir_all(root).map_err(|e| format!("创建用户目录失败：{e}"))?;
         let root = root.canonicalize().map_err(|e| e.to_string())?;
         let work = loop {
@@ -284,7 +295,7 @@ impl InstallReceipt {
         })
     }
 
-    fn move_original(&mut self, relative: &str) -> Result<(), String> {
+    pub(crate) fn move_original(&mut self, relative: &str) -> Result<(), String> {
         let destination = safe_target(&self.root, relative)?;
         let had_original = destination.exists();
         if had_original {
@@ -303,7 +314,12 @@ impl InstallReceipt {
         Ok(())
     }
 
-    fn replace(&mut self, relative: &str, source: &Path, hash: String) -> Result<(), String> {
+    pub(crate) fn replace(
+        &mut self,
+        relative: &str,
+        source: &Path,
+        hash: String,
+    ) -> Result<(), String> {
         let destination = safe_target(&self.root, relative)?;
         fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
         self.move_original(relative)?;
@@ -399,69 +415,139 @@ impl Drop for InstallReceipt {
     }
 }
 
-async fn download(path: &Path, progress: &(impl Fn(u8, &str) + Send + Sync)) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .user_agent("KeyTao-Wanxiang-Installer")
+fn client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("KeyTao-Addon-Installer")
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(15 * 60))
+        .timeout(timeout)
         .https_only(true)
         .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(DOWNLOAD_URL)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn github_metadata(url: &str) -> Result<serde_json::Value, String> {
+    let response = client(Duration::from_secs(30))?
+        .get(url)
         .send()
         .await
-        .map_err(|e| format!("下载万象词库失败：{e}"))?
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?
         .error_for_status()
-        .map_err(|e| format!("下载万象词库失败：{e}"))?;
-    if response
-        .content_length()
-        .is_some_and(|size| size != DOWNLOAD_BYTES)
-    {
-        return Err("官方万象发布包大小已变化，请更新应用后重试".into());
+        .map_err(|e| format!("查询附加方案更新失败：{e}"))?;
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err("附加方案版本信息过大".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("附加方案版本信息无效：{e}"))
+}
+
+fn release_package(release: &serde_json::Value) -> Result<RemotePackage, String> {
+    let version = release["tag_name"]
+        .as_str()
+        .filter(|tag| !tag.is_empty())
+        .ok_or("万象发布信息缺少版本号")?;
+    let asset = release["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|asset| asset["name"] == "rime-wanxiang-base.zip")
+        })
+        .ok_or("最新万象发布缺少基础词库")?;
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .filter(|url| url.starts_with("https://"))
+        .ok_or("万象发布下载地址无效")?;
+    let size = asset["size"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= MAX_DOWNLOAD_BYTES)
+        .ok_or("万象发布包大小超出限制")?;
+    Ok(RemotePackage {
+        version: version.into(),
+        source: format!("https://github.com/amzxyz/rime-wanxiang/releases/tag/{version}"),
+        download_url: download_url.into(),
+        download_bytes: Some(size),
+    })
+}
+
+async fn latest_package() -> Result<RemotePackage, String> {
+    release_package(&github_metadata(RELEASE_API).await?)
+}
+
+pub async fn latest_version() -> Result<String, String> {
+    Ok(latest_package().await?.version)
+}
+
+pub(crate) async fn download(
+    package: &RemotePackage,
+    path: &Path,
+    progress: &(impl Fn(u8, &str) + Send + Sync),
+) -> Result<(), String> {
+    let client = client(Duration::from_secs(15 * 60))?;
+    let response = client
+        .get(&package.download_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载附加方案失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("下载附加方案失败：{e}"))?;
+    let expected = package.download_bytes.or(response.content_length());
+    if expected.is_some_and(|size| size == 0 || size > MAX_DOWNLOAD_BYTES) {
+        return Err("附加方案下载大小超出限制".into());
     }
     let mut output = tokio::fs::File::create(path)
         .await
         .map_err(|e| e.to_string())?;
     let mut stream = response.bytes_stream();
     let mut downloaded = 0u64;
-    let mut hash = Sha256::new();
     let mut last_percent = 0;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("下载万象词库中断：{e}"))?;
+        let chunk = chunk.map_err(|e| format!("下载附加方案中断：{e}"))?;
         downloaded += chunk.len() as u64;
-        if downloaded > DOWNLOAD_BYTES {
-            return Err("万象下载超出预期大小".into());
+        if downloaded > MAX_DOWNLOAD_BYTES || expected.is_some_and(|size| downloaded > size) {
+            return Err("附加方案下载超出预期大小".into());
         }
         output
             .write_all(&chunk)
             .await
-            .map_err(|e| format!("保存万象下载失败：{e}"))?;
-        hash.update(&chunk);
-        let percent = (5 + downloaded * 45 / DOWNLOAD_BYTES) as u8;
+            .map_err(|e| format!("保存附加方案下载失败：{e}"))?;
+        let percent = expected.map_or(5, |size| (5 + downloaded * 45 / size) as u8);
         if percent != last_percent {
-            progress(percent, "正在下载万象拼音基础词库…");
+            progress(percent, "正在下载附加方案…");
             last_percent = percent;
         }
     }
     output.flush().await.map_err(|e| e.to_string())?;
-    verify_download(downloaded, &format!("{:x}", hash.finalize()))
+    verify_download(downloaded, expected)
 }
 
-fn verify_download(downloaded: u64, sha256: &str) -> Result<(), String> {
-    if downloaded != DOWNLOAD_BYTES || sha256 != DOWNLOAD_SHA256 {
-        return Err("万象词库完整性校验失败，未修改已安装方案".into());
+fn verify_download(downloaded: u64, expected: Option<u64>) -> Result<(), String> {
+    if downloaded == 0
+        || downloaded > MAX_DOWNLOAD_BYTES
+        || expected.is_some_and(|size| downloaded != size)
+    {
+        return Err("附加方案下载不完整，未修改已安装方案".into());
     }
     Ok(())
 }
 
-fn extract(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, String> {
+pub(crate) fn extract_package(
+    archive: &Path,
+    stage: &Path,
+    destination: impl Fn(&str) -> Option<String>,
+    adapt: impl Fn(&str, &Path) -> Result<(), String>,
+) -> Result<Vec<InstalledFile>, String> {
     let mut archive = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
         .map_err(|e| format!("无法读取万象压缩包：{e}"))?;
     if archive.len() > MAX_FILES {
         return Err("万象压缩包文件数量超出限制".into());
     }
     let mut seen = BTreeSet::new();
+    let mut destinations = BTreeSet::new();
     let mut files = Vec::new();
     let mut expanded = 0u64;
     for index in 0..archive.len() {
@@ -486,9 +572,12 @@ fn extract(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, String> {
         if entry.size() > MAX_FILE_BYTES || expanded > MAX_EXPANDED_BYTES {
             return Err("万象压缩包展开大小超出限制".into());
         }
-        let Some(name) = package_destination(&name) else {
+        let Some(name) = destination(&name) else {
             continue;
         };
+        if !destinations.insert(name.to_ascii_lowercase()) {
+            return Err(format!("附加方案压缩包含重复目标路径：{name}"));
+        }
         let destination = safe_target(stage, &name)?;
         fs::create_dir_all(destination.parent().unwrap()).map_err(|e| e.to_string())?;
         let mut file = File::create(&destination).map_err(|e| e.to_string())?;
@@ -498,7 +587,7 @@ fn extract(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, String> {
             return Err(format!("万象文件大小不符：{name}"));
         }
         drop(file);
-        adapt_source(&name, &destination)?;
+        adapt(&name, &destination)?;
         let (sha256, size) = fingerprint(&destination)?;
         files.push(InstalledFile {
             path: name,
@@ -506,16 +595,27 @@ fn extract(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, String> {
             size,
         });
     }
+    Ok(files)
+}
+
+fn extract(
+    archive: &Path,
+    stage: &Path,
+    package: &RemotePackage,
+) -> Result<Vec<InstalledFile>, String> {
+    let mut files = extract_package(archive, stage, package_destination, adapt_source)?;
     for required in required_files() {
         if !stage.join(&required).is_file() {
             return Err(format!("万象发布包缺少必要文件：{required}"));
         }
     }
+    let version = &package.version;
+    let source = &package.source;
     let notice = format!(
-        "Wanxiang Pinyin / 万象拼音 {VERSION}\nAuthor: amzxyz and upstream contributors\n\
-         Source: {SOURCE_URL}\nLicense: Creative Commons Attribution 4.0 International\n\
+        "Wanxiang Pinyin / 万象拼音 {version}\nAuthor: amzxyz and upstream contributors\n\
+         Source: {source}\nLicense: Creative Commons Attribution 4.0 International\n\
          https://creativecommons.org/licenses/by/4.0/\n\
-         Full upstream license: https://github.com/amzxyz/rime-wanxiang/blob/v18.0.5/LICENSE\n\
+         Full upstream license: https://github.com/amzxyz/rime-wanxiang/blob/{version}/LICENSE\n\
          Provided AS IS, without warranties; see the linked license for terms.\n\
          KeyTao integration changes: a portable schema uses built-in Rime components\n\
          with upstream's full-pinyin algebra and dictionary; dictionary tables are\n\
@@ -544,7 +644,12 @@ fn adapt_source(name: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn commit_files(receipt: &mut InstallReceipt, files: Vec<InstalledFile>) -> Result<(), String> {
+fn commit_files(
+    receipt: &mut InstallReceipt,
+    files: Vec<InstalledFile>,
+    package: &RemotePackage,
+    archive_sha256: String,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
@@ -595,9 +700,9 @@ fn commit_files(receipt: &mut InstallReceipt, files: Vec<InstalledFile>) -> Resu
     }
     let manifest = Manifest {
         format: 1,
-        version: VERSION.into(),
-        source: SOURCE_URL.into(),
-        archive_sha256: DOWNLOAD_SHA256.into(),
+        version: package.version.clone(),
+        source: package.source.clone(),
+        archive_sha256,
         includes_grammar: false,
         files: owned,
     };
@@ -618,15 +723,16 @@ pub async fn install(
     let receipt = InstallReceipt::new(root)?;
     // Detect an invalid ownership record before spending bandwidth.
     read_manifest(&receipt.root)?;
+    let package = latest_package().await?;
     progress(5, "正在下载万象拼音基础词库（不含语法模型）…");
     let archive = receipt.work.join("download.zip");
-    download(&archive, &progress).await?;
+    download(&package, &archive, &progress).await?;
     progress(52, "正在校验并解压万象拼音词库…");
     tokio::task::spawn_blocking(move || {
         let mut receipt = receipt;
-        let files = extract(&archive, &receipt.work.join("files"))?;
+        let files = extract(&archive, &receipt.work.join("files"), &package)?;
         progress(60, "正在安装万象拼音词库…");
-        commit_files(&mut receipt, files)?;
+        commit_files(&mut receipt, files, &package, fingerprint(&archive)?.0)?;
         Ok(receipt)
     })
     .await

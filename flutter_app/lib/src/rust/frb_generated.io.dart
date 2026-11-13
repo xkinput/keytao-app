@@ -51,7 +51,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AccountUserDto dco_decode_account_user_dto(dynamic raw);
 
   @protected
-  AddonSchemaStatusDto dco_decode_addon_schema_status_dto(dynamic raw);
+  AddonStatusDto dco_decode_addon_status_dto(dynamic raw);
 
   @protected
   AndroidImeInputSettingsDto dco_decode_android_ime_input_settings_dto(
@@ -339,9 +339,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VerifyEntryDto dco_decode_verify_entry_dto(dynamic raw);
 
   @protected
-  WanxiangStatusDto dco_decode_wanxiang_status_dto(dynamic raw);
-
-  @protected
   WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw);
 
   @protected
@@ -367,9 +364,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AccountUserDto sse_decode_account_user_dto(SseDeserializer deserializer);
 
   @protected
-  AddonSchemaStatusDto sse_decode_addon_schema_status_dto(
-    SseDeserializer deserializer,
-  );
+  AddonStatusDto sse_decode_addon_status_dto(SseDeserializer deserializer);
 
   @protected
   AndroidImeInputSettingsDto sse_decode_android_ime_input_settings_dto(
@@ -721,11 +716,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VerifyEntryDto sse_decode_verify_entry_dto(SseDeserializer deserializer);
 
   @protected
-  WanxiangStatusDto sse_decode_wanxiang_status_dto(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   WindowsImeStatusDto sse_decode_windows_ime_status_dto(
     SseDeserializer deserializer,
   );
@@ -773,8 +763,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_addon_schema_status_dto(
-    AddonSchemaStatusDto self,
+  void sse_encode_addon_status_dto(
+    AddonStatusDto self,
     SseSerializer serializer,
   );
 
@@ -1216,12 +1206,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_verify_entry_dto(
     VerifyEntryDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_wanxiang_status_dto(
-    WanxiangStatusDto self,
     SseSerializer serializer,
   );
 

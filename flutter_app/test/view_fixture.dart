@@ -1,4 +1,5 @@
 import 'package:keytao/src/app/controller.dart';
+import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 
 WindowsImeStatusDto windowsStatus({
@@ -54,16 +55,17 @@ class ViewController extends AppController {
       version: '2026.09.26',
       schemas: ['keytao', 'english'],
     );
-    addon = const AddonSchemaStatusDto(
+    addon = const AddonStatusDto(
       installed: true,
       deployed: true,
       version: '2026.09',
       englishAvailable: true,
     );
-    wanxiang = const WanxiangStatusDto(
+    wanxiang = const AddonStatusDto(
       installed: false,
       deployed: false,
       version: '',
+      englishAvailable: false,
     );
     macosIme = const MacosImeStatusDto(
       installed: true,

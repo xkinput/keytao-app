@@ -57,8 +57,7 @@ APP="$PROJECT_DIR/flutter_app/build/ios/iphoneos/KeyTao.app"
 KEYBOARD="$APP/PlugIns/KeyTaoKeyboard.appex"
 for required in \
     "$APP/KeyTao" "$APP/Info.plist" "$KEYBOARD/KeyTaoKeyboard" "$KEYBOARD/Info.plist" \
-    "$APP/rime-data/default.yaml" "$KEYBOARD/rime-data/default.yaml" \
-    "$APP/addon-schemas/easy_en/easy_en.schema.yaml"; do
+    "$APP/rime-data/default.yaml" "$KEYBOARD/rime-data/default.yaml"; do
     test -f "$required" || die "missing IPA input: $required"
 done
 test -x "$APP/KeyTao" && test -x "$KEYBOARD/KeyTaoKeyboard" || die "missing executable permissions"

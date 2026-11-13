@@ -47,8 +47,6 @@ set(AOT_LIBRARY "${KEYTAO_ROOT}/fixture-engine/app.so" PARENT_SCOPE)
 set(PROJECT_BUILD_DIR "${KEYTAO_ROOT}/fixture-engine/" PARENT_SCOPE)
 ''')
     (windows / "flutter/generated_plugins.cmake").write_text("")
-    (root / "resources/addon-schemas/english").mkdir(parents=True)
-    (root / "resources/addon-schemas/english/english.schema.yaml").write_text("fixture addon")
     staging = root / "target/keytao-windows-ime-runtime"
     for arch in ["current", "x86", "arm64x"]:
         runtime = staging / arch
@@ -70,12 +68,15 @@ set(PROJECT_BUILD_DIR "${KEYTAO_ROOT}/fixture-engine/" PARENT_SCOPE)
     assert f"KEYTAO_VERSION_NUMBER {','.join(numeric)},0" in version, version
     # No Windows sources are compiled; the install target receives a dummy file.
     (build / "runner/keytao-app").write_text("fixture executable")
+    (install / "addon-schemas/easy_en").mkdir(parents=True)
+    (install / "addon-schemas/easy_en/easy_en.schema.yaml").write_text("stale add-on")
     install_command = [CMAKE, "--install", str(build), "--config", "Release"]
     run(install_command, work / "install.log")
     for file in ["keytao-app", "rime.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll",
                  "keytao_app_bridge.dll", "data/flutter_assets/AssetManifest.bin", "data/app.so",
-                 "rime-data/default.yaml", "addon-schemas/english/english.schema.yaml"]:
+                 "rime-data/default.yaml"]:
         assert (install / file).is_file(), file
+    assert not (install / "addon-schemas/easy_en").exists(), "Unexpected bundled Easy English"
     for arch in ["current", "x86", "arm64x"]:
         installed = install / f"keytao-windows-ime-runtime/{arch}/rime-data/default.yaml"
         assert installed.read_bytes() == (staging / arch / "rime-data/default.yaml").read_bytes()

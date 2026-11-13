@@ -21,13 +21,10 @@ RIME_DATA_DIR="$REPO_DIR/target/keytao-ios-runtime/$runtime/rime-data"
 if [ ! -f "$RIME_DATA_DIR/default.yaml" ]; then
     RIME_DATA_DIR="$REPO_DIR/vendor/librime/ios/$runtime/rime-data"
 fi
-ADDON_DIR="$REPO_DIR/resources/addon-schemas"
 CONFIG_DIR="$REPO_DIR/crates/keytao-ios-ime/Sources/KeyTaoIOSIME/Resources"
 required=("$RIME_DATA_DIR/default.yaml")
 if [ "${PRODUCT_NAME:?}" = "KeyTaoKeyboard" ]; then
     required+=("$CONFIG_DIR/keytao_ios_ime.json" "$CONFIG_DIR/keytao-logo.png")
-else
-    required+=("$ADDON_DIR/easy_en/easy_en.schema.yaml")
 fi
 for source in "${required[@]}"; do
     if [ ! -f "$source" ]; then
@@ -37,11 +34,8 @@ for source in "${required[@]}"; do
 done
 
 mkdir -p "$RESOURCES_DIR"
-rm -rf "$RESOURCES_DIR/rime-data"
+rm -rf "$RESOURCES_DIR/rime-data" "$RESOURCES_DIR/addon-schemas"
 ditto "$RIME_DATA_DIR" "$RESOURCES_DIR/rime-data"
 if [ "$PRODUCT_NAME" = "KeyTaoKeyboard" ]; then
     cp "$CONFIG_DIR/keytao_ios_ime.json" "$CONFIG_DIR/keytao-logo.png" "$RESOURCES_DIR/"
-else
-    rm -rf "$RESOURCES_DIR/addon-schemas"
-    ditto "$ADDON_DIR" "$RESOURCES_DIR/addon-schemas"
 fi

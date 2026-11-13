@@ -62,8 +62,6 @@ class AndroidHost {
   ) => _map('smartExtractZip', {'zipPath': zipPath, 'treeUri': treeUri});
   Future<Map<String, dynamic>> smartExtractZipToPrivate(String zipPath) =>
       _map('smartExtractZipToPrivate', {'zipPath': zipPath});
-  Future<Map<String, dynamic>> copyAddonSchemaAssets(String id) =>
-      _map('copyAddonSchemaAssets', {'id': id});
   Future<Map<String, dynamic>> deployImeData() => _map('deployImeData');
   Future<void> adoptAppLogger() =>
       _channel.invokeMethod<void>('adoptAppLogger');

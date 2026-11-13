@@ -172,7 +172,10 @@ class AppController extends ChangeNotifier {
   InstallProgressDto? wanxiangProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
-  WanxiangStatusDto? wanxiang;
+  core.AddonStatusDto? wanxiang;
+  String? wanxiangLatestVersion;
+  String? addonLatestVersion;
+  final _addonUpdateChecks = <String, Object>{};
   DebugLogsDto? systemLogs;
   String? selectedDirectory;
   String? selectedTreeUri;
@@ -188,7 +191,7 @@ class AppController extends ChangeNotifier {
   List<VerifyEntryDto> verification = [];
   LocalSchemaDto? local;
   String? _localSchemaError;
-  AddonSchemaStatusDto? addon;
+  core.AddonStatusDto? addon;
   Map<String, dynamic>? storage;
   Map<String, dynamic>? ime;
   MacosImeStatusDto? macosIme;
@@ -347,7 +350,16 @@ class AppController extends ChangeNotifier {
   bool get canInstallWanxiang => canInstallAddon;
   bool get canUninstallAddon => !busy && addon?.installed == true;
   bool get canUninstallWanxiang => !busy && wanxiang?.installed == true;
-  bool get showAddonInstall => addon?.deployed != true;
+  bool get addonHasUpdate =>
+      addon?.installed == true &&
+      (addon!.version.isEmpty ||
+          (addonLatestVersion != null && addonLatestVersion != addon!.version));
+  bool get wanxiangHasUpdate =>
+      wanxiang?.installed == true &&
+      wanxiangLatestVersion != null &&
+      _normalizedVersion(wanxiangLatestVersion!) !=
+          _normalizedVersion(wanxiang!.version);
+  bool get showAddonInstall => addon?.deployed != true || addonHasUpdate;
   bool get canInstallCustom => canInstall && selectedDirectory != null;
   int get operationLogCount => operationLogs.length;
   int get customVerifyFailureCount =>
@@ -373,10 +385,16 @@ class AppController extends ChangeNotifier {
   String get wanxiangTooltip => local?.installed == true
       ? AppStrings.installWanxiangTooltip
       : AppStrings.installMainFirst;
-  String get addonButtonLabel =>
-      addon?.installed == true ? AppStrings.redeploy : AppStrings.install;
-  String get wanxiangButtonLabel =>
-      wanxiang?.installed == true ? AppStrings.redeploy : AppStrings.install;
+  String get addonButtonLabel => addonHasUpdate
+      ? AppStrings.update
+      : addon?.installed == true
+      ? AppStrings.redeploy
+      : AppStrings.install;
+  String get wanxiangButtonLabel => wanxiangHasUpdate
+      ? AppStrings.update
+      : wanxiang?.installed == true
+      ? AppStrings.redeploy
+      : AppStrings.install;
   String get addonStatusText =>
       _addonStatus(addon?.installed, addon?.deployed, addon?.version);
   String get wanxiangStatusText =>
@@ -386,9 +404,7 @@ class AppController extends ChangeNotifier {
       ? AppStrings.checking
       : !installed
       ? AppStrings.notInstalled
-      : deployed != true
-      ? AppStrings.installedNotDeployed
-      : AppStrings.deployedVersion(version ?? '');
+      : '${deployed == true ? AppStrings.deployed : AppStrings.installedNotDeployed} · ${version == null || version.isEmpty ? AppStrings.unknownVersion : version}';
   String? get localStatusLine => local == null
       ? null
       : AppStrings.localStatus(
@@ -885,7 +901,39 @@ class AppController extends ChangeNotifier {
       unawaited(refreshSchemeUpdates());
       unawaited(refreshRelease());
     }
+    if (result && !_disposed) unawaited(_checkAddonUpdates());
     return result;
+  }
+
+  Future<void> _checkAddonUpdates() async {
+    await Future.wait([
+      if (addon?.installed == true)
+        _checkAddonUpdate('easy_en', addon!.version),
+      if (wanxiang?.installed == true)
+        _checkAddonUpdate('wanxiang', wanxiang!.version),
+    ]);
+  }
+
+  Future<void> _checkAddonUpdate(String id, String version) async {
+    if (_addonUpdateChecks.containsKey(id)) return;
+    final check = Object();
+    _addonUpdateChecks[id] = check;
+    try {
+      final status = await core.checkAddonUpdate(id: id);
+      final current = id == 'easy_en' ? addon : wanxiang;
+      if (_disposed ||
+          !identical(_addonUpdateChecks[id], check) ||
+          current?.installed != true ||
+          current!.version != version) {
+        return;
+      }
+      if (id == 'easy_en') {
+        addonLatestVersion = status.latestVersion;
+      } else {
+        wanxiangLatestVersion = status.latestVersion;
+      }
+      _changed();
+    } catch (_) {}
   }
 
   Future<void> _readWindowsIme() async {
@@ -2108,6 +2156,7 @@ class AppController extends ChangeNotifier {
   Future<bool> installAddon() => _manageAddon(true);
   Future<bool> uninstallAddon() => _manageAddon(false);
   Future<bool> _manageAddon(bool installed) => run(() async {
+    _addonUpdateChecks['easy_en'] = Object();
     _startOperation(
       OperationKind.addon,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -2120,7 +2169,6 @@ class AppController extends ChangeNotifier {
       }
       if (isAndroid) {
         await _requireStorage();
-        if (installed) await android.copyAddonSchemaAssets('easy_en');
       }
       addon = installed
           ? await core.addonSchemaInstall(
@@ -2131,6 +2179,7 @@ class AppController extends ChangeNotifier {
               id: 'easy_en',
               androidDeploy: _androidDeploy,
             );
+      if (installed) addonLatestVersion = addon!.version;
       addOperationLogs([
         installed
             ? AppStrings.easyEnglishInstalled(addon!.version)
@@ -2157,6 +2206,7 @@ class AppController extends ChangeNotifier {
   });
 
   Future<bool> manageWanxiang(bool installed) => run(() async {
+    _addonUpdateChecks['wanxiang'] = Object();
     _startOperation(
       OperationKind.wanxiang,
       installed ? AppStrings.installing : AppStrings.uninstall,
@@ -2172,6 +2222,7 @@ class AppController extends ChangeNotifier {
         installed: installed,
         androidDeploy: _androidDeploy,
       );
+      if (installed) wanxiangLatestVersion = wanxiang!.version;
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.wanxiangInstalled : AppStrings.wanxiangRemoved,

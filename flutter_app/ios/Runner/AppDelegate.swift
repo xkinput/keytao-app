@@ -183,7 +183,7 @@ import UniformTypeIdentifiers
 
     // The three-key channel contract lets Dart use dataDir as resourceDir too.
     // Only bundled resources are refreshed; credentials and user schemas are untouched.
-    for name in ["rime-data", "addon-schemas"] {
+    for name in ["rime-data"] {
       guard let source = Bundle.main.resourceURL?.appendingPathComponent(name),
         manager.fileExists(atPath: source.path)
       else {

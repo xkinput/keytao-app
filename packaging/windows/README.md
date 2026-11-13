@@ -25,7 +25,9 @@ The app is x64; its TSF payload also serves x86 and native ARM64/ARM64EC hosts.
   `keytao-app-<version>-windows-x64-setup.exe` release asset name.
 - `crates/keytao-app-core/src/ime_status/windows.rs`:
   runtime lookup under `resource_dir/keytao-windows-ime-runtime`, then rime-data.
-  `crates/keytao-app-core/src/addon.rs`: root addon-schemas lookup.
+
+Easy English and Wanxiang are downloaded from their upstream repositories when
+installed, with installed versions and manual updates available in the app.
 
 The standalone installer restores the original directory, stops verified
 KeyTao processes in that directory, and installs the Flutter payload with the

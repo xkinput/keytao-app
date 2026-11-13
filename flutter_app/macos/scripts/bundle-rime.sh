@@ -7,12 +7,10 @@ VENDOR_DIR="$REPO_DIR/vendor/librime/macos-universal"
 RESOURCES_DIR="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}"
 FRAMEWORKS_DIR="${TARGET_BUILD_DIR:?}/${FRAMEWORKS_FOLDER_PATH:?}"
 RIME_DATA_DIR="$VENDOR_DIR/rime-data"
-ADDON_SCHEMAS_DIR="$REPO_DIR/resources/addon-schemas"
 RIME_LIB_DIR="$VENDOR_DIR/lib"
 
 for required in \
     "$RIME_DATA_DIR/default.yaml" \
-    "$ADDON_SCHEMAS_DIR/easy_en/easy_en.schema.yaml" \
     "$RIME_LIB_DIR/librime.1.dylib" \
     "$RIME_LIB_DIR/rime-plugins/librime-lua.dylib"; do
     if [ ! -f "$required" ]; then
@@ -26,7 +24,6 @@ rm -rf "$RESOURCES_DIR/rime-data" "$RESOURCES_DIR/addon-schemas" "$FRAMEWORKS_DI
 # Remove the former Flutter code asset on incremental builds.
 rm -rf "$FRAMEWORKS_DIR/librime.framework"
 ditto "$RIME_DATA_DIR" "$RESOURCES_DIR/rime-data"
-ditto "$ADDON_SCHEMAS_DIR" "$RESOURCES_DIR/addon-schemas"
 mkdir -p "$FRAMEWORKS_DIR/rime-plugins"
 
 copy_dylib() {

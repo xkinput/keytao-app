@@ -363,16 +363,14 @@ Future<EnglishModeDto> getDesktopEnglishMode() =>
 Future<EnglishModeDto> setDesktopEnglishMode({required EnglishModeDto mode}) =>
     RustLib.instance.api.crateApiCoreSetDesktopEnglishMode(mode: mode);
 
-Future<AddonSchemaStatusDto> addonSchemaStatus({required String id}) =>
+Future<AddonStatusDto> addonSchemaStatus({required String id}) =>
     RustLib.instance.api.crateApiCoreAddonSchemaStatus(id: id);
 
-/// Android: await copyAddonSchemaAssets(id) through the platform channel first;
-/// this call's host treats copy_addon_assets as already complete. android_deploy
-/// must await deployImeData and return "" on success or error text on failure,
+/// android_deploy must await deployImeData and return "" on success or error text on failure,
 /// catching Dart exceptions. Do not re-enter bridge install/deploy calls from
 /// the callback: the install lock is held. macOS ignores the callback and uses
 /// the existing bridge deploy. InstallProgress continues through core_events.
-Future<AddonSchemaStatusDto> addonSchemaInstall({
+Future<AddonStatusDto> addonSchemaInstall({
   required String id,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreAddonSchemaInstall(
@@ -380,9 +378,9 @@ Future<AddonSchemaStatusDto> addonSchemaInstall({
   androidDeploy: androidDeploy,
 );
 
-/// Uses the same per-call deploy contract as addon_schema_install; no asset copy
-/// is needed. Core owns schema removal, English-mode reset and progress events.
-Future<AddonSchemaStatusDto> addonSchemaUninstall({
+/// Uses the same per-call deploy contract as addon_schema_install.
+/// Core owns schema removal, English-mode reset and progress events.
+Future<AddonStatusDto> addonSchemaUninstall({
   required String id,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreAddonSchemaUninstall(
@@ -390,13 +388,17 @@ Future<AddonSchemaStatusDto> addonSchemaUninstall({
   androidDeploy: androidDeploy,
 );
 
-Future<WanxiangStatusDto> wanxiangStatus() =>
+Future<AddonStatusDto> wanxiangStatus() =>
     RustLib.instance.api.crateApiCoreWanxiangStatus();
+
+/// A failed upstream check leaves the locally installed status available.
+Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
+    RustLib.instance.api.crateApiCoreCheckAddonUpdate(id: id);
 
 /// Uses addon_schema_install's deploy contract. Core keeps its receipt/rollback
 /// flow unchanged and may call android_deploy again after restoring files.
 /// The install lock covers the whole operation, including rollback/deployment.
-Future<WanxiangStatusDto> manageWanxiang({
+Future<AddonStatusDto> manageWanxiang({
   required bool installed,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageWanxiang(
@@ -460,3 +462,38 @@ Future<DebugLogsDto> readDebugLogs() =>
 
 Future<void> clearRuntimeLog() =>
     RustLib.instance.api.crateApiCoreClearRuntimeLog();
+
+class AddonStatusDto {
+  final bool installed;
+  final bool deployed;
+  final String version;
+  final bool englishAvailable;
+  final String? latestVersion;
+
+  const AddonStatusDto({
+    required this.installed,
+    required this.deployed,
+    required this.version,
+    required this.englishAvailable,
+    this.latestVersion,
+  });
+
+  @override
+  int get hashCode =>
+      installed.hashCode ^
+      deployed.hashCode ^
+      version.hashCode ^
+      englishAvailable.hashCode ^
+      latestVersion.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AddonStatusDto &&
+          runtimeType == other.runtimeType &&
+          installed == other.installed &&
+          deployed == other.deployed &&
+          version == other.version &&
+          englishAvailable == other.englishAvailable &&
+          latestVersion == other.latestVersion;
+}

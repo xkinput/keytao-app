@@ -75,6 +75,9 @@ abstract final class AppStrings {
   static const install = '安装';
   static const installScheme = '安装方案';
   static const updateScheme = '更新方案';
+  static const update = '更新';
+  static const deployed = '已部署';
+  static const unknownVersion = '未知版本';
   static const redeploy = '重新部署';
   static const uninstall = '卸载';
   static const checkingPermission = '检测权限...';

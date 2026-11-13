@@ -1,11 +1,117 @@
+use crate::wanxiang::{self, InstallReceipt, InstalledFile, RemotePackage};
 use crate::{
     Core, CoreError, CoreEvent, events::InstallProgress, scheme_files::*, scheme_host::SchemeHost,
     scheme_types::AddonSchemaStatus,
 };
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const EASY_EN_ADDON_ID: &str = "easy_en";
-const EASY_EN_ADDON_VERSION: &str = "0.10.1";
+const MANIFEST: &str = ".keytao-easy-en.json";
+const LICENSE: &str = "easy_en-LICENSE";
+const CUSTOM: &str = "# KeyTao add-on defaults: no external word-splitter on mobile/desktop.\npatch:\n  easy_en/split_sentence: false\n";
+const REPOSITORY_API: &str = "https://api.github.com/repos/BlindingDark/rime-easy-en";
+// Ownership fingerprints for the former bundled package, not download pins.
+const LEGACY_FILES: &[(&str, &str)] = &[
+    (
+        "easy_en.schema.yaml",
+        "34fad4619104f2f6ddd2571b650f6f9b4090cef17e60eb2ba957d9eb439f89e7",
+    ),
+    (
+        "easy_en.dict.yaml",
+        "4f039026b2746fa9b0d4d7a248cdf866b64609dca2317708f04e9e68ac7d868a",
+    ),
+    (
+        "lua/easy_en.lua",
+        "57b91eae86cce8a1e89bbc3cc212e08268b2426d75a9a2ef72b4893815c8485e",
+    ),
+];
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    format: u32,
+    version: String,
+    source: String,
+    archive_sha256: String,
+    files: Vec<InstalledFile>,
+}
+
+fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
+    use std::io::Read;
+    let path = wanxiang::safe_target(root, MANIFEST)?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("English 安装记录过大".into());
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("English 安装记录损坏：{e}"))?;
+    let mut seen = std::collections::BTreeSet::new();
+    if manifest.format != 1
+        || manifest.files.len() != 5
+        || manifest.files.iter().any(|file| {
+            !is_package_file(&file.path)
+                || !seen.insert(&file.path)
+                || file.sha256.len() != 64
+                || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err("English 安装记录含无效文件".into());
+    }
+    if manifest.archive_sha256.len() != 64
+        || !manifest
+            .archive_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("English 安装记录的压缩包校验值无效".into());
+    }
+    Ok(Some(manifest))
+}
+
+fn is_package_file(path: &str) -> bool {
+    path == LICENSE
+        || addon_schema_source_files(EASY_EN_ADDON_ID)
+            .iter()
+            .any(|(_, relative)| relative == path)
+}
+
+fn package_from_commit(commit: &serde_json::Value) -> Result<RemotePackage, String> {
+    let sha = commit["sha"]
+        .as_str()
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("English 上游版本无效")?;
+    Ok(RemotePackage {
+        version: sha[..12].into(),
+        source: format!("https://github.com/BlindingDark/rime-easy-en/commit/{sha}"),
+        download_url: format!("https://codeload.github.com/BlindingDark/rime-easy-en/zip/{sha}"),
+        download_bytes: None,
+    })
+}
+
+async fn latest_package() -> Result<RemotePackage, String> {
+    let repository = wanxiang::github_metadata(REPOSITORY_API).await?;
+    let branch = repository["default_branch"]
+        .as_str()
+        .filter(|branch| !branch.is_empty())
+        .ok_or("English 上游缺少默认分支")?;
+    let mut url = reqwest::Url::parse(REPOSITORY_API).map_err(|e| e.to_string())?;
+    url.path_segments_mut()
+        .map_err(|_| "English 上游地址无效")?
+        .extend(["commits", branch]);
+    package_from_commit(&wanxiang::github_metadata(url.as_str()).await?)
+}
+
+pub async fn latest_version() -> Result<String, String> {
+    Ok(latest_package().await?.version)
+}
 
 pub fn validate_addon_schema_id(id: &str) -> Result<&str, String> {
     match id.trim() {
@@ -81,7 +187,10 @@ pub fn addon_schema_status_at(root: &Path, id: &str) -> AddonSchemaStatus {
     AddonSchemaStatus {
         installed,
         deployed,
-        version: EASY_EN_ADDON_VERSION.into(),
+        version: read_manifest(root)
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |manifest| manifest.version),
         english_available: deployed_english_schema_available(root),
     }
 }
@@ -152,59 +261,233 @@ pub fn addon_schema_status(
     result.map_err(CoreError::Other)
 }
 
-#[cfg(not(target_os = "android"))]
-pub fn bundled_addon_schema_dir(core: &Core, id: &str) -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-    {
-        let resource_dir = &core.env().resource_dir;
-        candidates.extend([
-            resource_dir.join("addon-schemas").join(id),
-            resource_dir
-                .join("resources")
-                .join("addon-schemas")
-                .join(id),
-        ]);
+fn extract_package(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, String> {
+    let mut files = wanxiang::extract_package(
+        archive,
+        stage,
+        |name| {
+            let (_, relative) = name.split_once('/')?;
+            match relative {
+                "easy_en.schema.yaml" | "easy_en.dict.yaml" | "lua/easy_en.lua" => {
+                    Some(relative.into())
+                }
+                "LICENSE" => Some(LICENSE.into()),
+                _ => None,
+            }
+        },
+        |_, _| Ok(()),
+    )?;
+    for required in [
+        "easy_en.schema.yaml",
+        "easy_en.dict.yaml",
+        "lua/easy_en.lua",
+        LICENSE,
+    ] {
+        if !stage.join(required).is_file() {
+            return Err(format!("English 上游压缩包缺少必要文件：{required}"));
+        }
     }
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/addon-schemas")
-            .join(id),
-    );
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.join("easy_en.schema.yaml").is_file())
-        .ok_or_else(|| format!("应用包中缺少附加方案资源：{id}"))
+    let custom = stage.join("easy_en.custom.yaml");
+    std::fs::write(&custom, CUSTOM).map_err(|e| e.to_string())?;
+    let (sha256, size) = wanxiang::fingerprint(&custom)?;
+    files.push(InstalledFile {
+        path: "easy_en.custom.yaml".into(),
+        sha256,
+        size,
+    });
+    Ok(files)
 }
 
-#[cfg(not(target_os = "android"))]
-fn install_addon_schema_files(core: &Core, root: &Path, id: &str) -> Result<(), String> {
-    let source = bundled_addon_schema_dir(core, id)?;
-    for (source_relative, destination_relative) in addon_schema_source_files(id) {
-        let bytes = std::fs::read(source.join(source_relative))
-            .map_err(|error| format!("读取附加方案资源 {source_relative} 失败: {error}"))?;
-        let destination = root.join(&destination_relative);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
-        }
-        if crate::install::is_protected_user_file(&destination_relative) {
-            let mut logs = Vec::new();
-            let result = crate::install::write_package_file(
-                root,
-                &destination_relative,
-                &bytes,
-                &mut logs,
-            );
-            for log in logs {
-                tracing::info!("{log}");
+fn commit_package(
+    receipt: &mut InstallReceipt,
+    archive: &Path,
+    package: &RemotePackage,
+) -> Result<(), String> {
+    let files = extract_package(archive, &receipt.work.join("files"))?;
+    let previous = read_manifest(&receipt.root)?;
+    let legacy =
+        previous.is_none() && addon_schema_status_at(&receipt.root, EASY_EN_ADDON_ID).installed;
+    for file in &files {
+        let destination = wanxiang::safe_target(&receipt.root, &file.path)?;
+        if destination.exists() {
+            if file.path == "easy_en.custom.yaml" && destination.is_file() {
+                continue;
             }
-            result?;
-        } else {
-            write_file_atomic(&destination, &bytes)
-                .map_err(|error| format!("写入 {} 失败: {error}", destination.display()))?;
+            let (hash, _) = wanxiang::fingerprint(&destination)?;
+            let legacy_owned = legacy
+                && LEGACY_FILES
+                    .iter()
+                    .any(|(name, old_hash)| *name == file.path && *old_hash == hash);
+            if hash != file.sha256
+                && !legacy_owned
+                && previous
+                    .as_ref()
+                    .and_then(|manifest| manifest.files.iter().find(|old| old.path == file.path))
+                    .is_none_or(|old| old.sha256 != hash)
+            {
+                return Err(format!(
+                    "已有文件 {} 与 English 冲突，已保留原文件",
+                    file.path
+                ));
+            }
         }
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
+    }
+    for file in &files {
+        if file.path == "easy_en.custom.yaml"
+            && wanxiang::safe_target(&receipt.root, &file.path)?.is_file()
+        {
+            continue;
+        }
+        let source = receipt.work.join("files").join(&file.path);
+        #[cfg(windows)]
+        let source = {
+            let copy = receipt.work.join("commit").join(&file.path);
+            std::fs::create_dir_all(copy.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::copy(&source, &copy).map_err(|e| e.to_string())?;
+            copy
+        };
+        receipt.replace(&file.path, &source, file.sha256.clone())?;
+    }
+    let manifest = Manifest {
+        format: 1,
+        version: package.version.clone(),
+        source: package.source.clone(),
+        archive_sha256: wanxiang::fingerprint(archive)?.0,
+        files,
+    };
+    let path = receipt.work.join("manifest.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    receipt.replace(MANIFEST, &path, wanxiang::fingerprint(&path)?.0)
+}
+
+async fn install_package(
+    root: &Path,
+    progress: impl Fn(u8, &str) + Send + Sync,
+) -> Result<InstallReceipt, String> {
+    let receipt = InstallReceipt::new(root)?;
+    read_manifest(&receipt.root)?;
+    let package = latest_package().await?;
+    let archive = receipt.work.join("download.zip");
+    wanxiang::download(&package, &archive, &progress).await?;
+    tokio::task::spawn_blocking(move || {
+        let mut receipt = receipt;
+        commit_package(&mut receipt, &archive, &package)?;
+        Ok(receipt)
+    })
+    .await
+    .map_err(|e| format!("English 安装任务失败：{e}"))?
+}
+
+#[cfg(any(windows, test))]
+fn cached_manifest(cache: &Path) -> Result<(PathBuf, Manifest), String> {
+    let generation =
+        std::fs::read_to_string(cache.join("current.txt")).map_err(|e| e.to_string())?;
+    if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("English 公共包缓存无效".into());
+    }
+    let root = wanxiang::safe_target(cache, &generation)?;
+    let manifest = read_manifest(&root)?.ok_or("English 公共包缓存缺少安装记录")?;
+    Ok((root, manifest))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn official_source_files(cache: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    let (root, manifest) = cached_manifest(cache)?;
+    let mut files = Vec::new();
+    for file in manifest.files {
+        let path = wanxiang::safe_target(&root, &file.path)?;
+        if wanxiang::fingerprint(&path)? != (file.sha256, file.size) {
+            return Err(format!(
+                "English 文件 {} 已修改，请先更新附加方案",
+                file.path
+            ));
+        }
+        files.push((
+            file.path.into(),
+            std::fs::read(path).map_err(|e| e.to_string())?,
+        ));
+    }
+    Ok(files)
+}
+
+#[cfg(any(windows, test))]
+fn cache_public_package(cache: &Path, stage: &Path, manifest: &Manifest) -> Result<(), String> {
+    let destination = cache.join(&manifest.archive_sha256);
+    for file in &manifest.files {
+        let path = wanxiang::safe_target(&destination, &file.path)?;
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        let source = stage.join(&file.path);
+        if wanxiang::fingerprint(&source)? != (file.sha256.clone(), file.size) {
+            return Err("English 官方暂存文件校验失败".into());
+        }
+        std::fs::copy(source, path).map_err(|e| e.to_string())?;
+    }
+    let content = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
+    write_file_atomic(&destination.join(MANIFEST), &content).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+pub(crate) async fn prepare_public_package(root: &Path, cache: &Path) -> Result<(), String> {
+    let installed = read_manifest(root)?;
+    if cached_manifest(cache).is_ok_and(|(_, cached)| {
+        installed
+            .as_ref()
+            .is_none_or(|installed| installed.source == cached.source)
+    }) && official_source_files(cache).is_ok()
+    {
+        return Ok(());
+    }
+    let package = if let Some(manifest) = installed {
+        let sha = manifest
+            .source
+            .strip_prefix("https://github.com/BlindingDark/rime-easy-en/commit/")
+            .ok_or("English 上游来源无效")?;
+        package_from_commit(&serde_json::json!({"sha": sha}))?
+    } else {
+        latest_package().await?
+    };
+    let receipt = InstallReceipt::new(root)?;
+    let archive = receipt.work.join("download.zip");
+    wanxiang::download(&package, &archive, &|_, _| {}).await?;
+    let files = extract_package(&archive, &receipt.work.join("files"))?;
+    let manifest = Manifest {
+        format: 1,
+        version: package.version,
+        source: package.source,
+        archive_sha256: wanxiang::fingerprint(&archive)?.0,
+        files,
+    };
+    cache_public_package(cache, &receipt.work.join("files"), &manifest)?;
+    write_file_atomic(
+        &cache.join("current.txt"),
+        manifest.archive_sha256.as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    receipt.finish()
+}
+
+fn write_schema_list_transaction(
+    receipt: &mut InstallReceipt,
+    installed: bool,
+) -> Result<(), String> {
+    let relative = ["default.custom.yaml", "default-custom.yaml"]
+        .into_iter()
+        .find(|name| receipt.root.join(name).is_file())
+        .ok_or("请先安装键道方案")?;
+    let existing =
+        std::fs::read_to_string(receipt.root.join(relative)).map_err(|e| e.to_string())?;
+    let updated = update_addon_schema_list_content(&existing, EASY_EN_ADDON_ID, installed)?;
+    let path = receipt.work.join("default.custom.yaml");
+    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+    receipt.replace(relative, &path, wanxiang::fingerprint(&path)?.0)
 }
 
 fn remove_path_if_present(path: &Path) -> Result<(), String> {
@@ -222,9 +505,6 @@ fn remove_path_if_present(path: &Path) -> Result<(), String> {
 }
 
 fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
-    for (_, relative) in addon_schema_source_files(id) {
-        remove_path_if_present(&root.join(relative))?;
-    }
     for dir in [root.to_path_buf(), root.join("build")] {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -244,6 +524,22 @@ fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn uninstall_package(root: &Path) -> Result<InstallReceipt, String> {
+    let mut receipt = InstallReceipt::new(root)?;
+    read_manifest(&receipt.root)?;
+    for relative in addon_schema_source_files(EASY_EN_ADDON_ID)
+        .into_iter()
+        .map(|(_, relative)| relative)
+        .chain([LICENSE.into(), MANIFEST.into()])
+    {
+        let path = wanxiang::safe_target(&receipt.root, &relative)?;
+        if path.exists() {
+            receipt.move_original(&relative)?;
+        }
+    }
+    Ok(receipt)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -274,6 +570,27 @@ fn reset_mobile_english_mode(_root: &Path) -> Result<bool, String> {
     let changed = read_english_mode(_root) != EnglishMode::Ascii;
     if changed {
         write_english_mode(_root, EnglishMode::Ascii)?;
+    }
+    Ok(changed)
+}
+
+fn reset_english_mode_transaction(receipt: &mut InstallReceipt) -> Result<bool, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let relative = android_ime_config_path(Path::new(""))
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let relative = keytao_core::english_mode::SETTINGS_FILE.to_string();
+    let source = wanxiang::safe_target(&receipt.root, &relative)?;
+    let stage = receipt.work.join("settings");
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    if source.is_file() {
+        std::fs::copy(&source, stage.join(&relative)).map_err(|e| e.to_string())?;
+    }
+    let changed = reset_mobile_english_mode(&stage)?;
+    if changed {
+        let path = stage.join(&relative);
+        receipt.replace(&relative, &path, wanxiang::fingerprint(&path)?.0)?;
     }
     Ok(changed)
 }
@@ -312,33 +629,54 @@ pub async fn addon_schema_install(
             return Err("请先安装键道方案".into());
         }
         core.emit(CoreEvent::InstallProgress(InstallProgress {
-            stage: "addon-copy".into(),
-            percent: 20,
-            message: "正在复制附加方案 English...".into(),
+            stage: "addon-download".into(),
+            percent: 5,
+            message: "正在下载附加方案 English...".into(),
         }));
-        #[cfg(not(target_os = "android"))]
-        install_addon_schema_files(core, &root, id)?;
-        #[cfg(target_os = "android")]
-        host.copy_addon_assets(id)?;
-        write_addon_schema_list(&root, id, true)?;
+        let mut receipt = install_package(&root, |percent, message| {
+            core.emit(CoreEvent::InstallProgress(InstallProgress {
+                stage: "addon-download".into(),
+                percent: u32::from(percent),
+                message: message.into(),
+            }));
+        }).await?;
+        write_schema_list_transaction(&mut receipt, true)?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "addon-deploy".into(),
             percent: 55,
             message: "正在部署键道方案与 English...".into(),
         }));
-        host.deploy().await?;
-        let status = addon_schema_status_at(&root, id);
-        if !status.deployed {
-            return Err("附加方案文件已安装，但部署产物缺失".into());
+        let deployed = async {
+            host.deploy().await?;
+            if !addon_schema_status_at(&root, id).deployed {
+                return Err("附加方案文件已安装，但部署产物缺失".to_string());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let manifest = read_manifest(&root)?.ok_or("English 安装记录缺失")?;
+                let cache = core.env().data_dir.join("easy-en-public");
+                cache_public_package(&cache, &receipt.work.join("files"), &manifest)?;
+                host.publish_wanxiang_sources(&receipt.public_source_files())?;
+                if let Err(error) = write_file_atomic(&cache.join("current.txt"), manifest.archive_sha256.as_bytes()) {
+                    tracing::warn!(%error, "English public cache selection will be rebuilt when needed");
+                }
+            }
+            Ok(())
+        }.await;
+        if let Err(error) = deployed {
+            receipt.rollback().map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            if let Err(restore) = host.deploy().await {
+                return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
+            }
+            return Err(error);
         }
-        #[cfg(target_os = "windows")]
-        host.publish_english_addon()?;
+        receipt.finish()?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "done".into(),
             percent: 100,
             message: "附加方案 English 已安装并部署".into(),
         }));
-        Ok(status)
+        Ok(addon_schema_status_at(&root, id))
     }
     .await;
     result.map_err(CoreError::Other)
@@ -357,23 +695,38 @@ pub async fn addon_schema_uninstall(
             percent: 20,
             message: "正在卸载附加方案 English...".into(),
         }));
-        write_addon_schema_list(&root, id, false)?;
+        let mut receipt = uninstall_package(&root)?;
+        write_schema_list_transaction(&mut receipt, false)?;
+        let reset_english_mode = reset_english_mode_transaction(&mut receipt)?;
+        let deployed = async {
+            if keytao_core::schema_install_state(&root).installed {
+                host.deploy().await?;
+            } else {
+                let _ = host.write_reload_stamp(&root)?;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let files = addon_schema_source_files(id)
+                    .into_iter()
+                    .map(|(_, relative)| PathBuf::from(relative))
+                    .collect::<Vec<_>>();
+                host.remove_public_schema(id, &files)?;
+                host.publish_english_settings(false)?;
+            }
+            Ok::<_, String>(())
+        }
+        .await;
+        if let Err(error) = deployed {
+            receipt
+                .rollback()
+                .map_err(|rollback| format!("{error}；恢复 English 失败：{rollback}"))?;
+            if let Err(restore) = host.deploy().await {
+                return Err(format!("{error}；已恢复文件，请重新部署：{restore}"));
+            }
+            return Err(error);
+        }
+        receipt.finish()?;
         remove_addon_schema_files(&root, id)?;
-        let reset_english_mode = reset_mobile_english_mode(&root)?;
-        #[cfg(target_os = "windows")]
-        {
-            let files = addon_schema_source_files(id)
-                .into_iter()
-                .map(|(_, relative)| PathBuf::from(relative))
-                .collect::<Vec<_>>();
-            host.remove_public_schema(id, &files)?;
-            host.publish_english_settings(false)?;
-        }
-        if keytao_core::schema_install_state(&root).installed {
-            host.deploy().await?;
-        } else {
-            let _ = host.write_reload_stamp(&root)?;
-        }
         if reset_english_mode {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
                 stage: "addon-reset-mode".into(),
@@ -390,4 +743,428 @@ pub async fn addon_schema_uninstall(
     }
     .await;
     result.map_err(CoreError::Other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    struct TestRoot {
+        directory: tempfile::TempDir,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestRoot {
+        fn new() -> Self {
+            let serial = wanxiang::TEST_SERIAL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("default.custom.yaml"),
+                "patch:\n  schema_list:\n    - schema: keytao\n",
+            )
+            .unwrap();
+            Self {
+                directory,
+                _serial: serial,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.directory.path()
+        }
+    }
+
+    fn fixture_archive(path: &Path, content: &str, extras: &[(&str, &str)]) {
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, text) in [
+            ("rime-easy-en-commit/easy_en.schema.yaml", content),
+            ("rime-easy-en-commit/easy_en.dict.yaml", content),
+            ("rime-easy-en-commit/lua/easy_en.lua", content),
+            ("rime-easy-en-commit/LICENSE", "LGPL-3.0 fixture"),
+            ("rime-easy-en-commit/README.md", "not installed"),
+        ]
+        .into_iter()
+        .chain(extras.iter().copied())
+        {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(text.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    fn install_fixture(root: &Path, sha: char, content: &str) -> InstallReceipt {
+        let mut receipt = InstallReceipt::new(root).unwrap();
+        let archive = receipt.work.join("fixture.zip");
+        fixture_archive(&archive, content, &[]);
+        let sha = sha.to_string().repeat(40);
+        let package = package_from_commit(&serde_json::json!({"sha": sha})).unwrap();
+        commit_package(&mut receipt, &archive, &package).unwrap();
+        write_schema_list_transaction(&mut receipt, true).unwrap();
+        receipt
+    }
+
+    #[test]
+    fn fixture_install_writes_only_package_files_custom_defaults_and_version() {
+        let root = TestRoot::new();
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        let status = addon_schema_status_at(root.path(), EASY_EN_ADDON_ID);
+        assert!(status.installed);
+        assert!(!status.deployed);
+        assert_eq!(status.version, "aaaaaaaaaaaa");
+        for name in [
+            "easy_en.schema.yaml",
+            "easy_en.dict.yaml",
+            "lua/easy_en.lua",
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(name)).unwrap(),
+                "first upstream"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap(),
+            CUSTOM
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(LICENSE)).unwrap(),
+            "LGPL-3.0 fixture"
+        );
+        assert!(!root.path().join("README.md").exists());
+        assert!(!root.path().join("LICENSE").exists());
+        let manifest = read_manifest(root.path()).unwrap().unwrap();
+        assert_eq!(manifest.version, "aaaaaaaaaaaa");
+        assert_eq!(manifest.files.len(), 5);
+        assert!(manifest.source.ends_with(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn update_replaces_owned_sources_and_manifest_version() {
+        let root = TestRoot::new();
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        install_fixture(root.path(), 'b', "updated upstream")
+            .finish()
+            .unwrap();
+        assert_eq!(
+            addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
+            "bbbbbbbbbbbb"
+        );
+        for name in [
+            "easy_en.schema.yaml",
+            "easy_en.dict.yaml",
+            "lua/easy_en.lua",
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(name)).unwrap(),
+                "updated upstream"
+            );
+        }
+        assert_eq!(
+            parse_schema_list(
+                &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
+            ),
+            ["keytao", "easy_en"]
+        );
+    }
+
+    #[test]
+    fn legacy_install_without_receipt_is_detected_and_can_update_and_uninstall() {
+        let root = TestRoot::new();
+        for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
+            let path = root.path().join(&name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                if name == "easy_en.custom.yaml" {
+                    CUSTOM
+                } else {
+                    "current upstream"
+                },
+            )
+            .unwrap();
+        }
+        write_addon_schema_list(root.path(), EASY_EN_ADDON_ID, true).unwrap();
+        let status = addon_schema_status_at(root.path(), EASY_EN_ADDON_ID);
+        assert!(status.installed);
+        assert!(status.version.is_empty());
+        install_fixture(root.path(), 'c', "current upstream")
+            .finish()
+            .unwrap();
+        assert_eq!(
+            addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
+            "cccccccccccc"
+        );
+        let mut receipt = uninstall_package(root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, false).unwrap();
+        receipt.finish().unwrap();
+        assert!(!addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
+        assert!(!root.path().join(MANIFEST).exists());
+        assert!(!root.path().join(LICENSE).exists());
+    }
+
+    #[test]
+    fn legacy_install_can_uninstall_without_creating_a_receipt() {
+        let root = TestRoot::new();
+        for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "legacy bundled source").unwrap();
+        }
+        write_addon_schema_list(root.path(), EASY_EN_ADDON_ID, true).unwrap();
+        let mut receipt = uninstall_package(root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, false).unwrap();
+        receipt.finish().unwrap();
+        assert!(!addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
+        for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
+            assert!(!root.path().join(name).exists());
+        }
+    }
+
+    #[test]
+    fn modified_legacy_custom_is_preserved_on_update() {
+        let root = TestRoot::new();
+        for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
+            let path = root.path().join(&name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                if name == "easy_en.custom.yaml" {
+                    "patch: {user_setting: true}"
+                } else {
+                    "current upstream"
+                },
+            )
+            .unwrap();
+        }
+        write_addon_schema_list(root.path(), EASY_EN_ADDON_ID, true).unwrap();
+        install_fixture(root.path(), 'a', "current upstream")
+            .finish()
+            .unwrap();
+        for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
+            let expected = if name == "easy_en.custom.yaml" {
+                "patch: {user_setting: true}"
+            } else {
+                "current upstream"
+            };
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(name)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
+            "aaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn existing_custom_is_preserved_on_first_install() {
+        let root = TestRoot::new();
+        let custom = "# User settings\npatch: {user_setting: true}\n";
+        std::fs::write(root.path().join("easy_en.custom.yaml"), custom).unwrap();
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap(),
+            custom
+        );
+        assert!(addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
+    }
+
+    #[test]
+    fn modified_receipt_custom_is_preserved_on_update_redeploy_and_rollback() {
+        let root = TestRoot::new();
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        let custom = "# User settings\npatch: {user_setting: true}\n";
+        let path = root.path().join("easy_en.custom.yaml");
+        std::fs::write(&path, custom).unwrap();
+        install_fixture(root.path(), 'b', "updated upstream")
+            .finish()
+            .unwrap();
+        install_fixture(root.path(), 'b', "updated upstream")
+            .finish()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        assert_eq!(
+            addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
+            "bbbbbbbbbbbb"
+        );
+        let receipt = install_fixture(root.path(), 'c', "cancelled upstream");
+        let edited = "patch: {edited_during_deploy: true}\n";
+        std::fs::write(&path, edited).unwrap();
+        receipt.rollback().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), edited);
+        assert_eq!(
+            addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
+            "bbbbbbbbbbbb"
+        );
+    }
+
+    #[test]
+    fn modified_owned_source_prevents_every_update_write() {
+        let root = TestRoot::new();
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        std::fs::write(root.path().join("easy_en.dict.yaml"), "user vocabulary").unwrap();
+        let manifest = std::fs::read(root.path().join(MANIFEST)).unwrap();
+        let mut receipt = InstallReceipt::new(root.path()).unwrap();
+        let archive = receipt.work.join("fixture.zip");
+        fixture_archive(&archive, "updated upstream", &[]);
+        let package = package_from_commit(&serde_json::json!({"sha": "b".repeat(40)})).unwrap();
+        assert!(
+            commit_package(&mut receipt, &archive, &package)
+                .unwrap_err()
+                .contains("冲突")
+        );
+        receipt.rollback().unwrap();
+        assert_eq!(std::fs::read(root.path().join(MANIFEST)).unwrap(), manifest);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.schema.yaml")).unwrap(),
+            "first upstream"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.dict.yaml")).unwrap(),
+            "user vocabulary"
+        );
+    }
+
+    #[test]
+    fn public_cache_contains_only_staged_upstream_files_and_rejects_modified_cache() {
+        let root = TestRoot::new();
+        let archive = root.path().join("fixture.zip");
+        fixture_archive(&archive, "official source", &[]);
+        let stage = root.path().join("stage");
+        let files = extract_package(&archive, &stage).unwrap();
+        let manifest = Manifest {
+            format: 1,
+            version: "aaaaaaaaaaaa".into(),
+            source: format!(
+                "https://github.com/BlindingDark/rime-easy-en/commit/{}",
+                "a".repeat(40)
+            ),
+            archive_sha256: wanxiang::fingerprint(&archive).unwrap().0,
+            files,
+        };
+        let cache = root.path().join("public-cache");
+        cache_public_package(&cache, &stage, &manifest).unwrap();
+        assert!(!cache.join("current.txt").exists());
+        write_file_atomic(
+            &cache.join("current.txt"),
+            manifest.archive_sha256.as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("easy_en.dict.yaml"), "private vocabulary").unwrap();
+        let public = official_source_files(&cache).unwrap();
+        assert_eq!(
+            public
+                .iter()
+                .find(|(path, _)| path == Path::new("easy_en.dict.yaml"))
+                .unwrap()
+                .1,
+            b"official source"
+        );
+        std::fs::write(
+            cache
+                .join(&manifest.archive_sha256)
+                .join("easy_en.dict.yaml"),
+            "modified cache",
+        )
+        .unwrap();
+        assert!(official_source_files(&cache).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.dict.yaml")).unwrap(),
+            "private vocabulary"
+        );
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn uninstall_resets_english_before_reload_and_rollback_restores_the_preference() {
+        use keytao_core::english_mode::{EnglishMode, SETTINGS_FILE, read_english_mode};
+        let root = TestRoot::new();
+        install_fixture(root.path(), 'a', "upstream")
+            .finish()
+            .unwrap();
+        let original = b"{\"englishMode\":\"schema\",\"other\":7}";
+        std::fs::write(root.path().join(SETTINGS_FILE), original).unwrap();
+        let mut receipt = uninstall_package(root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, false).unwrap();
+        assert!(reset_english_mode_transaction(&mut receipt).unwrap());
+        assert_eq!(read_english_mode(root.path()), EnglishMode::Ascii);
+        drop(receipt);
+        assert_eq!(
+            std::fs::read(root.path().join(SETTINGS_FILE)).unwrap(),
+            original
+        );
+        assert_eq!(read_english_mode(root.path()), EnglishMode::Schema);
+        assert!(addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
+    }
+
+    #[test]
+    fn cancelled_install_and_update_restore_sources_manifest_and_schema_list() {
+        let root = TestRoot::new();
+        let initial_config = std::fs::read(root.path().join("default.custom.yaml")).unwrap();
+        drop(install_fixture(root.path(), 'a', "first upstream"));
+        assert!(!root.path().join(MANIFEST).exists());
+        assert!(!root.path().join("easy_en.schema.yaml").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("default.custom.yaml")).unwrap(),
+            initial_config
+        );
+        install_fixture(root.path(), 'a', "first upstream")
+            .finish()
+            .unwrap();
+        let manifest = std::fs::read(root.path().join(MANIFEST)).unwrap();
+        let config = std::fs::read(root.path().join("default.custom.yaml")).unwrap();
+        drop(install_fixture(root.path(), 'b', "updated upstream"));
+        assert_eq!(std::fs::read(root.path().join(MANIFEST)).unwrap(), manifest);
+        assert_eq!(
+            std::fs::read(root.path().join("default.custom.yaml")).unwrap(),
+            config
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.schema.yaml")).unwrap(),
+            "first upstream"
+        );
+    }
+
+    #[test]
+    fn archive_rejects_multiple_roots_that_target_the_same_file() {
+        let root = TestRoot::new();
+        let archive = root.path().join("fixture.zip");
+        fixture_archive(
+            &archive,
+            "upstream",
+            &[("other-root/easy_en.schema.yaml", "other")],
+        );
+        assert!(
+            extract_package(&archive, &root.path().join("stage"))
+                .unwrap_err()
+                .contains("重复目标路径")
+        );
+        assert!(!root.path().join("easy_en.schema.yaml").exists());
+    }
+
+    #[test]
+    fn metadata_requires_a_full_hex_commit_and_pins_the_archive_to_it() {
+        for sha in ["", "short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
+            assert!(package_from_commit(&serde_json::json!({"sha": sha})).is_err());
+        }
+        let sha = "a".repeat(40);
+        let package = package_from_commit(&serde_json::json!({"sha": sha})).unwrap();
+        assert!(package.download_url.ends_with(&sha));
+        assert_eq!(package.version, sha[..12]);
+    }
 }

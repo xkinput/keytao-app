@@ -149,4 +149,4 @@ DYLD_FALLBACK_LIBRARY_PATH=$RIME_LIB_DIR cargo test
 本项目以 [MIT](LICENSE) 许可证发布。第三方组件：
 
 - librime：BSD-3-Clause，见 [crates/librime-sys/LICENSE-librime](crates/librime-sys/LICENSE-librime)。
-- Easy English 附加方案：LGPL-3.0，来源与许可证见 [NOTICE](resources/addon-schemas/easy_en/NOTICE.md) 和 [LICENSE](resources/addon-schemas/easy_en/LICENSE)。
+- Easy English 附加方案：从 [BlindingDark/rime-easy-en](https://github.com/BlindingDark/rime-easy-en) 下载，作者 Patrick 与 BlindingDark，采用 [LGPL-3.0](https://github.com/BlindingDark/rime-easy-en/blob/master/LICENSE)。App 显示已安装版本，并支持检查和手动更新；KeyTao 生成的 `easy_en.custom.yaml` 禁用外部分词器。

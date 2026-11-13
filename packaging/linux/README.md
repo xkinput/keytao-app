@@ -7,8 +7,7 @@ the tree and `packaging/linux/key-tao.spec` packages it as rpm.
 ## Installed files
 
 - `/usr/lib/KeyTao/`: Flutter bundle, `keytao-ime`, `runtime/` (one stripped
-  `librime.so.1` with merged Lua, OpenCC data and `rime-data`), `rime-data -> runtime/rime-data`,
-  and `addon-schemas/`.
+  `librime.so.1` with merged Lua, OpenCC data and `rime-data`) and `rime-data -> runtime/rime-data`.
 - `/usr/bin/keytao-app`, `/usr/bin/keytao-ime`: relative symlinks into
   `/usr/lib/KeyTao`, so `current_exe()` and Dart `resolvedExecutable` find the
   bundle root.
