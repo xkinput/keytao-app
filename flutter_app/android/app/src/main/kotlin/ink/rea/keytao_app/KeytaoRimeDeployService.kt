@@ -71,7 +71,8 @@ class KeytaoRimeDeployService : Service() {
                 // Ending this dedicated process is the only reliable way to return it to Android.
                 Thread.sleep(processExitDelayMs)
                 KeytaoRuntimeLog.flush(200)
-                Process.killProcess(Process.myPid())
+                // The client may already have started the next step in this process.
+                if (!deploymentRunning.get()) Process.killProcess(Process.myPid())
             },
             "KeyTao-Rime-Deployer",
         ).start()
