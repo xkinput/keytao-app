@@ -63,19 +63,12 @@ class AccentPicker extends StatelessWidget {
     return SettingRow(
       AppStrings.accentColor,
       icon: FLucideIcons.paintbrush,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
         children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final hex in themeAccents.keys) swatch(hex),
-              swatch(selected, custom: true),
-            ],
-          ),
-          const SizedBox(height: 8),
-          FBadge(child: Text(controller.themeBadge)),
+          for (final hex in themeAccents.keys) swatch(hex),
+          swatch(selected, custom: true),
         ],
       ),
     );
