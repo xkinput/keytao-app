@@ -141,12 +141,23 @@ fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<Instal
         .iter()
         .map(|name| format!("dicts/{name}.dict.yaml"))
         .collect();
+    let dictionary = format!(
+        "---\nname: wanxiang\nimport_tables:\n{}...\n",
+        DICTIONARIES
+            .iter()
+            .map(|name| format!("  - dicts/{name}\n"))
+            .collect::<String>()
+    );
     let mut entries: Vec<_> = REQUIRED
         .iter()
         .map(|name| {
             (
                 *name,
-                "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n",
+                if *name == "wanxiang.dict.yaml" {
+                    dictionary.as_str()
+                } else {
+                    "grammar:\n  language: wanxiang-lts-zh-hans\ntranslator:\n  dictionary: wanxiang\n"
+                },
             )
         })
         .collect();
@@ -159,6 +170,98 @@ fn stage_fixture(receipt: &InstallReceipt, extra: &[(&str, &str)]) -> Vec<Instal
     let archive = receipt.work.join("fixture.zip");
     archive_at(&archive, &entries);
     extract(&archive, &receipt.work.join("files"), &fixture_package()).unwrap()
+}
+
+#[test]
+fn package_without_lianxiang_installs_only_provided_dictionaries() {
+    let root = TestRoot::new();
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    let archive = receipt.work.join("fixture.zip");
+    archive_at(
+        &archive,
+        &[
+            ("wanxiang.schema.yaml", "schema fixture"),
+            (
+                "wanxiang.dict.yaml",
+                "---\nname: wanxiang\nimport_tables:\n  - dicts/zi # base table\n  - 'dicts/jichu' # phrase table\n# - dicts/lianxiang\n  # - dicts/shici\n  - other/unused\n...\n",
+            ),
+            ("wanxiang_algebra.yaml", "algebra fixture"),
+            ("dicts/zi.dict.yaml", "character fixture"),
+            ("dicts/jichu.dict.yaml", "phrase fixture"),
+            ("dicts/cuoyin.dict.yaml", "unreferenced dictionary fixture"),
+            ("dicts/en.dict.yaml", "excluded dictionary fixture"),
+        ],
+    );
+    let files = extract(&archive, &receipt.work.join("files"), &fixture_package()).unwrap();
+    commit_fixture(&mut receipt, files).unwrap();
+    receipt.finish().unwrap();
+    assert!(status_at(&root.path).installed);
+    for name in ["zi", "jichu", "cuoyin"] {
+        assert!(
+            root.path
+                .join(format!("wanxiang-dicts/{name}.dict.yaml"))
+                .is_file()
+        );
+    }
+    for name in ["lianxiang", "shici", "en"] {
+        assert!(
+            !root
+                .path
+                .join(format!("wanxiang-dicts/{name}.dict.yaml"))
+                .exists()
+        );
+    }
+    let dictionary = fs::read_to_string(root.path.join("wanxiang.dict.yaml")).unwrap();
+    assert!(dictionary.contains("  - wanxiang-dicts/zi # base table"));
+    assert!(dictionary.contains("  - 'wanxiang-dicts/jichu' # phrase table"));
+}
+
+#[test]
+fn package_missing_a_listed_dictionary_is_rejected() {
+    let root = TestRoot::new();
+    let archive = root.path.join("fixture.zip");
+    archive_at(
+        &archive,
+        &[
+            ("wanxiang.schema.yaml", "schema fixture"),
+            (
+                "wanxiang.dict.yaml",
+                "---\nname: wanxiang\nimport_tables:\n  - dicts/zi\n  - dicts/lianxiang # required table\n...\n",
+            ),
+            ("wanxiang_algebra.yaml", "algebra fixture"),
+            ("dicts/zi.dict.yaml", "character fixture"),
+        ],
+    );
+    assert_eq!(
+        extract(&archive, &root.path.join("stage"), &fixture_package()).unwrap_err(),
+        "万象发布包缺少必要文件：wanxiang-dicts/lianxiang.dict.yaml"
+    );
+}
+
+#[test]
+fn installed_status_requires_manifest_files_and_core_files() {
+    let root = TestRoot::new();
+    let mut receipt = InstallReceipt::new(&root.path).unwrap();
+    let files = stage_fixture(&receipt, &[]);
+    commit_fixture(&mut receipt, files).unwrap();
+    receipt.finish().unwrap();
+    assert!(status_at(&root.path).installed);
+    let mut manifest = read_manifest(&root.path).unwrap().unwrap();
+    manifest
+        .files
+        .retain(|file| file.path != "wanxiang_algebra.yaml");
+    fs::write(
+        root.path.join(MANIFEST),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let algebra = fs::read(root.path.join("wanxiang_algebra.yaml")).unwrap();
+    fs::remove_file(root.path.join("wanxiang_algebra.yaml")).unwrap();
+    assert!(!status_at(&root.path).installed);
+    fs::write(root.path.join("wanxiang_algebra.yaml"), algebra).unwrap();
+    assert!(status_at(&root.path).installed);
+    fs::remove_file(root.path.join(NOTICE)).unwrap();
+    assert!(!status_at(&root.path).installed);
 }
 
 #[test]

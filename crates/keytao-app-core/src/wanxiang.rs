@@ -61,16 +61,31 @@ const DICTIONARIES: &[&str] = &[
 ];
 const BASIC_SCHEMA: &str = include_str!("wanxiang-basic.schema.yaml");
 
-fn required_files() -> Vec<String> {
-    REQUIRED
+fn required_files(archive: &Path) -> Result<Vec<String>, String> {
+    let mut archive = zip::ZipArchive::new(File::open(archive).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("无法读取万象压缩包：{e}"))?;
+    let dictionary = archive
+        .by_name("wanxiang.dict.yaml")
+        .map_err(|_| "万象发布包缺少必要文件：wanxiang.dict.yaml".to_string())?;
+    let header = serde_yaml::Deserializer::from_reader(dictionary)
+        .next()
+        .ok_or("wanxiang.dict.yaml is empty")?;
+    let header = serde_yaml::Value::deserialize(header)
+        .map_err(|e| format!("invalid wanxiang.dict.yaml: {e}"))?;
+    Ok(REQUIRED
         .iter()
         .map(|s| (*s).to_string())
         .chain(
-            DICTIONARIES
-                .iter()
+            header
+                .get("import_tables")
+                .and_then(serde_yaml::Value::as_sequence)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_yaml::Value::as_str)
+                .filter_map(|table| table.strip_prefix("dicts/"))
                 .map(|name| format!("wanxiang-dicts/{name}.dict.yaml")),
         )
-        .collect()
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -106,10 +121,14 @@ struct Manifest {
 
 pub fn status_at(root: &Path) -> Status {
     let manifest = read_manifest(root).ok().flatten();
-    let installed = manifest.is_some()
-        && required_files()
+    let installed = manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .files
             .iter()
-            .all(|name| safe_target(root, name).is_ok_and(|p| p.is_file()));
+            .map(|file| file.path.as_str())
+            .chain(REQUIRED.iter().copied())
+            .all(|name| safe_target(root, name).is_ok_and(|p| p.is_file()))
+    });
     Status {
         installed,
         deployed: installed
@@ -639,8 +658,8 @@ fn extract(
     package: &RemotePackage,
 ) -> Result<Vec<InstalledFile>, String> {
     let mut files = extract_package(archive, stage, package_destination, adapt_source)?;
-    for required in required_files() {
-        if !stage.join(&required).is_file() {
+    for required in required_files(archive)? {
+        if !safe_target(stage, &required)?.is_file() {
             return Err(format!("万象发布包缺少必要文件：{required}"));
         }
     }
