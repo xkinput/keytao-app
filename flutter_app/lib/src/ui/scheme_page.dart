@@ -638,7 +638,6 @@ class AddonCard extends StatelessWidget {
       required bool active,
       required Widget progress,
       required String? error,
-      String? description,
     }) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -670,16 +669,6 @@ class AddonCard extends StatelessWidget {
               ActionButton(AppStrings.uninstall, onPress: uninstall),
           ],
         ),
-        if (description != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            description,
-            style: context.theme.typography.body.xs.copyWith(
-              height: 1.5,
-              color: context.theme.colors.mutedForeground,
-            ),
-          ),
-        ],
         if (active) ...[const SizedBox(height: 12), progress],
         if (error != null) ...[const SizedBox(height: 8), ErrorMessage(error)],
       ],
@@ -721,7 +710,6 @@ class AddonCard extends StatelessWidget {
             progress: c.wanxiangProgress,
           ),
           error: c.wanxiangError,
-          description: AppStrings.wanxiangDescription,
         ),
       ],
     );

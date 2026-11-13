@@ -68,8 +68,6 @@ abstract final class AppStrings {
   static const customInstallDone = '安装完成，请手动重新部署输入法';
   static const easyEnglish = 'Easy English · 英文单词输入';
   static const wanxiang = '万象拼音 · 基础词库';
-  static const wanxiangDescription =
-      '下载约 35 MB，支持所有平台。不含额外语法模型和 Lua 扩展。安装后可在输入法方案菜单中选择“万象拼音”，保留现有方案和个人词库。';
   static const checking = '检测中';
   static const notInstalled = '未安装';
   static const installedNotDeployed = '已安装 · 未部署';
