@@ -1,27 +1,19 @@
 //! Shared state between all TSF COM objects.
 
 use keytao_core::{
-    default_shared_data_dir, default_user_data_dir,
+    default_user_data_dir,
     runtime_log::{self, Level},
-    ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy, ReloadStamp,
-    WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
+    ImeState, InputContextPolicy,
 };
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::{
-    core::{Interface, PCWSTR},
+    core::Interface,
     Win32::{
-        Foundation::{
-            CloseHandle, FreeLibrary, HANDLE, HMODULE, HWND, WAIT_ABANDONED, WAIT_OBJECT_0,
-        },
-        System::LibraryLoader::{
-            LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-            LOAD_LIBRARY_SEARCH_SYSTEM32,
-        },
-        System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        Foundation::HWND,
         UI::Input::KeyboardAndMouse::GetFocus,
         UI::TextServices::{
             ITfComposition, ITfCompositionView, ITfContext, ITfContextOwnerCompositionServices,
@@ -35,6 +27,7 @@ use windows::{
 use crate::{
     candidate_ui::CandidateUiManager,
     edit_session::with_write_session,
+    engine_backend::{EngineHandle, ImeEngineBackend, InProcEngine},
     engine_status,
     globals::DllActivityGuard,
     input_context::{
@@ -48,7 +41,6 @@ use crate::{
     panel_anchor::PanelAnchor,
 };
 
-const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
 /// How often the key path may stat the reload stamp. Focus changes always
 /// force a fresh read, so a schema update is still picked up before the first
 /// key of the next focus; this only keeps typing off the file system.
@@ -113,9 +105,8 @@ impl InputContextRetry {
 // ── Shared TsfState ───────────────────────────────────────────────────────────
 
 pub struct TsfState {
-    pub runtime: Option<ImeRuntime>,
-    pub session: Option<ImeRuntimeSession>,
-    rime_dll: Option<LoadedRimeDll>,
+    pub runtime: Option<Arc<dyn ImeEngineBackend>>,
+    pub session: Option<EngineHandle>,
     pub engine_building: bool,
     pub engine_error: Option<String>,
     engine_retry_after: Option<Instant>,
@@ -154,6 +145,7 @@ pub struct TsfState {
     pub ascii_mode: bool,
     /// UI language: English can use a candidate schema while raw ASCII is off.
     pub english_mode: bool,
+    // Retained across failed reloads and for callers that seed a stamp before warmup.
     pub reload_stamp_path: Option<PathBuf>,
     pub reload_stamp_signature: Option<String>,
     pub reload_in_progress: bool,
@@ -233,11 +225,10 @@ pub(crate) struct CompartmentSinkRegistration {
 }
 
 pub(crate) struct EngineBundle {
-    runtime: ImeRuntime,
-    session: ImeRuntimeSession,
-    reload_stamp_path: PathBuf,
+    runtime: Arc<dyn ImeEngineBackend>,
+    session: EngineHandle,
+    reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
-    rime_dll: Option<LoadedRimeDll>,
 }
 
 struct EngineBuildMailbox {
@@ -266,66 +257,11 @@ impl EngineBuildMailbox {
     }
 }
 
-struct LoadedRimeDll(HMODULE);
-
-struct EngineInitGuard(HANDLE);
-
-// SAFETY: The handle is retained only to keep the lazily loaded module alive
-// while the TSF text service owns the librime runtime. It is not dereferenced.
-unsafe impl Send for LoadedRimeDll {}
-
-unsafe impl Send for EngineInitGuard {}
-
-impl EngineInitGuard {
-    fn acquire(appcontainer: bool) -> Result<Self, String> {
-        // An unprefixed name uses the AppContainer's own object namespace;
-        // the desktop Local\\ mutex is neither needed nor accessible there.
-        let mutex_name = if appcontainer {
-            "KeyTao.WindowsIme.EngineInit"
-        } else {
-            WINDOWS_IME_ENGINE_INIT_MUTEX_NAME
-        };
-        let mut name: Vec<u16> = mutex_name.encode_utf16().collect();
-        name.push(0);
-        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-            .map_err(|error| format!("create engine initialization mutex: {error}"))?;
-        let wait = unsafe { WaitForSingleObject(handle, ENGINE_INIT_MUTEX_TIMEOUT_MS) };
-        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            return Err(format!(
-                "wait for engine initialization mutex: 0x{:08x}",
-                wait.0
-            ));
-        }
-        Ok(Self(handle))
-    }
-}
-
-impl Drop for EngineInitGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = ReleaseMutex(self.0);
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
-impl Drop for LoadedRimeDll {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = FreeLibrary(self.0);
-        }
-    }
-}
-
 impl TsfState {
     pub fn new() -> Self {
         Self {
             runtime: None,
             session: None,
-            rime_dll: None,
             engine_building: false,
             engine_error: None,
             engine_retry_after: None,
@@ -403,7 +339,7 @@ impl TsfState {
     pub(crate) fn build_engine() -> Result<EngineBundle, String> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Self::try_build_engine().map(|bundle| {
-                let schema = bundle.session.state().schema_id;
+                let schema = bundle.session.schema_id.clone();
                 (bundle, schema)
             })
         }))
@@ -414,49 +350,14 @@ impl TsfState {
     }
 
     fn try_build_engine() -> Result<EngineBundle, String> {
-        let sandboxed = crate::appcontainer::is_appcontainer()
-            .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
-        let _init_guard = EngineInitGuard::acquire(sandboxed)?;
-        let sandbox = if sandboxed {
-            Some(crate::appcontainer::prepare_data()?)
-        } else {
-            None
-        };
-        let user_dir = match &sandbox {
-            Some(data) => data.user_dir.clone(),
-            None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
-        };
-        let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
-        let rime_dll = preload_rime_dll(&shared)?;
-        let reload_stamp_path = sandbox.as_ref().map_or_else(
-            || ReloadStamp::path(&user_dir),
-            |data| data.reload_stamp_path.clone(),
-        );
-        let needs_deploy = sandbox.as_ref().is_some_and(|data| {
-            data.changed
-                || !keytao_core::schema_install_state(&user_dir).deployed
-                || keytao_core::windows_rime_build_repair_required(&user_dir)
-        });
-        let runtime = ImeRuntime::with_dirs(&user_dir, shared).with_ime_host();
-        if needs_deploy {
-            // This function only runs on the warmup/reload worker, never the
-            // host's input thread. Public package updates preserve private userdb.
-            runtime.reload()?;
-            sandbox.as_ref().unwrap().mark_deployed()?;
-        } else {
-            runtime.init_without_deploy()?;
-        }
-        let session = runtime.create_session()?;
-        let reload_stamp_signature = sandbox.as_ref().map_or_else(
-            || ReloadStamp::signature_at(&reload_stamp_path),
-            |data| data.reload_stamp_signature.clone(),
-        );
+        let runtime = Arc::new(InProcEngine::default());
+        let session = runtime.build()?;
+        let (reload_stamp_path, reload_stamp_signature) = runtime.reload_stamp();
         Ok(EngineBundle {
             runtime,
             session,
             reload_stamp_path,
             reload_stamp_signature,
-            rime_dll,
         })
     }
 
@@ -464,13 +365,12 @@ impl TsfState {
         self.runtime = Some(bundle.runtime);
         self.session = Some(bundle.session);
         self.reload_stamp_signature = bundle.reload_stamp_signature;
-        self.reload_stamp_path = Some(bundle.reload_stamp_path);
-        self.rime_dll = bundle.rime_dll;
+        self.reload_stamp_path = bundle.reload_stamp_path;
         self.invalidate_reload_stamp_cache();
         // A fresh session starts with the default policy, so the sensitive
         // policy of the focused context has to be pushed again.
         self.input_policy_applied = None;
-        if let Some(session) = self.session.as_ref() {
+        if let Some(session) = self.session() {
             self.ime_state = Some(session.set_english_mode(self.english_mode).unwrap_or_else(
                 |error| {
                     keytao_core::rt_log!(Level::Info, "error", "restore_english_mode", msg = error);
@@ -538,8 +438,10 @@ impl TsfState {
         self.input_generation = self.input_generation.wrapping_add(1);
         self.pending_commit_retry = None;
         self.session = None;
+        if let Some(runtime) = &self.runtime {
+            runtime.drop_session();
+        }
         self.runtime = None;
-        self.rime_dll = None;
         self.ime_state = None;
         self.reload_clear_pending = true;
         self.reload_retry_after = None;
@@ -550,14 +452,14 @@ impl TsfState {
         if self.reload_in_progress {
             return true;
         }
-        let Some(path) = &self.reload_stamp_path else {
-            return false;
-        };
-        // A missing stamp is not a reload request, matching ReloadStampWatcher.
-        let Some(signature) = ReloadStamp::signature_at(path) else {
-            return false;
-        };
-        self.reload_stamp_signature.as_deref() != Some(signature.as_str())
+        match &self.runtime {
+            Some(runtime) => runtime.reload_needed(),
+            None => InProcEngine::with_reload_stamp(
+                self.reload_stamp_path.clone(),
+                self.reload_stamp_signature.clone(),
+            )
+            .reload_needed(),
+        }
     }
 
     /// `reload_needed` for the key path: stats the stamp at most every
@@ -614,8 +516,9 @@ impl TsfState {
         }
     }
 
-    pub(crate) fn session(&self) -> Option<ImeRuntimeSession> {
-        self.session.clone()
+    pub(crate) fn session(&self) -> Option<Arc<dyn ImeEngineBackend>> {
+        self.session.as_ref()?;
+        self.runtime.clone()
     }
 }
 
@@ -2074,75 +1977,6 @@ fn with_detached_candidate_ui<R>(
     };
     drop(replaced);
     result
-}
-
-fn has_rime_base_data(dir: &Path) -> bool {
-    dir.join("default.yaml").is_file()
-}
-
-fn preload_rime_dll(shared_data_dir: &str) -> Result<Option<LoadedRimeDll>, String> {
-    let Some(runtime_dir) = Path::new(shared_data_dir).parent() else {
-        return Ok(None);
-    };
-    let rime_dll = if cfg!(target_arch = "aarch64") {
-        runtime_dir.join("rime-arm64.dll")
-    } else {
-        runtime_dir.join("rime.dll")
-    };
-    if !rime_dll.is_file() {
-        return Ok(None);
-    }
-
-    let mut wide: Vec<u16> = rime_dll.to_string_lossy().encode_utf16().collect();
-    wide.push(0);
-    let flags =
-        LOAD_LIBRARY_FLAGS(LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.0 | LOAD_LIBRARY_SEARCH_SYSTEM32.0);
-    let module = unsafe { LoadLibraryExW(PCWSTR(wide.as_ptr()), HANDLE::default(), flags) }
-        .map_err(|e| format!("load bundled rime.dll from {}: {e}", rime_dll.display()))?;
-    Ok(Some(LoadedRimeDll(module)))
-}
-
-fn bundled_shared_data_dir() -> Option<String> {
-    for base in dll_related_dirs() {
-        for candidate in [
-            base.join("rime-data"),
-            base.join("resources").join("rime-data"),
-            base.join("share").join("rime-data"),
-        ] {
-            if has_rime_base_data(&candidate) {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-    }
-    None
-}
-
-fn dll_related_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(hmodule) = crate::globals::DLL_INSTANCE.get().copied() {
-        let mut buf = vec![0u16; 32768];
-        let len = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleFileNameW(
-                windows::Win32::Foundation::HMODULE(hmodule as _),
-                &mut buf,
-            )
-        } as usize;
-        if len > 0 {
-            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
-
-    if let Some(parent) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-    {
-        dirs.push(parent);
-    }
-
-    dirs
 }
 
 pub(crate) fn fallback_focus_window() -> windows::Win32::Foundation::HWND {

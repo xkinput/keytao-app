@@ -1,7 +1,7 @@
 //! ITfKeyEventSink + ITfCompositionSink — the hot path for all keystrokes.
 //!
 //! Key handling mirrors keytao-linux-ime/src/wayland_backend.rs:
-//!   VK → X11 keysym → ImeRuntimeSession::process_key_result() → ImeState
+//!   VK → X11 keysym → ImeEngineBackend::process_key() → ImeState
 //!   committed text  → write via TSF edit session (ITfInsertAtSelection)
 //!   preedit text    → manage ITfComposition
 //!   candidate list  → update CandidateWindow (same tiny-skia panel as Linux)
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use keytao_core::{
     key_policy,
     runtime_log::{self, Level},
-    utf16_offset_from_chars, ImeRuntimeSession, ImeState, KeyProcessResult,
+    utf16_offset_from_chars, ImeState, KeyProcessResult,
 };
 use windows::{
     core::{implement, Interface, Result, GUID, PCWSTR, VARIANT},
@@ -41,6 +41,7 @@ use crate::{
         take_selection_range, with_async_dontcare_write_session, with_read_session,
         with_write_session,
     },
+    engine_backend::ImeEngineBackend,
     globals::DllActivityGuard,
     guard,
     key_map::{
@@ -1828,7 +1829,7 @@ fn ensure_layout_sink(shared_state: &SharedState, context: &ITfContext) {
     );
 }
 
-fn runtime_session(shared_state: &SharedState) -> Option<ImeRuntimeSession> {
+fn runtime_session(shared_state: &SharedState) -> Option<std::sync::Arc<dyn ImeEngineBackend>> {
     shared_state.borrow().session()
 }
 
@@ -1933,7 +1934,7 @@ fn process_key_result(
     keysym: u32,
     mods: u32,
 ) -> Option<KeyProcessResult> {
-    runtime_session(shared_state)?.process_key_result(keysym, mods)
+    runtime_session(shared_state)?.process_key(keysym, mods)
 }
 
 /// What a click on the candidate panel maps to.
@@ -2331,8 +2332,9 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let before_state = cached_ime_state(&state).unwrap_or_else(ImeState::empty);
             // ascii_composer only recognizes a release after seeing its press.
             // Both run here so test callbacks remain entirely outside librime.
-            let _ = process_key_result(&state, keysym, 0);
-            let result = process_key_result(&state, keysym, RIME_RELEASE_MASK);
+            let result = runtime_session(&state).and_then(|session| {
+                session.process_keys(&[(keysym, 0), (keysym, RIME_RELEASE_MASK)])
+            });
             let Some(result) = result else {
                 append_key_diagnostic!("OnKeyUp modifier pending=true result=false");
                 hide_candidate_window(&state);

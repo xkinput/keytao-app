@@ -20,6 +20,7 @@ mod candidate_ui;
 mod candidate_win;
 mod display_attribute;
 mod edit_session;
+mod engine_backend;
 mod engine_status;
 mod globals;
 mod input_context;
