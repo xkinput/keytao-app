@@ -126,14 +126,15 @@ def write_svg(path, width, height, body):
 
 def write_pdf(path, shape):
     operators = {"M": "m", "L": "l", "C": "c", "Z": "h"}
-    stream = ("0 g\n1 0 0 -1 0 20 cm\n" + "\n".join(
+    # macOS caps input-source icons; keep the 21x15 pt page the previous icon used.
+    stream = ("0 g\n0.75 0 0 -0.75 0 15 cm\n" + "\n".join(
         " ".join([*(number(v) for v in values), operators[command]])
         for command, *values in shape
     ) + "\nf*\n").encode("ascii")
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 28 20] /Resources << >> /Contents 4 0 R >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 21 15] /Resources << >> /Contents 4 0 R >>",
         f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream",
     ]
     document = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
