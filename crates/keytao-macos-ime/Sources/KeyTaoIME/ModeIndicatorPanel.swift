@@ -24,8 +24,9 @@ final class ModeIndicatorPanel: NSPanel {
 
         label.stringValue = modeHint.text
         let contentSize = label.intrinsicContentSize
-        let padding = theme.modeHint.fontSize / 3
+        let padding = theme.font.size / 3
         let size = NSSize(width: contentSize.width + padding * 2, height: contentSize.height + padding * 2)
+        containerView.layer?.cornerRadius = min(theme.modeHint.cornerRadius, size.height / 2)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let anchor = cursorRect.isUsableTextInputRect
@@ -82,7 +83,7 @@ final class ModeIndicatorPanel: NSPanel {
         containerView.layer?.borderColor = theme.modeHint.borderColor.cgColor
         containerView.layer?.borderWidth = theme.modeHint.borderWidth
         containerView.layer?.cornerRadius = theme.modeHint.cornerRadius
-        label.font = .systemFont(ofSize: theme.modeHint.fontSize, weight: .semibold)
+        label.font = .systemFont(ofSize: theme.font.size, weight: .semibold)
         label.textColor = theme.modeHint.foreground.nsColor
     }
 }

@@ -121,19 +121,24 @@ class DebugLogPanel extends StatelessWidget {
   final String storageKey;
   final double height;
   @override
-  Widget build(BuildContext context) => Section(
-    title: title,
-    children: [
-      if (log?.truncated == true)
-        Text(
-          AppStrings.recentLines(log!.lines.length),
-          style: context.theme.typography.body.xs,
+  // The section's tile group is itself scrollable and would draw a second
+  // desktop scrollbar next to the one LogLines owns.
+  Widget build(BuildContext context) => ScrollConfiguration(
+    behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+    child: Section(
+      title: title,
+      children: [
+        if (log?.truncated == true)
+          Text(
+            AppStrings.recentLines(log!.lines.length),
+            style: context.theme.typography.body.xs,
+          ),
+        LogLines(
+          lines: log?.lines ?? const [],
+          storageKey: storageKey,
+          height: height,
         ),
-      LogLines(
-        lines: log?.lines ?? const [],
-        storageKey: storageKey,
-        height: height,
-      ),
-    ],
+      ],
+    ),
   );
 }
