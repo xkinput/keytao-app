@@ -14,7 +14,8 @@ class CandidatePanelPreview extends StatelessWidget {
   final Map<String, dynamic> theme;
   final PanelOrientationDto orientation;
 
-  static const _candidates = ['组', '足', '祖', '租', '族'];
+  static const _candidates = ['这', '之', '支', '只能', '服从', '中国'];
+  static const _comments = ['🚫', '', '', '~a', '~c', '~g'];
 
   double _metric(Map<String, dynamic> section, String name) =>
       (section[name] as num).toDouble();
@@ -108,7 +109,7 @@ class CandidatePanelPreview extends StatelessWidget {
     for (var index = 0; index < _candidates.length; index++) {
       final selected = index == 0;
       final label = '${index + 1}${option['labelSuffix']}';
-      final comment = index == 0 ? '~a' : '';
+      final comment = _comments[index];
       final labelStyle = style(
         _metric(font, 'labelSize'),
         _color(option, selected ? 'selectedLabelColor' : 'labelColor'),
@@ -287,7 +288,7 @@ class CandidatePanelPreview extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'zu',
+                          'f',
                           semanticsLabel: '预编辑 zu',
                           style: preeditStyle,
                           textScaler: TextScaler.noScaling,
