@@ -77,7 +77,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         fun onDeleteClipboardEntry(key: String, media: Boolean = false)
         fun onClearClipboardHistory()
         fun onCommitClipboardMedia(key: String)
-        fun onToolbarCustomization(order: List<String>, pinnedCount: Int)
+        fun onToolbarCustomization(order: List<String>, pinnedCount: Int, symbolLayer: Boolean)
         fun onSettingPreview(key: String, value: String)
         fun onSettingChanged(key: String, value: String)
     }
@@ -415,8 +415,24 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var toolbarLongPressConsumed = false
     private var toolbarMoreExpanded = false
     private var toolbarEditMode = false
-    private var toolbarActionOrderOverride: List<String>? = null
-    private var toolbarPinnedCountOverride: Int? = null
+    private val toolbarActionOrderOverrides = mutableMapOf<Boolean, List<String>>()
+    private val toolbarPinnedCountOverrides = mutableMapOf<Boolean, Int>()
+    private var toolbarActionOrderOverride: List<String>?
+        get() = toolbarActionOrderOverrides[keyboardLayer == "symbols"]
+        set(value) {
+            if (value == null) toolbarActionOrderOverrides.remove(keyboardLayer == "symbols")
+            else toolbarActionOrderOverrides[keyboardLayer == "symbols"] = value
+        }
+    private var toolbarPinnedCountOverride: Int?
+        get() = toolbarPinnedCountOverrides[keyboardLayer == "symbols"]
+        set(value) {
+            if (value == null) toolbarPinnedCountOverrides.remove(keyboardLayer == "symbols")
+            else toolbarPinnedCountOverrides[keyboardLayer == "symbols"] = value
+        }
+    private val configuredToolbarActionOrder: List<String>
+        get() = if (keyboardLayer == "symbols") config.toolbarSymbolActionOrder else config.toolbarActionOrder
+    private val configuredToolbarPinnedCount: Int
+        get() = if (keyboardLayer == "symbols") config.toolbarSymbolPinnedCount else config.toolbarPinnedCount
     private var toolbarDragActionId: String? = null
     private var toolbarInactiveActionIds: List<String> = emptyList()
     private var downX = 0f
@@ -493,8 +509,8 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         config = next
         if (!toolbarEditMode) {
-            toolbarActionOrderOverride = next.toolbarActionOrder.takeIf { it.isNotEmpty() }
-            toolbarPinnedCountOverride = next.toolbarPinnedCount
+            toolbarActionOrderOverrides.clear()
+            toolbarPinnedCountOverrides.clear()
         }
         candidateWidthCache.clear()
         invalidateKeyboardLayoutCache()
@@ -4685,10 +4701,10 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun toolbarActions(): List<ToolbarAction> {
         val base = baseToolbarActions()
         val byId = base.mapNotNull { action -> action.id?.let { it to action } }.toMap()
-        val configuredOrder = toolbarActionOrderOverride ?: config.toolbarActionOrder
+        val configuredOrder = toolbarActionOrderOverride ?: configuredToolbarActionOrder
         val orderedIds = (configuredOrder + base.mapNotNull(ToolbarAction::id)).distinct()
         val ordered = orderedIds.mapNotNull(byId::get)
-        val pinnedCount = (toolbarPinnedCountOverride ?: config.toolbarPinnedCount).coerceIn(1, ordered.size.coerceAtLeast(1))
+        val pinnedCount = (toolbarPinnedCountOverride ?: configuredToolbarPinnedCount).coerceIn(1, ordered.size.coerceAtLeast(1))
         val more = ToolbarAction(
             label = if (toolbarMoreExpanded) "收起" else "更多",
             command = KeyCommand.panel("toolbarMore"),
@@ -4775,13 +4791,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun currentToolbarOrder(): List<String> {
         val available = baseToolbarActions().mapNotNull(ToolbarAction::id)
-        return ((toolbarActionOrderOverride ?: config.toolbarActionOrder) + available)
+        return ((toolbarActionOrderOverride ?: configuredToolbarActionOrder) + available)
             .distinct()
             .filter(available::contains)
     }
 
     private fun currentToolbarPinnedCount(): Int {
-        return (toolbarPinnedCountOverride ?: config.toolbarPinnedCount)
+        return (toolbarPinnedCountOverride ?: configuredToolbarPinnedCount)
             .coerceIn(1, currentToolbarOrder().size.coerceAtLeast(1))
     }
 
@@ -4820,7 +4836,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             .filterNot { it == toolbarSettingsActionId }
             .distinct()
         toolbarActionOrderOverride = persistedOrder
-        listener?.onToolbarCustomization(persistedOrder, currentToolbarPinnedCount())
+        listener?.onToolbarCustomization(persistedOrder, currentToolbarPinnedCount(), keyboardLayer == "symbols")
     }
 
     private fun drawFloatingInteractionHints(canvas: Canvas) {
@@ -5116,7 +5132,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 }
                 "toolbarEdit" -> {
                     val visibleOrder = currentToolbarOrder()
-                    val configuredOrder = toolbarActionOrderOverride ?: config.toolbarActionOrder
+                    val configuredOrder = toolbarActionOrderOverride ?: configuredToolbarActionOrder
                     toolbarInactiveActionIds = configuredOrder.filterNot(visibleOrder::contains)
                     toolbarEditMode = true
                     toolbarMoreExpanded = true

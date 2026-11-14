@@ -2441,8 +2441,14 @@ class AppController extends ChangeNotifier {
     onboardingCompleted = true;
   });
 
-  Future<bool> saveAndroid(Map<String, Object> patch) => run(() async {
+  Future<bool> saveAndroid(Map<String, Object> patch) => _saveAndroid(patch);
+
+  Future<bool> _saveAndroid(
+    Map<String, Object> patch, {
+    bool resetKeyboardLayout = false,
+  }) => run(() async {
     if (isAndroid) await _requireStorage();
+    if (isAndroid && resetKeyboardLayout) await android.resetKeyboardLayout();
     final current = await core.getAndroidImeInputSettings();
     if (patch['englishMode'] == 'schema') {
       await _readLocal();
@@ -2571,7 +2577,8 @@ class AppController extends ChangeNotifier {
     isIos ? const IosHost().openSettings : android.openInputMethodSettings,
   );
   Future<bool> showInputMethodPicker() => run(android.showInputMethodPicker);
-  Future<bool> resetAndroidSettings() => saveAndroid(androidDefaults);
+  Future<bool> resetAndroidSettings() =>
+      _saveAndroid(androidDefaults, resetKeyboardLayout: true);
 
   Future<void> _readLogs() async {
     logsLoading = true;

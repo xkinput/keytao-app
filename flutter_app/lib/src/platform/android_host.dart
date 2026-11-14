@@ -49,6 +49,8 @@ class AndroidHost {
       _channel.invokeMethod<void>('openInputMethodSettings');
   Future<void> showInputMethodPicker() =>
       _channel.invokeMethod<void>('showInputMethodPicker');
+  Future<void> resetKeyboardLayout() =>
+      _channel.invokeMethod<void>('resetKeyboardLayout');
   Future<String?> pickDirectory() async =>
       (await _channel.invokeMapMethod<String, dynamic>('pickDirectory'))?['uri']
           as String?;

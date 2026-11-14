@@ -2,12 +2,193 @@ package ink.rea.keytao_app
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
 
 class KeytaoAndroidImeConfigTest {
+    @Test
+    fun `every historical default is refreshed even with an unrelated seed history`() {
+        val bundledHash = "0".repeat(64)
+        val unrelatedSeed = setOf("1".repeat(64))
+        for (hash in KeytaoAndroidImeConfig.historicalDefaultKeyboardHashes) {
+            assertTrue(KeytaoAndroidImeConfig.shouldRefreshDefaultKeyboard(hash, bundledHash, unrelatedSeed))
+        }
+        assertFalse(KeytaoAndroidImeConfig.shouldRefreshDefaultKeyboard("2".repeat(64), bundledHash, unrelatedSeed))
+        assertFalse(KeytaoAndroidImeConfig.shouldRefreshDefaultKeyboard(bundledHash, bundledHash, unrelatedSeed))
+    }
+
+    @Test
+    fun `single hash seeds remain readable and upgrades retain every seeded default`() {
+        val directory = Files.createTempDirectory("keytao-keyboard-seeds").toFile()
+        try {
+            val file = directory.resolve("keyboard.yaml")
+            val seed = directory.resolve(".keyboard.seed")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "first default")
+            val firstHash = seed.readText()
+            assertEquals(setOf(firstHash), KeytaoAndroidImeConfig.readKeyboardSeedHistory("$firstHash\n"))
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "second default")
+            assertEquals("second default", file.readText())
+            val secondHistory = KeytaoAndroidImeConfig.readKeyboardSeedHistory(seed.readText())
+            assertEquals(2, secondHistory.size)
+            assertTrue(firstHash in secondHistory)
+            file.writeText("first default")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "third default")
+            assertEquals("third default", file.readText())
+            assertEquals(3, KeytaoAndroidImeConfig.readKeyboardSeedHistory(seed.readText()).size)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `edited layouts are kept until an explicit restore backs them up`() {
+        val directory = Files.createTempDirectory("keytao-keyboard-restore").toFile()
+        try {
+            val file = directory.resolve("keyboard.yaml")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "first default")
+            file.writeText("my edited layout")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default")
+            assertEquals("my edited layout", file.readText())
+            assertFalse(directory.resolve("keyboard.yaml.bak").exists())
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default", restore = true)
+            assertEquals("new default", file.readText())
+            assertEquals("my edited layout", directory.resolve("keyboard.yaml.bak").readText())
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default", restore = true)
+            assertEquals("my edited layout", directory.resolve("keyboard.yaml.bak").readText())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `resetting known defaults preserves the edited layout backup`() {
+        val directory = Files.createTempDirectory("keytao-default-keyboard-restore").toFile()
+        try {
+            val file = directory.resolve("keyboard.yaml")
+            val backup = directory.resolve("keyboard.yaml.bak")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "first default")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default", restore = true)
+            assertFalse(backup.exists())
+            backup.writeText("my edited layout")
+            file.writeText("first default")
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default", restore = true)
+            assertEquals("new default", file.readText())
+            assertEquals("my edited layout", backup.readText())
+            directory.resolve(".keyboard.seed").delete()
+            KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default", restore = true)
+            assertEquals("my edited layout", backup.readText())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `blank layouts are reseeded without replacing an existing backup`() {
+        val directory = Files.createTempDirectory("keytao-blank-keyboard").toFile()
+        try {
+            val file = directory.resolve("keyboard.yaml")
+            val backup = directory.resolve("keyboard.yaml.bak")
+            backup.writeText("my edited layout")
+            for (layout in listOf("", " \n\t\r\n")) {
+                file.writeText(layout)
+                KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default")
+                assertEquals("new default", file.readText())
+                assertEquals("my edited layout", backup.readText())
+                assertEquals(1, KeytaoAndroidImeConfig.readKeyboardSeedHistory(directory.resolve(".keyboard.seed").readText()).size)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `valid unknown layouts without a seed are kept`() {
+        val directory = Files.createTempDirectory("keytao-unknown-keyboard").toFile()
+        try {
+            val file = directory.resolve("keyboard.yaml")
+            for (layout in listOf("unknown keyboard layout", "rows: [[{label: q, value: q}]]\n")) {
+                file.writeText(layout)
+                KeytaoAndroidImeConfig.ensureDefaultKeyboardConfig(file, "new default")
+                assertEquals(layout, file.readText())
+                assertFalse(directory.resolve(".keyboard.seed").exists())
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `unseen toolbar actions enter their default position without reordering known actions`() {
+        val saved = listOf("emoji", "rime", "clipboard", "language", "layout")
+        val (order, pinned) = KeytaoAndroidImeConfig.mergeToolbarCustomization(saved, 3, saved.toSet())
+        assertEquals(listOf("emoji", "rime", "editor", "clipboard", "language", "layout"), order)
+        assertEquals(saved, order.filterNot { it == "editor" })
+        assertEquals(4, pinned)
+        assertEquals(order to pinned, KeytaoAndroidImeConfig.mergeToolbarCustomization(order, pinned, order.toSet()))
+    }
+
+    @Test
+    fun `new toolbar actions outside the pinned area stay in more and known missing actions append`() {
+        val defaults = listOf("rime", "language", "clipboard", "emoji")
+        val saved = listOf("language", "rime", "clipboard")
+        val (order, pinned) = KeytaoAndroidImeConfig.mergeToolbarCustomization(saved, 2, saved.toSet(), defaults)
+        assertEquals(listOf("language", "rime", "clipboard", "emoji"), order)
+        assertEquals(2, pinned)
+        val seen = setOf("rime", "language", "clipboard", "emoji")
+        assertEquals(
+            listOf("language", "clipboard", "emoji", "rime") to 2,
+            KeytaoAndroidImeConfig.mergeToolbarCustomization(listOf("language", "clipboard", "emoji"), 2, seen, defaults),
+        )
+    }
+
+    @Test
+    fun `toolbar migration persists seen actions and keeps symbol pinning independent`() {
+        val directory = Files.createTempDirectory("keytao-toolbar-upgrade").toFile()
+        try {
+            val file = directory.resolve("android_ime.json")
+            file.writeText("""{
+              "toolbarActionOrder": ["emoji", "rime", "clipboard", "language", "layout"],
+              "toolbarPinnedCount": 3
+            }""")
+            val migrated = KeytaoAndroidImeConfig.migrateToolbarCustomization(
+                file, file.readText(), KeytaoAndroidImeConfig.parse(file.readText()),
+            )
+            assertEquals(listOf("emoji", "rime", "editor", "clipboard", "language", "layout"), migrated.toolbarActionOrder)
+            assertEquals(4, migrated.toolbarPinnedCount)
+            assertEquals(KeytaoAndroidImeConfig.defaultSymbolToolbarActionOrder, migrated.toolbarSymbolActionOrder)
+            assertEquals(6, migrated.toolbarSymbolPinnedCount)
+            val persisted = JSONObject(file.readText())
+            val seen = persisted.getJSONArray("toolbarSeenActionIds")
+            assertEquals(10, seen.length())
+            val reloaded = KeytaoAndroidImeConfig.migrateToolbarCustomization(
+                file, file.readText(), KeytaoAndroidImeConfig.parse(file.readText()),
+            )
+            assertEquals(migrated.toolbarActionOrder, reloaded.toolbarActionOrder)
+            assertEquals(migrated.toolbarPinnedCount, reloaded.toolbarPinnedCount)
+            assertEquals(migrated.toolbarSymbolActionOrder, reloaded.toolbarSymbolActionOrder)
+            assertEquals(migrated.toolbarSymbolPinnedCount, reloaded.toolbarSymbolPinnedCount)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `mixed legacy toolbar orders insert new actions at each visible default index`() {
+        val json = """{
+          "toolbarActionOrder": ["rime", "chinese", "english", "numbers", "letters", "layout", "language", "clipboard", "emoji"],
+          "toolbarPinnedCount": 3
+        }"""
+        val migrated = KeytaoAndroidImeConfig.migrateToolbarCustomization(null, json, KeytaoAndroidImeConfig.parse(json))
+        assertEquals(listOf("rime", "layout", "editor", "language", "clipboard", "emoji"), migrated.toolbarActionOrder)
+        assertEquals(4, migrated.toolbarPinnedCount)
+        assertEquals(KeytaoAndroidImeConfig.defaultSymbolToolbarActionOrder, migrated.toolbarSymbolActionOrder)
+        assertEquals(3, migrated.toolbarSymbolPinnedCount)
+    }
+
     @Test
     fun `mnemonic hints default off and persist runtime overrides in both directions`() {
         val bundled = JSONObject("""{ "rows": [[{ "label": "q", "value": "q" }]] }""")

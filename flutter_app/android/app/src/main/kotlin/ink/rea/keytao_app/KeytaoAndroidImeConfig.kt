@@ -143,6 +143,8 @@ data class KeytaoAndroidImeConfig(
     val numberRows: List<List<KeySpec>>,
     val symbolRows: List<List<KeySpec>>,
     val customRows: Map<String, List<List<KeySpec>>> = emptyMap(),
+    val toolbarSymbolActionOrder: List<String> = emptyList(),
+    val toolbarSymbolPinnedCount: Int = 5,
 ) {
     val effectiveKeyboardHeightDp: Float
         get() {
@@ -226,7 +228,17 @@ data class KeytaoAndroidImeConfig(
         private const val keyboardHeightScaleDefault = 100
         private const val keyboardSeedFileName = ".keyboard.seed"
         private const val excludedToolbarActionId = "settings"
-        private val legacyDefaultKeyboardHashes = setOf(
+        internal val defaultToolbarActionOrder = listOf("rime", "language", "editor", "clipboard", "emoji", "layout")
+        internal val defaultSymbolToolbarActionOrder = listOf("rime", "chinese", "english", "numbers", "letters", "layout")
+        // All versions of crates/keytao-theme/default-keyboard.yaml in Git history.
+        internal val historicalDefaultKeyboardHashes = setOf(
+            "3fc4b50a4ddf2a37f24d63671f788414e32776f78334ae741444eaaade513a66",
+            "6f34882fe10e215dd0351c5e8e990e9b2ed40afb351668ca2104ab49e8da2549",
+            "eeb40d355a81a536b3b3bb2d11b5ea889f0ea656220b956bda9e45f1e11caf31",
+            "7168cea0f730954a7d93f748275fd7f6c3f82f83ced681e9aff4fa60d870a9a4",
+            "046288ffa66825452485199a9c5d5fba0f1de5c6d6e50d9ea1c21acc09aa90ab",
+            "169d17974591052bd9e4481f45d1f442acfb6c0d376fb6a8aa283dc37520fb78",
+            "cea5f21a618e959d230a637aa6350506dbeb6e7c22bcd2ecca5147adb004cc7a",
             "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
             "3ebe95295376bfeffb79c0106f86bc7e3d8631311dae0c595d330ed4c1b2805c",
             "25ae1b176617c64fec16a55b73c9faae8abd17c3eba12d1fc67ec9f66364b854",
@@ -238,11 +250,20 @@ data class KeytaoAndroidImeConfig(
 
         /**
          * Write the bundled keyboard.yaml when the user has none, or reseed it
-         * when the sidecar hash proves it is still untouched. Blocking and
+         * when a known default hash proves it is still untouched. Blocking and
          * writing, so it belongs on a background thread — [load] never does it.
          */
         fun ensureDefaults(context: Context) {
             ensureDefaultKeyboardConfig(context)
+        }
+
+        @Synchronized
+        fun resetDefaultKeyboard(context: Context) {
+            val file = KeytaoAndroidPaths.keyboardFileOrNull(context) ?: error("键盘存储不可用")
+            val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: error("默认键盘不可用")
+            ensureDefaultKeyboardConfig(file, yaml, restore = true)
+            cachedSignature = null
+            cachedConfig = null
         }
 
         /**
@@ -265,10 +286,11 @@ data class KeytaoAndroidImeConfig(
             val userJson = userConfig?.takeIf { it.isFile }?.readText()
             val userKeyboard = resolvedUserKeyboard(userKeyboardFile)
             val defaultRoot = JSONObject(defaultJson)
-            val config = parseSources(userKeyboard, userJson, defaultRoot) { layer ->
+            val parsed = parseSources(userKeyboard, userJson, defaultRoot) { layer ->
                 KeytaoRuntimeLog.event("error", "config_rows_empty") { put("layer", layer) }
             }
-            cachedSignature = signature
+            val config = migrateToolbarCustomization(userConfig, userJson, parsed)
+            cachedSignature = "${fileSignature(userConfig)}|${fileSignature(userKeyboardFile)}"
             cachedConfig = config
             return config
         }
@@ -297,7 +319,12 @@ data class KeytaoAndroidImeConfig(
         }
 
         @Synchronized
-        fun persistToolbarCustomization(context: Context, order: List<String>, pinnedCount: Int): Boolean {
+        fun persistToolbarCustomization(
+            context: Context,
+            order: List<String>,
+            pinnedCount: Int,
+            symbolLayer: Boolean = false,
+        ): Boolean {
             val file = KeytaoAndroidPaths.imeConfigFileOrNull(context) ?: return false
             return runCatching {
                 val root = file.takeIf { it.isFile }
@@ -305,8 +332,11 @@ data class KeytaoAndroidImeConfig(
                     ?.let(::JSONObject)
                     ?: JSONObject()
                 val normalizedOrder = normalizeToolbarActionOrder(order)
-                root.put("toolbarActionOrder", JSONArray(normalizedOrder))
-                root.put("toolbarPinnedCount", pinnedCount.coerceIn(1, 12))
+                root.put(if (symbolLayer) "toolbarSymbolActionOrder" else "toolbarActionOrder", JSONArray(normalizedOrder))
+                root.put(if (symbolLayer) "toolbarSymbolPinnedCount" else "toolbarPinnedCount", pinnedCount.coerceIn(1, 12))
+                root.put("toolbarSeenActionIds", JSONArray(
+                    (stringList(root.optJSONArray("toolbarSeenActionIds")) + normalizedOrder).distinct(),
+                ))
                 file.parentFile?.mkdirs()
                 val temporary = File(file.parentFile, ".${file.name}.toolbar.tmp")
                 temporary.writeText(root.toString(2))
@@ -458,6 +488,10 @@ data class KeytaoAndroidImeConfig(
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
                 symbolRows = symbolRows.ifEmpty { defaultSymbolRows() },
                 customRows = customRows,
+                toolbarSymbolActionOrder = normalizeToolbarActionOrder(
+                    mergedStringList(root, fallbackRoot, "toolbarSymbolActionOrder"),
+                ),
+                toolbarSymbolPinnedCount = mergedInt(root, fallbackRoot, "toolbarSymbolPinnedCount", 5).coerceIn(1, 12),
             )
         }
 
@@ -608,6 +642,16 @@ data class KeytaoAndroidImeConfig(
                 } else {
                     config.toolbarPinnedCount
                 },
+                toolbarSymbolActionOrder = if (runtimeRoot.has("toolbarSymbolActionOrder")) {
+                    normalizeToolbarActionOrder(stringList(runtimeRoot.optJSONArray("toolbarSymbolActionOrder")))
+                } else {
+                    config.toolbarSymbolActionOrder
+                },
+                toolbarSymbolPinnedCount = if (runtimeRoot.has("toolbarSymbolPinnedCount")) {
+                    runtimeRoot.optInt("toolbarSymbolPinnedCount", config.toolbarSymbolPinnedCount).coerceIn(1, 12)
+                } else {
+                    config.toolbarSymbolPinnedCount
+                },
                 keyboardHeightDp = if (runtimeRoot.has("keyboardHeightDp")) {
                     runtimeRoot.optInt("keyboardHeightDp", config.keyboardHeightDp).coerceIn(160, 420)
                 } else {
@@ -729,6 +773,63 @@ data class KeytaoAndroidImeConfig(
                 .distinct()
         }
 
+        internal fun mergeToolbarCustomization(
+            order: List<String>,
+            pinnedCount: Int,
+            seenActionIds: Set<String>,
+            defaultOrder: List<String> = defaultToolbarActionOrder,
+        ): Pair<List<String>, Int> {
+            if (order.isEmpty()) return order to pinnedCount
+            val merged = normalizeToolbarActionOrder(order).toMutableList()
+            var pinned = pinnedCount.coerceIn(1, merged.size.coerceAtLeast(1))
+            for ((defaultIndex, id) in defaultOrder.withIndex()) {
+                if (id in merged) continue
+                if (id in seenActionIds) {
+                    merged.add(id)
+                } else {
+                    val index = defaultIndex.coerceAtMost(merged.size)
+                    merged.add(index, id)
+                    if (index < pinned) pinned = (pinned + 1).coerceAtMost(12)
+                }
+            }
+            return merged to pinned
+        }
+
+        internal fun migrateToolbarCustomization(
+            file: File?,
+            userJson: String?,
+            config: KeytaoAndroidImeConfig,
+        ): KeytaoAndroidImeConfig {
+            val root = userJson?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject()
+            val previousSeen = stringList(root.optJSONArray("toolbarSeenActionIds")).toSet()
+            val symbolOrder = if (root.has("toolbarSymbolActionOrder")) config.toolbarSymbolActionOrder else {
+                config.toolbarActionOrder.filter(defaultSymbolToolbarActionOrder::contains)
+            }
+            val symbolPinned = if (root.has("toolbarSymbolPinnedCount")) config.toolbarSymbolPinnedCount else config.toolbarPinnedCount
+            val seen = previousSeen + config.toolbarActionOrder + symbolOrder
+            val normalOrder = config.toolbarActionOrder.filter(defaultToolbarActionOrder::contains)
+            val (order, pinned) = mergeToolbarCustomization(normalOrder, config.toolbarPinnedCount, seen)
+            val (symbols, symbolsPinned) = mergeToolbarCustomization(symbolOrder, symbolPinned, seen, defaultSymbolToolbarActionOrder)
+            val updatedSeen = seen + defaultToolbarActionOrder + defaultSymbolToolbarActionOrder
+            if (file != null && (order != config.toolbarActionOrder || pinned != config.toolbarPinnedCount ||
+                    symbols != config.toolbarSymbolActionOrder || symbolsPinned != config.toolbarSymbolPinnedCount ||
+                    updatedSeen != previousSeen)) {
+                persistSettings(file, mapOf(
+                    "toolbarActionOrder" to JSONArray(order),
+                    "toolbarPinnedCount" to pinned,
+                    "toolbarSymbolActionOrder" to JSONArray(symbols),
+                    "toolbarSymbolPinnedCount" to symbolsPinned,
+                    "toolbarSeenActionIds" to JSONArray(updatedSeen.toList()),
+                ))
+            }
+            return config.copy(
+                toolbarActionOrder = order,
+                toolbarPinnedCount = pinned,
+                toolbarSymbolActionOrder = symbols,
+                toolbarSymbolPinnedCount = symbolsPinned,
+            )
+        }
+
         private fun layerRows(
             root: JSONObject,
             fallbackRoot: JSONObject?,
@@ -768,40 +869,57 @@ data class KeytaoAndroidImeConfig(
 
         private fun ensureDefaultKeyboardConfig(context: Context) {
             val file = KeytaoAndroidPaths.keyboardFileOrNull(context) ?: return
-            val seedFile = File(file.parentFile, keyboardSeedFileName)
             val yaml = KeytaoNativeBridge.defaultKeyboardYaml() ?: return
+            runCatching { ensureDefaultKeyboardConfig(file, yaml) }
+        }
+
+        @Synchronized
+        internal fun ensureDefaultKeyboardConfig(file: File, yaml: String, restore: Boolean = false) {
+            val seedFile = File(file.parentFile, keyboardSeedFileName)
+            val seededHashes = readKeyboardSeedHistory(
+                seedFile.takeIf { it.isFile }?.readText(),
+            ).toMutableSet()
             val bundledHash = sha256(yaml)
             if (file.isFile) {
-                val existing = runCatching { file.readText() }.getOrNull()
-                    ?: return
-                val seededHash = runCatching { seedFile.readText().trim() }.getOrNull()
-                if (!shouldRefreshDefaultKeyboard(existing, bundledHash, seededHash)) {
-                    if (sha256(existing) == bundledHash && seededHash != bundledHash) {
-                        runCatching { seedFile.writeText(bundledHash) }
+                val existing = file.readText()
+                val existingHash = sha256(existing)
+                val refreshDefault = shouldRefreshDefaultKeyboard(existingHash, bundledHash, seededHashes)
+                val knownDefault = existingHash == bundledHash || refreshDefault
+                if (!restore && !existing.isBlank() && !refreshDefault) {
+                    if (existingHash == bundledHash && bundledHash !in seededHashes) {
+                        seedFile.writeText((seededHashes + bundledHash).joinToString("\n"))
                     }
                     return
                 }
+                val backup = File(file.parentFile, "keyboard.yaml.bak")
+                if (restore && !knownDefault && !existing.isBlank()) {
+                    file.copyTo(backup, overwrite = true)
+                }
+                if (existingHash in historicalDefaultKeyboardHashes) seededHashes.add(existingHash)
             }
-            runCatching {
-                file.parentFile?.mkdirs()
-                file.writeText(yaml)
-                seedFile.writeText(bundledHash)
+            file.parentFile?.mkdirs()
+            val temporary = File(file.parentFile, ".${file.name}.tmp")
+            try {
+                temporary.writeText(yaml)
+                check(temporary.renameTo(file)) { "恢复默认键盘失败" }
+                seedFile.writeText((seededHashes + bundledHash).joinToString("\n"))
+            } finally {
+                temporary.delete()
             }
         }
 
-        private fun shouldRefreshDefaultKeyboard(
-            existing: String,
+        internal fun readKeyboardSeedHistory(seed: String?): Set<String> {
+            return seed.orEmpty().lineSequence().map(String::trim)
+                .filter { it.matches(Regex("[a-f0-9]{64}")) }.toSet()
+        }
+
+        internal fun shouldRefreshDefaultKeyboard(
+            existingHash: String,
             bundledHash: String,
-            seededHash: String?,
+            seededHashes: Set<String>,
         ): Boolean {
-            if (existing.isBlank()) return true
-            val existingHash = sha256(existing)
             if (existingHash == bundledHash) return false
-            return if (seededHash.isNullOrBlank()) {
-                existingHash in legacyDefaultKeyboardHashes
-            } else {
-                existingHash == seededHash
-            }
+            return existingHash in seededHashes || existingHash in historicalDefaultKeyboardHashes
         }
 
         private fun sha256(value: String): String {
