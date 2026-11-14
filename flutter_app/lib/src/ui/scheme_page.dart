@@ -415,7 +415,12 @@ class SchemePackageRow extends StatelessWidget {
                 icon: FLucideIcons.play,
                 onPress: c.canDeploy ? c.deploy : null,
               ),
-            if (package != null || changelogBody != null)
+            if (changelogBody != null ||
+                (package != null &&
+                    (package.supportsUserWords ||
+                        isLocal ||
+                        c.accountUser != null ||
+                        !active)))
               FPopoverMenu(
                 menuAnchor: Alignment.topRight,
                 childAnchor: Alignment.bottomRight,
