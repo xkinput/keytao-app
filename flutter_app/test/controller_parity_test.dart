@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -89,6 +90,8 @@ class FakeCore implements RustLibApi {
   String? installFailure;
   final logFailures = <String>{};
   Completer<void>? deployGate;
+  final deployStarted = Completer<void>();
+  String? deployFailure;
   EnglishModeDto english = EnglishModeDto.schema;
   int onboardingWrites = 0;
 
@@ -304,7 +307,9 @@ class FakeCore implements RustLibApi {
   @override
   Future<DeployResultDto> crateApiCoreDeployDefault() async {
     calls.add('deployDefault');
+    if (!deployStarted.isCompleted) deployStarted.complete();
     await deployGate?.future;
+    if (deployFailure != null) throw StateError(deployFailure!);
     local = deployedLocal;
     return const DeployResultDto(success: true, message: 'done');
   }
@@ -434,6 +439,72 @@ void main() {
     await core.events.close();
     await android.progress.close();
     RustLib.dispose();
+  });
+
+  Future<File> prepareIosUpgrade() async {
+    final root = await Directory.systemTemp.createTemp('keytao-ios-upgrade-');
+    addTearDown(() => root.delete(recursive: true));
+    final shared = await Directory('${root.path}/rime-data').create();
+    final stamp = File('${shared.path}/.bundled-version');
+    await stamp.writeAsString('2/20');
+    controller.dispose();
+    controller = AppController(
+      info: BridgeInfo(
+        platform: BridgePlatform.ios,
+        appVersion: '2',
+        userRoot: root.path,
+      ),
+    );
+    return stamp;
+  }
+
+  test(
+    'iOS startup deploys stale data once without concurrent user deploy',
+    () async {
+      await prepareIosUpgrade();
+      core.deployGate = Completer<void>();
+      final startup = controller.refreshState();
+      await core.deployStarted.future.timeout(const Duration(seconds: 2));
+      expect(controller.busy, isTrue);
+      expect(await controller.deploy(), isFalse);
+      expect(await controller.refreshState(), isFalse);
+      controller.onResume();
+      core.deployGate!.complete();
+      expect(await startup, isTrue);
+      await settle();
+      expect(controller.local?.deployed, isTrue);
+      expect(await controller.refreshState(), isTrue);
+      expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+    },
+  );
+
+  test('iOS resume waits for a user deploy and does not repeat it', () async {
+    await prepareIosUpgrade();
+    core.deployGate = Completer<void>();
+    controller.local = installedLocal;
+    final deploying = controller.deploy();
+    await core.deployStarted.future;
+    controller.onResume();
+    expect(await controller.refreshState(), isFalse);
+    core.deployGate!.complete();
+    expect(await deploying, isTrue);
+    await settle();
+    expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+  });
+
+  test('iOS failed upgrade retries only for a new bundle stamp', () async {
+    final stamp = await prepareIosUpgrade();
+    core.deployFailure = 'deploy failed';
+    expect(await controller.refreshState(), isFalse);
+    expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+    expect(await controller.refreshState(), isTrue);
+    expect(await controller.refreshState(), isTrue);
+    expect(core.calls.where((call) => call == 'deployDefault'), hasLength(1));
+    await stamp.writeAsString('3/30');
+    core.deployFailure = null;
+    expect(await controller.refreshState(), isTrue);
+    expect(core.calls.where((call) => call == 'deployDefault'), hasLength(2));
+    expect(controller.local?.deployed, isTrue);
   });
 
   test('source switching keeps fetched releases and never refetches', () async {

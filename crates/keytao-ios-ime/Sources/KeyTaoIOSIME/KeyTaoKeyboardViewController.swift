@@ -1879,12 +1879,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let ready = installed && deployed && engine.nativeReady
         if ready {
             message = ""
+        } else if engine.isDeploying() {
+            message = "正在部署方案…"
         } else if !installed && !hasFullAccess {
             message = "请在系统设置中允许 KeyTao 完全访问"
         } else if !installed {
             message = "请先在 KeyTao App 安装键道方案"
         } else if !deployed {
-            message = "请先在 KeyTao App 部署方案"
+            message = "请打开 KeyTao App 完成升级"
         } else {
             message = "RIME 运行库未就绪，请重新安装 KeyTao"
         }
