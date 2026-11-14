@@ -161,6 +161,25 @@ struct ImeTheme: Codable {
     var navigation: Navigation
     var modeHint: ModeHint
 
+    func scaledCandidatePanel() -> ImeTheme {
+        // Theme spacing and secondary fonts are specified at the default candidate size.
+        let scale = font.size / Self.default.font.size
+        var theme = self
+        theme.font.labelSize *= scale
+        theme.font.commentSize *= scale
+        theme.font.preeditSize *= scale
+        theme.panel.paddingX *= scale
+        theme.panel.paddingY *= scale
+        theme.panel.gap *= scale
+        theme.panel.preeditGap *= scale
+        theme.candidate.paddingX *= scale
+        theme.candidate.paddingY *= scale
+        theme.candidate.inlineGap *= scale
+        theme.candidate.minHeight *= scale
+        theme.navigation.buttonSize *= scale
+        return theme
+    }
+
     static var `default`: ImeTheme {
         ImeTheme(
             version: 2,

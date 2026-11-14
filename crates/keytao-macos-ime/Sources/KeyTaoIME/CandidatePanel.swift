@@ -86,7 +86,7 @@ class CandidatePanel: NSPanel {
     /// page availability are decided there, so every frontend shows the same
     /// candidate list.
     func update(model: KeyTaoPanelModel, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
-        let theme = ImeThemeManager.shared.theme()
+        let theme = ImeThemeManager.shared.theme().scaledCandidatePanel()
         level = windowLevel
         apply(theme, orientation: model.orientation)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
@@ -238,7 +238,7 @@ class CandidatePanel: NSPanel {
             separator.widthAnchor.constraint(greaterThanOrEqualToConstant: theme.panel.minWidth - theme.panel.paddingX * 2).isActive = true
         } else {
             separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
-            separator.heightAnchor.constraint(equalToConstant: max(1, theme.candidate.minHeight - 8)).isActive = true
+            separator.heightAnchor.constraint(equalToConstant: max(1, theme.candidate.minHeight - theme.candidate.paddingY * 2)).isActive = true
         }
         return separator
     }
@@ -378,13 +378,14 @@ private final class CandidateNavigationButton: NSControl {
         translatesAutoresizingMaskIntoConstraints = false
         label.stringValue = symbol
         label.alignment = .center
-        label.font = .systemFont(ofSize: theme.font.size + 6, weight: .regular)
+        label.font = .systemFont(ofSize: theme.font.size * 1.3, weight: .regular)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 
+        let buttonSize = max(theme.navigation.buttonSize, label.intrinsicContentSize.height)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: theme.navigation.buttonSize),
-            heightAnchor.constraint(equalToConstant: theme.navigation.buttonSize),
+            widthAnchor.constraint(equalToConstant: buttonSize),
+            heightAnchor.constraint(equalToConstant: buttonSize),
             label.leadingAnchor.constraint(equalTo: leadingAnchor),
             label.trailingAnchor.constraint(equalTo: trailingAnchor),
             label.topAnchor.constraint(equalTo: topAnchor),

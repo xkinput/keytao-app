@@ -101,6 +101,7 @@ class OperationLogButton extends StatelessWidget {
         builder: (context, _) => AppDialog(
           title: AppStrings.operationLogs,
           animation: animation,
+          scrollable: false,
           actions: [
             ActionButton(
               AppStrings.clearOperationLogs,

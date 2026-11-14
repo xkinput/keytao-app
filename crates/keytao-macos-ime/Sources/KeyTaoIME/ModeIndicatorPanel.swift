@@ -23,7 +23,9 @@ final class ModeIndicatorPanel: NSPanel {
         apply(theme)
 
         label.stringValue = modeHint.text
-        let size = NSSize(width: theme.modeHint.width, height: theme.modeHint.height)
+        let contentSize = label.intrinsicContentSize
+        let padding = theme.modeHint.fontSize / 3
+        let size = NSSize(width: contentSize.width + padding * 2, height: contentSize.height + padding * 2)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let anchor = cursorRect.isUsableTextInputRect
@@ -67,10 +69,8 @@ final class ModeIndicatorPanel: NSPanel {
         label.translatesAutoresizingMaskIntoConstraints = false
         containerView.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            label.topAnchor.constraint(equalTo: containerView.topAnchor),
-            label.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            label.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
         ])
 
         contentView = containerView

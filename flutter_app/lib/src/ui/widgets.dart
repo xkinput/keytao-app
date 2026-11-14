@@ -677,7 +677,7 @@ class ErrorMessage extends StatelessWidget {
       : const SizedBox.shrink();
 }
 
-class LogLines extends StatelessWidget {
+class LogLines extends StatefulWidget {
   const LogLines({
     super.key,
     required this.lines,
@@ -690,34 +690,61 @@ class LogLines extends StatelessWidget {
   final double height;
   final bool colorCoded;
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    child: lines.isEmpty
-        ? const Center(child: Text(AppStrings.noLogs))
-        : ListView.builder(
-            key: PageStorageKey(storageKey),
-            primary: false,
-            itemCount: lines.length,
-            itemBuilder: (context, index) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: SelectableText(
-                lines[index],
-                style: context.theme.typography.body.xs.copyWith(
-                  fontFamily: 'monospace',
-                  color: !colorCoded
-                      ? null
-                      : switch (operationLogKind(lines[index])) {
-                          LogLineKind.error => context.theme.colors.destructive,
-                          LogLineKind.warning => warningColor(context),
-                          LogLineKind.deploy => successColor(context),
-                          LogLineKind.merged => context.theme.colors.primary,
-                          LogLineKind.normal => context.theme.colors.foreground,
-                        },
+  State<LogLines> createState() => _LogLinesState();
+}
+
+class _LogLinesState extends State<LogLines> {
+  final _scrollController = ScrollController();
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scrollBehavior = ScrollConfiguration.of(context)
+        .copyWith(scrollbars: false);
+    return SizedBox(
+      height: widget.height,
+      child: widget.lines.isEmpty
+          ? const Center(child: Text(AppStrings.noLogs))
+          : Scrollbar(
+              controller: _scrollController,
+              child: ScrollConfiguration(
+                behavior: scrollBehavior,
+                child: ListView.builder(
+                  key: PageStorageKey(widget.storageKey),
+                  controller: _scrollController,
+                  primary: false,
+                  itemCount: widget.lines.length,
+                  itemBuilder: (context, index) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: SelectableText(
+                      widget.lines[index],
+                      scrollBehavior: scrollBehavior,
+                      style: context.theme.typography.body.xs.copyWith(
+                        fontFamily: 'monospace',
+                        color: !widget.colorCoded
+                            ? null
+                            : switch (operationLogKind(widget.lines[index])) {
+                                LogLineKind.error =>
+                                  context.theme.colors.destructive,
+                                LogLineKind.warning => warningColor(context),
+                                LogLineKind.deploy => successColor(context),
+                                LogLineKind.merged =>
+                                  context.theme.colors.primary,
+                                LogLineKind.normal =>
+                                  context.theme.colors.foreground,
+                              },
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-  );
+    );
+  }
 }
 
 class AppDialog extends StatelessWidget {
@@ -727,11 +754,13 @@ class AppDialog extends StatelessWidget {
     required this.child,
     required this.actions,
     required this.animation,
+    this.scrollable = true,
   });
   final String title;
   final Widget child;
   final List<Widget> actions;
   final Animation<double> animation;
+  final bool scrollable;
   @override
   Widget build(BuildContext context) => FDialog(
     animation: animation,
@@ -748,7 +777,9 @@ class AppDialog extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          Flexible(child: SingleChildScrollView(child: child)),
+          Flexible(
+            child: scrollable ? SingleChildScrollView(child: child) : child,
+          ),
           const SizedBox(height: 20),
           Align(
             alignment: Alignment.centerRight,
