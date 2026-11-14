@@ -224,3 +224,11 @@ client 对 server 做以下检查：
 3. **AppContainer 学词是否继续隔离**：继续隔离（本文默认，server 里跑第二个 runtime），还是并入桌面 userdb，彻底去掉第二份？
 4. **Windows 验收在哪跑**：先给 `ime-regressions.yml` 加一个 `windows-latest` job，跑 `cargo test -p keytao-windows-ime`，还是每批都在你的 Windows 实机上手工验收？
 5. **server 身份校验到什么程度**：只校验 exe 路径在 `%ProgramFiles%\KeyTao\` 下（本文默认，因为 Program Files 只有 admin 能写），还是还要做 Authenticode 签名校验？是否需要支持 LPAC 宿主（`S-1-15-2-2`）？
+
+### 决定（2026-11-15，用户确认按建议）
+
+1. server 不可用：用不学词的临时 userdb 继续打字（Batch 3 生效；Batch 2 开关为 Pipe 且 server 不可用时退回 InProc）。
+2. 拉起：登录 Run 键 + App 运行时看门狗；暂不加计划任务。
+3. AppContainer 学词继续隔离（server 内第二个 runtime）。
+4. 新增 Windows CI job，跑 `cargo test -p keytao-windows-ime -- --test-threads=1`。
+5. 只校验 server exe 路径在 `%ProgramFiles%\KeyTao\` 下；签名校验等安装包签名后再加；暂不支持 LPAC。
