@@ -62,6 +62,7 @@ class KeytaoAndroidChannel(
                 "openStoragePermissionSettings" -> openStoragePermissionSettings(reply)
                 "openInputMethodSettings" -> openInputMethodSettings(reply)
                 "showInputMethodPicker" -> showInputMethodPicker(reply)
+                "resetKeyboardLayout" -> resetKeyboardLayout(reply)
                 "pickDirectory" -> pickDirectory(reply)
                 "importLocalSchemeDirectory" -> pickDirectory(reply, importLocalScheme = true)
                 "listFiles" -> listFiles(call, reply)
@@ -108,6 +109,17 @@ class KeytaoAndroidChannel(
     private fun adoptAppLogger(reply: Reply) {
         KeytaoRuntimeLog.adoptAppLoggerIfEnabled()
         reply.success()
+    }
+
+    private fun resetKeyboardLayout(reply: Reply) {
+        Thread {
+            try {
+                KeytaoAndroidImeConfig.resetDefaultKeyboard(activity)
+                reply.success()
+            } catch (ex: Exception) {
+                reply.error(ex.message ?: "恢复默认键盘失败")
+            }
+        }.start()
     }
 
     private fun openUrl(call: MethodCall, reply: Reply) {

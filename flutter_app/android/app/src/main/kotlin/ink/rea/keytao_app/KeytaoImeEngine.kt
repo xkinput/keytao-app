@@ -4,7 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
+import android.util.Log
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.Executors
 
 /** Why the IME cannot compose right now, or [Readiness.READY] when it can. */
@@ -565,11 +567,11 @@ class KeytaoImeEngine(context: Context) {
     private fun ensureBundledSharedData(context: Context) {
         val root = userDir ?: error("KeyTao storage is unavailable")
         val target = File(root, "rime-data")
-        refreshBundledSharedData(target, bundledVersion) {
+        refreshBundledSharedData(target, bundledVersion) { staging ->
             check(context.assets.list(bundledRimeDataAssetPath)?.contains("default.yaml") == true) {
                 "Missing bundled RIME shared data"
             }
-            copyAssetTree(context, bundledRimeDataAssetPath, target)
+            copyAssetTree(context, bundledRimeDataAssetPath, staging)
         }
     }
 
@@ -603,14 +605,48 @@ class KeytaoImeEngine(context: Context) {
         private val upgradeDeploymentAttempts = mutableSetOf<Pair<String, String>>()
 
         @Synchronized
-        internal fun refreshBundledSharedData(target: File, version: String, copy: () -> Unit) {
-            val stamp = File(target, ".bundled-version")
-            if (File(target, "default.yaml").isFile &&
-                runCatching { stamp.readText() }.getOrNull() == version) return
-            check(!stamp.exists() || stamp.delete()) { "Failed to invalidate bundled RIME version" }
-            copy()
-            check(File(target, "default.yaml").isFile) { "Missing rime-data/default.yaml" }
-            stamp.writeText(version)
+        internal fun refreshBundledSharedData(target: File, version: String, copy: (File) -> Unit) {
+            val parent = target.absoluteFile.parentFile ?: error("Missing bundled RIME parent directory")
+            check(parent.mkdirs() || parent.isDirectory) { "Failed to create bundled RIME parent directory" }
+            RandomAccessFile(File(parent, ".${target.name}.lock"), "rw").use { lockFile ->
+                val lock = lockFile.channel.lock()
+                try {
+                    val staging = File(parent, ".${target.name}.staging")
+                    val previous = File(parent, ".${target.name}.previous")
+                    if (!target.exists() && previous.exists()) {
+                        check(previous.renameTo(target)) { "Failed to restore bundled RIME shared data" }
+                    }
+                    val stamp = File(target, ".bundled-version")
+                    if (File(target, "default.yaml").isFile &&
+                        runCatching { stamp.readText() }.getOrNull() == version) {
+                        for (leftover in listOf(staging, previous)) {
+                            if (!runCatching { leftover.deleteRecursively() }.getOrDefault(false)) {
+                                Log.w("KeytaoImeEngine", "Failed to remove bundled RIME leftover: ${leftover.name}")
+                            }
+                        }
+                        return
+                    }
+                    check(staging.deleteRecursively()) { "Failed to remove staged bundled RIME shared data" }
+                    check(staging.mkdirs()) { "Failed to create bundled RIME staging directory" }
+                    try {
+                        copy(staging)
+                        check(File(staging, "default.yaml").isFile) { "Missing rime-data/default.yaml" }
+                        check(previous.deleteRecursively()) { "Failed to remove old bundled RIME shared data" }
+                        val hadTarget = target.exists()
+                        check(!hadTarget || target.renameTo(previous)) { "Failed to move old bundled RIME shared data" }
+                        if (!staging.renameTo(target)) {
+                            check(!hadTarget || previous.renameTo(target)) { "Failed to restore bundled RIME shared data" }
+                            error("Failed to activate bundled RIME shared data")
+                        }
+                        check(previous.deleteRecursively()) { "Failed to remove old bundled RIME shared data" }
+                        stamp.writeText(version)
+                    } finally {
+                        staging.deleteRecursively()
+                    }
+                } finally {
+                    lock.release()
+                }
+            }
         }
 
         @Synchronized

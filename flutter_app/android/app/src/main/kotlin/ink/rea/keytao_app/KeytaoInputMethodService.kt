@@ -1029,8 +1029,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
     }
 
-    override fun onToolbarCustomization(order: List<String>, pinnedCount: Int) {
-        if (!KeytaoAndroidImeConfig.persistToolbarCustomization(this, order, pinnedCount)) {
+    override fun onToolbarCustomization(order: List<String>, pinnedCount: Int, symbolLayer: Boolean) {
+        if (!KeytaoAndroidImeConfig.persistToolbarCustomization(this, order, pinnedCount, symbolLayer)) {
             keyboardView?.showMessage("工具栏顺序保存失败")
         }
     }
