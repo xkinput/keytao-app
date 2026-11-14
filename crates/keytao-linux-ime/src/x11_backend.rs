@@ -413,6 +413,17 @@ impl KeyTaoHandler {
         let Some(renderer) = &self.renderer else {
             return;
         };
+        // XIM clients cannot embed preedit, so keep it visible without candidates.
+        let mut preedit_only;
+        let state = if renderer.hide_candidate_panel() {
+            preedit_only = state.clone();
+            preedit_only.candidates.clear();
+            preedit_only.page = 0;
+            preedit_only.is_last_page = true;
+            &preedit_only
+        } else {
+            state
+        };
         let (pixels, w, h, hit_areas) = renderer.render_with_hit_areas(state);
         self.panel_hit_areas = hit_areas;
         let (root_x, root_y) = self.last_anchor;

@@ -632,7 +632,7 @@ pub(crate) fn diagnostics_enabled() -> bool {
 
 /// Missing theme file or key means panel-only preedit by default.
 pub(crate) fn embedded_composition() -> bool {
-    with_current_theme(|theme| theme.ui.embedded_composition)
+    with_current_theme(|theme| theme.ui.effective_embedded_composition())
 }
 
 pub(crate) fn current_theme() -> keytao_theme::ResolvedImeTheme {
@@ -1452,7 +1452,7 @@ pub(crate) fn update_ime_windows(
         } else {
             allow
         }
-    });
+    }) && !current_theme().ui.hide_candidate_panel;
     if shared_state.borrow().ime_state.is_none() {
         return true;
     }

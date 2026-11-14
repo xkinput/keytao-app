@@ -135,6 +135,7 @@ impl InputContext {
     async fn apply_ime_state(&self, ime_state: ImeState, ctxt: &SignalContext<'_>) {
         let ascii_mode = ime_state.is_english_mode();
         let has_candidates = !ime_state.candidates.is_empty();
+        let hide_candidate_panel = self.theme_resolver.current().ui.hide_candidate_panel;
         if let Some(ref text) = ime_state.committed {
             if !text.is_empty() {
                 tracing::debug!("IBus CommitText: {} chars", text.chars().count());
@@ -168,7 +169,7 @@ impl InputContext {
             }
         }
 
-        if ime_state.candidates.is_empty() {
+        if ime_state.candidates.is_empty() || hide_candidate_panel {
             let _ = Self::hide_lookup_table(ctxt).await;
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_lookup_table(kctxt, false).await;

@@ -383,6 +383,9 @@ Future<ImeUiSettingsDto> setImeEmbeddedComposition({required bool embedded}) =>
       embedded: embedded,
     );
 
+Future<ImeUiSettingsDto> setImeHideCandidatePanel({required bool hide_}) =>
+    RustLib.instance.api.crateApiCoreSetImeHideCandidatePanel(hide_: hide_);
+
 Future<EnglishModeDto> getDesktopEnglishMode() =>
     RustLib.instance.api.crateApiCoreGetDesktopEnglishMode();
 

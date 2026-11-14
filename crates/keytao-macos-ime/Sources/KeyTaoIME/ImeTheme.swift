@@ -78,6 +78,11 @@ struct ImeTheme: Codable {
         var effectiveColorScheme: EffectiveThemeColorScheme
         var accentColor: ThemeColor?
         var embeddedComposition: Bool
+        var hideCandidatePanel: Bool
+
+        var effectiveEmbeddedComposition: Bool {
+            embeddedComposition || hideCandidatePanel
+        }
     }
 
     struct Font: Codable {
@@ -187,7 +192,8 @@ struct ImeTheme: Codable {
                 colorScheme: .auto,
                 effectiveColorScheme: .light,
                 accentColor: nil,
-                embeddedComposition: false
+                embeddedComposition: false,
+                hideCandidatePanel: false
             ),
             font: Font(
                 family: nil,
@@ -258,6 +264,17 @@ struct ImeTheme: Codable {
                 englishText: "英"
             )
         )
+    }
+}
+
+extension ImeTheme.Ui {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        colorScheme = try container.decode(ThemeColorScheme.self, forKey: .colorScheme)
+        effectiveColorScheme = try container.decode(EffectiveThemeColorScheme.self, forKey: .effectiveColorScheme)
+        accentColor = try container.decodeIfPresent(ThemeColor.self, forKey: .accentColor)
+        embeddedComposition = try container.decode(Bool.self, forKey: .embeddedComposition)
+        hideCandidatePanel = try container.decodeIfPresent(Bool.self, forKey: .hideCandidatePanel) ?? false
     }
 }
 

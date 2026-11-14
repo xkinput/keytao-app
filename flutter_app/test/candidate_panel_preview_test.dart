@@ -34,6 +34,8 @@ class _PreviewController extends ViewController {
       effectiveColorScheme: current.effectiveColorScheme,
       orientation: orientation ?? current.orientation,
       embeddedComposition: current.embeddedComposition,
+      hideCandidatePanel: current.hideCandidatePanel,
+      effectiveEmbeddedComposition: current.effectiveEmbeddedComposition,
       accentColor: accentColor ?? current.accentColor,
       fontSize: fontSize ?? current.fontSize,
       themeExists: current.themeExists,
@@ -47,6 +49,7 @@ class _PreviewController extends ViewController {
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
     String? accentColor,
     double? fontSize,
   }) async {

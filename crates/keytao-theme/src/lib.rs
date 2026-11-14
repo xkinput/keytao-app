@@ -263,13 +263,31 @@ pub struct ResolvedImeTheme {
     pub mode_hint: ModeHintTheme,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct UiTheme {
     pub color_scheme: UiColorScheme,
     pub effective_color_scheme: EffectiveColorScheme,
     pub accent_color: Option<RgbaColor>,
     pub embedded_composition: bool,
+    pub hide_candidate_panel: bool,
+}
+
+impl Serialize for UiTheme {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("UiTheme", 6)?;
+        state.serialize_field("colorScheme", &self.color_scheme)?;
+        state.serialize_field("effectiveColorScheme", &self.effective_color_scheme)?;
+        state.serialize_field("accentColor", &self.accent_color)?;
+        state.serialize_field("embeddedComposition", &self.embedded_composition)?;
+        state.serialize_field("hideCandidatePanel", &self.hide_candidate_panel)?;
+        state.serialize_field(
+            "effectiveEmbeddedComposition",
+            &self.effective_embedded_composition(),
+        )?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1027,6 +1045,7 @@ impl Default for UiTheme {
             effective_color_scheme: EffectiveColorScheme::Light,
             accent_color: None,
             embedded_composition: false,
+            hide_candidate_panel: false,
         }
     }
 }
@@ -1069,6 +1088,8 @@ struct PartialUiTheme {
     color_scheme: Option<UiColorScheme>,
     #[serde(alias = "embedded_composition")]
     embedded_composition: Option<bool>,
+    #[serde(alias = "hide_candidate_panel")]
+    hide_candidate_panel: Option<bool>,
     #[serde(alias = "night_mode")]
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "optional_color")]
@@ -1183,6 +1204,10 @@ struct PartialModeHintTheme {
 }
 
 impl UiTheme {
+    pub fn effective_embedded_composition(&self) -> bool {
+        self.hide_candidate_panel || self.embedded_composition
+    }
+
     fn apply(&mut self, partial: PartialUiTheme) {
         if let Some(color_scheme) = partial.color_scheme {
             self.color_scheme = color_scheme;
@@ -1198,6 +1223,9 @@ impl UiTheme {
         }
         if let Some(embedded_composition) = partial.embedded_composition {
             self.embedded_composition = embedded_composition;
+        }
+        if let Some(hide_candidate_panel) = partial.hide_candidate_panel {
+            self.hide_candidate_panel = hide_candidate_panel;
         }
     }
 }
@@ -1659,6 +1687,8 @@ mod tests {
         assert_eq!(theme.version, THEME_SCHEMA_VERSION);
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert!(!theme.ui.embedded_composition);
+        assert!(!theme.ui.hide_candidate_panel);
+        assert!(!theme.ui.effective_embedded_composition());
         assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
         assert_eq!(theme.panel.min_width, 128.0);
         assert_eq!(theme.font.size, 20.0);
@@ -1669,6 +1699,39 @@ mod tests {
         );
         assert_eq!(theme.mode_hint.width, 72.0);
         assert_eq!(theme.mode_hint.height, 44.0);
+    }
+
+    #[test]
+    fn hide_candidate_panel_forces_effective_embedded_composition() {
+        for hide in [false, true] {
+            for embedded in [false, true] {
+                let mut theme = ResolvedImeTheme::default();
+                let partial = serde_yaml::from_str::<PartialTheme>(&format!(
+                    "ui:\n  hideCandidatePanel: {hide}\n  embeddedComposition: {embedded}\n"
+                ))
+                .unwrap();
+                theme.apply(partial);
+                assert_eq!(theme.ui.hide_candidate_panel, hide);
+                assert_eq!(theme.ui.embedded_composition, embedded);
+                assert_eq!(theme.ui.effective_embedded_composition(), hide || embedded);
+                let json = serde_json::to_value(&theme).unwrap();
+                assert_eq!(json["ui"]["hideCandidatePanel"], hide);
+                assert_eq!(json["ui"]["embeddedComposition"], embedded);
+                assert_eq!(json["ui"]["effectiveEmbeddedComposition"], hide || embedded);
+            }
+        }
+    }
+
+    #[test]
+    fn hide_candidate_panel_accepts_legacy_key_and_rejects_non_boolean() {
+        let partial =
+            serde_yaml::from_str::<PartialTheme>("ui:\n  hide_candidate_panel: true\n").unwrap();
+        let mut theme = ResolvedImeTheme::default();
+        theme.apply(partial);
+        assert!(theme.ui.hide_candidate_panel);
+        assert!(
+            serde_yaml::from_str::<PartialTheme>("ui:\n  hideCandidatePanel: wrong\n").is_err()
+        );
     }
 
     #[test]

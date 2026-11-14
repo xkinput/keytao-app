@@ -336,6 +336,14 @@ impl App {
     }
 
     fn redraw_panel(&mut self, qh: &QueueHandle<Self>) {
+        let hide_candidates = self
+            .renderer
+            .as_ref()
+            .is_some_and(PanelRenderer::hide_candidate_panel);
+        if hide_candidates && !self.mode_hint_active() {
+            self.hide_panel_popup();
+            return;
+        }
         let (Some(renderer), Some(shm), Some(surface)) = (
             self.renderer.as_ref(),
             self.shm.as_ref(),
@@ -348,7 +356,7 @@ impl App {
         let (pixels, w, h, hit_areas) = if let Some(state) = self
             .ime_state
             .as_ref()
-            .filter(|state| !state.candidates.is_empty())
+            .filter(|state| !hide_candidates && !state.candidates.is_empty())
         {
             renderer.render_with_hit_areas(state)
         } else if show_hint {
@@ -393,8 +401,12 @@ impl App {
         self.pressed_click = None;
         // The application already renders preedit through set_preedit_string.
         // Keep the popup for actual candidate menus and short mode hints only.
-        let has_content = !state.candidates.is_empty();
-        if has_content {
+        let has_content = !state.candidates.is_empty()
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|renderer| !renderer.hide_candidate_panel());
+        if !state.candidates.is_empty() {
             // A hint's timeout must never hide candidates typed after it.
             self.mode_hint_until = None;
         }

@@ -18,6 +18,8 @@ pub struct ImeUiSettings {
     pub effective_color_scheme: keytao_theme::EffectiveColorScheme,
     pub orientation: keytao_theme::PanelOrientation,
     pub embedded_composition: bool,
+    pub hide_candidate_panel: bool,
+    pub effective_embedded_composition: bool,
     pub accent_color: String,
     pub font_size: f32,
     pub theme_path: Option<String>,
@@ -53,6 +55,8 @@ fn ime_ui_settings_from_paths(
         effective_color_scheme: theme.ui.effective_color_scheme,
         orientation: theme.panel.orientation,
         embedded_composition: theme.ui.embedded_composition,
+        hide_candidate_panel: theme.ui.hide_candidate_panel,
+        effective_embedded_composition: theme.ui.effective_embedded_composition(),
         accent_color: color_to_hex(accent_color),
         font_size: theme.font.size,
         theme_exists: theme_path.is_file(),
@@ -98,6 +102,31 @@ fn write_ime_embedded_composition_to_path(
     theme_path: PathBuf,
     embedded: bool,
 ) -> Result<(), String> {
+    write_ime_ui_flag_to_path(
+        theme_path,
+        "embeddedComposition",
+        "embedded_composition",
+        embedded,
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_hide_candidate_panel_to_path(theme_path: PathBuf, hide: bool) -> Result<(), String> {
+    write_ime_ui_flag_to_path(
+        theme_path,
+        "hideCandidatePanel",
+        "hide_candidate_panel",
+        hide,
+    )
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_ime_ui_flag_to_path(
+    theme_path: PathBuf,
+    key: &str,
+    legacy_key: &str,
+    value: bool,
+) -> Result<(), String> {
     if let Some(parent) = theme_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建主题目录失败: {e}"))?;
     }
@@ -121,10 +150,10 @@ fn write_ime_embedded_composition_to_path(
             serde_yaml::Value::Number(serde_yaml::Number::from(keytao_theme::THEME_SCHEMA_VERSION))
         });
     let ui_mapping = yaml_child_mapping(mapping, "ui", "主题 UI 配置必须是 YAML mapping")?;
-    ui_mapping.remove(&serde_yaml::Value::String("embedded_composition".into()));
+    ui_mapping.remove(&serde_yaml::Value::String(legacy_key.into()));
     ui_mapping.insert(
-        serde_yaml::Value::String("embeddedComposition".into()),
-        serde_yaml::Value::Bool(embedded),
+        serde_yaml::Value::String(key.into()),
+        serde_yaml::Value::Bool(value),
     );
     let content = serde_yaml::to_string(&root).map_err(|e| format!("序列化主题配置失败: {e}"))?;
     write_file_atomic(&theme_path, content.as_bytes())
@@ -760,6 +789,19 @@ pub fn set_ime_embedded_composition(embedded: bool) -> Result<ImeUiSettings, Cor
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn set_ime_hide_candidate_panel(hide: bool) -> Result<ImeUiSettings, CoreError> {
+    let result: Result<_, String> = (|| {
+        write_ime_hide_candidate_panel_to_path(ime_theme_path()?, hide)?;
+        let reload_message = match write_keytao_ime_reload_stamp() {
+            Ok(()) => "已保存无候选框模式设置并通知系统输入法重载".to_string(),
+            Err(e) => format!("已保存无候选框模式设置，但系统输入法重载通知失败：{e}"),
+        };
+        ime_ui_settings_with_message(reload_message)
+    })();
+    result.map_err(CoreError::Other)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn set_ime_ui_settings(
     color_scheme: keytao_theme::UiColorScheme,
     orientation: keytao_theme::PanelOrientation,
@@ -934,6 +976,76 @@ mod tests {
             Some(keytao_theme::THEME_SCHEMA_VERSION.into())
         );
         assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(false));
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn hide_candidate_panel_round_trip_preserves_embedded_and_unrelated_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.yaml");
+        std::fs::write(&path, "version: 7\nui:\n  embeddedComposition: false\n  hide_candidate_panel: false\n  accentColor: '#123456'\ncandidate:\n  labelSuffix: ')'\n").unwrap();
+
+        for hide in [true, false] {
+            write_ime_hide_candidate_panel_to_path(path.clone(), hide).unwrap();
+            keytao_theme::write_ime_ui_settings_to_path(
+                &path,
+                keytao_theme::UiColorScheme::Dark,
+                keytao_theme::PanelOrientation::Horizontal,
+                "#123456".into(),
+                24.0,
+            )
+            .unwrap();
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(root["version"].as_u64(), Some(7));
+            assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(hide));
+            assert!(root["ui"].get("hide_candidate_panel").is_none());
+            assert_eq!(root["ui"]["embeddedComposition"].as_bool(), Some(false));
+            assert_eq!(root["ui"]["accentColor"].as_str(), Some("#123456"));
+            assert_eq!(root["candidate"]["labelSuffix"].as_str(), Some(")"));
+            let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+            assert_eq!(settings.hide_candidate_panel, hide);
+            assert!(!settings.embedded_composition);
+            assert_eq!(settings.effective_embedded_composition, hide);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn hide_candidate_panel_rejects_invalid_yaml_without_overwriting_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.yaml");
+        for original in ["ui: [", "ui:\n  hideCandidatePanel: [true"] {
+            std::fs::write(&path, original).unwrap();
+            assert!(write_ime_hide_candidate_panel_to_path(path.clone(), true).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn hide_candidate_panel_defaults_off_and_creates_missing_parent_and_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/theme.yaml");
+        let settings = ime_ui_settings_from_paths(path.clone(), None, String::new()).unwrap();
+        assert!(!settings.hide_candidate_panel);
+        assert!(!settings.embedded_composition);
+        assert!(!settings.effective_embedded_composition);
+
+        write_ime_hide_candidate_panel_to_path(path.clone(), true).unwrap();
+        let root: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            root["version"].as_u64(),
+            Some(keytao_theme::THEME_SCHEMA_VERSION.into())
+        );
+        assert_eq!(root["ui"]["hideCandidatePanel"].as_bool(), Some(true));
+        let settings = ime_ui_settings_from_paths(path, None, String::new()).unwrap();
+        assert!(settings.hide_candidate_panel);
+        assert!(!settings.embedded_composition);
+        assert!(settings.effective_embedded_composition);
     }
 
     #[test]

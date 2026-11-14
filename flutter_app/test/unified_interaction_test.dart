@@ -17,6 +17,7 @@ class _EditingController extends ViewController {
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
     String? accentColor,
     double? fontSize,
   }) async {

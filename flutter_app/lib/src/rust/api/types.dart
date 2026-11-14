@@ -483,6 +483,8 @@ class ImeUiSettingsDto {
   final EffectiveColorSchemeDto effectiveColorScheme;
   final PanelOrientationDto orientation;
   final bool embeddedComposition;
+  final bool hideCandidatePanel;
+  final bool effectiveEmbeddedComposition;
   final String accentColor;
   final double fontSize;
   final String? themePath;
@@ -496,6 +498,8 @@ class ImeUiSettingsDto {
     required this.effectiveColorScheme,
     required this.orientation,
     required this.embeddedComposition,
+    required this.hideCandidatePanel,
+    required this.effectiveEmbeddedComposition,
     required this.accentColor,
     required this.fontSize,
     this.themePath,
@@ -511,6 +515,8 @@ class ImeUiSettingsDto {
       effectiveColorScheme.hashCode ^
       orientation.hashCode ^
       embeddedComposition.hashCode ^
+      hideCandidatePanel.hashCode ^
+      effectiveEmbeddedComposition.hashCode ^
       accentColor.hashCode ^
       fontSize.hashCode ^
       themePath.hashCode ^
@@ -528,6 +534,8 @@ class ImeUiSettingsDto {
           effectiveColorScheme == other.effectiveColorScheme &&
           orientation == other.orientation &&
           embeddedComposition == other.embeddedComposition &&
+          hideCandidatePanel == other.hideCandidatePanel &&
+          effectiveEmbeddedComposition == other.effectiveEmbeddedComposition &&
           accentColor == other.accentColor &&
           fontSize == other.fontSize &&
           themePath == other.themePath &&

@@ -252,6 +252,7 @@ class _SettingsCardState extends State<SettingsCard> {
   Future<void> _savePreview({
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
     double? fontSize,
   }) async {
     setState(() {
@@ -262,6 +263,7 @@ class _SettingsCardState extends State<SettingsCard> {
     final saved = await controller.saveUi(
       colorScheme: colorScheme,
       orientation: orientation,
+      hideCandidatePanel: hideCandidatePanel,
       fontSize: fontSize,
     );
     if (!saved && mounted) setState(_resetPreview);
@@ -344,17 +346,23 @@ class _SettingsCardState extends State<SettingsCard> {
                 ? null
                 : (value) => _savePreview(colorScheme: value),
           ),
-          ChoiceSetting<PanelOrientationDto>(
-            label: '候选排列',
-            value: s.orientation,
-            options: orientations,
+          ChoiceSetting<PanelOrientationDto?>(
+            label: '候选模式',
+            value: s.hideCandidatePanel ? null : s.orientation,
+            options: const {...orientations, null: '隐藏'},
             icons: const {
               PanelOrientationDto.horizontal: FLucideIcons.columns3,
               PanelOrientationDto.vertical: FLucideIcons.rows3,
+              null: FLucideIcons.eyeOff,
             },
             onChanged: c.busy
                 ? null
-                : (value) => _savePreview(orientation: value),
+                : (value) => value == null
+                      ? c.saveHideCandidatePanel(true)
+                      : _savePreview(
+                          orientation: value,
+                          hideCandidatePanel: false,
+                        ),
           ),
           ChoiceSetting<EnglishModeDto>(
             label: AppStrings.englishMode,
@@ -367,39 +375,42 @@ class _SettingsCardState extends State<SettingsCard> {
           if (c.showsEmbeddedComposition)
             SwitchSetting(
               AppStrings.embedded,
-              value: s.embeddedComposition,
-              stateLabel: s.embeddedComposition
+              value: s.effectiveEmbeddedComposition,
+              stateLabel: s.effectiveEmbeddedComposition
                   ? AppStrings.on
                   : AppStrings.off,
-              hint: AppStrings.embeddedDescription,
-              onChanged: c.busy ? null : c.saveEmbedded,
+              onChanged: c.busy || s.hideCandidatePanel ? null : c.saveEmbedded,
             ),
-          SliderSetting(
-            label: AppStrings.candidateFontSize,
-            value: s.fontSize,
-            min: candidateFontMin,
-            max: candidateFontMax,
-            divisions: candidateFontDivisions,
-            icon: FLucideIcons.type,
-            onPreview: (value) => setState(() => _previewFontSize = value),
-            onChanged: c.busy ? null : (value) => _savePreview(fontSize: value),
-          ),
-          AccentPicker(
-            controller: c,
-            onPreview: (value) {
-              if (mounted) setState(() => _previewAccent = value);
-            },
-          ),
-          CandidatePanelPreview(
-            theme: c.resolveCandidatePanelPreview(
-              colorScheme: _previewScheme ?? s.colorScheme,
-              accentColor: _previewAccent ?? s.accentColor,
-              fontSize: _previewFontSize ?? s.fontSize,
-              systemDark:
-                  MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+          if (!s.hideCandidatePanel) ...[
+            SliderSetting(
+              label: AppStrings.candidateFontSize,
+              value: s.fontSize,
+              min: candidateFontMin,
+              max: candidateFontMax,
+              divisions: candidateFontDivisions,
+              icon: FLucideIcons.type,
+              onPreview: (value) => setState(() => _previewFontSize = value),
+              onChanged: c.busy
+                  ? null
+                  : (value) => _savePreview(fontSize: value),
             ),
-            orientation: _previewOrientation ?? s.orientation,
-          ),
+            AccentPicker(
+              controller: c,
+              onPreview: (value) {
+                if (mounted) setState(() => _previewAccent = value);
+              },
+            ),
+            CandidatePanelPreview(
+              theme: c.resolveCandidatePanelPreview(
+                colorScheme: _previewScheme ?? s.colorScheme,
+                accentColor: _previewAccent ?? s.accentColor,
+                fontSize: _previewFontSize ?? s.fontSize,
+                systemDark:
+                    MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+              ),
+              orientation: _previewOrientation ?? s.orientation,
+            ),
+          ],
           if (s.themePath case final path?)
             Row(
               children: [

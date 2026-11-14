@@ -157,7 +157,8 @@ impl KimpanelHandle {
             }
         }
 
-        if state.candidates.is_empty() {
+        let theme = self.theme_resolver.current();
+        if state.candidates.is_empty() || theme.ui.hide_candidate_panel {
             if let Err(e) = self.set_lookup_table(&[], &[], &[], false, false, -1).await {
                 tracing::warn!("Kimpanel: set_lookup_table(empty) failed: {e}");
             }
@@ -167,7 +168,6 @@ impl KimpanelHandle {
             return;
         }
 
-        let theme = self.theme_resolver.current();
         let model = theme.candidate_panel_model(
             state_to_panel_input(state),
             &UiCapabilities::system_lookup_table(),

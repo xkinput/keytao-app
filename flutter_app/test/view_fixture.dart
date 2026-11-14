@@ -96,6 +96,8 @@ class ViewController extends AppController {
       effectiveColorScheme: EffectiveColorSchemeDto.light,
       orientation: PanelOrientationDto.horizontal,
       embeddedComposition: false,
+      hideCandidatePanel: false,
+      effectiveEmbeddedComposition: false,
       accentColor: '#3B73D9',
       fontSize: 18,
       themeExists: true,

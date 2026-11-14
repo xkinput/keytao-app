@@ -302,6 +302,8 @@ pub struct ImeUiSettingsDto {
     pub effective_color_scheme: EffectiveColorSchemeDto,
     pub orientation: PanelOrientationDto,
     pub embedded_composition: bool,
+    pub hide_candidate_panel: bool,
+    pub effective_embedded_composition: bool,
     pub accent_color: String,
     pub font_size: f32,
     pub theme_path: Option<String>,

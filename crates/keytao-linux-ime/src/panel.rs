@@ -410,6 +410,10 @@ impl X11OverlayPanel {
     }
 
     pub fn show(&mut self, state: &ImeState, x: i32, y: i32) {
+        if self.renderer.hide_candidate_panel() {
+            self.hide();
+            return;
+        }
         let (pixels, w, h) = self.renderer.render(state);
         self.conn
             .configure_window(
@@ -562,6 +566,10 @@ impl PanelRenderer {
             scale: clamp_panel_scale(scale),
             theme_resolver: ThemeResolver::from_default_locations(),
         })
+    }
+
+    pub fn hide_candidate_panel(&self) -> bool {
+        self.theme_resolver.current().ui.hide_candidate_panel
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).

@@ -257,7 +257,7 @@ final class KeyTaoInputController: IMKInputController {
         hasComposition = state.hasComposition
         englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
 
-        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.embeddedComposition) {
+        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.effectiveEmbeddedComposition) {
             hideCandidates()
         } else {
             showCandidates(panelModel(for: state), client: client)
@@ -280,7 +280,7 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?) {
-        guard ImeThemeManager.shared.theme().ui.embeddedComposition else {
+        guard ImeThemeManager.shared.theme().ui.effectiveEmbeddedComposition else {
             if hasMarkedText { clearMarkedText(client: client) }
             lastPreeditCursor = 0
             return
@@ -350,7 +350,7 @@ final class KeyTaoInputController: IMKInputController {
 
     private func panelModel(for state: KeyTaoImeState) -> KeyTaoPanelModel {
         var model = state.candidatePanel
-        if ImeThemeManager.shared.theme().ui.embeddedComposition || state.preedit.isEmpty {
+        if ImeThemeManager.shared.theme().ui.effectiveEmbeddedComposition || state.preedit.isEmpty {
             model.preedit = nil
         } else {
             var scalars = Array(state.preedit.unicodeScalars)
@@ -362,7 +362,10 @@ final class KeyTaoInputController: IMKInputController {
 
     private func showCandidates(_ model: KeyTaoPanelModel, client: IMKTextInput?) {
         let generation = inputContextGeneration.current
-        guard isActive else { hideCandidates(); return }
+        guard isActive, !ImeThemeManager.shared.theme().ui.hideCandidatePanel else {
+            hideCandidates()
+            return
+        }
         let windowLevel = panelLevel(for: client)
         guard inputContextGeneration.isCurrent(generation), isActive else { return }
         let rect = cursorRect(for: client)
@@ -566,7 +569,7 @@ final class KeyTaoInputController: IMKInputController {
         guard let state = KeyTaoImeState.consuming(keytao_session_state_json(session)) else { return }
         hasComposition = state.hasComposition
         englishMode = self.session.map { keytao_session_get_english_mode($0) } ?? state.asciiMode
-        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.embeddedComposition) {
+        if state.candidatePanel.candidates.isEmpty && (state.preedit.isEmpty || ImeThemeManager.shared.theme().ui.effectiveEmbeddedComposition) {
             hideCandidates()
         } else {
             showCandidates(panelModel(for: state), client: client)

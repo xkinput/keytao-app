@@ -1728,6 +1728,7 @@ class AppController extends ChangeNotifier {
           'accent_color': ui.accentColor,
           'font_size': ui.fontSize,
           'embedded_composition': ui.embeddedComposition,
+          'hide_candidate_panel': ui.hideCandidatePanel,
         },
       'desktop_english_mode': desktopEnglishMode.name,
     };
@@ -2009,6 +2010,9 @@ class AppController extends ChangeNotifier {
       );
       if (ui['embedded_composition'] case final bool value) {
         uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+      }
+      if (ui['hide_candidate_panel'] case final bool value) {
+        uiSettings = await core.setImeHideCandidatePanel(hide_: value);
       }
     }
     if (settings['desktop_english_mode'] case final String mode
@@ -2516,6 +2520,7 @@ class AppController extends ChangeNotifier {
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,
+    bool? hideCandidatePanel,
     String? accentColor,
     double? fontSize,
   }) {
@@ -2532,12 +2537,22 @@ class AppController extends ChangeNotifier {
         accentColor: normalizedAccent ?? current.accentColor,
         fontSize: (fontSize ?? current.fontSize).clamp(10, 36),
       );
+      if (hideCandidatePanel != null &&
+          hideCandidatePanel != current.hideCandidatePanel) {
+        uiSettings = await core.setImeHideCandidatePanel(
+          hide_: hideCandidatePanel,
+        );
+      }
       await _persistSchemeSettings();
     });
   }
 
   Future<bool> saveEmbedded(bool value) => run(() async {
     uiSettings = await core.setImeEmbeddedComposition(embedded: value);
+    await _persistSchemeSettings();
+  });
+  Future<bool> saveHideCandidatePanel(bool value) => run(() async {
+    uiSettings = await core.setImeHideCandidatePanel(hide_: value);
     await _persistSchemeSettings();
   });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {

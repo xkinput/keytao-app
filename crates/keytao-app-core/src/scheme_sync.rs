@@ -109,7 +109,7 @@ fn sanitize_settings(input: &Value) -> Value {
         ),
         (
             "ime_ui",
-            &["embedded_composition"][..],
+            &["embedded_composition", "hide_candidate_panel"][..],
             &[("font_size", 10.0, 36.0)][..],
             &[
                 ("color_scheme", &["auto", "light", "dark"][..]),
