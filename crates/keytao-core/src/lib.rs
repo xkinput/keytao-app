@@ -11,6 +11,11 @@ pub mod english_mode;
 ))]
 mod runtime_access_tests;
 pub mod runtime_log;
+mod schema_switch_request;
+pub use schema_switch_request::{
+    read_schema_switch_request, schema_switch_applied_generation, write_file_atomic,
+    SchemaSwitchRequest, SCHEMA_SWITCH_APPLIED_FILE, SCHEMA_SWITCH_REQUEST_FILE,
+};
 
 use runtime_log::Level;
 use serde::{Deserialize, Serialize};
@@ -1892,6 +1897,19 @@ mod desktop {
             engine_capabilities().supports_candidate_selection()
         }
 
+        pub(crate) fn prepare_switch_request(
+            root: &Path,
+        ) -> Result<Option<SchemaSwitchRequest>, String> {
+            let request = schema_switch_request::pending_for_process(root)?;
+            if let (Some(request), Some(schema_id)) =
+                (request.as_ref(), deployed_schema_id_from_dir(root))
+            {
+                let _rime = rime_api_lock();
+                persist_requested_switches_locked(&schema_id, request)?;
+            }
+            Ok(request)
+        }
+
         pub(crate) fn new_with_user_data_dir(user_data_dir: Option<&Path>) -> Result<Self, String> {
             // Locating and checking the compiled schema is file I/O; the
             // librime lock is only taken once the session is actually created.
@@ -1914,7 +1932,6 @@ mod desktop {
             } else {
                 validate_active_schema(&session)?;
             }
-            apply_saved_schema_switches_locked(&session)?;
             Ok(Self {
                 session: ManuallyDrop::new(session),
                 user_data_dir: effective_user_data_dir,
@@ -2365,8 +2382,26 @@ mod desktop {
         pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
             let _rime = rime_api_lock();
             select_schema_checked(&self.session, schema_id)?;
-            apply_saved_schema_switches_locked(&self.session)?;
             Ok(extract_state_readonly(&self.session))
+        }
+
+        pub(crate) fn apply_switch_request(
+            &self,
+            request: &SchemaSwitchRequest,
+        ) -> Result<(), String> {
+            let _rime = rime_api_lock();
+            let status = self
+                .session
+                .status()
+                .map_err(|error| format!("read switch schema: {error:?}"))?;
+            for switch in read_schema_switches_locked(status.schema_id()) {
+                for name in switch.name.iter().chain(switch.options.iter()) {
+                    if let Some(&enabled) = request.options.get(name) {
+                        set_session_option(&self.session, name, enabled);
+                    }
+                }
+            }
+            Ok(())
         }
 
         pub fn is_ascii_mode(&self) -> bool {
@@ -2529,146 +2564,108 @@ mod desktop {
         setup_only(user_dir.to_string_lossy().into_owned(), shared_dir.into())
     }
 
-    fn with_user_config_locked<T>(
-        action: impl FnOnce(&mut RimeConfig) -> Result<T, String>,
-    ) -> Result<T, String> {
-        unsafe {
-            let api = rime_get_api();
-            let open = rime_api_member!(api, user_config_open)
-                .ok_or("librime user config API is unavailable")?;
-            let close = rime_api_member!(api, config_close)
-                .ok_or("librime config close API is unavailable")?;
-            let mut config: RimeConfig = std::mem::zeroed();
-            if open(c"user".as_ptr(), &mut config) == 0 {
-                return Err("cannot open Rime user config".into());
-            }
-            let result = action(&mut config);
-            let closed = close(&mut config) != 0;
-            if !closed {
-                return Err("cannot save Rime user config".into());
-            }
-            result
-        }
-    }
-
-    fn switch_settings_locked(
-        config: &mut RimeConfig,
-        schema_id: &str,
-    ) -> Vec<SchemaSwitchSetting> {
-        visible_switch_settings(schema_id, read_schema_switches_locked(schema_id), |name| {
-            config_bool_locked(config, &format!("var/option/{name}"))
-        })
-    }
-
     pub(super) fn list_switch_settings(
+        user_dir: &Path,
         schema_id: &str,
     ) -> Result<Vec<SchemaSwitchSetting>, String> {
         let _rime = rime_api_lock();
-        with_user_config_locked(|config| Ok(switch_settings_locked(config, schema_id)))
+        let user: Value = match std::fs::read(user_dir.join("user.yaml")) {
+            Ok(bytes) => serde_yaml::from_slice(&bytes)
+                .map_err(|error| format!("read Rime user config: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(format!("read Rime user config: {error}")),
+        };
+        let pending = schema_switch_request::pending(user_dir)?;
+        Ok(visible_switch_settings(
+            schema_id,
+            read_schema_switches_locked(schema_id),
+            |name| {
+                pending
+                    .as_ref()
+                    .and_then(|request| request.options.get(name).copied())
+                    .or_else(|| user.get("var")?.get("option")?.get(name)?.as_bool())
+            },
+        ))
     }
 
     pub(super) fn set_switch_setting(
+        user_dir: &Path,
         schema_id: &str,
         switch_name: &str,
         value: usize,
     ) -> Result<Vec<SchemaSwitchSetting>, String> {
-        let _rime = rime_api_lock();
-        with_user_config_locked(|config| {
-            let switches = switch_settings_locked(config, schema_id);
-            let switch = switches
+        let switches = list_switch_settings(user_dir, schema_id)?;
+        let switch = switches
+            .iter()
+            .find(|switch| switch.name == switch_name)
+            .ok_or("Rime switch is unavailable")?;
+        if value >= switch.states.len() {
+            return Err("Rime switch value is out of range".into());
+        }
+        let values = if switch.options.is_empty() {
+            vec![(switch.name.clone(), value != 0)]
+        } else {
+            switch
+                .options
                 .iter()
-                .find(|switch| switch.name == switch_name)
-                .ok_or("Rime switch is unavailable")?;
-            if value >= switch.states.len() {
-                return Err("Rime switch value is out of range".into());
-            }
-            let values = if switch.options.is_empty() {
-                vec![(switch.name.as_str(), value != 0)]
-            } else {
-                switch
-                    .options
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| (name.as_str(), index == value))
-                    .collect()
-            };
-            write_switch_options_locked(config, values)?;
-            Ok(switch_settings_locked(config, schema_id))
-        })
+                .enumerate()
+                .map(|(index, name)| (name.clone(), index == value))
+                .collect()
+        };
+        schema_switch_request::merge(user_dir, values)?;
+        list_switch_settings(user_dir, schema_id)
     }
 
-    fn write_switch_options_locked<'a>(
-        config: &mut RimeConfig,
-        values: impl IntoIterator<Item = (&'a str, bool)>,
+    // RimeSetOption changes only the context. Update the IME's shared user
+    // ConfigData before the next session's Switcher::SetActiveSchema saves it.
+    fn persist_requested_switches_locked(
+        schema_id: &str,
+        request: &SchemaSwitchRequest,
     ) -> Result<(), String> {
-        let values = values
+        let names: HashSet<_> = read_schema_switches_locked(schema_id)
             .into_iter()
-            .map(|(name, enabled)| {
-                CString::new(format!("var/option/{name}"))
-                    .map(|key| (key, enabled))
-                    .map_err(|_| "invalid Rime switch name".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .flat_map(|switch| switch.name.into_iter().chain(switch.options))
+            .collect();
         unsafe {
             let api = rime_get_api();
+            let open =
+                rime_api_member!(api, config_open).ok_or("librime config API is unavailable")?;
+            let user_open = rime_api_member!(api, user_config_open)
+                .ok_or("librime user config API is unavailable")?;
+            let close = rime_api_member!(api, config_close)
+                .ok_or("librime config close API is unavailable")?;
             let set = rime_api_member!(api, config_set_bool)
                 .ok_or("librime config bool setter is unavailable")?;
-            for (key, enabled) in values {
-                if set(config, key.as_ptr(), i32::from(enabled)) == 0 {
-                    return Err("cannot write Rime switch value".into());
-                }
+            let mut config: RimeConfig = std::mem::zeroed();
+            if open(c"default".as_ptr(), &mut config) == 0 {
+                return Err("cannot open Rime switcher config".into());
+            }
+            let saved = config_string_list_locked(&mut config, "switcher/save_options");
+            close(&mut config);
+            let values = request
+                .options
+                .iter()
+                .filter(|(name, _)| names.contains(*name) && saved.contains(name))
+                .map(|(name, value)| {
+                    CString::new(format!("var/option/{name}")).map(|key| (key, *value))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "invalid Rime switch name")?;
+            if values.is_empty() {
+                return Ok(());
+            }
+            if user_open(c"user".as_ptr(), &mut config) == 0 {
+                return Err("cannot open Rime user config".into());
+            }
+            let result = values
+                .iter()
+                .all(|(key, value)| set(&mut config, key.as_ptr(), i32::from(*value)) != 0);
+            let closed = close(&mut config) != 0;
+            if !result || !closed {
+                return Err("cannot persist IME switch request".into());
             }
         }
         Ok(())
-    }
-
-    pub(super) fn import_switch_options(
-        options: &std::collections::BTreeMap<String, bool>,
-    ) -> Result<(), String> {
-        let _rime = rime_api_lock();
-        with_user_config_locked(|config| {
-            write_switch_options_locked(
-                config,
-                options.iter().map(|(name, value)| (name.as_str(), *value)),
-            )
-        })
-    }
-
-    fn apply_saved_schema_switches_locked(session: &rime_api::Session) -> Result<(), String> {
-        let status = session
-            .status()
-            .map_err(|error| format!("read switch schema: {error:?}"))?;
-        with_user_config_locked(|config| {
-            for switch in switch_settings_locked(config, status.schema_id()) {
-                let names = if switch.options.is_empty() {
-                    std::slice::from_ref(&switch.name)
-                } else {
-                    switch.options.as_slice()
-                };
-                if !names
-                    .iter()
-                    .any(|name| config_bool_locked(config, &format!("var/option/{name}")).is_some())
-                {
-                    continue;
-                }
-                let values = if switch.options.is_empty() {
-                    vec![(switch.name.as_str(), switch.value != 0)]
-                } else {
-                    switch
-                        .options
-                        .iter()
-                        .enumerate()
-                        .map(|(index, name)| (name.as_str(), index == switch.value))
-                        .collect()
-                };
-                for (name, enabled) in values {
-                    if get_session_option(session, name) != enabled {
-                        set_session_option(session, name, enabled);
-                    }
-                }
-            }
-            Ok(())
-        })
     }
 
     fn config_string_locked(config: &mut RimeConfig, key: &str) -> Option<String> {
@@ -3144,10 +3141,12 @@ pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>,
     {
         return Ok(Vec::new());
     }
-    with_schema_switch_config(user_dir, || desktop::list_switch_settings(&schema_id))
+    with_schema_switch_config(user_dir, || {
+        desktop::list_switch_settings(user_dir, &schema_id)
+    })
 }
 
-/// Persist a visible F4 switch through librime's user configuration API.
+/// Request a visible F4 switch change for the IME process to apply once.
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -3170,31 +3169,10 @@ pub fn set_schema_switch(
         return Err("Rime schema is no longer deployed or selected".into());
     }
     with_schema_switch_config(user_dir, || {
-        desktop::set_switch_setting(schema_id, switch_name, value)
+        desktop::set_switch_setting(user_dir, schema_id, switch_name, value)
     })
 }
 
-pub const PUBLISHED_SCHEMA_SWITCHES_FILE: &str = "keytao-schema-switches.json";
-
-/// Merge sandbox-published options through librime before creating a session.
-#[cfg(any(
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "android",
-    target_os = "ios"
-))]
-pub fn import_published_schema_switches(user_dir: &Path) -> Result<(), String> {
-    let bytes = match std::fs::read(user_dir.join(PUBLISHED_SCHEMA_SWITCHES_FILE)) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("read published Rime switches: {error}")),
-    };
-    let options: std::collections::BTreeMap<String, bool> =
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("read published Rime switches: {error}"))?;
-    with_schema_switch_config(user_dir, || desktop::import_switch_options(&options))
-}
 #[cfg(target_os = "android")]
 pub use desktop::{deploy_android_config, deploy_android_schema};
 
@@ -3794,7 +3772,6 @@ pub struct ImeRuntime(Arc<ImeRuntimeState>);
 ))]
 #[derive(Clone)]
 pub struct ImeRuntimeSession {
-    shared: Arc<ImeRuntimeState>,
     /// The resolved deployment this session belongs to. Another runtime may
     /// switch the process-wide librime instance to different directories.
     dirs: RimeDataDirs,
@@ -3809,9 +3786,11 @@ pub struct ImeRuntimeSession {
     target_os = "android",
     target_os = "ios"
 ))]
+#[derive(Clone)]
 struct ImeRuntimeState {
     user_data_dir: Option<PathBuf>,
     shared_data_dir: Option<String>,
+    ime_host: bool,
 }
 
 /// The data directories librime is running for.
@@ -3908,6 +3887,45 @@ impl ProcessRimeState {
         sessions.push(Arc::downgrade(session));
     }
 
+    /// Callers hold the reload barrier; acknowledge only after every live
+    /// session has been rebuilt and received the same request.
+    fn apply_switch_request(
+        &self,
+        root: &Path,
+        extra: Option<&Engine>,
+        request: Option<&SchemaSwitchRequest>,
+    ) -> Result<(), String> {
+        let Some(request) = request else {
+            return Ok(());
+        };
+        let sessions = lock_ignore_poison(&self.sessions);
+        let mut applied = false;
+        for session in sessions.iter().filter_map(Weak::upgrade) {
+            let mut inner = lock_ignore_poison(&session);
+            if !inner.ime_host || inner.user_data_dir != root {
+                continue;
+            }
+            ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
+            if let Some(engine) = inner.engine.as_ref() {
+                engine.apply_switch_request(request)?;
+                applied = true;
+            }
+        }
+        if let Some(engine) = extra {
+            engine.apply_switch_request(request)?;
+            applied = true;
+        }
+        if applied {
+            schema_switch_request::acknowledge(root, request.generation)?;
+        }
+        Ok(())
+    }
+
+    fn apply_pending_switch_request(&self, root: &Path) -> Result<(), String> {
+        let request = Engine::prepare_switch_request(root)?;
+        self.apply_switch_request(root, None, request.as_ref())
+    }
+
     /// Tear librime down when it is up for different directories, so that the
     /// caller can bring it back up for the ones it wants. Every live engine is
     /// dropped first, exactly like a reload.
@@ -3964,9 +3982,10 @@ pub fn reinitialize(user_data_dir: String, shared_data_dir: String) -> Result<()
     target_os = "ios"
 ))]
 struct ImeRuntimeSessionInner {
-    /// `None` between a reload and the next access; the engine is rebuilt
-    /// lazily so that the old one is already gone when librime re-reads the
-    /// deployment.
+    user_data_dir: PathBuf,
+    ime_host: bool,
+    /// `None` after teardown. Pending switch requests rebuild all live engines
+    /// before acknowledgment; other reloads rebuild lazily on the next access.
     engine: Option<Engine>,
     generation: u64,
     /// ascii_mode of the engine that was dropped, restored on the rebuilt one.
@@ -3998,7 +4017,22 @@ impl ImeRuntime {
         Self(Arc::new(ImeRuntimeState {
             user_data_dir,
             shared_data_dir,
+            ime_host: false,
         }))
+    }
+
+    /// Allow only an IME host process to apply and acknowledge switch requests.
+    /// App previews, test input and deployment runtimes must keep the default.
+    pub fn with_ime_host(mut self) -> Self {
+        Arc::make_mut(&mut self.0).ime_host = true;
+        self
+    }
+
+    fn apply_pending_switch_request(&self, root: &Path) -> Result<(), String> {
+        if self.0.ime_host {
+            PROCESS_RIME.apply_pending_switch_request(root)?;
+        }
+        Ok(())
     }
 
     /// What the linked librime can do natively, see [`EngineCapabilities`].
@@ -4129,7 +4163,8 @@ impl ImeRuntime {
                 dirs.shared.clone(),
             );
             PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
-            *initialized = result.is_ok().then_some(dirs);
+            *initialized = result.is_ok().then(|| dirs.clone());
+            let result = result.and_then(|()| self.apply_pending_switch_request(&dirs.user));
             drop(barrier);
             result
         })();
@@ -4171,6 +4206,7 @@ impl ImeRuntime {
         })();
         PROCESS_RIME.generation.fetch_add(1, Ordering::SeqCst);
         *initialized = result.is_ok().then(|| dirs.clone());
+        let result = result.and_then(|()| self.apply_pending_switch_request(&dirs.user));
         drop(barrier);
         if let Some(started) = started {
             crate::rt_log!(
@@ -4218,13 +4254,23 @@ impl ImeRuntime {
             let barrier = try_read_ignore_poison(&PROCESS_RIME.reload_barrier)
                 .ok_or("librime initialization or reload is busy")?;
             let generation = PROCESS_RIME.generation.load(Ordering::SeqCst);
-            let engine = Engine::new_with_user_data_dir(self.0.user_data_dir.as_deref())?;
+            let request = if self.0.ime_host {
+                Engine::prepare_switch_request(&dirs.user)?
+            } else {
+                None
+            };
+            let engine = Engine::new_with_user_data_dir(Some(&dirs.user))?;
             let mut english_mode = english_mode::EnglishModeController::default();
             english_mode.configure(
                 english_mode::read_english_mode(&dirs.user),
                 engine.list_schemas(),
             );
+            if request.is_some() {
+                PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
+            }
             let inner = Arc::new(Mutex::new(ImeRuntimeSessionInner {
+                user_data_dir: dirs.user.clone(),
+                ime_host: self.0.ime_host,
                 engine: Some(engine),
                 generation,
                 carried_ascii_mode: None,
@@ -4235,7 +4281,6 @@ impl ImeRuntime {
             drop(barrier);
             drop(initialized);
             Ok(ImeRuntimeSession {
-                shared: self.0.clone(),
                 dirs,
                 inner,
                 policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
@@ -4536,6 +4581,10 @@ impl ImeRuntimeSession {
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
+        Self::rebuild_engine(inner, &self.dirs.user)
+    }
+
+    fn rebuild_engine(inner: &mut ImeRuntimeSessionInner, root: &Path) -> Result<(), String> {
         let current = PROCESS_RIME.generation.load(Ordering::SeqCst);
         if inner.generation == current && inner.engine.is_some() {
             return Ok(());
@@ -4549,19 +4598,11 @@ impl ImeRuntimeSession {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
                 inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
             }
-            let engine = Engine::new_with_user_data_dir(self.shared.user_data_dir.as_deref())?;
-            let root = self
-                .shared
-                .user_data_dir
-                .clone()
-                .or_else(default_user_data_dir);
-            inner.english_mode.configure(
-                root.as_deref()
-                    .map(english_mode::read_english_mode)
-                    .unwrap_or_default(),
-                engine.list_schemas(),
-            );
-            // Restore live language state after the constructor applies saved switches.
+            let engine = Engine::new_with_user_data_dir(Some(root))?;
+            inner
+                .english_mode
+                .configure(english_mode::read_english_mode(root), engine.list_schemas());
+            // Restore live language state before applying any new app request.
             if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
                 engine.apply_ascii_mode(ascii_mode);
             }

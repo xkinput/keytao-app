@@ -119,6 +119,9 @@ fn checked_relative(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn is_public_asset(path: &Path) -> bool {
+    if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE) {
+        return true;
+    }
     if path.components().any(|part| {
         let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
         name.starts_with('.') || name.ends_with(".userdb") || name == "log"
@@ -494,6 +497,12 @@ mod tests {
         }
         assert!(is_public_asset(Path::new("lua/english.lua")));
         assert!(is_public_asset(Path::new("build/keytao.table.bin")));
+        assert!(is_public_asset(Path::new(
+            keytao_core::SCHEMA_SWITCH_REQUEST_FILE
+        )));
+        assert!(!is_public_asset(Path::new(
+            keytao_core::SCHEMA_SWITCH_APPLIED_FILE
+        )));
     }
 
     #[test]
@@ -518,6 +527,14 @@ mod tests {
                     b"schema: {schema_id: keytao}".to_vec(),
                 ),
                 ("keytao.userdb/LOG".into(), b"private".to_vec()),
+                (
+                    keytao_core::SCHEMA_SWITCH_REQUEST_FILE.into(),
+                    br#"{"generation":1,"options":{"mars":false}}"#.to_vec(),
+                ),
+                (
+                    keytao_core::SCHEMA_SWITCH_APPLIED_FILE.into(),
+                    b"1".to_vec(),
+                ),
             ],
             false,
         )
@@ -536,6 +553,11 @@ mod tests {
         assert!(files.contains_key(Path::new("keytao.schema.yaml")));
         assert!(files.contains_key(Path::new("easy_en.schema.yaml")));
         assert!(!files.contains_key(Path::new("keytao.userdb/LOG")));
+        assert_eq!(
+            files[Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)],
+            br#"{"generation":1,"options":{"mars":false}}"#
+        );
+        assert!(!files.contains_key(Path::new(keytao_core::SCHEMA_SWITCH_APPLIED_FILE)));
         assert!(root.join(first).join("keytao.schema.yaml").is_file());
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -1,41 +1,4 @@
-use std::path::Path;
-
-/// Replace a file's contents in a single step so a concurrent reader never
-/// sees a half-written file. The input methods (notably the iOS keyboard
-/// extension, which shares these files through the App Group container) poll
-/// the shared configuration while the app rewrites it, and a plain
-/// `fs::write` truncates before it writes.
-///
-/// The temporary file is created in the destination directory, so the final
-/// `rename` stays inside one filesystem and is therefore atomic.
-pub fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("keytao");
-    let tmp = dir.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let outcome = std::fs::File::create(&tmp)
-        .and_then(|mut file| {
-            file.write_all(content)?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    outcome
-}
+pub use keytao_core::write_file_atomic;
 
 pub fn yaml_child_mapping<'a>(
     mapping: &'a mut serde_yaml::Mapping,

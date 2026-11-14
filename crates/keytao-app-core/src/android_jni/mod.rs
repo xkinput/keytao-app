@@ -344,6 +344,19 @@ fn android_set_user_theme_path(path: PathBuf) {
 }
 
 #[cfg(target_os = "android")]
+fn android_new_runtime(user_dir: &Path, shared_dir: &str) -> keytao_core::ImeRuntime {
+    let runtime = keytao_core::ImeRuntime::with_dirs(user_dir, shared_dir);
+    // The app and deployment service load the same library as the :ime host.
+    let command = std::fs::read("/proc/self/cmdline").unwrap_or_default();
+    let name = command.split(|byte| *byte == 0).next().unwrap_or_default();
+    if name.ends_with(b":ime") {
+        runtime.with_ime_host()
+    } else {
+        runtime
+    }
+}
+
+#[cfg(target_os = "android")]
 fn android_install_runtime(runtime: keytao_core::ImeRuntime, user_dir: &Path, shared_dir: &str) {
     if let Ok(mut dirs) = ANDROID_IME_RUNTIME_DIRS.lock() {
         *dirs = Some((user_dir.to_path_buf(), shared_dir.to_string()));
@@ -783,7 +796,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeInit(
         let user_theme_path = user_dir.join("theme.yaml");
         let shared_dir = user_dir.join("rime-data").to_string_lossy().into_owned();
 
-        let runtime = keytao_core::ImeRuntime::with_dirs(user_dir.clone(), shared_dir.clone());
+        let runtime = android_new_runtime(&user_dir, &shared_dir);
         let init_result = if deploy != 0 {
             runtime.init()
         } else {
@@ -832,7 +845,7 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeReiniti
             return 0;
         }
 
-        let runtime = keytao_core::ImeRuntime::with_dirs(user_dir.clone(), shared_dir.clone());
+        let runtime = android_new_runtime(&user_dir, &shared_dir);
         if runtime.init_without_deploy().is_err() {
             return 0;
         }

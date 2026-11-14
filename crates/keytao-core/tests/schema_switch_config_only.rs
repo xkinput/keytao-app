@@ -21,9 +21,10 @@ fn compiled_schema_settings_work_without_runtime_source_or_deployment_marker() {
     assert_eq!(switches[0].value, 0);
     let switches = set_schema_switch(&dir, "keytao_config_only", "mars", 1).unwrap();
     assert_eq!(switches[0].value, 1);
-    let user: serde_yaml::Value =
-        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
-    assert_eq!(user["var"]["option"]["mars"].as_bool(), Some(true));
+    let request = keytao_core::read_schema_switch_request(&dir).unwrap();
+    assert_eq!(request.generation, 1);
+    assert_eq!(request.options.get("mars"), Some(&true));
+    assert!(!dir.join("user.yaml").exists());
     assert_eq!(std::fs::read_to_string(compiled).unwrap(), schema);
     assert!(!dir.join("default.custom.yaml").exists());
     assert!(!dir.join("keytao_config_only.schema.yaml").exists());

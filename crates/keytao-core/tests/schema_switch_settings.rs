@@ -2,8 +2,9 @@
 mod smoke_fixture;
 
 use keytao_core::{
-    import_published_schema_switches, list_schema_switches, set_schema_switch, ImeRuntime,
-    SchemaSwitchSetting, PUBLISHED_SCHEMA_SWITCHES_FILE,
+    list_schema_switches, read_schema_switch_request, schema_switch_applied_generation,
+    set_schema_switch, ImeRuntime, SchemaSwitchSetting, SCHEMA_SWITCH_APPLIED_FILE,
+    SCHEMA_SWITCH_REQUEST_FILE,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -15,6 +16,10 @@ fn serialized() -> MutexGuard<'static, ()> {
 }
 
 fn fixture(name: &str) -> (ImeRuntime, PathBuf) {
+    fixture_with_mars_reset(name, true)
+}
+
+fn fixture_with_mars_reset(name: &str, reset: bool) -> (ImeRuntime, PathBuf) {
     let dir = smoke_fixture::scratch_dir(name);
     smoke_fixture::write(&dir).unwrap();
     let path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
@@ -23,11 +28,14 @@ fn fixture(name: &str) -> (ImeRuntime, PathBuf) {
         path,
         schema.replace(
             "engine:\n",
-            "  - name: mars\n    reset: 1\n    states: [普通, 火星文]\n  - name: hidden_option\n    reset: 1\nengine:\n",
+            &format!("  - name: mars\n{}    states: [普通, 火星文]\n  - name: hidden_option\n    reset: 1\nengine:\n", if reset { "    reset: 1\n" } else { "" }),
         ),
-    )
-    .unwrap();
-    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    ).unwrap();
+    std::fs::write(
+        dir.join("default.yaml"),
+        format!("config_version: \"1\"\nschema_list:\n  - schema: {}\nswitcher:\n  hotkeys: [F4]\n  fold_options: false\n  save_options: [mars, ascii_mode, punctuation_ascii, punctuation_cjk]\n", smoke_fixture::SCHEMA_ID),
+    ).unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
     runtime.init().unwrap();
     (runtime, dir)
 }
@@ -48,6 +56,72 @@ fn protected_files(dir: &Path) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn app_switch_write_does_not_touch_the_ime_user_config() {
+    let _serialized = serialized();
+    let (_runtime, dir) = fixture("switch-single-writer");
+    let before = std::fs::read(dir.join("user.yaml")).ok();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    assert_eq!(std::fs::read(dir.join("user.yaml")).ok(), before);
+    let request = read_schema_switch_request(&dir).unwrap();
+    assert_eq!(request.generation, 1);
+    assert_eq!(request.options["mars"], false);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn app_runtime_sessions_and_reloads_leave_switch_requests_for_the_ime() {
+    let _serialized = serialized();
+    let (ime, dir) = fixture("switch-app-runtime");
+    let app = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    app.init_without_deploy().unwrap();
+    let warmup = app.create_session().unwrap();
+    drop(warmup);
+    let user_config = || {
+        let mut user: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
+        // librime updates these timestamps during ordinary sessions/deployments.
+        user["var"]["last_build_time"] = serde_yaml::Value::Null;
+        user["var"]["schema_access_time"] = serde_yaml::Value::Null;
+        user
+    };
+    let user = user_config();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    let request = std::fs::read(dir.join(SCHEMA_SWITCH_REQUEST_FILE)).unwrap();
+    let unchanged = || {
+        assert_eq!(user_config(), user);
+        assert!(!dir.join(SCHEMA_SWITCH_APPLIED_FILE).exists());
+        assert_eq!(
+            std::fs::read(dir.join(SCHEMA_SWITCH_REQUEST_FILE)).unwrap(),
+            request
+        );
+    };
+
+    let session = app.create_session().unwrap();
+    unchanged();
+    assert!(session.get_option("mars"));
+    app.reload_without_deploy().unwrap();
+    unchanged();
+    assert!(session.get_option("mars"));
+    app.reload().unwrap();
+    unchanged();
+    assert!(session.get_option("mars"));
+    keytao_core::reinitialize(
+        dir.to_string_lossy().into_owned(),
+        dir.to_string_lossy().into_owned(),
+    )
+    .unwrap();
+    unchanged();
+    assert!(session.get_option("mars"));
+    let ime_session = ime.create_session().unwrap();
+    assert!(!ime_session.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 1);
+    assert!(session.get_option("mars"));
+    drop(ime_session);
+    drop(session);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn compiled_switches_include_boolean_and_radio_but_hide_stateless_items() {
     let _serialized = serialized();
     let (_runtime, dir) = fixture("switch-parsing");
@@ -65,69 +139,142 @@ fn compiled_switches_include_boolean_and_radio_but_hide_stateless_items() {
         .iter()
         .all(|switch| switch.schema_id == smoke_fixture::SCHEMA_ID));
     assert!(!switches.iter().any(|switch| switch.name == "hidden_option"));
-    let _ = std::fs::remove_dir_all(dir);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn user_config_api_persists_boolean_and_exclusive_radio_values() {
+fn request_round_trip_merges_boolean_and_exclusive_radio_values() {
     let _serialized = serialized();
-    let (runtime, dir) = fixture("switch-persistence");
+    let (_runtime, dir) = fixture("switch-requests");
     let protected = protected_files(&dir);
+    let user = std::fs::read(dir.join("user.yaml")).ok();
     set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "ascii_mode", 1).unwrap();
     set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
     set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 0).unwrap();
-    let user: serde_yaml::Value =
-        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
-    let options = &user["var"]["option"];
-    assert_eq!(options["ascii_mode"].as_bool(), Some(true));
-    assert_eq!(options["mars"].as_bool(), Some(false));
-    assert_eq!(options["punctuation_ascii"].as_bool(), Some(true));
-    assert_eq!(options["punctuation_cjk"].as_bool(), Some(false));
+    let request = read_schema_switch_request(&dir).unwrap();
+    assert_eq!(request.generation, 3);
+    assert_eq!(request.options["ascii_mode"], true);
+    assert_eq!(request.options["mars"], false);
+    assert_eq!(request.options["punctuation_ascii"], true);
+    assert_eq!(request.options["punctuation_cjk"], false);
+    assert_eq!(std::fs::read(dir.join("user.yaml")).ok(), user);
     assert!(set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "hidden_option", 1).is_err());
     assert!(set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 2).is_err());
     assert!(set_schema_switch(&dir, "missing_schema", "ascii_mode", 1).is_err());
-    runtime.reload_without_deploy().unwrap();
-    let switches = list_schema_switches(&dir).unwrap();
-    assert_eq!(switch(&switches, "ascii_mode").value, 1);
-    assert_eq!(switch(&switches, "mars").value, 0);
-    assert_eq!(switch(&switches, "punctuation_ascii").value, 0);
+    assert_eq!(read_schema_switch_request(&dir).unwrap(), request);
     assert_eq!(protected_files(&dir), protected);
-    let _ = std::fs::remove_dir_all(dir);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn persisted_options_apply_to_new_sessions_and_preserve_carried_reload_state() {
+fn reload_applies_each_generation_to_all_live_sessions() {
     let _serialized = serialized();
-    let (runtime, dir) = fixture("switch-session-apply");
-    let existing = runtime.create_session().unwrap();
-    assert!(!existing.get_option("ascii_mode"));
-    assert!(existing.get_option("punctuation_cjk"));
+    let (runtime, dir) = fixture("switch-broadcast");
+    let other_runtime =
+        ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+    other_runtime.init().unwrap();
+    let first = runtime.create_session().unwrap();
+    let second = other_runtime.create_session().unwrap();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 1).unwrap();
+    runtime.reload_without_deploy().unwrap();
+    assert!(first.get_option("mars"));
+    assert!(second.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 1);
+
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
     set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "ascii_mode", 1).unwrap();
     set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 0).unwrap();
-    let fresh = runtime.create_session().unwrap();
-    assert!(fresh.get_option("ascii_mode"));
-    assert!(fresh.get_option("punctuation_ascii"));
-    assert!(!fresh.get_option("punctuation_cjk"));
     runtime.reload_without_deploy().unwrap();
-    assert!(!existing.get_option("ascii_mode"));
-    assert!(fresh.get_option("ascii_mode"));
-    assert!(existing.get_option("punctuation_ascii"));
-    assert!(!existing.get_option("punctuation_cjk"));
-    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "ascii_mode", 0).unwrap();
-    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 1).unwrap();
-    existing.set_ascii_mode(true).unwrap();
-    runtime.reload_without_deploy().unwrap();
-    assert!(existing.get_option("ascii_mode"));
-    assert!(fresh.get_option("ascii_mode"));
-    assert!(!existing.get_option("punctuation_ascii"));
-    assert!(existing.get_option("punctuation_cjk"));
-    drop(existing);
-    drop(fresh);
-    let _ = std::fs::remove_dir_all(dir);
+    // Read the second session first, after the generation has already been acknowledged.
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 4);
+    for session in [&second, &first] {
+        assert!(!session.get_option("mars"));
+        assert!(session.get_option("ascii_mode"));
+        assert!(session.get_option("punctuation_ascii"));
+        assert!(!session.get_option("punctuation_cjk"));
+    }
+    let user: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
+    assert_eq!(user["var"]["option"]["mars"].as_bool(), Some(false));
+    drop(first);
+    drop(second);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn published_options_reach_private_sessions_without_copying_desktop_user_config() {
+fn applied_request_does_not_override_later_session_choices_on_rebuild() {
+    let _serialized = serialized();
+    let (runtime, dir) = fixture_with_mars_reset("switch-apply-once", false);
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    let session = runtime.create_session().unwrap();
+    assert!(!session.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 1);
+    let menu = session.process_key_result(0xffc1, 0).unwrap(); // F4
+    assert!(menu.accepted);
+    let index = menu
+        .state
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "普通")
+        .unwrap();
+    session.select_candidate_on_page(index).unwrap();
+    assert!(session.get_option("mars"));
+    let fresh = runtime.create_session().unwrap();
+    assert!(fresh.get_option("mars"));
+    runtime.reload_without_deploy().unwrap();
+    assert!(session.get_option("mars"));
+    assert!(fresh.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 1);
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    runtime.reload().unwrap();
+    assert!(!session.get_option("mars"));
+    assert!(!fresh.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 2);
+    drop(session);
+    drop(fresh);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ui_reads_pending_then_user_config_then_schema_reset_without_writing() {
+    let _serialized = serialized();
+    let (_runtime, dir) = fixture("switch-ui");
+    assert_eq!(
+        switch(&list_schema_switches(&dir).unwrap(), "mars").value,
+        1
+    );
+    let user = b"var:\n  option:\n    mars: false\n";
+    std::fs::write(dir.join("user.yaml"), user).unwrap();
+    assert_eq!(
+        switch(&list_schema_switches(&dir).unwrap(), "mars").value,
+        0
+    );
+    // File reads must bypass librime's cached user configuration.
+    std::fs::write(dir.join("user.yaml"), b"var:\n  option:\n    mars: true\n").unwrap();
+    assert_eq!(
+        switch(&list_schema_switches(&dir).unwrap(), "mars").value,
+        1
+    );
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    let switches = list_schema_switches(&dir).unwrap();
+    assert_eq!(switch(&switches, "mars").value, 0);
+    assert_eq!(switch(&switches, "ascii_mode").value, 0);
+    std::fs::write(dir.join(SCHEMA_SWITCH_APPLIED_FILE), "1").unwrap();
+    assert_eq!(
+        switch(&list_schema_switches(&dir).unwrap(), "mars").value,
+        1
+    );
+    std::fs::write(dir.join("user.yaml"), user).unwrap();
+    assert_eq!(
+        switch(&list_schema_switches(&dir).unwrap(), "mars").value,
+        0
+    );
+    assert_eq!(std::fs::read(dir.join("user.yaml")).unwrap(), user);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn sandbox_request_is_consumed_once_and_ignores_options_outside_the_schema() {
     let _serialized = serialized();
     let (runtime, dir) = fixture("switch-sandbox");
     let protected = protected_files(&dir);
@@ -136,42 +283,51 @@ fn published_options_reach_private_sessions_without_copying_desktop_user_config(
         "var:\n  private_marker: keep\n  option:\n    private_option: true\n",
     )
     .unwrap();
-    std::fs::write(
-        dir.join(PUBLISHED_SCHEMA_SWITCHES_FILE),
-        br#"{"mars":false,"punctuation_ascii":true,"punctuation_cjk":false}"#,
-    )
-    .unwrap();
-    import_published_schema_switches(&dir).unwrap();
+    let write_request = |generation, mars| {
+        std::fs::write(
+            dir.join(SCHEMA_SWITCH_REQUEST_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "generation": generation,
+                "options": {"mars": mars, "punctuation_ascii": true,
+                            "punctuation_cjk": false, "unknown_option": true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write_request(7, false);
     let session = runtime.create_session().unwrap();
     assert!(!session.get_option("mars"));
     assert!(session.get_option("punctuation_ascii"));
     assert!(!session.get_option("punctuation_cjk"));
+    assert!(!session.get_option("unknown_option"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 7);
     let user: serde_yaml::Value =
         serde_yaml::from_slice(&std::fs::read(dir.join("user.yaml")).unwrap()).unwrap();
     assert_eq!(user["var"]["private_marker"].as_str(), Some("keep"));
-    assert_eq!(user["var"]["option"]["private_option"].as_bool(), Some(true));
-    assert_eq!(protected_files(&dir), protected);
-    drop(session);
-    std::fs::write(
-        dir.join(PUBLISHED_SCHEMA_SWITCHES_FILE),
-        br#"{"mars":true,"punctuation_ascii":false,"punctuation_cjk":true}"#,
-    )
-    .unwrap();
+    assert_eq!(
+        user["var"]["option"]["private_option"].as_bool(),
+        Some(true)
+    );
+    write_request(6, true);
+    let fresh = runtime.create_session().unwrap();
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 7);
+    write_request(8, false);
     runtime.reload_without_deploy().unwrap();
-    import_published_schema_switches(&dir).unwrap();
-    let session = runtime.create_session().unwrap();
-    assert!(session.get_option("mars"));
-    assert!(!session.get_option("punctuation_ascii"));
-    assert!(session.get_option("punctuation_cjk"));
-    drop(session);
+    assert!(!fresh.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 8);
+    assert_eq!(protected_files(&dir), protected);
     let saved = std::fs::read(dir.join("user.yaml")).unwrap();
     std::fs::write(
-        dir.join(PUBLISHED_SCHEMA_SWITCHES_FILE),
-        br#"{"mars":"invalid"}"#,
+        dir.join(SCHEMA_SWITCH_REQUEST_FILE),
+        br#"{"generation":9,"options":{"mars":"invalid"}}"#,
     )
     .unwrap();
-    assert!(import_published_schema_switches(&dir).is_err());
+    assert!(runtime.create_session().is_err());
     assert_eq!(std::fs::read(dir.join("user.yaml")).unwrap(), saved);
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 8);
+    drop(session);
+    drop(fresh);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

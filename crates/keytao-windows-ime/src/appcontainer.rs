@@ -104,6 +104,9 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
 }
 
 fn public_asset(path: &Path) -> bool {
+    if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE) {
+        return true;
+    }
     !path.components().any(|part| {
         let part = part.as_os_str().to_string_lossy().to_ascii_lowercase();
         part.starts_with('.') || part.ends_with(".userdb") || part == "log"
@@ -178,7 +181,12 @@ fn prepare_at(public_root: &Path, private: &Path) -> std::result::Result<Sandbox
                     .map_err(|error| error.to_string())?;
                 let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
                 if std::fs::read(&output).ok().as_deref() != Some(bytes.as_slice()) {
-                    std::fs::write(&output, bytes).map_err(|error| error.to_string())?;
+                    if relative == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE) {
+                        keytao_core::write_file_atomic(&output, &bytes)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        std::fs::write(&output, bytes).map_err(|error| error.to_string())?;
+                    }
                 }
                 copied.push(relative.to_string_lossy().into_owned());
             }
@@ -275,9 +283,33 @@ mod tests {
         .unwrap();
         std::fs::write(public.join(&first).join("addon.schema.yaml"), b"addon").unwrap();
         std::fs::write(public.join(&first).join("user.yaml"), b"must not copy").unwrap();
+        let request = br#"{"generation":1,"options":{"mars":false}}"#;
+        std::fs::write(
+            public
+                .join(&first)
+                .join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE),
+            request,
+        )
+        .unwrap();
+        std::fs::write(private.join(keytao_core::SCHEMA_SWITCH_APPLIED_FILE), b"1").unwrap();
+        std::fs::write(
+            public
+                .join(&first)
+                .join(keytao_core::SCHEMA_SWITCH_APPLIED_FILE),
+            b"99",
+        )
+        .unwrap();
         std::fs::write(public.join("current.txt"), &first).unwrap();
         assert!(prepare_at(&public, &private).unwrap().changed);
         assert!(!private.join("user.yaml").exists());
+        assert_eq!(
+            std::fs::read(private.join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)).unwrap(),
+            request
+        );
+        assert_eq!(
+            std::fs::read(private.join(keytao_core::SCHEMA_SWITCH_APPLIED_FILE)).unwrap(),
+            b"1"
+        );
         assert!(private.join("addon.schema.yaml").is_file());
         std::fs::create_dir_all(private.join("build")).unwrap();
         std::fs::write(private.join("build/addon.schema.yaml"), b"compiled addon").unwrap();
@@ -289,6 +321,13 @@ mod tests {
         .unwrap();
         std::fs::write(public.join("current.txt"), &second).unwrap();
         prepare_at(&public, &private).unwrap();
+        assert!(!private
+            .join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE)
+            .exists());
+        assert_eq!(
+            std::fs::read(private.join(keytao_core::SCHEMA_SWITCH_APPLIED_FILE)).unwrap(),
+            b"1"
+        );
         assert!(!private.join("addon.schema.yaml").exists());
         assert!(!private.join("build/addon.schema.yaml").exists());
         assert_eq!(

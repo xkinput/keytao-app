@@ -668,23 +668,10 @@ pub fn get_schema_switches(
 pub(crate) fn schema_switch_settings_file(
     root: &std::path::Path,
 ) -> Result<(PathBuf, Vec<u8>), String> {
-    let user: serde_yaml::Value = match std::fs::read(root.join("user.yaml")) {
-        Ok(bytes) => serde_yaml::from_slice(&bytes).map_err(|error| error.to_string())?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_yaml::Value::Null,
-        Err(error) => return Err(error.to_string()),
-    };
-    // Publish only explicit boolean options, never private user metadata.
-    let options: std::collections::BTreeMap<_, _> = user
-        .get("var")
-        .and_then(|value| value.get("option"))
-        .and_then(serde_yaml::Value::as_mapping)
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, value)| Some((name.as_str()?, value.as_bool()?)))
-        .collect();
+    let request = keytao_core::read_schema_switch_request(root)?;
     Ok((
-        keytao_core::PUBLISHED_SCHEMA_SWITCHES_FILE.into(),
-        serde_json::to_vec(&options).map_err(|error| error.to_string())?,
+        keytao_core::SCHEMA_SWITCH_REQUEST_FILE.into(),
+        serde_json::to_vec(&request).map_err(|error| error.to_string())?,
     ))
 }
 
@@ -695,8 +682,8 @@ pub fn set_schema_switch(
     value: usize,
 ) -> Result<Vec<keytao_core::SchemaSwitchSetting>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?;
-    let switches = keytao_core::set_schema_switch(&root, schema_id, name, value)
-        .map_err(CoreError::Other)?;
+    let switches =
+        keytao_core::set_schema_switch(&root, schema_id, name, value).map_err(CoreError::Other)?;
     #[cfg(target_os = "windows")]
     host.publish_schema_switches().map_err(CoreError::Other)?;
     host.write_reload_stamp(&root).map_err(CoreError::Other)?;
@@ -863,23 +850,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn published_switches_include_only_explicit_boolean_options() {
+    fn published_switches_include_only_the_request_and_its_generation() {
         let dir = tempfile::tempdir().unwrap();
         let (name, bytes) = schema_switch_settings_file(dir.path()).unwrap();
-        assert_eq!(name, PathBuf::from(keytao_core::PUBLISHED_SCHEMA_SWITCHES_FILE));
-        assert_eq!(bytes, b"{}");
+        assert_eq!(name, PathBuf::from(keytao_core::SCHEMA_SWITCH_REQUEST_FILE));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"generation": 0, "options": {}})
+        );
         let user = "installation_id: private\nvar:\n  previously_selected_schema: private_schema\n  option:\n    mars: true\n    punctuation_ascii: false\n    punctuation_cjk: true\n    private_text: secret\n    42: true\n";
         std::fs::write(dir.path().join("user.yaml"), user).unwrap();
+        let request = br#"{"generation":42,"options":{"mars":false,"punctuation_ascii":true,"punctuation_cjk":false}}"#;
+        std::fs::write(
+            dir.path().join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE),
+            request,
+        )
+        .unwrap();
         let (_, bytes) = schema_switch_settings_file(dir.path()).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-            serde_json::json!({"mars": true, "punctuation_ascii": false, "punctuation_cjk": true})
+            serde_json::from_slice::<serde_json::Value>(request).unwrap()
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("user.yaml")).unwrap(),
             user
         );
         std::fs::write(dir.path().join("user.yaml"), "var: [").unwrap();
+        assert!(schema_switch_settings_file(dir.path()).is_ok());
+        std::fs::write(
+            dir.path().join(keytao_core::SCHEMA_SWITCH_REQUEST_FILE),
+            "{",
+        )
+        .unwrap();
         assert!(schema_switch_settings_file(dir.path()).is_err());
     }
 

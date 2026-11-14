@@ -505,7 +505,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         // and brought back up, so the whole rebuild runs under the write guard.
         // `GLOBAL` was released above: it is only ever taken below this lock.
         let mut epoch = write_ignore_poison(&SESSION_EPOCH);
-        let runtime = ImeRuntime::with_dirs(user, shared);
+        let runtime = ImeRuntime::with_dirs(user, shared).with_ime_host();
         if let Err(e) = runtime.init_without_deploy() {
             log_error(format_args!("keytao_init: runtime init failed: {e}"));
             retire_unavailable_runtime(previous_runtime.as_ref(), &mut epoch);

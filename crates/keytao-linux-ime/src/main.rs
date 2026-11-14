@@ -380,7 +380,7 @@ fn main() {
                 None
             }
         };
-        let engine = engine::CoreEngine::new();
+        let engine = engine::CoreEngine::new().with_ime_host();
         if let Err(e) = engine.init_without_deploy() {
             tracing::error!("librime init failed: {e}");
             std::process::exit(1);
