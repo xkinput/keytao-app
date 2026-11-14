@@ -20,6 +20,14 @@ fn fixture(name: &str) -> (ImeRuntime, PathBuf) {
 }
 
 fn fixture_with_mars_reset(name: &str, reset: bool) -> (ImeRuntime, PathBuf) {
+    fixture_with_config(name, reset, |_| {})
+}
+
+fn fixture_with_config(
+    name: &str,
+    reset: bool,
+    configure: impl FnOnce(&Path),
+) -> (ImeRuntime, PathBuf) {
     let dir = smoke_fixture::scratch_dir(name);
     smoke_fixture::write(&dir).unwrap();
     let path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
@@ -35,6 +43,7 @@ fn fixture_with_mars_reset(name: &str, reset: bool) -> (ImeRuntime, PathBuf) {
         dir.join("default.yaml"),
         format!("config_version: \"1\"\nschema_list:\n  - schema: {}\nswitcher:\n  hotkeys: [F4]\n  fold_options: false\n  save_options: [mars, ascii_mode, punctuation_ascii, punctuation_cjk]\n", smoke_fixture::SCHEMA_ID),
     ).unwrap();
+    configure(&dir);
     let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
     runtime.init().unwrap();
     (runtime, dir)
@@ -236,12 +245,150 @@ fn applied_request_does_not_override_later_session_choices_on_rebuild() {
 }
 
 #[test]
-fn ui_reads_pending_then_user_config_then_schema_reset_without_writing() {
+fn reset_requests_survive_acknowledgment_in_a_new_process_and_engine() {
+    const CHILD_ROOT: &str = "KEYTAO_RESET_SWITCH_CHILD_ROOT";
     let _serialized = serialized();
-    let (_runtime, dir) = fixture("switch-ui");
+    if let Some(dir) = std::env::var_os(CHILD_ROOT) {
+        let dir = PathBuf::from(dir);
+        let runtime =
+            ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+        runtime.init_without_deploy().unwrap();
+        assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 3);
+        let first = runtime.create_session().unwrap();
+        assert!(!first.get_option("mars"));
+        assert!(first.get_option("ascii_mode"));
+        assert!(first.get_option("punctuation_ascii"));
+        assert!(!first.get_option("punctuation_cjk"));
+        first.set_option("mars", true);
+        first.set_option("ascii_mode", false);
+        first.set_option("punctuation_ascii", false);
+        first.set_option("punctuation_cjk", true);
+        let second = runtime.create_session().unwrap();
+        assert!(!second.get_option("mars"));
+        assert!(second.get_option("ascii_mode"));
+        assert!(second.get_option("punctuation_ascii"));
+        assert!(!second.get_option("punctuation_cjk"));
+        assert!(first.get_option("mars"));
+        runtime.reload_without_deploy().unwrap();
+        for session in [&first, &second] {
+            assert!(!session.get_option("mars"));
+            assert!(session.get_option("ascii_mode"));
+            assert!(session.get_option("punctuation_ascii"));
+            assert!(!session.get_option("punctuation_cjk"));
+        }
+        runtime.reload().unwrap();
+        assert!(!first.get_option("mars"));
+        assert!(first.get_option("ascii_mode"));
+        assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 3);
+        return;
+    }
+
+    let (runtime, dir) = fixture("switch-reset-restart");
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "ascii_mode", 1).unwrap();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 0).unwrap();
+    let session = runtime.create_session().unwrap();
+    assert!(!session.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 3);
+    drop(session);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "reset_requests_survive_acknowledgment_in_a_new_process_and_engine",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child process failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn reset_requests_are_defaults_after_schema_and_english_mode_changes() {
+    let _serialized = serialized();
+    let (runtime, dir) = fixture_with_config("switch-reset-schema-load", true, |dir| {
+        let default = std::fs::read_to_string(dir.join("default.yaml")).unwrap();
+        std::fs::write(
+            dir.join("default.yaml"),
+            format!("{default}menu:\n  page_size: 20\n"),
+        )
+        .unwrap();
+        let schema =
+            std::fs::read_to_string(dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID)))
+                .unwrap();
+        std::fs::write(
+            dir.join("easy_en.schema.yaml"),
+            schema
+                .replace(
+                    &format!("schema_id: {}", smoke_fixture::SCHEMA_ID),
+                    "schema_id: easy_en",
+                )
+                .replace("name: KeyTao Smoke", "name: Easy English"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            format!(
+                "patch:\n  schema_list:\n    - schema: {}\n    - schema: easy_en\n",
+                smoke_fixture::SCHEMA_ID
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("keytao-ime.json"), br#"{"englishMode":"schema"}"#).unwrap();
+    });
+    runtime.reload_without_deploy().unwrap();
+    let initial = runtime.create_session().unwrap();
+    initial.select_schema(smoke_fixture::SCHEMA_ID).unwrap();
+    drop(initial);
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "mars", 0).unwrap();
+    set_schema_switch(&dir, smoke_fixture::SCHEMA_ID, "punctuation_ascii", 0).unwrap();
+    let session = runtime.create_session().unwrap();
+    let menu = session.process_key_result(0xffc1, 0).unwrap(); // F4
+    let index = menu
+        .state
+        .candidates
+        .iter()
+        .position(|candidate| candidate.text == "Easy English")
+        .unwrap_or_else(|| panic!("schema candidates: {:?}", menu.state.candidates));
+    session.select_candidate_on_page(index).unwrap();
+    assert_eq!(session.current_schema().unwrap().id, "easy_en");
+    assert!(!session.get_option("mars"));
+    session.select_schema(smoke_fixture::SCHEMA_ID).unwrap();
+    session.set_option("mars", true);
+    session.select_schema("easy_en").unwrap();
+    assert!(!session.get_option("mars"));
+    session.set_option("mars", true);
+    session.select_schema(smoke_fixture::SCHEMA_ID).unwrap();
+    assert!(!session.get_option("mars"));
+    assert!(session.get_option("punctuation_ascii"));
+    assert!(!session.get_option("punctuation_cjk"));
+    session.set_option("mars", true);
+    session.set_english_mode(true).unwrap();
+    assert_eq!(session.current_schema().unwrap().id, "easy_en");
+    session.set_english_mode(false).unwrap();
+    assert_eq!(
+        session.current_schema().unwrap().id,
+        smoke_fixture::SCHEMA_ID
+    );
+    assert!(!session.get_option("mars"));
+    assert_eq!(schema_switch_applied_generation(&dir).unwrap(), 2);
+    drop(session);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ui_reads_non_reset_pending_then_user_config_then_default_without_writing() {
+    let _serialized = serialized();
+    let (_runtime, dir) = fixture_with_mars_reset("switch-ui", false);
     assert_eq!(
         switch(&list_schema_switches(&dir).unwrap(), "mars").value,
-        1
+        0
     );
     let user = b"var:\n  option:\n    mars: false\n";
     std::fs::write(dir.join("user.yaml"), user).unwrap();

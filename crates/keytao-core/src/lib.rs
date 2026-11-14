@@ -341,7 +341,7 @@ pub struct SchemaSwitchSetting {
 fn visible_switch_settings(
     schema_id: &str,
     switches: Vec<SchemaSwitch>,
-    mut saved_option: impl FnMut(&str) -> Option<bool>,
+    mut saved_option: impl FnMut(&str, bool) -> Option<bool>,
 ) -> Vec<SchemaSwitchSetting> {
     switches
         .into_iter()
@@ -361,13 +361,15 @@ fn visible_switch_settings(
                 .unwrap_or(0);
             let (name, value) = if switch.options.is_empty() {
                 let name = switch.name?;
-                let value = saved_option(&name).map(usize::from).unwrap_or(reset);
+                let value = saved_option(&name, switch.reset.is_some())
+                    .map(usize::from)
+                    .unwrap_or(reset);
                 (name, value)
             } else {
                 let value = switch
                     .options
                     .iter()
-                    .position(|name| saved_option(name) == Some(true))
+                    .position(|name| saved_option(name, switch.reset.is_some()) == Some(true))
                     .unwrap_or(reset);
                 (switch.options[0].clone(), value)
             };
@@ -2388,6 +2390,7 @@ mod desktop {
         pub(crate) fn apply_switch_request(
             &self,
             request: &SchemaSwitchRequest,
+            reset_only: bool,
         ) -> Result<(), String> {
             let _rime = rime_api_lock();
             let status = self
@@ -2395,6 +2398,21 @@ mod desktop {
                 .status()
                 .map_err(|error| format!("read switch schema: {error:?}"))?;
             for switch in read_schema_switches_locked(status.schema_id()) {
+                if reset_only && switch.reset.is_none() {
+                    continue;
+                }
+                if !switch.options.is_empty() {
+                    if let Some(selected) = switch
+                        .options
+                        .iter()
+                        .position(|name| request.options.get(name) == Some(&true))
+                    {
+                        for (index, name) in switch.options.iter().enumerate() {
+                            set_session_option(&self.session, name, index == selected);
+                        }
+                        continue;
+                    }
+                }
                 for name in switch.name.iter().chain(switch.options.iter()) {
                     if let Some(&enabled) = request.options.get(name) {
                         set_session_option(&self.session, name, enabled);
@@ -2402,6 +2420,11 @@ mod desktop {
                 }
             }
             Ok(())
+        }
+
+        pub(crate) fn apply_reset_switch_request(&self, root: &Path) -> Result<(), String> {
+            // A schema reset overrides save_options whenever librime loads it.
+            self.apply_switch_request(&read_schema_switch_request(root)?, true)
         }
 
         pub fn is_ascii_mode(&self) -> bool {
@@ -2575,15 +2598,20 @@ mod desktop {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
             Err(error) => return Err(format!("read Rime user config: {error}")),
         };
-        let pending = schema_switch_request::pending(user_dir)?;
+        let request = read_schema_switch_request(user_dir)?;
+        let pending = request.generation > schema_switch_applied_generation(user_dir)?;
         Ok(visible_switch_settings(
             schema_id,
             read_schema_switches_locked(schema_id),
-            |name| {
-                pending
-                    .as_ref()
-                    .and_then(|request| request.options.get(name).copied())
-                    .or_else(|| user.get("var")?.get("option")?.get(name)?.as_bool())
+            |name, has_reset| {
+                if has_reset {
+                    request.options.get(name).copied()
+                } else {
+                    pending
+                        .then(|| request.options.get(name).copied())
+                        .flatten()
+                        .or_else(|| user.get("var")?.get("option")?.get(name)?.as_bool())
+                }
             },
         ))
     }
@@ -3146,7 +3174,7 @@ pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>,
     })
 }
 
-/// Request a visible F4 switch change for the IME process to apply once.
+/// Request a visible F4 switch change for the IME process.
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -3895,9 +3923,6 @@ impl ProcessRimeState {
         extra: Option<&Engine>,
         request: Option<&SchemaSwitchRequest>,
     ) -> Result<(), String> {
-        let Some(request) = request else {
-            return Ok(());
-        };
         let sessions = lock_ignore_poison(&self.sessions);
         let mut applied = false;
         for session in sessions.iter().filter_map(Weak::upgrade) {
@@ -3907,16 +3932,22 @@ impl ProcessRimeState {
             }
             ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
             if let Some(engine) = inner.engine.as_ref() {
-                engine.apply_switch_request(request)?;
+                if let Some(request) = request {
+                    engine.apply_switch_request(request, false)?;
+                }
                 applied = true;
             }
         }
         if let Some(engine) = extra {
-            engine.apply_switch_request(request)?;
+            if let Some(request) = request {
+                engine.apply_switch_request(request, false)?;
+            }
             applied = true;
         }
         if applied {
-            schema_switch_request::acknowledge(root, request.generation)?;
+            if let Some(request) = request {
+                schema_switch_request::acknowledge(root, request.generation)?;
+            }
         }
         Ok(())
     }
@@ -4265,6 +4296,9 @@ impl ImeRuntime {
                 english_mode::read_english_mode(&dirs.user),
                 engine.list_schemas(),
             );
+            if self.0.ime_host {
+                engine.apply_reset_switch_request(&dirs.user)?;
+            }
             if request.is_some() {
                 PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
             }
@@ -4337,8 +4371,9 @@ impl ImeRuntimeSession {
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
-        self.with_engine_and_mode(|engine, policy, english_mode| {
+        self.with_engine_and_mode(|engine, policy, english_mode, ime_host| {
             if policy.composing {
+                let previous_schema = ime_host.then(|| engine.current_schema());
                 let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
                     && english_mode.mode == english_mode::EnglishMode::Schema;
                 let before = desktop_dictionary && engine.is_ascii_mode();
@@ -4351,6 +4386,13 @@ impl ImeRuntimeSession {
                         english_mode.reconcile_ascii_toggle(engine, before, &mut result)
                     {
                         crate::rt_log!(Level::Info, "error", "english_mode_switch", msg = error);
+                    }
+                }
+                if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
+                    if let Err(error) =
+                        self.apply_reset_switch_request(engine, ime_host, &mut result.state)
+                    {
+                        crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
                     }
                 }
                 result
@@ -4412,11 +4454,20 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
-        self.with_engine(|engine| engine.select_candidate_on_page(index))
+        self.select_candidate_on_page(index)
     }
 
     pub fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
-        self.with_engine(|engine| engine.select_candidate_on_page(index))
+        self.with_engine_and_mode(|engine, _, _, ime_host| {
+            let previous_schema = ime_host.then(|| engine.current_schema());
+            let mut state = engine.select_candidate_on_page(index);
+            if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
+                if let Err(error) = self.apply_reset_switch_request(engine, ime_host, &mut state) {
+                    crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
+                }
+            }
+            state
+        })
     }
 
     pub fn highlight_candidate_on_page(&self, index: usize) -> Option<ImeState> {
@@ -4472,8 +4523,12 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
-        self.with_engine(|engine| engine.select_schema(schema_id))
-            .ok_or_else(|| "Rime session is unavailable".to_string())?
+        self.with_engine_and_mode(|engine, _, _, ime_host| {
+            let mut state = engine.select_schema(schema_id)?;
+            self.apply_reset_switch_request(engine, ime_host, &mut state)?;
+            Ok(state)
+        })
+        .ok_or_else(|| "Rime session is unavailable".to_string())?
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
@@ -4495,15 +4550,37 @@ impl ImeRuntimeSession {
     /// Logical English mode, including a dictionary schema with ASCII off.
     /// Keep `is_ascii_mode` for deciding whether keys should pass through.
     pub fn is_english_mode(&self) -> bool {
-        self.with_engine_and_mode(|engine, _, mode| mode.is_english(engine))
+        self.with_engine_and_mode(|engine, _, mode, _| mode.is_english(engine))
             .unwrap_or(false)
     }
 
     /// Switch desktop input using the saved ASCII/dictionary preference.
     /// Mobile clients that manage schemas themselves keep using set_ascii_mode.
     pub fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String> {
-        self.with_engine_and_mode(|engine, _, mode| mode.switch(engine, enabled))
-            .ok_or_else(|| "Rime session is unavailable".to_string())?
+        self.with_engine_and_mode(|engine, _, mode, ime_host| {
+            let previous_schema = ime_host.then(|| engine.current_schema());
+            let mut state = mode.switch(engine, enabled)?;
+            if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
+                self.apply_reset_switch_request(engine, ime_host, &mut state)?;
+            }
+            Ok(state)
+        })
+        .ok_or_else(|| "Rime session is unavailable".to_string())?
+    }
+
+    fn apply_reset_switch_request(
+        &self,
+        engine: &Engine,
+        ime_host: bool,
+        state: &mut ImeState,
+    ) -> Result<(), String> {
+        if ime_host {
+            engine.apply_reset_switch_request(&self.dirs.user)?;
+            let committed = state.committed.take();
+            *state = engine.state();
+            state.committed = committed;
+        }
+        Ok(())
     }
 
     pub fn get_option(&self, option_name: &str) -> bool {
@@ -4547,12 +4624,17 @@ impl ImeRuntimeSession {
         &self,
         action: impl FnOnce(&Engine, InputContextPolicy) -> T,
     ) -> Option<T> {
-        self.with_engine_and_mode(|engine, policy, _| action(engine, policy))
+        self.with_engine_and_mode(|engine, policy, _, _| action(engine, policy))
     }
 
     fn with_engine_and_mode<T>(
         &self,
-        action: impl FnOnce(&Engine, InputContextPolicy, &mut english_mode::EnglishModeController) -> T,
+        action: impl FnOnce(
+            &Engine,
+            InputContextPolicy,
+            &mut english_mode::EnglishModeController,
+            bool,
+        ) -> T,
     ) -> Option<T> {
         // A surviving session must not rebuild against another runtime's
         // deployment. Take locks in the same order as initialization, and keep
@@ -4567,6 +4649,7 @@ impl ImeRuntimeSession {
         drop(initialized);
         let mut inner = try_lock_ignore_poison(&self.inner)?;
         self.refresh_if_needed(&mut inner).ok()?;
+        let ime_host = inner.ime_host;
         let (policy, clear_composition) = self.policy.take_for_engine();
         let ImeRuntimeSessionInner {
             engine,
@@ -4577,7 +4660,7 @@ impl ImeRuntimeSession {
         if clear_composition {
             engine.discard_composition();
         }
-        Some(action(engine, policy, english_mode))
+        Some(action(engine, policy, english_mode, ime_host))
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
@@ -4615,6 +4698,9 @@ impl ImeRuntimeSession {
                         crate::rt_log!(Level::Info, "error", "english_mode_restore", msg = error);
                     }
                 }
+            }
+            if inner.ime_host {
+                engine.apply_reset_switch_request(root)?;
             }
             inner.engine = Some(engine);
             inner.generation = current;

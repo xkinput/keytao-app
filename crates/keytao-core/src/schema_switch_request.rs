@@ -36,11 +36,6 @@ pub fn schema_switch_applied_generation(root: &Path) -> Result<u64, String> {
     }
 }
 
-pub(crate) fn pending(root: &Path) -> Result<Option<SchemaSwitchRequest>, String> {
-    let request = read_schema_switch_request(root)?;
-    Ok((request.generation > schema_switch_applied_generation(root)?).then_some(request))
-}
-
 #[derive(Default)]
 struct ProcessSwitchState {
     generations: BTreeMap<PathBuf, u64>,
@@ -71,9 +66,10 @@ impl ProcessSwitchState {
     }
 
     fn acknowledge(&mut self, root: &Path, generation: u64) -> Result<(), String> {
+        let recorded = schema_switch_applied_generation(root)?.max(generation);
         write_file_atomic(
             &root.join(SCHEMA_SWITCH_APPLIED_FILE),
-            generation.to_string().as_bytes(),
+            recorded.to_string().as_bytes(),
         )
         .map_err(|error| format!("save applied schema switch generation: {error}"))?;
         let applied = self.generations.entry(root.to_path_buf()).or_default();
@@ -130,6 +126,20 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slower_process_cannot_decrease_the_applied_generation() {
+        let root =
+            std::env::temp_dir().join(format!("keytao-switch-monotonic-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut slow = ProcessSwitchState::default();
+        assert!(slow.pending(&root).unwrap().is_none());
+        ProcessSwitchState::default().acknowledge(&root, 5).unwrap();
+        slow.acknowledge(&root, 3).unwrap();
+        assert_eq!(schema_switch_applied_generation(&root).unwrap(), 5);
+        assert_eq!(slow.generations[&root], 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn warm_processes_each_apply_a_shared_generation_once() {
