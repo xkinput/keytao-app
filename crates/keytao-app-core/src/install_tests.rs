@@ -25,7 +25,6 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
         "keytao.user.dict.yaml",
         "keytao.user.yaml",
         "user.yaml",
-        "xmjd6.custom.yaml",
         "user_dict.txt",
         "xmjd6_user.txt",
         ".keytao-sync-base-42.json",
@@ -36,6 +35,7 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
     for name in [
         "default.custom.yaml",
         "default-custom.yaml",
+        "xmjd6.custom.yaml",
         "lua/x.custom.yaml",
         "lua/keytao.user.dict.yaml",
         "User.yaml",
@@ -106,7 +106,7 @@ fn protected_file_install_keeps_utf8_bom_dictionary() {
 #[test]
 fn protected_file_install_keeps_duplicate_key_settings() {
     let dir = tempfile::tempdir().unwrap();
-    let relative = "x.custom.yaml";
+    let relative = "x.user.yaml";
     let user = b"patch:\n  a: 1\n  a: 2\n";
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
@@ -115,13 +115,13 @@ fn protected_file_install_keeps_duplicate_key_settings() {
         .unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
-    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
+    assert_eq!(logs, ["[KEPT] x.user.yaml"]);
 }
 
 #[test]
 fn protected_file_install_keeps_utf8_bom_settings() {
     let dir = tempfile::tempdir().unwrap();
-    let relative = "x.custom.yaml";
+    let relative = "x.user.yaml";
     let user = b"\xef\xbb\xbfcustomization:\n  v: 1\npatch:\n  a: 1\n";
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
@@ -130,7 +130,7 @@ fn protected_file_install_keeps_utf8_bom_settings() {
         .unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
-    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
+    assert_eq!(logs, ["[KEPT] x.user.yaml"]);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
@@ -185,7 +185,7 @@ fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
         fs::remove_file(backup).unwrap();
     }
 
-    let relative = format!("{}.custom.yaml", "x".repeat(240));
+    let relative = format!("{}.user.yaml", "x".repeat(240));
     let path = dir.path().join(&relative);
     let broken = b"patch: [\n";
     fs::write(&path, broken).unwrap();
@@ -817,4 +817,17 @@ async fn package_without_rime_lua_rewrites_only_changed_local_content() {
         assert_eq!(result.logs.iter().any(|line| line == "[MERGED] rime.lua"), changed);
         assert!(result.verify.iter().all(|entry| entry.ok));
     }
+}
+
+#[test]
+fn package_custom_yaml_replaces_the_installed_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative = "xmjd6.custom.yaml";
+    fs::write(dir.path().join(relative), b"patch:\n  switches/@4/reset: 1\n").unwrap();
+    let mut logs = Vec::new();
+
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
+        .unwrap();
+
+    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), b"patch: {}\n");
 }

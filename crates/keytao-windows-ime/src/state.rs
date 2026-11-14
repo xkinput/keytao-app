@@ -437,7 +437,7 @@ impl TsfState {
                 || !keytao_core::schema_install_state(&user_dir).deployed
                 || keytao_core::windows_rime_build_repair_required(&user_dir)
         });
-        let runtime = ImeRuntime::with_dirs(user_dir, shared);
+        let runtime = ImeRuntime::with_dirs(&user_dir, shared);
         if needs_deploy {
             // This function only runs on the warmup/reload worker, never the
             // host's input thread. Public package updates preserve private userdb.
@@ -445,6 +445,9 @@ impl TsfState {
             sandbox.as_ref().unwrap().mark_deployed()?;
         } else {
             runtime.init_without_deploy()?;
+        }
+        if sandboxed {
+            keytao_core::import_published_schema_switches(&user_dir)?;
         }
         let session = runtime.create_session()?;
         let reload_stamp_signature = sandbox.as_ref().map_or_else(

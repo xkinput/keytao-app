@@ -201,6 +201,7 @@ class AppController extends ChangeNotifier {
   LinuxImeStatusDto? linuxIme;
   AndroidImeInputSettingsDto? androidSettings;
   ImeUiSettingsDto? uiSettings;
+  List<SchemaSwitchDto> schemaSwitches = [];
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
   ComponentVersionsDto? versions;
   RuntimeLogSettingsDto? logSettings;
@@ -789,6 +790,14 @@ class AppController extends ChangeNotifier {
       addonError = null;
     } catch (failure) {
       addonError = errorText(failure);
+    }
+    await _readSchemaSwitches();
+  }
+
+  Future<void> _readSchemaSwitches() async {
+    schemaSwitches = [];
+    if (local?.deployed == true) {
+      schemaSwitches = await core.getSchemaSwitches();
     }
   }
 
@@ -2453,6 +2462,16 @@ class AppController extends ChangeNotifier {
     );
     await _persistSchemeSettings();
   });
+
+  Future<bool> saveSchemaSwitch(SchemaSwitchDto entry, int value) =>
+      run(() async {
+        if (isAndroid) await _requireStorage();
+        schemaSwitches = await core.setSchemaSwitch(
+          schemaId: entry.schemaId,
+          name: entry.name,
+          value: value,
+        );
+      });
 
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,

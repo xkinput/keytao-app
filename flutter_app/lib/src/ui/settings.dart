@@ -230,8 +230,48 @@ class SettingsCard extends StatelessWidget {
   const SettingsCard({super.key, required this.controller});
   final AppController controller;
   @override
-  Widget build(BuildContext context) =>
-      controller.isMobile ? _mobile(context) : _desktop(context);
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      controller.isMobile ? _mobile(context) : _desktop(context),
+      if (controller.local?.deployed == true &&
+          controller.schemaSwitches.isNotEmpty) ...[
+        const SizedBox(height: 24),
+        _schemaSwitches(),
+      ],
+    ],
+  );
+
+  Widget _schemaSwitches() {
+    final c = controller;
+    return Section(
+      title: '方案开关',
+      icon: FLucideIcons.slidersHorizontal,
+      children: [
+        for (final entry in c.schemaSwitches)
+          if (entry.options.isEmpty)
+            SwitchSetting(
+              entry.states[1],
+              value: entry.value == 1,
+              onChanged: c.busy
+                  ? null
+                  : (value) => c.saveSchemaSwitch(entry, value ? 1 : 0),
+            )
+          else
+            ChoiceSetting<int>(
+              label: entry.states.join(' / '),
+              value: entry.value,
+              options: {
+                for (var index = 0; index < entry.states.length; index++)
+                  index: entry.states[index],
+              },
+              onChanged: c.busy
+                  ? null
+                  : (value) => c.saveSchemaSwitch(entry, value),
+            ),
+      ],
+    );
+  }
 
   Widget _desktop(BuildContext context) {
     final c = controller;

@@ -17,7 +17,6 @@ pub fn is_protected_user_file(relative: &str) -> bool {
         && (relative.ends_with(".user.dict.yaml")
             || relative.ends_with(".user.yaml")
             || relative == "user.yaml"
-            || relative.ends_with(".custom.yaml")
             || relative == "user_dict.txt"
             || relative == keytao_core::ACTIVE_SCHEME_MANIFEST
             || relative.ends_with("_user.txt")

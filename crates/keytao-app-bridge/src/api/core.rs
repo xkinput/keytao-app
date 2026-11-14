@@ -878,6 +878,27 @@ pub async fn set_android_ime_input_settings(
     )
 }
 
+pub fn get_schema_switches() -> Result<Vec<SchemaSwitchDto>, String> {
+    keytao_app_core::ime_settings::get_schema_switches(runtime::state()?.host.clone())
+        .map(|switches| switches.into_iter().map(Into::into).collect())
+        .map_err(|error| error.to_string())
+}
+
+pub fn set_schema_switch(
+    schema_id: String,
+    name: String,
+    value: u32,
+) -> Result<Vec<SchemaSwitchDto>, String> {
+    keytao_app_core::ime_settings::set_schema_switch(
+        runtime::state()?.host.clone(),
+        &schema_id,
+        &name,
+        value as usize,
+    )
+    .map(|switches| switches.into_iter().map(Into::into).collect())
+    .map_err(|error| error.to_string())
+}
+
 pub fn get_ime_ui_settings() -> Result<ImeUiSettingsDto, String> {
     let state = runtime::state()?;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

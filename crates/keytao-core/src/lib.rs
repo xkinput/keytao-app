@@ -324,6 +324,59 @@ pub struct SchemaSwitch {
     pub reset: Option<i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaSwitchSetting {
+    pub schema_id: String,
+    pub name: String,
+    pub states: Vec<String>,
+    pub value: usize,
+    pub options: Vec<String>,
+}
+
+fn visible_switch_settings(
+    schema_id: &str,
+    switches: Vec<SchemaSwitch>,
+    mut saved_option: impl FnMut(&str) -> Option<bool>,
+) -> Vec<SchemaSwitchSetting> {
+    switches
+        .into_iter()
+        .filter_map(|switch| {
+            let count = if switch.options.is_empty() {
+                2
+            } else {
+                switch.options.len()
+            };
+            if switch.states.len() != count || count < 2 {
+                return None;
+            }
+            let reset = switch
+                .reset
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value < count)
+                .unwrap_or(0);
+            let (name, value) = if switch.options.is_empty() {
+                let name = switch.name?;
+                let value = saved_option(&name).map(usize::from).unwrap_or(reset);
+                (name, value)
+            } else {
+                let value = switch
+                    .options
+                    .iter()
+                    .position(|name| saved_option(name) == Some(true))
+                    .unwrap_or(reset);
+                (switch.options[0].clone(), value)
+            };
+            Some(SchemaSwitchSetting {
+                schema_id: schema_id.into(),
+                name,
+                states: switch.states,
+                value,
+                options: switch.options,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeyProcessResult {
     pub state: ImeState,
@@ -1861,6 +1914,7 @@ mod desktop {
             } else {
                 validate_active_schema(&session)?;
             }
+            apply_saved_schema_switches_locked(&session)?;
             Ok(Self {
                 session: ManuallyDrop::new(session),
                 user_data_dir: effective_user_data_dir,
@@ -2311,6 +2365,7 @@ mod desktop {
         pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
             let _rime = rime_api_lock();
             select_schema_checked(&self.session, schema_id)?;
+            apply_saved_schema_switches_locked(&self.session)?;
             Ok(extract_state_readonly(&self.session))
         }
 
@@ -2454,6 +2509,166 @@ mod desktop {
             config_close(&mut config);
             result
         }
+    }
+
+    pub(super) fn setup_switch_config(user_dir: &Path, shared_dir: &str) -> Result<(), String> {
+        let _rime = rime_api_lock();
+        if *lock_ignore_poison(&RIME_INITIALIZED) {
+            unsafe {
+                let api = rime_get_api();
+                let get_dir = rime_api_member!(api, get_user_data_dir)
+                    .ok_or("librime user directory API is unavailable")?;
+                let current =
+                    cstr_to_str(get_dir()).ok_or("librime user directory is unavailable")?;
+                if Path::new(&current) != user_dir {
+                    return Err("librime is initialized for another user directory".into());
+                }
+            }
+            return Ok(());
+        }
+        setup_only(user_dir.to_string_lossy().into_owned(), shared_dir.into())
+    }
+
+    fn with_user_config_locked<T>(
+        action: impl FnOnce(&mut RimeConfig) -> Result<T, String>,
+    ) -> Result<T, String> {
+        unsafe {
+            let api = rime_get_api();
+            let open = rime_api_member!(api, user_config_open)
+                .ok_or("librime user config API is unavailable")?;
+            let close = rime_api_member!(api, config_close)
+                .ok_or("librime config close API is unavailable")?;
+            let mut config: RimeConfig = std::mem::zeroed();
+            if open(c"user".as_ptr(), &mut config) == 0 {
+                return Err("cannot open Rime user config".into());
+            }
+            let result = action(&mut config);
+            let closed = close(&mut config) != 0;
+            if !closed {
+                return Err("cannot save Rime user config".into());
+            }
+            result
+        }
+    }
+
+    fn switch_settings_locked(
+        config: &mut RimeConfig,
+        schema_id: &str,
+    ) -> Vec<SchemaSwitchSetting> {
+        visible_switch_settings(schema_id, read_schema_switches_locked(schema_id), |name| {
+            config_bool_locked(config, &format!("var/option/{name}"))
+        })
+    }
+
+    pub(super) fn list_switch_settings(
+        schema_id: &str,
+    ) -> Result<Vec<SchemaSwitchSetting>, String> {
+        let _rime = rime_api_lock();
+        with_user_config_locked(|config| Ok(switch_settings_locked(config, schema_id)))
+    }
+
+    pub(super) fn set_switch_setting(
+        schema_id: &str,
+        switch_name: &str,
+        value: usize,
+    ) -> Result<Vec<SchemaSwitchSetting>, String> {
+        let _rime = rime_api_lock();
+        with_user_config_locked(|config| {
+            let switches = switch_settings_locked(config, schema_id);
+            let switch = switches
+                .iter()
+                .find(|switch| switch.name == switch_name)
+                .ok_or("Rime switch is unavailable")?;
+            if value >= switch.states.len() {
+                return Err("Rime switch value is out of range".into());
+            }
+            let values = if switch.options.is_empty() {
+                vec![(switch.name.as_str(), value != 0)]
+            } else {
+                switch
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.as_str(), index == value))
+                    .collect()
+            };
+            write_switch_options_locked(config, values)?;
+            Ok(switch_settings_locked(config, schema_id))
+        })
+    }
+
+    fn write_switch_options_locked<'a>(
+        config: &mut RimeConfig,
+        values: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Result<(), String> {
+        let values = values
+            .into_iter()
+            .map(|(name, enabled)| {
+                CString::new(format!("var/option/{name}"))
+                    .map(|key| (key, enabled))
+                    .map_err(|_| "invalid Rime switch name".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        unsafe {
+            let api = rime_get_api();
+            let set = rime_api_member!(api, config_set_bool)
+                .ok_or("librime config bool setter is unavailable")?;
+            for (key, enabled) in values {
+                if set(config, key.as_ptr(), i32::from(enabled)) == 0 {
+                    return Err("cannot write Rime switch value".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn import_switch_options(
+        options: &std::collections::BTreeMap<String, bool>,
+    ) -> Result<(), String> {
+        let _rime = rime_api_lock();
+        with_user_config_locked(|config| {
+            write_switch_options_locked(
+                config,
+                options.iter().map(|(name, value)| (name.as_str(), *value)),
+            )
+        })
+    }
+
+    fn apply_saved_schema_switches_locked(session: &rime_api::Session) -> Result<(), String> {
+        let status = session
+            .status()
+            .map_err(|error| format!("read switch schema: {error:?}"))?;
+        with_user_config_locked(|config| {
+            for switch in switch_settings_locked(config, status.schema_id()) {
+                let names = if switch.options.is_empty() {
+                    std::slice::from_ref(&switch.name)
+                } else {
+                    switch.options.as_slice()
+                };
+                if !names
+                    .iter()
+                    .any(|name| config_bool_locked(config, &format!("var/option/{name}")).is_some())
+                {
+                    continue;
+                }
+                let values = if switch.options.is_empty() {
+                    vec![(switch.name.as_str(), switch.value != 0)]
+                } else {
+                    switch
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| (name.as_str(), index == switch.value))
+                        .collect()
+                };
+                for (name, enabled) in values {
+                    if get_session_option(session, name) != enabled {
+                        set_session_option(session, name, enabled);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn config_string_locked(config: &mut RimeConfig, key: &str) -> Option<String> {
@@ -2882,6 +3097,104 @@ pub use desktop::deploy_for_upgrade;
     target_os = "ios"
 ))]
 pub use desktop::{deploy, setup_only, Engine};
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+fn with_schema_switch_config<T>(
+    user_dir: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut initialized = lock_ignore_poison(&PROCESS_RIME.initialized);
+    let _barrier = write_ignore_poison(&PROCESS_RIME.reload_barrier);
+    let dirs = initialized
+        .as_ref()
+        .filter(|dirs| dirs.user == user_dir)
+        .cloned()
+        .unwrap_or_else(|| RimeDataDirs {
+            user: user_dir.into(),
+            shared: default_shared_data_dir(),
+        });
+    PROCESS_RIME.shutdown_for_dir_change(&mut initialized, &dirs)?;
+    desktop::setup_switch_config(user_dir, &dirs.shared)?;
+    *initialized = Some(dirs);
+    action()
+}
+
+/// Read the visible F4 switches of the currently deployed schema.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn list_schema_switches(user_dir: &Path) -> Result<Vec<SchemaSwitchSetting>, String> {
+    let Some(schema_id) = deployed_schema_id_from_dir(user_dir) else {
+        return Ok(Vec::new());
+    };
+    if !user_dir
+        .join("build")
+        .join(format!("{schema_id}.schema.yaml"))
+        .is_file()
+    {
+        return Ok(Vec::new());
+    }
+    with_schema_switch_config(user_dir, || desktop::list_switch_settings(&schema_id))
+}
+
+/// Persist a visible F4 switch through librime's user configuration API.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn set_schema_switch(
+    user_dir: &Path,
+    schema_id: &str,
+    switch_name: &str,
+    value: usize,
+) -> Result<Vec<SchemaSwitchSetting>, String> {
+    if deployed_schema_id_from_dir(user_dir).as_deref() != Some(schema_id)
+        || !user_dir
+            .join("build")
+            .join(format!("{schema_id}.schema.yaml"))
+            .is_file()
+    {
+        return Err("Rime schema is no longer deployed or selected".into());
+    }
+    with_schema_switch_config(user_dir, || {
+        desktop::set_switch_setting(schema_id, switch_name, value)
+    })
+}
+
+pub const PUBLISHED_SCHEMA_SWITCHES_FILE: &str = "keytao-schema-switches.json";
+
+/// Merge sandbox-published options through librime before creating a session.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub fn import_published_schema_switches(user_dir: &Path) -> Result<(), String> {
+    let bytes = match std::fs::read(user_dir.join(PUBLISHED_SCHEMA_SWITCHES_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read published Rime switches: {error}")),
+    };
+    let options: std::collections::BTreeMap<String, bool> =
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("read published Rime switches: {error}"))?;
+    with_schema_switch_config(user_dir, || desktop::import_switch_options(&options))
+}
 #[cfg(target_os = "android")]
 pub use desktop::{deploy_android_config, deploy_android_schema};
 
@@ -4248,6 +4561,7 @@ impl ImeRuntimeSession {
                     .unwrap_or_default(),
                 engine.list_schemas(),
             );
+            // Restore live language state after the constructor applies saved switches.
             if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
                 engine.apply_ascii_mode(ascii_mode);
             }
@@ -4280,12 +4594,45 @@ impl ImeRuntimeSession {
 
 fn preferred_schema_location(user_data_dir: Option<&Path>) -> Option<(PathBuf, String)> {
     if let Some(dir) = user_data_dir {
-        if let Some(schema) = preferred_schema_id_from_dir(dir) {
+        if let Some(schema) = deployed_schema_id_from_dir(dir) {
             return Some((dir.to_path_buf(), schema));
         }
     }
     default_user_data_dir()
-        .and_then(|dir| preferred_schema_id_from_dir(&dir).map(|schema| (dir, schema)))
+        .and_then(|dir| deployed_schema_id_from_dir(&dir).map(|schema| (dir, schema)))
+}
+
+fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
+    let deployed = std::fs::read_to_string(dir.join("build/default.yaml"))
+        .ok()
+        .map(|content| parse_schema_list(&content))
+        .filter(|schemas| !schemas.is_empty());
+    let schemas = deployed
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| configured_schema_list_from_dir(dir));
+    let selected = std::fs::read_to_string(dir.join("user.yaml"))
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
+        .and_then(|value| {
+            value["var"]["previously_selected_schema"]
+                .as_str()
+                .map(str::to_owned)
+        });
+    if let Some(schema) = selected.filter(|schema| {
+        valid_rime_build_id(schema)
+            && schemas.contains(schema)
+            && dir
+                .join("build")
+                .join(format!("{schema}.schema.yaml"))
+                .is_file()
+    }) {
+        return Some(schema);
+    }
+    match deployed {
+        Some(schemas) => preferred_schema_from_list(schemas),
+        None => preferred_schema_id_from_dir(dir),
+    }
 }
 
 fn preferred_schema_id_from_dir(dir: &Path) -> Option<String> {
@@ -6378,6 +6725,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preferred_schema_honors_compiled_previous_selection_and_falls_back_when_missing() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-current-schema-{suffix}"));
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(
+            dir.join("build/default.yaml"),
+            "schema_list:\n  - schema: keytao\n  - schema: selected\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("user.yaml"),
+            "var:\n  previously_selected_schema: selected\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("keytao")
+        );
+        std::fs::write(dir.join("build/selected.schema.yaml"), "").unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("selected")
+        );
+        std::fs::remove_file(dir.join("build/selected.schema.yaml")).unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("keytao")
+        );
+        std::fs::write(dir.join("build/selected.schema.yaml"), "").unwrap();
+        std::fs::write(
+            dir.join("build/default.yaml"),
+            "schema_list:\n  - schema: keytao\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: selected\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("keytao")
+        );
+        std::fs::remove_file(dir.join("build/default.yaml")).unwrap();
+        assert_eq!(
+            super::deployed_schema_id_from_dir(&dir).as_deref(),
+            Some("selected")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

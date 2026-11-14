@@ -117,6 +117,8 @@ class FakeCore implements RustLibApi {
   @override
   Future<LocalSchemaDto> crateApiCoreCheckLocalSchema() async => local;
   @override
+  Future<List<SchemaSwitchDto>> crateApiCoreGetSchemaSwitches() async => [];
+  @override
   Future<List<InstalledPackageDto>> crateApiCoreListInstalledPackages() async =>
       [];
   @override
