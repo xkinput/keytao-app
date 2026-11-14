@@ -63,7 +63,13 @@ void main() {
       final c = ViewController(BridgePlatform.macOs)
         ..activePage = AppPage.scheme;
       await _pump(tester, c, size);
-      await tester.ensureVisible(find.text(AppStrings.changelog));
+      final more = find.descendant(
+        of: find.byKey(const ValueKey('scheme-package-keytao')),
+        matching: find.byIcon(FLucideIcons.ellipsis),
+      );
+      await tester.ensureVisible(more);
+      await tester.tap(more);
+      await tester.pumpAndSettle();
       await tester.tap(find.text(AppStrings.changelog));
       await tester.pumpAndSettle();
       expect(find.byType(FDialog), findsOneWidget);
