@@ -134,6 +134,44 @@ fn deployment_marker_rejects_bundled_apk_version_change() {
 }
 
 #[test]
+fn deployment_marker_requires_redeployment_for_ios_version_and_build_changes() {
+    let dir = installed_schema();
+    compiled_schema(&dir);
+    fs::create_dir(dir.join("rime-data")).unwrap();
+    let stamp = dir.join("rime-data/.bundled-version");
+    fs::write(&stamp, "1.2.5/42").unwrap();
+    complete_deployment(&dir).unwrap();
+
+    for bundled_version in ["1.2.6/42", "1.2.6/43"] {
+        let previous_marker = fs::read(dir.join("build/.keytao-deployed")).unwrap();
+        fs::write(&stamp, bundled_version).unwrap();
+        let state = schema_install_state(&dir);
+        assert!(state.installed);
+        assert!(!state.deployed);
+        assert_eq!(
+            fs::read(dir.join("build/.keytao-deployed")).unwrap(),
+            previous_marker
+        );
+
+        begin_deployment(&dir).unwrap();
+        assert!(!schema_install_state(&dir).deployed);
+        complete_deployment(&dir).unwrap();
+        assert!(schema_install_state(&dir).deployed);
+        assert!(!dir.join("build/.keytao-deploying").exists());
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("build/.keytao-deployed")).unwrap()).unwrap();
+        assert_eq!(
+            marker["fingerprint"],
+            format!(
+                "keytao-core/{};bundled/{bundled_version}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn deploy_start_invalidates_previous_ready_build_until_completion() {
     let dir = installed_schema();
     compiled_schema(&dir);

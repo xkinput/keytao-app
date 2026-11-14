@@ -4543,7 +4543,7 @@ struct DeploymentMarker {
 }
 
 fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
-    // Android publishes the APK version only after refreshing its shared assets.
+    // Mobile apps publish the bundle version only after refreshing shared assets.
     let bundled_version =
         match std::fs::read_to_string(user_data_dir.join("rime-data/.bundled-version")) {
             Ok(version) => version,

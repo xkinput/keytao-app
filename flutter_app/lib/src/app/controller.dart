@@ -134,6 +134,7 @@ class AppController extends ChangeNotifier {
   bool _refreshWhenIdle = false;
   bool _manuallySelectedScheme = false;
   bool _startupStarted = false;
+  final Set<String> _iosUpgradeDeploymentAttempts = {};
   bool _logsWhenIdle = false;
   int _releaseRequest = 0;
   int _schemeUpdatesRequest = 0;
@@ -902,6 +903,7 @@ class AppController extends ChangeNotifier {
         }
       }
       await _readState();
+      await _deployIosUpgradeIfNeeded();
       if (startupImeError != null) {
         if (isWindows) windowsImeError = startupImeError;
         if (isLinux) linuxImeError = startupImeError;
@@ -916,6 +918,24 @@ class AppController extends ChangeNotifier {
     }
     if (result && !_disposed) unawaited(_checkAddonUpdates());
     return result;
+  }
+
+  Future<void> _deployIosUpgradeIfNeeded() async {
+    if (!isIos || local?.installed != true || local?.deployed == true) return;
+    final String stamp;
+    try {
+      stamp = await File('${info.userRoot}/rime-data/.bundled-version')
+          .readAsString();
+    } on FileSystemException {
+      return;
+    }
+    if (_disposed ||
+        stamp.isEmpty ||
+        !_iosUpgradeDeploymentAttempts.add(stamp)) {
+      return;
+    }
+    // Keep run's busy guard held; core replaces an interrupted deploy sentinel.
+    await _deploy();
   }
 
   Future<void> _checkAddonUpdates() async {

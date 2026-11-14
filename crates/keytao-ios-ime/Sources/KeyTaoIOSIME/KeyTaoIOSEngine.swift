@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import CKeytaoCore
 import Darwin
 import ImageIO
@@ -197,13 +196,6 @@ struct KeyTaoRimeOptionsState: Equatable {
 
 enum KeyTaoIOSPaths {
     static let appGroupIdentifier = "group.ink.rea.keytao-app"
-    private static let keyboardSeedFileName = ".keyboard.seed"
-    private static let legacyDefaultKeyboardHashes: Set<String> = [
-        "e4d7aa7445ac138286941d095017ee7d9e397ecc5501cfb744482835538e5329",
-        "3ebe95295376bfeffb79c0106f86bc7e3d8631311dae0c595d330ed4c1b2805c",
-        "25ae1b176617c64fec16a55b73c9faae8abd17c3eba12d1fc67ec9f66364b854",
-        "34475509153894fcd8e53f5d21b1f6d0852b800731d670e9cfe7694cdf64df2c",
-    ]
 
     static func userRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["KEYTAO_IOS_USER_DATA_DIR"], !override.isEmpty {
@@ -260,13 +252,33 @@ enum KeyTaoIOSPaths {
     static func hasDeployedSchema(userRoot: URL) -> Bool {
         let schemas = configuredSchemas(userRoot: userRoot)
         let build = userRoot.appendingPathComponent("build", isDirectory: true)
-        return !schemas.isEmpty
+        let bundle = Bundle.main
+        let coreVersion = bundle.url(forResource: "keytao-core-version", withExtension: nil)
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildNumber = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        let bundleStamp = version.flatMap { version in buildNumber.map { "\(version)/\($0)" } }
+        let sharedStamp = try? String(
+            contentsOf: userRoot.appendingPathComponent("rime-data/.bundled-version"), encoding: .utf8
+        )
+        return KeyTaoIOSDeploymentState.isCurrent(
+                marker: try? Data(contentsOf: build.appendingPathComponent(".keytao-deployed")),
+                coreVersion: coreVersion,
+                bundleStamp: bundleStamp,
+                sharedStamp: sharedStamp,
+                schemas: schemas,
+                deploying: isDeploying(userRoot: userRoot)
+            )
             && schemas.allSatisfy {
                 FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("\($0).schema.yaml").path)
             }
             && schemas.allSatisfy {
                 FileManager.default.fileExists(atPath: build.appendingPathComponent("\($0).schema.yaml").path)
             }
+    }
+
+    static func isDeploying(userRoot: URL) -> Bool {
+        FileManager.default.fileExists(atPath: userRoot.appendingPathComponent("build/.keytao-deploying").path)
     }
 
     private static func configuredSchemas(userRoot: URL) -> [String] {
@@ -296,68 +308,6 @@ enum KeyTaoIOSPaths {
         }.filter { schema in
             ["keytao", "txjx", "xmjd6", "keydo"].contains { schema.hasPrefix($0) }
         }
-    }
-
-    static func ensureUserRoot(_ url: URL) {
-        do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        } catch {
-            KeyTaoLog.configWriteFailed("user_root")
-        }
-    }
-
-    /// Drops the bundled layout into the App Group so that users have a
-    /// `keyboard.yaml` to edit. A reseed happens only when the sidecar hash
-    /// proves the existing file is still the last bundled layout: the extension
-    /// must never overwrite a layout the user has customised.
-    static func seedDefaultKeyboardIfNeeded(userRoot: URL) {
-        let url = keyboardFile(userRoot: userRoot)
-        let seedURL = userRoot.appendingPathComponent(keyboardSeedFileName)
-        guard let yaml = KeyTaoIOSKeyboardConfigResolver.defaultKeyboardYaml() else {
-            return
-        }
-        let bundledHash = sha256(yaml)
-        if FileManager.default.fileExists(atPath: url.path) {
-            guard let existing = try? String(contentsOf: url, encoding: .utf8) else {
-                return
-            }
-            if !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let existingHash = sha256(existing)
-                let seededHash = try? String(contentsOf: seedURL, encoding: .utf8)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if existingHash == bundledHash {
-                    if seededHash != bundledHash {
-                        do {
-                            try bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
-                        } catch {
-                            KeyTaoLog.configWriteFailed("keyboard_seed_hash")
-                        }
-                    }
-                    return
-                }
-                let canReseed: Bool
-                if let seededHash, !seededHash.isEmpty {
-                    canReseed = existingHash == seededHash
-                } else {
-                    canReseed = legacyDefaultKeyboardHashes.contains(existingHash)
-                }
-                guard canReseed else {
-                    return
-                }
-            }
-        }
-        do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try yaml.write(to: url, atomically: true, encoding: .utf8)
-            try bundledHash.write(to: seedURL, atomically: true, encoding: .utf8)
-        } catch {
-            KeyTaoLog.configWriteFailed("keyboard_seed")
-            return
-        }
-    }
-
-    private static func sha256(_ value: String) -> String {
-        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func hasDefaultYaml(at url: URL) -> Bool {
@@ -464,8 +414,8 @@ final class KeyTaoIOSEngine {
     }
 
     /// Keyboard extensions are launched on demand by the host and must show an
-    /// interactive first frame straight away, so the App Group seeding plus
-    /// `keytao_init` and the session handshake run on a private serial queue.
+    /// interactive first frame straight away, so `keytao_init` and the session
+    /// handshake run on a private serial queue. The app owns shared-data seeding.
     /// Only the resulting session pointer crosses back to the main queue, where
     /// every other member of this class is read and written.
     func ensureReadyAsync(_ completion: @escaping (Bool) -> Void) {
@@ -484,8 +434,6 @@ final class KeyTaoIOSEngine {
         startupInFlight = true
         let userRoot = self.userRoot
         startupQueue.async { [weak self] in
-            KeyTaoIOSPaths.ensureUserRoot(userRoot)
-            KeyTaoIOSPaths.seedDefaultKeyboardIfNeeded(userRoot: userRoot)
             let prepared = Self.prepareRuntime(userRoot: userRoot)
             DispatchQueue.main.async {
                 guard let self else {
@@ -574,6 +522,10 @@ final class KeyTaoIOSEngine {
 
     func hasDeployedSchema() -> Bool {
         KeyTaoIOSPaths.hasDeployedSchema(userRoot: userRoot)
+    }
+
+    func isDeploying() -> Bool {
+        KeyTaoIOSPaths.isDeploying(userRoot: userRoot)
     }
 
     /// Shared App Group files are written by the containing app while the
