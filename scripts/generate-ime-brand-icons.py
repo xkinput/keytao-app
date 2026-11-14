@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Generate the shared rounded-star IME icons using Python's standard library."""
+
+import argparse
+import math
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ICO_SIZES = (16, 20, 24, 32, 40, 48)
+INNER_RATIO = 0.5
+TIP_RADIUS = 0.10
+INNER_RADIUS = 0.035
+MENU_RECT = [
+    ("M", 5.2, 0), ("L", 22.8, 0), ("C", 25.8, 0, 28, 2.2, 28, 5.2),
+    ("L", 28, 14.8), ("C", 28, 17.8, 25.8, 20, 22.8, 20),
+    ("L", 5.2, 20), ("C", 2.2, 20, 0, 17.8, 0, 14.8),
+    ("L", 0, 5.2), ("C", 0, 2.2, 2.2, 0, 5.2, 0), ("Z",),
+]
+
+
+def rounded_star():
+    vertices = []
+    for i in range(10):
+        angle = -math.pi / 2 + i * math.pi / 5
+        radius = 1 if i % 2 == 0 else INNER_RATIO
+        vertices.append((radius * math.cos(angle), radius * math.sin(angle)))
+    path = []
+    for i, vertex in enumerate(vertices):
+        previous, following = vertices[i - 1], vertices[(i + 1) % 10]
+        incoming = tuple(vertex[j] - previous[j] for j in (0, 1))
+        outgoing = tuple(following[j] - vertex[j] for j in (0, 1))
+        incoming = tuple(v / math.hypot(*incoming) for v in incoming)
+        outgoing = tuple(v / math.hypot(*outgoing) for v in outgoing)
+        turn = math.acos(max(-1, min(1, sum(a * b for a, b in zip(incoming, outgoing)))))
+        radius = TIP_RADIUS if i % 2 == 0 else INNER_RADIUS
+        distance = radius * math.tan(turn / 2)
+        handle = 4 * radius * math.tan(turn / 4) / 3
+        entry = tuple(vertex[j] - distance * incoming[j] for j in (0, 1))
+        exit_point = tuple(vertex[j] + distance * outgoing[j] for j in (0, 1))
+        control1 = tuple(entry[j] + handle * incoming[j] for j in (0, 1))
+        control2 = tuple(exit_point[j] - handle * outgoing[j] for j in (0, 1))
+        path.append(("M" if i == 0 else "L", *entry))
+        # Short segments avoid MSVG flattening small-radius curves into visible facets.
+        points = (entry, control1, control2, exit_point)
+        for segment in range(4):
+            start, end = segment / 4, (segment + 1) / 4
+            first, tangent1 = cubic_point(points, start)
+            last, tangent2 = cubic_point(points, end)
+            path.append(("C",
+                         *(first[j] + tangent1[j] / 12 for j in (0, 1)),
+                         *(last[j] - tangent2[j] / 12 for j in (0, 1)), *last))
+    return path + [("Z",)]
+
+
+def cubic_point(points, t):
+    p0, p1, p2, p3 = points
+    point = tuple((1 - t) ** 3 * p0[j] + 3 * (1 - t) ** 2 * t * p1[j]
+                  + 3 * (1 - t) * t * t * p2[j] + t ** 3 * p3[j] for j in (0, 1))
+    tangent = tuple(3 * (1 - t) ** 2 * (p1[j] - p0[j])
+                    + 6 * (1 - t) * t * (p2[j] - p1[j])
+                    + 3 * t * t * (p3[j] - p2[j]) for j in (0, 1))
+    return point, tangent
+
+
+def path_bounds(path):
+    coordinates = [[], []]
+    current = None
+    for command, *values in path:
+        if command in ("M", "L"):
+            current = tuple(values)
+            for axis in (0, 1):
+                coordinates[axis].append(current[axis])
+        elif command == "C":
+            for axis in (0, 1):
+                p0, p1, p2, p3 = current[axis], *values[axis::2]
+                a, b, c = -p0 + 3 * p1 - 3 * p2 + p3, 2 * (p0 - 2 * p1 + p2), p1 - p0
+                roots = []
+                if abs(a) < 1e-12:
+                    if abs(b) > 1e-12:
+                        roots = [-c / b]
+                elif b * b - 4 * a * c >= 0:
+                    discriminant = math.sqrt(b * b - 4 * a * c)
+                    roots = [(-b + discriminant) / (2 * a), (-b - discriminant) / (2 * a)]
+                coordinates[axis].append(p3)
+                for t in roots:
+                    if 0 < t < 1:
+                        coordinates[axis].append(
+                            (1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1
+                            + 3 * (1 - t) * t * t * p2 + t ** 3 * p3
+                        )
+            current = tuple(values[-2:])
+    return tuple(min(axis) for axis in coordinates) + tuple(max(axis) for axis in coordinates)
+
+
+def fit_star(bounds):
+    path = rounded_star()
+    original = path_bounds(path)
+    scale = tuple((bounds[i + 2] - bounds[i]) / (original[i + 2] - original[i]) for i in (0, 1))
+    # Preserve the previous visible footprint, including its optical vertical placement.
+    return [
+        (command, *(bounds[i % 2] + (v - original[i % 2]) * scale[i % 2]
+                    for i, v in enumerate(values)))
+        for command, *values in path
+    ]
+
+
+def number(value):
+    return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def svg_path(path):
+    return " ".join(command + " ".join(number(v) for v in values) for command, *values in path)
+
+
+def write_svg(path, width, height, body):
+    path.write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">\n'
+        '  <!-- Generated by scripts/generate-ime-brand-icons.py. -->\n'
+        f'{body}\n</svg>\n', encoding="utf-8",
+    )
+
+
+def write_pdf(path, shape):
+    operators = {"M": "m", "L": "l", "C": "c", "Z": "h"}
+    stream = ("0 g\n1 0 0 -1 0 20 cm\n" + "\n".join(
+        " ".join([*(number(v) for v in values), operators[command]])
+        for command, *values in shape
+    ) + "\nf*\n").encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 28 20] /Resources << >> /Contents 4 0 R >>",
+        f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"endstream",
+    ]
+    document = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(document))
+        document.extend(f"{index} 0 obj\n".encode("ascii") + obj + b"\nendobj\n")
+    xref = len(document)
+    document.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode("ascii"))
+    for offset in offsets[1:]:
+        document.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    document.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
+    )
+    path.write_bytes(document)
+
+
+def render_svg(source, destination, width, height, source_width):
+    # MSVG uses ImageMagick's internal renderer; each output gets its own 8x render.
+    subprocess.run([
+        "magick", "-background", "none", "-density", number(96 * 8 * width / source_width),
+        f"MSVG:{source}", "-filter", "Lanczos", "-resize", f"{width}x{height}!",
+        "-strip", f"PNG32:{destination}",
+    ], check=True)
+
+
+def generate_macos():
+    directory = ROOT / "crates/keytao-macos-ime/Resources"
+    shape = MENU_RECT + fit_star((6.3, 2.7, 21.7, 16.85))
+    svg = directory / "keytao-menu-icon.svg"
+    write_svg(svg, 28, 20, f'  <path fill="#000000" fill-rule="evenodd" d="{svg_path(shape)}"/>')
+    write_pdf(directory / "keytao-menu-icon.pdf", shape)
+    render_svg(svg, directory / "keytao-menu-icon.png", 56, 40, 28)
+
+
+def generate_windows():
+    directory = ROOT / "crates/keytao-windows-ime"
+    svg = directory / "ime-brand.svg"
+    star = svg_path(fit_star((11.2, 12.8, 52.8, 51.1)))
+    write_svg(svg, 64, 64,
+              '  <rect x="3" y="3" width="58" height="58" rx="14" fill="#202124"/>\n'
+              f'  <path id="keytao-star" fill="#ffffff" d="{star}"/>')
+    with tempfile.TemporaryDirectory(prefix="keytao-ime-icons-") as temporary:
+        frames = []
+        for size in ICO_SIZES:
+            frame = Path(temporary) / f"{size}.png"
+            render_svg(svg, frame, size, size, 64)
+            frames.append(str(frame))
+        subprocess.run(["magick", *frames, "-strip", str(directory / "ime-brand.ico")], check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--platform", choices=("all", "macos", "windows"), default="all")
+    args = parser.parse_args()
+    if args.platform in ("all", "macos"):
+        generate_macos()
+    if args.platform in ("all", "windows"):
+        generate_windows()
+
+
+if __name__ == "__main__":
+    main()

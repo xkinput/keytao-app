@@ -22,6 +22,8 @@ if ! command -v magick >/dev/null 2>&1; then
     echo "ERROR: ImageMagick 'magick' is required to generate macOS IME icons." >&2
     exit 1
 fi
+python3 -I "$WORKSPACE_DIR/scripts/generate-ime-brand-icons.py" --platform macos
+
 if ! command -v iconutil >/dev/null 2>&1; then
     if have_generated_icons; then
         echo "macOS 'iconutil' is not available; reusing checked-in macOS IME icons."
@@ -39,7 +41,6 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/keytao-ime-icons.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 MASK="$TMP_DIR/keytao-logo-mask.png"
-MENU_SVG="$TMP_DIR/keytao-menu-icon.svg"
 INPUT_BG="$TMP_DIR/keytao-input-bg.png"
 INPUT_MASK="$TMP_DIR/keytao-input-mask.png"
 INPUT_GLYPH="$TMP_DIR/keytao-input-glyph.png"
@@ -54,16 +55,6 @@ magick "$SOURCE_ICON" \
     -morphology Open Disk:0.6 \
     -alpha off \
     "$MASK"
-
-cat > "$MENU_SVG" << 'SVGEOF'
-<svg xmlns="http://www.w3.org/2000/svg" width="28" height="20" viewBox="0 0 28 20">
-  <path fill="#000" fill-rule="evenodd" d="
-    M5.2 0H22.8C25.8 0 28 2.2 28 5.2V14.8C28 17.8 25.8 20 22.8 20H5.2C2.2 20 0 17.8 0 14.8V5.2C0 2.2 2.2 0 5.2 0Z
-    M14 2.7L15.95 8.05H21.7L17.05 11.38L18.82 16.85L14 13.48L9.18 16.85L10.95 11.38L6.3 8.05H12.05Z"/>
-</svg>
-SVGEOF
-magick -background none "$MENU_SVG" "$MENU_PDF"
-magick -background none -density 288 "$MENU_SVG" -resize 28x20 "$MENU_PNG"
 
 magick -size 1024x1024 xc:none \
     -fill '#c8cdd4' \
