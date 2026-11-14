@@ -9,14 +9,21 @@ import 'package:flutter_rust_bridge_hooks/flutter_rust_bridge_hooks.dart';
 // build phase bundles librime and its plugins directly in Contents/Frameworks.
 void main(List<String> args) async {
   await build(args, (input, output) async {
-    final vendor = Directory.fromUri(input.packageRoot.resolve('../vendor/librime/'));
+    final vendor = Directory.fromUri(
+      input.packageRoot.resolve('../vendor/librime/'),
+    );
     final code = input.config.code;
     // librime-sys runs bindgen against the NDK sysroot; the NDK root is five levels
     // above the clang Flutter configured (toolchains/llvm/prebuilt/<host>/bin/clang).
     final ndkRoot = code.targetOS == OS.android
         ? code.cCompiler?.compiler.resolve('../../../../../').toFilePath()
         : null;
-    final rime = _rimeFor(code.targetOS, code.targetArchitecture, vendor.path, ndkRoot);
+    final rime = _rimeFor(
+      code.targetOS,
+      code.targetArchitecture,
+      vendor.path,
+      ndkRoot,
+    );
 
     await FlutterRustBridgeNativeAssetsBuilder(
       cratePath: '../crates/keytao-app-bridge',
@@ -50,7 +57,9 @@ String? _releaseVersion(String path) {
   final file = File(path);
   if (!file.existsSync()) return null;
   for (final line in file.readAsLinesSync()) {
-    if (line.startsWith('version=')) return line.substring('version='.length).trim();
+    if (line.startsWith('version=')) {
+      return line.substring('version='.length).trim();
+    }
   }
   return null;
 }
@@ -64,44 +73,65 @@ class _Rime {
 
 _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
   Map<String, String> sdk(String root) => {
-        'RIME_INCLUDE_DIR': '$root/include',
-        'RIME_LIB_DIR': '$root/lib',
-        'BINDGEN_EXTRA_CLANG_ARGS': '-I$root/include',
-        // The bridge embeds this via option_env!; the hook scrubs the caller's env.
-        'OPENCC_VERSION': ?_releaseVersion('$root/opencc-release.txt'),
-      };
+    'RIME_INCLUDE_DIR': '$root/include',
+    'RIME_LIB_DIR': '$root/lib',
+    'BINDGEN_EXTRA_CLANG_ARGS': '-I$root/include',
+    // The bridge embeds this via option_env!; the hook scrubs the caller's env.
+    'OPENCC_VERSION': ?_releaseVersion('$root/opencc-release.txt'),
+  };
 
   switch (os) {
     case OS.macOS:
       final root = '${vendor}macos-universal';
       return _Rime(sdk(root));
     case OS.iOS:
-      return _Rime({'KEYTAO_IOS_RIME_ROOT': '${vendor}ios'});
+      return _Rime({
+        'KEYTAO_IOS_RIME_ROOT': '${vendor}ios',
+        'OPENCC_VERSION': ?[
+          for (final target in [
+            'iphoneos-arm64',
+            'iphonesimulator-arm64',
+            'iphonesimulator-x86_64',
+          ])
+            _releaseVersion('${vendor}ios/$target/opencc-release.txt'),
+        ].nonNulls.firstOrNull,
+      });
     case OS.android:
       final abi = switch (arch) {
         Architecture.arm64 => 'arm64-v8a',
         Architecture.arm => 'armeabi-v7a',
         Architecture.x64 => 'x86_64',
         Architecture.ia32 => 'x86',
-        final other => throw UnsupportedError('librime has no Android $other build'),
+        final other => throw UnsupportedError(
+          'librime has no Android $other build',
+        ),
       };
       final lib = '${vendor}android/$abi/lib';
       // Source-built librime.so needs only the shared C++ runtime bundled here.
-      return _Rime({
-        'KEYTAO_ANDROID_RIME_ROOT': '${vendor}android',
-        'ANDROID_NDK_HOME': ?ndkRoot,
-      }, [
-        for (final name in ['librime.so', 'libc++_shared.so'])
-          '$lib/$name',
-      ]);
+      return _Rime(
+        {
+          'KEYTAO_ANDROID_RIME_ROOT': '${vendor}android',
+          'ANDROID_NDK_HOME': ?ndkRoot,
+          'OPENCC_VERSION': ?_releaseVersion(
+            '${vendor}android/$abi/opencc-release.txt',
+          ),
+        },
+        [
+          for (final name in ['librime.so', 'libc++_shared.so']) '$lib/$name',
+        ],
+      );
     case OS.windows:
       final windowsArch = switch (arch) {
         Architecture.x64 => 'x64',
         Architecture.arm64 => 'arm64',
         Architecture.ia32 => 'x86',
-        final other => throw UnsupportedError('librime has no Windows $other build'),
+        final other => throw UnsupportedError(
+          'librime has no Windows $other build',
+        ),
       };
-      final root = Directory.fromUri(Uri.directory(vendor).resolve('windows-$windowsArch'));
+      final root = Directory.fromUri(
+        Uri.directory(vendor).resolve('windows-$windowsArch'),
+      );
       final libName = arch == Architecture.arm64 ? 'rime-arm64' : 'rime';
       final bin = Directory.fromUri(root.uri.resolve('bin/'));
       final libraries = <String, String>{
@@ -115,12 +145,19 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
       // Tauri ships bin/*.dll plus the matching MSVC redistributables staged by
       // build-windows-ime.ps1. Use the arch-specific runtime, never "current",
       // which may belong to a different architecture in a multi-arch build.
-      final runtime = Uri.directory(vendor).resolve('../../target/keytao-windows-ime-runtime/$windowsArch/');
-      for (final name in ['vcruntime140.dll', 'msvcp140.dll', if (arch != Architecture.ia32) 'vcruntime140_1.dll']) {
+      final runtime = Uri.directory(vendor)
+          .resolve('../../target/keytao-windows-ime-runtime/$windowsArch/');
+      for (final name in [
+        'vcruntime140.dll',
+        'msvcp140.dll',
+        if (arch != Architecture.ia32) 'vcruntime140_1.dll',
+      ]) {
         if (libraries.containsKey(name)) continue;
         final file = File.fromUri(runtime.resolve(name));
         if (!file.existsSync()) {
-          throw StateError('Missing $name; run scripts/build-windows-ime.ps1 -Arch $windowsArch first');
+          throw StateError(
+            'Missing $name; run scripts/build-windows-ime.ps1 -Arch $windowsArch first',
+          );
         }
         libraries[name] = file.path;
       }
@@ -142,7 +179,9 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
 // Always hand Flutter a private copy: installing a code asset can delete or
 // rewrite the file it was given, which once removed the vendored librime.1.dylib.
 Future<Uri> _copyForBundle(String library, BuildInput input) async {
-  final copy = input.outputDirectory.resolve(Uri.file(library).pathSegments.last);
+  final copy = input.outputDirectory.resolve(
+    Uri.file(library).pathSegments.last,
+  );
   await File(library).copy(copy.toFilePath());
   return copy;
 }
