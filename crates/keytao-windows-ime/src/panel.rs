@@ -5,8 +5,8 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
-    CandidatePanelInput, CandidatePanelModel, PanelOrientation, ResolvedImeTheme, RgbaColor,
-    ThemeCandidate, ThemeResolver, UiCapabilities,
+    scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel, PanelOrientation,
+    ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
 use std::path::{Path as FsPath, PathBuf};
 use tiny_skia::*;
@@ -158,8 +158,9 @@ impl PanelRenderer {
         &self,
         model: &CandidatePanelModel,
         scale: f32,
-        mut theme: ResolvedImeTheme,
+        theme: ResolvedImeTheme,
     ) -> RenderedPanel {
+        let mut theme = scaled_candidate_panel(&theme);
         let scale = scale_candidate_ui_metrics(&mut theme, scale);
         let font_size = theme.font.size;
         let label_size = theme.font.label_size;
@@ -383,14 +384,16 @@ impl PanelRenderer {
         scale: f32,
         mut theme: ResolvedImeTheme,
     ) -> (Vec<u8>, u32, u32) {
-        let scale = scale_candidate_ui_metrics(&mut theme, scale);
+        scale_candidate_ui_metrics(&mut theme, scale);
         let model = theme.mode_hint_model(ascii_mode);
-        let font_size = theme.mode_hint.font_size;
-        let height = theme.mode_hint.height.ceil().max(1.0) as u32;
-        let min_width = theme.mode_hint.width.ceil().max(1.0) as u32;
+        let font_size = theme.font.size;
+        let padding = font_size / 3.0;
         let label = model.text;
-        let text_width = self.text_width(&label, font_size);
-        let width = min_width.max((text_width + 40.0 * scale).ceil() as u32);
+        let (text_left, text_bottom, text_right, text_top) = self.text_bounds(&label, font_size);
+        let text_width = text_right - text_left;
+        let text_height = text_top - text_bottom;
+        let width = (text_width + padding * 2.0).ceil().max(1.0) as u32;
+        let height = (text_height + padding * 2.0).ceil().max(1.0) as u32;
 
         let Some(mut pm) = Pixmap::new(width, height) else {
             tracing::warn!("mode hint: failed to allocate pixmap {width}x{height}");
@@ -403,14 +406,14 @@ impl PanelRenderer {
             0.5,
             width as f32 - 1.0,
             height as f32 - 1.0,
-            theme.mode_hint.corner_radius,
+            theme.mode_hint.corner_radius.min(height as f32 / 2.0),
             theme.mode_hint.background,
             theme.mode_hint.border_color,
             theme.mode_hint.border_width,
         );
 
-        let x = (width as f32 - text_width) * 0.5;
-        let baseline = (height as f32 + font_size) * 0.5 - 3.0 * scale;
+        let x = (width as f32 - text_width) * 0.5 - text_left;
+        let baseline = (height as f32 - text_height) * 0.5 + text_top;
         self.draw_text(
             &mut pm,
             &label,
@@ -617,6 +620,35 @@ impl PanelRenderer {
             .sum()
     }
 
+    fn text_bounds(&self, text: &str, size: f32) -> (f32, f32, f32, f32) {
+        let mut advance = 0.0;
+        let mut left = 0.0_f32;
+        let mut right = 0.0_f32;
+        let mut bottom = f32::INFINITY;
+        let mut top = f32::NEG_INFINITY;
+        for ch in text.chars() {
+            if is_zero_width_emoji_component(ch) {
+                continue;
+            }
+            if let Some((metrics, _)) = self.rasterize_char(ch, size) {
+                if metrics.width > 0 && metrics.height > 0 {
+                    left = left.min(advance + metrics.xmin as f32);
+                    right = right.max(advance + metrics.xmin as f32 + metrics.width as f32);
+                    bottom = bottom.min(metrics.ymin as f32);
+                    top = top.max(metrics.ymin as f32 + metrics.height as f32);
+                }
+                advance += metrics.advance_width;
+            } else {
+                advance += size * 0.5;
+            }
+        }
+        if !bottom.is_finite() {
+            bottom = 0.0;
+            top = size;
+        }
+        (left, bottom, right.max(advance), top)
+    }
+
     fn rasterize_char(&self, ch: char, size: f32) -> Option<(fontdue::Metrics, Vec<u8>)> {
         for font in &self.fonts {
             if !font.has_glyph(ch) {
@@ -693,9 +725,6 @@ fn scale_candidate_ui_metrics(theme: &mut ResolvedImeTheme, scale: f32) -> f32 {
     theme.navigation.corner_radius *= scale;
 
     theme.mode_hint.border_width *= scale;
-    theme.mode_hint.font_size *= scale;
-    theme.mode_hint.width *= scale;
-    theme.mode_hint.height *= scale;
     theme.mode_hint.corner_radius *= scale;
 
     scale
@@ -875,8 +904,97 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_zero_width_emoji_component, load_font, state_to_panel_input, PanelRenderer};
+    use super::{
+        is_zero_width_emoji_component, load_font, state_to_panel_input, FontSet, PanelRenderer,
+    };
     use keytao_core::ImeState;
+    use keytao_theme::{
+        CandidatePanelInput, PanelOrientation, ResolvedImeTheme, ThemeCandidate, UiCapabilities,
+    };
+
+    #[test]
+    fn candidate_hit_areas_scale_with_font_size_and_dpi_in_both_orientations() {
+        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let default_theme = ResolvedImeTheme::default();
+        for orientation in [PanelOrientation::Horizontal, PanelOrientation::Vertical] {
+            let mut theme = default_theme.clone();
+            theme.panel.orientation = orientation;
+            let model = theme.candidate_panel_model(
+                CandidatePanelInput {
+                    preedit: "ni".into(),
+                    candidates: vec![
+                        ThemeCandidate {
+                            text: "one".into(),
+                            comment: Some("first".into()),
+                        },
+                        ThemeCandidate {
+                            text: "two".into(),
+                            comment: Some("second".into()),
+                        },
+                    ],
+                    highlighted_candidate_index: 0,
+                    page: 1,
+                    is_last_page: false,
+                    select_keys: None,
+                },
+                &UiCapabilities::full_custom(),
+            );
+            let baseline = renderer.render(&model, 1.0, theme.clone());
+            for font_size in [10.0, 20.0, 36.0] {
+                for dpi_scale in [1.0, 2.0] {
+                    theme.font.size = font_size;
+                    let rendered = renderer.render(&model, dpi_scale, theme.clone());
+                    let ratio = font_size / default_theme.font.size * dpi_scale;
+                    let original = baseline
+                        .hit_areas
+                        .candidates
+                        .iter()
+                        .chain(baseline.hit_areas.previous_page.iter())
+                        .chain(baseline.hit_areas.next_page.iter());
+                    let resized = rendered
+                        .hit_areas
+                        .candidates
+                        .iter()
+                        .chain(rendered.hit_areas.previous_page.iter())
+                        .chain(rendered.hit_areas.next_page.iter());
+                    for (original, resized) in original.zip(resized) {
+                        for (expected, actual) in [
+                            (original.x, resized.x),
+                            (original.y, resized.y),
+                            (original.width, resized.width),
+                            (original.height, resized.height),
+                        ] {
+                            assert!((actual as f32 - expected as f32 * ratio).abs() <= 1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mode_hint_uses_candidate_font_measurement_and_ignores_legacy_box_fields() {
+        let renderer = PanelRenderer::new(FontSet { fonts: Vec::new() });
+        let mut theme = ResolvedImeTheme::default();
+        theme.mode_hint.english_text = "English".into();
+        theme.mode_hint.font_size = 99.0;
+        theme.mode_hint.width = 999.0;
+        theme.mode_hint.height = 999.0;
+        for font_size in [10.0, 20.0, 36.0] {
+            for dpi_scale in [1.0, 2.0] {
+                theme.font.size = font_size;
+                for ascii_mode in [false, true] {
+                    let (_, width, height) =
+                        renderer.render_mode_hint(ascii_mode, dpi_scale, theme.clone());
+                    let font_size = font_size * dpi_scale;
+                    let label = theme.mode_hint_model(ascii_mode).text;
+                    let text_width = label.chars().count() as f32 * font_size * 0.5;
+                    assert_eq!(width, (text_width + font_size / 3.0 * 2.0).ceil() as u32);
+                    assert_eq!(height, (font_size + font_size / 3.0 * 2.0).ceil() as u32);
+                }
+            }
+        }
+    }
 
     #[test]
     fn candidate_panel_does_not_duplicate_inline_preedit() {

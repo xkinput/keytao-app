@@ -623,8 +623,28 @@ pub fn resolve_theme_from_paths_with_system_scheme(
     resolve_theme_with_pending_settings(default_theme_path, user_theme_path, system_scheme, None)
 }
 
+/// Scale candidate spacing and secondary fonts from the default candidate size.
+pub fn scaled_candidate_panel(theme: &ResolvedImeTheme) -> ResolvedImeTheme {
+    // Keep in sync with crates/keytao-macos-ime/Sources/KeyTaoIME/ImeTheme.swift::scaledCandidatePanel.
+    let scale = theme.font.size / ResolvedImeTheme::default().font.size;
+    let mut theme = theme.clone();
+    theme.font.label_size *= scale;
+    theme.font.comment_size *= scale;
+    theme.font.preedit_size *= scale;
+    theme.panel.padding_x *= scale;
+    theme.panel.padding_y *= scale;
+    theme.panel.gap *= scale;
+    theme.panel.preedit_gap *= scale;
+    theme.candidate.padding_x *= scale;
+    theme.candidate.padding_y *= scale;
+    theme.candidate.inline_gap *= scale;
+    theme.candidate.min_height *= scale;
+    theme.navigation.button_size *= scale;
+    theme
+}
+
 /// Resolve unsaved App settings without changing the user's theme document.
-/// Candidate metrics match the macOS panel's default-size scaling.
+/// Candidate metrics match the native panels' default-size scaling.
 pub fn resolve_candidate_panel_preview_from_paths(
     default_theme_path: Option<&Path>,
     user_theme_path: Option<&Path>,
@@ -647,27 +667,13 @@ pub fn resolve_candidate_panel_preview_from_paths(
         }),
         ..Default::default()
     };
-    let mut theme = resolve_theme_with_pending_settings(
+    let theme = resolve_theme_with_pending_settings(
         default_theme_path,
         user_theme_path,
         system_scheme,
         Some(pending),
     );
-    // Keep in sync with crates/keytao-macos-ime/Sources/KeyTaoIME/ImeTheme.swift::scaledCandidatePanel.
-    let scale = theme.font.size / 20.0;
-    theme.font.label_size *= scale;
-    theme.font.comment_size *= scale;
-    theme.font.preedit_size *= scale;
-    theme.panel.padding_x *= scale;
-    theme.panel.padding_y *= scale;
-    theme.panel.gap *= scale;
-    theme.panel.preedit_gap *= scale;
-    theme.candidate.padding_x *= scale;
-    theme.candidate.padding_y *= scale;
-    theme.candidate.inline_gap *= scale;
-    theme.candidate.min_height *= scale;
-    theme.navigation.button_size *= scale;
-    Ok(theme)
+    Ok(scaled_candidate_panel(&theme))
 }
 
 fn resolve_theme_with_pending_settings(
@@ -1828,7 +1834,40 @@ mod tests {
     }
 
     #[test]
-    fn preview_scales_only_macos_candidate_metrics_without_reclamping() {
+    fn scaled_candidate_panel_scales_metrics_without_reclamping() {
+        let base = ResolvedImeTheme::default();
+        assert_eq!(
+            resolved_theme_json(&scaled_candidate_panel(&base)).unwrap(),
+            resolved_theme_json(&base).unwrap()
+        );
+        for font_size in [10.0, 20.0, 36.0] {
+            let mut theme = base.clone();
+            theme.font.size = font_size;
+            let scaled = scaled_candidate_panel(&theme);
+            let scale = font_size / base.font.size;
+            assert_eq!(scaled.font.size, font_size);
+            for (actual, original) in [
+                (scaled.font.label_size, base.font.label_size),
+                (scaled.font.comment_size, base.font.comment_size),
+                (scaled.font.preedit_size, base.font.preedit_size),
+                (scaled.panel.padding_x, base.panel.padding_x),
+                (scaled.panel.padding_y, base.panel.padding_y),
+                (scaled.panel.gap, base.panel.gap),
+                (scaled.panel.preedit_gap, base.panel.preedit_gap),
+                (scaled.candidate.padding_x, base.candidate.padding_x),
+                (scaled.candidate.padding_y, base.candidate.padding_y),
+                (scaled.candidate.inline_gap, base.candidate.inline_gap),
+                (scaled.candidate.min_height, base.candidate.min_height),
+                (scaled.navigation.button_size, base.navigation.button_size),
+            ] {
+                assert_eq!(actual, original * scale);
+            }
+            assert_eq!(theme.candidate.min_height, base.candidate.min_height);
+        }
+    }
+
+    #[test]
+    fn preview_scales_only_candidate_metrics_without_reclamping() {
         let base = resolve_candidate_panel_preview_from_paths(
             None,
             None,

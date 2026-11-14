@@ -15,7 +15,8 @@ use std::{
 use freetype::{bitmap::PixelMode, face::LoadFlag, ffi, Face, Library};
 use keytao_core::ImeState;
 use keytao_theme::{
-    CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
+    scaled_candidate_panel, CandidatePanelInput, PanelOrientation, RgbaColor, ThemeCandidate,
+    ThemeResolver, UiCapabilities,
 };
 use tiny_skia::*;
 
@@ -571,7 +572,7 @@ impl PanelRenderer {
 
     /// Like `render`, plus where each candidate and paging button was drawn.
     pub fn render_with_hit_areas(&self, state: &ImeState) -> (Vec<u8>, u32, u32, PanelHitAreas) {
-        let theme = self.theme_resolver.current();
+        let theme = scaled_candidate_panel(&self.theme_resolver.current());
         let model = theme
             .candidate_panel_model(state_to_panel_input(state), &UiCapabilities::full_custom());
         let font_size = self.s(theme.font.size);
@@ -729,12 +730,14 @@ impl PanelRenderer {
     pub fn render_mode_hint(&self, ascii_mode: bool) -> (Vec<u8>, u32, u32) {
         let theme = self.theme_resolver.current();
         let model = theme.mode_hint_model(ascii_mode);
-        let hint_size = self.s(theme.mode_hint.font_size);
-        let hint_height = self.s(theme.mode_hint.height).ceil() as u32;
-        let hint_min_width = self.s(theme.mode_hint.width).ceil() as u32;
+        let hint_size = self.s(theme.font.size);
+        let padding = hint_size / 3.0;
         let label = model.text;
-        let text_width = self.text_width(&label, hint_size);
-        let width = hint_min_width.max((text_width + self.s(20.0) * 2.0).ceil() as u32);
+        let (left, top, right, bottom) = self.text_bounds(&label, hint_size);
+        let text_width = right - left;
+        let text_height = bottom - top;
+        let width = (text_width + padding * 2.0).ceil().max(1.0) as u32;
+        let hint_height = (text_height + padding * 2.0).ceil().max(1.0) as u32;
         let mut pm = Pixmap::new(width, hint_height).expect("pixmap alloc");
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
 
@@ -744,14 +747,15 @@ impl PanelRenderer {
             0.5,
             width as f32 - 1.0,
             hint_height as f32 - 1.0,
-            self.s(theme.mode_hint.corner_radius),
+            self.s(theme.mode_hint.corner_radius)
+                .min(hint_height as f32 * 0.5),
             theme.mode_hint.background,
             theme.mode_hint.border_color,
             self.s(theme.mode_hint.border_width),
         );
 
-        let x = (width as f32 - text_width) * 0.5;
-        let baseline = (hint_height as f32 + hint_size) * 0.5 - self.s(3.0);
+        let x = (width as f32 - text_width) * 0.5 - left;
+        let baseline = (hint_height as f32 - text_height) * 0.5 - top;
         self.draw_text(
             &mut pm,
             &label,
@@ -1048,6 +1052,72 @@ impl PanelRenderer {
             .sum()
     }
 
+    fn text_bounds(&self, text: &str, size: f32) -> (f32, f32, f32, f32) {
+        let mut x: f32 = 0.0;
+        let mut left: f32 = 0.0;
+        let mut right: f32 = 0.0;
+        let mut top = f32::INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
+        for ch in text.chars().filter(|ch| !is_zero_width_selector(*ch)) {
+            let Some(face) = self.face_for_char(ch) else {
+                x += size * 0.5;
+                continue;
+            };
+            if face.set_pixel_sizes(0, size.ceil() as u32).is_err() {
+                let _ = face.select_size(0);
+            }
+            let load_flags = if face.has_color() {
+                LoadFlag::RENDER | LoadFlag::COLOR
+            } else {
+                LoadFlag::TARGET_NORMAL
+            };
+            if face.load_char(ch as usize, load_flags).is_err() {
+                x += size * 0.5;
+                continue;
+            }
+            if !face.has_color() {
+                let slot = face.glyph().raw() as *const _ as ffi::FT_GlyphSlot;
+                unsafe {
+                    ffi::FT_GlyphSlot_Embolden(slot);
+                    if ffi::FT_Render_Glyph(slot, ffi::FT_RENDER_MODE_NORMAL) != 0 {
+                        x += size * 0.5;
+                        continue;
+                    }
+                }
+            }
+            let glyph = face.glyph();
+            let bitmap = glyph.bitmap();
+            let width = bitmap.width().max(0) as f32;
+            let rows = bitmap.rows().max(0) as f32;
+            let color_glyph = bitmap.pixel_mode().ok() == Some(PixelMode::Bgra);
+            let scale = if color_glyph && width > 0.0 && rows > 0.0 {
+                (size * COLOR_GLYPH_HEIGHT_FACTOR / rows)
+                    .min(size * COLOR_GLYPH_WIDTH_FACTOR / width)
+                    .min(1.0)
+            } else {
+                1.0
+            };
+            if width > 0.0 && rows > 0.0 {
+                let glyph_left = x + glyph.bitmap_left() as f32 * scale;
+                let glyph_top = -glyph.bitmap_top() as f32 * scale;
+                left = left.min(glyph_left);
+                right = right.max(glyph_left + (width * scale).ceil());
+                top = top.min(glyph_top);
+                bottom = bottom.max(glyph_top + (rows * scale).ceil());
+            }
+            x += if color_glyph && width > 0.0 && rows > 0.0 {
+                (width * scale).ceil() + size * 0.1
+            } else {
+                (glyph.advance().x as f32 / 64.0).max(size * 0.35)
+            };
+        }
+        if !top.is_finite() {
+            top = -size;
+            bottom = 0.0;
+        }
+        (left, top, right.max(x), bottom)
+    }
+
     fn face_for_char(&self, ch: char) -> Option<&Face> {
         self.faces
             .iter()
@@ -1265,6 +1335,39 @@ mod tests {
             visible_text_pixels > 0,
             "mode hint rendered no visible pixels"
         );
+    }
+
+    #[test]
+    fn measured_text_bounds_contain_rendered_glyphs() {
+        let Some(source) = load_font() else {
+            eprintln!("skipping text bounds test: no CJK font found");
+            return;
+        };
+        let Some(renderer) = PanelRenderer::with_scale(source, 1.0) else {
+            eprintln!("skipping text bounds test: font source could not be reopened");
+            return;
+        };
+
+        for size in [10.0, 20.0, 36.0] {
+            let text = "j中英";
+            let (left, top, right, bottom) = renderer.text_bounds(text, size);
+            let mut pm = Pixmap::new(256, 128).unwrap();
+            let x = 32.0;
+            let baseline = 64.0;
+            renderer.draw_text(&mut pm, text, x, baseline, [0, 0, 0, 255], size);
+            let mut visible = false;
+            for (index, pixel) in pm.data().chunks_exact(4).enumerate() {
+                if pixel[3] == 0 {
+                    continue;
+                }
+                visible = true;
+                let px = (index % pm.width() as usize) as f32;
+                let py = (index / pm.width() as usize) as f32;
+                assert!(px >= x + left && px < x + right);
+                assert!(py >= baseline + top && py < baseline + bottom);
+            }
+            assert!(visible, "text bounds check rendered no visible glyphs");
+        }
     }
 
     #[test]
