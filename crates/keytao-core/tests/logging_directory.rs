@@ -48,6 +48,7 @@ fn redeploy_restores_the_process_wide_log_directory() {
         .expect_err("a file blocks the log directory");
     assert!(error.contains("cannot prepare process-wide librime log directory"));
     assert!(error.contains(original_log.to_str().unwrap()));
+    assert!(error.ends_with(&format!("\n日志目录：{}", original_log.display())));
     std::fs::remove_file(&original_log).unwrap();
     second
         .reload()

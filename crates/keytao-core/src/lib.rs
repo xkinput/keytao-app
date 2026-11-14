@@ -2,6 +2,7 @@
 //! Every consumer (the Flutter app via keytao-app-bridge, the C FFI and the
 //! platform IMEs) links against this crate as its rime back-end.
 
+mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
@@ -822,6 +823,14 @@ mod desktop {
         Ok(())
     }
 
+    fn capture_deployment_log(user_dir: &Path) -> deployment_log::DeploymentLog {
+        // glog keeps the first setup's directory across runtime switches.
+        let directory = lock_ignore_poison(&RIME_SETUP_LOG_DIR)
+            .clone()
+            .unwrap_or_else(|| rime_log_dir(user_dir));
+        deployment_log::DeploymentLog::capture(directory)
+    }
+
     /// Initialize and fully deploy librime.
     /// `setup` + `initialize` run only on the first call; subsequent calls only
     /// re-run `full_deploy_and_wait` so that newly installed schemas are picked up.
@@ -842,8 +851,8 @@ mod desktop {
         );
         let result = (|| {
             let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+            let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
             begin_deployment(Path::new(&user_data_dir))?;
-            let log_dir = rime_log_dir(Path::new(&user_data_dir));
 
             #[cfg(target_os = "windows")]
             patch_windows_lua_compatibility(Path::new(&user_data_dir))?;
@@ -851,36 +860,25 @@ mod desktop {
             #[cfg(target_os = "android")]
             {
                 setup_only(user_data_dir.clone(), shared_data_dir)?;
-                deploy_android_staged(&user_data_dir).map_err(|error| {
-                    format!(
-                        "Rime deployment failed: {error}. See librime logs in {}",
-                        log_dir.display()
-                    )
-                })?;
+                deploy_android_staged(&user_data_dir)
+                    .map_err(|error| deploy_log.failure_message(Some(&error)))?;
             }
 
             #[cfg(not(target_os = "android"))]
             {
                 setup_only(user_data_dir.clone(), shared_data_dir)?;
-                if !full_deploy_and_wait()? {
-                    return Err(format!(
-                        "Rime deployment failed. See librime logs in {}",
-                        log_dir.display()
-                    ));
+                if !full_deploy_and_wait()
+                    .map_err(|error| deploy_log.failure_message(Some(&error)))?
+                {
+                    return Err(deploy_log.failure_message(None));
                 }
 
                 let user_dir = Path::new(&user_data_dir);
                 deploy_desktop_schema_dependencies(user_dir).map_err(|error| {
-                    format!(
-                        "Rime dependency deployment failed: {error}. See librime logs in {}",
-                        log_dir.display()
-                    )
+                    deploy_log.failure_message(Some(&format!("依赖部署失败：{error}")))
                 })?;
                 validate_deployed_schemas(user_dir).map_err(|error| {
-                    format!(
-                        "Rime deployment validation failed: {error}. See librime logs in {}",
-                        log_dir.display()
-                    )
+                    deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
                 })?;
             }
             complete_deployment(Path::new(&user_data_dir))
@@ -907,6 +905,7 @@ mod desktop {
         let user_dir = Path::new(&user_data_dir);
         runtime_log::init_for_engine(user_dir);
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        let deploy_log = capture_deployment_log(user_dir);
         begin_deployment(user_dir)?;
         {
             let _rime = rime_api_lock();
@@ -928,13 +927,12 @@ mod desktop {
             // setup_only exports user dictionaries; Lua initialization can run user code.
             initialize_rime(&user_data_dir, &shared_data_dir, true);
         }
-        if !full_deploy_and_wait()? {
-            return Err(format!(
-                "Rime upgrade deployment failed. See librime logs in {}",
-                rime_log_dir(user_dir).display()
-            ));
+        if !full_deploy_and_wait().map_err(|error| deploy_log.failure_message(Some(&error)))? {
+            return Err(deploy_log.failure_message(None));
         }
-        validate_deployed_schema_files(user_dir)?;
+        validate_deployed_schema_files(user_dir).map_err(|error| {
+            deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
+        })?;
         complete_deployment(user_dir)
     }
 
@@ -945,9 +943,11 @@ mod desktop {
     ) -> Result<Vec<String>, String> {
         runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         begin_deployment(Path::new(&user_data_dir))?;
         setup_only(user_data_dir.clone(), shared_data_dir)?;
-        deploy_config_file("default.yaml", "config_version")?;
+        deploy_config_file("default.yaml", "config_version")
+            .map_err(|error| deploy_log.failure_message(Some(&error)))?;
         let schemas = parse_schema_list_from_dir(Path::new(&user_data_dir));
         if schemas.is_empty() {
             Err("no schema selected in default.custom.yaml".into())
@@ -964,6 +964,7 @@ mod desktop {
     ) -> Result<Vec<String>, String> {
         runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
+        let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
         if !source.is_file() {
@@ -971,7 +972,7 @@ mod desktop {
         }
         let _dictionary_override =
             prepare_android_auxiliary_dictionary(Path::new(&user_data_dir), &schema_id)?;
-        deploy_schema_file(&source)?;
+        deploy_schema_file(&source).map_err(|error| deploy_log.failure_message(Some(&error)))?;
         let compiled = Path::new(&user_data_dir)
             .join("build")
             .join(format!("{schema_id}.schema.yaml"));
