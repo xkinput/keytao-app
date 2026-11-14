@@ -46,6 +46,15 @@ void main(List<String> args) async {
   });
 }
 
+String? _releaseVersion(String path) {
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  for (final line in file.readAsLinesSync()) {
+    if (line.startsWith('version=')) return line.substring('version='.length).trim();
+  }
+  return null;
+}
+
 class _Rime {
   const _Rime(this.cargoEnvironment, [this.bundledLibraries = const []]);
 
@@ -58,6 +67,8 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
         'RIME_INCLUDE_DIR': '$root/include',
         'RIME_LIB_DIR': '$root/lib',
         'BINDGEN_EXTRA_CLANG_ARGS': '-I$root/include',
+        // The bridge embeds this via option_env!; the hook scrubs the caller's env.
+        'OPENCC_VERSION': ?_releaseVersion('$root/opencc-release.txt'),
       };
 
   switch (os) {
