@@ -8,15 +8,23 @@ use std::{
     path::Path,
 };
 
+fn ships_with_scheme(name: &str) -> bool {
+    name.ends_with(".user.dict.yaml") || name.ends_with("_user.txt") || name == "user_dict.txt"
+}
+
 fn excluded(relative: &str) -> bool {
     let top = relative.split('/').next().unwrap_or(relative);
     matches!(top, "build" | "sync" | "installation.yaml" | "user.yaml")
         || relative.split('/').any(|part| {
             matches!(part, ".git" | ".DS_Store")
                 || part.ends_with(".userdb")
-                || part.ends_with(".custom.yaml")
+                || part == "default.custom.yaml"
                 || part == "default-custom.yaml"
-                || (part != "user.yaml" && crate::install::is_protected_user_file(part))
+                // Schemes import their user dictionaries, so ship them; install keeps an
+                // existing copy in the Rime root and only fills in a missing one.
+                || (part != "user.yaml"
+                    && !ships_with_scheme(part)
+                    && crate::install::is_protected_user_file(part))
         })
 }
 

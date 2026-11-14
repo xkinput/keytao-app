@@ -146,19 +146,25 @@ fn local_import_excludes_top_level_junk_and_recursive_private_files() {
         files.keys().map(String::as_str).collect::<Vec<_>>(),
         vec![
             "default.custom.yaml",
+            "example.custom.yaml",
             "example.schema.yaml",
+            "example.user.dict.yaml",
+            "example_user.txt",
             "lua/nested/helper.lua",
             "nested/build/data",
+            "nested/example.custom.yaml",
+            "nested/example.user.dict.yaml",
             "nested/installation.yaml",
             "nested/sync/data",
             "nested/user.yaml",
+            "user_dict.txt",
         ]
     );
     let config = std::str::from_utf8(&files["default.custom.yaml"]).unwrap();
     assert_eq!(keytao_core::parse_schema_list(config), ["example"]);
     assert!(!config.contains("private content"));
     let (_, meta) = crate::packages::stored_archive(&core, &key).unwrap();
-    assert_eq!(meta.manifest.len(), 6);
+    assert_eq!(meta.manifest.len(), 9);
     for name in nested {
         assert_eq!(files[name], b"package data");
     }
@@ -199,7 +205,6 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
     );
     let protected = [
         "example.user.yaml",
-        "example.custom.yaml",
         "example.user.dict.yaml",
         "user_dict.txt",
         "example_user.txt",
@@ -208,6 +213,9 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
         fs::write(root.join(name), "user-owned content").unwrap();
         fs::write(path.join(name), "incoming content").unwrap();
     }
+    // Scheme patches belong to the imported folder and replace the installed copy.
+    fs::write(root.join("example.custom.yaml"), "patch: {old: 1}\n").unwrap();
+    fs::write(path.join("example.custom.yaml"), "patch: {new: 1}\n").unwrap();
     let config = "patch:\n  menu/page_size: 7\n  schema_list:\n    - schema: example\n";
     fs::write(root.join("default.custom.yaml"), config).unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
@@ -263,6 +271,10 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
             "user-owned content"
         );
     }
+    assert_eq!(
+        fs::read_to_string(root.join("example.custom.yaml")).unwrap(),
+        "patch: {new: 1}\n"
+    );
     assert!(!root.join("obsolete.yaml").exists());
     assert!(
         fs::read_to_string(root.join("example.schema.yaml"))
