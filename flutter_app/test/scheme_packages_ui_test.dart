@@ -466,6 +466,35 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+  testWidgets('custom words action follows package support', (tester) async {
+    final c = _PackageController();
+    addTearDown(c.dispose);
+    _size(tester, const Size(360, 800));
+    for (final active in [false, true]) {
+      for (final supportsUserWords in [false, true]) {
+        c.installedPackages = [
+          InstalledPackageDto(
+            schemeKey: 'keydo',
+            active: active,
+            hasPackageZip: true,
+            supportsUserWords: supportsUserWords,
+          ),
+        ];
+        await _pumpRow(tester, c, 'keydo');
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('自造词'),
+          supportsUserWords ? findsOneWidget : findsNothing,
+        );
+        await tester.tap(find.byIcon(FLucideIcons.ellipsis));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
   testWidgets('scheme sections separate local packages and deployment', (
     tester,
   ) async {

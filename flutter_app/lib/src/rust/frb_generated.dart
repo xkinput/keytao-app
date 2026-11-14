@@ -3604,15 +3604,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   InstalledPackageDto dco_decode_installed_package_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return InstalledPackageDto(
       schemeKey: dco_decode_String(arr[0]),
       version: dco_decode_opt_String(arr[1]),
       active: dco_decode_bool(arr[2]),
       hasPackageZip: dco_decode_bool(arr[3]),
-      source: dco_decode_opt_String(arr[4]),
-      displayName: dco_decode_opt_String(arr[5]),
+      supportsUserWords: dco_decode_bool(arr[4]),
+      source: dco_decode_opt_String(arr[5]),
+      displayName: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -4668,6 +4669,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_version = sse_decode_opt_String(deserializer);
     var var_active = sse_decode_bool(deserializer);
     var var_hasPackageZip = sse_decode_bool(deserializer);
+    var var_supportsUserWords = sse_decode_bool(deserializer);
     var var_source = sse_decode_opt_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
     return InstalledPackageDto(
@@ -4675,6 +4677,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       version: var_version,
       active: var_active,
       hasPackageZip: var_hasPackageZip,
+      supportsUserWords: var_supportsUserWords,
       source: var_source,
       displayName: var_displayName,
     );
@@ -5901,6 +5904,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.version, serializer);
     sse_encode_bool(self.active, serializer);
     sse_encode_bool(self.hasPackageZip, serializer);
+    sse_encode_bool(self.supportsUserWords, serializer);
     sse_encode_opt_String(self.source, serializer);
     sse_encode_opt_String(self.displayName, serializer);
   }

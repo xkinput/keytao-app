@@ -33,11 +33,14 @@ pub struct LocalSchemaDto {
 }
 
 #[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
 pub struct InstalledPackageDto {
     pub scheme_key: String,
     pub version: Option<String>,
     pub active: bool,
     pub has_package_zip: bool,
+    #[frb(default = true)]
+    pub supports_user_words: bool,
     pub source: Option<String>,
     pub display_name: Option<String>,
 }

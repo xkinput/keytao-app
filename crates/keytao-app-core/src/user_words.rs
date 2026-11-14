@@ -57,11 +57,19 @@ struct CachedPackage {
 }
 
 struct PackageData {
-    user_name: String,
+    user_name: Option<String>,
     template: Option<Vec<u8>>,
     dictionaries: HashMap<String, Vec<u8>>,
     main: Option<String>,
     index: OnceLock<Result<PackageIndex, String>>,
+}
+
+impl PackageData {
+    fn user_name(&self) -> Result<&str, CoreError> {
+        self.user_name
+            .as_deref()
+            .ok_or_else(|| CoreError::Other("该方案不支持自造词".into()))
+    }
 }
 
 #[derive(Default)]
@@ -310,15 +318,19 @@ fn package_data(
                 "Nested user dictionary paths are not supported".into(),
             ));
         }
-        Some(name) if safe_name(&name) => name,
+        Some(name) if safe_name(&name) => Some(name),
         Some(_) => {
             return Err(CoreError::Other(
                 "Invalid user dictionary name in package".into(),
             ));
         }
-        None => fallback_dict(scheme)?.into(),
+        None if fingerprint.is_some() => None,
+        None => fallback_dict(scheme)?.map(String::from),
     };
-    let template = package_file(&dictionaries, &user_name)?.cloned();
+    let template = match &user_name {
+        Some(name) => package_file(&dictionaries, name)?.cloned(),
+        None => None,
+    };
     let data = Arc::new(PackageData {
         user_name,
         template,
@@ -334,6 +346,14 @@ fn package_data(
         },
     );
     Ok(data)
+}
+
+pub(crate) fn supports_user_words(core: &Core, scheme: &str) -> Result<bool, CoreError> {
+    let mut state = core
+        .user_words
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    Ok(package_data(&mut state, core, scheme)?.user_name.is_some())
 }
 
 pub fn take_user_words_report(core: &Core, scheme: &str) -> Result<UserWordsReport, CoreError> {
@@ -368,6 +388,9 @@ pub fn compare_user_words(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
+    if package.user_name.is_none() {
+        return Ok(Vec::new());
+    }
     let index = package_index(&package)?;
     let dictionary = Dictionary::parse(&fs::read(user_path(core, &package, root, true)?)?)?;
     Ok(dictionary
@@ -389,6 +412,7 @@ pub fn lookup_user_word(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
+    package.user_name()?;
     Ok(package_index(&package)?.compare(UserWord {
         id: 0,
         word: word.into(),
@@ -408,7 +432,7 @@ pub fn reconcile_user_words(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let package = package_data(&mut state, core, scheme)?;
-    if package.main.is_none() {
+    if package.user_name.is_none() || package.main.is_none() {
         return Ok(UserWordsReport::default());
     }
     let path = user_path(core, &package, root, false)?;
@@ -457,17 +481,13 @@ pub fn reconcile_user_words(
     Ok(UserWordsReport { removed, conflicts })
 }
 
-fn fallback_dict(scheme: &str) -> Result<&'static str, CoreError> {
+fn fallback_dict(scheme: &str) -> Result<Option<&'static str>, CoreError> {
     crate::scheme::validate_scheme_key(scheme).map_err(CoreError::Other)?;
     Ok(match scheme {
-        "xmjd" | "xmjd-feiding" => "xmjd6.user",
-        "txjx" => "txjx.user",
-        "keydo" => {
-            return Err(CoreError::Other(
-                "The scheme package does not import a user dictionary".into(),
-            ));
-        }
-        _ => "keytao.user",
+        "xmjd" | "xmjd-feiding" => Some("xmjd6.user"),
+        "txjx" => Some("txjx.user"),
+        "keydo" => None,
+        _ => Some("keytao.user"),
     })
 }
 
@@ -477,7 +497,8 @@ fn user_path(
     root: &Path,
     create: bool,
 ) -> Result<PathBuf, CoreError> {
-    let relative = format!("{}.dict.yaml", package.user_name);
+    let user_name = package.user_name()?;
+    let relative = format!("{user_name}.dict.yaml");
     let mut path = root.to_path_buf();
     for component in Path::new(&relative).components() {
         path.push(component);
@@ -492,12 +513,12 @@ fn user_path(
         let bytes = package.template.clone().unwrap_or_else(|| {
             format!(
                 "---\nname: {}\nversion: \"1\"\nsort: original\n...\n",
-                package.user_name
+                user_name
             )
             .into_bytes()
         });
         Dictionary::parse(&bytes)?;
-        if package.user_name == "keytao.user" {
+        if user_name == "keytao.user" {
             // A recreated dictionary cannot authorize deletions from an older instance.
             crate::account::invalidate_dictionary_bases(core, root)?;
         }
@@ -712,6 +733,9 @@ pub(crate) fn read_user_words_locked(
     root: &Path,
 ) -> Result<(Vec<u8>, Vec<UserWord>), CoreError> {
     let package = package_data(state, core, scheme)?;
+    if package.user_name.is_none() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let content = fs::read(user_path(core, &package, root, true)?)?;
     let entries = Dictionary::parse(&content)?.entries();
     Ok((content, entries))
@@ -1524,6 +1548,85 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_skips_packages_without_a_user_dictionary() {
+        for scheme in ["keydo", "keytao", "local-plain"] {
+            let (dir, core) = fixture();
+            package(
+                &core,
+                scheme,
+                &[
+                    (
+                        &format!("{scheme}.schema.yaml"),
+                        &format!(
+                            "translator:\n  dictionary: {scheme}\n  enable_user_dict: false\n"
+                        ),
+                    ),
+                    (
+                        &format!("{scheme}.dict.yaml"),
+                        &format!("---\nname: {scheme}\n...\nofficial\tabc\n"),
+                    ),
+                ],
+            );
+            let path = dir.path().join("keytao.user.dict.yaml");
+            let original = "---\nname: keytao.user\n...\nofficial\tabc\n";
+            fs::write(&path, original).unwrap();
+
+            assert!(!supports_user_words(&core, scheme).unwrap());
+            assert!(
+                list_user_words(&core, scheme, dir.path())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                compare_user_words(&core, scheme, dir.path())
+                    .unwrap()
+                    .is_empty()
+            );
+            for remove in [false, true] {
+                assert_eq!(
+                    reconcile_user_words(&core, scheme, dir.path(), remove).unwrap(),
+                    UserWordsReport::default()
+                );
+                remember_reconciliation(&core, scheme, dir.path(), remove);
+                assert_eq!(
+                    take_user_words_report(&core, scheme).unwrap(),
+                    UserWordsReport::default()
+                );
+                assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+            }
+            assert_eq!(
+                add_user_word(&core, scheme, dir.path(), "custom", "xyz", None)
+                    .unwrap_err()
+                    .to_string(),
+                "该方案不支持自造词"
+            );
+            assert_eq!(
+                update_user_word(
+                    &core,
+                    scheme,
+                    dir.path(),
+                    4,
+                    "official",
+                    "abc",
+                    "custom",
+                    "xyz",
+                    None,
+                )
+                .unwrap_err()
+                .to_string(),
+                "该方案不支持自造词"
+            );
+            assert_eq!(
+                delete_user_word(&core, scheme, dir.path(), 4, "official", "abc")
+                    .unwrap_err()
+                    .to_string(),
+                "该方案不支持自造词"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+        }
+    }
+
+    #[test]
     fn reconciliation_skips_packages_without_a_main_dictionary() {
         let (dir, core) = fixture();
         let scheme = "local-mytest";
@@ -1547,11 +1650,11 @@ mod tests {
             );
             assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
         }
+        assert!(!supports_user_words(&core, scheme).unwrap());
         assert!(
             compare_user_words(&core, scheme, dir.path())
-                .unwrap_err()
-                .to_string()
-                .contains("Stored package has no main dictionary; comparison is unavailable")
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -37,6 +37,7 @@ pub struct InstalledPackageInfo {
     pub version: Option<String>,
     pub active: bool,
     pub has_package_zip: bool,
+    pub supports_user_words: bool,
     pub source: String,
     pub display_name: Option<String>,
 }
@@ -604,6 +605,11 @@ pub fn list_installed_packages(core: &Core) -> Result<Vec<InstalledPackageInfo>,
             };
             Some(InstalledPackageInfo {
                 active: state.active_scheme.as_deref() == Some(&scheme_key),
+                supports_user_words: crate::user_words::supports_user_words(core, &scheme_key)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%scheme_key, %error, "Cannot read user dictionary support");
+                        false
+                    }),
                 scheme_key,
                 version: package.version,
                 has_package_zip,

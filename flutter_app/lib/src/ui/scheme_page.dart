@@ -464,20 +464,21 @@ class SchemePackageRow extends StatelessWidget {
                                 },
                         ),
                       if (package != null) ...[
-                        FItem(
-                          title: const Text('自造词'),
-                          prefix: const Icon(FLucideIcons.bookOpen),
-                          onPress: c.busy
-                              ? null
-                              : () {
-                                  popover.hide();
-                                  openUserWords(
-                                    context,
-                                    c,
-                                    schemeKey: schemeKey,
-                                  );
-                                },
-                        ),
+                        if (package.supportsUserWords)
+                          FItem(
+                            title: const Text('自造词'),
+                            prefix: const Icon(FLucideIcons.bookOpen),
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    openUserWords(
+                                      context,
+                                      c,
+                                      schemeKey: schemeKey,
+                                    );
+                                  },
+                          ),
                         if (active && c.accountUser != null)
                           FItem(
                             title: const Text('上传'),

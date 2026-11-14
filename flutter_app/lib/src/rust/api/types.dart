@@ -590,6 +590,7 @@ class InstalledPackageDto {
   final String? version;
   final bool active;
   final bool hasPackageZip;
+  final bool supportsUserWords;
   final String? source;
   final String? displayName;
 
@@ -598,6 +599,7 @@ class InstalledPackageDto {
     this.version,
     required this.active,
     required this.hasPackageZip,
+    this.supportsUserWords = true,
     this.source,
     this.displayName,
   });
@@ -608,6 +610,7 @@ class InstalledPackageDto {
       version.hashCode ^
       active.hashCode ^
       hasPackageZip.hashCode ^
+      supportsUserWords.hashCode ^
       source.hashCode ^
       displayName.hashCode;
 
@@ -620,6 +623,7 @@ class InstalledPackageDto {
           version == other.version &&
           active == other.active &&
           hasPackageZip == other.hasPackageZip &&
+          supportsUserWords == other.supportsUserWords &&
           source == other.source &&
           displayName == other.displayName;
 }
