@@ -282,6 +282,7 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
+    required String variant,
     required FutureOr<String> Function() androidDeploy,
   }) async {
     calls.add('wanxiang:$installed');
@@ -294,6 +295,7 @@ class FakeCore implements RustLibApi {
       deployed: installed,
       version: '1',
       englishAvailable: false,
+      variant: installed ? variant : null,
     );
   }
 

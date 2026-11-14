@@ -29,6 +29,34 @@ class _SchemePageState extends State<SchemePage> {
     }
   }
 
+  Widget _packageGrid(Iterable<String> keys) => LayoutBuilder(
+    builder: (context, constraints) {
+      final columns = constraints.maxWidth >= 480 ? 2 : 1;
+      final width = (constraints.maxWidth - (columns - 1) * 8) / columns;
+      return Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (final key in keys)
+            SizedBox(
+              width: width,
+              child: FCard(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SchemePackageRow(
+                    controller: widget.controller,
+                    schemeKey: key,
+                    activating: _activatingScheme == key,
+                    onActivate: () => _activate(key),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
+
   @override
   Widget build(BuildContext context) {
     final c = widget.controller;
@@ -61,14 +89,7 @@ class _SchemePageState extends State<SchemePage> {
             ),
           ),
           children: [
-            for (final key in schemeKeys)
-              if (!c.isLocalScheme(key))
-                SchemePackageRow(
-                  controller: c,
-                  schemeKey: key,
-                  activating: _activatingScheme == key,
-                  onActivate: () => _activate(key),
-                ),
+            _packageGrid(schemeKeys.where((key) => !c.isLocalScheme(key))),
             if (c.schemeUpdatesLoading) const FProgress(),
           ],
         ),
@@ -81,14 +102,8 @@ class _SchemePageState extends State<SchemePage> {
             onPress: c.busy ? null : c.importLocalScheme,
           ),
           children: [
-            for (final key in schemeKeys)
-              if (c.isLocalScheme(key))
-                SchemePackageRow(
-                  controller: c,
-                  schemeKey: key,
-                  activating: _activatingScheme == key,
-                  onActivate: () => _activate(key),
-                ),
+            if (schemeKeys.any(c.isLocalScheme))
+              _packageGrid(schemeKeys.where(c.isLocalScheme)),
           ],
         ),
         Section(
@@ -97,8 +112,18 @@ class _SchemePageState extends State<SchemePage> {
           children: [
             if (c.packageError case final error?) ErrorMessage(error),
             if (c.schemeSyncError case final error?) ErrorMessage(error),
-            if (!c.isLocalScheme(c.scheme))
-              VersionPicker(controller: c, showScheme: true),
+            for (final package in c.installedPackages)
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      package.displayName ??
+                          schemeDisplayName(package.schemeKey),
+                    ),
+                  ),
+                  if (package.active) FBadge(child: const Text('已启用')),
+                ],
+              ),
             ValueRow(AppStrings.directory, c.defaultDir),
             if (c.localStatusLine case final status?)
               StatusMessage(
@@ -187,6 +212,8 @@ class SchemePackageRow extends StatelessWidget {
     final active = package?.active == true;
     final activeLegacy = active && !package!.hasPackageZip && update == null;
     final deploying = activating || (active && c.isDeploying);
+    final installing = c.installingSchemeKey == schemeKey;
+    final changelogBody = schemeKey == 'keytao' ? c.changelogBody : null;
     final failedDeploySteps = c.deploySteps.where(
       (step) => step.state == DeployStepState.failed,
     );
@@ -196,74 +223,71 @@ class SchemePackageRow extends StatelessWidget {
       key: ValueKey('scheme-package-$schemeKey'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Semantics(
-          selected: c.scheme == schemeKey,
-          child: FButton(
-            variant: FButtonVariant.ghost,
-            mainAxisAlignment: MainAxisAlignment.start,
-            style: const FButtonStyleDelta.delta(
-              contentStyle: FButtonContentStyleDelta.delta(
-                padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
-              ),
-            ),
-            onPress: c.busy ? null : () => c.selectScheme(schemeKey),
-            child: Text(package?.displayName ?? schemeDisplayName(schemeKey)),
-          ),
-        ),
-        if (package != null || update != null) ...[
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (deploying)
-                Row(
-                  children: [
-                    const SizedBox.square(
-                      dimension: 18,
-                      child: FCircularProgress(),
+        Row(
+          spacing: 6,
+          children: [
+            Flexible(
+              flex: 2,
+              child: Semantics(
+                selected: c.scheme == schemeKey,
+                child: FButton(
+                  variant: FButtonVariant.ghost,
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  style: const FButtonStyleDelta.delta(
+                    contentStyle: FButtonContentStyleDelta.delta(
+                      padding: EdgeInsetsGeometryDelta.value(EdgeInsets.zero),
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: InstallProgressView(
-                        active: true,
-                        progress: c.installProgress,
-                        fraction: c.installFraction,
-                        message: c.progress,
-                      ),
+                  ),
+                  onPress: c.busy ? null : () => c.selectScheme(schemeKey),
+                  child: Flexible(
+                    child: Text(
+                      package?.displayName ?? schemeDisplayName(schemeKey),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ],
-                )
-              else if (active)
-                FBadge(
-                  child: Text(
-                    deployFailed
-                        ? '部署失败'
-                        : c.local?.deployed == true
-                        ? '使用中'
-                        : '待部署',
                   ),
                 ),
-              if (package != null)
-                Text(
+              ),
+            ),
+            if (deploying)
+              const SizedBox.square(dimension: 18, child: FCircularProgress())
+            else if (active)
+              FBadge(
+                child: Text(
+                  deployFailed
+                      ? '部署失败'
+                      : c.local?.deployed == true
+                      ? '使用中'
+                      : '待部署',
+                ),
+              ),
+            if (package != null)
+              Flexible(
+                child: Text(
                   package.version?.trim().isNotEmpty == true
                       ? package.version!
                       : '—',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: context.theme.typography.body.sm.copyWith(
                     color: context.theme.colors.mutedForeground,
                   ),
                 ),
-              if (update != null)
-                Text(
+              ),
+            if (update != null)
+              Flexible(
+                child: Text(
                   '→ ${update.latestVersion}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: context.theme.typography.body.sm.copyWith(
                     color: context.theme.colors.mutedForeground,
                   ),
                 ),
-            ],
-          ),
-        ],
+              ),
+          ],
+        ),
         if (active && !deploying)
           for (final step in failedDeploySteps) ...[
             const SizedBox(height: 8),
@@ -308,6 +332,51 @@ class SchemePackageRow extends StatelessWidget {
         const SizedBox(height: 10),
         ActionRow(
           children: [
+            if (schemeKey == 'keytao')
+              SizedBox(
+                width: 180,
+                child: Semantics(
+                  key: const ValueKey('scheme-source'),
+                  label: '下载来源',
+                  enabled: !c.busy,
+                  child: ExcludeFocus(
+                    excluding: c.busy,
+                    child: IgnorePointer(
+                      ignoring: c.busy,
+                      child: Opacity(
+                        opacity: c.busy ? .5 : 1,
+                        child: FTabs(
+                          control: FTabControl.lifted(
+                            index: downloadSources.keys
+                                .toList()
+                                .indexOf(c.source)
+                                .clamp(0, downloadSources.length - 1),
+                            onChange: (index) => c.selectSource(
+                              downloadSources.keys.elementAt(index),
+                            ),
+                          ),
+                          style: const FTabsStyleDelta.delta(
+                            spacing: 0,
+                            minHeight: 32,
+                          ),
+                          children: [
+                            for (final label in downloadSources.values)
+                              FTabEntry(
+                                label: Text(
+                                  label,
+                                  maxLines: 1,
+                                  softWrap: false,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                child: const SizedBox.shrink(),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             if (update != null)
               ActionButton(
                 '更新',
@@ -346,7 +415,7 @@ class SchemePackageRow extends StatelessWidget {
                 icon: FLucideIcons.play,
                 onPress: c.canDeploy ? c.deploy : null,
               ),
-            if (package != null)
+            if (package != null || changelogBody != null)
               FPopoverMenu(
                 menuAnchor: Alignment.topRight,
                 childAnchor: Alignment.bottomRight,
@@ -354,72 +423,120 @@ class SchemePackageRow extends StatelessWidget {
                   FItemGroup(
                     enabled: !c.busy,
                     children: [
-                      FItem(
-                        title: const Text('自造词'),
-                        prefix: const Icon(FLucideIcons.bookOpen),
-                        onPress: c.busy
-                            ? null
-                            : () {
-                                popover.hide();
-                                openUserWords(context, c, schemeKey: schemeKey);
-                              },
-                      ),
-                      if (active && c.accountUser != null)
+                      if (changelogBody != null)
                         FItem(
-                          title: const Text('上传'),
-                          prefix: const Icon(FLucideIcons.upload),
-                          enabled: !c.busy && package.hasPackageZip,
-                          onPress: c.busy || !package.hasPackageZip
+                          title: const Text(AppStrings.changelog),
+                          prefix: const Icon(FLucideIcons.scrollText),
+                          onPress: c.busy
                               ? null
                               : () {
                                   popover.hide();
-                                  showCloudPackageTransfer(
+                                  showFDialog<void>(
+                                    context: context,
+                                    builder: (context, _, animation) =>
+                                        AppDialog(
+                                          title: c.changelogTitle!,
+                                          animation: animation,
+                                          actions: [
+                                            ActionButton(
+                                              AppStrings.close,
+                                              primary: true,
+                                              onPress: () =>
+                                                  Navigator.pop(context),
+                                            ),
+                                          ],
+                                          child: SizedBox(
+                                            width: 560,
+                                            child: SelectableText(
+                                              changelogBody,
+                                              style: context
+                                                  .theme
+                                                  .typography
+                                                  .body
+                                                  .sm
+                                                  .copyWith(
+                                                    fontFamily: 'monospace',
+                                                  ),
+                                            ),
+                                          ),
+                                        ),
+                                  );
+                                },
+                        ),
+                      if (package != null) ...[
+                        FItem(
+                          title: const Text('自造词'),
+                          prefix: const Icon(FLucideIcons.bookOpen),
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  openUserWords(
                                     context,
                                     c,
                                     schemeKey: schemeKey,
                                   );
                                 },
                         ),
-                      if (isLocal)
-                        FItem(
-                          title: const Text('重新导入'),
-                          prefix: const Icon(FLucideIcons.folderOpen),
-                          onPress: c.busy
-                              ? null
-                              : () {
-                                  popover.hide();
-                                  c.importLocalScheme(schemeKey: schemeKey);
-                                },
-                        ),
-                      if (c.accountUser != null)
-                        FItem(
-                          title: const Text('随账号同步'),
-                          semanticsChecked: c.syncedSchemes.contains(schemeKey),
-                          suffix: c.syncedSchemes.contains(schemeKey)
-                              ? const Icon(FLucideIcons.check)
-                              : null,
-                          onPress: c.busy
-                              ? null
-                              : () {
-                                  popover.hide();
-                                  c.setSchemeAccountSync(
-                                    schemeKey,
-                                    !c.syncedSchemes.contains(schemeKey),
-                                  );
-                                },
-                        ),
-                      if (!active)
-                        FItem(
-                          title: const Text('删除'),
-                          variant: FItemVariant.destructive,
-                          prefix: const Icon(FLucideIcons.trash2),
-                          onPress: c.busy
-                              ? null
-                              : () {
-                                  popover.hide();
-                                  c.removeSchemePackage(schemeKey);
-                                },
-                        ),
+                        if (active && c.accountUser != null)
+                          FItem(
+                            title: const Text('上传'),
+                            prefix: const Icon(FLucideIcons.upload),
+                            enabled: !c.busy && package.hasPackageZip,
+                            onPress: c.busy || !package.hasPackageZip
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    showCloudPackageTransfer(
+                                      context,
+                                      c,
+                                      schemeKey: schemeKey,
+                                    );
+                                  },
+                          ),
+                        if (isLocal)
+                          FItem(
+                            title: const Text('重新导入'),
+                            prefix: const Icon(FLucideIcons.folderOpen),
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    c.importLocalScheme(schemeKey: schemeKey);
+                                  },
+                          ),
+                        if (c.accountUser != null)
+                          FItem(
+                            title: const Text('随账号同步'),
+                            semanticsChecked: c.syncedSchemes.contains(
+                              schemeKey,
+                            ),
+                            suffix: c.syncedSchemes.contains(schemeKey)
+                                ? const Icon(FLucideIcons.check)
+                                : null,
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    c.setSchemeAccountSync(
+                                      schemeKey,
+                                      !c.syncedSchemes.contains(schemeKey),
+                                    );
+                                  },
+                          ),
+                        if (!active)
+                          FItem(
+                            title: const Text('删除'),
+                            variant: FItemVariant.destructive,
+                            prefix: const Icon(FLucideIcons.trash2),
+                            onPress: c.busy
+                                ? null
+                                : () {
+                                    popover.hide();
+                                    c.removeSchemePackage(schemeKey);
+                                  },
+                          ),
+                      ],
                     ],
                   ),
                 ],
@@ -437,6 +554,22 @@ class SchemePackageRow extends StatelessWidget {
               ),
           ],
         ),
+        if (installing || deploying) ...[
+          const SizedBox(height: 8),
+          InstallProgressView(
+            active: true,
+            progress: c.installProgress,
+            fraction: c.installFraction,
+            message: c.progress,
+          ),
+        ] else if (c.scheme == schemeKey && c.releaseLoading) ...[
+          const SizedBox(height: 8),
+          const FProgress(),
+        ],
+        if (c.scheme == schemeKey && c.releaseError != null) ...[
+          const SizedBox(height: 8),
+          ErrorMessage(c.releaseError!),
+        ],
       ],
     );
   }
@@ -638,6 +771,7 @@ class AddonCard extends StatelessWidget {
       required bool active,
       required Widget progress,
       required String? error,
+      Widget? variant,
     }) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -654,6 +788,7 @@ class AddonCard extends StatelessWidget {
             color: context.theme.colors.mutedForeground,
           ),
         ),
+        if (variant != null) ...[const SizedBox(height: 12), variant],
         const SizedBox(height: 12),
         ActionRow(
           children: [
@@ -695,6 +830,27 @@ class AddonCard extends StatelessWidget {
         ),
         addon(
           title: AppStrings.wanxiang,
+          variant: Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: 160,
+              child: Semantics(
+                label: AppStrings.wanxiangVariant,
+                enabled: !c.busy,
+                child: FSelect<String>(
+                  enabled: !c.busy,
+                  control: FSelectControl.lifted(
+                    value: c.selectedWanxiangVariant,
+                    onChange: c.selectWanxiangVariant,
+                  ),
+                  items: {
+                    for (final entry in AppStrings.wanxiangVariants.entries)
+                      entry.value: entry.key,
+                  },
+                ),
+              ),
+            ),
+          ),
           status: c.wanxiangStatusText,
           label: c.wanxiangButtonLabel,
           tooltip: c.wanxiangTooltip,

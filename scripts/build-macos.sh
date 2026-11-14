@@ -94,6 +94,9 @@ if [ -z "$RIME_DATA_DIR" ]; then
     exit 1
 fi
 
+# The macOS bundle ships no opencc-release.txt; embed the version at compile time.
+export OPENCC_VERSION="${OPENCC_VERSION:-$(sed -n 's/^version=//p' "$VENDOR_DIR/opencc-release.txt" 2>/dev/null)}"
+
 echo "==> Building macOS IME runtime..."
 export KEYTAO_RIME_SHARED_DATA_DIR="$RIME_DATA_DIR"
 KEYTAO_MACOS_BUILD_DIR="$IME_BUILD_DIR" \

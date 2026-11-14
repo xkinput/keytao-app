@@ -952,6 +952,7 @@ pub struct AddonStatusDto {
     pub installed: bool,
     pub deployed: bool,
     pub version: String,
+    pub variant: Option<String>,
     #[serde(default)]
     pub english_available: bool,
     pub latest_version: Option<String>,
@@ -1026,13 +1027,14 @@ pub async fn check_addon_update(id: String) -> Result<AddonStatusDto, String> {
 /// The install lock covers the whole operation, including rollback/deployment.
 pub async fn manage_wanxiang(
     installed: bool,
+    variant: String,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
 ) -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let host = InstallHost::new(state.host.clone(), android_deploy);
     runtime::dto(
-        keytao_app_core::wanxiang::manage_wanxiang(&state.core, installed, &host)
+        keytao_app_core::wanxiang::manage_wanxiang(&state.core, installed, variant, &host)
             .await
             .map_err(|error| error.to_string())?,
     )

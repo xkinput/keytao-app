@@ -165,7 +165,7 @@ void main() {
         )
         .first;
     final position = tester.state<ScrollableState>(scrollable).position;
-    final source = find.widgetWithText(ChoiceSetting<String>, '下载来源');
+    final source = find.byKey(const ValueKey('scheme-source'));
     final tab = find.descendant(of: source, matching: find.byType(FTabs));
     final label = find.descendant(of: tab, matching: find.byType(Text)).first;
     Focus.of(tester.element(label)).requestFocus();
@@ -407,8 +407,8 @@ void main() {
       if (entry.package != null) {
         expect(find.text('v1'), findsOneWidget);
         expect(
-          tester.getTopLeft(find.text('v1')).dy,
-          greaterThan(tester.getBottomLeft(title).dy),
+          tester.getCenter(find.text('v1')).dy,
+          closeTo(tester.getCenter(title).dy, 0.01),
         );
         expect(
           tester.getTopLeft(find.byType(ActionRow)).dy,
@@ -518,6 +518,14 @@ void main() {
     );
     expect(
       find.descendant(of: deployment, matching: find.byType(VersionPicker)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: deployment, matching: find.text('Custom scheme')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: deployment, matching: find.text('已启用')),
       findsOneWidget,
     );
     expect(
@@ -627,8 +635,15 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('星猫键道 · 顶功'), findsOneWidget);
-    expect(find.text('星猫键道 · 非顶'), findsOneWidget);
+    final catalogue = find.widgetWithText(Section, '键道方案');
+    expect(
+      find.descendant(of: catalogue, matching: find.text('星猫键道 · 顶功')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: catalogue, matching: find.text('星猫键道 · 非顶')),
+      findsOneWidget,
+    );
     expect(find.text('20261104'), findsOneWidget);
     expect(find.text('20261103'), findsOneWidget);
     expect(

@@ -400,9 +400,11 @@ Future<AddonStatusDto> checkAddonUpdate({required String id}) =>
 /// The install lock covers the whole operation, including rollback/deployment.
 Future<AddonStatusDto> manageWanxiang({
   required bool installed,
+  required String variant,
   required FutureOr<String> Function() androidDeploy,
 }) => RustLib.instance.api.crateApiCoreManageWanxiang(
   installed: installed,
+  variant: variant,
   androidDeploy: androidDeploy,
 );
 
@@ -467,6 +469,7 @@ class AddonStatusDto {
   final bool installed;
   final bool deployed;
   final String version;
+  final String? variant;
   final bool englishAvailable;
   final String? latestVersion;
 
@@ -474,6 +477,7 @@ class AddonStatusDto {
     required this.installed,
     required this.deployed,
     required this.version,
+    this.variant,
     required this.englishAvailable,
     this.latestVersion,
   });
@@ -483,6 +487,7 @@ class AddonStatusDto {
       installed.hashCode ^
       deployed.hashCode ^
       version.hashCode ^
+      variant.hashCode ^
       englishAvailable.hashCode ^
       latestVersion.hashCode;
 
@@ -494,6 +499,7 @@ class AddonStatusDto {
           installed == other.installed &&
           deployed == other.deployed &&
           version == other.version &&
+          variant == other.variant &&
           englishAvailable == other.englishAvailable &&
           latestVersion == other.latestVersion;
 }

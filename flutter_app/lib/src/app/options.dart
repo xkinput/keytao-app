@@ -49,6 +49,12 @@ const themeAccents = {
   '#0F9F8F': '绿',
   '#D87A32': '橙',
   '#8B5CF6': '紫',
+  '#4F46E5': '靛',
+  '#0284C7': '天蓝',
+  '#16A34A': '草绿',
+  '#E5484D': '红',
+  '#DB2777': '玫红',
+  '#475569': '石墨',
 };
 const logLevels = {
   RuntimeLogLevelDto.info: 'info',

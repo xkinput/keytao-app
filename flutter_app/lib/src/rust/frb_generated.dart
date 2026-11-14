@@ -259,6 +259,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
+    required String variant,
     required FutureOr<String> Function() androidDeploy,
   });
 
@@ -2104,6 +2105,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreManageWanxiang({
     required bool installed,
+    required String variant,
     required FutureOr<String> Function() androidDeploy,
   }) {
     return handler.executeNormal(
@@ -2111,6 +2113,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_bool(installed, serializer);
+          sse_encode_String(variant, serializer);
           sse_encode_DartFn_Inputs__Output_String_AnyhowException(
             androidDeploy,
             serializer,
@@ -2127,7 +2130,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreManageWanxiangConstMeta,
-        argValues: [installed, androidDeploy],
+        argValues: [installed, variant, androidDeploy],
         apiImpl: this,
       ),
     );
@@ -2135,7 +2138,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiCoreManageWanxiangConstMeta => const TaskConstMeta(
     debugName: "manage_wanxiang",
-    argNames: ["installed", "androidDeploy"],
+    argNames: ["installed", "variant", "androidDeploy"],
   );
 
   @override
@@ -3153,14 +3156,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AddonStatusDto dco_decode_addon_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return AddonStatusDto(
       installed: dco_decode_bool(arr[0]),
       deployed: dco_decode_bool(arr[1]),
       version: dco_decode_String(arr[2]),
-      englishAvailable: dco_decode_bool(arr[3]),
-      latestVersion: dco_decode_opt_String(arr[4]),
+      variant: dco_decode_opt_String(arr[3]),
+      englishAvailable: dco_decode_bool(arr[4]),
+      latestVersion: dco_decode_opt_String(arr[5]),
     );
   }
 
@@ -4133,12 +4137,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_installed = sse_decode_bool(deserializer);
     var var_deployed = sse_decode_bool(deserializer);
     var var_version = sse_decode_String(deserializer);
+    var var_variant = sse_decode_opt_String(deserializer);
     var var_englishAvailable = sse_decode_bool(deserializer);
     var var_latestVersion = sse_decode_opt_String(deserializer);
     return AddonStatusDto(
       installed: var_installed,
       deployed: var_deployed,
       version: var_version,
+      variant: var_variant,
       englishAvailable: var_englishAvailable,
       latestVersion: var_latestVersion,
     );
@@ -5406,6 +5412,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.installed, serializer);
     sse_encode_bool(self.deployed, serializer);
     sse_encode_String(self.version, serializer);
+    sse_encode_opt_String(self.variant, serializer);
     sse_encode_bool(self.englishAvailable, serializer);
     sse_encode_opt_String(self.latestVersion, serializer);
   }

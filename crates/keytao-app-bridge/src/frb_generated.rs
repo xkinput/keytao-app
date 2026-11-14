@@ -2116,6 +2116,7 @@ fn wire__crate__api__core__manage_wanxiang_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_installed = <bool>::sse_decode(&mut deserializer);
+            let api_variant = <String>::sse_decode(&mut deserializer);
             let api_android_deploy = decode_DartFn_Inputs__Output_String_AnyhowException(
                 <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
             );
@@ -2123,9 +2124,12 @@ fn wire__crate__api__core__manage_wanxiang_impl(
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::core::manage_wanxiang(api_installed, api_android_deploy)
-                                .await?;
+                        let output_ok = crate::api::core::manage_wanxiang(
+                            api_installed,
+                            api_variant,
+                            api_android_deploy,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -3250,12 +3254,14 @@ impl SseDecode for crate::api::core::AddonStatusDto {
         let mut var_installed = <bool>::sse_decode(deserializer);
         let mut var_deployed = <bool>::sse_decode(deserializer);
         let mut var_version = <String>::sse_decode(deserializer);
+        let mut var_variant = <Option<String>>::sse_decode(deserializer);
         let mut var_englishAvailable = <bool>::sse_decode(deserializer);
         let mut var_latestVersion = <Option<String>>::sse_decode(deserializer);
         return crate::api::core::AddonStatusDto {
             installed: var_installed,
             deployed: var_deployed,
             version: var_version,
+            variant: var_variant,
             english_available: var_englishAvailable,
             latest_version: var_latestVersion,
         };
@@ -4637,6 +4643,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::core::AddonStatusDto {
             self.installed.into_into_dart().into_dart(),
             self.deployed.into_into_dart().into_dart(),
             self.version.into_into_dart().into_dart(),
+            self.variant.into_into_dart().into_dart(),
             self.english_available.into_into_dart().into_dart(),
             self.latest_version.into_into_dart().into_dart(),
         ]
@@ -5734,6 +5741,7 @@ impl SseEncode for crate::api::core::AddonStatusDto {
         <bool>::sse_encode(self.installed, serializer);
         <bool>::sse_encode(self.deployed, serializer);
         <String>::sse_encode(self.version, serializer);
+        <Option<String>>::sse_encode(self.variant, serializer);
         <bool>::sse_encode(self.english_available, serializer);
         <Option<String>>::sse_encode(self.latest_version, serializer);
     }
