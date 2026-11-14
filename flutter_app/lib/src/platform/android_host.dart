@@ -62,35 +62,6 @@ class AndroidHost {
   ) => _map('smartExtractZip', {'zipPath': zipPath, 'treeUri': treeUri});
   Future<Map<String, dynamic>> smartExtractZipToPrivate(String zipPath) =>
       _map('smartExtractZipToPrivate', {'zipPath': zipPath});
-  Future<void> finishPackageCustomInstall(
-    Map<String, dynamic> extracted, {
-    required bool commit,
-  }) async {
-    final receipt = extracted['packageCustomReceipt'] as String?;
-    if (receipt == null) return;
-    await _channel.invokeMethod<void>('finishPackageCustomInstall', {
-      'receipt': receipt,
-      'commit': commit,
-    });
-  }
-
-  Future<T> completePackageCustomInstall<T>(
-    Map<String, dynamic> extracted,
-    Future<T> Function() install,
-  ) async {
-    var committed = false;
-    try {
-      final result = await install();
-      await finishPackageCustomInstall(extracted, commit: true);
-      committed = true;
-      return result;
-    } finally {
-      if (!committed) {
-        await finishPackageCustomInstall(extracted, commit: false);
-      }
-    }
-  }
-
   Future<Map<String, dynamic>> deployImeData() => _map('deployImeData');
   Future<void> adoptAppLogger() =>
       _channel.invokeMethod<void>('adoptAppLogger');

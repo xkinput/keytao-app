@@ -564,8 +564,6 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepare
     _receiver: JObject<'_>,
     relative: JString<'_>,
     existing: JByteArray<'_>,
-    package_content: JByteArray<'_>,
-    previous_sha256: JString<'_>,
 ) -> jstring {
     android_jni_guard(
         "nativePrepareProtectedFileInstall",
@@ -582,21 +580,8 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepare
                 };
                 Some(bytes)
             };
-            let package_content = if package_content.is_null() {
-                None
-            } else {
-                let Ok(bytes) = env.convert_byte_array(&package_content) else {
-                    return std::ptr::null_mut();
-                };
-                Some(bytes)
-            };
-            let previous_sha256 = optional_jni_raw_text(&mut env, previous_sha256);
-            let decision = crate::install::prepare_protected_file_install(
-                &relative,
-                existing.as_deref(),
-                package_content.as_deref(),
-                previous_sha256.as_deref(),
-            );
+            let decision =
+                crate::install::prepare_protected_file_install(&relative, existing.as_deref());
             let Ok(json) = serde_json::to_string(&decision) else {
                 return std::ptr::null_mut();
             };

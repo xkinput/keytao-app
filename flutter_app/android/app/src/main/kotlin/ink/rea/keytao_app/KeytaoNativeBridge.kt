@@ -9,7 +9,6 @@ data class ProtectedFileInstall(
     val write: Boolean,
     val backupName: String?,
     val log: String?,
-    val newName: String? = null,
 )
 
 object KeytaoNativeBridge {
@@ -97,14 +96,9 @@ object KeytaoNativeBridge {
         )
     }
 
-    fun prepareProtectedFileInstall(
-        relative: String,
-        existing: ByteArray?,
-        packageContent: ByteArray? = null,
-        previousSha256: String? = null,
-    ): ProtectedFileInstall {
+    fun prepareProtectedFileInstall(relative: String, existing: ByteArray?): ProtectedFileInstall {
         check(loaded) { "KeyTao native bridge is unavailable" }
-        val json = runCatching { nativePrepareProtectedFileInstall(relative, existing, packageContent, previousSha256) }
+        val json = runCatching { nativePrepareProtectedFileInstall(relative, existing) }
             .getOrElse { throw IllegalStateException("Failed to prepare protected file installation", it) }
             ?: error("Failed to prepare protected file installation")
         val result = JSONObject(json)
@@ -113,7 +107,6 @@ object KeytaoNativeBridge {
             result.getBoolean("write"),
             if (result.isNull("backup_name")) null else result.getString("backup_name"),
             if (result.isNull("log")) null else result.getString("log"),
-            if (result.isNull("new_name")) null else result.getString("new_name"),
         )
     }
 
@@ -381,12 +374,7 @@ object KeytaoNativeBridge {
         packageLuaFilenamesJson: String,
     ): String?
 
-    external fun nativePrepareProtectedFileInstall(
-        relative: String,
-        existing: ByteArray?,
-        packageContent: ByteArray?,
-        previousSha256: String?,
-    ): String?
+    external fun nativePrepareProtectedFileInstall(relative: String, existing: ByteArray?): String?
 
     external fun nativeMergeLocalDefaultCustom(existing: String?, packageContent: String): String?
 

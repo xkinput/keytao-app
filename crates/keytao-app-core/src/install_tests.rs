@@ -2,29 +2,8 @@ use crate::{AppEnv, Core, CoreEvent, EventSink, Platform, install::smart_install
 use std::{
     fs,
     io::Write,
-    path::Path,
     sync::{Arc, Mutex},
 };
-
-fn write_package_file(
-    root: &Path,
-    relative: &str,
-    content: &[u8],
-    logs: &mut Vec<String>,
-) -> Result<(), String> {
-    let mut install = crate::install::PackageCustomFileInstall::new(root)?;
-    install.write_package_file(relative, content, logs)?;
-    install.finish()
-}
-
-fn package_custom_hashes(root: &Path) -> serde_json::Value {
-    serde_json::from_slice(&fs::read(root.join(".keytao-package-custom.json")).unwrap()).unwrap()
-}
-
-fn content_hash(content: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(content))
-}
 
 #[derive(Default)]
 struct ProgressSink(Mutex<Vec<(String, u32, String)>>);
@@ -86,7 +65,7 @@ fn sync_base_is_never_written_by_package_install() {
         } else {
             fs::remove_file(&path).unwrap();
         }
-        write_package_file(dir.path(), relative, b"[]", &mut logs).unwrap();
+        crate::install::write_package_file(dir.path(), relative, b"[]", &mut logs).unwrap();
         assert_eq!(fs::read(&path).ok().as_deref(), existing);
     }
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -116,28 +95,12 @@ fn protected_file_install_keeps_utf8_bom_dictionary() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    write_package_file(dir.path(), relative, b"entries: []\n", &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"entries: []\n", &mut logs)
+        .unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
     assert_eq!(logs, ["[KEPT] keytao.user.dict.yaml"]);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-}
-
-#[test]
-fn protected_file_install_keeps_user_settings_without_custom_provenance() {
-    let dir = tempfile::tempdir().unwrap();
-    let user = b"patch: {personal: true}\n";
-    for relative in ["user.yaml", "xmjd6.user.yaml"] {
-        fs::write(dir.path().join(relative), user).unwrap();
-        let mut logs = Vec::new();
-
-        write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
-
-        assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
-        assert_eq!(logs, [format!("[KEPT] {relative}")]);
-        assert!(!dir.path().join(format!("{relative}.new")).exists());
-    }
-    assert!(!dir.path().join(".keytao-package-custom.json").exists());
 }
 
 #[test]
@@ -148,18 +111,11 @@ fn protected_file_install_keeps_duplicate_key_settings() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
+        .unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
-    assert!(
-        logs.iter()
-            .any(|line| line.starts_with("[KEPT] x.custom.yaml")
-                && line.contains("x.custom.yaml.new"))
-    );
-    assert_eq!(
-        fs::read(dir.path().join("x.custom.yaml.new")).unwrap(),
-        b"patch: {}\n"
-    );
+    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
 }
 
 #[test]
@@ -170,19 +126,12 @@ fn protected_file_install_keeps_utf8_bom_settings() {
     fs::write(dir.path().join(relative), user).unwrap();
     let mut logs = Vec::new();
 
-    write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), relative, b"patch: {}\n", &mut logs)
+        .unwrap();
 
     assert_eq!(fs::read(dir.path().join(relative)).unwrap(), user);
-    assert!(
-        logs.iter()
-            .any(|line| line.starts_with("[KEPT] x.custom.yaml")
-                && line.contains("x.custom.yaml.new"))
-    );
-    assert_eq!(
-        fs::read(dir.path().join("x.custom.yaml.new")).unwrap(),
-        b"patch: {}\n"
-    );
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    assert_eq!(logs, ["[KEPT] x.custom.yaml"]);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -193,20 +142,20 @@ fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
     let package = b"entries: []\n";
     let mut logs = Vec::new();
 
-    write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
     assert_eq!(fs::read(&path).unwrap(), package);
 
     let valid = b"---\nname: keytao.user\nversion: \"1\"\n...\nuser_word\tabcd\t1\n";
     fs::write(&path, valid).unwrap();
     logs.clear();
-    write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
     assert_eq!(fs::read(&path).unwrap(), valid);
     assert_eq!(logs, ["[KEPT] keytao.user.dict.yaml"]);
 
     for broken in [b"entries: [\n".as_slice(), b"\xff\xfe".as_slice()] {
         fs::write(&path, broken).unwrap();
         logs.clear();
-        write_package_file(dir.path(), relative, package, &mut logs).unwrap();
+        crate::install::write_package_file(dir.path(), relative, package, &mut logs).unwrap();
         assert_eq!(fs::read(&path).unwrap(), package);
         let backup = fs::read_dir(dir.path())
             .unwrap()
@@ -236,406 +185,15 @@ fn protected_file_install_decides_missing_valid_and_broken_with_backup() {
         fs::remove_file(backup).unwrap();
     }
 
-    let relative = format!("{}.user.yaml", "x".repeat(240));
+    let relative = format!("{}.custom.yaml", "x".repeat(240));
     let path = dir.path().join(&relative);
     let broken = b"patch: [\n";
     fs::write(&path, broken).unwrap();
     logs.clear();
-    write_package_file(dir.path(), &relative, package, &mut logs).unwrap();
+    crate::install::write_package_file(dir.path(), &relative, package, &mut logs).unwrap();
     assert_eq!(fs::read(&path).unwrap(), broken);
-    assert!(
-        logs.iter()
-            .any(|line| line.starts_with("[BROKEN] ") && line.contains("left untouched"))
-    );
-}
-
-#[tokio::test]
-async fn smart_install_updates_untouched_custom_after_core_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rime");
-    let relative = "xmjd6.custom.yaml";
-    let versions = [
-        b"patch:\n  switches/@0/reset: 0\n".as_slice(),
-        b"patch:\n  switches/@1/reset: 0\n".as_slice(),
-    ];
-    for (index, content) in versions.into_iter().enumerate() {
-        let core = Core::new(
-            AppEnv {
-                data_dir: dir.path().join("state"),
-                cache_dir: dir.path().join("cache"),
-                resource_dir: dir.path().join("resources"),
-                app_version: "test".into(),
-                platform: Platform::MacOs,
-            },
-            Arc::new(ProgressSink::default()),
-        )
-        .unwrap();
-        let archive = dir.path().join("package.zip");
-        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-        zip.start_file(relative, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(content).unwrap();
-        zip.finish().unwrap();
-
-        let result = smart_install(
-            &core,
-            archive.to_string_lossy().into_owned(),
-            root.to_string_lossy().into_owned(),
-            #[cfg(target_os = "windows")]
-            |_, _, _, _| Ok(Vec::new()),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(fs::read(root.join(relative)).unwrap(), content);
-        assert_eq!(
-            package_custom_hashes(&root)[relative],
-            content_hash(content)
-        );
-        assert!(!root.join(format!("{relative}.new")).exists());
-        assert!(result.verify.iter().all(|entry| entry.ok));
-        if index == 1 {
-            assert!(
-                result
-                    .logs
-                    .iter()
-                    .any(|line| line == "[UPDATED] xmjd6.custom.yaml")
-            );
-        }
-    }
-}
-
-#[test]
-fn package_custom_install_keeps_edits_and_records_each_shipped_version() {
-    let dir = tempfile::tempdir().unwrap();
-    let relative = "xmjd6.custom.yaml";
-    let path = dir.path().join(relative);
-    let mut logs = Vec::new();
-    write_package_file(dir.path(), relative, b"patch: {version: 1}\n", &mut logs).unwrap();
-    let edited = b"patch: [\n";
-    fs::write(&path, edited).unwrap();
-
-    for content in [b"patch: {version: 2}\n", b"patch: {version: 3}\n"] {
-        logs.clear();
-        write_package_file(dir.path(), relative, content, &mut logs).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), edited);
-        assert_eq!(
-            fs::read(dir.path().join(format!("{relative}.new"))).unwrap(),
-            content
-        );
-        assert_eq!(
-            package_custom_hashes(dir.path())[relative],
-            content_hash(content)
-        );
-        assert!(
-            logs.iter()
-                .any(|line| line.starts_with("[KEPT] xmjd6.custom.yaml")
-                    && line.contains("xmjd6.custom.yaml.new"))
-        );
-        assert!(!logs.iter().any(|line| line.starts_with("[BROKEN]")));
-    }
-
-    fs::write(&path, b"patch: {version: 3}\n").unwrap();
-    let next = b"patch: {version: 4}\n";
-    logs.clear();
-    write_package_file(dir.path(), relative, next, &mut logs).unwrap();
-    assert_eq!(fs::read(path).unwrap(), next);
-    assert_eq!(
-        package_custom_hashes(dir.path())[relative],
-        content_hash(next)
-    );
-    assert!(
-        logs.iter()
-            .any(|line| line == "[UPDATED] xmjd6.custom.yaml")
-    );
-}
-
-#[test]
-fn package_custom_install_keeps_legacy_file_and_writes_new() {
-    let dir = tempfile::tempdir().unwrap();
-    let relative = "xmjd6.custom.yaml";
-    let legacy = b"patch: {version: 1}\n";
-    let package = b"patch: {version: 2}\n";
-    fs::write(dir.path().join(relative), legacy).unwrap();
-    let mut logs = Vec::new();
-
-    write_package_file(dir.path(), relative, package, &mut logs).unwrap();
-
-    assert_eq!(fs::read(dir.path().join(relative)).unwrap(), legacy);
-    assert_eq!(
-        fs::read(dir.path().join(format!("{relative}.new"))).unwrap(),
-        package
-    );
-    assert_eq!(
-        package_custom_hashes(dir.path())[relative],
-        content_hash(package)
-    );
-    assert!(
-        logs.iter()
-            .any(|line| line.starts_with("[KEPT] xmjd6.custom.yaml")
-                && line.contains("xmjd6.custom.yaml.new"))
-    );
-}
-
-#[test]
-fn package_custom_install_identical_content_only_records_hash() {
-    let dir = tempfile::tempdir().unwrap();
-    let relative = "xmjd6.custom.yaml";
-    let path = dir.path().join(relative);
-    let package = b"patch: {version: 1}\n";
-    fs::write(&path, package).unwrap();
-    let old_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_modified(old_mtime)
-        .unwrap();
-
-    write_package_file(dir.path(), relative, package, &mut Vec::new()).unwrap();
-
-    assert_eq!(fs::read(&path).unwrap(), package);
-    assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), old_mtime);
-    assert_eq!(
-        package_custom_hashes(dir.path())[relative],
-        content_hash(package)
-    );
-    assert!(!dir.path().join(format!("{relative}.new")).exists());
-}
-
-#[test]
-fn package_custom_install_tracks_schemes_independently() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut install = crate::install::PackageCustomFileInstall::new(dir.path()).unwrap();
-    let mut logs = Vec::new();
-    for relative in ["xmjd6.custom.yaml", "keytao.custom.yaml"] {
-        install
-            .write_package_file(relative, b"patch: {version: 1}\n", &mut logs)
-            .unwrap();
-    }
-    install.finish().unwrap();
-
-    let next = b"patch: {version: 2}\n";
-    write_package_file(dir.path(), "xmjd6.custom.yaml", next, &mut logs).unwrap();
-
-    let hashes = package_custom_hashes(dir.path());
-    assert_eq!(hashes["xmjd6.custom.yaml"], content_hash(next));
-    assert_eq!(
-        hashes["keytao.custom.yaml"],
-        content_hash(b"patch: {version: 1}\n")
-    );
-    assert_eq!(
-        fs::read(dir.path().join("keytao.custom.yaml")).unwrap(),
-        b"patch: {version: 1}\n"
-    );
-}
-
-#[test]
-fn package_custom_install_rolls_back_files_new_and_hashes_on_failure() {
-    for recorded in [false, true] {
-        for existing_new in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let relative = "xmjd6.custom.yaml";
-            let path = dir.path().join(relative);
-            let new_path = dir.path().join(format!("{relative}.new"));
-            let record_path = dir.path().join(".keytao-package-custom.json");
-            let old = b"patch: {version: 1}\n";
-            if recorded {
-                write_package_file(dir.path(), relative, old, &mut Vec::new()).unwrap();
-            } else {
-                fs::write(&path, old).unwrap();
-            }
-            if existing_new {
-                fs::write(&new_path, b"previous comparison").unwrap();
-            }
-            let old_record = fs::read(&record_path).ok();
-            let old_new = fs::read(&new_path).ok();
-            fs::write(dir.path().join("blocked"), b"file blocks directory").unwrap();
-
-            {
-                let mut install =
-                    crate::install::PackageCustomFileInstall::new(dir.path()).unwrap();
-                let mut logs = Vec::new();
-                let next = b"patch: {version: 2}\n";
-                install
-                    .write_package_file(relative, next, &mut logs)
-                    .unwrap();
-                if recorded {
-                    assert_eq!(fs::read(&path).unwrap(), next);
-                } else {
-                    assert_eq!(fs::read(&new_path).unwrap(), next);
-                }
-                assert!(
-                    install
-                        .write_package_file("blocked/file.lua", b"failure", &mut logs)
-                        .is_err()
-                );
-            }
-
-            assert_eq!(fs::read(&path).unwrap(), old);
-            assert_eq!(fs::read(&new_path).ok(), old_new);
-            assert_eq!(fs::read(&record_path).ok(), old_record);
-        }
-    }
-}
-
-#[tokio::test]
-async fn smart_install_rolls_back_custom_files_when_package_staging_fails() {
-    for recorded in [false, true] {
-        for existing_new in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().join("rime");
-            fs::create_dir_all(&root).unwrap();
-            let relative = "xmjd6.custom.yaml";
-            let old = b"patch: {version: 1}\n";
-            if recorded {
-                write_package_file(&root, relative, old, &mut Vec::new()).unwrap();
-            } else {
-                fs::write(root.join(relative), old).unwrap();
-            }
-            let new_path = root.join(format!("{relative}.new"));
-            if existing_new {
-                fs::write(&new_path, b"previous comparison").unwrap();
-            }
-            let record_path = root.join(".keytao-package-custom.json");
-            let old_record = fs::read(&record_path).ok();
-            let old_new = fs::read(&new_path).ok();
-            let sink = Arc::new(ProgressSink::default());
-            let core = Core::new(
-                AppEnv {
-                    data_dir: dir.path().join("state"),
-                    cache_dir: dir.path().join("cache"),
-                    resource_dir: dir.path().join("resources"),
-                    app_version: "test".into(),
-                    platform: Platform::MacOs,
-                },
-                sink.clone(),
-            )
-            .unwrap();
-            assert!(core.state().active_scheme.is_none());
-            fs::create_dir_all(&core.env().data_dir).unwrap();
-            fs::write(core.env().data_dir.join("scheme-packages"), b"blocked").unwrap();
-            let archive = dir.path().join("package.zip");
-            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-            zip.start_file(relative, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(b"patch: {version: 2}\n").unwrap();
-            zip.finish().unwrap();
-
-            let result = smart_install(
-                &core,
-                archive.to_string_lossy().into_owned(),
-                root.to_string_lossy().into_owned(),
-                #[cfg(target_os = "windows")]
-                |_, _, _, _| Ok(Vec::new()),
-            )
-            .await;
-
-            assert!(result.is_err());
-            assert!(
-                sink.0
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|(_, _, message)| { message.contains("1/1: xmjd6.custom.yaml") })
-            );
-            assert_eq!(fs::read(root.join(relative)).unwrap(), old);
-            assert_eq!(fs::read(new_path).ok(), old_new);
-            assert_eq!(fs::read(record_path).ok(), old_record);
-            assert!(archive.exists());
-        }
-    }
-}
-
-#[tokio::test]
-async fn smart_install_rejects_custom_comparison_collision_before_writes() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rime");
-    let relative = "xmjd6.custom.yaml";
-    let old = b"patch: {version: 1}\n";
-    write_package_file(&root, relative, old, &mut Vec::new()).unwrap();
-    let new_path = root.join(format!("{relative}.new"));
-    fs::write(&new_path, b"previous comparison").unwrap();
-    let record_path = root.join(".keytao-package-custom.json");
-    let old_record = fs::read(&record_path).unwrap();
-    let core = Core::new(
-        AppEnv {
-            data_dir: dir.path().join("state"),
-            cache_dir: dir.path().join("cache"),
-            resource_dir: dir.path().join("resources"),
-            app_version: "test".into(),
-            platform: Platform::MacOs,
-        },
-        Arc::new(ProgressSink::default()),
-    )
-    .unwrap();
-    let archive = dir.path().join("package.zip");
-    let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
-    for (name, content) in [
-        (relative, b"patch: {version: 2}\n".as_slice()),
-        ("xmjd6.custom.yaml.new", b"archive comparison".as_slice()),
-        ("unrelated.lua", b"archive module".as_slice()),
-    ] {
-        zip.start_file(name, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(content).unwrap();
-    }
-    zip.finish().unwrap();
-
-    let error = smart_install(
-        &core,
-        archive.to_string_lossy().into_owned(),
-        root.to_string_lossy().into_owned(),
-        #[cfg(target_os = "windows")]
-        |_, _, _, _| Ok(Vec::new()),
-    )
-    .await
-    .err()
-    .expect("An archive must not overwrite the generated comparison file");
-
-    assert!(
-        error
-            .to_string()
-            .contains("reserved custom comparison file")
-    );
-    assert_eq!(fs::read(root.join(relative)).unwrap(), old);
-    assert_eq!(fs::read(new_path).unwrap(), b"previous comparison");
-    assert_eq!(fs::read(record_path).unwrap(), old_record);
-    assert!(!root.join("unrelated.lua").exists());
-    assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
-}
-
-#[test]
-fn package_custom_rollback_continues_after_a_concurrent_edit() {
-    let dir = tempfile::tempdir().unwrap();
-    let old = b"patch: {version: 1}\n";
-    let next = b"patch: {version: 2}\n";
-    let mut install = crate::install::PackageCustomFileInstall::new(dir.path()).unwrap();
-    for relative in ["a.custom.yaml", "b.custom.yaml"] {
-        install
-            .write_package_file(relative, old, &mut Vec::new())
-            .unwrap();
-    }
-    install.finish().unwrap();
-    let record_path = dir.path().join(".keytao-package-custom.json");
-    let old_record = fs::read(&record_path).unwrap();
-
-    {
-        let mut install = crate::install::PackageCustomFileInstall::new(dir.path()).unwrap();
-        for relative in ["a.custom.yaml", "b.custom.yaml"] {
-            install
-                .write_package_file(relative, next, &mut Vec::new())
-                .unwrap();
-        }
-        fs::write(dir.path().join("b.custom.yaml"), b"concurrent user edit").unwrap();
-    }
-
-    assert_eq!(fs::read(dir.path().join("a.custom.yaml")).unwrap(), old);
-    assert_eq!(
-        fs::read(dir.path().join("b.custom.yaml")).unwrap(),
-        b"concurrent user edit"
-    );
-    assert_eq!(fs::read(record_path).unwrap(), old_record);
+    assert!(logs.iter().any(|line| line.starts_with("[BROKEN] ")
+        && line.contains("left untouched")));
 }
 
 #[test]
@@ -1151,7 +709,6 @@ async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progr
     .await
     .unwrap();
     assert_eq!(result.merged_schemas, vec!["personal"]);
-    assert!(!dest.join(".keytao-package-custom.json").exists());
     assert_eq!(
         crate::scheme_files::parse_schema_list(
             &fs::read_to_string(dest.join("default.custom.yaml")).unwrap()
