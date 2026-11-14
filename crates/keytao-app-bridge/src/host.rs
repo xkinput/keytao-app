@@ -255,7 +255,7 @@ impl SchemeHost for BridgeHost {
     }
     #[cfg(target_os = "windows")]
     fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
-        keytao_app_core::windows_public_schemas::publish_english_settings(enabled)
+        keytao_app_core::windows_public_schemas::publish_english_settings(&self.root, enabled)
     }
     #[cfg(target_os = "windows")]
     fn publish_wanxiang_sources(&self, files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
@@ -275,6 +275,10 @@ impl ImeHost for BridgeHost {
     #[cfg(target_os = "windows")]
     fn publish_english_settings(&self, enabled: bool) -> Result<(), String> {
         SchemeHost::publish_english_settings(self, enabled)
+    }
+    #[cfg(target_os = "windows")]
+    fn publish_schema_switches(&self) -> Result<(), String> {
+        keytao_app_core::windows_public_schemas::publish_schema_switches(&self.root)
     }
     #[cfg(target_os = "android")]
     fn deploy_ime_data(&self) -> Result<serde_json::Value, String> {

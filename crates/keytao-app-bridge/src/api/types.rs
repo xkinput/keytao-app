@@ -212,6 +212,28 @@ pub struct ReleaseInfoDto {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SchemaSwitchDto {
+    pub schema_id: String,
+    pub name: String,
+    pub states: Vec<String>,
+    pub options: Vec<String>,
+    pub value: u32,
+}
+
+impl From<keytao_core::SchemaSwitchSetting> for SchemaSwitchDto {
+    fn from(value: keytao_core::SchemaSwitchSetting) -> Self {
+        Self {
+            schema_id: value.schema_id,
+            name: value.name,
+            states: value.states,
+            options: value.options,
+            value: value.value as u32,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AndroidImeInputSettingsDto {
     pub haptics_enabled: bool,
     pub haptic_intensity: u8,

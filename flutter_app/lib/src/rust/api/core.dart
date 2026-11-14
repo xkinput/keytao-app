@@ -337,6 +337,19 @@ Future<AndroidImeInputSettingsDto> setAndroidImeInputSettings({
   settings: settings,
 );
 
+Future<List<SchemaSwitchDto>> getSchemaSwitches() =>
+    RustLib.instance.api.crateApiCoreGetSchemaSwitches();
+
+Future<List<SchemaSwitchDto>> setSchemaSwitch({
+  required String schemaId,
+  required String name,
+  required int value,
+}) => RustLib.instance.api.crateApiCoreSetSchemaSwitch(
+  schemaId: schemaId,
+  name: name,
+  value: value,
+);
+
 Future<ImeUiSettingsDto> getImeUiSettings() =>
     RustLib.instance.api.crateApiCoreGetImeUiSettings();
 

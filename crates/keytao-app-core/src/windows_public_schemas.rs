@@ -83,6 +83,7 @@ pub async fn prepare_search_schemas(core: &Core) -> Result<(), String> {
         publish_english_addon(core)?;
     }
     publish_english_settings(
+        &root,
         keytao_core::english_mode::read_english_mode(&root)
             == keytao_core::english_mode::EnglishMode::Schema,
     )?;
@@ -271,14 +272,20 @@ pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), S
     store_snapshot(&root, &files, true)
 }
 
-/// This single preference is safe to share; no other user settings or learned
-/// dictionaries are read by the publisher.
-pub fn publish_english_settings(enabled: bool) -> Result<(), String> {
+/// Publish input preferences without exposing private metadata or dictionaries.
+pub fn publish_english_settings(root: &Path, enabled: bool) -> Result<(), String> {
     let bytes = serde_json::to_vec(&serde_json::json!({
         "englishMode": if enabled { "schema" } else { "ascii" }
     }))
     .map_err(|error| error.to_string())?;
-    publish_files(&[(PathBuf::from("keytao-ime.json"), bytes)])
+    publish_files(&[
+        (PathBuf::from("keytao-ime.json"), bytes),
+        crate::ime_settings::schema_switch_settings_file(root)?,
+    ])
+}
+
+pub fn publish_schema_switches(root: &Path) -> Result<(), String> {
+    publish_files(&[crate::ime_settings::schema_switch_settings_file(root)?])
 }
 
 fn read_snapshot(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {

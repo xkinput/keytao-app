@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 29681135;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1784708082;
 
 // Section: executor
 
@@ -1521,6 +1521,38 @@ fn wire__crate__api__core__get_runtime_log_settings_impl(
         },
     )
 }
+fn wire__crate__api__core__get_schema_switches_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_schema_switches",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::core::get_schema_switches()?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__get_scheme_sync_state_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2679,6 +2711,42 @@ fn wire__crate__api__core__set_runtime_log_settings_impl(
         },
     )
 }
+fn wire__crate__api__core__set_schema_switch_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_schema_switch",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_schema_id = <String>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            let api_value = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::core::set_schema_switch(api_schema_id, api_name, api_value)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__core__set_scheme_sync_preferences_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3788,6 +3856,20 @@ impl SseDecode for Vec<crate::api::types::RuntimeLogFileInfoDto> {
     }
 }
 
+impl SseDecode for Vec<crate::api::types::SchemaSwitchDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::types::SchemaSwitchDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::types::SchemeUpdateDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4150,6 +4232,24 @@ impl SseDecode for crate::api::types::RuntimeLogSettingsDto {
     }
 }
 
+impl SseDecode for crate::api::types::SchemaSwitchDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_schemaId = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_states = <Vec<String>>::sse_decode(deserializer);
+        let mut var_options = <Vec<String>>::sse_decode(deserializer);
+        let mut var_value = <u32>::sse_decode(deserializer);
+        return crate::api::types::SchemaSwitchDto {
+            schema_id: var_schemaId,
+            name: var_name,
+            states: var_states,
+            options: var_options,
+            value: var_value,
+        };
+    }
+}
+
 impl SseDecode for crate::api::types::SchemeReleaseDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4492,104 +4592,106 @@ fn pde_ffi_dispatcher_primary_impl(
         41 => {
             wire__crate__api__core__get_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        42 => wire__crate__api__core__get_scheme_sync_state_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__core__import_local_scheme_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
-        48 => {
+        42 => wire__crate__api__core__get_schema_switches_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__core__get_scheme_sync_state_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__core__handle_app_args_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__core__import_local_scheme_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__core__init_app_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__core__init_core_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__core__install_latest_scheme_impl(port, ptr, rust_vec_len, data_len),
+        49 => {
             wire__crate__api__core__install_scheme_from_url_impl(port, ptr, rust_vec_len, data_len)
         }
-        49 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__core__list_cloud_packages_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
-        54 => {
+        50 => wire__crate__api__core__install_scheme_to_dir_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__core__linux_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__core__linux_start_ime_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__core__list_cloud_packages_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__core__list_dir_impl(port, ptr, rust_vec_len, data_len),
+        55 => {
             wire__crate__api__core__list_installed_packages_impl(port, ptr, rust_vec_len, data_len)
         }
-        55 => wire__crate__api__core__list_user_words_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__core__lookup_user_word_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
-        60 => {
+        56 => wire__crate__api__core__list_user_words_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__core__lookup_user_word_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__core__macos_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__core__manage_wanxiang_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__core__onboarding_impl(port, ptr, rust_vec_len, data_len),
+        61 => {
             wire__crate__api__core__prepare_android_install_impl(port, ptr, rust_vec_len, data_len)
         }
-        61 => wire__crate__api__core__preview_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__core__record_android_deploy_impl(port, ptr, rust_vec_len, data_len),
-        66 => {
+        62 => wire__crate__api__core__preview_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__core__read_debug_logs_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__core__read_local_schemas_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__core__read_runtime_log_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__core__record_android_deploy_impl(port, ptr, rust_vec_len, data_len),
+        67 => {
             wire__crate__api__core__record_installed_scheme_impl(port, ptr, rust_vec_len, data_len)
         }
-        67 => wire__crate__api__core__remove_downloaded_archive_impl(
+        68 => wire__crate__api__core__remove_downloaded_archive_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        69 => wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => {
+        71 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        71 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        72 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        73 => {
+        73 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        74 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        74 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        75 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => {
+        77 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        76 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        78 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        81 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        83 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__core__windows_pending_ime_action_impl(
+        84 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        86 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        85 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        87 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -5406,6 +5508,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::RuntimeLogSettingsDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::SchemaSwitchDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.schema_id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.states.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+            self.value.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::SchemaSwitchDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::SchemaSwitchDto>
+    for crate::api::types::SchemaSwitchDto
+{
+    fn into_into_dart(self) -> crate::api::types::SchemaSwitchDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::types::SchemeReleaseDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -6136,6 +6262,16 @@ impl SseEncode for Vec<crate::api::types::RuntimeLogFileInfoDto> {
     }
 }
 
+impl SseEncode for Vec<crate::api::types::SchemaSwitchDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::types::SchemaSwitchDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::types::SchemeUpdateDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6407,6 +6543,17 @@ impl SseEncode for crate::api::types::RuntimeLogSettingsDto {
         <Vec<crate::api::types::RuntimeLogFileInfoDto>>::sse_encode(self.files, serializer);
         <u32>::sse_encode(self.file_count, serializer);
         <u64>::sse_encode(self.total_bytes, serializer);
+    }
+}
+
+impl SseEncode for crate::api::types::SchemaSwitchDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.schema_id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Vec<String>>::sse_encode(self.states, serializer);
+        <Vec<String>>::sse_encode(self.options, serializer);
+        <u32>::sse_encode(self.value, serializer);
     }
 }
 

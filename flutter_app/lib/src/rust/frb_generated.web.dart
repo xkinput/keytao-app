@@ -195,6 +195,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<SchemaSwitchDto> dco_decode_list_schema_switch_dto(dynamic raw);
+
+  @protected
   List<SchemeUpdateDto> dco_decode_list_scheme_update_dto(dynamic raw);
 
   @protected
@@ -285,6 +288,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RuntimeLogSettingsDto dco_decode_runtime_log_settings_dto(dynamic raw);
+
+  @protected
+  SchemaSwitchDto dco_decode_schema_switch_dto(dynamic raw);
 
   @protected
   SchemeReleaseDto dco_decode_scheme_release_dto(dynamic raw);
@@ -538,6 +544,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<SchemaSwitchDto> sse_decode_list_schema_switch_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<SchemeUpdateDto> sse_decode_list_scheme_update_dto(
     SseDeserializer deserializer,
   );
@@ -652,6 +663,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RuntimeLogSettingsDto sse_decode_runtime_log_settings_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  SchemaSwitchDto sse_decode_schema_switch_dto(SseDeserializer deserializer);
 
   @protected
   SchemeReleaseDto sse_decode_scheme_release_dto(SseDeserializer deserializer);
@@ -987,6 +1001,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_schema_switch_dto(
+    List<SchemaSwitchDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_scheme_update_dto(
     List<SchemeUpdateDto> self,
     SseSerializer serializer,
@@ -1127,6 +1147,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_runtime_log_settings_dto(
     RuntimeLogSettingsDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_schema_switch_dto(
+    SchemaSwitchDto self,
     SseSerializer serializer,
   );
 

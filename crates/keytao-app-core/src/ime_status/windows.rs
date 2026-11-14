@@ -1457,6 +1457,11 @@ pub fn windows_deploy_rime_blocking(
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
     keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
+    crate::windows_public_schemas::publish_english_settings(
+        &user_dir,
+        keytao_core::english_mode::read_english_mode(&user_dir)
+            == keytao_core::english_mode::EnglishMode::Schema,
+    )?;
     write_keytao_ime_reload_stamp()
         .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
     keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
