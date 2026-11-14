@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'candidate_panel_preview.dart';
 import 'color_picker.dart';
 import 'user_words.dart';
 import 'widgets.dart';
@@ -226,9 +227,46 @@ String cloudSyncDate(String? value) {
       value;
 }
 
-class SettingsCard extends StatelessWidget {
+class SettingsCard extends StatefulWidget {
   const SettingsCard({super.key, required this.controller});
   final AppController controller;
+  @override
+  State<SettingsCard> createState() => _SettingsCardState();
+}
+
+class _SettingsCardState extends State<SettingsCard> {
+  AppController get controller => widget.controller;
+  ImeUiSettingsDto? _previewSource;
+  UiColorSchemeDto? _previewScheme;
+  PanelOrientationDto? _previewOrientation;
+  String? _previewAccent;
+  double? _previewFontSize;
+
+  void _resetPreview() {
+    _previewScheme = null;
+    _previewOrientation = null;
+    _previewAccent = null;
+    _previewFontSize = null;
+  }
+
+  Future<void> _savePreview({
+    UiColorSchemeDto? colorScheme,
+    PanelOrientationDto? orientation,
+    double? fontSize,
+  }) async {
+    setState(() {
+      _previewScheme = colorScheme ?? _previewScheme;
+      _previewOrientation = orientation ?? _previewOrientation;
+      _previewFontSize = fontSize ?? _previewFontSize;
+    });
+    final saved = await controller.saveUi(
+      colorScheme: colorScheme,
+      orientation: orientation,
+      fontSize: fontSize,
+    );
+    if (!saved && mounted) setState(_resetPreview);
+  }
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -276,6 +314,10 @@ class SettingsCard extends StatelessWidget {
   Widget _desktop(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
+    if (!identical(s, _previewSource)) {
+      _previewSource = s;
+      _resetPreview();
+    }
     return Section(
       title: AppStrings.imeSettings,
       icon: FLucideIcons.palette,
@@ -298,7 +340,9 @@ class SettingsCard extends StatelessWidget {
               UiColorSchemeDto.light: FLucideIcons.sun,
               UiColorSchemeDto.dark: FLucideIcons.moon,
             },
-            onChanged: c.busy ? null : (value) => c.saveUi(colorScheme: value),
+            onChanged: c.busy
+                ? null
+                : (value) => _savePreview(colorScheme: value),
           ),
           ChoiceSetting<PanelOrientationDto>(
             label: '候选排列',
@@ -308,7 +352,9 @@ class SettingsCard extends StatelessWidget {
               PanelOrientationDto.horizontal: FLucideIcons.columns3,
               PanelOrientationDto.vertical: FLucideIcons.rows3,
             },
-            onChanged: c.busy ? null : (value) => c.saveUi(orientation: value),
+            onChanged: c.busy
+                ? null
+                : (value) => _savePreview(orientation: value),
           ),
           ChoiceSetting<EnglishModeDto>(
             label: AppStrings.englishMode,
@@ -335,9 +381,25 @@ class SettingsCard extends StatelessWidget {
             max: candidateFontMax,
             divisions: candidateFontDivisions,
             icon: FLucideIcons.type,
-            onChanged: c.busy ? null : (value) => c.saveUi(fontSize: value),
+            onPreview: (value) => setState(() => _previewFontSize = value),
+            onChanged: c.busy ? null : (value) => _savePreview(fontSize: value),
           ),
-          AccentPicker(controller: c),
+          AccentPicker(
+            controller: c,
+            onPreview: (value) {
+              if (mounted) setState(() => _previewAccent = value);
+            },
+          ),
+          CandidatePanelPreview(
+            theme: c.resolveCandidatePanelPreview(
+              colorScheme: _previewScheme ?? s.colorScheme,
+              accentColor: _previewAccent ?? s.accentColor,
+              fontSize: _previewFontSize ?? s.fontSize,
+              systemDark:
+                  MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+            ),
+            orientation: _previewOrientation ?? s.orientation,
+          ),
           if (s.themePath case final path?)
             Row(
               children: [

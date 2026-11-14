@@ -2499,6 +2499,20 @@ class AppController extends ChangeNotifier {
         );
       });
 
+  Map<String, dynamic> resolveCandidatePanelPreview({
+    required UiColorSchemeDto colorScheme,
+    required String accentColor,
+    required double fontSize,
+    required bool systemDark,
+  }) => jsonDecode(
+    core.resolveCandidatePanelPreview(
+      colorScheme: colorScheme,
+      accentColor: accentColor,
+      fontSize: fontSize,
+      systemDark: systemDark,
+    ),
+  ) as Map<String, dynamic>;
+
   Future<bool> saveUi({
     UiColorSchemeDto? colorScheme,
     PanelOrientationDto? orientation,

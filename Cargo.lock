@@ -1725,6 +1725,7 @@ dependencies = [
  "flutter_rust_bridge",
  "keytao-app-core",
  "keytao-core",
+ "keytao-theme",
  "serde",
  "serde_json",
  "tempfile",

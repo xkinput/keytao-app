@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1784708082;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1901304384;
 
 // Section: executor
 
@@ -2521,6 +2521,45 @@ fn wire__crate__api__core__remove_scheme_package_impl(
         },
     )
 }
+fn wire__crate__api__core__resolve_candidate_panel_preview_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "resolve_candidate_panel_preview",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_color_scheme =
+                <crate::api::types::UiColorSchemeDto>::sse_decode(&mut deserializer);
+            let api_accent_color = <String>::sse_decode(&mut deserializer);
+            let api_font_size = <f32>::sse_decode(&mut deserializer);
+            let api_system_dark = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::core::resolve_candidate_panel_preview(
+                    api_color_scheme,
+                    api_accent_color,
+                    api_font_size,
+                    api_system_dark,
+                )?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__core__set_android_ime_input_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -4635,65 +4674,65 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         69 => wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        71 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => {
+        72 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        72 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        73 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        73 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        74 => {
+        74 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        75 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        75 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        76 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        77 => {
+        78 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        78 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        79 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        83 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        84 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        85 => wire__crate__api__core__windows_pending_ime_action_impl(
+        85 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        86 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        87 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        87 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        88 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -4711,6 +4750,11 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
+        70 => wire__crate__api__core__resolve_candidate_panel_preview_impl(
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
         _ => unreachable!(),
     }
 }

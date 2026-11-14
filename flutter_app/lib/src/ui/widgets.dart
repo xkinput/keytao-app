@@ -308,6 +308,7 @@ class SliderSetting extends StatefulWidget {
     required this.divisions,
     this.unit = '',
     this.onChanged,
+    this.onPreview,
     this.semanticLabel,
     this.icon = FLucideIcons.slidersHorizontal,
   });
@@ -318,6 +319,7 @@ class SliderSetting extends StatefulWidget {
   final int divisions;
   final String unit;
   final ValueChanged<double>? onChanged;
+  final ValueChanged<double>? onPreview;
   final String? semanticLabel;
   final IconData icon;
   @override
@@ -361,7 +363,11 @@ class _SliderSettingState extends State<SliderSetting> {
               max: (value - widget.min) / (widget.max - widget.min),
             ),
             stepPercentage: 1 / widget.divisions,
-            onChange: (value) => setState(() => _draft = _value(value.max)),
+            onChange: (value) {
+              final draft = _value(value.max);
+              setState(() => _draft = draft);
+              widget.onPreview?.call(draft);
+            },
           ),
           tooltipBuilder: (_, value) => Text(_label(_value(value))),
           semanticValueFormatterCallback: (value) =>

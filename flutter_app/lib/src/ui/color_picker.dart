@@ -11,8 +11,15 @@ String _hex(Color color) =>
     '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
 class AccentPicker extends StatelessWidget {
-  const AccentPicker({super.key, required this.controller});
+  const AccentPicker({super.key, required this.controller, this.onPreview});
   final AppController controller;
+  final ValueChanged<String>? onPreview;
+  Future<void> _save(String value) async {
+    onPreview?.call(value);
+    final saved = await controller.saveUi(accentColor: value);
+    if (!saved) onPreview?.call(controller.uiSettings!.accentColor);
+  }
+
   Future<void> _pick(BuildContext context) async {
     final value = await showFDialog<String>(
       context: context,
@@ -21,7 +28,7 @@ class AccentPicker extends StatelessWidget {
         animation: animation,
       ),
     );
-    if (value != null) await controller.saveUi(accentColor: value);
+    if (value != null) await _save(value);
   }
 
   @override
@@ -37,9 +44,7 @@ class AccentPicker extends StatelessWidget {
         child: FTappable(
           onPress: controller.busy
               ? null
-              : () => custom
-                    ? _pick(context)
-                    : controller.saveUi(accentColor: hex),
+              : () => custom ? _pick(context) : _save(hex),
           child: Container(
             width: custom ? 40 : 28,
             height: 28,

@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
@@ -37,7 +40,12 @@ const linuxStatus = LinuxImeStatusDto(
   message: 'Linux fixture',
 );
 
-// View-only fixture: no bootstrap, event subscription, FFI, or external IO.
+// Captured from the Rust preview resolver at 20pt with the default accent.
+final _candidatePanelThemes = jsonDecode(
+  File('test/fixtures/candidate_panel_themes.json').readAsStringSync(),
+) as Map<String, dynamic>;
+
+// View-only fixture: local theme data, no bootstrap, events, network, or FFI.
 class ViewController extends AppController {
   ViewController(BridgePlatform platform)
     : super(
@@ -216,6 +224,42 @@ class ViewController extends AppController {
     );
   }
   int logRefreshes = 0;
+  String? previewAccent;
+
+  @override
+  Map<String, dynamic> resolveCandidatePanelPreview({
+    required UiColorSchemeDto colorScheme,
+    required String accentColor,
+    required double fontSize,
+    required bool systemDark,
+  }) {
+    previewAccent = accentColor;
+    final dark =
+        colorScheme == UiColorSchemeDto.dark ||
+        (colorScheme == UiColorSchemeDto.auto && systemDark);
+    final theme = jsonDecode(
+      jsonEncode(_candidatePanelThemes[dark ? 'dark' : 'light']),
+    ) as Map<String, dynamic>;
+    (theme['ui'] as Map<String, dynamic>)['colorScheme'] = colorScheme.name;
+    final scale = fontSize / 20;
+    final font = theme['font'] as Map<String, dynamic>;
+    font['size'] = fontSize;
+    for (final field in ['labelSize', 'commentSize', 'preeditSize']) {
+      font[field] = (font[field] as num) * scale;
+    }
+    for (final entry in {
+      'panel': ['paddingX', 'paddingY', 'gap', 'preeditGap'],
+      'candidate': ['paddingX', 'paddingY', 'inlineGap', 'minHeight'],
+      'navigation': ['buttonSize'],
+    }.entries) {
+      final section = theme[entry.key] as Map<String, dynamic>;
+      for (final field in entry.value) {
+        section[field] = (section[field] as num) * scale;
+      }
+    }
+    return theme;
+  }
+
   @override
   Future<bool> refreshLogs() async {
     logRefreshes++;

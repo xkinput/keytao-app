@@ -1,0 +1,390 @@
+{
+  "light": {
+    "version": 2,
+    "ui": {
+      "colorScheme": "light",
+      "effectiveColorScheme": "light",
+      "accentColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "embeddedComposition": false
+    },
+    "font": {
+      "family": null,
+      "size": 20.0,
+      "labelSize": 15.0,
+      "commentSize": 16.0,
+      "preeditSize": 15.0,
+      "weight": "semibold"
+    },
+    "panel": {
+      "orientation": "vertical",
+      "background": {
+        "red": 248,
+        "green": 250,
+        "blue": 255,
+        "alpha": 242
+      },
+      "borderColor": {
+        "red": 184,
+        "green": 195,
+        "blue": 208,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "cornerRadius": 16.0,
+      "paddingX": 10.0,
+      "paddingY": 10.0,
+      "gap": 4.0,
+      "preeditGap": 10.0,
+      "minWidth": 128.0,
+      "maxWidth": 320.0,
+      "maxHeight": 460.0,
+      "screenMargin": 8.0,
+      "shadow": true
+    },
+    "candidate": {
+      "background": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 0
+      },
+      "hoverBackground": {
+        "red": 231,
+        "green": 238,
+        "blue": 252,
+        "alpha": 255
+      },
+      "pressedBackground": {
+        "red": 195,
+        "green": 212,
+        "blue": 244,
+        "alpha": 255
+      },
+      "pressedForeground": {
+        "red": 20,
+        "green": 35,
+        "blue": 59,
+        "alpha": 255
+      },
+      "selectedBackground": {
+        "red": 214,
+        "green": 226,
+        "blue": 248,
+        "alpha": 255
+      },
+      "foreground": {
+        "red": 38,
+        "green": 52,
+        "blue": 66,
+        "alpha": 255
+      },
+      "selectedForeground": {
+        "red": 36,
+        "green": 50,
+        "blue": 65,
+        "alpha": 255
+      },
+      "labelColor": {
+        "red": 127,
+        "green": 141,
+        "blue": 156,
+        "alpha": 255
+      },
+      "selectedLabelColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "commentColor": {
+        "red": 63,
+        "green": 78,
+        "blue": 94,
+        "alpha": 255
+      },
+      "selectedCommentColor": {
+        "red": 46,
+        "green": 62,
+        "blue": 80,
+        "alpha": 255
+      },
+      "borderColor": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 0
+      },
+      "selectedBorderColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "cornerRadius": 11.0,
+      "paddingX": 10.0,
+      "paddingY": 5.0,
+      "inlineGap": 4.0,
+      "minHeight": 34.0,
+      "maxWidth": 190.0,
+      "separatorVisible": false,
+      "separatorColor": {
+        "red": 220,
+        "green": 231,
+        "blue": 247,
+        "alpha": 255
+      },
+      "labelSuffix": "."
+    },
+    "navigation": {
+      "foreground": {
+        "red": 104,
+        "green": 118,
+        "blue": 132,
+        "alpha": 255
+      },
+      "disabledForeground": {
+        "red": 165,
+        "green": 176,
+        "blue": 184,
+        "alpha": 255
+      },
+      "hoverBackground": {
+        "red": 241,
+        "green": 246,
+        "blue": 255,
+        "alpha": 255
+      },
+      "buttonSize": 28.0,
+      "cornerRadius": 10.0
+    },
+    "modeHint": {
+      "background": {
+        "red": 45,
+        "green": 75,
+        "blue": 99,
+        "alpha": 255
+      },
+      "foreground": {
+        "red": 255,
+        "green": 255,
+        "blue": 255,
+        "alpha": 255
+      },
+      "borderColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "fontSize": 24.0,
+      "width": 72.0,
+      "height": 44.0,
+      "cornerRadius": 14.0,
+      "duration": 0.75,
+      "shadow": true,
+      "chineseText": "中",
+      "englishText": "英"
+    }
+  },
+  "dark": {
+    "version": 2,
+    "ui": {
+      "colorScheme": "dark",
+      "effectiveColorScheme": "dark",
+      "accentColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "embeddedComposition": false
+    },
+    "font": {
+      "family": null,
+      "size": 20.0,
+      "labelSize": 15.0,
+      "commentSize": 16.0,
+      "preeditSize": 15.0,
+      "weight": "semibold"
+    },
+    "panel": {
+      "orientation": "vertical",
+      "background": {
+        "red": 23,
+        "green": 26,
+        "blue": 32,
+        "alpha": 242
+      },
+      "borderColor": {
+        "red": 62,
+        "green": 70,
+        "blue": 82,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "cornerRadius": 16.0,
+      "paddingX": 10.0,
+      "paddingY": 10.0,
+      "gap": 4.0,
+      "preeditGap": 10.0,
+      "minWidth": 128.0,
+      "maxWidth": 320.0,
+      "maxHeight": 460.0,
+      "screenMargin": 8.0,
+      "shadow": true
+    },
+    "candidate": {
+      "background": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 0
+      },
+      "hoverBackground": {
+        "red": 31,
+        "green": 46,
+        "blue": 73,
+        "alpha": 255
+      },
+      "pressedBackground": {
+        "red": 42,
+        "green": 74,
+        "blue": 132,
+        "alpha": 255
+      },
+      "pressedForeground": {
+        "red": 255,
+        "green": 255,
+        "blue": 255,
+        "alpha": 255
+      },
+      "selectedBackground": {
+        "red": 38,
+        "green": 63,
+        "blue": 110,
+        "alpha": 255
+      },
+      "foreground": {
+        "red": 238,
+        "green": 243,
+        "blue": 247,
+        "alpha": 255
+      },
+      "selectedForeground": {
+        "red": 255,
+        "green": 255,
+        "blue": 255,
+        "alpha": 255
+      },
+      "labelColor": {
+        "red": 154,
+        "green": 168,
+        "blue": 181,
+        "alpha": 255
+      },
+      "selectedLabelColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "commentColor": {
+        "red": 201,
+        "green": 211,
+        "blue": 220,
+        "alpha": 255
+      },
+      "selectedCommentColor": {
+        "red": 233,
+        "green": 242,
+        "blue": 250,
+        "alpha": 255
+      },
+      "borderColor": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 0
+      },
+      "selectedBorderColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "cornerRadius": 11.0,
+      "paddingX": 10.0,
+      "paddingY": 5.0,
+      "inlineGap": 4.0,
+      "minHeight": 34.0,
+      "maxWidth": 190.0,
+      "separatorVisible": false,
+      "separatorColor": {
+        "red": 52,
+        "green": 60,
+        "blue": 71,
+        "alpha": 255
+      },
+      "labelSuffix": "."
+    },
+    "navigation": {
+      "foreground": {
+        "red": 200,
+        "green": 210,
+        "blue": 218,
+        "alpha": 255
+      },
+      "disabledForeground": {
+        "red": 102,
+        "green": 113,
+        "blue": 124,
+        "alpha": 255
+      },
+      "hoverBackground": {
+        "red": 36,
+        "green": 45,
+        "blue": 54,
+        "alpha": 255
+      },
+      "buttonSize": 28.0,
+      "cornerRadius": 10.0
+    },
+    "modeHint": {
+      "background": {
+        "red": 45,
+        "green": 75,
+        "blue": 99,
+        "alpha": 255
+      },
+      "foreground": {
+        "red": 255,
+        "green": 255,
+        "blue": 255,
+        "alpha": 255
+      },
+      "borderColor": {
+        "red": 59,
+        "green": 115,
+        "blue": 217,
+        "alpha": 255
+      },
+      "borderWidth": 1.0,
+      "fontSize": 24.0,
+      "width": 72.0,
+      "height": 44.0,
+      "cornerRadius": 14.0,
+      "duration": 0.75,
+      "shadow": true,
+      "chineseText": "中",
+      "englishText": "英"
+    }
+  }
+}

@@ -912,6 +912,33 @@ pub fn get_ime_ui_settings() -> Result<ImeUiSettingsDto, String> {
     )
 }
 
+/// Resolve the candidate preview using pending controls, without initializing Core.
+#[flutter_rust_bridge::frb(sync)]
+pub fn resolve_candidate_panel_preview(
+    color_scheme: UiColorSchemeDto,
+    accent_color: String,
+    font_size: f32,
+    system_dark: bool,
+) -> Result<String, String> {
+    let theme = keytao_theme::resolve_candidate_panel_preview_from_paths(
+        keytao_theme::default_bundled_theme_path().as_deref(),
+        keytao_theme::default_user_theme_path().as_deref(),
+        if system_dark {
+            keytao_theme::EffectiveColorScheme::Dark
+        } else {
+            keytao_theme::EffectiveColorScheme::Light
+        },
+        match color_scheme {
+            UiColorSchemeDto::Auto => keytao_theme::UiColorScheme::Auto,
+            UiColorSchemeDto::Light => keytao_theme::UiColorScheme::Light,
+            UiColorSchemeDto::Dark => keytao_theme::UiColorScheme::Dark,
+        },
+        &accent_color,
+        font_size,
+    )?;
+    keytao_theme::resolved_theme_json(&theme).map_err(|error| error.to_string())
+}
+
 pub fn set_ime_ui_settings(
     color_scheme: UiColorSchemeDto,
     orientation: PanelOrientationDto,
@@ -1271,6 +1298,34 @@ pub async fn clear_runtime_log() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_preview_resolves_pending_settings_and_rejects_invalid_inputs() {
+        let json =
+            resolve_candidate_panel_preview(UiColorSchemeDto::Auto, "#123456".into(), 15.0, true)
+                .unwrap();
+        let theme: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(theme["ui"]["colorScheme"], "auto");
+        assert_eq!(theme["ui"]["effectiveColorScheme"], "dark");
+        assert_eq!(theme["font"]["size"], 15.0);
+        assert_eq!(theme["candidate"]["selectedLabelColor"]["red"], 0x12);
+        assert!(resolve_candidate_panel_preview(
+            UiColorSchemeDto::Light,
+            "invalid".into(),
+            20.0,
+            false,
+        )
+        .is_err());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(resolve_candidate_panel_preview(
+                UiColorSchemeDto::Light,
+                "#123456".into(),
+                invalid,
+                false,
+            )
+            .is_err());
+        }
+    }
 
     fn config() -> BridgeConfig {
         // All tests share the process-wide Core and keep its directories alive.

@@ -620,6 +620,62 @@ pub fn resolve_theme_from_paths_with_system_scheme(
     user_theme_path: Option<&Path>,
     system_scheme: EffectiveColorScheme,
 ) -> ResolvedImeTheme {
+    resolve_theme_with_pending_settings(default_theme_path, user_theme_path, system_scheme, None)
+}
+
+/// Resolve unsaved App settings without changing the user's theme document.
+/// Candidate metrics match the macOS panel's default-size scaling.
+pub fn resolve_candidate_panel_preview_from_paths(
+    default_theme_path: Option<&Path>,
+    user_theme_path: Option<&Path>,
+    system_scheme: EffectiveColorScheme,
+    color_scheme: UiColorScheme,
+    accent_color: &str,
+    font_size: f32,
+) -> Result<ResolvedImeTheme, String> {
+    let accent_color = normalize_hex_color(accent_color)?;
+    let font_size = normalize_candidate_font_size(font_size)?;
+    let pending = PartialTheme {
+        ui: Some(PartialUiTheme {
+            color_scheme: Some(color_scheme),
+            accent_color: parse_color(&accent_color),
+            ..Default::default()
+        }),
+        font: Some(PartialFontTheme {
+            size: Some(font_size),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut theme = resolve_theme_with_pending_settings(
+        default_theme_path,
+        user_theme_path,
+        system_scheme,
+        Some(pending),
+    );
+    // Keep in sync with crates/keytao-macos-ime/Sources/KeyTaoIME/ImeTheme.swift::scaledCandidatePanel.
+    let scale = theme.font.size / 20.0;
+    theme.font.label_size *= scale;
+    theme.font.comment_size *= scale;
+    theme.font.preedit_size *= scale;
+    theme.panel.padding_x *= scale;
+    theme.panel.padding_y *= scale;
+    theme.panel.gap *= scale;
+    theme.panel.preedit_gap *= scale;
+    theme.candidate.padding_x *= scale;
+    theme.candidate.padding_y *= scale;
+    theme.candidate.inline_gap *= scale;
+    theme.candidate.min_height *= scale;
+    theme.navigation.button_size *= scale;
+    Ok(theme)
+}
+
+fn resolve_theme_with_pending_settings(
+    default_theme_path: Option<&Path>,
+    user_theme_path: Option<&Path>,
+    system_scheme: EffectiveColorScheme,
+    pending_settings: Option<PartialTheme>,
+) -> ResolvedImeTheme {
     let mut partials = Vec::new();
     if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
         partials.push(partial);
@@ -633,6 +689,7 @@ pub fn resolve_theme_from_paths_with_system_scheme(
         };
         partials.push(partial);
     }
+    partials.extend(pending_settings);
 
     let mut ui = UiTheme::default();
     for partial in &partials {
@@ -1715,6 +1772,104 @@ mod tests {
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
         assert_eq!(theme.candidate.foreground, rgba(0x0a, 0x0b, 0x0c, 0xff));
+    }
+
+    #[test]
+    fn preview_pending_settings_override_saved_values_before_variant_resolution() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-preview-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        let saved = "ui:\n  colorScheme: dark\n  accentColor: '#FFFFFF'\nfont:\n  size: 36\nlight:\n  font:\n    size: 30\n  panel:\n    background: '#102030'\n  candidate:\n    foreground: '#010203'\ndark:\n  candidate:\n    foreground: '#AABBCC'\n";
+        fs::write(&path, saved).unwrap();
+
+        let theme = resolve_candidate_panel_preview_from_paths(
+            None,
+            Some(&path),
+            EffectiveColorScheme::Dark,
+            UiColorScheme::Light,
+            "123456",
+            15.0,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        fs::remove_file(path).ok();
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Light);
+        assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Light);
+        assert_eq!(theme.ui.accent_color, Some(rgba(0x12, 0x34, 0x56, 0xff)));
+        assert_eq!(theme.font.size, 15.0);
+        assert_eq!(theme.candidate.foreground, rgba(0x01, 0x02, 0x03, 0xff));
+        assert_eq!(
+            theme.candidate.selected_label_color,
+            rgba(0x12, 0x34, 0x56, 0xff)
+        );
+        assert_eq!(theme.candidate.selected_background, rgba(16, 36, 55, 255));
+    }
+
+    #[test]
+    fn preview_auto_scheme_uses_supplied_brightness() {
+        for system_scheme in [EffectiveColorScheme::Light, EffectiveColorScheme::Dark] {
+            let theme = resolve_candidate_panel_preview_from_paths(
+                None,
+                None,
+                system_scheme,
+                UiColorScheme::Auto,
+                "#3B73D9",
+                20.0,
+            )
+            .unwrap();
+            assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
+            assert_eq!(theme.ui.effective_color_scheme, system_scheme);
+            let expected = resolve_theme_from_paths_with_system_scheme(None, None, system_scheme);
+            assert_eq!(theme.panel.background, expected.panel.background);
+        }
+    }
+
+    #[test]
+    fn preview_scales_only_macos_candidate_metrics_without_reclamping() {
+        let base = resolve_candidate_panel_preview_from_paths(
+            None,
+            None,
+            EffectiveColorScheme::Light,
+            UiColorScheme::Light,
+            "#3B73D9",
+            20.0,
+        )
+        .unwrap();
+        let small = resolve_candidate_panel_preview_from_paths(
+            None,
+            None,
+            EffectiveColorScheme::Light,
+            UiColorScheme::Light,
+            "#3B73D9",
+            10.0,
+        )
+        .unwrap();
+        assert_eq!(small.font.size, 10.0);
+        assert_eq!(small.font.label_size, base.font.label_size * 0.5);
+        assert_eq!(small.font.comment_size, base.font.comment_size * 0.5);
+        assert_eq!(small.font.preedit_size, base.font.preedit_size * 0.5);
+        assert_eq!(small.panel.padding_x, base.panel.padding_x * 0.5);
+        assert_eq!(small.panel.padding_y, base.panel.padding_y * 0.5);
+        assert_eq!(small.panel.gap, base.panel.gap * 0.5);
+        assert_eq!(small.panel.preedit_gap, base.panel.preedit_gap * 0.5);
+        assert_eq!(small.candidate.padding_x, base.candidate.padding_x * 0.5);
+        assert_eq!(small.candidate.padding_y, base.candidate.padding_y * 0.5);
+        assert_eq!(small.candidate.inline_gap, base.candidate.inline_gap * 0.5);
+        assert_eq!(small.candidate.min_height, 17.0);
+        assert_eq!(small.navigation.button_size, 14.0);
+        assert_eq!(small.panel.corner_radius, base.panel.corner_radius);
+        assert_eq!(small.panel.min_width, base.panel.min_width);
+        assert_eq!(small.panel.max_width, base.panel.max_width);
+        assert_eq!(small.candidate.corner_radius, base.candidate.corner_radius);
+        assert_eq!(small.candidate.max_width, base.candidate.max_width);
+        assert_eq!(
+            small.navigation.corner_radius,
+            base.navigation.corner_radius
+        );
+        assert_eq!(small.mode_hint.font_size, base.mode_hint.font_size);
     }
 
     #[test]

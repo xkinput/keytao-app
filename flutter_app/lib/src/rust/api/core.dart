@@ -353,6 +353,19 @@ Future<List<SchemaSwitchDto>> setSchemaSwitch({
 Future<ImeUiSettingsDto> getImeUiSettings() =>
     RustLib.instance.api.crateApiCoreGetImeUiSettings();
 
+/// Resolve the candidate preview using pending controls, without initializing Core.
+String resolveCandidatePanelPreview({
+  required UiColorSchemeDto colorScheme,
+  required String accentColor,
+  required double fontSize,
+  required bool systemDark,
+}) => RustLib.instance.api.crateApiCoreResolveCandidatePanelPreview(
+  colorScheme: colorScheme,
+  accentColor: accentColor,
+  fontSize: fontSize,
+  systemDark: systemDark,
+);
+
 Future<ImeUiSettingsDto> setImeUiSettings({
   required UiColorSchemeDto colorScheme,
   required PanelOrientationDto orientation,
