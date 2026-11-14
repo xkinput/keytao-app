@@ -28,6 +28,8 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
+import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
@@ -37,10 +39,88 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile as JZipFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+
+private const val packageCustomManifest = ".keytao-package-custom.json"
+
+internal fun isPackageCustomFile(relative: String): Boolean =
+    !relative.contains('/') && relative.endsWith(".custom.yaml") && relative != "default.custom.yaml"
+
+internal fun validatePackageCustomSidecars(paths: Set<String>) {
+    for (relative in paths) {
+        check(!isPackageCustomFile(relative) || "$relative.new" !in paths) {
+            "Package contains a reserved custom comparison file: $relative.new"
+        }
+    }
+}
+
+internal class PackageCustomInstallReceipt(
+    private val read: (String) -> ByteArray?,
+    private val write: (String, ByteArray) -> Unit,
+    private val remove: (String) -> Unit,
+) : Closeable {
+    private val originals = linkedMapOf<String, ByteArray?>()
+    private val shipped = linkedMapOf<String, String>()
+    private var finished = false
+    private var deferred = false
+    private val previous by lazy {
+        val record = read(packageCustomManifest)?.let { JSONObject(it.toString(Charsets.UTF_8)) } ?: JSONObject()
+        for (name in record.keys()) {
+            check(isPackageCustomFile(name) && record.getString(name).matches(Regex("[0-9a-f]{64}"))) {
+                "Invalid package custom file record"
+            }
+        }
+        record
+    }
+
+    fun previousSha256(relative: String): String? =
+        if (previous.has(relative)) previous.getString(relative) else null
+
+    fun replace(relative: String, content: ByteArray) {
+        if (!originals.containsKey(relative)) originals[relative] = read(relative)
+        write(relative, content)
+    }
+
+    fun record(relative: String, content: ByteArray) {
+        shipped[relative] = MessageDigest.getInstance("SHA-256").digest(content).joinToString("") { "%02x".format(it) }
+    }
+
+    fun finish() {
+        if (shipped.isNotEmpty()) {
+            val record = previous
+            for ((relative, hash) in shipped) record.put(relative, hash)
+            replace(packageCustomManifest, record.toString().toByteArray(Charsets.UTF_8))
+        }
+        finished = true
+    }
+
+    fun defer() {
+        deferred = true
+    }
+
+    fun rollback() {
+        deferred = false
+        close()
+    }
+
+    override fun close() {
+        if (finished || deferred) return
+        val failures = mutableListOf<String>()
+        for ((relative, content) in originals.entries.toList().asReversed()) {
+            try {
+                if (content == null) remove(relative) else write(relative, content)
+            } catch (error: Exception) {
+                failures.add("$relative: ${error.message}")
+            }
+        }
+        check(failures.isEmpty()) { "Failed to restore package custom files: ${failures.joinToString("; ")}" }
+        finished = true
+    }
+}
 
 class KeytaoAndroidChannel(
     private val activity: Activity,
@@ -51,6 +131,7 @@ class KeytaoAndroidChannel(
     private val pendingStoragePermissions = mutableListOf<Pair<Reply, (Reply) -> Unit>>()
     private var pendingDirectoryPick: Reply? = null
     private var pendingDirectoryImport = false
+    private val pendingCustomInstalls = ConcurrentHashMap<String, PackageCustomInstallReceipt>()
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = Reply(result, mainHandler)
@@ -68,6 +149,7 @@ class KeytaoAndroidChannel(
                 "readLocalSchemas" -> readLocalSchemas(call, reply)
                 "smartExtractZip" -> smartExtractZip(call, reply)
                 "smartExtractZipToPrivate" -> smartExtractZipToPrivate(call, reply)
+                "finishPackageCustomInstall" -> finishPackageCustomInstall(call, reply)
                 "deployImeData" -> deployImeData(reply)
                 "adoptAppLogger" -> adoptAppLogger(reply)
                 "openUrl" -> openUrl(call, reply)
@@ -679,9 +761,34 @@ class KeytaoAndroidChannel(
                     logs.add(if (merged) "[MERGED] $relative" else "[OK] $relative")
                 }
 
-                JZipFile(zipFile).use { zip ->
+                extractPackageWithCustomReceipt(PackageCustomInstallReceipt(
+                    read = { relative ->
+                        val existing = getCachedFileMap(root)[relative] ?: root.findFile(relative)?.uri
+                        existing?.let {
+                            activity.contentResolver.openInputStream(it)?.use { input -> input.readBytes() }
+                                ?: throw Exception("Failed to read: $relative")
+                        }
+                    },
+                    write = { relative, content ->
+                        val output = getOrCreateFileUri(root, relative) ?: error("Failed to create: $relative")
+                        val pfd = activity.contentResolver.openFileDescriptor(output, "rwt")
+                            ?: error("Failed to open: $relative")
+                        pfd.use { FileOutputStream(it.fileDescriptor).use { stream -> stream.write(content) } }
+                    },
+                    remove = { relative ->
+                        val files = getCachedFileMap(root)
+                        val existing = files[relative] ?: root.findFile(relative)?.uri
+                        if (existing != null) {
+                            check(DocumentsContract.deleteDocument(activity.contentResolver, existing)) {
+                                "Failed to remove: $relative"
+                            }
+                            files.remove(relative)
+                        }
+                    },
+                ), zipFile, reply) { customInstall, zip ->
                     val allEntries = zip.entries().toList()
                     allEntries.forEach { validateZipRelativePath(it.name) }
+                    validatePackageCustomSidecars(allEntries.filterNot { it.isDirectory }.map { it.name }.toSet())
                     val totalFiles = allEntries.count { !it.isDirectory }
                     var processed = 0
                     val emitProgress: (String) -> Unit = { fname ->
@@ -746,21 +853,27 @@ class KeytaoAndroidChannel(
                             isDefaultCustom(filename) && dcMergeResult != null -> {
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, dcMergeResult.mergedContent.toByteArray(), relative, merged = true) }
-                                catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                                catch (e: Exception) { throw Exception("Write failed: $relative", e) }
                                 processed++; emitProgress(filename)
                             }
                             filename == "rime.lua" && !relative.contains('/') && rimeLuaMergeResult != null -> {
                                 val dir = getOrCreateDir(dirPart)
                                 try { writeToDir(dir, filename, rimeLuaMergeResult.mergedContent.toByteArray(), relative, merged = true) }
-                                catch (e: Exception) { return@Thread reply.error(e.message ?: "Write failed: $relative") }
+                                catch (e: Exception) { throw Exception("Write failed: $relative", e) }
                                 processed++; emitProgress(filename)
                             }
                             else -> {
                                 val dir = try { getOrCreateDir(dirPart) } catch (e: Exception) {
                                     logs.add("[ERROR] mkdir for $relative: ${e.message}")
-                                    return@Thread reply.error("Failed to create directory for: $relative")
+                                    throw Exception("Failed to create directory for: $relative", e)
                                 }
-                                val decision = preparePackageFileWrite(relative, logs, existingBytes = {
+                                val packageContent = if (isPackageCustomFile(relative)) {
+                                    zip.getInputStream(entry).use { it.readBytes() }
+                                } else null
+                                val decision = preparePackageFileWrite(relative, logs,
+                                    packageContent = packageContent,
+                                    previousSha256 = packageContent?.let { customInstall.previousSha256(relative) },
+                                    existingBytes = {
                                     val existingUri = getCachedFileMap(dir)[filename]
                                         ?: dir.findFile(filename)?.uri
                                     existingUri?.let {
@@ -785,14 +898,24 @@ class KeytaoAndroidChannel(
                                     files[backupName] = backupUri
                                 })
                                 if (decision.isProtected) protectedPaths.add(relative)
+                                if (packageContent != null) {
+                                    if (decision.write) {
+                                        customInstall.replace(relative, packageContent)
+                                        if (decision.log == null) logs.add("[OK] $relative")
+                                    }
+                                    decision.newName?.let { customInstall.replace(it, packageContent) }
+                                    customInstall.record(relative, packageContent)
+                                    processed++; emitProgress(filename)
+                                    continue
+                                }
                                 if (!decision.write) {
                                     processed++; emitProgress(filename)
                                     continue
                                 }
                                 val outUri = getOrCreateFileUri(dir, filename)
-                                    ?: run { logs.add("[ERROR] createFile: $relative"); return@Thread reply.error("Failed to create: $filename") }
+                                    ?: throw Exception("Failed to create: $relative")
                                 val pfd = activity.contentResolver.openFileDescriptor(outUri, "rwt")
-                                if (pfd == null) { logs.add("[ERROR] openFileDescriptor: $relative"); return@Thread reply.error("Failed to open output stream: $relative") }
+                                    ?: throw Exception("Failed to open output stream: $relative")
                                 val digest = MessageDigest.getInstance("SHA-256")
                                 pfd.use {
                                     DigestOutputStream(FileOutputStream(it.fileDescriptor), digest).buffered(65536).use { out ->
@@ -814,7 +937,7 @@ class KeytaoAndroidChannel(
 
                     if (renamedLuaFiles.isNotEmpty()) {
                         val luaDir = try { getOrCreateDir("lua") } catch (e: Exception) {
-                            return@Thread reply.error("Failed to ensure lua dir: ${e.message}")
+                            throw Exception("Failed to ensure lua dir: ${e.message}", e)
                         }
                         for ((newName, bytes) in renamedLuaFiles) {
                             val fname = "$newName.lua"
@@ -831,7 +954,7 @@ class KeytaoAndroidChannel(
 
                     root.findFile("build")?.let { build ->
                         if (!build.delete()) {
-                            return@Thread reply.error("无法清理旧的 Android RIME 部署产物")
+                            throw Exception("无法清理旧的 Android RIME 部署产物")
                         }
                         logs.add("[INVALIDATED] build")
                     }
@@ -869,17 +992,17 @@ class KeytaoAndroidChannel(
                         else addVerify(relative, false, "文件不存在")
                     }
 
-                    reply.success(mapOf(
+                    mapOf(
                         "mergedSchemas" to dcMergeResult?.userSchemas.orEmpty(),
                         "logs" to logs.toList(),
                         "verify" to verifyArray,
                         "packageZipPath" to zipFile.absolutePath,
                         "packageManifest" to packageManifest,
                         "packageRoot" to treeUriString,
-                    ))
+                    )
                 }
             } catch (ex: Exception) {
-                reply.error(ex.message ?: "Extraction failed")
+                reply.error(packageInstallError(ex, "Extraction failed"))
             }
         }.start()
     }
@@ -908,12 +1031,22 @@ class KeytaoAndroidChannel(
                 val packageManifest = linkedMapOf<String, String>()
                 val protectedPaths = linkedSetOf<String>()
 
-                JZipFile(zipFile).use { zip ->
+                extractPackageWithCustomReceipt(PackageCustomInstallReceipt(
+                    read = { relative ->
+                        safePrivateFile(root, relative).let { if (it.exists()) it.readBytes() else null }
+                    },
+                    write = { relative, content -> safePrivateFile(root, relative).writeBytes(content) },
+                    remove = { relative ->
+                        val file = safePrivateFile(root, relative)
+                        check(file.delete() || !file.exists()) { "Failed to remove: $relative" }
+                    },
+                ), zipFile, reply) { customInstall, zip ->
                     val allEntries = zip.entries().toList()
                     allEntries.forEach {
                         val relative = validateZipRelativePath(it.name)
                         safePrivateFile(root, relative)
                     }
+                    validatePackageCustomSidecars(allEntries.filterNot { it.isDirectory }.map { it.name }.toSet())
                     val zipLuaFilenames = mutableSetOf<String>()
                     var dcEntry: java.util.zip.ZipEntry? = null
                     var rimeLuaEntry: java.util.zip.ZipEntry? = null
@@ -973,7 +1106,13 @@ class KeytaoAndroidChannel(
                                 logs.add("[MERGED] $relative")
                             }
                             else -> {
-                                val decision = preparePackageFileWrite(relative, logs, existingBytes = {
+                                val packageContent = if (isPackageCustomFile(relative)) {
+                                    zip.getInputStream(entry).use { it.readBytes() }
+                                } else null
+                                val decision = preparePackageFileWrite(relative, logs,
+                                    packageContent = packageContent,
+                                    previousSha256 = packageContent?.let { customInstall.previousSha256(relative) },
+                                    existingBytes = {
                                     if (output.exists()) output.readBytes() else null
                                 }, backup = { backupName ->
                                     val backup = File(output.parentFile, backupName)
@@ -981,6 +1120,15 @@ class KeytaoAndroidChannel(
                                     check(output.renameTo(backup)) { "Failed to rename: $relative" }
                                 })
                                 if (decision.isProtected) protectedPaths.add(relative)
+                                if (packageContent != null) {
+                                    if (decision.write) {
+                                        customInstall.replace(relative, packageContent)
+                                        if (decision.log == null) logs.add("[OK] $relative")
+                                    }
+                                    decision.newName?.let { customInstall.replace(it, packageContent) }
+                                    customInstall.record(relative, packageContent)
+                                    continue
+                                }
                                 if (!decision.write) continue
                                 val digest = MessageDigest.getInstance("SHA-256")
                                 zip.getInputStream(entry).use { input ->
@@ -1011,7 +1159,7 @@ class KeytaoAndroidChannel(
                     }
 
                     if (!KeytaoAndroidPaths.invalidateDeployment(root)) {
-                        return@Thread reply.error("无法清理旧的 Android RIME 部署产物")
+                        throw Exception("无法清理旧的 Android RIME 部署产物")
                     }
                     logs.add("[INVALIDATED] build")
 
@@ -1028,17 +1176,56 @@ class KeytaoAndroidChannel(
                         addVerify(relative, exists, if (exists) "文件存在" else "文件不存在")
                     }
 
-                    reply.success(mutableMapOf<String, Any?>().apply {
+                    mutableMapOf<String, Any?>().apply {
                         put("mergedSchemas", mergedArray)
                         put("logs", logsArray)
                         put("verify", verifyArray)
                         put("packageZipPath", zipFile.absolutePath)
                         put("packageManifest", packageManifest)
                         put("packageRoot", root.absolutePath)
-                    })
+                    }
                 }
             } catch (ex: Exception) {
-                reply.error(ex.message ?: "Private extraction failed")
+                reply.error(packageInstallError(ex, "Private extraction failed"))
+            }
+        }.start()
+    }
+
+    private fun extractPackageWithCustomReceipt(
+        receipt: PackageCustomInstallReceipt,
+        archive: File,
+        reply: Reply,
+        extract: (PackageCustomInstallReceipt, JZipFile) -> Map<String, Any?>,
+    ) {
+        receipt.use {
+            val result = JZipFile(archive).use { zip -> extract(receipt, zip) }
+            val token = UUID.randomUUID().toString()
+            val response = result + ("packageCustomReceipt" to token)
+            pendingCustomInstalls[token] = receipt
+            receipt.defer()
+            reply.success(response)
+        }
+    }
+
+    private fun packageInstallError(error: Exception, fallback: String): String =
+        (listOf(error.message ?: fallback) + error.suppressed.map { it.message ?: "Custom file rollback failed" })
+            .joinToString("; ")
+
+    private fun finishPackageCustomInstall(call: MethodCall, reply: Reply) {
+        val token = call.argument<String>("receipt") ?: return reply.error("Missing package custom receipt")
+        val commit = call.argument<Boolean>("commit") ?: return reply.error("Missing package custom outcome")
+        Thread {
+            val receipt = pendingCustomInstalls.remove(token) ?: return@Thread reply.success()
+            try {
+                if (commit) receipt.finish() else receipt.rollback()
+                reply.success()
+            } catch (error: Exception) {
+                try {
+                    receipt.rollback()
+                } catch (rollback: Exception) {
+                    return@Thread reply.error("${error.message}; ${rollback.message}")
+                }
+                reply.error(error.message ?: "Failed to finalize package custom files")
             }
         }.start()
     }
@@ -1095,13 +1282,15 @@ class KeytaoAndroidChannel(
     private fun preparePackageFileWrite(
         relative: String,
         logs: MutableList<String>,
+        packageContent: ByteArray? = null,
+        previousSha256: String? = null,
         existingBytes: () -> ByteArray?,
         backup: (String) -> Unit,
     ): ProtectedFileInstall {
-        val initial = KeytaoNativeBridge.prepareProtectedFileInstall(relative, null)
+        val initial = KeytaoNativeBridge.prepareProtectedFileInstall(relative, null, packageContent, previousSha256)
         if (!initial.isProtected) return initial
         val existing = existingBytes()
-        var decision = if (existing == null) initial else KeytaoNativeBridge.prepareProtectedFileInstall(relative, existing)
+        var decision = if (existing == null) initial else KeytaoNativeBridge.prepareProtectedFileInstall(relative, existing, packageContent, previousSha256)
         decision.backupName?.let { backupName ->
             try {
                 backup(backupName)

@@ -3,12 +3,22 @@ use crate::{
     scheme_types::*,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "windows", target_os = "android"))]
 use std::path::Path;
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
+
+pub(crate) const PACKAGE_CUSTOM_MANIFEST: &str = ".keytao-package-custom.json";
 
 fn is_default_custom(filename: &str) -> bool {
     filename == "default.custom.yaml" || filename == "default-custom.yaml"
+}
+
+pub(crate) fn is_package_custom_file(relative: &str) -> bool {
+    !relative.contains('/') && relative.ends_with(".custom.yaml") && !is_default_custom(relative)
 }
 
 pub fn is_protected_user_file(relative: &str) -> bool {
@@ -20,6 +30,7 @@ pub fn is_protected_user_file(relative: &str) -> bool {
             || relative.ends_with(".custom.yaml")
             || relative == "user_dict.txt"
             || relative == keytao_core::ACTIVE_SCHEME_MANIFEST
+            || relative == PACKAGE_CUSTOM_MANIFEST
             || relative.ends_with("_user.txt")
             || (relative.starts_with(".keytao-sync-base-") && relative.ends_with(".json")))
 }
@@ -29,23 +40,27 @@ pub struct ProtectedFileInstall {
     pub protected: bool,
     pub write: bool,
     pub backup_name: Option<String>,
+    pub new_name: Option<String>,
     pub log: Option<String>,
 }
 
 pub fn prepare_protected_file_install(
     relative: &str,
     existing: Option<&[u8]>,
+    package_content: Option<&[u8]>,
+    previous_sha256: Option<&str>,
 ) -> ProtectedFileInstall {
     let mut decision = ProtectedFileInstall {
         protected: is_protected_user_file(relative),
         write: true,
         backup_name: None,
+        new_name: None,
         log: None,
     };
     if !decision.protected {
         return decision;
     }
-    if relative.starts_with(".keytao-sync-base-") {
+    if relative.starts_with(".keytao-sync-base-") || relative == PACKAGE_CUSTOM_MANIFEST {
         decision.write = false;
         decision.log = Some(format!("[KEPT] {relative}"));
         return decision;
@@ -53,6 +68,20 @@ pub fn prepare_protected_file_install(
     let Some(existing) = existing else {
         return decision;
     };
+    if let Some(package) = package_content.filter(|_| is_package_custom_file(relative)) {
+        if existing == package {
+            decision.write = false;
+            decision.log = Some(format!("[KEPT] {relative}"));
+        } else if previous_sha256 == Some(format!("{:x}", Sha256::digest(existing)).as_str()) {
+            decision.log = Some(format!("[UPDATED] {relative}"));
+        } else {
+            decision.write = false;
+            let new_name = format!("{relative}.new");
+            decision.log = Some(format!("[KEPT] {relative} (new package: {new_name})"));
+            decision.new_name = Some(new_name);
+        }
+        return decision;
+    }
     let validity = std::str::from_utf8(existing)
         .map_err(|error| error.to_string())
         .and_then(|text| {
@@ -90,49 +119,158 @@ pub fn prepare_protected_file_install(
     decision
 }
 
-pub(crate) fn write_package_file(
-    root: &std::path::Path,
-    relative: &str,
-    content: &[u8],
-    logs: &mut Vec<String>,
-) -> Result<(), String> {
-    let out = crate::packages::safe_path(root, relative)?;
-    let existing = if is_protected_user_file(relative) {
-        match std::fs::read(&out) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(format!("Cannot read {relative}; left untouched: {error}")),
-        }
-    } else {
-        None
-    };
-    let decision = prepare_protected_file_install(relative, existing.as_deref());
-    if let Some(backup_name) = &decision.backup_name {
-        let backup = root.join(backup_name);
-        let renamed = match std::fs::symlink_metadata(&backup) {
-            Ok(_) => Err(format!("backup already exists: {backup_name}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::rename(&out, backup).map_err(|error| error.to_string())
-            }
-            Err(error) => Err(error.to_string()),
-        };
-        if let Err(error) = renamed {
-            logs.push(format!(
-                "{}; backup rename failed: {error}; left untouched",
-                decision.log.as_deref().unwrap_or_default()
-            ));
+// Keep installed provenance separate from the downloaded package cache. Each
+// top-level custom filename identifies the scheme configuration it belongs to.
+pub(crate) struct PackageCustomFileInstall {
+    root: PathBuf,
+    hashes: BTreeMap<String, String>,
+    hashes_changed: bool,
+    changes: Vec<(String, Option<Vec<u8>>, String)>,
+}
+
+fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Cannot read {}; left untouched: {error}",
+            path.display()
+        )),
+    }
+}
+
+impl PackageCustomFileInstall {
+    pub(crate) fn new(root: &std::path::Path) -> Result<Self, String> {
+        let path = crate::packages::safe_path(root, PACKAGE_CUSTOM_MANIFEST)?;
+        let hashes = read_optional(&path)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            root: root.to_owned(),
+            hashes,
+            hashes_changed: false,
+            changes: Vec::new(),
+        })
+    }
+
+    fn replace_custom(&mut self, relative: &str, content: &[u8]) -> Result<(), String> {
+        let out = crate::packages::safe_path(&self.root, relative)?;
+        let previous = read_optional(&out)?;
+        if previous.as_deref() == Some(content) {
             return Ok(());
         }
+        std::fs::create_dir_all(&self.root).map_err(|error| error.to_string())?;
+        crate::scheme_files::write_file_atomic(&out, content).map_err(|error| error.to_string())?;
+        self.changes.push((
+            relative.into(),
+            previous,
+            format!("{:x}", Sha256::digest(content)),
+        ));
+        Ok(())
     }
-    if let Some(log) = decision.log {
-        logs.push(log);
+
+    pub(crate) fn finish(mut self) -> Result<(), String> {
+        if self.hashes_changed {
+            let out = crate::packages::safe_path(&self.root, PACKAGE_CUSTOM_MANIFEST)?;
+            let content =
+                serde_json::to_vec_pretty(&self.hashes).map_err(|error| error.to_string())?;
+            crate::scheme_files::write_file_atomic(&out, &content)
+                .map_err(|error| error.to_string())?;
+        }
+        self.changes.clear();
+        Ok(())
     }
-    if !decision.write {
-        return Ok(());
+
+    pub(crate) fn write_package_file(
+        &mut self,
+        relative: &str,
+        content: &[u8],
+        logs: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let root = &self.root;
+        let out = crate::packages::safe_path(root, relative)?;
+        let existing = if is_protected_user_file(relative) {
+            read_optional(&out)?
+        } else {
+            None
+        };
+        let decision = prepare_protected_file_install(
+            relative,
+            existing.as_deref(),
+            Some(content),
+            self.hashes.get(relative).map(String::as_str),
+        );
+        if is_package_custom_file(relative) {
+            if decision.write {
+                self.replace_custom(relative, content)?;
+                logs.push(format!("[OK] {relative}"));
+            } else if let Some(new_name) = &decision.new_name {
+                self.replace_custom(new_name, content)?;
+            }
+            if let Some(log) = decision.log {
+                logs.push(log);
+            }
+            let hash = format!("{:x}", Sha256::digest(content));
+            self.hashes_changed |= self.hashes.get(relative) != Some(&hash);
+            self.hashes.insert(relative.into(), hash);
+            return Ok(());
+        }
+        if let Some(backup_name) = &decision.backup_name {
+            let backup = root.join(backup_name);
+            let renamed = match std::fs::symlink_metadata(&backup) {
+                Ok(_) => Err(format!("backup already exists: {backup_name}")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(&out, backup).map_err(|error| error.to_string())
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = renamed {
+                logs.push(format!(
+                    "{}; backup rename failed: {error}; left untouched",
+                    decision.log.as_deref().unwrap_or_default()
+                ));
+                return Ok(());
+            }
+        }
+        if let Some(log) = decision.log {
+            logs.push(log);
+        }
+        if !decision.write {
+            return Ok(());
+        }
+        let tag = write_file_force(&out, content)?;
+        logs.push(format!("[OK]{tag} {relative}"));
+        Ok(())
     }
-    let tag = write_file_force(&out, content)?;
-    logs.push(format!("[OK]{tag} {relative}"));
-    Ok(())
+}
+
+impl Drop for PackageCustomFileInstall {
+    fn drop(&mut self) {
+        while let Some((relative, previous, expected)) = self.changes.pop() {
+            let restored = (|| {
+                let path = crate::packages::safe_path(&self.root, &relative)?;
+                if let Some(current) = read_optional(&path)? {
+                    if format!("{:x}", Sha256::digest(&current)) != expected {
+                        return Err(format!(
+                            "{relative} changed during installation; left untouched"
+                        ));
+                    }
+                }
+                match &previous {
+                    Some(bytes) => crate::scheme_files::write_file_atomic(&path, bytes),
+                    None => match std::fs::remove_file(&path) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        result => result,
+                    },
+                }
+                .map_err(|error| error.to_string())
+            })();
+            if let Err(error) = restored {
+                tracing::error!(%error, "Package custom file rollback failed");
+            }
+        }
+    }
 }
 
 // Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
@@ -164,10 +302,7 @@ pub fn prepare_rime_lua_install(
     (cleaned, Vec::new())
 }
 
-pub fn merge_default_custom(
-    existing: Option<&str>,
-    zip_content: &str,
-) -> (String, Vec<String>) {
+pub fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
     keytao_core::merge_default_custom_content(existing, zip_content).unwrap_or_else(|_| {
         let user: Vec<String> = existing
             .map(|c| {
@@ -499,12 +634,18 @@ pub(crate) async fn smart_install_preserving_settings(
 
         let zip_bytes = std::fs::read(&zip_path).map_err(|e| e.to_string())?;
         let dest = PathBuf::from(&dest_path);
+        let mut custom_files = PackageCustomFileInstall::new(&dest)?;
         let replacing_root = dest.canonicalize().ok();
         core.update_state(|state| {
-            if state.last_deploy.as_ref().is_some_and(|last| Some(&last.root) == replacing_root.as_ref()) {
+            if state
+                .last_deploy
+                .as_ref()
+                .is_some_and(|last| Some(&last.root) == replacing_root.as_ref())
+            {
                 state.last_deploy = None;
             }
-        }).map_err(|e| e.to_string())?;
+        })
+        .map_err(|e| e.to_string())?;
         // Validate the entire archive and manifest before deleting or writing files.
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
@@ -590,7 +731,14 @@ pub(crate) async fn smart_install_preserving_settings(
                 })
                 .collect::<Vec<_>>();
 
-            (dc_path, dc_content, schemas, zip_rime_lua_path, rl_content, renamed)
+            (
+                dc_path,
+                dc_content,
+                schemas,
+                zip_rime_lua_path,
+                rl_content,
+                renamed,
+            )
         };
 
         // Second pass: smart extraction
@@ -644,7 +792,7 @@ pub(crate) async fn smart_install_preserving_settings(
                     }
                 }
             } else {
-                match write_package_file(&dest, &relative, &content, &mut logs) {
+                match custom_files.write_package_file(&relative, &content, &mut logs) {
                     Ok(()) => {
                         if !crate::packages::excluded_from_manifest(&relative) {
                             use sha2::{Digest, Sha256};
@@ -720,6 +868,7 @@ pub(crate) async fn smart_install_preserving_settings(
                 .into_owned(),
         )
         .map_err(|e| e.to_string())?;
+        custom_files.finish()?;
         // Activation reads the permanent archive through this same pipeline.
         if !std::path::Path::new(&zip_path).starts_with(core.env().data_dir.join("scheme-packages"))
         {

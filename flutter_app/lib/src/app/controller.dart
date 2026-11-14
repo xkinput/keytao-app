@@ -1209,10 +1209,13 @@ class AppController extends ChangeNotifier {
         final zipPath = await core.prepareAndroidInstall(url: url);
         try {
           final extracted = await android.smartExtractZipToPrivate(zipPath);
-          result = await core.finishAndroidInstall(
-            resultJson: jsonEncode(extracted),
-            schemeKey: installing,
-            version: installingVersion,
+          result = await android.completePackageCustomInstall(
+            extracted,
+            () => core.finishAndroidInstall(
+              resultJson: jsonEncode(extracted),
+              schemeKey: installing,
+              version: installingVersion,
+            ),
           );
         } finally {
           await core.removeDownloadedArchive(path: zipPath);
@@ -1413,18 +1416,25 @@ class AppController extends ChangeNotifier {
     packageError = null;
     _invalidateSchemeUpdates();
     _startOperation(OperationKind.install, AppStrings.installing);
+    Map<String, dynamic>? extracted;
+    var customCommitted = false;
     try {
       if (isAndroid) await _requireStorage(redirect: true);
       final result = await core.activateScheme(
         schemeKey: key,
         androidExtract: (archive) async {
           try {
-            return jsonEncode(await android.smartExtractZipToPrivate(archive));
+            extracted = await android.smartExtractZipToPrivate(archive);
+            return jsonEncode(extracted);
           } catch (failure) {
             return jsonEncode({'error': errorText(failure)});
           }
         },
       );
+      if (extracted != null) {
+        await android.finishPackageCustomInstall(extracted!, commit: true);
+      }
+      customCommitted = true;
       _recordInstallResult(result);
       verification = result.verify;
       _manuallySelectedScheme = true;
@@ -1441,7 +1451,13 @@ class AppController extends ChangeNotifier {
       packageError = errorText(failure);
       rethrow;
     } finally {
-      operation = null;
+      try {
+        if (extracted != null && !customCommitted) {
+          await android.finishPackageCustomInstall(extracted!, commit: false);
+        }
+      } finally {
+        operation = null;
+      }
     }
     if (verification.every((entry) => entry.ok)) await _deploy();
   }
@@ -2406,10 +2422,13 @@ class AppController extends ChangeNotifier {
               archive,
               selectedTreeUri!,
             );
-            customResult = await core.finishAndroidInstall(
-              resultJson: jsonEncode(result),
-              schemeKey: installing,
-              version: installingVersion,
+            customResult = await android.completePackageCustomInstall(
+              result,
+              () => core.finishAndroidInstall(
+                resultJson: jsonEncode(result),
+                schemeKey: installing,
+                version: installingVersion,
+              ),
             );
           } finally {
             await core.removeDownloadedArchive(path: archive);

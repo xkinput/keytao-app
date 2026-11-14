@@ -731,7 +731,7 @@ pub async fn activate_scheme(
 pub(crate) fn archive_paths(zip_bytes: &[u8], root: &Path) -> Result<BTreeSet<String>, String> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|e| e.to_string())?;
-    let mut paths = BTreeSet::new();
+    let mut paths = BTreeSet::<String>::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|e| e.to_string())?;
         let relative = file.name().trim_end_matches('/');
@@ -744,6 +744,15 @@ pub(crate) fn archive_paths(zip_bytes: &[u8], root: &Path) -> Result<BTreeSet<St
         }
         if !file.is_dir() {
             paths.insert(relative.into());
+        }
+    }
+    for relative in &paths {
+        if crate::install::is_package_custom_file(relative)
+            && paths.contains(&format!("{relative}.new"))
+        {
+            return Err(format!(
+                "Package contains a reserved custom comparison file: {relative}.new"
+            ));
         }
     }
     Ok(paths)
@@ -1033,6 +1042,85 @@ mod tests {
         assert_eq!(meta.version.as_deref(), Some("20261105"));
         assert_eq!(meta.manifest.len(), 1);
         assert!(!store_dir(&core).join("active-manifest.json").exists());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[tokio::test]
+    async fn downloaded_and_local_package_activation_uses_installed_custom_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        let relative = "xmjd6.custom.yaml";
+        let old = b"patch: {switches/@0/reset: 0}\n";
+        let new = b"patch: {switches/@1/reset: 0}\n";
+        let mut logs = Vec::new();
+        let mut receipt = crate::install::PackageCustomFileInstall::new(&root).unwrap();
+        receipt
+            .write_package_file(relative, old, &mut logs)
+            .unwrap();
+        receipt.finish().unwrap();
+        let record = root.join(crate::install::PACKAGE_CUSTOM_MANIFEST);
+        let old_record = fs::read(&record).unwrap();
+
+        let archive_path = dir.path().join("download.zip");
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(relative, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(new).unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        fs::write(&archive_path, &bytes).unwrap();
+        download_scheme_package_with(
+            &core,
+            "xmjd",
+            &root,
+            || std::future::ready(Ok(("v2".into(), "local".into()))),
+            |_| std::future::ready(Ok(archive_path.to_string_lossy().into_owned())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(root.join(relative)).unwrap(), old);
+        assert_eq!(fs::read(&record).unwrap(), old_record);
+
+        let reopened = open_core(dir.path());
+        let result = activate_scheme(
+            &reopened,
+            "xmjd",
+            &root,
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(root.join(relative)).unwrap(), new);
+        assert!(
+            result
+                .logs
+                .iter()
+                .any(|log| log == "[UPDATED] xmjd6.custom.yaml")
+        );
+        assert!(!root.join(format!("{relative}.new")).exists());
+
+        let local_key = store_cloud_archive(
+            &reopened,
+            "local-example",
+            None,
+            Some("Example"),
+            &bytes,
+            &root,
+        )
+        .unwrap();
+        let result = activate_scheme(
+            &reopened,
+            &local_key,
+            &root,
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(root.join(relative)).unwrap(), new);
+        assert!(!root.join(format!("{relative}.new")).exists());
+        assert!(!result.logs.iter().any(|log| log.contains("[UPDATED]")));
     }
 
     fn user_words_package() -> Vec<u8> {
