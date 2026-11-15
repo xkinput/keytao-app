@@ -102,8 +102,9 @@ fn every_request_variant_round_trips() {
         Request::SetEnglishMode { enabled: true },
         Request::Generation,
         Request::Deploy,
+        Request::Shutdown,
     ];
-    assert_eq!(requests.len(), 13);
+    assert_eq!(requests.len(), 14);
     for (seq, message) in requests.into_iter().enumerate() {
         assert_round_trip(&Envelope {
             seq: seq as u64,
@@ -331,6 +332,24 @@ fn english_and_deployment_results_preserve_success_and_failure() {
         Response::Deployed(Err("deployment failed".into())),
     ] {
         assert_round_trip(&response);
+    }
+}
+
+#[test]
+fn deployment_and_shutdown_requests_preserve_reply_sequences() {
+    for (seq, message, response) in [
+        (41, Request::Deploy, Response::Deployed(Ok(()))),
+        (42, Request::Shutdown, Response::Ok),
+    ] {
+        let request = RequestEnvelope { seq, message };
+        assert_round_trip(&request);
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request.reply(response.clone())).unwrap();
+        let decoded = read_response(&mut Cursor::new(bytes), seq).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(response).unwrap()
+        );
     }
 }
 

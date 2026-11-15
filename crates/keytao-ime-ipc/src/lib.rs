@@ -7,7 +7,7 @@ use keytao_core::{ImeState, InputContextPolicy, KeyProcessResult};
 use serde::{Deserialize, Serialize};
 
 /// The server accepts this protocol version and its immediate predecessor.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientRole {
@@ -49,8 +49,10 @@ pub enum Request {
     },
     /// The client compares the generation to implement `reload_needed`.
     Generation,
-    /// Reserved for the App's deployment path; requires server authorization.
+    /// The App's deployment path; requires server authorization.
     Deploy,
+    /// A replacement server may ask the installed server to exit.
+    Shutdown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

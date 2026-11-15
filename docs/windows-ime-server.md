@@ -1,6 +1,8 @@
 # Windows IME engine server
 
-Status: Batch 2 实现，默认 InProc；Batch 3 尚未实现。Scope: `crates/keytao-windows-ime` (TSF DLL)、server 和 Windows App deploy 路径。
+Status: Batch 3 已实现，Windows 默认 Pipe；实机验收待完成。Scope: `crates/keytao-windows-ime` (TSF DLL)、server 和 Windows App deploy 路径。
+
+Batch 3 fixes: no-learning fallback reuses a stamped per-user temp directory; explicit `EngineMode=0` keeps startup/deploy in-process; App startup seeds DWORD `EngineMode=1` only when missing.
 
 ## 1. 目标 / 非目标
 
@@ -67,7 +69,7 @@ Shift 释放今天会连续调两次 engine（press + `RIME_RELEASE_MASK`，key_
 - 主路径：HKCU `Run` 值 `KeyTaoImeServer`，登录时启动。安装器（per-machine，admin）不方便给每个用户写 HKCU，所以由 App 首次启动时写入。卸载脚本已经会删 HKCU Run 的 `KeyTao`（keytao.nsi:175），再加上新值即可。
 - 兜底：App 启动时检测 pipe，不存在就拉起 server。
 - 沙箱宿主不能拉起 medium 级 server，因为子进程会继承 AC token。所以 DLL 从不 spawn server。连不上时 DLL 按 2.7 的 fallback 策略处理，并在后台每 5s 重连一次（复用 engine_status.rs:12 的 backoff，上限 60s）。
-- 单实例：pipe 用 `FILE_FLAG_FIRST_PIPE_INSTANCE` 创建，第二个 server 创建失败后直接退出。
+- 单实例：pipe 用 `FILE_FLAG_FIRST_PIPE_INSTANCE` 创建；新 server 遇到旧实例时认证后发送 `Shutdown`，在 3s 内重试接管。
 
 ### 2.3 Pipe 名与 ACL
 
@@ -85,6 +87,7 @@ server 对每个连接做以下检查：
 
 client 对 server 做以下检查：
 - 用 `GetNamedPipeServerProcessId` 拿到 server PID，`QueryFullProcessImageNameW` 取 exe 路径，要求在安装目录 `%ProgramFiles%\KeyTao\` 下。
+- AC 宿主仅在进程查询被拒绝时，改查 pipe owner SID 是否等于当前用户 SID；其它失败拒绝连接。日志记录采用的校验。
 - 签名校验暂不做，见开放问题。
 
 剩余风险：同用户进程本来就能注入按键、读剪贴板，这个威胁模型和今天进程内 engine 一样。上面的校验只防跨会话、跨用户访问和伪造 server。
@@ -120,16 +123,16 @@ client 对 server 做以下检查：
 ### 2.6 超时
 
 - 每键请求在 TSF 线程上用 overlapped I/O 同步等待，超时 **80ms**，做成常量。
-- build 和 Deploy 用单独的超时（30s，与 init mutex 一致，state.rs:280），而且只在后台线程上等。
+- build 超时 30s；App Deploy 超时 120s，都只在后台线程等待。
 - 每键请求超时后返回 `None`，按键放行、隐藏面板，同时标记连接失效。下一次 build 触发（焦点或按键，入口同 text_service.rs:243/485 和 key_event_sink.rs:1999）时在后台线程重连并 `CreateSession`。已经存在的"engine 未就绪"路径会接住这段时间。
 
 ### 2.7 进程内回退策略
 
 问题在于：server 不可用时如果退回今天的进程内 engine，userdb 多写者问题又回来了。
 
-- Batch 2 默认 `InProc`，也就是今天的行为；显式设为 `Pipe` 但连接或握手失败时，该次 build 退回 `InProc`。
-- Batch 3 之后默认 `Pipe`。连不上时**不**打开 desktop userdb，而是在进程内用临时 user_dir 跑一个"无学习" runtime：`InputContextPolicy{learning:false}`，userdb 指向 `%TEMP%` 下的一次性目录，不触发 recovery。这样能打字，但不学词。是否值得保留这个回退，见开放问题 1。
-- Batch 3 将回退状态写进 `keytao-ime-engine.json`（`ok=false, error="server unavailable"`），App 据此提示；Batch 2 仅记录 Pipe 失败日志，状态文件沿用该次 build 的结果。
+- Batch 3 默认 `Pipe`。只有 HKCU `Software\KeyTao\Ime` DWORD `EngineMode=0` 使用完整 InProc；缺失、1、不可读或无效值都使用 Pipe。
+- 连接或握手失败时，user_dir 使用每用户固定目录 `%TEMP%\keytao-no-learning`（AC 使用自己的私有 Temp），各宿主共用、按 stamp 复用，从已部署数据复制方案、排除 userdb，以桌面部署数据或 AC 公共快照作为 shared data。临时源和编译配置禁用默认及命名 translator 的用户词典；`learning:false` 在后续策略变更中保持，不打开或修复 desktop userdb。
+- 回退写 `keytao-ime-engine.json`（`ok=false, error="server unavailable"`）。后台按 5/10/20/40/60s 重试，连通后标记 reload，下一次 build 切回 Pipe。
 
 ### 2.8 server 崩溃 / 重启
 
@@ -140,7 +143,7 @@ client 对 server 做以下检查：
 
 - 现状：App 在自己的进程里跑 `keytao_core::deploy`（ime_status/windows.rs:1459），宿主 stat stamp 文件来感知（state.rs:52, 557）。这本身就是第二个 userdb 写者。
 - Batch 2：deploy 仍由 App 执行；server 监听 InProc 使用的同一个 reload stamp，重新初始化唯一的 runtime 并递增 generation。reload 前创建的 session 随即失效，不能继续处理按键。
-- 目标：App 发 `Deploy` RPC，由 server 执行。server 先暂停所有 session（这期间请求返回 `None`），然后 `reload()`，写 `SCHEMA_SWITCH_APPLIED_FILE`，`generation += 1`。
+- Batch 3：App 先发 `Deploy` RPC，pipe 不在时拉起 server、等待最多约 5s；仍不可达才走原进程内部署，RPC 已发送后的失败不重试部署。server 串行暂停全部 session，失效旧 generation，销毁旧 engine、deploy、reload，并沿用 core 写 `SCHEMA_SWITCH_APPLIED_FILE`。
 - 客户端的 `reload_needed()` 改为向 server 请求 `Generation`，在 250ms 缓存内比较，宿主不再 stat 文件。generation 变了就走现有的 `begin_reload_if_changed` 流程，重建 session。
 - `ProfileDeploymentGuard::suspend()`（windows.rs:314）在 Batch 3 里保留，等 Windows 实机确认不需要后再删。
 - schema 切换请求文件和 `keytao-ime-engine.json` 由 server 读写，格式不变，所以 App 侧的读取代码不用改。
@@ -206,11 +209,11 @@ client 对 server 做以下检查：
 
 ### Batch 3：默认 server + deploy 迁入 server + 热更新
 
-- App 写 HKCU Run `KeyTaoImeServer`，App 启动时拉起 server，并按 2.8 做看门狗。文件：`crates/keytao-app-core/src/ime_status/windows.rs`，以及 `packaging/windows/keytao.nsi` 的卸载段（删 Run 值）。
-- Deploy 改为 RPC：`windows.rs:1449-1470` 改成发 `Deploy`；server 那边执行 deploy，然后 `generation += 1`。`ReloadStamp` 只保留给 fallback 用。
-- `EngineMode` 默认改成 1。fallback 按 2.7 的"无学习临时 userdb"实现。
-- 热更新：新版 server 启动时，如果 pipe 已被占用，就通过 `Hello` 让旧 server 退出（新增 `Shutdown` 请求，只接受同 exe 目录的调用者），然后重试创建 pipe。客户端会断开并重建 session。
-- 文件：`keytao-windows-ime-server/`、`keytao-ime-ipc/`、`engine_backend.rs`、`engine_pipe.rs`、`ime_status/windows.rs`、`keytao.nsi`。`state.rs` 的 reload 流程在 Batch 2 已接入 Generation。
+- 已实现：Windows App 启动写 HKCU Run `KeyTaoImeServer`，定位 HKLM `WindowsImeRuntimeDir` 下的当前架构 server，隐藏控制台拉起，并每 5s 检查 pipe。运行文件放在 Program Files 下的版本化目录；卸载删除 Run 值并停止 server。
+- 两处 App deploy 均优先 RPC，保留 profile suspend；server 使用唯一桌面 runtime 和与 App 相同的已安装 shared data。部署完成后 generation 递增，旧 session 失效。
+- 默认 Pipe，显式 0 保留原 InProc；失败按 2.7 使用临时无学习回退和后台重连。
+- 协议升为 3，接受 3/2。新增 `Shutdown`，仅接受同用户且 exe 位于同一 `%ProgramFiles%\KeyTao\` 安装树的调用者；新实例握手、请求旧实例退出，再在 3s 内重试创建 pipe。已加载的旧 DLL 可继续使用协议 2。
+- Batch 2 server 尚不认识 `Shutdown`，首次从该版本迁移需先退出旧 server；后续支持该请求的 server 可直接热替换。
 
 验收：
 - macOS：`cargo test -p keytao-ime-ipc`（Deploy、Shutdown 消息）通过；`cargo check` 覆盖三个 Windows target。
@@ -230,7 +233,7 @@ client 对 server 做以下检查：
 
 ### 决定（2026-11-15，用户确认按建议）
 
-1. server 不可用：用不学词的临时 userdb 继续打字（Batch 3 生效；Batch 2 开关为 Pipe 且 server 不可用时退回 InProc）。
+1. server 不可用：用不学词的临时 userdb 继续打字（Batch 3 已实现）。
 2. 拉起：登录 Run 键 + App 运行时看门狗；暂不加计划任务。
 3. AppContainer 与桌面共用 server 内唯一的 runtime 和 userdb（2026-11-15 改：librime 状态进程全局，同进程无法跑第二个 runtime）。
 4. 新增 Windows CI job，跑 `cargo test -p keytao-windows-ime -- --test-threads=1`。

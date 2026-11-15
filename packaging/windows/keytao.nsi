@@ -174,6 +174,7 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\KeyTao.lnk"
     Delete "$DESKTOP\KeyTao.lnk"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeyTao"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeyTaoImeServer"
   ${EndIf}
   DeleteRegKey HKLM "${UNINSTKEY}"
   ; Retain the old install-location preference and all user data, as Tauri did.
