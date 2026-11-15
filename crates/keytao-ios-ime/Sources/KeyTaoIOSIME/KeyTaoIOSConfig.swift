@@ -966,15 +966,6 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
 }
 
 enum KeyTaoIOSKeyboardConfigResolver {
-    static func defaultKeyboardYaml() -> String? {
-        guard let ptr = keytao_default_keyboard_yaml() else {
-            return nil
-        }
-        defer { keytao_free_string(ptr) }
-        let yaml = String(cString: ptr)
-        return yaml.isEmpty ? nil : yaml
-    }
-
     static func resolveJson(userKeyboardPath: String?) -> String? {
         let ptr: UnsafeMutablePointer<CChar>? = withOptionalCString(userKeyboardPath) { userPtr in
             keytao_resolve_keyboard_json(nil, userPtr)

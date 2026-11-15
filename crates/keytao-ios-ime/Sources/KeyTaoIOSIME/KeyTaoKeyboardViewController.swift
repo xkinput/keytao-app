@@ -108,6 +108,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         side: .right
     )
     private var currentTheme: KeyTaoImeTheme = .fallback
+    private var currentThemeCacheKey: String?
     private var lastPresentationLandscape: Bool?
     private var currentState = KeyTaoImeState.empty
     private var bypassAsciiActive = false
@@ -182,7 +183,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyTaoKeyboardLog.info("KeyTao keyboard viewDidLoad")
 
         let systemColorScheme = currentSystemColorScheme()
-        let theme = engine.resolveTheme(systemColorScheme: systemColorScheme)
+        let resolvedTheme = engine.resolveTheme(systemColorScheme: systemColorScheme)
+        let theme = resolvedTheme.theme
         let config = engine.loadConfig()
         let view = KeyTaoIOSKeyboardView(
             engine: engine,
@@ -227,6 +229,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         currentTheme = theme
+        currentThemeCacheKey = resolvedTheme.cacheKey
         keyboardContainer = container
         layoutSideButton = sideButton
         inputModeSwitchButton = switchButton
@@ -332,6 +335,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         resetClipboardState()
         queuedCommands.removeAll()
         engine.releaseCaches()
+        currentThemeCacheKey = nil
         keyboardView?.releaseCaches()
     }
 
@@ -1992,8 +1996,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func updateThemeForCurrentAppearance(systemColorScheme: KeyTaoEffectiveColorScheme? = nil) {
-        let theme = engine.resolveTheme(systemColorScheme: systemColorScheme ?? currentSystemColorScheme())
+        let resolved = engine.resolveTheme(systemColorScheme: systemColorScheme ?? currentSystemColorScheme())
+        guard resolved.cacheKey == nil || resolved.cacheKey != currentThemeCacheKey else { return }
+        let theme = resolved.theme
         currentTheme = theme
+        currentThemeCacheKey = resolved.cacheKey
         applyInterfaceStyle(for: theme)
         keyboardView?.update(theme: theme)
         updateLayoutAppearance()

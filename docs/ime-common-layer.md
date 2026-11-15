@@ -596,7 +596,7 @@ ResolvedImeTheme + Model
 
 兼容口径：旧 `theme.yaml` 里的根级 `keyboard:` 段**仍可解析**，把该文件路径传给 `resolve_mobile_layout_from_paths` 即可继续生效（它同时接受 `keyboard.yaml` 文档与带 `keyboard:` 段的 `theme.yaml`）；但 `light:` / `dark:` 变体不再能覆盖键盘布局。
 
-`keyboard.yaml` 的种子写入按分层约定应由 App 负责。当前只有 iOS 键盘扩展在做（且已改为“仅在文件缺失或为空时写、且不在冷启动主线程”），在 App 补上之前扩展侧不能删这段逻辑，否则用户会失去可编辑的布局文件。
+Both Android and iOS apps seed `keyboard.yaml` when it is missing or empty and refresh untouched defaults by hash. On iOS, the existing hash must match the saved seed hash; known legacy default hashes are considered only when the saved seed hash is absent or empty. User-edited layouts with other hashes are preserved. The iOS keyboard extension only reads the shared configuration; it does not seed it.
 
 `theme.yaml` v2 只表达跨平台可落地语义：
 
