@@ -13,13 +13,28 @@ impl EventSink for Sink {
     fn emit(&self, _: CoreEvent) {}
 }
 
-struct Host(PathBuf);
+struct Host(
+    PathBuf,
+    #[cfg(target_os = "linux")] crate::ime_status::linux::ManagedImeHelper,
+);
 impl ImeHost for Host {
     fn user_root(&self) -> Result<PathBuf, String> {
         Ok(self.0.clone())
     }
     fn write_reload_stamp(&self, _: &Path) -> Result<Option<PathBuf>, String> {
         Ok(None)
+    }
+    #[cfg(target_os = "linux")]
+    fn managed_helper(&self) -> &crate::ime_status::linux::ManagedImeHelper {
+        &self.1
+    }
+    #[cfg(target_os = "linux")]
+    fn suspend_for_deploy(&self, _: String, shared: String) -> keytao_core::ImeRuntime {
+        keytao_core::ImeRuntime::with_dirs(self.0.clone(), shared)
+    }
+    #[cfg(target_os = "linux")]
+    fn resume_after_deploy(&self) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -38,7 +53,11 @@ fn fixture() -> (tempfile::TempDir, Arc<Core>, Host) {
     .unwrap();
     core.import_legacy_state(Some("fixture-token".into()), Some(json!({"id":7})), false)
         .unwrap();
-    let host = Host(dir.path().join("rime"));
+    let host = Host(
+        dir.path().join("rime"),
+        #[cfg(target_os = "linux")]
+        Default::default(),
+    );
     std::fs::create_dir_all(&host.0).unwrap();
     std::fs::write(
         host.0.join("keytao.user.dict.yaml"),
