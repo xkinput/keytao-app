@@ -107,7 +107,7 @@ jobs:
           - platform: macos-15
             os_name: macos
             package_arch: universal
-            artifacts: target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos.pkg
+            artifacts: target/keytao-macos-pkg/keytao-app-${{ needs.prepare.outputs.version }}-macos.dmg
           - platform: windows-latest
             os_name: windows
             package_arch: x64
@@ -225,6 +225,11 @@ jobs:
         if: matrix.os_name == 'macos'
         shell: bash
         run: scripts/verify-macos-pkg.sh "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.pkg"
+
+      - name: Verify macOS DMG
+        if: matrix.os_name == 'macos'
+        shell: bash
+        run: scripts/verify-macos-dmg.sh "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.dmg" "target/keytao-macos-pkg/keytao-app-${VERSION}-macos.pkg"
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4

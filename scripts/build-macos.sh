@@ -303,6 +303,13 @@ mkbom -s "$PKG_PAYLOAD" "$PKG_FLAT_DIR/Bom"
 mv "$PKG_CLEAN_OUTPUT" "$PKG_OUTPUT"
 rm -rf "$PKG_REPACK_DIR"
 
+DMG_OUTPUT="$PKG_BUILD_DIR/keytao-app-${PACKAGE_VERSION}-macos.dmg"
+"$PROJECT_DIR/scripts/package-macos-dmg.sh" "$PKG_OUTPUT" "$DMG_OUTPUT"
+case "$SIGN_ID" in
+    -) ;;
+    *) codesign --force --sign "$SIGN_ID" "$DMG_OUTPUT" ;;
+esac
+
 echo ""
 echo "==> pkg complete: $PKG_OUTPUT"
 echo "    /Applications/KeyTao.app"

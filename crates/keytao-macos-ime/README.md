@@ -141,7 +141,7 @@ scripts/verify-macos-pkg.sh target/keytao-macos-pkg/keytao-app-<version>-macos.p
 产物：
 
 - `target/keytao-macos-pkg/keytao-app-<version>-macos.pkg`
-- GitHub Release 发布一个 `keytao-app-<version>-macos.pkg`，包含 x86_64 + arm64。
+- GitHub Release 发布一个 `keytao-app-<version>-macos.dmg`（内含上述 pkg），包含 x86_64 + arm64。
 
 测试安装：
 
