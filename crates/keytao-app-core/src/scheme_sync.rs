@@ -236,6 +236,7 @@ pub async fn apply_profile_at(
     let profile = checked_profile(profile)?;
     core.update_state(|state| state.scheme_sync_settings = profile.settings.clone())?;
     let mut skipped = Vec::new();
+    let mut cloud_packages = None;
     for package in profile.packages {
         if core
             .state()
@@ -245,8 +246,12 @@ pub async fn apply_profile_at(
             continue;
         }
         if package.source.starts_with("cloud:") || package.source.starts_with("cloud-sha256:") {
-            let packages = crate::cloud_packages::list_at(core, api_base).await?;
-            let cloud = packages
+            if cloud_packages.is_none() {
+                cloud_packages = Some(crate::cloud_packages::list_at(core, api_base).await?);
+            }
+            let cloud = cloud_packages
+                .as_ref()
+                .unwrap()
                 .iter()
                 .find(|cloud| {
                     cloud.scheme_key == package.scheme_key

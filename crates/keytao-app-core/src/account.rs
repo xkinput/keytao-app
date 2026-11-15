@@ -89,13 +89,11 @@ impl<'a> ApiClient<'a> {
 
     fn token(&self) -> Result<String, CoreError> {
         let state = self.core.state();
-        let current_account = state.user.as_ref().and_then(|user| user["id"].as_i64());
-        if self.account_id.is_none() || current_account != self.account_id {
+        if !same_account(&state, self.account_id) {
             return Err(CoreError::Permission("请先登录 KeyTao 账号".into()));
         }
         state
             .auth_token
-            .filter(|token| !token.trim().is_empty())
             .ok_or_else(|| CoreError::Permission("请先登录 KeyTao 账号".into()))
     }
 
@@ -316,13 +314,22 @@ fn token_timing(token: &str) -> Option<TokenTiming> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn account_id(core: &Core) -> Option<i64> {
+pub(crate) fn account_id(core: &Core) -> Option<i64> {
     core.state()
         .user
         .as_ref()?
         .get("id")?
         .as_i64()
         .filter(|id| *id > 0)
+}
+
+pub(crate) fn same_account(state: &crate::AppState, expected: Option<i64>) -> bool {
+    expected.is_some_and(|id| id > 0)
+        && state.user.as_ref().and_then(|user| user["id"].as_i64()) == expected
+        && state
+            .auth_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
 }
 
 pub async fn startup_refresh(core: &Core) -> Result<(), CoreError> {

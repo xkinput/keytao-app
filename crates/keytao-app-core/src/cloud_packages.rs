@@ -1,4 +1,4 @@
-use crate::account::{API_BASE, ApiClient};
+use crate::account::{API_BASE, ApiClient, account_id, same_account};
 use crate::{Core, CoreError, CoreEvent, events::CloudTransferProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,22 +15,6 @@ fn cloud_error(error: CoreError) -> CoreError {
     } else {
         error
     }
-}
-
-fn account_id(core: &Core) -> Option<i64> {
-    core.state()
-        .user
-        .as_ref()
-        .and_then(|user| user["id"].as_i64())
-}
-
-fn same_account(state: &crate::AppState, expected: Option<i64>) -> bool {
-    expected.is_some_and(|id| id > 0)
-        && state.user.as_ref().and_then(|user| user["id"].as_i64()) == expected
-        && state
-            .auth_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty())
 }
 
 fn ensure_account(core: &Core, expected: Option<i64>) -> Result<(), CoreError> {
@@ -595,6 +579,7 @@ pub(crate) async fn download_at(
         core,
         &package.scheme_key,
         package.version.as_deref(),
+        "cloud",
         Some(&package.name),
         &bytes,
         user_root,

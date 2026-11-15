@@ -49,18 +49,8 @@ fn invalid_response() -> CoreError {
 }
 
 fn account_id(core: &Core) -> Result<i64, CoreError> {
-    let state = core.state();
-    if state
-        .auth_token
-        .as_deref()
-        .is_none_or(|token| token.trim().is_empty())
-    {
-        return Err(CoreError::Permission("请先登录 KeyTao 账号".into()));
-    }
-    state
-        .user
-        .as_ref()
-        .and_then(|user| user["id"].as_i64())
+    crate::account::account_id(core)
+        .filter(|id| crate::account::same_account(&core.state(), Some(*id)))
         .ok_or_else(|| CoreError::Permission("请先登录 KeyTao 账号".into()))
 }
 
