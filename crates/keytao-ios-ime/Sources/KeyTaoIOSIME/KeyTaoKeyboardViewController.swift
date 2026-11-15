@@ -2322,9 +2322,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// window can be a narrow column while the device is landscape, so the
     /// keyboard's own bounds and size classes decide the layout.
     private func currentInterfaceIsLandscape() -> Bool {
-        let bounds = view.bounds
+        // The keyboard view is always wider than tall, so only the screen tells orientation.
+        let bounds = view.window?.windowScene?.screen.bounds ?? UIScreen.main.bounds
         if bounds.width > 0, bounds.height > 0 {
-            return bounds.width > bounds.height * 1.2
+            return bounds.width > bounds.height
         }
         if traitCollection.verticalSizeClass == .compact {
             return true
