@@ -11,7 +11,6 @@ WindowsImeStatusDto windowsStatus({
   bool registered = true,
   String? error,
 }) => WindowsImeStatusDto(
-  supported: true,
   packaged: true,
   registered: registered,
   registeredDll: registered,
@@ -22,21 +21,17 @@ WindowsImeStatusDto windowsStatus({
   runtimeDir: r'C:\ProgramData\KeyTao\runtime',
   registeredPath: r'C:\ProgramData\KeyTao\runtime\keytao_windows_ime.dll',
   profileStatus: 'enabled',
-  sharedDataSource: 'packaged',
   message: 'Windows fixture',
 );
 
 const linuxStatus = LinuxImeStatusDto(
-  supported: true,
   kdeSession: true,
   kdeConfigured: true,
   running: true,
   managedPid: 123,
   command: '/usr/lib/KeyTao/keytao-ime',
-  processes: [],
   kdeNativeProcesses: 1,
   fallbackProcesses: 2,
-  sharedDataSource: 'packaged',
   message: 'Linux fixture',
 );
 
@@ -77,8 +72,6 @@ class ViewController extends AppController {
     );
     macosIme = const MacosImeStatusDto(
       installed: true,
-      sharedDataSource:
-          '/Library/Input Methods/KeyTao.app/Contents/SharedSupport',
       appPath: '/Library/Input Methods/KeyTao.app',
       message: '',
     );

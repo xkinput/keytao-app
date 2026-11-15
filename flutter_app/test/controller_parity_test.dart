@@ -153,7 +153,6 @@ class FakeCore implements RustLibApi {
   Future<MacosImeStatusDto> crateApiCoreMacosImeStatus() async =>
       const MacosImeStatusDto(
         installed: true,
-        sharedDataSource: '',
         message: '',
       );
   @override

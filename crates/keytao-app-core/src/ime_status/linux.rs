@@ -1,4 +1,4 @@
-use crate::{Core, ime_host::ImeHost, ime_paths::*};
+use crate::{Core, ime_host::ImeHost};
 use serde::Serialize;
 use std::{collections::HashSet, path::PathBuf, sync::Mutex};
 
@@ -7,21 +7,13 @@ pub struct ManagedImeHelper(Mutex<Option<std::process::Child>>);
 
 #[derive(Serialize, Clone)]
 pub struct LinuxImeStatus {
-    pub supported: bool,
     pub kde_session: bool,
     pub kde_configured: bool,
     pub running: bool,
     pub managed_pid: Option<u32>,
-    pub daemon_owner_pid: Option<u32>,
     pub command: String,
-    pub processes: Vec<String>,
     pub kde_native_processes: usize,
     pub fallback_processes: usize,
-    pub user_data_dir: Option<String>,
-    pub shared_data_dir: Option<String>,
-    pub shared_data_source: String,
-    pub reload_stamp_path: Option<String>,
-    pub reload_stamp_signature: Option<String>,
     pub message: String,
 }
 
@@ -205,49 +197,16 @@ fn linux_ime_status_with_message(
         .any(|kde_native| ready_keytao_ime_pid(&process_entries, kde_native).is_some());
     let kde_native_processes = process_entries.iter().filter(|p| p.kde_native).count();
     let fallback_processes = process_entries.iter().filter(|p| !p.kde_native).count();
-    let processes = process_entries.into_iter().map(|p| p.line).collect();
-    let (shared_data_dir, shared_data_source) = shared_data_status(linux_app_shared_data_dir(core));
-    let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
     LinuxImeStatus {
-        supported: true,
         kde_session: is_kde_session(),
         kde_configured: is_kde_input_method_configured(),
         running,
         managed_pid,
-        daemon_owner_pid: linux_ime_daemon_owner_pid(),
         command,
-        processes,
         kde_native_processes,
         fallback_processes,
-        user_data_dir: default_user_data_dir_string(),
-        shared_data_dir,
-        shared_data_source,
-        reload_stamp_path,
-        reload_stamp_signature,
         message,
     }
-}
-
-fn linux_ime_daemon_owner_pid() -> Option<u32> {
-    let output = std::process::Command::new("busctl")
-        .args([
-            "--user",
-            "call",
-            "org.freedesktop.DBus",
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
-            "GetConnectionUnixProcessID",
-            "s",
-            "org.xkinput.keytao.ime.Daemon",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .find_map(|part| part.parse::<u32>().ok())
 }
 
 fn linux_runtime_dirs(core: &Core) -> Vec<PathBuf> {
@@ -481,10 +440,10 @@ fn process_has_wayland_socket(pid: u32) -> bool {
         .any(|item| item.starts_with(b"WAYLAND_SOCKET="))
 }
 
-fn stop_external_keytao_ime_processes(include_kde_native: bool) {
+fn stop_external_keytao_ime_processes() {
     let processes: Vec<KeytaoImeProcess> = keytao_ime_process_entries()
         .into_iter()
-        .filter(|process| include_kde_native || !process.kde_native)
+        .filter(|process| !process.kde_native)
         .collect();
     if processes.is_empty() {
         return;
@@ -559,7 +518,7 @@ pub fn launch_keytao_ime(
     }
     if restart || processes.iter().any(|process| !process.kde_native) {
         stop_managed_ime_helper(host);
-        stop_external_keytao_ime_processes(false);
+        stop_external_keytao_ime_processes();
     }
     if let Err(error) = std::fs::remove_file(&ready_path) {
         if error.kind() != std::io::ErrorKind::NotFound {

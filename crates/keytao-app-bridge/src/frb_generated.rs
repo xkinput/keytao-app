@@ -1906,11 +1906,10 @@ fn wire__crate__api__core__linux_start_ime_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_restart = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok = crate::api::core::linux_start_ime(api_restart)?;
+                    let output_ok = crate::api::core::linux_start_ime()?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -3819,41 +3818,23 @@ impl SseDecode for isize {
 impl SseDecode for crate::api::types::LinuxImeStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_supported = <bool>::sse_decode(deserializer);
         let mut var_kdeSession = <bool>::sse_decode(deserializer);
         let mut var_kdeConfigured = <bool>::sse_decode(deserializer);
         let mut var_running = <bool>::sse_decode(deserializer);
         let mut var_managedPid = <Option<u32>>::sse_decode(deserializer);
-        let mut var_daemonOwnerPid = <Option<u32>>::sse_decode(deserializer);
         let mut var_command = <String>::sse_decode(deserializer);
-        let mut var_processes = <Vec<String>>::sse_decode(deserializer);
         let mut var_kdeNativeProcesses = <u32>::sse_decode(deserializer);
         let mut var_fallbackProcesses = <u32>::sse_decode(deserializer);
-        let mut var_userDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataSource = <String>::sse_decode(deserializer);
-        let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
-        let mut var_reloadStampSignature = <Option<String>>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
-        let mut var_error = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::LinuxImeStatusDto {
-            supported: var_supported,
             kde_session: var_kdeSession,
             kde_configured: var_kdeConfigured,
             running: var_running,
             managed_pid: var_managedPid,
-            daemon_owner_pid: var_daemonOwnerPid,
             command: var_command,
-            processes: var_processes,
             kde_native_processes: var_kdeNativeProcesses,
             fallback_processes: var_fallbackProcesses,
-            user_data_dir: var_userDataDir,
-            shared_data_dir: var_sharedDataDir,
-            shared_data_source: var_sharedDataSource,
-            reload_stamp_path: var_reloadStampPath,
-            reload_stamp_signature: var_reloadStampSignature,
             message: var_message,
-            error: var_error,
         };
     }
 }
@@ -4053,22 +4034,10 @@ impl SseDecode for crate::api::types::MacosImeStatusDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_installed = <bool>::sse_decode(deserializer);
         let mut var_appPath = <Option<String>>::sse_decode(deserializer);
-        let mut var_userDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataSource = <String>::sse_decode(deserializer);
-        let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
-        let mut var_reloadStampSignature = <Option<String>>::sse_decode(deserializer);
-        let mut var_logDir = <Option<String>>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
         return crate::api::types::MacosImeStatusDto {
             installed: var_installed,
             app_path: var_appPath,
-            user_data_dir: var_userDataDir,
-            shared_data_dir: var_sharedDataDir,
-            shared_data_source: var_sharedDataSource,
-            reload_stamp_path: var_reloadStampPath,
-            reload_stamp_signature: var_reloadStampSignature,
-            log_dir: var_logDir,
             message: var_message,
         };
     }
@@ -4541,7 +4510,6 @@ impl SseDecode for crate::api::types::VerifyEntryDto {
 impl SseDecode for crate::api::types::WindowsImeStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_supported = <bool>::sse_decode(deserializer);
         let mut var_packaged = <bool>::sse_decode(deserializer);
         let mut var_registered = <bool>::sse_decode(deserializer);
         let mut var_registeredDll = <bool>::sse_decode(deserializer);
@@ -4550,17 +4518,10 @@ impl SseDecode for crate::api::types::WindowsImeStatusDto {
         let mut var_registrationState = <String>::sse_decode(deserializer);
         let mut var_registrationError = <Option<String>>::sse_decode(deserializer);
         let mut var_runtimeDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_dllPath = <Option<String>>::sse_decode(deserializer);
         let mut var_registeredPath = <Option<String>>::sse_decode(deserializer);
         let mut var_profileStatus = <String>::sse_decode(deserializer);
-        let mut var_userDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataDir = <Option<String>>::sse_decode(deserializer);
-        let mut var_sharedDataSource = <String>::sse_decode(deserializer);
-        let mut var_reloadStampPath = <Option<String>>::sse_decode(deserializer);
-        let mut var_reloadStampSignature = <Option<String>>::sse_decode(deserializer);
         let mut var_message = <String>::sse_decode(deserializer);
         return crate::api::types::WindowsImeStatusDto {
-            supported: var_supported,
             packaged: var_packaged,
             registered: var_registered,
             registered_dll: var_registeredDll,
@@ -4569,14 +4530,8 @@ impl SseDecode for crate::api::types::WindowsImeStatusDto {
             registration_state: var_registrationState,
             registration_error: var_registrationError,
             runtime_dir: var_runtimeDir,
-            dll_path: var_dllPath,
             registered_path: var_registeredPath,
             profile_status: var_profileStatus,
-            user_data_dir: var_userDataDir,
-            shared_data_dir: var_sharedDataDir,
-            shared_data_source: var_sharedDataSource,
-            reload_stamp_path: var_reloadStampPath,
-            reload_stamp_signature: var_reloadStampSignature,
             message: var_message,
         };
     }
@@ -5344,23 +5299,14 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::InstalledPackageDto>
 impl flutter_rust_bridge::IntoDart for crate::api::types::LinuxImeStatusDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
-            self.supported.into_into_dart().into_dart(),
             self.kde_session.into_into_dart().into_dart(),
             self.kde_configured.into_into_dart().into_dart(),
             self.running.into_into_dart().into_dart(),
             self.managed_pid.into_into_dart().into_dart(),
-            self.daemon_owner_pid.into_into_dart().into_dart(),
             self.command.into_into_dart().into_dart(),
-            self.processes.into_into_dart().into_dart(),
             self.kde_native_processes.into_into_dart().into_dart(),
             self.fallback_processes.into_into_dart().into_dart(),
-            self.user_data_dir.into_into_dart().into_dart(),
-            self.shared_data_dir.into_into_dart().into_dart(),
-            self.shared_data_source.into_into_dart().into_dart(),
-            self.reload_stamp_path.into_into_dart().into_dart(),
-            self.reload_stamp_signature.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
-            self.error.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5428,12 +5374,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::MacosImeStatusDto {
         [
             self.installed.into_into_dart().into_dart(),
             self.app_path.into_into_dart().into_dart(),
-            self.user_data_dir.into_into_dart().into_dart(),
-            self.shared_data_dir.into_into_dart().into_dart(),
-            self.shared_data_source.into_into_dart().into_dart(),
-            self.reload_stamp_path.into_into_dart().into_dart(),
-            self.reload_stamp_signature.into_into_dart().into_dart(),
-            self.log_dir.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -5874,7 +5814,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::VerifyEntryDto>
 impl flutter_rust_bridge::IntoDart for crate::api::types::WindowsImeStatusDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
-            self.supported.into_into_dart().into_dart(),
             self.packaged.into_into_dart().into_dart(),
             self.registered.into_into_dart().into_dart(),
             self.registered_dll.into_into_dart().into_dart(),
@@ -5883,14 +5822,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::WindowsImeStatusDto {
             self.registration_state.into_into_dart().into_dart(),
             self.registration_error.into_into_dart().into_dart(),
             self.runtime_dir.into_into_dart().into_dart(),
-            self.dll_path.into_into_dart().into_dart(),
             self.registered_path.into_into_dart().into_dart(),
             self.profile_status.into_into_dart().into_dart(),
-            self.user_data_dir.into_into_dart().into_dart(),
-            self.shared_data_dir.into_into_dart().into_dart(),
-            self.shared_data_source.into_into_dart().into_dart(),
-            self.reload_stamp_path.into_into_dart().into_dart(),
-            self.reload_stamp_signature.into_into_dart().into_dart(),
             self.message.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -6279,23 +6212,14 @@ impl SseEncode for isize {
 impl SseEncode for crate::api::types::LinuxImeStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.supported, serializer);
         <bool>::sse_encode(self.kde_session, serializer);
         <bool>::sse_encode(self.kde_configured, serializer);
         <bool>::sse_encode(self.running, serializer);
         <Option<u32>>::sse_encode(self.managed_pid, serializer);
-        <Option<u32>>::sse_encode(self.daemon_owner_pid, serializer);
         <String>::sse_encode(self.command, serializer);
-        <Vec<String>>::sse_encode(self.processes, serializer);
         <u32>::sse_encode(self.kde_native_processes, serializer);
         <u32>::sse_encode(self.fallback_processes, serializer);
-        <Option<String>>::sse_encode(self.user_data_dir, serializer);
-        <Option<String>>::sse_encode(self.shared_data_dir, serializer);
-        <String>::sse_encode(self.shared_data_source, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_signature, serializer);
         <String>::sse_encode(self.message, serializer);
-        <Option<String>>::sse_encode(self.error, serializer);
     }
 }
 
@@ -6444,12 +6368,6 @@ impl SseEncode for crate::api::types::MacosImeStatusDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.installed, serializer);
         <Option<String>>::sse_encode(self.app_path, serializer);
-        <Option<String>>::sse_encode(self.user_data_dir, serializer);
-        <Option<String>>::sse_encode(self.shared_data_dir, serializer);
-        <String>::sse_encode(self.shared_data_source, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_signature, serializer);
-        <Option<String>>::sse_encode(self.log_dir, serializer);
         <String>::sse_encode(self.message, serializer);
     }
 }
@@ -6825,7 +6743,6 @@ impl SseEncode for crate::api::types::VerifyEntryDto {
 impl SseEncode for crate::api::types::WindowsImeStatusDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.supported, serializer);
         <bool>::sse_encode(self.packaged, serializer);
         <bool>::sse_encode(self.registered, serializer);
         <bool>::sse_encode(self.registered_dll, serializer);
@@ -6834,14 +6751,8 @@ impl SseEncode for crate::api::types::WindowsImeStatusDto {
         <String>::sse_encode(self.registration_state, serializer);
         <Option<String>>::sse_encode(self.registration_error, serializer);
         <Option<String>>::sse_encode(self.runtime_dir, serializer);
-        <Option<String>>::sse_encode(self.dll_path, serializer);
         <Option<String>>::sse_encode(self.registered_path, serializer);
         <String>::sse_encode(self.profile_status, serializer);
-        <Option<String>>::sse_encode(self.user_data_dir, serializer);
-        <Option<String>>::sse_encode(self.shared_data_dir, serializer);
-        <String>::sse_encode(self.shared_data_source, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_path, serializer);
-        <Option<String>>::sse_encode(self.reload_stamp_signature, serializer);
         <String>::sse_encode(self.message, serializer);
     }
 }

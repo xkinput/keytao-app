@@ -65,7 +65,7 @@ flowchart TD
     Stamp -->|"DispatchSource 文件监听"| EngineInit
     EngineInit -->|"keytao_reload_if_stamp_changed()"| FFI
     Controller -->|"NSEvent -> X11 keysym + modifiers"| FFI
-    FFI -->|"keytao_session_process_key"| Runtime
+    FFI -->|"keytao_session_process_key_json"| Runtime
     Runtime --> Core
     Librime --> Core
     Core --> FFI

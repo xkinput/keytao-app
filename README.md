@@ -45,11 +45,14 @@ crates/keytao-app-core/      App 业务逻辑：方案下载、安装合并、�
 crates/keytao-app-bridge/    flutter_rust_bridge 桥接层
 crates/keytao-core/          librime setup、deploy、session、ImeState
 crates/keytao-core-ffi/      给 Swift 前端的 per-session C ABI
+crates/keytao-ime-ipc/       Shared IME engine IPC protocol
 crates/keytao-theme/         theme.yaml 解析与共享 UI model
+crates/keytao-schema-logo/   Shared schema logo rendering
 crates/librime-sys/          librime 绑定，经 [patch.crates-io] 引入，不是 workspace 成员
 crates/keytao-linux-ime/     Linux daemon
 crates/keytao-macos-ime/     macOS IMKit bundle（Swift）
 crates/keytao-windows-ime/   Windows TSF DLL
+crates/keytao-windows-ime-server/ Windows IME engine server
 crates/keytao-ios-ime/       iOS 键盘扩展（Swift）
 packaging/                   Linux / Windows 打包
 scripts/                     构建、打包、校验脚本
