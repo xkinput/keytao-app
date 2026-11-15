@@ -22,7 +22,7 @@ Payload/KeyTao.app/PlugIns/KeyTaoKeyboard.appex
 签名时需要满足以下条件：
 
 1. 主 App 和键盘扩展分别使用匹配各自 Bundle ID 的 provisioning profile。
-2. 先签名 `KeyTaoKeyboard.appex`，最后签名外层 `KeyTao.app`。
+2. 先签名内嵌 framework / dylib，再签名 `KeyTaoKeyboard.appex`，最后签名外层 `KeyTao.app`。
 3. 两个 profile 必须包含相同的 App Group，完整功能默认使用 `group.ink.rea.keytao-app`。
 4. 不要使用 `codesign --deep` 代替逐层签名；`--deep` 只用于最后验证。
 
@@ -124,6 +124,99 @@ open flutter_app/ios/Runner.xcworkspace
 security find-identity -v -p codesigning
 ```
 
+#### 官方团队获取 Development profile（2026-11-16 实测）
+
+团队 `2G395DH7KX` 成员先在 **Xcode > Settings > Accounts** 登录团队 Apple ID。iPhone 在 **设置 > 隐私与安全性 > 开发者模式** 开启后重启并确认；连接、信任 Mac，并在申请 profile 时保持解锁。运行 `xcrun devicectl list devices`，状态应为 `available (paired)`；出现 `connected (no DDI)` 或 `needs to be unlocked` 时，先检查解锁状态和开发者模式。
+
+这次 `xcodebuild -exportArchive` 自动签名因要求云端托管的 `DEVELOPMENT_MANAGED` 证书失败，构建 Flutter Runner workspace 又提前失败于 Flutter SDK 脚本。实际可行的方法是用已安装的 `xcodegen` 生成一个临时原生工程，只为两个官方 Bundle ID 申请 profile，无需构建 Flutter。在临时目录准备以下最小文件：
+
+```bash
+PROV_DIR="$(mktemp -d)"
+cd "$PROV_DIR"
+mkdir App Kb
+cat > App/main.swift <<'SWIFT'
+import UIKit
+UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, nil)
+SWIFT
+cat > Kb/KeyboardViewController.swift <<'SWIFT'
+import UIKit
+class KeyboardViewController: UIInputViewController {}
+SWIFT
+cat > ent.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>com.apple.security.application-groups</key>
+<array><string>group.ink.rea.keytao-app</string></array>
+</dict></plist>
+PLIST
+cat > Kb/Info.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+<key>CFBundleName</key><string>KeyTaoKeyboard</string>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundlePackageType</key><string>XPC!</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>NSExtension</key><dict>
+<key>NSExtensionPointIdentifier</key><string>com.apple.keyboard-service</string>
+<key>NSExtensionPrincipalClass</key><string>$(PRODUCT_MODULE_NAME).KeyboardViewController</string>
+<key>NSExtensionAttributes</key><dict>
+<key>IsASCIICapable</key><false/>
+<key>PrimaryLanguage</key><string>zh-Hans</string>
+<key>RequestsOpenAccess</key><true/>
+</dict></dict>
+</dict></plist>
+PLIST
+```
+
+`project.yml`：
+
+```yaml
+name: KeyTaoProv
+options:
+  deploymentTarget: { iOS: "15.0" }
+settings:
+  base:
+    DEVELOPMENT_TEAM: 2G395DH7KX
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_ENTITLEMENTS: ent.plist
+    GENERATE_INFOPLIST_FILE: YES
+    SWIFT_VERSION: "5.0"
+targets:
+  KeyTao:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    settings:
+      base: { PRODUCT_BUNDLE_IDENTIFIER: ink.rea.keytao-app }
+    dependencies:
+      - target: KeyTaoKeyboard
+  KeyTaoKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Kb
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ink.rea.keytao-app.keyboard
+        INFOPLIST_FILE: Kb/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+```
+
+将设备 UDID 填入后构建；两个 target 均使用上面的 App Group entitlement：
+
+```bash
+xcodegen generate
+xcodebuild -project KeyTaoProv.xcodeproj -scheme KeyTao -configuration Debug \
+  -destination 'id=<UDID>' -allowProvisioningUpdates \
+  -allowProvisioningDeviceRegistration build
+open "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+```
+
+从该目录取出两个 profile，按下一步检查 Bundle ID、设备和 App Group，再分别作为 `APP_PROFILE`、`KEYBOARD_PROFILE` 重签 Release IPA。
+
 ### 2. 检查描述文件
 
 ```bash
@@ -180,6 +273,10 @@ rm -rf "$APP/_CodeSignature" "$KEYBOARD/_CodeSignature"
 cp "$APP_PROFILE" "$APP/embedded.mobileprovision"
 cp "$KEYBOARD_PROFILE" "$KEYBOARD/embedded.mobileprovision"
 
+while IFS= read -r -d '' nested; do
+  codesign --force --sign "$IDENTITY" --timestamp=none "$nested"
+done < <(find "$APP" -depth \( -name '*.framework' -o -name '*.dylib' \) -print0)
+
 codesign --force \
   --sign "$IDENTITY" \
   --entitlements "$WORK_DIR/keyboard-entitlements.plist" \
@@ -200,7 +297,7 @@ ditto -c -k --sequesterRsrc --keepParent "$WORK_DIR/Payload" "$OUTPUT"
 echo "Created $OUTPUT"
 ```
 
-如果以后 IPA 中增加了动态 framework，也需要先签最深层 framework，再签 `.appex`，最后签 `.app`。
+脚本会先签最深层 framework / dylib，包括 `Flutter.framework`、`App.framework` 和 `keytao_app_bridge.framework`，再签 `.appex` 和 `.app`。
 
 ### 4. 验证签名结果
 
@@ -214,6 +311,19 @@ codesign -d --entitlements :- "$VERIFY_DIR/Payload/KeyTao.app/PlugIns/KeyTaoKeyb
 ```
 
 重点确认两层签名均有效、Bundle ID 正确，并且两个 entitlement 中的 App Group 完全一致。
+
+### 5. 直接安装与取回崩溃报告
+
+已解包、签名且通过验证的 `Payload/KeyTao.app` 可直接安装，无需重新压缩 IPA（若使用上面的脚本，需在退出并清理 `WORK_DIR` 前安装，路径为 `$APP`）：
+
+```bash
+xcrun devicectl device install app --device '<UDID>' Payload/KeyTao.app
+xcrun devicectl device info files --device '<UDID>' --domain-type systemCrashLogs
+xcrun devicectl device copy from --device '<UDID>' --domain-type systemCrashLogs \
+  --source '<file>' --destination '<path>'
+```
+
+`<file>` 使用列表中的报告相对路径，`<path>` 为本机保存路径。
 
 ## 安装已签名 IPA
 
