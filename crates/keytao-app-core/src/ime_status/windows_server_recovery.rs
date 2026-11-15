@@ -2,8 +2,19 @@
 
 use std::io;
 
-pub(super) fn can_manage_server(elevated: bool) -> bool {
-    !elevated
+pub(super) fn can_manage_server(elevated: bool, shell_launch_available: bool) -> bool {
+    !elevated || shell_launch_available
+}
+
+pub(super) fn require_absent_server(pipe: io::Result<()>) -> Result<(), String> {
+    match pipe {
+        // Win32 ERROR_FILE_NOT_FOUND; keep this check portable for recovery tests.
+        Err(error) if error.raw_os_error() == Some(2) => Ok(()),
+        Ok(()) => Err("IME server pipe exists; in-process deploy is forbidden".into()),
+        Err(error) => Err(format!(
+            "cannot confirm IME server pipe is absent; in-process deploy is forbidden: {error}"
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -33,21 +44,21 @@ impl HelloFailure {
 }
 
 pub(super) fn deploy_once<C>(
-    elevated: bool,
+    management: Result<(), String>,
     connect: impl FnMut() -> Result<Option<(C, bool)>, String>,
     hello: impl FnMut(&mut C) -> Result<(), HelloFailure>,
     replace: impl FnMut(C, bool) -> Result<(), String>,
     deploy: impl FnOnce(C) -> Result<(), String>,
 ) -> Result<bool, String> {
     // A failed Deploy write may already have reached the server. Recovery is only preparation.
-    match prepare_server(elevated, connect, hello, replace)? {
+    match prepare_server(management, connect, hello, replace)? {
         Some(connection) => deploy(connection).map(|()| true),
         None => Ok(false),
     }
 }
 
 fn prepare_server<C>(
-    elevated: bool,
+    management: Result<(), String>,
     mut connect: impl FnMut() -> Result<Option<(C, bool)>, String>,
     mut hello: impl FnMut(&mut C) -> Result<(), HelloFailure>,
     mut replace: impl FnMut(C, bool) -> Result<(), String>,
@@ -56,7 +67,7 @@ fn prepare_server<C>(
         return Ok(None);
     };
     let handshake = hello(&mut connection);
-    if handshake.is_ok() && (current || elevated) {
+    if handshake.is_ok() && current {
         return Ok(Some(connection));
     }
     let reason = handshake
@@ -64,14 +75,14 @@ fn prepare_server<C>(
         .err()
         .map_or("outdated IME server", |error| error.reason.as_str());
     let reason = reason.to_owned();
-    if !can_manage_server(elevated)
-        || (current
-            && !handshake
-                .as_ref()
-                .is_err_and(|error| error.eof_before_reply))
+    if current
+        && !handshake
+            .as_ref()
+            .is_err_and(|error| error.eof_before_reply)
     {
         return Err(reason);
     }
+    management.map_err(|error| format!("{reason}; {error}"))?;
     replace(connection, handshake.is_ok())
         .map_err(|error| format!("{reason}; IME server recovery failed: {error}"))?;
     let (mut connection, current) = connect()
@@ -97,10 +108,34 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
+    fn in_process_deploy_requires_a_definitely_absent_server_pipe() {
+        assert_eq!(
+            require_absent_server(Err(io::Error::from_raw_os_error(2))),
+            Ok(())
+        );
+        assert!(
+            require_absent_server(Ok(()))
+                .unwrap_err()
+                .contains("in-process deploy is forbidden")
+        );
+        for error in [
+            io::Error::from_raw_os_error(231),
+            io::Error::from_raw_os_error(5),
+            io::Error::from_raw_os_error(3),
+            io::Error::other("pipe lookup failed"),
+        ] {
+            let reason = error.to_string();
+            let failure = require_absent_server(Err(error)).unwrap_err();
+            assert!(failure.contains("in-process deploy is forbidden"));
+            assert!(failure.contains(&reason));
+        }
+    }
+
+    #[test]
     fn healthy_current_server_needs_no_recovery() {
         assert_eq!(
             prepare_server(
-                false,
+                Ok(()),
                 || Ok(Some((42, true))),
                 |_| Ok(()),
                 |_, _| panic!("unexpected recovery")
@@ -114,7 +149,7 @@ mod tests {
         let events = RefCell::new(Vec::new());
         let mut attempts = 0;
         let connection = prepare_server(
-            false,
+            Ok(()),
             || {
                 attempts += 1;
                 events.borrow_mut().push("connect");
@@ -151,7 +186,7 @@ mod tests {
             let connections = Cell::new(0);
             let deployments = Cell::new(0);
             let error = deploy_once(
-                false,
+                Ok(()),
                 || {
                     connections.set(connections.get() + 1);
                     Ok(Some(((), true)))
@@ -175,7 +210,7 @@ mod tests {
         let mut attempts = 0;
         assert_eq!(
             prepare_server(
-                false,
+                Ok(()),
                 || {
                     attempts += 1;
                     Ok(Some((attempts, attempts == 2)))
@@ -194,7 +229,7 @@ mod tests {
     fn repeated_rejection_keeps_both_reasons_without_a_second_recovery() {
         let mut replacements = 0;
         let error = prepare_server(
-            false,
+            Ok(()),
             || Ok(Some(((), false))),
             |_| {
                 Err(HelloFailure::other(
@@ -217,7 +252,7 @@ mod tests {
     #[test]
     fn unverified_peer_and_failed_shutdown_cannot_reach_a_retry() {
         let error = prepare_server::<()>(
-            false,
+            Ok(()),
             || Err("unverified server image".into()),
             |_| panic!("unexpected hello"),
             |_, _| panic!("unexpected termination"),
@@ -226,7 +261,7 @@ mod tests {
         assert_eq!(error, "unverified server image");
         let mut connections = 0;
         let error = prepare_server(
-            false,
+            Ok(()),
             || {
                 connections += 1;
                 Ok(Some(((), false)))
@@ -243,56 +278,111 @@ mod tests {
     }
 
     #[test]
-    fn elevated_app_cannot_spawn_or_replace_any_server() {
-        assert!(!can_manage_server(true));
-        assert!(can_manage_server(false));
+    fn management_requires_a_shell_launcher_only_for_elevated_apps() {
+        assert!(can_manage_server(false, false));
+        assert!(can_manage_server(false, true));
+        assert!(!can_manage_server(true, false));
+        assert!(can_manage_server(true, true));
+    }
+
+    #[test]
+    fn unavailable_shell_launcher_cannot_replace_or_deploy() {
+        let hint = "当前 KeyTao 以管理员权限运行，无法使用交互式桌面令牌启动输入法服务";
         for current in [false, true] {
-            for failure in ["eof", "timeout", "HelloErr: access denied"] {
+            for failure in ["eof", "timeout", "HelloErr: access denied", "healthy"] {
+                if current && failure == "healthy" {
+                    continue;
+                }
+                let mut reason = String::new();
                 let error = deploy_once(
-                    true,
+                    Err(hint.into()),
                     || Ok(Some(((), current))),
                     |_| {
-                        Err(if failure == "eof" {
+                        if failure == "healthy" {
+                            reason = "outdated IME server".into();
+                            return Ok(());
+                        }
+                        let error = if failure == "eof" {
                             HelloFailure::read(io::ErrorKind::UnexpectedEof.into(), 0)
                         } else {
                             HelloFailure::other(failure.into())
-                        })
+                        };
+                        reason = error.reason.clone();
+                        Err(error)
                     },
-                    |_, _| panic!("elevated App must not terminate or respawn"),
-                    |_| panic!("failed handshake must not deploy"),
+                    |_, _| panic!("unavailable shell launcher must not terminate or respawn"),
+                    |_| panic!("unprepared server must not deploy"),
                 )
                 .unwrap_err();
-                if failure != "eof" {
-                    assert_eq!(error, failure);
+                if current && failure != "eof" {
+                    assert_eq!(error, reason);
+                } else {
+                    assert_eq!(error, format!("{reason}; {hint}"));
                 }
             }
         }
     }
 
     #[test]
-    fn elevated_app_deploys_to_authenticated_current_or_old_server() {
-        for current in [false, true] {
+    fn elevated_app_with_shell_launcher_replaces_stale_or_silent_server() {
+        assert!(can_manage_server(true, true));
+        for (current, silent) in [(false, false), (false, true), (true, true)] {
+            let mut connections = 0;
+            let mut replacements = 0;
             assert_eq!(
                 deploy_once(
-                    true,
-                    || Ok(Some((42, current))),
-                    |_| Ok(()),
-                    |_, _| panic!("elevated App must not replace an authenticated server"),
+                    Ok(()),
+                    || {
+                        connections += 1;
+                        Ok(Some((connections, current || connections == 2)))
+                    },
                     |connection| {
-                        assert_eq!(connection, 42);
+                        if silent && *connection == 1 {
+                            Err(HelloFailure::read(io::ErrorKind::UnexpectedEof.into(), 0))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |connection, authenticated| {
+                        assert_eq!(connection, 1);
+                        assert_eq!(authenticated, !silent);
+                        replacements += 1;
+                        Ok(())
+                    },
+                    |connection| {
+                        assert_eq!(connection, 2);
                         Ok(())
                     },
                 ),
                 Ok(true)
             );
+            assert_eq!(connections, 2);
+            assert_eq!(replacements, 1);
         }
     }
 
     #[test]
-    fn elevated_app_falls_back_only_when_connection_reports_no_server() {
+    fn current_authenticated_server_needs_no_management_capability() {
+        assert_eq!(
+            deploy_once(
+                Err("shell launcher unavailable".into()),
+                || Ok(Some((42, true))),
+                |_| Ok(()),
+                |_, _| panic!("current server must not be replaced"),
+                |connection| {
+                    assert_eq!(connection, 42);
+                    Ok(())
+                },
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn no_server_fallback_remains_the_callers_decision() {
         assert_eq!(
             deploy_once::<()>(
-                true,
+                Err("shell launcher unavailable".into()),
                 || Ok(None),
                 |_| panic!("no server to authenticate"),
                 |_, _| panic!("elevated App must not spawn"),
@@ -302,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             deploy_once::<()>(
-                true,
+                Err("shell launcher unavailable".into()),
                 || Err("server pipe remains busy".into()),
                 |_| panic!("no connection"),
                 |_, _| panic!("elevated App must not spawn"),
@@ -320,18 +410,24 @@ mod tests {
             HelloFailure::read(io::ErrorKind::UnexpectedEof.into(), 2),
             HelloFailure::other("invalid response".into()),
         ] {
-            let reason = failure.reason.clone();
-            let mut failure = Some(failure);
-            assert_eq!(
-                deploy_once(
-                    false,
-                    || Ok(Some(((), true))),
-                    |_| Err(failure.take().unwrap()),
-                    |_, _| panic!("current server must not be terminated"),
-                    |_| panic!("failed handshake must not deploy"),
-                ),
-                Err(reason)
-            );
+            for management in [Ok(()), Err("当前 KeyTao 以管理员权限运行".into())] {
+                let reason = failure.reason.clone();
+                assert_eq!(
+                    deploy_once(
+                        management,
+                        || Ok(Some(((), true))),
+                        |_| {
+                            Err(HelloFailure {
+                                reason: failure.reason.clone(),
+                                eof_before_reply: failure.eof_before_reply,
+                            })
+                        },
+                        |_, _| panic!("current server must not be terminated"),
+                        |_| panic!("failed handshake must not deploy"),
+                    ),
+                    Err(reason)
+                );
+            }
         }
     }
 
@@ -342,7 +438,7 @@ mod tests {
             let mut hellos = 0;
             assert_eq!(
                 prepare_server(
-                    false,
+                    Ok(()),
                     || {
                         attempts += 1;
                         Ok(Some((attempts, attempts == 2)))

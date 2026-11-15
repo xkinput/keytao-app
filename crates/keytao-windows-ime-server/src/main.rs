@@ -1,5 +1,8 @@
 //! The non-Windows entry point intentionally has no native engine dependencies.
 
+// A GUI-subsystem exe never gets a console, however it is launched.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(any(windows, test))]
 use keytao_ime_ipc::engine_config;
 

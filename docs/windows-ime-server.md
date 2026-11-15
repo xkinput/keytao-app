@@ -2,7 +2,7 @@
 
 Status: Batch 3 已实现，Windows 默认 Pipe；实机验收待完成。Scope: `crates/keytao-windows-ime` (TSF DLL)、server 和 Windows App deploy 路径。
 
-Batch 3 fixes: no-learning fallback reuses a stamped per-user temp directory; explicit `EngineMode=0` keeps startup/deploy in-process; App startup seeds DWORD `EngineMode=1` only when missing.
+Batch 3 fixes: no-learning fallback reuses a stamped per-user temp directory; explicit `EngineMode=0` keeps startup in-process and allows in-process deploy only when the server pipe is absent; App startup seeds DWORD `EngineMode=1` only when missing.
 
 ## 1. 目标 / 非目标
 
@@ -68,6 +68,7 @@ Shift 释放今天会连续调两次 engine（press + `RIME_RELEASE_MASK`，key_
 
 - 主路径：HKCU `Run` 值 `KeyTaoImeServer`，登录时启动。安装器（per-machine，admin）不方便给每个用户写 HKCU，所以由 App 首次启动时写入。卸载脚本已经会删 HKCU Run 的 `KeyTao`（keytao.nsi:175），再加上新值即可。
 - 兜底：App 启动时检测 pipe，不存在就拉起 server。
+- 提权 App 使用交互式 shell 的主 token 启动 server：`GetShellWindow` → 同用户、同会话进程 → `OpenProcessToken` / `DuplicateTokenEx(TokenPrimary)` → `CreateProcessWithTokenW`，不继承 App 的管理员 token。shell 本身已提权（内置 Administrator 或关闭 UAC）时保留其 token；无法取得 shell token 时不启动或终止 server，并提示正常启动 KeyTao。创建进程失败不回退到 App token。使用显式 exe 路径和隐藏控制台标志，进程及 token 句柄均及时释放。参见 [CreateProcessWithTokenW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithtokenw)。
 - 沙箱宿主不能拉起 medium 级 server，因为子进程会继承 AC token。所以 DLL 从不 spawn server。连不上时 DLL 按 2.7 的 fallback 策略处理，并在后台每 5s 重连一次（复用 engine_status.rs:12 的 backoff，上限 60s）。
 - 单实例：pipe 用 `FILE_FLAG_FIRST_PIPE_INSTANCE` 创建；新 server 遇到旧实例时认证后发送 `Shutdown`，在 3s 内重试接管。
 
@@ -134,7 +135,7 @@ client 对 server 做以下检查：
 
 问题在于：server 不可用时如果退回今天的进程内 engine，userdb 多写者问题又回来了。
 
-- Batch 3 默认 `Pipe`。只有 HKCU `Software\KeyTao\Ime` DWORD `EngineMode=0` 使用完整 InProc；缺失、1、不可读或无效值都使用 Pipe。
+- Batch 3 默认 `Pipe`。只有 HKCU `Software\KeyTao\Ime` DWORD `EngineMode=0` 使用 InProc，App 部署还需确认无 server pipe；缺失、1、不可读或无效值都使用 Pipe。
 - 连接或握手失败时，user_dir 使用每用户固定目录 `%TEMP%\keytao-no-learning`（AC 使用自己的私有 Temp），各宿主共用、按 stamp 复用，从已部署数据复制方案、排除 userdb，以桌面部署数据或 AC 公共快照作为 shared data。临时源和编译配置禁用默认及命名 translator 的用户词典；`learning:false` 在后续策略变更中保持，不打开或修复 desktop userdb。
 - 回退写 `keytao-ime-engine.json`（`ok=false, error="server unavailable"`）。后台按 5/10/20/40/60s 重试，连通后标记 reload，下一次 build 切回 Pipe。
 
@@ -147,7 +148,7 @@ client 对 server 做以下检查：
 
 - 现状：App 在自己的进程里跑 `keytao_core::deploy`（ime_status/windows.rs:1459），宿主 stat stamp 文件来感知（state.rs:52, 557）。这本身就是第二个 userdb 写者。
 - Batch 2：deploy 仍由 App 执行；server 监听 InProc 使用的同一个 reload stamp，重新初始化唯一的 runtime 并递增 generation。reload 前创建的 session 随即失效，不能继续处理按键。
-- Batch 3：Pipe 模式只由 server 部署，连接失败不转 App 进程内部署；只有显式 `EngineMode=0` 保留原路径，避免与 watchdog 拉起的 server 同时写 userdb。App 在写 `Deploy` 之前最多恢复一次：验证 pipe peer 的同会话、安装树、server 文件名并持有进程句柄；旧版本握手成功后请求 `Shutdown`，握手失败（包括不支持当前协议的 alpha.7）才终止该已验证进程。确认旧进程退出及旧 pipe 释放后，启动/连接当前安装 server 并重试握手。Shutdown 超时不强杀；一旦开始写 `Deploy`，写入失败或响应失败均不重试。watchdog 与 App 部署/恢复持同一生命周期锁。失败保留原始 `HelloErr` 原因；App 的 `TokenElevation` 为真时提示关闭后正常启动 KeyTao。
+- Batch 3：Pipe 模式只由 server 部署，连接失败不转 App 进程内部署；只有显式 `EngineMode=0` 且确认当前用户、当前会话无 server pipe 才保留原路径，pipe 存在、忙碌或探测失败均禁止进程内部署，避免同时写 userdb。App 在写 `Deploy` 之前最多恢复一次：验证 pipe peer 的同会话、安装树、server 文件名并持有进程句柄；旧版本握手成功后请求 `Shutdown`，旧版本握手失败或任何版本在 Hello 回复前静默 EOF 才终止该已验证进程。当前安装版本的超时、`HelloErr`、部分回复均不终止。确认旧进程退出及旧 pipe 释放后，启动/连接当前安装 server 并重试握手；提权 App 必须先取得 shell 启动 token 才允许替换。Shutdown 超时不强杀；一旦开始写 `Deploy`，写入失败或响应失败均不重试。watchdog 与 App 部署/恢复持同一生命周期锁。失败保留原始服务原因，仅 shell token 获取失败或以该 token 创建进程被拒绝时追加管理员提示；无 pipe 且无法安全启动时也报错，不转进程内部署。
 - 客户端的 `reload_needed()` 改为向 server 请求 `Generation`，在 250ms 缓存内比较，宿主不再 stat 文件。generation 变了就走现有的 `begin_reload_if_changed` 流程，重建 session。
 - `ProfileDeploymentGuard::suspend()`（windows.rs:314）在 Batch 3 里保留，等 Windows 实机确认不需要后再删。
 - schema 切换请求文件和 `keytao-ime-engine.json` 由 server 读写，格式不变，所以 App 侧的读取代码不用改。
@@ -206,7 +207,7 @@ client 对 server 做以下检查：
 验收：
 - macOS 和 Linux CI：`cargo test -p keytao-ime-ipc` 覆盖 framing 往返、超限帧被拒、半帧和 EOF、seq 不匹配、版本协商（N、N-1、N-2 被拒）。把 `keytao-ime-ipc` 加进 `ime-regressions.yml` 的 test 列表。`cargo check --target x86_64-pc-windows-msvc` 覆盖 server 和 dll。
 - Windows 实机：
-  - `EngineMode=0` 时行为与 Batch 1 完全一致。
+  - `EngineMode=0` 且无 server pipe 时，行为与 Batch 1 一致；pipe 存在或探测失败时 App 拒绝进程内部署。
   - `EngineMode=1` 加手动启动 server 后，在记事本和 Edge 打字、翻页、点选候选。用 x86 宿主（32 位记事本或 SysWOW64 应用）和 Windows Search/开始菜单（AppContainer）各验证一次。
   - 测每键 p99 往返延迟（server 日志统计），要求 <5ms。
   - kill server 后宿主不崩溃、按键放行，重新拉起后能继续打字。
@@ -216,7 +217,7 @@ client 对 server 做以下检查：
 
 - 已实现：Windows App 启动写 HKCU Run `KeyTaoImeServer`，定位 HKLM `WindowsImeRuntimeDir` 下的当前架构 server，隐藏控制台拉起，并每 5s 检查 pipe。运行文件放在 Program Files 下的版本化目录；卸载删除 Run 值并停止 server。
 - 两处 App deploy 均优先 RPC，保留 profile suspend；server 使用唯一桌面 runtime 和与 App 相同的已安装 shared data。部署完成后 generation 递增，旧 session 失效。
-- 默认 Pipe，显式 0 保留原 InProc；失败按 2.7 使用临时无学习回退和后台重连。
+- 默认 Pipe，显式 0 保留原 InProc，App 仅在确认无 server pipe 时进程内部署；失败按 2.7 使用临时无学习回退和后台重连。
 - 协议升为 3，接受 3/2。新增 `Shutdown`，仅接受同用户且 exe 位于同一 `%ProgramFiles%\KeyTao\` 安装树的调用者；新实例握手、请求旧实例退出，再在 3s 内重试创建 pipe。已加载的旧 DLL 可继续使用协议 2。
 - Batch 2 server 尚不认识 `Shutdown`；App 部署遇到旧协议握手拒绝时，可以在验证进程后终止旧 server 并恢复一次。正常握手的后续 server 通过 `Shutdown` 热替换。
 
