@@ -40,7 +40,7 @@ TSF loads the IME DLL into each target process, so the package includes x86,
 x64, and ARM64 code. On Windows on ARM, an ARM64X forwarder dispatches to the
 native ARM64 target or the x64 target according to the host process. The
 installer copies the complete runtimes into a unique directory below
-`%ProgramData%\KeyTao\keytao-windows-ime-runtime` before registration. Loaded
+`%ProgramFiles%\KeyTao\keytao-windows-ime-runtime` before registration. Loaded
 TIP files are therefore never overwritten during an upgrade.
 
 ### Host-process startup check

@@ -1,22 +1,7 @@
-use std::path::{Component, Path};
+use std::path::Path;
 
 pub fn installed_caller(caller_sid: &str, server_sid: &str, image: &Path, root: &Path) -> bool {
-    if caller_sid != server_sid
-        || image
-            .components()
-            .chain(root.components())
-            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-    {
-        return false;
-    }
-    let image: Vec<_> = image.components().collect();
-    let root: Vec<_> = root.components().collect();
-    image.len() > root.len()
-        && root.iter().zip(&image).all(|(left, right)| {
-            left.as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-        })
+    caller_sid == server_sid && crate::engine_config::is_descendant(image, root)
 }
 
 #[cfg(test)]

@@ -27,7 +27,7 @@ use windows::{
 use crate::{
     candidate_ui::CandidateUiManager,
     edit_session::with_write_session,
-    engine_backend::{EngineHandle, ImeEngineBackend, InProcEngine},
+    engine_backend::{stamp_changed, EngineHandle, ImeEngineBackend},
     engine_status,
     globals::DllActivityGuard,
     input_context::{
@@ -457,11 +457,10 @@ impl TsfState {
         }
         match &self.runtime {
             Some(runtime) => runtime.reload_needed(),
-            None => InProcEngine::with_reload_stamp(
-                self.reload_stamp_path.clone(),
-                self.reload_stamp_signature.clone(),
-            )
-            .reload_needed(),
+            None => stamp_changed(
+                self.reload_stamp_path.as_deref(),
+                self.reload_stamp_signature.as_deref(),
+            ),
         }
     }
 

@@ -8,8 +8,10 @@ use keytao_theme::{
     scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel, PanelOrientation,
     ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use tiny_skia::*;
+
+use crate::globals::dll_related_dirs;
 
 // ── Font loader ───────────────────────────────────────────────────────────────
 
@@ -752,34 +754,6 @@ pub(crate) fn windows_theme_resolver() -> ThemeResolver {
         windows_bundled_default_theme_path().or_else(keytao_theme::default_bundled_theme_path),
         keytao_theme::default_user_theme_path(),
     )
-}
-
-fn dll_related_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(hmodule) = crate::globals::DLL_INSTANCE.get().copied() {
-        let mut buf = vec![0u16; 32768];
-        let len = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleFileNameW(
-                windows::Win32::Foundation::HMODULE(hmodule as _),
-                &mut buf,
-            )
-        } as usize;
-        if len > 0 {
-            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
-
-    if let Some(parent) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(FsPath::to_path_buf))
-    {
-        dirs.push(parent);
-    }
-
-    dirs
 }
 
 #[inline]

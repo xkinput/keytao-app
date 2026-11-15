@@ -1,5 +1,6 @@
 //! Engine boundary shared by the TSF state and key callbacks.
 
+use crate::globals::dll_related_dirs;
 use keytao_core::{
     default_shared_data_dir, default_user_data_dir, ImeRuntime, ImeRuntimeSession, ImeState,
     InputContextPolicy, KeyProcessResult, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
@@ -24,6 +25,17 @@ use windows::{
 };
 
 const ENGINE_INIT_MUTEX_TIMEOUT_MS: u32 = 30_000;
+
+pub(crate) fn stamp_changed(path: Option<&Path>, signature: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    // A missing stamp is not a reload request, matching ReloadStampWatcher.
+    let Some(current) = ReloadStamp::signature_at(path) else {
+        return false;
+    };
+    signature != Some(current.as_str())
+}
 
 pub struct EngineHandle {
     pub schema_id: String,
@@ -202,18 +214,6 @@ impl InProcEngine {
             }),
             ..Self::default()
         })
-    }
-
-    /// Retain stamp checks when a failed reload has already dropped its engine.
-    pub(crate) fn with_reload_stamp(path: Option<PathBuf>, signature: Option<String>) -> Self {
-        Self {
-            inner: Mutex::new(InProcState {
-                reload_stamp_path: path,
-                reload_stamp_signature: signature,
-                ..InProcState::default()
-            }),
-            ..Self::default()
-        }
     }
 
     pub(crate) fn reload_stamp(&self) -> (Option<PathBuf>, Option<String>) {
@@ -467,14 +467,7 @@ impl ImeEngineBackend for InProcEngine {
             return true;
         }
         let (path, signature) = self.reload_stamp();
-        let Some(path) = path else {
-            return false;
-        };
-        // A missing stamp is not a reload request, matching ReloadStampWatcher.
-        let Some(current) = ReloadStamp::signature_at(&path) else {
-            return false;
-        };
-        signature.as_deref() != Some(current.as_str())
+        stamp_changed(path.as_deref(), signature.as_deref())
     }
 
     fn status_error(&self) -> Option<&'static str> {
@@ -648,32 +641,4 @@ fn bundled_shared_data_dir() -> Option<String> {
 
 fn server_shared_data_dir() -> String {
     bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir)
-}
-
-fn dll_related_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(hmodule) = crate::globals::DLL_INSTANCE.get().copied() {
-        let mut buf = vec![0u16; 32768];
-        let len = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleFileNameW(
-                windows::Win32::Foundation::HMODULE(hmodule as _),
-                &mut buf,
-            )
-        } as usize;
-        if len > 0 {
-            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
-
-    if let Some(parent) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-    {
-        dirs.push(parent);
-    }
-
-    dirs
 }
