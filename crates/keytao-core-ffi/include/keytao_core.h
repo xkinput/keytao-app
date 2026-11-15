@@ -246,6 +246,12 @@ char *keytao_session_state_json(void *session);
 
 char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);
 
+char *keytao_session_process_key_with_panel_json(void *session,
+                                                 uint32_t keyval,
+                                                 uint32_t modifiers,
+                                                 bool panel_visible,
+                                                 bool vertical);
+
 /**
  * Handle `Return` the way every frontend must: librime decides, and only if it
  * passes the key back is the raw input committed.

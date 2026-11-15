@@ -954,9 +954,8 @@ mod desktop {
         if !full_deploy_and_wait().map_err(|error| deploy_log.failure_message(Some(&error)))? {
             return Err(deploy_log.failure_message(None));
         }
-        validate_deployed_schema_files(user_dir).map_err(|error| {
-            deploy_log.failure_message(Some(&format!("部署验证失败：{error}")))
-        })?;
+        validate_deployed_schema_files(user_dir)
+            .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
         complete_deployment(user_dir)
     }
 
@@ -3291,6 +3290,70 @@ pub mod key_policy {
     /// `0x01000000 | codepoint`.
     pub const XK_UNICODE_BASE: u32 = 0x0100_0000;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum CandidatePanelLayout {
+        Hidden,
+        Horizontal,
+        Vertical,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum CandidateArrowAction {
+        PreviousCandidate,
+        NextCandidate,
+        PreviousPage,
+        NextPage,
+    }
+
+    impl CandidateArrowAction {
+        // Private keycodes outside X11's Unicode range also travel through
+        // the Windows engine pipe without changing its key-event protocol.
+        fn keycode(self) -> u32 {
+            0x0200_0000 + self as u32
+        }
+
+        pub(super) fn from_keycode(keycode: u32) -> Option<Self> {
+            match keycode {
+                0x0200_0000 => Some(Self::PreviousCandidate),
+                0x0200_0001 => Some(Self::NextCandidate),
+                0x0200_0002 => Some(Self::PreviousPage),
+                0x0200_0003 => Some(Self::NextPage),
+                _ => None,
+            }
+        }
+    }
+
+    pub fn candidate_arrow_action(
+        sym: u32,
+        mods: u32,
+        state: &ImeState,
+        panel: CandidatePanelLayout,
+    ) -> Option<CandidateArrowAction> {
+        use CandidateArrowAction::*;
+        use CandidatePanelLayout::*;
+        if state.candidates.is_empty() || super::rime_modifier_mask(mods) != 0 {
+            return None;
+        }
+        match (panel, sym) {
+            (Vertical, XK_UP) | (Horizontal, XK_LEFT) => Some(PreviousCandidate),
+            (Vertical, XK_DOWN) | (Horizontal, XK_RIGHT) => Some(NextCandidate),
+            (Vertical, XK_LEFT) | (Horizontal, XK_UP) => Some(PreviousPage),
+            (Vertical, XK_RIGHT) | (Horizontal, XK_DOWN) => Some(NextPage),
+            _ => None,
+        }
+    }
+
+    /// Map visible-panel arrows to core navigation, independently of the
+    /// schema's selector bindings and preedit caret position.
+    pub fn candidate_arrow_key(
+        sym: u32,
+        mods: u32,
+        state: &ImeState,
+        panel: CandidatePanelLayout,
+    ) -> u32 {
+        candidate_arrow_action(sym, mods, state, panel).map_or(sym, CandidateArrowAction::keycode)
+    }
+
     /// What a frontend should do with `Return`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum EnterAction {
@@ -3513,6 +3576,60 @@ mod ime_runtime_tests {
         ];
         state.select_keys = select_keys.map(str::to_owned);
         state
+    }
+
+    #[test]
+    fn candidate_arrows_follow_the_visible_panel_orientation() {
+        use key_policy::{CandidateArrowAction::*, CandidatePanelLayout::*, *};
+        let state = state_with_candidates(None);
+        for (panel, keys) in [
+            (Vertical, [XK_UP, XK_DOWN, XK_LEFT, XK_RIGHT]),
+            (Horizontal, [XK_LEFT, XK_RIGHT, XK_UP, XK_DOWN]),
+        ] {
+            for (key, action) in
+                keys.into_iter()
+                    .zip([PreviousCandidate, NextCandidate, PreviousPage, NextPage])
+            {
+                assert_eq!(candidate_arrow_action(key, 0, &state, panel), Some(action));
+                assert_eq!(
+                    CandidateArrowAction::from_keycode(candidate_arrow_key(key, 0, &state, panel)),
+                    Some(action)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_arrows_preserve_hidden_empty_and_modified_keys() {
+        use key_policy::{CandidatePanelLayout::*, *};
+        let state = state_with_candidates(None);
+        let mut no_candidates = state.clone();
+        no_candidates.candidates.clear();
+        for key in [XK_LEFT, XK_RIGHT, XK_UP, XK_DOWN] {
+            for panel in [Horizontal, Vertical, Hidden] {
+                for empty in [ImeState::empty(), no_candidates.clone()] {
+                    assert_eq!(candidate_arrow_key(key, 0, &empty, panel), key);
+                }
+                for mods in [
+                    RIME_MOD_SHIFT,
+                    RIME_MOD_CONTROL,
+                    RIME_MOD_ALT,
+                    RIME_MOD_SUPER,
+                    RIME_MOD_META,
+                    RIME_RELEASE_MASK,
+                ] {
+                    assert_eq!(candidate_arrow_key(key, mods, &state, panel), key);
+                }
+            }
+            assert_eq!(candidate_arrow_key(key, 0, &state, Hidden), key);
+            assert_ne!(
+                candidate_arrow_key(key, RIME_MOD_LOCK, &state, Vertical),
+                key
+            );
+        }
+        for key in [b'a' as u32, XK_SPACE, XK_RETURN, XK_PAGE_UP, XK_PAGE_DOWN] {
+            assert_eq!(candidate_arrow_key(key, 0, &state, Vertical), key);
+        }
     }
 
     #[test]
@@ -4392,7 +4509,38 @@ impl ImeRuntimeSession {
                 let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
                     && english_mode.mode == english_mode::EnglishMode::Schema;
                 let before = desktop_dictionary && engine.is_ascii_mode();
-                let mut result = engine.process_key_result(keycode, mask);
+                let mut result = if mask == 0 {
+                    key_policy::CandidateArrowAction::from_keycode(keycode)
+                        .map(|action| {
+                            use key_policy::CandidateArrowAction::*;
+                            let state = engine.state();
+                            let Some(index) = key_policy::highlighted_candidate_index(&state)
+                            else {
+                                return KeyProcessResult {
+                                    state,
+                                    accepted: false,
+                                };
+                            };
+                            let state = match action {
+                                PreviousCandidate if index > 0 => {
+                                    engine.highlight_candidate_on_page(index - 1)
+                                }
+                                NextCandidate if index + 1 < state.candidates.len() => {
+                                    engine.highlight_candidate_on_page(index + 1)
+                                }
+                                PreviousPage if state.page > 0 => engine.change_page(true),
+                                NextPage if !state.is_last_page => engine.change_page(false),
+                                _ => state,
+                            };
+                            KeyProcessResult {
+                                state,
+                                accepted: true,
+                            }
+                        })
+                        .unwrap_or_else(|| engine.process_key_result(keycode, mask))
+                } else {
+                    engine.process_key_result(keycode, mask)
+                };
                 // Mobile keyboards already select schemas themselves. Desktop
                 // ascii_composer toggles become dictionary-mode switches only
                 // when the user explicitly selected the schema preference.
@@ -4978,10 +5126,15 @@ fn legacy_active_local_manifest(data_dir: &Path) -> Option<serde_json::Value> {
         &std::fs::read(data_dir.join("scheme-packages/active-manifest.json")).ok()?,
     )
     .ok()?;
-    if manifest["scheme_key"].as_str().is_some_and(|actual| actual != key) {
+    if manifest["scheme_key"]
+        .as_str()
+        .is_some_and(|actual| actual != key)
+    {
         return None;
     }
-    manifest.as_object_mut()?.insert("scheme_key".into(), key.into());
+    manifest
+        .as_object_mut()?
+        .insert("scheme_key".into(), key.into());
     Some(manifest)
 }
 
@@ -5846,10 +5999,32 @@ pub fn strip_rime_lua_gc_tuning(content: &str) -> String {
                         || (!terminated && next.starts_with(['.', ':', '[', '(', '{', '\'', '"']))
                         || matches!(
                             previous_token,
-                            "=" | "." | ":" | "," | "+" | "-" | "*" | "/" | "%" | "^"
-                                | "<" | ">" | "~" | "#" | "&" | "|" | "and" | "or" | "not"
-                                | "return" | "local" | "function"
-                                | "if" | "elseif" | "while" | "until" | "in"
+                            "=" | "."
+                                | ":"
+                                | ","
+                                | "+"
+                                | "-"
+                                | "*"
+                                | "/"
+                                | "%"
+                                | "^"
+                                | "<"
+                                | ">"
+                                | "~"
+                                | "#"
+                                | "&"
+                                | "|"
+                                | "and"
+                                | "or"
+                                | "not"
+                                | "return"
+                                | "local"
+                                | "function"
+                                | "if"
+                                | "elseif"
+                                | "while"
+                                | "until"
+                                | "in"
                         );
                     if complete
                         && !continuation
@@ -6570,7 +6745,10 @@ mod tests {
 
     #[test]
     fn schema_install_state_accepts_legacy_installed_local_manifest() {
-        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("keytao-legacy-local-state-{suffix}"));
         std::fs::create_dir_all(dir.join("scheme-packages")).unwrap();
         let mut state = serde_json::json!({
@@ -6581,11 +6759,23 @@ mod tests {
         let manifest = serde_json::json!({
             "root": dir.canonicalize().unwrap(), "manifest": {"example.schema.yaml": "hash"}
         });
-        std::fs::write(dir.join("scheme-packages/active-manifest.json"), manifest.to_string()).unwrap();
+        std::fs::write(
+            dir.join("scheme-packages/active-manifest.json"),
+            manifest.to_string(),
+        )
+        .unwrap();
         let restored = super::legacy_active_local_manifest(&dir).unwrap();
         assert_eq!(restored["scheme_key"], "local-example");
-        std::fs::write(dir.join(super::ACTIVE_SCHEME_MANIFEST), restored.to_string()).unwrap();
-        std::fs::write(dir.join("default.custom.yaml"), "patch:\n  schema_list:\n    - schema: example\n").unwrap();
+        std::fs::write(
+            dir.join(super::ACTIVE_SCHEME_MANIFEST),
+            restored.to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: example\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("example.schema.yaml"), "schema: {}\n").unwrap();
         assert!(schema_install_state(&dir).installed);
         state["installed_packages"] = serde_json::json!({});
@@ -7071,14 +7261,20 @@ mod tests {
         );
         let package = "collectgarbage('setpause', 150)\ncollectgarbage(\"setstepmul\", 200)\n";
         let (merged, renames) = merge_rime_lua_content(Some(local), package, &HashSet::new());
-        assert_eq!(merged, format!("{package}{}", concat!(
-            "old_pause = collectgarbage([=[setpause]=], 50)\n",
-            "user_module = require('personal')\n",
-            "user_flag = true\n",
-            "collectgarbage('collect')\n",
-            "mycollectgarbage('setpause', 60)\n",
-            "message = 'collectgarbage(\"setpause\", 50)'\n",
-        )));
+        assert_eq!(
+            merged,
+            format!(
+                "{package}{}",
+                concat!(
+                    "old_pause = collectgarbage([=[setpause]=], 50)\n",
+                    "user_module = require('personal')\n",
+                    "user_flag = true\n",
+                    "collectgarbage('collect')\n",
+                    "mycollectgarbage('setpause', 60)\n",
+                    "message = 'collectgarbage(\"setpause\", 50)'\n",
+                )
+            )
+        );
         assert!(renames.is_empty());
         assert_eq!(
             merge_rime_lua_content(None, package, &HashSet::new()).0,
@@ -7106,15 +7302,17 @@ mod tests {
         );
         let package = "same = require('package')\nfunction package_function()\nend\n";
         let files = HashSet::from(["custom.lua".to_string()]);
-        let (merged, renames) = super::merge_rime_lua_content_preserving_local_lines(
-            Some(local), package, &files,
-        );
+        let (merged, renames) =
+            super::merge_rime_lua_content_preserving_local_lines(Some(local), package, &files);
         let expected_local = local
             .strip_prefix("same = require('package')\n")
             .unwrap()
             .replacen("require('custom')", "require('custom_user')", 1);
         assert_eq!(merged, format!("{package}{expected_local}"));
-        assert_eq!(renames, vec![("custom".to_string(), "custom_user".to_string())]);
+        assert_eq!(
+            renames,
+            vec![("custom".to_string(), "custom_user".to_string())]
+        );
     }
 
     #[test]
@@ -7173,7 +7371,10 @@ mod tests {
 
     #[test]
     fn prune_rime_logs_keeps_newest_twenty_and_preserves_other_files() {
-        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("keytao-glog-prune-{suffix}"));
         std::fs::create_dir_all(&dir).unwrap();
         let levels = ["INFO", "WARNING", "ERROR", "FATAL"];
@@ -7185,7 +7386,12 @@ mod tests {
                 .unwrap();
             names.push(name);
         }
-        for name in ["keytao-app.log", "keytao-ime.log", "rime.log.INFO", "other.txt"] {
+        for name in [
+            "keytao-app.log",
+            "keytao-ime.log",
+            "rime.log.INFO",
+            "other.txt",
+        ] {
             std::fs::write(dir.join(name), "keep").unwrap();
         }
         std::fs::create_dir(dir.join("directory.log.INFO.keep")).unwrap();
@@ -7193,7 +7399,12 @@ mod tests {
         for (index, name) in names.iter().enumerate() {
             assert_eq!(dir.join(name).exists(), index >= 5, "{name}");
         }
-        for name in ["keytao-app.log", "keytao-ime.log", "rime.log.INFO", "other.txt"] {
+        for name in [
+            "keytao-app.log",
+            "keytao-ime.log",
+            "rime.log.INFO",
+            "other.txt",
+        ] {
             assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "keep");
         }
         assert!(dir.join("directory.log.INFO.keep").is_dir());

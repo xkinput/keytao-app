@@ -58,6 +58,77 @@ fn type_code(session: &ImeRuntimeSession) -> ImeState {
 }
 
 #[test]
+fn panel_arrows_navigate_without_caret_motion_commits_or_wrapping() {
+    use keytao_core::key_policy::{self, CandidatePanelLayout::*, *};
+    let _serialized = serialized();
+    let (runtime, dir) = deployed_runtime("panel-arrows");
+    let session = runtime.create_session().expect("create a session");
+    for (panel, previous, next, previous_page, next_page) in [
+        (Vertical, XK_UP, XK_DOWN, XK_LEFT, XK_RIGHT),
+        (Horizontal, XK_LEFT, XK_RIGHT, XK_UP, XK_DOWN),
+    ] {
+        for option in ["_horizontal", "_linear", "_vertical"] {
+            session.set_option(option, true).unwrap();
+        }
+        type_code(&session);
+        let press = |key| {
+            let before = session.state();
+            let mapped = key_policy::candidate_arrow_key(key, 0, &before, panel);
+            let result = session.process_key_result(mapped, 0).unwrap();
+            assert!(result.accepted);
+            assert_eq!(result.state.preedit, before.preedit);
+            assert_eq!(result.state.cursor, before.cursor);
+            assert!(result.state.committed.is_none());
+            result.state
+        };
+        assert_eq!(press(previous).highlighted_candidate_index, 0);
+        assert_eq!(press(previous_page).page, 0);
+        assert_eq!(press(next).highlighted_candidate_index, 1);
+        assert_eq!(press(previous).highlighted_candidate_index, 0);
+        assert_eq!(press(next_page).page, 1);
+        assert_eq!(press(next_page).page, 1);
+        assert_eq!(press(previous_page).page, 0);
+        session
+            .highlight_candidate_on_page(smoke_fixture::PAGE_SIZE - 1)
+            .unwrap();
+        let last = press(next);
+        assert_eq!(last.page, 0);
+        assert_eq!(
+            last.highlighted_candidate_index,
+            smoke_fixture::PAGE_SIZE - 1
+        );
+        press(next_page);
+        let last_index = session.state().candidates.len() - 1;
+        session.highlight_candidate_on_page(last_index).unwrap();
+        assert_eq!(press(next).highlighted_candidate_index, last_index);
+
+        type_code(&session);
+        let highlighted = press(next);
+        let committed = session.process_key_result(XK_SPACE, 0).unwrap();
+        assert_eq!(
+            committed.state.committed.as_deref(),
+            Some(highlighted.candidates[1].text.as_str())
+        );
+        for key in [previous, next, previous_page, next_page] {
+            let empty = session.state();
+            assert_eq!(key_policy::candidate_arrow_key(key, 0, &empty, panel), key);
+            assert!(!session.process_key_result(key, 0).unwrap().accepted);
+        }
+    }
+    for option in ["_horizontal", "_linear", "_vertical"] {
+        session.set_option(option, false).unwrap();
+    }
+    type_code(&session);
+    let before = session.state();
+    let key = key_policy::candidate_arrow_key(XK_LEFT, 0, &before, Hidden);
+    let result = session.process_key_result(key, 0).unwrap();
+    assert!(result.state.cursor < before.cursor);
+    drop(session);
+    drop(runtime);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_shift_mode_switch_can_commit_text_even_when_rime_rejects_the_release() {
     let _serialized = serialized();
     let dir = smoke_fixture::scratch_dir("shift-release-commit");
