@@ -54,6 +54,7 @@ struct KeyTaoImeState: Decodable {
     var selEnd: Int
     var committed: String
     var asciiMode: Bool
+    var englishMode: Bool
     var accepted: Bool
     var candidatePanel: KeyTaoPanelModel
     var modeHint: KeyTaoModeHintModel
@@ -69,6 +70,7 @@ struct KeyTaoImeState: Decodable {
         selEnd: 0,
         committed: "",
         asciiMode: false,
+        englishMode: false,
         accepted: false,
         candidatePanel: .empty,
         modeHint: .empty
@@ -81,6 +83,7 @@ struct KeyTaoImeState: Decodable {
         case selEnd
         case committed
         case asciiMode
+        case englishMode
         case accepted
         case candidatePanel
         case modeHint
@@ -98,6 +101,7 @@ struct KeyTaoImeState: Decodable {
         selEnd = Self.decode(container, .selEnd, empty.selEnd)
         committed = Self.decode(container, .committed, empty.committed)
         asciiMode = Self.decode(container, .asciiMode, empty.asciiMode)
+        englishMode = Self.decode(container, .englishMode, asciiMode)
         accepted = Self.decode(container, .accepted, empty.accepted)
         candidatePanel = Self.decode(container, .candidatePanel, empty.candidatePanel)
         modeHint = Self.decode(container, .modeHint, empty.modeHint)
@@ -110,6 +114,7 @@ struct KeyTaoImeState: Decodable {
         selEnd: Int,
         committed: String,
         asciiMode: Bool,
+        englishMode: Bool,
         accepted: Bool,
         candidatePanel: KeyTaoPanelModel,
         modeHint: KeyTaoModeHintModel
@@ -120,6 +125,7 @@ struct KeyTaoImeState: Decodable {
         self.selEnd = selEnd
         self.committed = committed
         self.asciiMode = asciiMode
+        self.englishMode = englishMode
         self.accepted = accepted
         self.candidatePanel = candidatePanel
         self.modeHint = modeHint

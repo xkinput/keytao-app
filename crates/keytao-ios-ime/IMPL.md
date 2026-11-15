@@ -228,8 +228,8 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 
 队列已有待处理文字时，后续退格、退格手势、直输文字和文档编辑命令也按顺序排队，避免「输入 a → 退格」先删除宿主旧文、随后又重放 a，或直输 Emoji 跑到待输入文字前面。队列为空时这些操作仍即时执行；布局、Shift、面板与键盘切换不因此延迟。初始化回调先复位 `runtimeStarting`，重放时先取走队列快照，避免命令再次入队。
 
-- `keytao_init` + `keytao_create_session` + App Group 目录种子写入在专用串行队列上执行（`KeyTaoIOSEngine.ensureReadyAsync`），只有 session 指针回到主队列安装，`viewDidLoad` 不再同步阻塞首帧；加载期间候选栏显示「正在加载键道方案…」。
-- `keyboard.yaml` 只在文件缺失或为空时种子写入，不再按字符串启发式覆盖用户已经编辑过的布局。
+- `keytao_init` and `keytao_create_session` run on the dedicated serial queue in `KeyTaoIOSEngine.ensureReadyAsync`; only the session pointer returns to the main queue for installation, keeping runtime initialization off the first-frame path. The candidate bar shows its loading status while initialization is pending.
+- The containing app seeds `keyboard.yaml` when it is missing or empty, and refreshes untouched defaults when their hash matches `.keyboard.seed`, or a known legacy default hash when no seed hash exists. Edited layouts with other hashes are preserved; the extension does not seed shared files.
 - `didReceiveMemoryWarning` 释放可重建缓存：剪贴板历史、按键重放队列、展开候选、logo 图片、theme/config 缓存；session 与已部署方案不动，打字不受影响。
 - App Group 共享文件可能正被主 App 写入，`resolveTheme` / `loadConfig` 解析结果为空时保留上一次成功的 theme/config，而不是回退到内置默认值。
 

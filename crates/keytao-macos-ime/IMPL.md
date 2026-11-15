@@ -7,7 +7,6 @@
 ## 代码地图
 
 - `Sources/KeyTaoIME/main.swift`：Swift 可执行入口、输入源管理命令、`IMKServer` 创建、accessory app run loop。
-- `Sources/KeyTaoIME/IMKSetup.swift`：保留的 C ABI setup helper，目前不是 `build.sh` 产物的主入口。
 - `Sources/KeyTaoIME/InputSourceInstaller.swift`：TIS 注册、启用、选择、禁用旧输入源、列出 KeyTao 输入源。
 - `Sources/KeyTaoIME/EngineInit.swift`：用户目录/共享目录解析，以及 `KeyTaoRuntime` —— 进程级一次性初始化、UI 能力声明、reload stamp 文件监听。
 - `Sources/KeyTaoIME/ImeState.swift`：FFI JSON 状态的 Swift DTO（`KeyTaoImeState` / `KeyTaoPanelModel` / `KeyTaoModeHintModel`）与 Unicode 标量偏移 → UTF-16 换算。
@@ -130,8 +129,6 @@ macOS 发行包只构建 pkg，不构建 dmg。原因是 KeyTao 同时包含普�
 8. controller deinit 时调用 `keytao_destroy_session()` 并注销通知观察者。
 
 `handleEvent:client:` 是客户端进程的同步调用，输入法在其中阻塞会拖住前台应用的事件循环。因此 librime 初始化、部署检测、reload stamp 读取一律不在 IMK 回调线程上做。
-
-`IMKSetup.swift` 中的 `keytao_imk_setup()` 也会创建 `IMKServer` 并保存在全局，但当前 `build.sh` 直接编译 Swift 可执行文件，主路径是 `main.swift`。
 
 ## 用户目录
 
