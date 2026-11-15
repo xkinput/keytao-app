@@ -202,6 +202,8 @@ class AppController extends ChangeNotifier {
   core.AddonStatusDto? addon;
   Map<String, dynamic>? storage;
   Map<String, dynamic>? ime;
+  bool iosKeyboardEnabled = false;
+  bool? iosKeyboardFullAccess;
   MacosImeStatusDto? macosIme;
   WindowsImeStatusDto? windowsIme;
   LinuxImeStatusDto? linuxIme;
@@ -828,6 +830,16 @@ class AppController extends ChangeNotifier {
           ime = await android.imeStatus();
         }),
       ]);
+    } else if (isIos) {
+      iosKeyboardEnabled = false;
+      iosKeyboardFullAccess = null;
+      await read(() async {
+        final status = await const IosHost().keyboardStatus();
+        iosKeyboardEnabled = status['enabled'] == true;
+        iosKeyboardFullAccess = iosKeyboardEnabled
+            ? status['fullAccess'] == true
+            : null;
+      });
     } else if (isWindows) {
       await read(_readWindowsIme);
     } else if (isLinux) {
@@ -840,7 +852,7 @@ class AppController extends ChangeNotifier {
           rethrow;
         }
       });
-    } else if (!isIos) {
+    } else {
       macosIme = null;
       await read(() async {
         try {

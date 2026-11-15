@@ -252,6 +252,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             KeyTaoLog.memorySnapshot("view_will_appear")
         }
         super.viewWillAppear(animated)
+        let statusDefaults = UserDefaults(suiteName: KeyTaoIOSPaths.appGroupIdentifier)
+        statusDefaults?.set(hasFullAccess, forKey: "keyboardFullAccess")
+        statusDefaults?.set(Date().timeIntervalSince1970, forKey: "keyboardStatusUpdatedAt")
         refreshRuntimeLogCollection()
         // The keyboard is coming back for a (possibly different) input context:
         // start from a clean composition instead of resurrecting whatever the

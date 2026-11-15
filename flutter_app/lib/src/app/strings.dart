@@ -41,14 +41,14 @@ abstract final class AppStrings {
   static const iosOnboarding = '启用 KeyTao 键盘';
   static const fullAccess = '允许完全访问';
   static const deployScheme = '部署方案';
-  static const iosOpenApp = '先打开一次 KeyTao 主 App。';
   static const iosAddKeyboard = '进入 设置 > 通用 > 键盘 > 键盘 > 添加新键盘。';
   static const iosChooseKeyboard = '在第三方键盘中选择 KeyTao 输入法。';
-  static const iosEnableFullAccess = '再次进入 KeyTao 输入法设置，按需开启 允许完全访问。';
+  static const iosEnableFullAccess = '请为 KeyTao 开启“允许完全访问”。';
   static const iosInstallDeploy = '回到 KeyTao 主 App，安装方案并执行部署。';
   static const iosGlobe = '打开任意普通文本框，长按地球键并选择 KeyTao 输入法。';
-  static const iosFullAccessDescription =
-      'KeyTao 需要“允许完全访问”才能通过 App Group 与主 App 共享已安装方案、主题和部署状态。不开放时，键盘只能使用扩展自身容器或包内的基础数据。';
+  static const iosFullAccessDescription = '允许完全访问后，键盘才能使用主 App 中的方案和主题。';
+  static const iosKeyboardStatusRefresh = '打开一次 KeyTao 键盘即可刷新状态。';
+  static const iosKeyboardReady = '已启用 · 已允许完全访问';
   static const mobileKeyboard = '移动端键盘';
   static const customDirectory = '安装到自定义目录';
   static const customDirectoryDescription = '将方案安装到指定的输入法数据目录，安装完成后请手动重新部署输入法。';

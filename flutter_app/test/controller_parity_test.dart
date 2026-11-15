@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
+import 'package:keytao/src/platform/ios_host.dart';
 import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
@@ -459,6 +460,15 @@ void main() {
   });
 
   Future<File> prepareIosUpgrade() async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(IosHost.channel, (call) async {
+      expect(call.method, 'keyboardStatus');
+      return {'enabled': true, 'fullAccess': true};
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(IosHost.channel, null),
+    );
     final root = await Directory.systemTemp.createTemp('keytao-ios-upgrade-');
     addTearDown(() => root.delete(recursive: true));
     final shared = await Directory('${root.path}/rime-data').create();

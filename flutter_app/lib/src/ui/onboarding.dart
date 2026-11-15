@@ -152,7 +152,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
     final description = switch (step) {
       SetupStep.enable =>
         c.isIos
-            ? '${AppStrings.iosOpenApp}\n${AppStrings.iosAddKeyboard}\n${AppStrings.iosChooseKeyboard}'
+            ? '${AppStrings.iosAddKeyboard}\n${AppStrings.iosChooseKeyboard}'
             : AppStrings.enableDescription,
       SetupStep.fullAccess =>
         '${AppStrings.iosEnableFullAccess}\n${AppStrings.iosFullAccessDescription}',
@@ -274,17 +274,10 @@ class _OnboardingPageState extends State<OnboardingPage> {
                                           ? FButtonVariant.primary
                                           : FButtonVariant.outline,
                                       selected: i == _index,
-                                      semanticsLabel: c.isIos
-                                          ? '${i + 1}. ${steps[i].title}'
-                                          : '${i + 1}. ${steps[i].title}，${_done(steps[i]) ? '已完成' : '待完成'}',
+                                      semanticsLabel:
+                                          '${i + 1}. ${steps[i].title}，${_done(steps[i]) ? '已完成' : '待完成'}',
                                       onPress: () => _move(i),
-                                      child:
-                                          _done(steps[i]) &&
-                                              !(c.isIos &&
-                                                  (steps[i] ==
-                                                          SetupStep.enable ||
-                                                      steps[i] ==
-                                                          SetupStep.fullAccess))
+                                      child: _done(steps[i])
                                           ? const Icon(
                                               FLucideIcons.check,
                                               size: 16,
@@ -317,10 +310,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         Section(
                           title: c.isMobile ? AppStrings.imeSettings : '设置状态',
                           children: [
-                            if (!(c.isIos &&
-                                (step == SetupStep.enable ||
-                                    step == SetupStep.fullAccess)))
-                              Text(_done(step) ? '已完成' : '待完成'),
+                            Text(_done(step) ? '已完成' : '待完成'),
                             Text(description),
                             if (step == SetupStep.component &&
                                 !_done(step)) ...[

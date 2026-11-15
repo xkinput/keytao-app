@@ -92,10 +92,9 @@ enum SetupStep {
     component => c.macosIme?.installed == true,
     install => c.local?.installed == true,
     deploy => c.local?.deployed == true,
-    // iOS exposes no keyboard/Full Access status query. These are guidance
-    // pages, not detected system prerequisites; the UI does not mark them done.
-    enable => c.isIos || c.ime?['enabled'] == true,
-    fullAccess => c.isIos,
+    // iOS reads the keyboard list and Full Access recorded by the extension.
+    enable => c.isIos ? c.iosKeyboardEnabled : c.ime?['enabled'] == true,
+    fullAccess => c.isIos && c.iosKeyboardFullAccess == true,
     select => c.ime?['selected'] == true,
     finish => c.setupReady,
   };
