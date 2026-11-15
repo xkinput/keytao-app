@@ -1,8 +1,7 @@
-use crate::{
-    Core, CoreError, CoreEvent, events::InstallProgress, scheme_files::parse_schema_list,
-    scheme_types::*,
-};
+use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme_types::*};
 use serde::Deserialize;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 #[cfg(any(target_os = "windows", target_os = "android"))]
 use std::path::Path;
 use std::{collections::HashSet, path::PathBuf};
@@ -163,25 +162,9 @@ pub fn prepare_rime_lua_install(
     (cleaned, Vec::new())
 }
 
-pub fn merge_default_custom(
-    existing: Option<&str>,
-    zip_content: &str,
-) -> (String, Vec<String>) {
-    keytao_core::merge_default_custom_content(existing, zip_content).unwrap_or_else(|_| {
-        let user: Vec<String> = existing
-            .map(|c| {
-                parse_schema_list(c)
-                    .into_iter()
-                    .filter(|s| {
-                        !["keytao", "txjx", "xmjd6", "keydo"]
-                            .iter()
-                            .any(|prefix| s.starts_with(prefix))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        (zip_content.to_string(), user)
-    })
+pub fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
+    keytao_core::merge_default_custom_content(existing, zip_content)
+        .unwrap_or_else(|_| (zip_content.to_string(), Vec::new()))
 }
 
 pub(crate) fn merge_local_default_custom(
@@ -222,33 +205,15 @@ fn verify_install(
 ) -> Vec<VerifyEntry> {
     let mut entries: Vec<VerifyEntry> = Vec::new();
 
-    // Verify default.custom.yaml content matches what we wrote
-    if let Some(expected) = expected_dc {
-        let path = dest.join("default.custom.yaml");
-        let label = "default.custom.yaml".to_string();
-        match std::fs::read_to_string(&path) {
-            Ok(actual) if actual == expected => entries.push(VerifyEntry {
-                path: label,
-                ok: true,
-                note: "内容一致".into(),
-            }),
-            Ok(_) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: "内容与写入时不符，可能被其他程序修改或写入不完整".into(),
-            }),
-            Err(e) => entries.push(VerifyEntry {
-                path: label,
-                ok: false,
-                note: format!("读取失败: {e}"),
-            }),
-        }
-    }
-
-    // Verify rime.lua content matches what we wrote
-    if let Some(expected) = expected_rl {
-        let path = dest.join("rime.lua");
-        let label = "rime.lua".to_string();
+    for (name, expected) in [
+        ("default.custom.yaml", expected_dc),
+        ("rime.lua", expected_rl),
+    ] {
+        let Some(expected) = expected else {
+            continue;
+        };
+        let path = dest.join(name);
+        let label = name.to_string();
         match std::fs::read_to_string(&path) {
             Ok(actual) if actual == expected => entries.push(VerifyEntry {
                 path: label,
@@ -374,15 +339,16 @@ fn write_file_privileged_fallback(
     path: &std::path::Path,
     content: &[u8],
 ) -> Result<&'static str, String> {
-    let tmp = std::env::temp_dir().join("keytao_privileged_write");
-    std::fs::write(&tmp, content).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| format!("临时文件写入失败: {e}"))?;
+    tmp.write_all(content)
+        .and_then(|_| tmp.as_file().sync_all())
+        .map_err(|e| format!("临时文件写入失败: {e}"))?;
     let result = std::process::Command::new("pkexec")
         .arg("cp")
         .arg("--")
-        .arg(&tmp)
+        .arg(tmp.path())
         .arg(path)
         .output();
-    let _ = std::fs::remove_file(&tmp);
     match result {
         Ok(o) if o.status.success() => Ok(" [root]"),
         Ok(o) => Err(format!(

@@ -303,14 +303,8 @@ pub async fn lookup_user_word(
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     runtime::dto(
-        keytao_app_core::user_words::lookup_user_word(
-            &state.core,
-            &scheme_key,
-            &state.host.user_root()?,
-            &word,
-            &code,
-        )
-        .map_err(|error| error.to_string())?,
+        keytao_app_core::user_words::lookup_user_word(&state.core, &scheme_key, &word, &code)
+            .map_err(|error| error.to_string())?,
     )
 }
 

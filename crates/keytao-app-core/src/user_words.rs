@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, OnceLock},
     time::SystemTime,
@@ -221,6 +221,15 @@ fn package_data(
     core: &Core,
     scheme: &str,
 ) -> Result<Arc<PackageData>, CoreError> {
+    load_package_data(state, core, scheme, false)
+}
+
+fn load_package_data(
+    state: &mut UserWordsState,
+    core: &Core,
+    scheme: &str,
+    metadata_only: bool,
+) -> Result<Arc<PackageData>, CoreError> {
     let scheme = match scheme {
         "keytao-dz" | "keytao-bj" => "keytao",
         _ => scheme,
@@ -275,7 +284,20 @@ fn package_data(
                 continue;
             }
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
+            if metadata_only && filename.ends_with(".dict.yaml") {
+                let mut reader = std::io::BufReader::new(file);
+                loop {
+                    let offset = bytes.len();
+                    if reader.read_until(b'\n', &mut bytes)? == 0
+                        || std::str::from_utf8(&bytes[offset..])
+                            .is_ok_and(|line| line_body(line).trim() == "...")
+                    {
+                        break;
+                    }
+                }
+            } else {
+                file.read_to_end(&mut bytes)?;
+            }
             if let Some(name) = filename.strip_suffix(".dict.yaml") {
                 dictionaries.insert(name.to_owned(), bytes);
             } else if let Some(name) = filename.strip_suffix(".schema.yaml") {
@@ -338,13 +360,15 @@ fn package_data(
         main,
         index: OnceLock::new(),
     });
-    state.packages.insert(
-        scheme.into(),
-        CachedPackage {
-            fingerprint,
-            data: data.clone(),
-        },
-    );
+    if !metadata_only {
+        state.packages.insert(
+            scheme.into(),
+            CachedPackage {
+                fingerprint,
+                data: data.clone(),
+            },
+        );
+    }
     Ok(data)
 }
 
@@ -353,7 +377,9 @@ pub(crate) fn supports_user_words(core: &Core, scheme: &str) -> Result<bool, Cor
         .user_words
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    Ok(package_data(&mut state, core, scheme)?.user_name.is_some())
+    Ok(load_package_data(&mut state, core, scheme, true)?
+        .user_name
+        .is_some())
 }
 
 pub fn take_user_words_report(core: &Core, scheme: &str) -> Result<UserWordsReport, CoreError> {
@@ -403,7 +429,6 @@ pub fn compare_user_words(
 pub fn lookup_user_word(
     core: &Core,
     scheme: &str,
-    _root: &Path,
     word: &str,
     code: &str,
 ) -> Result<UserWordComparison, CoreError> {
@@ -969,7 +994,7 @@ mod tests {
             assert_eq!(comparisons[0].status, "identical");
             assert_eq!(comparisons[1].status, "none");
             assert_eq!(
-                lookup_user_word(&core, scheme, dir.path(), "official", "abc")
+                lookup_user_word(&core, scheme, "official", "abc")
                     .unwrap()
                     .status,
                 "identical"
@@ -1319,7 +1344,7 @@ mod tests {
             template.as_bytes()
         );
         assert_eq!(
-            lookup_user_word(&core, "keytao", dir.path(), "official", "abc")
+            lookup_user_word(&core, "keytao", "official", "abc")
                 .unwrap()
                 .status,
             "identical"
@@ -1408,7 +1433,7 @@ mod tests {
         );
         assert_eq!(comparisons[1].words, ["other"]);
         assert_eq!(comparisons[2].codes, ["official", "second"]);
-        let both = lookup_user_word(&core, "xmjd", dir.path(), "known", "taken").unwrap();
+        let both = lookup_user_word(&core, "xmjd", "known", "taken").unwrap();
         assert_eq!(both.status, "code_taken");
         assert_eq!(both.words, ["other"]);
         assert_eq!(both.codes, ["official", "second"]);
@@ -1660,7 +1685,7 @@ mod tests {
 
     #[test]
     fn cached_index_handles_124000_rows_and_same_version_package_replacement() {
-        let (dir, core) = fixture();
+        let (_dir, core) = fixture();
         let mut table = "---\nname: keytao.phrase\ncolumns: [text, code]\n...\n".to_owned();
         for row in 0..124_000 {
             table.push_str(&format!("word{row:06}\tcode{row:06}\n"));
@@ -1680,7 +1705,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            lookup_user_word(&core, "keytao", dir.path(), "word123999", "code123999")
+            lookup_user_word(&core, "keytao", "word123999", "code123999")
                 .unwrap()
                 .status,
             "identical"
@@ -1691,7 +1716,7 @@ mod tests {
         let original_index = package_index(&original).unwrap() as *const PackageIndex;
         for _ in 0..20 {
             assert_eq!(
-                lookup_user_word(&core, "keytao", dir.path(), "new", "code123999")
+                lookup_user_word(&core, "keytao", "new", "code123999")
                     .unwrap()
                     .words,
                 ["word123999"]
@@ -1717,13 +1742,13 @@ mod tests {
             ],
         );
         assert_eq!(
-            lookup_user_word(&core, "keytao", dir.path(), "replacement", "newcode")
+            lookup_user_word(&core, "keytao", "replacement", "newcode")
                 .unwrap()
                 .status,
             "identical"
         );
         assert_eq!(
-            lookup_user_word(&core, "keytao", dir.path(), "word123999", "code123999")
+            lookup_user_word(&core, "keytao", "word123999", "code123999")
                 .unwrap()
                 .status,
             "none"
