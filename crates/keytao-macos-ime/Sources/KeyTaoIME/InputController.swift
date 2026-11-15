@@ -281,8 +281,19 @@ final class KeyTaoInputController: IMKInputController {
 
     private func updateMarkedText(_ state: KeyTaoImeState, client: IMKTextInput?) {
         guard ImeThemeManager.shared.theme().ui.effectiveEmbeddedComposition else {
-            if hasMarkedText { clearMarkedText(client: client) }
             lastPreeditCursor = 0
+            if state.preedit.isEmpty {
+                if hasMarkedText { clearMarkedText(client: client) }
+                return
+            }
+            guard let client else { return }
+            // Keep a non-empty marked range so clients suppress default key actions.
+            hasMarkedText = true
+            client.setMarkedText(
+                "\u{200B}",
+                selectionRange: NSRange(location: 0, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
             return
         }
         let preedit = state.preedit
