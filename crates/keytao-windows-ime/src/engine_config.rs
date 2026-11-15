@@ -2,17 +2,17 @@
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EngineMode {
-    #[default]
     InProc,
+    #[default]
     Pipe,
 }
 
 impl EngineMode {
-    /// Only an exactly sized REG_DWORD containing one enables IPC.
+    /// Only an explicit, exactly sized REG_DWORD zero disables IPC.
     pub fn from_registry(value: Option<(u32, &[u8])>) -> Self {
         match value {
-            Some((4, [1, 0, 0, 0])) => Self::Pipe,
-            _ => Self::InProc,
+            Some((4, [0, 0, 0, 0])) => Self::InProc,
+            _ => Self::Pipe,
         }
     }
 }
@@ -30,21 +30,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_fails_closed() {
+    fn only_explicit_zero_selects_inproc() {
         assert_eq!(
-            EngineMode::from_registry(Some((4, &[1, 0, 0, 0]))),
-            EngineMode::Pipe
+            EngineMode::from_registry(Some((4, &[0, 0, 0, 0]))),
+            EngineMode::InProc
         );
         for value in [
             None,
-            Some((4, &[0, 0, 0, 0][..])),
+            Some((4, &[1, 0, 0, 0][..])),
             Some((4, &[2, 0, 0, 0][..])),
             Some((1, &[1, 0, 0, 0][..])),
             Some((4, &[1][..])),
             Some((4, &[1, 0, 0, 0, 0][..])),
             Some((4, &[255, 255, 255, 255][..])),
+            Some((1, &[0, 0, 0, 0][..])),
+            Some((4, &[0][..])),
         ] {
-            assert_eq!(EngineMode::from_registry(value), EngineMode::InProc);
+            assert_eq!(EngineMode::from_registry(value), EngineMode::Pipe);
         }
     }
 }

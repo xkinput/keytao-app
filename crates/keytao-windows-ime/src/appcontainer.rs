@@ -103,7 +103,7 @@ fn checked_relative(text: &str) -> std::result::Result<PathBuf, String> {
     Ok(path)
 }
 
-fn public_asset(path: &Path) -> bool {
+pub(crate) fn public_asset(path: &Path) -> bool {
     if path == Path::new(keytao_core::SCHEMA_SWITCH_REQUEST_FILE) {
         return true;
     }
@@ -114,6 +114,32 @@ fn public_asset(path: &Path) -> bool {
         path.file_name().and_then(|name| name.to_str()),
         Some("user.yaml" | "installation.yaml")
     )
+}
+
+pub(crate) fn fallback_directories(
+) -> std::result::Result<(PathBuf, PathBuf, PathBuf, Option<String>), String> {
+    let desktop = local_app_data(KF_FLAG_NO_PACKAGE_REDIRECTION | KF_FLAG_DONT_VERIFY)
+        .map_err(|error| format!("find public schema directory: {error}"))?;
+    let private = local_app_data(KF_FLAG_FORCE_PACKAGE_REDIRECTION)
+        .map_err(|error| format!("find AppContainer temporary directory: {error}"))?;
+    if private == desktop {
+        return Err("AppContainer temporary directory was not redirected".into());
+    }
+    let public = desktop.join("KeyTao/appcontainer-schemas");
+    let path = public.join("current.txt");
+    let signature = keytao_core::ReloadStamp::signature_at(&path);
+    let generation = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read public schema generation: {error}"))?;
+    let generation = generation.trim();
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid public schema generation".into());
+    }
+    Ok((
+        private.join("Temp"),
+        public.join(generation),
+        path,
+        signature,
+    ))
 }
 
 fn prepare_at(public_root: &Path, private: &Path) -> std::result::Result<SandboxData, String> {

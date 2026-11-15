@@ -10,6 +10,9 @@ use keytao_windows_ime::engine_config;
 #[cfg(windows)]
 mod server;
 
+#[cfg(any(windows, test))]
+mod authorization;
+
 #[cfg(windows)]
 fn main() {
     if let Err(error) = server::run() {

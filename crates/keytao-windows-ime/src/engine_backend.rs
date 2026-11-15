@@ -5,7 +5,10 @@ use keytao_core::{
     InputContextPolicy, KeyProcessResult, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -30,6 +33,9 @@ pub trait ImeEngineBackend: Send + Sync {
     /// Build only on the warmup/reload worker.
     fn build(&self) -> Result<EngineHandle, String>;
     fn reload_needed(&self) -> bool;
+    fn status_error(&self) -> Option<&'static str> {
+        None
+    }
     fn drop_session(&self);
     fn process_key(&self, keysym: u32, mods: u32) -> Option<KeyProcessResult>;
     fn process_keys(&self, keys: &[(u32, u32)]) -> Option<KeyProcessResult>;
@@ -64,6 +70,19 @@ pub(crate) fn build_backend() -> Result<
                 msg = error
             ),
         }
+        let engine = Arc::new(InProcEngine::no_learning());
+        let handle = engine.build().map_err(|error| {
+            keytao_core::rt_log!(
+                keytao_core::runtime_log::Level::Info,
+                "ipc",
+                "no_learning_fallback_failed",
+                msg = error
+            );
+            "server unavailable".to_string()
+        })?;
+        start_pipe_retry(&engine)?;
+        let (path, signature) = engine.reload_stamp();
+        return Ok((engine, handle, path, signature));
     }
     let engine = Arc::new(InProcEngine::default());
     let handle = engine.build()?;
@@ -97,6 +116,8 @@ fn read_engine_mode() -> crate::engine_config::EngineMode {
 #[derive(Default)]
 pub struct InProcEngine {
     inner: Mutex<InProcState>,
+    no_learning: bool,
+    pipe_ready: AtomicBool,
 }
 
 #[derive(Default)]
@@ -109,6 +130,13 @@ struct InProcState {
 }
 
 impl InProcEngine {
+    fn no_learning() -> Self {
+        Self {
+            no_learning: true,
+            ..Self::default()
+        }
+    }
+
     /// The server always initializes the desktop directories, including for AC clients.
     pub fn build_server(&self) -> Result<EngineHandle, String> {
         self.install(Self::try_build_engine(false)?)
@@ -131,6 +159,34 @@ impl InProcEngine {
         Ok(())
     }
 
+    /// The server serializes callers; core teardown invalidates every live engine.
+    pub fn deploy_server(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let _init_guard = EngineInitGuard::acquire(false)?;
+        let user_dir = default_user_data_dir().ok_or("cannot determine KeyTao data directory")?;
+        let shared = server_shared_data_dir();
+        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
+        keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared.clone())?;
+        keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
+        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared.clone())?;
+        keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+        let runtime = inner
+            .runtime
+            .clone()
+            .unwrap_or_else(|| ImeRuntime::with_dirs(&user_dir, shared).with_ime_host());
+        runtime.reload_without_deploy()?;
+        let session = runtime.create_session()?;
+        let path = ReloadStamp::write(&user_dir)?;
+        *inner = InProcState {
+            runtime: Some(runtime),
+            session: Some(session),
+            reload_stamp_signature: ReloadStamp::signature_at(&path),
+            reload_stamp_path: Some(path),
+            rime_dll,
+        };
+        Ok(())
+    }
+
     /// A server owns one initialized runtime; each connection gets its own session.
     pub fn fork_session(&self) -> Result<Self, String> {
         let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -144,6 +200,7 @@ impl InProcEngine {
                 reload_stamp_signature: inner.reload_stamp_signature.clone(),
                 rime_dll: inner.rime_dll.clone(),
             }),
+            ..Self::default()
         })
     }
 
@@ -155,6 +212,7 @@ impl InProcEngine {
                 reload_stamp_signature: signature,
                 ..InProcState::default()
             }),
+            ..Self::default()
         }
     }
 
@@ -197,7 +255,7 @@ impl InProcEngine {
             Some(data) => data.user_dir.clone(),
             None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
         };
-        let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
+        let shared = server_shared_data_dir();
         let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
         let reload_stamp_path = sandbox.as_ref().map_or_else(
             || ReloadStamp::path(&user_dir),
@@ -230,16 +288,184 @@ impl InProcEngine {
             rime_dll,
         })
     }
+
+    fn try_build_no_learning(sandboxed: bool) -> Result<InProcState, String> {
+        let _init_guard = EngineInitGuard::acquire_no_learning(sandboxed)?;
+        let (temporary_root, deployed, path, reload_stamp_signature) = if sandboxed {
+            crate::appcontainer::fallback_directories()?
+        } else {
+            let deployed =
+                default_user_data_dir().ok_or("cannot determine deployed data directory")?;
+            let path = ReloadStamp::path(&deployed);
+            let signature = ReloadStamp::signature_at(&path);
+            (std::env::temp_dir(), deployed, path, signature)
+        };
+        let user_dir = temporary_root.join("keytao-no-learning");
+        if let Ok(entries) = std::fs::read_dir(&temporary_root) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("keytao-no-learning-")
+                    && entry
+                        .file_type()
+                        .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let bundled = server_shared_data_dir();
+        let rime_dll = preload_rime_dll(&bundled)?.map(Arc::new);
+        let stamp = format!(
+            "{}\n{bundled}\n{}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            deployed.display(),
+            reload_stamp_signature.as_deref().unwrap_or_default(),
+        );
+        let marker = user_dir.join(".keytao-no-learning.version");
+        let stale = std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str())
+            || !keytao_core::schema_install_state(&user_dir).deployed;
+        let shared = deployed.to_string_lossy().into_owned();
+        let runtime = ImeRuntime::with_dirs(&user_dir, shared.clone());
+        if stale {
+            match std::fs::remove_dir_all(&user_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("clear stale no-learning directory: {error}")),
+            }
+            std::fs::create_dir_all(&user_dir).map_err(|error| error.to_string())?;
+            if !bundled.is_empty() {
+                copy_fallback_data(Path::new(&bundled), &user_dir)?;
+            }
+            copy_fallback_data(&deployed, &user_dir)?;
+            runtime.reload()?;
+            // Custom patches can override source settings, so enforce compiled settings too.
+            for entry in
+                std::fs::read_dir(user_dir.join("build")).map_err(|error| error.to_string())?
+            {
+                let entry = entry.map_err(|error| error.to_string())?;
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".schema.yaml")
+                {
+                    disable_schema_learning(&entry.path())?;
+                }
+            }
+            keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared)?;
+            keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+        } else {
+            runtime.init_without_deploy()?;
+        }
+        let session = runtime.create_session()?;
+        session.set_input_policy(InputContextPolicy {
+            learning: false,
+            ..InputContextPolicy::default()
+        });
+        if stale {
+            std::fs::write(marker, stamp).map_err(|error| error.to_string())?;
+        }
+        Ok(InProcState {
+            runtime: Some(runtime),
+            session: Some(session),
+            reload_stamp_signature,
+            reload_stamp_path: Some(path),
+            rime_dll,
+        })
+    }
+}
+
+fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry.file_name() == "build"
+            || !crate::appcontainer::public_asset(Path::new(&entry.file_name()))
+        {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if kind.is_symlink() {
+            return Err("symbolic link in fallback schema data".into());
+        }
+        let destination = target.join(entry.file_name());
+        if kind.is_dir() {
+            std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+            copy_fallback_data(&entry.path(), &destination)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &destination).map_err(|error| error.to_string())?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".schema.yaml")
+            {
+                disable_schema_learning(&destination)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn disable_schema_learning(path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let mut schema: serde_yaml::Value =
+        serde_yaml::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let mut namespaces = vec!["translator".to_string()];
+    if let Some(translators) = schema["engine"]["translators"].as_sequence() {
+        for translator in translators.iter().filter_map(|value| value.as_str()) {
+            if let Some((_, namespace)) = translator.split_once('@') {
+                namespaces.push(namespace.to_owned());
+            }
+        }
+    }
+    // Policy alone cannot stop librime learning in third-party translators.
+    for namespace in namespaces {
+        schema[namespace]["enable_user_dict"] = serde_yaml::Value::Bool(false);
+    }
+    let bytes = serde_yaml::to_string(&schema).map_err(|error| error.to_string())?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn start_pipe_retry(engine: &Arc<InProcEngine>) -> Result<(), String> {
+    crate::globals::pin_module().map_err(|error| error.to_string())?;
+    let engine = Arc::downgrade(engine);
+    std::thread::Builder::new()
+        .name("keytao-pipe-retry".into())
+        .spawn(move || {
+            let pipe = crate::engine_pipe::PipeEngine::default();
+            let mut failures = 1;
+            loop {
+                std::thread::sleep(crate::engine_status::retry_delay(failures));
+                let Some(engine) = engine.upgrade() else {
+                    return;
+                };
+                if pipe.build().is_ok() {
+                    pipe.drop_session();
+                    engine.pipe_ready.store(true, Ordering::Release);
+                    return;
+                }
+                failures = failures.saturating_add(1);
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("start pipe reconnect worker: {error}"))
 }
 
 impl ImeEngineBackend for InProcEngine {
     fn build(&self) -> Result<EngineHandle, String> {
         let sandboxed = crate::appcontainer::is_appcontainer()
             .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
-        self.install(Self::try_build_engine(sandboxed)?)
+        self.install(if self.no_learning {
+            Self::try_build_no_learning(sandboxed)?
+        } else {
+            Self::try_build_engine(sandboxed)?
+        })
     }
 
     fn reload_needed(&self) -> bool {
+        if self.pipe_ready.load(Ordering::Acquire) {
+            return true;
+        }
         let (path, signature) = self.reload_stamp();
         let Some(path) = path else {
             return false;
@@ -249,6 +475,10 @@ impl ImeEngineBackend for InProcEngine {
             return false;
         };
         signature.as_deref() != Some(current.as_str())
+    }
+
+    fn status_error(&self) -> Option<&'static str> {
+        self.no_learning.then_some("server unavailable")
     }
 
     fn drop_session(&self) {
@@ -294,7 +524,10 @@ impl ImeEngineBackend for InProcEngine {
             .map_or_else(ImeState::empty, |session| session.state())
     }
 
-    fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState> {
+    fn set_input_policy(&self, mut policy: InputContextPolicy) -> Option<ImeState> {
+        if self.no_learning {
+            policy.learning = false;
+        }
         self.session()?.set_input_policy(policy)
     }
 
@@ -325,6 +558,18 @@ impl EngineInitGuard {
         } else {
             WINDOWS_IME_ENGINE_INIT_MUTEX_NAME
         };
+        Self::acquire_named(mutex_name)
+    }
+
+    fn acquire_no_learning(appcontainer: bool) -> Result<Self, String> {
+        Self::acquire_named(if appcontainer {
+            "KeyTao.WindowsIme.NoLearning"
+        } else {
+            "Local\\KeyTao.WindowsIme.NoLearning"
+        })
+    }
+
+    fn acquire_named(mutex_name: &str) -> Result<Self, String> {
         let mut name: Vec<u16> = mutex_name.encode_utf16().collect();
         name.push(0);
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
@@ -399,6 +644,10 @@ fn bundled_shared_data_dir() -> Option<String> {
         }
     }
     None
+}
+
+fn server_shared_data_dir() -> String {
+    bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir)
 }
 
 fn dll_related_dirs() -> Vec<PathBuf> {

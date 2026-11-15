@@ -20,8 +20,12 @@ use windows::{
     core::{PCWSTR, PWSTR},
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE,
-            HANDLE, WAIT_OBJECT_0,
+            CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
+            GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0,
+        },
+        Security::{
+            Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT},
+            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
         },
         Storage::FileSystem::{
             CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_MODE, OPEN_EXISTING,
@@ -259,7 +263,7 @@ impl Connection {
         }
         .map_err(|error| format!("connect to engine pipe: {error}"))?;
         let pipe = Arc::new(OwnedHandle(pipe));
-        verify_server_image(pipe.0)?;
+        verify_server_image(pipe.0, &identity)?;
         let mut connection = Self {
             pipe,
             reaper,
@@ -524,25 +528,38 @@ fn poll_generation(shared: &Shared) {
     }
 }
 
-fn verify_server_image(pipe: HANDLE) -> Result<(), String> {
+fn verify_server_image(
+    pipe: HANDLE,
+    identity: &crate::pipe_security::Identity,
+) -> Result<(), String> {
     let mut process_id = 0;
     unsafe { GetNamedPipeServerProcessId(pipe, &mut process_id) }
         .map_err(|error| format!("read engine server process ID: {error}"))?;
-    let process = OwnedHandle(
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
-            .map_err(|error| format!("open engine server process: {error}"))?,
-    );
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
+    {
+        Ok(process) => OwnedHandle(process),
+        Err(error)
+            if identity.is_appcontainer && error.code() == ERROR_ACCESS_DENIED.to_hresult() =>
+        {
+            return verify_pipe_owner(pipe, &identity.sid);
+        }
+        Err(error) => return Err(format!("open engine server process: {error}")),
+    };
     let mut image = vec![0_u16; 32768];
     let mut length = image.len() as u32;
-    unsafe {
+    if let Err(error) = unsafe {
         QueryFullProcessImageNameW(
             process.0,
             PROCESS_NAME_WIN32,
             PWSTR(image.as_mut_ptr()),
             &mut length,
         )
+    } {
+        if identity.is_appcontainer && error.code() == ERROR_ACCESS_DENIED.to_hresult() {
+            return verify_pipe_owner(pipe, &identity.sid);
+        }
+        return Err(format!("read engine server image path: {error}"));
     }
-    .map_err(|error| format!("read engine server image path: {error}"))?;
     let image = PathBuf::from(String::from_utf16_lossy(&image[..length as usize]));
     let root = program_files_dir()?
         .join("KeyTao")
@@ -554,7 +571,53 @@ fn verify_server_image(pipe: HANDLE) -> Result<(), String> {
     if !is_descendant(&image, &root) {
         return Err("engine server image is outside Program Files\\KeyTao".into());
     }
+    log_server_verification("exe_path");
     Ok(())
+}
+
+fn verify_pipe_owner(pipe: HANDLE, user_sid: &str) -> Result<(), String> {
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        GetSecurityInfo(
+            pipe,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
+        )
+    }
+    .ok()
+    .map_err(|error| format!("read engine pipe owner: {error}"))?;
+    let owner_sid = (|| {
+        if owner.0.is_null() {
+            return Err("engine pipe has no owner SID".into());
+        }
+        let mut sid_text = PWSTR::null();
+        unsafe { ConvertSidToStringSidW(owner, &mut sid_text) }
+            .map_err(|error| format!("encode engine pipe owner SID: {error}"))?;
+        let sid = unsafe { sid_text.to_string() };
+        unsafe { LocalFree(HLOCAL(sid_text.0.cast())) };
+        sid.map_err(|error| format!("decode engine pipe owner SID: {error}"))
+    })();
+    unsafe { LocalFree(HLOCAL(descriptor.0)) };
+    if owner_sid? != user_sid {
+        return Err("engine pipe owner does not match the client user".into());
+    }
+    log_server_verification("pipe_owner_sid");
+    Ok(())
+}
+
+fn log_server_verification(check: &str) {
+    keytao_core::rt_log!(
+        keytao_core::runtime_log::Level::Info,
+        "ipc",
+        "server_identity_verified",
+        check = check
+    );
 }
 
 fn program_files_dir() -> Result<PathBuf, String> {

@@ -1,6 +1,7 @@
 use keytao_core::runtime_log::{self, Level};
 use keytao_ime_ipc::{
-    negotiate_protocol, read_frame, write_frame, EngineError, Request, RequestEnvelope, Response,
+    negotiate_protocol, read_frame, read_response, write_frame, ClientRole, EngineError, Request,
+    RequestEnvelope, Response, PROTOCOL_VERSION,
 };
 use keytao_windows_ime::{
     engine_backend::{ImeEngineBackend, InProcEngine},
@@ -9,24 +10,40 @@ use keytao_windows_ime::{
 };
 use std::{
     fs::File,
-    os::windows::io::FromRawHandle,
+    io::{self, Read, Write},
+    os::windows::io::{AsRawHandle, FromRawHandle},
+    path::PathBuf,
     sync::{Arc, Mutex, TryLockError},
     time::{Duration, Instant},
 };
 use windows::{
-    core::PCWSTR,
+    core::{PCWSTR, PWSTR},
     Win32::{
-        Foundation::{LocalFree, ERROR_PIPE_CONNECTED, HLOCAL},
+        Foundation::{
+            LocalFree, ERROR_ACCESS_DENIED, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+            GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
+        },
         Security::{
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
-        Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
-        System::Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
-            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+        Storage::FileSystem::{
+            CreateFileW, FlushFileBuffers, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+        },
+        System::{
+            Pipes::{
+                ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+                GetNamedPipeServerProcessId, SetNamedPipeHandleState, PIPE_NOWAIT,
+                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+            },
+            Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY},
+            Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
     },
 };
@@ -40,7 +57,7 @@ impl Drop for SecurityDescriptor {
     }
 }
 
-fn create_pipe(name: &str, sid: &str, first: bool) -> Result<OwnedHandle, String> {
+fn create_pipe(name: &str, sid: &str, first: bool) -> windows::core::Result<OwnedHandle> {
     let sddl: Vec<u16> = crate::engine_config::pipe_sddl(sid)
         .encode_utf16()
         .chain(Some(0))
@@ -53,8 +70,7 @@ fn create_pipe(name: &str, sid: &str, first: bool) -> Result<OwnedHandle, String
             &mut descriptor,
             None,
         )
-    }
-    .map_err(|e| e.to_string())?;
+    }?;
     let descriptor = SecurityDescriptor(descriptor);
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -79,12 +95,210 @@ fn create_pipe(name: &str, sid: &str, first: bool) -> Result<OwnedHandle, String
         )
     };
     if handle.is_invalid() {
-        return Err(format!(
-            "create exclusive IME pipe: {}",
-            windows::core::Error::from_win32()
-        ));
+        return Err(windows::core::Error::from_win32());
     }
     Ok(OwnedHandle(handle))
+}
+
+fn acquire_listener(name: &str, identity: &Identity) -> Result<Option<OwnedHandle>, String> {
+    match create_pipe(name, &identity.sid, true) {
+        Ok(listener) => return Ok(Some(listener)),
+        Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {}
+        Err(error) => return Err(format!("create exclusive IME pipe: {error}")),
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    if !request_shutdown(name, identity, deadline)? {
+        return Ok(None);
+    }
+    for _ in 0..30 {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match create_pipe(name, &identity.sid, true) {
+            Ok(listener) => return Ok(Some(listener)),
+            Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {}
+            Err(error) => return Err(format!("replace IME pipe: {error}")),
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("old IME server did not release its pipe within 3 seconds".into())
+}
+
+fn request_shutdown(name: &str, identity: &Identity, deadline: Instant) -> Result<bool, String> {
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let handle = loop {
+        let result = unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0),
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                HANDLE::default(),
+            )
+        };
+        match result {
+            Ok(handle) => break handle,
+            Err(error)
+                if error.code() == ERROR_PIPE_BUSY.to_hresult() && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("connect to old IME server: {error}")),
+        }
+    };
+    let handle = OwnedHandle(handle);
+    let mut pid = 0;
+    unsafe { GetNamedPipeServerProcessId(handle.0, &mut pid) }.map_err(|e| e.to_string())?;
+    let peer = process_identity(pid)?;
+    if peer.session_id != identity.session_id {
+        return Err("old IME server session does not match".into());
+    }
+    let image = installed_process(pid, &peer.sid, &identity.sid)?;
+    let current_image = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("resolve current server image: {error}"))?;
+    if image
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&current_image.to_string_lossy())
+    {
+        return Ok(false);
+    }
+    unsafe { SetNamedPipeHandleState(handle.0, Some(&PIPE_NOWAIT), None, None) }
+        .map_err(|error| format!("set replacement pipe deadline mode: {error}"))?;
+    let file = unsafe { File::from_raw_handle(handle.0 .0) };
+    std::mem::forget(handle);
+    let mut pipe = DeadlinePipe { file, deadline };
+    let hello = RequestEnvelope {
+        seq: 1,
+        message: Request::Hello {
+            protocol: PROTOCOL_VERSION - 1,
+            client_build: env!("CARGO_PKG_VERSION").into(),
+            role: ClientRole::App,
+            is_appcontainer: false,
+        },
+    };
+    write_frame(&mut pipe, &hello).map_err(|e| e.to_string())?;
+    match read_response(&mut pipe, hello.seq).map_err(|e| e.to_string())? {
+        Response::HelloOk { protocol, .. } if protocol == PROTOCOL_VERSION - 1 => {}
+        response => return Err(format!("old IME server handshake failed: {response:?}")),
+    }
+    let shutdown = RequestEnvelope {
+        seq: 2,
+        message: Request::Shutdown,
+    };
+    write_frame(&mut pipe, &shutdown).map_err(|e| e.to_string())?;
+    match read_response(&mut pipe, shutdown.seq).map_err(|e| e.to_string())? {
+        Response::Ok => Ok(true),
+        response => Err(format!("old IME server rejected replacement: {response:?}")),
+    }
+}
+
+struct DeadlinePipe {
+    file: File,
+    deadline: Instant,
+}
+
+impl DeadlinePipe {
+    fn check_deadline(&self) -> io::Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "server replacement timed out",
+            ));
+        }
+        Ok(())
+    }
+
+    fn wait(&self) -> io::Result<()> {
+        self.check_deadline()?;
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(())
+    }
+}
+
+impl Read for DeadlinePipe {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.check_deadline()?;
+            match self.file.read(buffer) {
+                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
+                    self.wait()?
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for DeadlinePipe {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        loop {
+            self.check_deadline()?;
+            match self.file.write(buffer) {
+                Ok(0) if !buffer.is_empty() => self.wait()?,
+                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
+                    self.wait()?
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+fn installed_process(pid: u32, caller_sid: &str, server_sid: &str) -> Result<PathBuf, String> {
+    let process = OwnedHandle(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(|error| format!("open installed caller process: {error}"))?,
+    );
+    let mut image = vec![0u16; 32768];
+    let mut length = image.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            process.0,
+            PROCESS_NAME_WIN32,
+            PWSTR(image.as_mut_ptr()),
+            &mut length,
+        )
+    }
+    .map_err(|error| format!("read installed caller image: {error}"))?;
+    let image = PathBuf::from(String::from_utf16_lossy(&image[..length as usize]))
+        .canonicalize()
+        .map_err(|error| format!("resolve installed caller image: {error}"))?;
+    let mut value = vec![0u16; 32768];
+    let mut size = (value.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
+            windows::core::w!("ProgramFilesDir"),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_err() || size < 4 || size as usize > value.len() * 2 || size % 2 != 0 {
+        return Err("cannot determine native Program Files directory".into());
+    }
+    let value = &value[..size as usize / 2];
+    let length = value
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or("unterminated Program Files directory")?;
+    let root = PathBuf::from(String::from_utf16(&value[..length]).map_err(|e| e.to_string())?)
+        .join("KeyTao")
+        .canonicalize()
+        .map_err(|error| format!("resolve KeyTao installation directory: {error}"))?;
+    if !crate::authorization::installed_caller(caller_sid, server_sid, &image, &root) {
+        return Err("caller image or user is outside the KeyTao installation".into());
+    }
+    Ok(image)
 }
 
 #[derive(Default)]
@@ -95,6 +309,30 @@ struct Runtime {
 }
 
 impl Runtime {
+    fn deploy(&mut self) -> Result<(), String> {
+        self.ready = false;
+        self.generation = self.generation.wrapping_add(1);
+        let result = if let Some(engine) = &self.engine {
+            engine.deploy_server()
+        } else {
+            let engine = InProcEngine::default();
+            let result = engine.deploy_server();
+            if result.is_ok() {
+                self.engine = Some(engine);
+            }
+            result
+        };
+        self.ready = result.is_ok();
+        self.write_status(
+            result.as_ref().err().map(String::as_str),
+            result
+                .as_ref()
+                .ok()
+                .and_then(|()| self.engine.as_ref().map(|engine| engine.state().schema_id)),
+        );
+        result
+    }
+
     fn refresh(&mut self) -> Result<(), String> {
         let changed = self
             .engine
@@ -159,7 +397,9 @@ pub fn run() -> Result<(), String> {
     runtime_log::init(&dir, "windows-ime-server");
     let name = crate::engine_config::pipe_name(&identity.sid, identity.session_id);
     let runtime = Arc::new(Mutex::new(Runtime::default()));
-    let mut listener = create_pipe(&name, &identity.sid, true)?;
+    let Some(mut listener) = acquire_listener(&name, &identity)? else {
+        return Ok(());
+    };
     let watched_runtime = Arc::clone(&runtime);
     std::thread::Builder::new()
         .name("ime-runtime-reload".into())
@@ -181,7 +421,7 @@ pub fn run() -> Result<(), String> {
     loop {
         let connected = unsafe { ConnectNamedPipe(listener.0, None) };
         // Create the next instance before handing off the last one, retaining ownership of the name.
-        let next = create_pipe(&name, &identity.sid, false)?;
+        let next = create_pipe(&name, &identity.sid, false).map_err(|e| e.to_string())?;
         let connection = std::mem::replace(&mut listener, next);
         if let Err(error) = connected {
             if error.code() != ERROR_PIPE_CONNECTED.to_hresult() {
@@ -227,6 +467,10 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
     if !matches!(response, Response::HelloOk { .. }) {
         return Ok(());
     }
+    let role = match hello.message {
+        Request::Hello { role, .. } => role,
+        _ => unreachable!(),
+    };
     let mut session = ClientSession::default();
     let mut sequence = hello.seq;
     loop {
@@ -235,8 +479,41 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
             return Err("non-increasing request sequence".into());
         }
         sequence = request.seq;
-        let response = dispatch(&request.message, &mut session, runtime);
+        let shutdown = matches!(request.message, Request::Shutdown);
+        // A replacement must wait for deployment/userdb maintenance before exiting.
+        let shutdown_guard = if shutdown
+            && !client.is_appcontainer
+            && installed_process(pid, &client.sid, &server.sid).is_ok()
+        {
+            Some(runtime.lock().unwrap_or_else(|p| p.into_inner()))
+        } else {
+            None
+        };
+        let response = if shutdown {
+            if shutdown_guard.is_some() {
+                Response::Ok
+            } else {
+                Response::Err(EngineError::Failed(
+                    "Shutdown caller is not installed".into(),
+                ))
+            }
+        } else if matches!(request.message, Request::Deploy) {
+            if !client.is_appcontainer && role == ClientRole::App {
+                Response::Deployed(runtime.lock().unwrap_or_else(|p| p.into_inner()).deploy())
+            } else {
+                Response::Deployed(Err("Deploy requires an authenticated App caller".into()))
+            }
+        } else {
+            dispatch(&request.message, &mut session, runtime)
+        };
+        let exit = shutdown && matches!(response, Response::Ok);
         write_frame(&mut file, &request.reply(response)).map_err(|e| e.to_string())?;
+        if exit {
+            // Flush waits until the replacement consumes the acknowledgment.
+            if unsafe { FlushFileBuffers(HANDLE(file.as_raw_handle())) }.is_ok() {
+                std::process::exit(0);
+            }
+        }
     }
 }
 
@@ -250,7 +527,9 @@ struct ClientSession {
 fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runtime>) -> Response {
     match request {
         Request::CreateSession => {
-            let result = runtime.lock().unwrap_or_else(|p| p.into_inner()).session();
+            // Keep the schema read inside the deploy barrier as it may rebuild a session.
+            let mut runtime = runtime.lock().unwrap_or_else(|p| p.into_inner());
+            let result = runtime.session();
             match result {
                 Ok((engine, generation)) => {
                     let schema_id = engine.state().schema_id;
@@ -286,8 +565,11 @@ fn dispatch(request: &Request, session: &mut ClientSession, runtime: &Mutex<Runt
             )
         }
         Request::Hello { .. } => Response::HelloErr("connection is already initialized".into()),
-        // Deployment remains in the App until Batch 3, regardless of the claimed client role.
-        Request::Deploy => Response::Deployed(Err("Deploy is unavailable in Batch 2".into())),
+        // Privileged requests are authorized against the authenticated process in serve.
+        Request::Deploy => Response::Deployed(Err("Deploy requires caller authorization".into())),
+        Request::Shutdown => Response::Err(EngineError::Failed(
+            "Shutdown requires caller authorization".into(),
+        )),
         request => {
             // Brief stamp checks must not turn a composition key into raw input.
             let deadline = Instant::now() + Duration::from_millis(10);
@@ -351,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_two_never_accepts_deployment() {
+    fn deployment_dispatch_requires_authenticated_caller_authorization() {
         assert!(matches!(
             dispatch(
                 &Request::Deploy,

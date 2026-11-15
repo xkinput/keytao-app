@@ -345,7 +345,11 @@ impl TsfState {
         }))
         .unwrap_or_else(|_| Err("engine initialization panicked".into()));
         let schema = result.as_ref().ok().map(|(_, schema)| schema.as_str());
-        record_engine_status(result.as_ref().err().map(String::as_str), schema);
+        let error = match &result {
+            Ok((bundle, _)) => bundle.runtime.status_error(),
+            Err(error) => Some(error.as_str()),
+        };
+        record_engine_status(error, schema);
         result.map(|(bundle, _)| bundle)
     }
 

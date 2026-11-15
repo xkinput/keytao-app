@@ -19,10 +19,6 @@
   WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}" "URL Protocol" ""
   WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}\DefaultIcon" "" '$\"$INSTDIR\keytao-app.exe$\",0'
   WriteRegStr HKLM "${KEYTAO_APP_PROTOCOL_KEY}\shell\open\command" "" '$\"$INSTDIR\keytao-app.exe$\" $\"%1$\"'
-  ReadEnvStr $R6 "ProgramData"
-  ${If} $R6 == ""
-    StrCpy $R6 "$WINDIR\..\ProgramData"
-  ${EndIf}
   WriteRegStr HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus" "preparing"
   DetailPrint "Preparing a versioned KeyTao Windows input method runtime..."
   ${If} ${IsNativeARM64}
@@ -37,7 +33,7 @@
     DetailPrint "KeyTao input method staging runtime is missing: $4"
     Return
   ${EndIf}
-  ; Keep the server in the installed payload: clients reject ProgramData paths.
+  ; The server runs only from the versioned Program Files runtime, never staging.
   ${IfNot} ${FileExists} "$4\${KEYTAO_IME_SERVER_EXE}"
     WriteRegStr HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus" "missing IME server: $4"
     DetailPrint "KeyTao input method server is missing from the installation: $4"
@@ -53,7 +49,8 @@
   ${EndIf}
   ${GetFileName} "$R7" $R8
   Delete "$R7"
-  StrCpy $R7 "$R6\KeyTao\keytao-windows-ime-runtime\${VERSION}\$R8"
+  ; A unique suffix also allows reinstalling this version while its server runs.
+  StrCpy $R7 "$PROGRAMFILES64\KeyTao\keytao-windows-ime-runtime\${VERSION}-$R8"
   ClearErrors
   CreateDirectory "$R7"
   ${If} ${Errors}
@@ -158,6 +155,8 @@
   ${If} ${RunningX64}
     SetRegView 64
   ${EndIf}
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeyTaoImeServer"
+  ExecWait '"$WINDIR\System32\taskkill.exe" /IM keytao-windows-ime-server.exe /F' $2
   ; An older installer must not remove another installation's handler.
   ReadRegStr $R0 HKLM "${KEYTAO_APP_PROTOCOL_KEY}\shell\open\command" ""
   ${If} $R0 == '$\"$INSTDIR\keytao-app.exe$\" $\"%1$\"'

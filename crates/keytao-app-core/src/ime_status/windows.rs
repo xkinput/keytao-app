@@ -11,6 +11,10 @@ use std::{
 #[cfg(target_os = "windows")]
 use time::OffsetDateTime;
 
+#[cfg(target_os = "windows")]
+#[path = "windows_server.rs"]
+mod server;
+
 #[cfg(any(target_os = "windows", test))]
 #[derive(serde::Deserialize)]
 struct WindowsImeEngineStatus {
@@ -545,6 +549,10 @@ fn windows_enable_ime_for_current_user() -> Result<(), String> {
 fn windows_ime_runtime_dir(core: &Core) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
+    if let Some(runtime) = server::installed_runtime_dir() {
+        candidates.push(runtime);
+    }
+
     if let Some(registered) = windows_registered_ime_path(false) {
         if let Some(parent) = PathBuf::from(registered).parent() {
             candidates.push(parent.to_path_buf());
@@ -1041,33 +1049,31 @@ fn windows_repair_ime_data_blocking(core: &Core) -> Result<WindowsImeStatus, Str
         ));
     }
 
-    let _engine_guard = WindowsImeEngineInitGuard::acquire()?;
-    if !keytao_core::windows_rime_build_repair_required(&user_dir) {
-        return Ok(windows_ime_status_with_message(
-            core,
-            "KeyTao Windows IME 已就绪".into(),
-        ));
-    }
-    write_keytao_ime_reload_stamp()
-        .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    let invalidated = keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-    tracing::info!(
-        invalidated = invalidated.len(),
-        "invalidated Windows RIME build artifacts before repair"
-    );
-    let shared =
-        windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
-    keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared)?;
-    write_keytao_ime_reload_stamp()
-        .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    let deployed_by_server = server::deploy_if_available()?;
+    let _engine_guard = if deployed_by_server {
+        None
+    } else {
+        Some(WindowsImeEngineInitGuard::acquire()?)
+    };
+    if !deployed_by_server {
+        write_keytao_ime_reload_stamp()
+            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+        let invalidated = keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
+        tracing::info!(
+            invalidated = invalidated.len(),
+            "invalidated Windows RIME build artifacts before repair"
+        );
+        let shared =
+            windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
+        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared)?;
+        write_keytao_ime_reload_stamp()
+            .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    }
     keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
     profile_guard.resume()?;
 
-    let message = format!(
-        "Windows 输入法词典修复完成，已重建 {} 个旧构建产物",
-        invalidated.len()
-    );
+    let message = "Windows 输入法词典修复完成，已重建旧构建产物".into();
     Ok(windows_ime_status_with_message(core, message))
 }
 
@@ -1103,19 +1109,16 @@ struct WindowsImeRegistrationTarget {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_ime_versioned_runtime_root() -> PathBuf {
-    let program_data = std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+fn windows_ime_versioned_runtime_root() -> Result<PathBuf, String> {
     let stamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
-    program_data
+    Ok(server::program_files_dir()?
         .join("KeyTao")
         .join("keytao-windows-ime-runtime")
         .join(format!(
             "{}-{}-{stamp}",
             env!("CARGO_PKG_VERSION"),
             std::process::id()
-        ))
+        )))
 }
 
 #[cfg(target_os = "windows")]
@@ -1313,7 +1316,7 @@ pub async fn windows_ime_status(core: Arc<Core>) -> Result<WindowsImeStatus, Cor
 fn windows_register_ime_blocking(core: &Core) -> Result<WindowsImeStatus, String> {
     let source_runtime_dir =
         windows_ime_runtime_dir(core).ok_or("安装包中未找到 keytao_windows_ime.dll")?;
-    let runtime_root = windows_ime_versioned_runtime_root();
+    let runtime_root = windows_ime_versioned_runtime_root()?;
     let native_runtime_name = if windows_native_machine() == WINDOWS_PE_MACHINE_ARM64 {
         "arm64x"
     } else {
@@ -1355,6 +1358,7 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
     let result: Result<_, String> = async {
         let status_app = core.clone();
         let status = tokio::task::spawn_blocking(move || {
+            server::start_watchdog();
             windows_ime_status_with_message(&status_app, "正在检测 KeyTao Windows IME 状态".into())
         })
         .await
@@ -1450,20 +1454,29 @@ pub fn windows_deploy_rime_blocking(
     user_dir: PathBuf,
     shared_data_dir: String,
 ) -> Result<(), String> {
-    let _engine_guard = WindowsImeEngineInitGuard::acquire()?;
     keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
-    write_keytao_ime_reload_stamp()
-        .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-    keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
+    let deployed_by_server = server::deploy_if_available()?;
+    let _engine_guard = if deployed_by_server {
+        None
+    } else {
+        Some(WindowsImeEngineInitGuard::acquire()?)
+    };
+    if !deployed_by_server {
+        write_keytao_ime_reload_stamp()
+            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+        keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
+        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
+    }
     crate::windows_public_schemas::publish_english_settings(
         &user_dir,
         keytao_core::english_mode::read_english_mode(&user_dir)
             == keytao_core::english_mode::EnglishMode::Schema,
     )?;
-    write_keytao_ime_reload_stamp()
-        .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    if !deployed_by_server {
+        write_keytao_ime_reload_stamp()
+            .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
+    }
     keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
     profile_guard.resume()
 }
