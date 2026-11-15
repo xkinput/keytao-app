@@ -2272,7 +2272,22 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let result = if is_enter_vk(vk) {
                 runtime_session(&state).and_then(|session| session.process_enter())
             } else {
-                process_key_result(&state, keysym, mods)
+                let theme = current_theme();
+                let panel_layout = if theme.ui.hide_candidate_panel {
+                    key_policy::CandidatePanelLayout::Hidden
+                } else {
+                    match theme.panel.orientation {
+                        keytao_theme::PanelOrientation::Horizontal => {
+                            key_policy::CandidatePanelLayout::Horizontal
+                        }
+                        keytao_theme::PanelOrientation::Vertical => {
+                            key_policy::CandidatePanelLayout::Vertical
+                        }
+                    }
+                };
+                let mapped_keysym =
+                    key_policy::candidate_arrow_key(keysym, mods, &before_state, panel_layout);
+                process_key_result(&state, mapped_keysym, mods)
             };
             let mut result = match result {
                 Some(r) => r,

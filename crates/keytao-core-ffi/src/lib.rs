@@ -1099,6 +1099,30 @@ pub extern "C" fn keytao_session_process_key_json(
     })
 }
 
+#[no_mangle]
+pub extern "C" fn keytao_session_process_key_with_panel_json(
+    session: *mut c_void,
+    keyval: u32,
+    modifiers: u32,
+    panel_visible: bool,
+    vertical: bool,
+) -> *mut c_char {
+    session_json("keytao_session_process_key_with_panel_json", session, |s| {
+        let keyval = if panel_visible && matches!(keyval, key_policy::XK_LEFT..=key_policy::XK_DOWN)
+        {
+            let panel = if vertical {
+                key_policy::CandidatePanelLayout::Vertical
+            } else {
+                key_policy::CandidatePanelLayout::Horizontal
+            };
+            key_policy::candidate_arrow_key(keyval, modifiers, &s.state(), panel)
+        } else {
+            keyval
+        };
+        s.process_key_result(keyval, modifiers).map(result_json)
+    })
+}
+
 /// Handle `Return` the way every frontend must: librime decides, and only if it
 /// passes the key back is the raw input committed.
 #[no_mangle]
@@ -1919,6 +1943,14 @@ mod tests {
     fn session_exports_refuse_a_null_handle() {
         assert!(keytao_session_state_json(std::ptr::null_mut()).is_null());
         assert!(keytao_session_process_key_json(std::ptr::null_mut(), 0x61, 0).is_null());
+        assert!(keytao_session_process_key_with_panel_json(
+            std::ptr::null_mut(),
+            0xff52,
+            0,
+            true,
+            true
+        )
+        .is_null());
         assert!(keytao_session_process_enter_json(std::ptr::null_mut()).is_null());
         assert!(keytao_session_select_candidate_json(std::ptr::null_mut(), 0).is_null());
         assert!(keytao_session_change_page_json(std::ptr::null_mut(), false).is_null());

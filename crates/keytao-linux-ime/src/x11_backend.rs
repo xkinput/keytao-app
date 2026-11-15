@@ -774,6 +774,12 @@ impl ServerHandler<MyServer> for KeyTaoHandler {
         {
             user_ic.user_data.session.process_enter()
         } else {
+            let panel = self.renderer.as_ref().map_or(
+                key_policy::CandidatePanelLayout::Hidden,
+                PanelRenderer::candidate_panel_layout,
+            );
+            let keysym =
+                key_policy::candidate_arrow_key(keysym, effective_mods, &before_state, panel);
             user_ic
                 .user_data
                 .session

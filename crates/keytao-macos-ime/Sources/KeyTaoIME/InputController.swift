@@ -165,10 +165,15 @@ final class KeyTaoInputController: IMKInputController {
 
         let usesEnterPath = keytao_key_policy_is_enter(keyval)
             && modifiers & (rimeModifierControl | rimeModifierAlt) == 0
+        let theme = ImeThemeManager.shared.theme()
         let keyStarted = DispatchTime.now().uptimeNanoseconds
         let json = usesEnterPath
             ? keytao_session_process_enter_json(session)
-            : keytao_session_process_key_json(session, keyval, modifiers)
+            : keytao_session_process_key_with_panel_json(
+                session, keyval, modifiers,
+                candidatePanel?.isVisible == true && !theme.ui.hideCandidatePanel,
+                theme.panel.orientation == .vertical
+            )
         guard let state = KeyTaoImeState.consuming(json) else { return false }
 
         apply(state, to: sender)

@@ -49,7 +49,10 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{inline_preedit, shift_key_modifiers, unhandled_key_text, CoreEngine, ImeSession},
+    engine::{
+        candidate_panel_layout, inline_preedit, shift_key_modifiers, unhandled_key_text,
+        CoreEngine, ImeSession,
+    },
     ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
@@ -585,10 +588,13 @@ impl App {
             return;
         }
 
-        let result = match self
-            .session
-            .process_key_result(if shift_press { base_sym } else { sym_raw }, effective_mods)
-        {
+        let keysym = key_policy::candidate_arrow_key(
+            if shift_press { base_sym } else { sym_raw },
+            effective_mods,
+            &before_state,
+            candidate_panel_layout(&self.theme_resolver.current()),
+        );
+        let result = match self.session.process_key_result(keysym, effective_mods) {
             Some(r) => r,
             None => {
                 // librime says it cannot process this key at all.

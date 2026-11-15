@@ -9,6 +9,22 @@ use std::sync::Arc;
 
 pub type ImeSession = Arc<keytao_core::ImeRuntimeSession>;
 
+pub fn candidate_panel_layout(
+    theme: &keytao_theme::ResolvedImeTheme,
+) -> keytao_core::key_policy::CandidatePanelLayout {
+    use keytao_core::key_policy::CandidatePanelLayout;
+    use keytao_theme::PanelOrientation;
+
+    if theme.ui.hide_candidate_panel {
+        CandidatePanelLayout::Hidden
+    } else {
+        match theme.panel.orientation {
+            PanelOrientation::Horizontal => CandidatePanelLayout::Horizontal,
+            PanelOrientation::Vertical => CandidatePanelLayout::Vertical,
+        }
+    }
+}
+
 pub fn create_session(engine: &CoreEngine) -> Result<ImeSession, String> {
     let _activity = crate::hot_update::activity();
     let session = Arc::new(engine.create_session()?);

@@ -41,7 +41,7 @@ use wayland_protocols::wp::input_method::zv1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
+    engine::{candidate_panel_layout, inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
     kimpanel::KimpanelHandle,
     panel::{load_font, PanelRenderer},
@@ -568,10 +568,13 @@ impl App {
             return;
         }
 
-        let Some(result) = self
-            .session
-            .process_key_result(if shift_press { base_sym } else { sym_raw }, effective_mods)
-        else {
+        let keysym = key_policy::candidate_arrow_key(
+            if shift_press { base_sym } else { sym_raw },
+            effective_mods,
+            &before_state,
+            candidate_panel_layout(&self.theme_resolver.current()),
+        );
+        let Some(result) = self.session.process_key_result(keysym, effective_mods) else {
             self.forward_key_press(evdev_keycode);
             return;
         };

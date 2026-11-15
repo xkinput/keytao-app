@@ -580,6 +580,10 @@ impl PanelRenderer {
         self.theme_resolver.current().ui.hide_candidate_panel
     }
 
+    pub fn candidate_panel_layout(&self) -> keytao_core::key_policy::CandidatePanelLayout {
+        crate::engine::candidate_panel_layout(&self.theme_resolver.current())
+    }
+
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
     pub fn render(&self, state: &ImeState) -> (Vec<u8>, u32, u32) {
         let (pixels, width, height, _) = self.render_with_hit_areas(state);

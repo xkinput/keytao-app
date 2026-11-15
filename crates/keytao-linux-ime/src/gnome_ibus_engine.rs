@@ -477,7 +477,8 @@ impl IBusEngine {
         let started = Instant::now();
         // The decision is shared with the standalone IBus shim; this object only
         // publishes the outcome over org.freedesktop.IBus.Engine.
-        let outcome = ibus_shared::process_key_event(&self.session, keyval, state);
+        let outcome =
+            ibus_shared::process_key_event(&self.session, keyval, state, &self.theme_resolver);
         let accepted = outcome.accepted();
         match outcome {
             KeyOutcome::Forward => {}

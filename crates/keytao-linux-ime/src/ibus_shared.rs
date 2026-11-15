@@ -13,10 +13,14 @@
 //! The decision machine and the IBus value builders live here.  The frontends
 //! only publish the outcome over their own interface.
 
-use crate::engine::{ibus_content_type_policy, shift_key_modifiers, ImeSession};
+use crate::engine::{
+    candidate_panel_layout, ibus_content_type_policy, shift_key_modifiers, ImeSession,
+};
 use crate::panel::state_to_panel_input;
 use keytao_core::{key_policy, ImeState, InputContextPolicy, KeyProcessResult, RIME_RELEASE_MASK};
-use keytao_theme::{CandidateOptionModel, CandidatePanelModel, ThemeResolver, UiCapabilities};
+use keytao_theme::{
+    CandidateOptionModel, CandidatePanelModel, PanelOrientation, ThemeResolver, UiCapabilities,
+};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use zbus::zvariant;
 
@@ -124,7 +128,12 @@ impl KeyOutcome {
 }
 
 /// Run one IBus `ProcessKeyEvent` against `session`.
-pub fn process_key_event(session: &ImeSession, keyval: u32, state: u32) -> KeyOutcome {
+pub fn process_key_event(
+    session: &ImeSession,
+    keyval: u32,
+    state: u32,
+    theme_resolver: &ThemeResolver,
+) -> KeyOutcome {
     match key_phase(keyval, state, session.input_policy()) {
         KeyPhase::Sensitive | KeyPhase::IgnoredRelease => KeyOutcome::Forward,
         // A mode-switch release can commit the current code or clear the
@@ -146,7 +155,13 @@ pub fn process_key_event(session: &ImeSession, keyval: u32, state: u32) -> KeyOu
                     } else {
                         state
                     };
-                    KeyOutcome::from_result(session.process_key_result(keyval, mods))
+                    let keysym = key_policy::candidate_arrow_key(
+                        keyval,
+                        mods,
+                        &before,
+                        candidate_panel_layout(&theme_resolver.current()),
+                    );
+                    KeyOutcome::from_result(session.process_key_result(keysym, mods))
                 }
             }
         }
@@ -283,8 +298,6 @@ impl ModeIndicator {
 
 // ── IBus value builders ───────────────────────────────────────────────────────
 
-pub const IBUS_ORIENTATION_SYSTEM: i32 = 2;
-
 /// Build the engine descriptor shared by the shim and the GNOME engine.
 pub fn ibus_engine_desc() -> zvariant::OwnedValue {
     use zvariant::{Dict, Signature, StructureBuilder, Value};
@@ -403,7 +416,10 @@ pub fn state_to_panel_model(
     let theme = theme_resolver.current();
     theme.candidate_panel_model(
         state_to_panel_input(state),
-        &UiCapabilities::system_lookup_table(),
+        &UiCapabilities {
+            supports_vertical: true,
+            ..UiCapabilities::system_lookup_table()
+        },
     )
 }
 
@@ -443,7 +459,10 @@ pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::Value<'
         .add_field(cursor_pos)
         .add_field(true) // cursor_visible
         .add_field(false) // round
-        .add_field(IBUS_ORIENTATION_SYSTEM)
+        .add_field(match model.orientation {
+            PanelOrientation::Horizontal => 0i32,
+            PanelOrientation::Vertical => 1i32,
+        })
         .append_field(Value::Array(candidates))
         .append_field(Value::Array(labels))
         .build();
