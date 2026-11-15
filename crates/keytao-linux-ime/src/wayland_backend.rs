@@ -11,7 +11,7 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{Seek, SeekFrom, Write},
-    os::fd::{AsFd, AsRawFd, FromRawFd},
+    os::fd::{AsFd, AsRawFd},
     time::{Duration, Instant},
 };
 
@@ -49,10 +49,15 @@ use xkbcommon::xkb;
 
 use crate::{
     engine::{shift_key_modifiers, unhandled_key_text, CoreEngine, ImeSession},
+    ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
     surrounding::SurroundingText,
+    wayland_common::{
+        deadline_active, key_repeats, key_sym, mode_hint_deadline, poll_timeout_ms,
+        preedit_cursor_bytes, take_expired_deadline, tempfile, KeyRepeat,
+    },
 };
 
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
@@ -73,10 +78,6 @@ const TEXT_INPUT_HINT_SECRET: u32 = 0x40 | 0x80;
 /// to, per the protocol.
 const DEFAULT_CONTENT_TYPE: (u32, u32) = (0, 0);
 
-fn is_shift_key(sym: u32) -> bool {
-    sym == xkb::keysyms::KEY_Shift_L || sym == xkb::keysyms::KEY_Shift_R
-}
-
 /// The session policy a `zwp_input_method_v2` content type maps to.
 ///
 /// Only the conclusion is shared with the IBus path in `engine.rs`: the
@@ -94,43 +95,11 @@ fn content_type_policy(hint: u32, purpose: u32) -> InputContextPolicy {
     }
 }
 
-/// `zwp_input_method_v2` preedit indices are byte offsets into the preedit
-/// string, while `ImeState::cursor` counts Unicode scalars.
-fn preedit_cursor_bytes(preedit: &str, cursor: usize) -> i32 {
-    preedit
-        .char_indices()
-        .nth(cursor)
-        .map(|(offset, _)| offset)
-        .unwrap_or(preedit.len()) as i32
-}
-
 fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
     // xkbcommon 0.7 includes the C terminator in keysym_to_utf8's String.
     // Strip it at this boundary before validating a single printable character.
     let text = xkb::keysym_to_utf8(xkb::Keysym::from(sym));
     unhandled_key_text(text.trim_end_matches('\0'), mods)
-}
-
-/// Turn a `repeat_info` event into (initial delay, interval between repeats).
-///
-/// `rate` is in keys per second and zero disables repeating entirely; negative
-/// values are illegal per the protocol and are treated the same way.
-fn repeat_timings(rate: i32, delay: i32) -> Option<(Duration, Duration)> {
-    if rate <= 0 || delay < 0 {
-        return None;
-    }
-    Some((
-        Duration::from_millis(delay as u64),
-        Duration::from_micros(1_000_000 / rate as u64),
-    ))
-}
-
-/// A key the IME consumed and now has to repeat itself: with the keyboard
-/// grabbed, the compositor no longer repeats anything for us.
-struct KeyRepeat {
-    key: u32,
-    next: Instant,
-    interval: Duration,
 }
 
 struct App {
@@ -157,9 +126,7 @@ struct App {
     /// Double-buffered `content_type`, applied on the next `done`.
     pending_content_type: Option<(u32, u32)>,
     surrounding_text: SurroundingText,
-    key_repeat: Option<KeyRepeat>,
-    repeat_delay: Option<Duration>,
-    repeat_interval: Option<Duration>,
+    key_repeat: KeyRepeat,
 
     xkb_context: xkb::Context,
     xkb_keymap: Option<xkb::Keymap>,
@@ -216,9 +183,7 @@ impl App {
             deactivate_deadline: None,
             pending_content_type: None,
             surrounding_text: SurroundingText::default(),
-            key_repeat: None,
-            repeat_delay: None,
-            repeat_interval: None,
+            key_repeat: KeyRepeat::default(),
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_keymap: None,
             xkb_state: None,
@@ -262,7 +227,7 @@ impl App {
             return;
         };
 
-        let mut file = match tempfile() {
+        let mut file = match tempfile(libc::MFD_CLOEXEC) {
             Ok(file) => file,
             Err(e) => {
                 tracing::warn!("failed to create virtual keyboard keymap fd: {e}");
@@ -290,27 +255,22 @@ impl App {
         else {
             return;
         };
-        let surface = compositor.create_surface(qh, ());
-        let popup = im.get_input_popup_surface(&surface, qh, ());
-
         // 1x1 transparent dummy buffer to make surface valid for KWin
         // KWin drops surfaces without buffers, so it won't send TextInputRectangle.
-        let fd = unsafe {
-            libc::memfd_create(
-                b"keytao-shm\0".as_ptr() as *const libc::c_char,
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            )
+        let mut file = match tempfile(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("failed to create dummy SHM file: {e}");
+                return;
+            }
         };
-        if fd < 0 {
-            panic!("memfd_create failed");
+        if let Err(e) = file.set_len(4).and_then(|_| file.write_all(&[0u8; 4])) {
+            tracing::warn!("failed to write dummy SHM buffer: {e}");
+            return;
         }
-        unsafe {
-            libc::ftruncate(fd, 4);
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        file.write_all(&[0u8; 4]).expect("write dummy buffer");
-        let fd = std::os::fd::AsFd::as_fd(&file);
-        let pool = shm.create_pool(fd, 4, qh, ());
+        let surface = compositor.create_surface(qh, ());
+        let popup = im.get_input_popup_surface(&surface, qh, ());
+        let pool = shm.create_pool(file.as_fd(), 4, qh, ());
         let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
         surface.attach(Some(&buf), 0, 0);
         surface.damage_buffer(0, 0, 1, 1);
@@ -340,7 +300,7 @@ impl App {
             .renderer
             .as_ref()
             .is_some_and(PanelRenderer::hide_candidate_panel);
-        if hide_candidates && !self.mode_hint_active() {
+        if hide_candidates && !deadline_active(self.mode_hint_until) {
             self.hide_panel_popup();
             return;
         }
@@ -352,7 +312,7 @@ impl App {
             return;
         };
 
-        let show_hint = self.mode_hint_active();
+        let show_hint = deadline_active(self.mode_hint_until);
         let (pixels, w, h, hit_areas) = if let Some(state) = self
             .ime_state
             .as_ref()
@@ -371,8 +331,17 @@ impl App {
         let stride = w * 4;
         let pool_size = (stride * h) as usize;
 
-        let mut tmp = tempfile().expect("tempfile");
-        tmp.write_all(&pixels).expect("write shm");
+        let mut tmp = match tempfile(libc::MFD_CLOEXEC) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("failed to create SHM tempfile: {e}");
+                return;
+            }
+        };
+        if let Err(e) = tmp.write_all(&pixels) {
+            tracing::warn!("failed to write SHM buffer: {e}");
+            return;
+        }
         let pool = shm.create_pool(tmp.as_fd(), pool_size as i32, qh, ());
         let buffer = pool.create_buffer(
             0,
@@ -410,7 +379,7 @@ impl App {
             // A hint's timeout must never hide candidates typed after it.
             self.mode_hint_until = None;
         }
-        let show_hint = self.mode_hint_active();
+        let show_hint = deadline_active(self.mode_hint_until);
         self.ime_state = Some(state);
         if has_content || show_hint {
             if self.panel_surface.is_none() {
@@ -423,43 +392,18 @@ impl App {
         }
     }
 
-    fn mode_hint_active(&self) -> bool {
-        self.mode_hint_until
-            .is_some_and(|deadline| Instant::now() < deadline)
-    }
-
     fn update_ascii_mode(&mut self, ascii_mode: bool, qh: &QueueHandle<Self>) {
         if ascii_mode == self.ascii_mode {
             return;
         }
         self.ascii_mode = ascii_mode;
-        let duration = self
-            .renderer
-            .as_ref()
-            .map(PanelRenderer::mode_hint_duration)
-            .unwrap_or_else(|| Duration::from_millis(750));
-        self.mode_hint_until = Some(Instant::now() + duration);
+        self.mode_hint_until = Some(mode_hint_deadline(
+            self.renderer
+                .as_ref()
+                .map(PanelRenderer::mode_hint_duration),
+        ));
         self.show_panel(ImeState::empty(), qh);
         tracing::info!("IME mode changed: {}", if ascii_mode { "EN" } else { "CN" });
-    }
-
-    fn key_sym(&self, evdev_keycode: u32) -> u32 {
-        let keycode = evdev_keycode + 8;
-        self.xkb_state
-            .as_ref()
-            .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
-            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
-            .into()
-    }
-
-    /// Keysym resolved without modifier state — see `xkb_base_state`.
-    fn base_key_sym(&self, evdev_keycode: u32) -> u32 {
-        let keycode = evdev_keycode + 8;
-        self.xkb_base_state
-            .as_ref()
-            .map(|s| s.key_get_one_sym(xkb::Keycode::from(keycode)))
-            .unwrap_or(xkb::Keysym::from(xkb::keysyms::KEY_NoSymbol))
-            .into()
     }
 
     /// Publish one `ImeState` to the client: commit first, then the new
@@ -509,108 +453,33 @@ impl App {
         }
         if previous.composing && !policy.composing {
             tracing::debug!("Wayland: sensitive content type, passing keys through");
-            self.cancel_key_repeat();
+            self.key_repeat.cancel();
             self.clear_client_preedit();
             self.hide_panel_popup();
         }
     }
 
-    fn set_repeat_info(&mut self, rate: i32, delay: i32) {
-        match repeat_timings(rate, delay) {
-            Some((delay, interval)) => {
-                self.repeat_delay = Some(delay);
-                self.repeat_interval = Some(interval);
-            }
-            None => {
-                self.repeat_delay = None;
-                self.repeat_interval = None;
-                self.key_repeat = None;
-            }
-        }
-    }
-
-    /// Whether the keymap marks this key as repeating.  Modifiers and keys
-    /// carrying `repeat=no` must not repeat, exactly as for an ordinary
-    /// `wl_keyboard` client.
-    fn key_repeats(&self, evdev_keycode: u32) -> bool {
-        self.xkb_keymap
-            .as_ref()
-            .is_some_and(|keymap| keymap.key_repeats(xkb::Keycode::from(evdev_keycode + 8)))
-    }
-
-    /// Start repeating a key the IME consumed.  Forwarded keys are left alone:
-    /// the client repeats those itself.
-    fn arm_key_repeat(&mut self, evdev_keycode: u32) {
-        let (Some(delay), Some(interval)) = (self.repeat_delay, self.repeat_interval) else {
-            self.key_repeat = None;
-            return;
-        };
-        if !self.key_repeats(evdev_keycode) {
-            self.key_repeat = None;
-            return;
-        }
-        self.key_repeat = Some(KeyRepeat {
-            key: evdev_keycode,
-            next: Instant::now() + delay,
-            interval,
-        });
-    }
-
-    fn cancel_key_repeat(&mut self) {
-        self.key_repeat = None;
-    }
-
-    fn cancel_key_repeat_for(&mut self, evdev_keycode: u32) {
-        if self
-            .key_repeat
-            .as_ref()
-            .is_some_and(|repeat| repeat.key == evdev_keycode)
-        {
-            self.key_repeat = None;
-        }
-    }
-
-    fn key_repeat_due(&self) -> bool {
-        self.key_repeat
-            .as_ref()
-            .is_some_and(|repeat| Instant::now() >= repeat.next)
-    }
-
     fn fire_key_repeat(&mut self, qh: &QueueHandle<Self>) {
-        let Some(key) = self.key_repeat.as_ref().map(|repeat| repeat.key) else {
+        let Some(key) = self.key_repeat.key() else {
             return;
         };
         self.handle_key_event(key, wl_keyboard::KeyState::Pressed, qh);
-        // `handle_key_event` re-arms with the initial delay; once repeating has
-        // started the following presses are one interval apart.
-        if let Some(repeat) = self.key_repeat.as_mut() {
-            if repeat.key == key {
-                repeat.next = Instant::now() + repeat.interval;
-            }
-        }
+        self.key_repeat.advance(key);
     }
 
     /// Milliseconds until the next timer fires, or -1 when nothing is pending.
     fn poll_timeout_ms(&self) -> i32 {
-        let deadlines = [
+        poll_timeout_ms([
             self.mode_hint_until,
             self.deactivate_deadline,
-            self.key_repeat.as_ref().map(|repeat| repeat.next),
-        ];
-        let Some(next) = deadlines.into_iter().flatten().min() else {
-            return -1;
-        };
-        let now = Instant::now();
-        if next <= now {
-            return 0;
-        }
-        (next - now).as_millis().min(i32::MAX as u128) as i32
+            self.key_repeat.next_deadline(),
+        ])
     }
 
     /// Drop the UI built from the dictionaries a reload just replaced.
     fn handle_reload(&mut self) {
         tracing::info!("Wayland IME: clearing composition after librime reload");
-        self.cancel_key_repeat();
+        self.key_repeat.cancel();
         self.session.clear_composition();
         self.clear_client_preedit();
         self.mode_hint_until = None;
@@ -630,7 +499,7 @@ impl App {
         }
 
         // A new press always supersedes whatever was repeating.
-        self.cancel_key_repeat();
+        self.key_repeat.cancel();
 
         // When inactive (e.g. during debounce window after deactivate), forward
         // all keys directly to the application instead of processing them.
@@ -640,8 +509,8 @@ impl App {
         // still arm librime's ascii_composer, or the release path below sees
         // an unpaired Shift and the zh/en toggle never fires.
         if !self.active {
-            let sym = self.key_sym(evdev_keycode);
-            let base_sym = self.base_key_sym(evdev_keycode);
+            let sym = key_sym(self.xkb_state.as_ref(), evdev_keycode);
+            let base_sym = key_sym(self.xkb_base_state.as_ref(), evdev_keycode);
             if is_shift_key(base_sym) && self.session.input_policy().composing {
                 let _ = self
                     .session
@@ -653,7 +522,10 @@ impl App {
 
         // Password and PIN fields: nothing reaches librime and nothing is drawn.
         if !self.session.input_policy().composing {
-            self.forward_unhandled_key(evdev_keycode, self.key_sym(evdev_keycode));
+            self.forward_unhandled_key(
+                evdev_keycode,
+                key_sym(self.xkb_state.as_ref(), evdev_keycode),
+            );
             return;
         }
 
@@ -666,7 +538,7 @@ impl App {
                 "NONE"
             }
         );
-        let sym_raw = self.key_sym(evdev_keycode);
+        let sym_raw = key_sym(self.xkb_state.as_ref(), evdev_keycode);
         tracing::trace!("key sym: {sym_raw:#x}");
         if sym_raw == xkb::keysyms::KEY_NoSymbol {
             tracing::warn!("unmapped key: forwarding without XKB translation");
@@ -674,7 +546,7 @@ impl App {
             return;
         }
 
-        let base_sym = self.base_key_sym(evdev_keycode);
+        let base_sym = key_sym(self.xkb_base_state.as_ref(), evdev_keycode);
         let shift_press = is_shift_key(base_sym);
         let effective_mods = if shift_press {
             shift_key_modifiers(self.mods)
@@ -755,7 +627,10 @@ impl App {
         } else {
             // The compositor stopped repeating this key when the grab took it,
             // so held Backspace/arrows/select keys have to repeat from here.
-            self.arm_key_repeat(evdev_keycode);
+            self.key_repeat.arm(
+                evdev_keycode,
+                key_repeats(self.xkb_keymap.as_ref(), evdev_keycode),
+            );
         }
 
         self.show_panel(ime_state, qh);
@@ -763,11 +638,11 @@ impl App {
     }
 
     fn handle_key_release(&mut self, evdev_keycode: u32, qh: &QueueHandle<Self>, started: Instant) {
-        self.cancel_key_repeat_for(evdev_keycode);
+        self.key_repeat.cancel_for(evdev_keycode);
         // Modifier detection must use the pristine state: at release time the
         // Shift key is still depressed in the live state, which resolves it to
         // its level-2 keysym (Caps_Lock) and breaks `is_shift_key`.
-        let sym_raw = self.base_key_sym(evdev_keycode);
+        let sym_raw = key_sym(self.xkb_base_state.as_ref(), evdev_keycode);
         tracing::debug!(
             "key release: keycode={} sym={sym_raw:#x} is_shift={} composing={}",
             evdev_keycode + 8,
@@ -822,7 +697,10 @@ impl App {
         } else if self.forward_text_key(sym) {
             // Text commits do not deliver a physical press for the client to
             // repeat. Keep repeating from the grab until its release arrives.
-            self.arm_key_repeat(evdev_keycode);
+            self.key_repeat.arm(
+                evdev_keycode,
+                key_repeats(self.xkb_keymap.as_ref(), evdev_keycode),
+            );
         }
     }
 
@@ -1118,7 +996,7 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for App {
             }
             zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
                 tracing::debug!("keyboard grab: repeat rate={rate} delay={delay}");
-                state.set_repeat_info(rate, delay);
+                state.key_repeat.set_info(rate, delay);
             }
             _ => {}
         }
@@ -1148,7 +1026,7 @@ impl Dispatch<ZwpInputPopupSurfaceV2, ()> for App {
                 .ime_state
                 .as_ref()
                 .map_or(false, |s| !s.candidates.is_empty());
-            let show_mode_hint = state.mode_hint_active();
+            let show_mode_hint = deadline_active(state.mode_hint_until);
             if state.panel_surface.is_some() && (has_content || show_mode_hint) {
                 tracing::debug!("rerender_panel_after_rectangle");
                 state.redraw_panel(qh);
@@ -1325,11 +1203,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
             return Ok(());
         }
 
-        if app
-            .mode_hint_until
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            app.mode_hint_until = None;
+        if take_expired_deadline(&mut app.mode_hint_until) {
             app.show_panel(ImeState::empty(), &qh);
         }
 
@@ -1339,7 +1213,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
         {
             app.deactivate_deadline = None;
             app.active = false;
-            app.cancel_key_repeat();
+            app.key_repeat.cancel();
             // `grab_keyboard` hands out an object whose `release` request is a
             // destructor; dropping the proxy alone leaves it alive in the
             // compositor, and the next activate takes a fresh grab.
@@ -1357,7 +1231,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
             tracing::debug!("IME deactivated after debounce (had_grab={had_grab})");
         }
 
-        if app.key_repeat_due() {
+        if app.key_repeat.due() {
             app.fire_key_repeat(&qh);
         }
 
@@ -1417,22 +1291,9 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-fn tempfile() -> std::io::Result<File> {
-    use std::os::unix::io::FromRawFd;
-    let name = c"keytao-shm";
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{content_type_policy, preedit_cursor_bytes, repeat_timings, unhandled_keysym_text};
-    use std::time::Duration;
+    use super::{content_type_policy, unhandled_keysym_text};
 
     #[test]
     fn number_row_and_keypad_digits_have_text_without_virtual_keyboard() {
@@ -1456,18 +1317,6 @@ mod tests {
     }
 
     #[test]
-    fn repeat_info_maps_to_a_delay_and_an_interval() {
-        assert_eq!(
-            repeat_timings(25, 600),
-            Some((Duration::from_millis(600), Duration::from_millis(40)))
-        );
-        // A rate of zero disables repeating, as does an illegal negative one.
-        assert_eq!(repeat_timings(0, 600), None);
-        assert_eq!(repeat_timings(-1, 600), None);
-        assert_eq!(repeat_timings(25, -1), None);
-    }
-
-    #[test]
     fn password_and_pin_content_types_stop_composing() {
         // purpose password / pin
         assert!(!content_type_policy(0, 8).composing);
@@ -1487,15 +1336,5 @@ mod tests {
         assert!(content_type_policy(0, 13).composing);
         // date is purpose 10 there, i.e. the IBus PIN value must not leak in
         assert!(content_type_policy(0, 10).composing);
-    }
-
-    #[test]
-    fn preedit_cursor_is_a_byte_offset() {
-        assert_eq!(preedit_cursor_bytes("nihao", 2), 2);
-        // Unicode scalar 2 of "你好ni" starts at byte 6.
-        assert_eq!(preedit_cursor_bytes("你好ni", 2), 6);
-        // Past the end clamps to the byte length rather than panicking.
-        assert_eq!(preedit_cursor_bytes("你好", 9), 6);
-        assert_eq!(preedit_cursor_bytes("", 0), 0);
     }
 }

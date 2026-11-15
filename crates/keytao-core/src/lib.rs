@@ -6271,37 +6271,23 @@ impl ReloadStamp {
             .unwrap_or(0);
         Some(format!("{}:{modified}:{content_hash:016x}", metadata.len()))
     }
-
-    /// Watcher seeded with the current signature: the first check only reports a
-    /// change if the stamp was rewritten after this call.
-    pub fn watcher(user_data_dir: &Path) -> ReloadStampWatcher {
-        ReloadStampWatcher::new(user_data_dir)
-    }
 }
 
-/// Remembers the last observed signature so frontends do not each keep their
-/// own idea of what "changed" means.
-pub struct ReloadStampWatcher {
+/// Peek/commit view of the reload signal. A failed reload leaves its request
+/// pending; committing the loaded signature also preserves newer requests.
+pub struct ReloadStampGate {
     path: PathBuf,
-    last_signature: Option<String>,
+    loaded_signature: Option<String>,
 }
 
-impl ReloadStampWatcher {
+impl ReloadStampGate {
+    /// Seed with the deployment the frontend just loaded at startup.
     pub fn new(user_data_dir: &Path) -> Self {
         let path = ReloadStamp::path(user_data_dir);
-        let last_signature = ReloadStamp::signature_at(&path);
+        let loaded_signature = ReloadStamp::signature_at(&path);
         Self {
             path,
-            last_signature,
-        }
-    }
-
-    /// Watcher that has seen nothing yet: an existing stamp counts as a change
-    /// on the first check. Use it when the frontend must reload after a restart.
-    pub fn unseen(user_data_dir: &Path) -> Self {
-        Self {
-            path: ReloadStamp::path(user_data_dir),
-            last_signature: None,
+            loaded_signature,
         }
     }
 
@@ -6309,21 +6295,16 @@ impl ReloadStampWatcher {
         &self.path
     }
 
-    pub fn signature(&self) -> Option<&str> {
-        self.last_signature.as_deref()
+    /// A missing stamp is not a reload request, so an uninstalled or not yet
+    /// deployed app never triggers one. Peeking does not consume a request.
+    pub fn pending(&self) -> Option<String> {
+        let current = ReloadStamp::signature_at(&self.path)?;
+        (self.loaded_signature.as_deref() != Some(current.as_str())).then_some(current)
     }
 
-    /// A missing stamp is not a reload request, so an uninstalled or not yet
-    /// deployed app never triggers one.
-    pub fn has_changed(&mut self) -> bool {
-        let Some(current) = ReloadStamp::signature_at(&self.path) else {
-            return false;
-        };
-        if self.last_signature.as_deref() == Some(current.as_str()) {
-            return false;
-        }
-        self.last_signature = Some(current);
-        true
+    /// Record exactly the signature a successful reload loaded.
+    pub fn commit(&mut self, signature: String) {
+        self.loaded_signature = Some(signature);
     }
 }
 
@@ -6346,7 +6327,7 @@ mod tests {
         parse_schema_list, parse_schema_name, patch_android_auxiliary_dictionary,
         patch_windows_lua_compatibility, preferred_schema_from_list, preferred_schema_id_from_dir,
         rime_build_dirs, rime_log_dir, schema_install_state, windows_rime_build_repair_required,
-        ReloadStamp, ReloadStampWatcher, RELOAD_STAMP_FILE_NAME,
+        ReloadStamp, ReloadStampGate, RELOAD_STAMP_FILE_NAME,
     };
     use std::collections::HashSet;
     #[cfg(target_os = "windows")]
@@ -6417,43 +6398,70 @@ mod tests {
             "a missing stamp has no signature"
         );
 
-        let mut watcher = ReloadStampWatcher::new(&dir);
-        assert!(!watcher.has_changed(), "a missing stamp is not a request");
+        let mut gate = ReloadStampGate::new(&dir);
+        assert_eq!(gate.path(), ReloadStamp::path(&dir));
+        assert_eq!(gate.pending(), None, "a missing stamp is not a request");
 
         let stamp = ReloadStamp::write(&dir).unwrap();
         assert_eq!(stamp, ReloadStamp::path(&dir));
-        assert!(watcher.has_changed(), "the first stamp is a request");
-        assert!(!watcher.has_changed(), "an unchanged stamp fires once");
+        gate.commit(gate.pending().expect("the first stamp is a request"));
+        assert_eq!(gate.pending(), None, "a loaded stamp fires once");
 
         // Same length and same mtime resolution: only the content hash differs.
         let signature_before = ReloadStamp::current_signature(&dir).unwrap();
         std::fs::write(&stamp, "0123456789\n").unwrap();
         let signature_after = ReloadStamp::current_signature(&dir).unwrap();
         assert_ne!(signature_before, signature_after);
-        assert!(watcher.has_changed(), "a rewritten stamp is a request");
+        assert!(gate.pending().is_some(), "a rewritten stamp is a request");
 
         std::fs::remove_file(&stamp).unwrap();
-        assert!(!watcher.has_changed(), "a removed stamp is not a request");
+        assert_eq!(gate.pending(), None, "a removed stamp is not a request");
 
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn reload_stamp_unseen_watcher_reports_existing_stamp() {
+    fn reload_stamp_failed_reload_keeps_request_pending() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("keytao-reload-stamp-unseen-{suffix}"));
+        let dir = std::env::temp_dir().join(format!("keytao-reload-stamp-retry-{suffix}"));
+        let mut gate = ReloadStampGate::new(&dir);
         ReloadStamp::write(&dir).unwrap();
 
-        let mut watcher = ReloadStampWatcher::unseen(&dir);
-        assert!(watcher.has_changed());
-        assert!(!watcher.has_changed());
+        let requested = gate.pending().expect("the first stamp is a request");
         assert_eq!(
-            watcher.signature().map(str::to_owned),
-            ReloadStamp::current_signature(&dir)
+            gate.pending().as_deref(),
+            Some(requested.as_str()),
+            "a failed reload must leave the request pending",
         );
+        gate.commit(requested);
+        assert_eq!(gate.pending(), None, "a loaded stamp fires once");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reload_stamp_commit_preserves_a_newer_request() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-reload-stamp-overlap-{suffix}"));
+        ReloadStamp::write(&dir).unwrap();
+        let mut gate = ReloadStampGate::new(&dir);
+        assert_eq!(gate.pending(), None, "startup adopts the loaded deployment");
+
+        let stamp = ReloadStamp::path(&dir);
+        std::fs::write(&stamp, "next deployment\n").unwrap();
+        let requested = gate.pending().expect("a rewrite is a request");
+        std::fs::write(&stamp, "newer deployment\n").unwrap();
+        gate.commit(requested.clone());
+        let newer = gate.pending().expect("a newer request must remain pending");
+        assert_ne!(requested, newer);
+        gate.commit(newer);
+        assert_eq!(gate.pending(), None);
 
         std::fs::remove_dir_all(dir).ok();
     }
