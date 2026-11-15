@@ -14,7 +14,8 @@ use std::{
 };
 
 use keytao_ime_ipc::{
-    ClientRole, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response, write_frame,
+    ClientRole, EngineMode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response,
+    write_frame,
 };
 use windows::{
     Win32::{
@@ -195,7 +196,9 @@ fn server_enabled() -> bool {
             Some(&mut size),
         )
     };
-    !(result.is_ok() && size == 4 && value == 0)
+    EngineMode::from_registry(
+        (result.is_ok() && size == 4).then_some((REG_DWORD.0, value.to_le_bytes().as_slice())),
+    ) == EngineMode::Pipe
 }
 
 fn initialize_engine_mode() -> Result<(), String> {
@@ -305,7 +308,7 @@ fn pipe_name() -> Result<String, String> {
             let mut session = 0;
             ProcessIdToSessionId(std::process::id(), &mut session)
                 .map_err(|error| error.to_string())?;
-            Ok(format!(r"\\.\pipe\KeyTao.Ime.{sid}.{session}.v1"))
+            Ok(keytao_ime_ipc::pipe_name(&sid, session))
         })();
         let _ = CloseHandle(token);
         result

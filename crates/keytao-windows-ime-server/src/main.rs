@@ -1,11 +1,7 @@
 //! The non-Windows entry point intentionally has no native engine dependencies.
 
-#[cfg(all(not(windows), test))]
-#[path = "../../keytao-windows-ime/src/engine_config.rs"]
-mod engine_config;
-
-#[cfg(windows)]
-use keytao_windows_ime::engine_config;
+#[cfg(any(windows, test))]
+use keytao_ime_ipc::engine_config;
 
 #[cfg(windows)]
 mod server;

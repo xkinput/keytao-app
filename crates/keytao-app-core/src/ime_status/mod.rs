@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod macos;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
 pub fn app_shared_data_dir(core: &crate::Core) -> String {

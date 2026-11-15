@@ -67,7 +67,7 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set +e
-          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -p keytao-ime-ipc -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
+          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -p keytao-ime-ipc -p keytao-app-core -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
           result=$?
           cat ime-regressions.log
           if [ "$result" -ne 0 ]; then

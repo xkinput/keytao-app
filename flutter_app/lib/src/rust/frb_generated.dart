@@ -239,7 +239,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<LinuxImeStatusDto> crateApiCoreLinuxImeStatus();
 
-  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme({required bool restart});
+  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme();
 
   Future<String> crateApiCoreListCloudPackages();
 
@@ -1944,12 +1944,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "linux_ime_status", argNames: []);
 
   @override
-  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme({required bool restart}) {
+  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_bool(restart, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1962,14 +1961,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreLinuxStartImeConstMeta,
-        argValues: [restart],
+        argValues: [],
         apiImpl: this,
       ),
     );
   }
 
   TaskConstMeta get kCrateApiCoreLinuxStartImeConstMeta =>
-      const TaskConstMeta(debugName: "linux_start_ime", argNames: ["restart"]);
+      const TaskConstMeta(debugName: "linux_start_ime", argNames: []);
 
   @override
   Future<String> crateApiCoreListCloudPackages() {
@@ -3707,26 +3706,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LinuxImeStatusDto dco_decode_linux_ime_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 17)
-      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return LinuxImeStatusDto(
-      supported: dco_decode_bool(arr[0]),
-      kdeSession: dco_decode_bool(arr[1]),
-      kdeConfigured: dco_decode_bool(arr[2]),
-      running: dco_decode_bool(arr[3]),
-      managedPid: dco_decode_opt_box_autoadd_u_32(arr[4]),
-      daemonOwnerPid: dco_decode_opt_box_autoadd_u_32(arr[5]),
-      command: dco_decode_String(arr[6]),
-      processes: dco_decode_list_String(arr[7]),
-      kdeNativeProcesses: dco_decode_u_32(arr[8]),
-      fallbackProcesses: dco_decode_u_32(arr[9]),
-      userDataDir: dco_decode_opt_String(arr[10]),
-      sharedDataDir: dco_decode_opt_String(arr[11]),
-      sharedDataSource: dco_decode_String(arr[12]),
-      reloadStampPath: dco_decode_opt_String(arr[13]),
-      reloadStampSignature: dco_decode_opt_String(arr[14]),
-      message: dco_decode_String(arr[15]),
-      error: dco_decode_opt_String(arr[16]),
+      kdeSession: dco_decode_bool(arr[0]),
+      kdeConfigured: dco_decode_bool(arr[1]),
+      running: dco_decode_bool(arr[2]),
+      managedPid: dco_decode_opt_box_autoadd_u_32(arr[3]),
+      command: dco_decode_String(arr[4]),
+      kdeNativeProcesses: dco_decode_u_32(arr[5]),
+      fallbackProcesses: dco_decode_u_32(arr[6]),
+      message: dco_decode_String(arr[7]),
     );
   }
 
@@ -3848,18 +3838,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MacosImeStatusDto dco_decode_macos_ime_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 9)
-      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return MacosImeStatusDto(
       installed: dco_decode_bool(arr[0]),
       appPath: dco_decode_opt_String(arr[1]),
-      userDataDir: dco_decode_opt_String(arr[2]),
-      sharedDataDir: dco_decode_opt_String(arr[3]),
-      sharedDataSource: dco_decode_String(arr[4]),
-      reloadStampPath: dco_decode_opt_String(arr[5]),
-      reloadStampSignature: dco_decode_opt_String(arr[6]),
-      logDir: dco_decode_opt_String(arr[7]),
-      message: dco_decode_String(arr[8]),
+      message: dco_decode_String(arr[2]),
     );
   }
 
@@ -4228,27 +4212,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 18)
-      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return WindowsImeStatusDto(
-      supported: dco_decode_bool(arr[0]),
-      packaged: dco_decode_bool(arr[1]),
-      registered: dco_decode_bool(arr[2]),
-      registeredDll: dco_decode_bool(arr[3]),
-      profileEnabled: dco_decode_bool(arr[4]),
-      registrationBusy: dco_decode_bool(arr[5]),
-      registrationState: dco_decode_String(arr[6]),
-      registrationError: dco_decode_opt_String(arr[7]),
-      runtimeDir: dco_decode_opt_String(arr[8]),
-      dllPath: dco_decode_opt_String(arr[9]),
-      registeredPath: dco_decode_opt_String(arr[10]),
-      profileStatus: dco_decode_String(arr[11]),
-      userDataDir: dco_decode_opt_String(arr[12]),
-      sharedDataDir: dco_decode_opt_String(arr[13]),
-      sharedDataSource: dco_decode_String(arr[14]),
-      reloadStampPath: dco_decode_opt_String(arr[15]),
-      reloadStampSignature: dco_decode_opt_String(arr[16]),
-      message: dco_decode_String(arr[17]),
+      packaged: dco_decode_bool(arr[0]),
+      registered: dco_decode_bool(arr[1]),
+      registeredDll: dco_decode_bool(arr[2]),
+      profileEnabled: dco_decode_bool(arr[3]),
+      registrationBusy: dco_decode_bool(arr[4]),
+      registrationState: dco_decode_String(arr[5]),
+      registrationError: dco_decode_opt_String(arr[6]),
+      runtimeDir: dco_decode_opt_String(arr[7]),
+      registeredPath: dco_decode_opt_String(arr[8]),
+      profileStatus: dco_decode_String(arr[9]),
+      message: dco_decode_String(arr[10]),
     );
   }
 
@@ -4778,41 +4755,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_supported = sse_decode_bool(deserializer);
     var var_kdeSession = sse_decode_bool(deserializer);
     var var_kdeConfigured = sse_decode_bool(deserializer);
     var var_running = sse_decode_bool(deserializer);
     var var_managedPid = sse_decode_opt_box_autoadd_u_32(deserializer);
-    var var_daemonOwnerPid = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_command = sse_decode_String(deserializer);
-    var var_processes = sse_decode_list_String(deserializer);
     var var_kdeNativeProcesses = sse_decode_u_32(deserializer);
     var var_fallbackProcesses = sse_decode_u_32(deserializer);
-    var var_userDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataSource = sse_decode_String(deserializer);
-    var var_reloadStampPath = sse_decode_opt_String(deserializer);
-    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
     var var_message = sse_decode_String(deserializer);
-    var var_error = sse_decode_opt_String(deserializer);
     return LinuxImeStatusDto(
-      supported: var_supported,
       kdeSession: var_kdeSession,
       kdeConfigured: var_kdeConfigured,
       running: var_running,
       managedPid: var_managedPid,
-      daemonOwnerPid: var_daemonOwnerPid,
       command: var_command,
-      processes: var_processes,
       kdeNativeProcesses: var_kdeNativeProcesses,
       fallbackProcesses: var_fallbackProcesses,
-      userDataDir: var_userDataDir,
-      sharedDataDir: var_sharedDataDir,
-      sharedDataSource: var_sharedDataSource,
-      reloadStampPath: var_reloadStampPath,
-      reloadStampSignature: var_reloadStampSignature,
       message: var_message,
-      error: var_error,
     );
   }
 
@@ -5012,22 +4971,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_installed = sse_decode_bool(deserializer);
     var var_appPath = sse_decode_opt_String(deserializer);
-    var var_userDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataSource = sse_decode_String(deserializer);
-    var var_reloadStampPath = sse_decode_opt_String(deserializer);
-    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
-    var var_logDir = sse_decode_opt_String(deserializer);
     var var_message = sse_decode_String(deserializer);
     return MacosImeStatusDto(
       installed: var_installed,
       appPath: var_appPath,
-      userDataDir: var_userDataDir,
-      sharedDataDir: var_sharedDataDir,
-      sharedDataSource: var_sharedDataSource,
-      reloadStampPath: var_reloadStampPath,
-      reloadStampSignature: var_reloadStampSignature,
-      logDir: var_logDir,
       message: var_message,
     );
   }
@@ -5479,7 +5426,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_supported = sse_decode_bool(deserializer);
     var var_packaged = sse_decode_bool(deserializer);
     var var_registered = sse_decode_bool(deserializer);
     var var_registeredDll = sse_decode_bool(deserializer);
@@ -5488,17 +5434,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_registrationState = sse_decode_String(deserializer);
     var var_registrationError = sse_decode_opt_String(deserializer);
     var var_runtimeDir = sse_decode_opt_String(deserializer);
-    var var_dllPath = sse_decode_opt_String(deserializer);
     var var_registeredPath = sse_decode_opt_String(deserializer);
     var var_profileStatus = sse_decode_String(deserializer);
-    var var_userDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataDir = sse_decode_opt_String(deserializer);
-    var var_sharedDataSource = sse_decode_String(deserializer);
-    var var_reloadStampPath = sse_decode_opt_String(deserializer);
-    var var_reloadStampSignature = sse_decode_opt_String(deserializer);
     var var_message = sse_decode_String(deserializer);
     return WindowsImeStatusDto(
-      supported: var_supported,
       packaged: var_packaged,
       registered: var_registered,
       registeredDll: var_registeredDll,
@@ -5507,14 +5446,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       registrationState: var_registrationState,
       registrationError: var_registrationError,
       runtimeDir: var_runtimeDir,
-      dllPath: var_dllPath,
       registeredPath: var_registeredPath,
       profileStatus: var_profileStatus,
-      userDataDir: var_userDataDir,
-      sharedDataDir: var_sharedDataDir,
-      sharedDataSource: var_sharedDataSource,
-      reloadStampPath: var_reloadStampPath,
-      reloadStampSignature: var_reloadStampSignature,
       message: var_message,
     );
   }
@@ -6007,23 +5940,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_bool(self.supported, serializer);
     sse_encode_bool(self.kdeSession, serializer);
     sse_encode_bool(self.kdeConfigured, serializer);
     sse_encode_bool(self.running, serializer);
     sse_encode_opt_box_autoadd_u_32(self.managedPid, serializer);
-    sse_encode_opt_box_autoadd_u_32(self.daemonOwnerPid, serializer);
     sse_encode_String(self.command, serializer);
-    sse_encode_list_String(self.processes, serializer);
     sse_encode_u_32(self.kdeNativeProcesses, serializer);
     sse_encode_u_32(self.fallbackProcesses, serializer);
-    sse_encode_opt_String(self.userDataDir, serializer);
-    sse_encode_opt_String(self.sharedDataDir, serializer);
-    sse_encode_String(self.sharedDataSource, serializer);
-    sse_encode_opt_String(self.reloadStampPath, serializer);
-    sse_encode_opt_String(self.reloadStampSignature, serializer);
     sse_encode_String(self.message, serializer);
-    sse_encode_opt_String(self.error, serializer);
   }
 
   @protected
@@ -6197,12 +6121,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.installed, serializer);
     sse_encode_opt_String(self.appPath, serializer);
-    sse_encode_opt_String(self.userDataDir, serializer);
-    sse_encode_opt_String(self.sharedDataDir, serializer);
-    sse_encode_String(self.sharedDataSource, serializer);
-    sse_encode_opt_String(self.reloadStampPath, serializer);
-    sse_encode_opt_String(self.reloadStampSignature, serializer);
-    sse_encode_opt_String(self.logDir, serializer);
     sse_encode_String(self.message, serializer);
   }
 
@@ -6600,7 +6518,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_bool(self.supported, serializer);
     sse_encode_bool(self.packaged, serializer);
     sse_encode_bool(self.registered, serializer);
     sse_encode_bool(self.registeredDll, serializer);
@@ -6609,14 +6526,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.registrationState, serializer);
     sse_encode_opt_String(self.registrationError, serializer);
     sse_encode_opt_String(self.runtimeDir, serializer);
-    sse_encode_opt_String(self.dllPath, serializer);
     sse_encode_opt_String(self.registeredPath, serializer);
     sse_encode_String(self.profileStatus, serializer);
-    sse_encode_opt_String(self.userDataDir, serializer);
-    sse_encode_opt_String(self.sharedDataDir, serializer);
-    sse_encode_String(self.sharedDataSource, serializer);
-    sse_encode_opt_String(self.reloadStampPath, serializer);
-    sse_encode_opt_String(self.reloadStampSignature, serializer);
     sse_encode_String(self.message, serializer);
   }
 }

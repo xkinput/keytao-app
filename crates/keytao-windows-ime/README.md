@@ -94,6 +94,7 @@ Weasel or any other input method. A minimal runtime layout is:
 ```text
 KeyTao\
   keytao_windows_ime.dll
+  keytao-windows-ime-server.exe
   rime.dll / rime-arm64.dll with merged librime-lua
   librime-features.txt
   rime-data\
@@ -101,6 +102,10 @@ KeyTao\
     essay.txt
     ...
 ```
+
+The engine server is required by the default Pipe mode. See
+[Windows IME engine server](../../docs/windows-ime-server.md) for its runtime
+architecture and configuration.
 
 The input-switcher branding icon is PE resource ID 1 inside each target DLL;
 its TSF profile index is the zero-based value `0`, so no external profile ICO

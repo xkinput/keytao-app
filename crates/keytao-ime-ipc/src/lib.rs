@@ -1,7 +1,9 @@
 //! Platform-independent messages and framing for the IME engine server.
 
+pub mod engine_config;
 mod framing;
 
+pub use engine_config::{pipe_name, EngineMode};
 pub use framing::{read_frame, read_response, write_frame, MAX_FRAME_SIZE};
 use keytao_core::{ImeState, InputContextPolicy, KeyProcessResult};
 use serde::{Deserialize, Serialize};

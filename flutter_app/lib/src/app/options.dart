@@ -1,6 +1,3 @@
-import 'package:flutter/cupertino.dart' show CupertinoIcons;
-import 'package:flutter/material.dart' show IconData, Icons;
-
 import '../rust/api/types.dart';
 import 'bootstrap.dart' show flutterVersion;
 import 'controller.dart';
@@ -65,42 +62,15 @@ const candidateFontMax = 36.0;
 const candidateFontDivisions = 26;
 
 enum AppPage {
-  input(
-    'ime',
-    AppStrings.ime,
-    CupertinoIcons.keyboard,
-    Icons.keyboard_outlined,
-  ),
-  scheme(
-    'scheme',
-    AppStrings.scheme,
-    CupertinoIcons.arrow_down_circle,
-    Icons.download_outlined,
-  ),
-  extension(
-    'extension',
-    AppStrings.extension,
-    CupertinoIcons.settings,
-    Icons.settings_outlined,
-  ),
-  about(
-    'about',
-    AppStrings.about,
-    CupertinoIcons.info_circle,
-    Icons.info_outline,
-  ),
-  debug(
-    'debug',
-    AppStrings.debug,
-    CupertinoIcons.doc_text,
-    Icons.receipt_long_outlined,
-  );
+  input('ime', AppStrings.ime),
+  scheme('scheme', AppStrings.scheme),
+  extension('extension', AppStrings.extension),
+  about('about', AppStrings.about),
+  debug('debug', AppStrings.debug);
 
-  const AppPage(this.id, this.title, this.cupertinoIcon, this.materialIcon);
+  const AppPage(this.id, this.title);
   final String id;
   final String title;
-  final IconData cupertinoIcon;
-  final IconData materialIcon;
   int get shortcutDigit => index + 1;
 }
 

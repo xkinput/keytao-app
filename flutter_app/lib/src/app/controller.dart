@@ -834,7 +834,7 @@ class AppController extends ChangeNotifier {
       await read(() async {
         try {
           linuxIme = await core.linuxImeStatus();
-          linuxImeError = linuxIme!.error;
+          linuxImeError = null;
         } catch (failure) {
           linuxImeError = errorText(failure);
           rethrow;
@@ -909,8 +909,8 @@ class AppController extends ChangeNotifier {
           }
         } else if (isLinux) {
           try {
-            linuxIme = await core.linuxStartIme(restart: false);
-            linuxImeError = linuxIme!.error;
+            linuxIme = await core.linuxStartIme();
+            linuxImeError = null;
           } catch (failure) {
             startupImeError = errorText(failure);
           }

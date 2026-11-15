@@ -152,7 +152,6 @@ pub struct CloudTransferProgressDto {
 
 #[derive(serde::Deserialize)]
 pub struct WindowsImeStatusDto {
-    pub supported: bool,
     pub packaged: bool,
     pub registered: bool,
     pub registered_dll: bool,
@@ -161,14 +160,8 @@ pub struct WindowsImeStatusDto {
     pub registration_state: String,
     pub registration_error: Option<String>,
     pub runtime_dir: Option<String>,
-    pub dll_path: Option<String>,
     pub registered_path: Option<String>,
     pub profile_status: String,
-    pub user_data_dir: Option<String>,
-    pub shared_data_dir: Option<String>,
-    pub shared_data_source: String,
-    pub reload_stamp_path: Option<String>,
-    pub reload_stamp_signature: Option<String>,
     pub message: String,
 }
 
@@ -314,54 +307,22 @@ pub struct ImeUiSettingsDto {
 }
 
 #[derive(serde::Deserialize)]
-pub struct AddonSchemaStatusDto {
-    pub installed: bool,
-    pub deployed: bool,
-    pub version: String,
-    pub english_available: bool,
-}
-
-#[derive(serde::Deserialize)]
-pub struct WanxiangStatusDto {
-    pub installed: bool,
-    pub deployed: bool,
-    pub version: String,
-}
-
-#[derive(serde::Deserialize)]
 pub struct MacosImeStatusDto {
     pub installed: bool,
     pub app_path: Option<String>,
-    pub user_data_dir: Option<String>,
-    pub shared_data_dir: Option<String>,
-    pub shared_data_source: String,
-    pub reload_stamp_path: Option<String>,
-    pub reload_stamp_signature: Option<String>,
-    pub log_dir: Option<String>,
     pub message: String,
 }
 
 #[derive(serde::Deserialize)]
 pub struct LinuxImeStatusDto {
-    pub supported: bool,
     pub kde_session: bool,
     pub kde_configured: bool,
     pub running: bool,
     pub managed_pid: Option<u32>,
-    pub daemon_owner_pid: Option<u32>,
     pub command: String,
-    pub processes: Vec<String>,
     pub kde_native_processes: u32,
     pub fallback_processes: u32,
-    pub user_data_dir: Option<String>,
-    pub shared_data_dir: Option<String>,
-    pub shared_data_source: String,
-    pub reload_stamp_path: Option<String>,
-    pub reload_stamp_signature: Option<String>,
     pub message: String,
-    /// Core reports operation failures through Result, as the old Linux card did.
-    #[serde(default)]
-    pub error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

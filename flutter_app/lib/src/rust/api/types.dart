@@ -7,7 +7,6 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AddonSchemaStatusDto`, `WanxiangStatusDto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
 
 class AccountUserDto {
@@ -637,88 +636,50 @@ class InstalledPackageDto {
 }
 
 class LinuxImeStatusDto {
-  final bool supported;
   final bool kdeSession;
   final bool kdeConfigured;
   final bool running;
   final int? managedPid;
-  final int? daemonOwnerPid;
   final String command;
-  final List<String> processes;
   final int kdeNativeProcesses;
   final int fallbackProcesses;
-  final String? userDataDir;
-  final String? sharedDataDir;
-  final String sharedDataSource;
-  final String? reloadStampPath;
-  final String? reloadStampSignature;
   final String message;
 
-  /// Core reports operation failures through Result, as the old Linux card did.
-  final String? error;
-
   const LinuxImeStatusDto({
-    required this.supported,
     required this.kdeSession,
     required this.kdeConfigured,
     required this.running,
     this.managedPid,
-    this.daemonOwnerPid,
     required this.command,
-    required this.processes,
     required this.kdeNativeProcesses,
     required this.fallbackProcesses,
-    this.userDataDir,
-    this.sharedDataDir,
-    required this.sharedDataSource,
-    this.reloadStampPath,
-    this.reloadStampSignature,
     required this.message,
-    this.error,
   });
 
   @override
   int get hashCode =>
-      supported.hashCode ^
       kdeSession.hashCode ^
       kdeConfigured.hashCode ^
       running.hashCode ^
       managedPid.hashCode ^
-      daemonOwnerPid.hashCode ^
       command.hashCode ^
-      processes.hashCode ^
       kdeNativeProcesses.hashCode ^
       fallbackProcesses.hashCode ^
-      userDataDir.hashCode ^
-      sharedDataDir.hashCode ^
-      sharedDataSource.hashCode ^
-      reloadStampPath.hashCode ^
-      reloadStampSignature.hashCode ^
-      message.hashCode ^
-      error.hashCode;
+      message.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is LinuxImeStatusDto &&
           runtimeType == other.runtimeType &&
-          supported == other.supported &&
           kdeSession == other.kdeSession &&
           kdeConfigured == other.kdeConfigured &&
           running == other.running &&
           managedPid == other.managedPid &&
-          daemonOwnerPid == other.daemonOwnerPid &&
           command == other.command &&
-          processes == other.processes &&
           kdeNativeProcesses == other.kdeNativeProcesses &&
           fallbackProcesses == other.fallbackProcesses &&
-          userDataDir == other.userDataDir &&
-          sharedDataDir == other.sharedDataDir &&
-          sharedDataSource == other.sharedDataSource &&
-          reloadStampPath == other.reloadStampPath &&
-          reloadStampSignature == other.reloadStampSignature &&
-          message == other.message &&
-          error == other.error;
+          message == other.message;
 }
 
 class LocalSchemaDto {
@@ -784,37 +745,16 @@ class LocalSchemasDto {
 class MacosImeStatusDto {
   final bool installed;
   final String? appPath;
-  final String? userDataDir;
-  final String? sharedDataDir;
-  final String sharedDataSource;
-  final String? reloadStampPath;
-  final String? reloadStampSignature;
-  final String? logDir;
   final String message;
 
   const MacosImeStatusDto({
     required this.installed,
     this.appPath,
-    this.userDataDir,
-    this.sharedDataDir,
-    required this.sharedDataSource,
-    this.reloadStampPath,
-    this.reloadStampSignature,
-    this.logDir,
     required this.message,
   });
 
   @override
-  int get hashCode =>
-      installed.hashCode ^
-      appPath.hashCode ^
-      userDataDir.hashCode ^
-      sharedDataDir.hashCode ^
-      sharedDataSource.hashCode ^
-      reloadStampPath.hashCode ^
-      reloadStampSignature.hashCode ^
-      logDir.hashCode ^
-      message.hashCode;
+  int get hashCode => installed.hashCode ^ appPath.hashCode ^ message.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -823,12 +763,6 @@ class MacosImeStatusDto {
           runtimeType == other.runtimeType &&
           installed == other.installed &&
           appPath == other.appPath &&
-          userDataDir == other.userDataDir &&
-          sharedDataDir == other.sharedDataDir &&
-          sharedDataSource == other.sharedDataSource &&
-          reloadStampPath == other.reloadStampPath &&
-          reloadStampSignature == other.reloadStampSignature &&
-          logDir == other.logDir &&
           message == other.message;
 }
 
@@ -1274,7 +1208,6 @@ class VerifyEntryDto {
 }
 
 class WindowsImeStatusDto {
-  final bool supported;
   final bool packaged;
   final bool registered;
   final bool registeredDll;
@@ -1283,18 +1216,11 @@ class WindowsImeStatusDto {
   final String registrationState;
   final String? registrationError;
   final String? runtimeDir;
-  final String? dllPath;
   final String? registeredPath;
   final String profileStatus;
-  final String? userDataDir;
-  final String? sharedDataDir;
-  final String sharedDataSource;
-  final String? reloadStampPath;
-  final String? reloadStampSignature;
   final String message;
 
   const WindowsImeStatusDto({
-    required this.supported,
     required this.packaged,
     required this.registered,
     required this.registeredDll,
@@ -1303,20 +1229,13 @@ class WindowsImeStatusDto {
     required this.registrationState,
     this.registrationError,
     this.runtimeDir,
-    this.dllPath,
     this.registeredPath,
     required this.profileStatus,
-    this.userDataDir,
-    this.sharedDataDir,
-    required this.sharedDataSource,
-    this.reloadStampPath,
-    this.reloadStampSignature,
     required this.message,
   });
 
   @override
   int get hashCode =>
-      supported.hashCode ^
       packaged.hashCode ^
       registered.hashCode ^
       registeredDll.hashCode ^
@@ -1325,14 +1244,8 @@ class WindowsImeStatusDto {
       registrationState.hashCode ^
       registrationError.hashCode ^
       runtimeDir.hashCode ^
-      dllPath.hashCode ^
       registeredPath.hashCode ^
       profileStatus.hashCode ^
-      userDataDir.hashCode ^
-      sharedDataDir.hashCode ^
-      sharedDataSource.hashCode ^
-      reloadStampPath.hashCode ^
-      reloadStampSignature.hashCode ^
       message.hashCode;
 
   @override
@@ -1340,7 +1253,6 @@ class WindowsImeStatusDto {
       identical(this, other) ||
       other is WindowsImeStatusDto &&
           runtimeType == other.runtimeType &&
-          supported == other.supported &&
           packaged == other.packaged &&
           registered == other.registered &&
           registeredDll == other.registeredDll &&
@@ -1349,13 +1261,7 @@ class WindowsImeStatusDto {
           registrationState == other.registrationState &&
           registrationError == other.registrationError &&
           runtimeDir == other.runtimeDir &&
-          dllPath == other.dllPath &&
           registeredPath == other.registeredPath &&
           profileStatus == other.profileStatus &&
-          userDataDir == other.userDataDir &&
-          sharedDataDir == other.sharedDataDir &&
-          sharedDataSource == other.sharedDataSource &&
-          reloadStampPath == other.reloadStampPath &&
-          reloadStampSignature == other.reloadStampSignature &&
           message == other.message;
 }

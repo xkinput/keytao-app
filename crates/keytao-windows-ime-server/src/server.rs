@@ -414,16 +414,13 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
     if client.session_id != server.session_id || client.sid != server.sid {
         return Err("pipe client user or session does not match".into());
     }
-    keytao_core::rt_log!(
-        Level::Info,
-        "ipc",
-        "client_authenticated",
-        pid = pid,
-        is_appcontainer = client.is_appcontainer
-    );
     let mut file = unsafe { File::from_raw_handle(pipe.0 .0) };
     std::mem::forget(pipe);
-    let hello: RequestEnvelope = read_frame(&mut file).map_err(|e| e.to_string())?;
+    let hello: RequestEnvelope = match read_frame(&mut file) {
+        Ok(hello) => hello,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
     let response = match &hello.message {
         Request::Hello { protocol, .. } => negotiate_protocol(*protocol, env!("CARGO_PKG_VERSION")),
         _ => Response::HelloErr("expected Hello".into()),
@@ -432,6 +429,13 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
     if !matches!(response, Response::HelloOk { .. }) {
         return Ok(());
     }
+    keytao_core::rt_log!(
+        Level::Info,
+        "ipc",
+        "client_authenticated",
+        pid = pid,
+        is_appcontainer = client.is_appcontainer
+    );
     let role = match hello.message {
         Request::Hello { role, .. } => role,
         _ => unreachable!(),
