@@ -21,12 +21,13 @@ use keytao_ime_ipc::{
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY, HANDLE, HLOCAL,
-            LocalFree, WAIT_OBJECT_0,
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY,
+            ERROR_PRIVILEGE_NOT_HELD, HANDLE, HLOCAL, LocalFree, WAIT_OBJECT_0,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_ELEVATION,
-            TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+            Authorization::ConvertSidToStringSidW, DuplicateTokenEx, GetTokenInformation,
+            SecurityImpersonation, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+            TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenPrimary, TokenUser,
         },
         System::{
             Pipes::{GetNamedPipeServerProcessId, PIPE_NOWAIT, SetNamedPipeHandleState},
@@ -38,12 +39,14 @@ use windows::{
             },
             RemoteDesktop::ProcessIdToSessionId,
             Threading::{
-                CREATE_NO_WINDOW, DETACHED_PROCESS, GetCurrentProcess, OpenProcess,
-                OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+                CREATE_NO_WINDOW, CreateProcessWithTokenW, DETACHED_PROCESS, GetCurrentProcess,
+                LOGON_WITH_PROFILE, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
+                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                PROCESS_TERMINATE, QueryFullProcessImageNameW, STARTF_USESHOWWINDOW, STARTUPINFOW,
                 TerminateProcess, WaitForSingleObject,
             },
         },
+        UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId, SW_HIDE},
     },
     core::{PCWSTR, PWSTR, w},
 };
@@ -58,10 +61,7 @@ static LAST_START: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
 static LAST_RUN_VALUE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(super) fn start_watchdog() {
-    if !server_enabled()
-        || !can_manage_server(app_is_elevated().unwrap_or(true))
-        || WATCHDOG_STARTED.swap(true, Ordering::AcqRel)
-    {
+    if !server_enabled() || WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
     if let Err(error) = std::thread::Builder::new()
@@ -81,7 +81,7 @@ pub(super) fn start_watchdog() {
 }
 
 fn ensure_started() -> Result<(), String> {
-    if !server_enabled() || !can_manage_server(app_is_elevated()?) {
+    if !server_enabled() {
         return Ok(());
     }
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
@@ -118,17 +118,122 @@ fn ensure_started() -> Result<(), String> {
     }) {
         return Ok(());
     }
-    start_server(&server, &mut last_start)
+    start_server(&server, &mut last_start, &ServerLauncher::prepare()?)
 }
 
-fn start_server(server: &Path, last_start: &mut Option<(PathBuf, Instant)>) -> Result<(), String> {
-    if !can_manage_server(app_is_elevated()?) {
-        return Err("请正常启动 KeyTao（不要以管理员身份运行），再重试部署。".into());
+struct ServerLauncher {
+    shell_token: Option<ProcessHandle>,
+}
+
+impl ServerLauncher {
+    fn prepare() -> Result<Self, String> {
+        let elevated = app_is_elevated()?;
+        let shell_token = elevated.then(shell_primary_token).transpose();
+        if !can_manage_server(elevated, shell_token.is_ok()) {
+            return Err(elevation_launch_error(shell_token.err().unwrap()));
+        }
+        Ok(Self {
+            shell_token: shell_token?,
+        })
     }
-    Command::new(server)
-        .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
-        .spawn()
-        .map_err(|error| format!("start installed IME server: {error}"))?;
+}
+
+fn elevation_launch_error(error: String) -> String {
+    format!(
+        "无法使用交互式桌面权限启动输入法服务：{error}；当前 KeyTao 以管理员权限运行，请关闭后正常启动 KeyTao（不要以管理员身份运行），再重试部署。"
+    )
+}
+
+fn shell_primary_token() -> Result<ProcessHandle, String> {
+    unsafe {
+        let shell = GetShellWindow();
+        if shell.0.is_null() {
+            return Err("interactive shell window is unavailable".into());
+        }
+        let mut pid = 0;
+        if GetWindowThreadProcessId(shell, Some(&mut pid)) == 0 || pid == 0 {
+            return Err("interactive shell process is unavailable".into());
+        }
+        let process = ProcessHandle(
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                .map_err(|error| format!("open interactive shell process: {error}"))?,
+        );
+        if process_session(pid)? != process_session(std::process::id())?
+            || process_sid(process.0)? != process_sid(GetCurrentProcess())?
+        {
+            return Err("interactive shell user or session does not match KeyTao".into());
+        }
+        let access = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY;
+        let mut token = HANDLE::default();
+        OpenProcessToken(process.0, access, &mut token)
+            .map_err(|error| format!("open interactive shell token: {error}"))?;
+        let token = ProcessHandle(token);
+        let mut primary = HANDLE::default();
+        // Preserve the shell's token even when UAC is disabled and the shell itself is elevated.
+        DuplicateTokenEx(
+            token.0,
+            access,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+        .map_err(|error| format!("duplicate interactive shell token: {error}"))?;
+        Ok(ProcessHandle(primary))
+    }
+}
+
+fn start_server(
+    server: &Path,
+    last_start: &mut Option<(PathBuf, Instant)>,
+    launcher: &ServerLauncher,
+) -> Result<(), String> {
+    if let Some(token) = &launcher.shell_token {
+        let path = super::windows_normal_path(server);
+        let application: Vec<_> = path.encode_utf16().chain(Some(0)).collect();
+        let mut command: Vec<_> = format!("\"{path}\"")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let startup = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            dwFlags: STARTF_USESHOWWINDOW,
+            wShowWindow: SW_HIDE.0 as u16,
+            ..Default::default()
+        };
+        let mut process = PROCESS_INFORMATION::default();
+        unsafe {
+            CreateProcessWithTokenW(
+                token.0,
+                LOGON_WITH_PROFILE,
+                PCWSTR(application.as_ptr()),
+                PWSTR(command.as_mut_ptr()),
+                // This API defaults to CREATE_NEW_CONSOLE; hide it without DETACHED_PROCESS.
+                CREATE_NO_WINDOW,
+                None,
+                PCWSTR::null(),
+                &startup,
+                &mut process,
+            )
+        }
+        .map_err(|error| {
+            let reason = format!("start installed IME server with shell token: {error}");
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
+                || error.code() == windows::core::HRESULT::from_win32(ERROR_PRIVILEGE_NOT_HELD.0)
+            {
+                elevation_launch_error(reason)
+            } else {
+                reason
+            }
+        })?;
+        drop(ProcessHandle(process.hThread));
+        drop(ProcessHandle(process.hProcess));
+    } else {
+        Command::new(server)
+            .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
+            .spawn()
+            .map_err(|error| format!("start installed IME server: {error}"))?;
+    }
     *last_start = Some((server.to_path_buf(), Instant::now()));
     Ok(())
 }
@@ -429,25 +534,16 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// False permits in-process deployment only in InProc mode or with no server and no spawn.
+/// False permits in-process deployment only in InProc mode with no server pipe.
 pub(super) fn deploy_if_available() -> Result<bool, String> {
     if !server_enabled() {
+        super::server_recovery::require_absent_server(open_pipe(&pipe_name()?).map(|_| ()))?;
         return Ok(false);
     }
-    let elevated = app_is_elevated()?;
     start_watchdog();
     // Serialize recovery/deploy with this App's watchdog, including the full deployment RPC.
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
-    deploy_via_server(&mut last_start, elevated)
-        .map_err(|error| {
-            if elevated {
-                format!(
-                    "无法通过输入法服务完成部署：{error}；当前 KeyTao 以管理员权限运行，请关闭后正常启动 KeyTao（不要以管理员身份运行），再重试部署。"
-                )
-            } else {
-                error
-            }
-        })
+    deploy_via_server(&mut last_start)
 }
 
 fn open_pipe(name: &str) -> io::Result<File> {
@@ -466,27 +562,17 @@ struct ServerConnection {
 fn connect_for_deploy(
     name: &str,
     last_start: &mut Option<(PathBuf, Instant)>,
-    elevated: bool,
+    launcher: &Result<ServerLauncher, String>,
 ) -> Result<Option<(ServerConnection, bool)>, String> {
     let deadline = Instant::now() + START_TIMEOUT;
     let mut started = false;
-    let mut observed_server = false;
     let file = loop {
         match open_pipe(name) {
             Ok(file) => break file,
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
-                if !can_manage_server(elevated) {
-                    return if observed_server {
-                        Err(
-                            "IME server pipe disappeared after being busy; deployment was not sent"
-                                .into(),
-                        )
-                    } else {
-                        Ok(None)
-                    };
-                }
                 if !started {
-                    start_server(&installed_server_exe()?, last_start)?;
+                    let launcher = launcher.as_ref().map_err(Clone::clone)?;
+                    start_server(&installed_server_exe()?, last_start, launcher)?;
                     started = true;
                 }
                 if Instant::now() >= deadline {
@@ -495,7 +581,6 @@ fn connect_for_deploy(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
-                observed_server = true;
                 if Instant::now() >= deadline {
                     return Err("IME server deployment pipe remains busy".into());
                 }
@@ -505,8 +590,7 @@ fn connect_for_deploy(
         }
     };
     let peer = verified_server(&file)?;
-    // Elevated Apps cannot replace a peer, so they need no current-version lookup.
-    let current = !elevated && same_path(&peer.image, &installed_server_exe()?);
+    let current = same_path(&peer.image, &installed_server_exe()?);
     unsafe {
         SetNamedPipeHandleState(HANDLE(file.as_raw_handle()), Some(&PIPE_NOWAIT), None, None)
     }
@@ -555,9 +639,6 @@ fn replace_before_deploy(
     authenticated: bool,
     name: &str,
 ) -> Result<(), String> {
-    if !can_manage_server(app_is_elevated()?) {
-        return Err("请正常启动 KeyTao（不要以管理员身份运行），再重试部署。".into());
-    }
     let ServerConnection { mut pipe, peer } = connection;
     tracing::warn!(server_pid = peer.pid, image = %peer.image.display(), authenticated, "recovering IME server before Deploy");
     if authenticated {
@@ -618,14 +699,13 @@ fn replace_before_deploy(
     }
 }
 
-fn deploy_via_server(
-    last_start: &mut Option<(PathBuf, Instant)>,
-    elevated: bool,
-) -> Result<bool, String> {
+fn deploy_via_server(last_start: &mut Option<(PathBuf, Instant)>) -> Result<bool, String> {
     let name = pipe_name()?;
+    // Prepare the launch token before allowing recovery to stop the existing writer.
+    let launcher = ServerLauncher::prepare();
     super::server_recovery::deploy_once(
-        elevated,
-        || connect_for_deploy(&name, last_start, elevated),
+        launcher.as_ref().map(|_| ()).map_err(Clone::clone),
+        || connect_for_deploy(&name, last_start, &launcher),
         |connection| {
             let result = hello(&mut connection.pipe);
             if let Err(error) = &result {
