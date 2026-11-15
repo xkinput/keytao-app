@@ -6,7 +6,10 @@ use keytao_ime_ipc::{
 use keytao_windows_ime::{
     engine_backend::{ImeEngineBackend, InProcEngine},
     engine_status,
-    pipe_security::{current_identity, process_identity, Identity, OwnedHandle},
+    pipe_security::{
+        current_identity, keytao_install_root, process_identity, process_image, Identity,
+        OwnedHandle,
+    },
 };
 use std::{
     fs::File,
@@ -17,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::{
-    core::{PCWSTR, PWSTR},
+    core::PCWSTR,
     Win32::{
         Foundation::{
             LocalFree, ERROR_ACCESS_DENIED, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
@@ -39,11 +42,7 @@ use windows::{
                 GetNamedPipeServerProcessId, SetNamedPipeHandleState, PIPE_NOWAIT,
                 PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
             },
-            Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY},
-            Threading::{
-                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-                PROCESS_QUERY_LIMITED_INFORMATION,
-            },
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
     },
 };
@@ -256,45 +255,11 @@ fn installed_process(pid: u32, caller_sid: &str, server_sid: &str) -> Result<Pat
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             .map_err(|error| format!("open installed caller process: {error}"))?,
     );
-    let mut image = vec![0u16; 32768];
-    let mut length = image.len() as u32;
-    unsafe {
-        QueryFullProcessImageNameW(
-            process.0,
-            PROCESS_NAME_WIN32,
-            PWSTR(image.as_mut_ptr()),
-            &mut length,
-        )
-    }
-    .map_err(|error| format!("read installed caller image: {error}"))?;
-    let image = PathBuf::from(String::from_utf16_lossy(&image[..length as usize]))
+    let image = process_image(process.0)
+        .map_err(|error| format!("read installed caller image: {error}"))?
         .canonicalize()
         .map_err(|error| format!("resolve installed caller image: {error}"))?;
-    let mut value = vec![0u16; 32768];
-    let mut size = (value.len() * 2) as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
-            windows::core::w!("ProgramFilesDir"),
-            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
-            None,
-            Some(value.as_mut_ptr().cast()),
-            Some(&mut size),
-        )
-    };
-    if status.is_err() || size < 4 || size as usize > value.len() * 2 || size % 2 != 0 {
-        return Err("cannot determine native Program Files directory".into());
-    }
-    let value = &value[..size as usize / 2];
-    let length = value
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or("unterminated Program Files directory")?;
-    let root = PathBuf::from(String::from_utf16(&value[..length]).map_err(|e| e.to_string())?)
-        .join("KeyTao")
-        .canonicalize()
-        .map_err(|error| format!("resolve KeyTao installation directory: {error}"))?;
+    let root = keytao_install_root()?;
     if !crate::authorization::installed_caller(caller_sid, server_sid, &image, &root) {
         return Err("caller image or user is outside the KeyTao installation".into());
     }

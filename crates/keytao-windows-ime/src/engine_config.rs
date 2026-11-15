@@ -1,5 +1,7 @@
 //! Portable configuration shared by the DLL and server.
 
+use std::path::{Component, Path};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EngineMode {
     InProc,
@@ -25,6 +27,24 @@ pub fn pipe_sddl(sid: &str) -> String {
     format!("D:(A;;GRGW;;;{sid})(A;;GRGW;;;S-1-15-2-1)S:(ML;;NW;;;LW)")
 }
 
+pub fn is_descendant(image: &Path, root: &Path) -> bool {
+    if image
+        .components()
+        .chain(root.components())
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    let image: Vec<_> = image.components().collect();
+    let root: Vec<_> = root.components().collect();
+    image.len() > root.len()
+        && root.iter().zip(&image).all(|(left, right)| {
+            left.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,6 +67,29 @@ mod tests {
             Some((4, &[0][..])),
         ] {
             assert_eq!(EngineMode::from_registry(value), EngineMode::Pipe);
+        }
+    }
+
+    #[test]
+    fn installation_descendants_require_a_component_boundary_and_no_traversal() {
+        let root = Path::new("C:/Program Files/KeyTao");
+        assert!(is_descendant(
+            Path::new("c:/program files/keytao/runtime/server.exe"),
+            root
+        ));
+        for image in [
+            "C:/Program Files/KeyTao",
+            "C:/Program Files/KeyTao-other/server.exe",
+            "C:/Program Files/KeyTao/../server.exe",
+            "./C:/Program Files/KeyTao/server.exe",
+        ] {
+            assert!(!is_descendant(Path::new(image), root), "{image}");
+        }
+        for root in ["C:/Program Files/KeyTao/..", "./C:/Program Files/KeyTao"] {
+            assert!(!is_descendant(
+                Path::new("C:/Program Files/KeyTao/../server.exe"),
+                Path::new(root)
+            ));
         }
     }
 }
