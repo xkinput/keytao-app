@@ -79,6 +79,8 @@ class FakeCore implements RustLibApi {
   LocalSchemaDto local = installedLocal;
   final latestRequests = <Completer<ReleaseInfoDto>>[];
   final schemeRequests = <String, Completer<SchemeReleaseDto>>{};
+  Completer<String>? schemeSyncState;
+  final schemeSettings = <String, dynamic>{};
   final addonUpdateRequests = <String, Completer<AddonStatusDto>>{};
   AddonStatusDto addonStatus = missingAddon;
   AddonStatusDto wanxiangStatus = missingAddon;
@@ -205,6 +207,16 @@ class FakeCore implements RustLibApi {
     calls.add('release:$scheme');
     return (schemeRequests[scheme] = Completer<SchemeReleaseDto>()).future;
   }
+
+  @override
+  Future<String> crateApiCoreGetSchemeSyncState() =>
+      schemeSyncState?.future ??
+      Future.value(jsonEncode({'settings': schemeSettings}));
+
+  @override
+  Future<String> crateApiCoreApplySchemeProfile({
+    required String profileJson,
+  }) async => profileJson;
 
   @override
   Future<String> crateApiCoreDownloadSchemeArchive({
@@ -421,13 +433,17 @@ void main() {
   late FakeCore core;
   late FakeAndroid android;
   late AppController controller;
-  AppController create({bool mobile = true}) => AppController(
+  AppController create({
+    bool mobile = true,
+    Future<String?> Function()? pickDesktopDirectory,
+  }) => AppController(
     info: BridgeInfo(
       platform: mobile ? BridgePlatform.android : BridgePlatform.macOs,
       appVersion: 'test',
       userRoot: '/isolated/key tao',
     ),
     android: android,
+    pickDesktopDirectory: pickDesktopDirectory ?? () async => null,
   );
 
   setUp(() {
@@ -669,6 +685,83 @@ void main() {
     },
   );
 
+  test(
+    'startup restores the selected scheme release and rejects the old request',
+    () async {
+      controller.dispose();
+      controller = create(mobile: false);
+      core.delayReleases = true;
+      core.schemeSyncState = Completer<String>();
+      expect(await controller.refreshState(), isTrue);
+      await settle();
+      expect(core.latestRequests, hasLength(1));
+
+      core.schemeSyncState!.complete(
+        jsonEncode({
+          'settings': {'selected_scheme': 'txjx'},
+        }),
+      );
+      await settle();
+      expect(controller.scheme, 'txjx');
+      expect(core.schemeRequests, contains('txjx'));
+      expect(controller.latestRelease, isNull);
+
+      core.schemeRequests['txjx']!.complete(
+        const SchemeReleaseDto(
+          scheme: 'txjx',
+          label: 'txjx',
+          version: '3',
+          name: '',
+          downloadUrl: 'offline-txjx',
+          assetName: 'txjx.zip',
+        ),
+      );
+      core.latestRequests.single.complete(release);
+      await settle();
+      expect(controller.latestRelease, isNull);
+      expect(controller.releaseVersion, '3');
+      expect(controller.downloadUrl, 'offline-txjx');
+      expect(controller.canInstall, isTrue);
+    },
+  );
+
+  test('cloud settings refresh a changed scheme release only once', () async {
+    controller.dispose();
+    controller = create(mobile: false);
+    expect(await controller.refreshState(), isTrue);
+    await settle();
+    expect(controller.latestRelease, same(release));
+    controller.pendingCloudProfile = {
+      'settings': {'selected_scheme': 'txjx'},
+    };
+    expect(await controller.applyCloudProfile(), isTrue);
+    expect(controller.scheme, 'txjx');
+    expect(controller.latestRelease, isNull);
+    expect(core.schemeRequests, contains('txjx'));
+
+    core.schemeRequests['txjx']!.complete(
+      const SchemeReleaseDto(
+        scheme: 'txjx',
+        label: 'txjx',
+        version: '3',
+        name: '',
+        downloadUrl: 'offline-txjx',
+        assetName: 'txjx.zip',
+      ),
+    );
+    await settle();
+    final selectedRelease = controller.schemeRelease;
+    controller.pendingCloudProfile = {
+      'settings': {'selected_scheme': 'txjx'},
+    };
+    expect(await controller.applyCloudProfile(), isTrue);
+    core.schemeSettings['selected_scheme'] = 'txjx';
+    await controller.loadSchemeSyncState();
+    expect(controller.schemeRelease, same(selectedRelease));
+    expect(core.calls.where((call) => call == 'release:txjx'), hasLength(1));
+    expect(controller.canInstall, isTrue);
+  });
+
   test('add-on update checks skip uninstalled schemes', () async {
     await controller.refreshState();
     await controller.refreshState();
@@ -820,15 +913,10 @@ void main() {
 
   test('macOS export uses the selected release and does not deploy', () async {
     controller.dispose();
-    controller = create(mobile: false)..latestRelease = release;
-    const channel = MethodChannel('ink.rea.keytao/window');
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      expect(call.method, 'pickDirectory');
-      return '/isolated/custom';
-    });
-    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    controller = create(
+      mobile: false,
+      pickDesktopDirectory: () async => '/isolated/custom',
+    )..latestRelease = release;
     await controller.pickCustomDirectory();
     expect(await controller.installCustomDirectory(), isTrue);
     expect(core.calls, contains('installTo:offline-ge:/isolated/custom'));

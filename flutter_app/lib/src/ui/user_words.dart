@@ -13,9 +13,6 @@ import 'widgets.dart';
 bool _hasConflict(UserWordComparisonDto comparison) =>
     comparison.status == 'code_taken' || comparison.status == 'word_has_code';
 
-bool _isKeytao(String scheme) =>
-    const {'keytao', 'keytao-dz', 'keytao-bj'}.contains(scheme);
-
 String _wordKey(String word, String code) => jsonEncode([word, code]);
 
 List<Map<String, dynamic>> _submissionObjects(Object? value) =>
@@ -150,7 +147,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         _submitted.clear();
         _selected.clear();
       });
-      if (_accountId != null && _isKeytao(_scheme)) {
+      if (_accountId != null && c.isKeytaoScheme(_scheme)) {
         c.scheduleUserDictionarySync();
       }
     }
@@ -161,7 +158,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         _loadedRevision != widget.controller.userWordsRevision) {
       unawaited(_load());
     }
-    if (_isKeytao(_scheme) &&
+    if (c.isKeytaoScheme(_scheme) &&
         c.accountUser != null &&
         _pendingAccountId != c.accountUser?.id &&
         !c.busy &&
@@ -172,7 +169,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
       unawaited(_refreshPending());
     }
     final confirmation = c.pendingDictionarySync;
-    if (_isKeytao(_scheme) &&
+    if (c.isKeytaoScheme(_scheme) &&
         confirmation != null &&
         !identical(confirmation, _shownSyncConfirmation) &&
         !c.busy &&
@@ -193,7 +190,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
     _opening = true;
     try {
       await _load();
-      if (!mounted || !_isKeytao(_scheme)) return;
+      if (!mounted || !widget.controller.isKeytaoScheme(_scheme)) return;
       final c = widget.controller;
       if (c.accountUser == null) return;
       if (c.pendingDictionarySync != null) return;
@@ -243,7 +240,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
     final entry = comparison.entry;
     final key = _wordKey(entry.word, entry.code);
     return widget.controller.accountUser != null &&
-        _isKeytao(_scheme) &&
+        widget.controller.isKeytaoScheme(_scheme) &&
         _comparisonAvailable &&
         comparison.status != 'identical' &&
         !_pending.contains(key) &&
@@ -313,23 +310,18 @@ class _UserWordsPageState extends State<UserWordsPage> {
   Future<void> _edit([UserWordDto? entry]) async {
     if (!await _commitPendingDelete() || !mounted) return;
     final scheme = _scheme;
-    final editor = _UserWordEditor(
+    _UserWordEditor editor([Animation<double>? animation]) => _UserWordEditor(
       controller: widget.controller,
       schemeKey: scheme,
       entry: entry,
+      animation: animation,
       onChanged: () => widget.controller.markUserWordsChanged(scheme),
     );
     final bool? changed;
     if (MediaQuery.sizeOf(context).width >= 640) {
       changed = await showFDialog<bool>(
         context: context,
-        builder: (_, _, animation) => _UserWordEditor(
-          controller: widget.controller,
-          schemeKey: scheme,
-          entry: entry,
-          animation: animation,
-          onChanged: () => widget.controller.markUserWordsChanged(scheme),
-        ),
+        builder: (_, _, animation) => editor(animation),
       );
     } else {
       changed = await showFSheet<bool>(
@@ -338,7 +330,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         mainAxisMaxRatio: 1,
         useSafeArea: true,
         resizeToAvoidBottomInset: false,
-        builder: (_) => editor,
+        builder: (_) => editor(),
       );
     }
     if (!mounted) return;
@@ -453,9 +445,6 @@ class _UserWordsPageState extends State<UserWordsPage> {
     });
     try {
       final synced = await c.syncUserDictionary(automatic: automatic);
-      if (!synced) {
-        await c.reloadAccountSession();
-      }
       _pendingAccountId = synced ? null : c.accountUser?.id;
       if (mounted && !synced) setState(() => _error = c.accountError);
     } catch (failure) {
@@ -796,7 +785,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                 () => _conflictsOnly = !_conflictsOnly,
                               ),
                             ),
-                            if (_isKeytao(_scheme) &&
+                            if (c.isKeytaoScheme(_scheme) &&
                                 c.accountUser != null) ...[
                               ActionButton(
                                 '同步',
@@ -824,7 +813,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                         ),
                         if (_loading) const FProgress(),
                         if (_error case final error?) ErrorMessage(error),
-                        if (_error == null && _isKeytao(_scheme))
+                        if (_error == null && c.isKeytaoScheme(_scheme))
                           if (c.accountError case final error?)
                             ErrorMessage(error),
                       ],
@@ -887,7 +876,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                           child: Row(
                                             children: [
                                               Expanded(child: Text(entry.word)),
-                                              if (_isKeytao(_scheme) &&
+                                              if (c.isKeytaoScheme(_scheme) &&
                                                   (_pending.contains(key) ||
                                                       _submitted.contains(
                                                         key,

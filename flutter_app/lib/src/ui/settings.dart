@@ -9,20 +9,6 @@ import 'color_picker.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
-Future<void> runCloudAccountAction(
-  BuildContext context,
-  AppController controller,
-  Future<bool> Function() action,
-) async {
-  if (controller.accountUser == null || !context.mounted) {
-    return;
-  }
-  final succeeded = await action();
-  if (!succeeded) {
-    await controller.reloadAccountSession();
-  }
-}
-
 Future<bool?> showCloudPackageTransfer(
   BuildContext context,
   AppController controller, {
@@ -639,23 +625,11 @@ class AccountCard extends StatelessWidget {
             children: [
               ActionButton(
                 '上传配置',
-                onPress: c.busy
-                    ? null
-                    : () => runCloudAccountAction(
-                        context,
-                        c,
-                        c.uploadSchemeProfile,
-                      ),
+                onPress: c.busy ? null : c.uploadSchemeProfile,
               ),
               ActionButton(
                 '从云端下载',
-                onPress: c.busy
-                    ? null
-                    : () => runCloudAccountAction(
-                        context,
-                        c,
-                        c.fetchCloudProfile,
-                      ),
+                onPress: c.busy ? null : c.fetchCloudProfile,
               ),
             ],
           ),
@@ -669,13 +643,7 @@ class AccountCard extends StatelessWidget {
             '云端方案',
             child: FButton.icon(
               variant: FButtonVariant.ghost,
-              onPress: c.busy
-                  ? null
-                  : () => runCloudAccountAction(
-                      context,
-                      c,
-                      c.refreshCloudPackages,
-                    ),
+              onPress: c.busy ? null : c.refreshCloudPackages,
               child: const Icon(FLucideIcons.refreshCw, size: 16),
             ),
           ),
@@ -710,12 +678,7 @@ class AccountCard extends StatelessWidget {
                       '删除',
                       onPress: c.busy
                           ? null
-                          : () => runCloudAccountAction(
-                              context,
-                              c,
-                              () =>
-                                  c.deleteCloudPackage(package['id'] as String),
-                            ),
+                          : () => c.deleteCloudPackage(package['id'] as String),
                     ),
                   ],
                 ),
