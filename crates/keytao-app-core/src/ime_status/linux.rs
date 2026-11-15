@@ -2,11 +2,9 @@ use crate::{Core, ime_host::ImeHost, ime_paths::*};
 use serde::Serialize;
 use std::{collections::HashSet, path::PathBuf, sync::Mutex};
 
-#[cfg(target_os = "linux")]
 #[derive(Default)]
 pub struct ManagedImeHelper(Mutex<Option<std::process::Child>>);
 
-#[cfg(target_os = "linux")]
 #[derive(Serialize, Clone)]
 pub struct LinuxImeStatus {
     pub supported: bool,
@@ -27,7 +25,6 @@ pub struct LinuxImeStatus {
     pub message: String,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Clone)]
 struct KeytaoImeProcess {
     pid: u32,
@@ -35,7 +32,6 @@ struct KeytaoImeProcess {
     kde_native: bool,
 }
 
-#[cfg(target_os = "linux")]
 pub fn stop_managed_ime_helper(host: &impl ImeHost) {
     let state = host.managed_helper();
     let Ok(mut child_slot) = state.0.lock() else {
@@ -49,7 +45,6 @@ pub fn stop_managed_ime_helper(host: &impl ImeHost) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn stop_ime_child(child: &mut std::process::Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
@@ -74,7 +69,6 @@ fn stop_ime_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-#[cfg(target_os = "linux")]
 fn refresh_managed_ime_helper(host: &impl ImeHost) -> Option<u32> {
     let state = host.managed_helper();
     let Ok(mut child_slot) = state.0.lock() else {
@@ -100,7 +94,6 @@ fn refresh_managed_ime_helper(host: &impl ImeHost) -> Option<u32> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn linux_target_triple() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
@@ -116,7 +109,6 @@ fn linux_target_triple() -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn is_kde_session() -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()
@@ -124,7 +116,6 @@ fn is_kde_session() -> bool {
     desktop.split(':').any(|s| s == "kde")
 }
 
-#[cfg(target_os = "linux")]
 fn cleanup_kde_legacy_ime_files() {
     if !is_kde_session() {
         return;
@@ -151,7 +142,6 @@ fn cleanup_kde_legacy_ime_files() {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn kde_input_method_config() -> Option<String> {
     for command in ["kreadconfig6", "kreadconfig5"] {
         let output = std::process::Command::new(command)
@@ -196,14 +186,12 @@ fn kde_input_method_config() -> Option<String> {
     None
 }
 
-#[cfg(target_os = "linux")]
 fn is_kde_input_method_configured() -> bool {
     kde_input_method_config()
         .as_deref()
         .is_some_and(|value| value == "keytao-wayland-launcher.desktop")
 }
 
-#[cfg(target_os = "linux")]
 fn linux_ime_status_with_message(
     core: &Core,
     host: &impl ImeHost,
@@ -240,7 +228,6 @@ fn linux_ime_status_with_message(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn linux_ime_daemon_owner_pid() -> Option<u32> {
     let output = std::process::Command::new("busctl")
         .args([
@@ -263,7 +250,6 @@ fn linux_ime_daemon_owner_pid() -> Option<u32> {
         .find_map(|part| part.parse::<u32>().ok())
 }
 
-#[cfg(target_os = "linux")]
 fn linux_runtime_dirs(core: &Core) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -303,7 +289,6 @@ fn linux_runtime_dirs(core: &Core) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
 pub fn linux_app_shared_data_dir(core: &Core) -> Option<String> {
     linux_runtime_dirs(core)
         .into_iter()
@@ -312,7 +297,6 @@ pub fn linux_app_shared_data_dir(core: &Core) -> Option<String> {
         .map(|dir| dir.to_string_lossy().into_owned())
 }
 
-#[cfg(target_os = "linux")]
 fn linux_runtime_lib_dirs(core: &Core) -> Vec<PathBuf> {
     linux_runtime_dirs(core)
         .into_iter()
@@ -321,7 +305,6 @@ fn linux_runtime_lib_dirs(core: &Core) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
 fn configure_linux_runtime_env(core: &Core, command: &mut std::process::Command) {
     if let Some(shared) = linux_app_shared_data_dir(core) {
         command.env("KEYTAO_RIME_SHARED_DATA_DIR", &shared);
@@ -339,14 +322,12 @@ fn configure_linux_runtime_env(core: &Core, command: &mut std::process::Command)
     }
 }
 
-#[cfg(target_os = "linux")]
 fn keytao_ime_command(core: &Core, program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     configure_linux_runtime_env(core, &mut command);
     command
 }
 
-#[cfg(target_os = "linux")]
 fn resolve_keytao_ime_command(core: &Core) -> (std::process::Command, String) {
     if let Ok(path) = std::env::var("KEYTAO_IME_BIN") {
         return (keytao_ime_command(core, &path), path);
@@ -383,7 +364,6 @@ fn resolve_keytao_ime_command(core: &Core) -> (std::process::Command, String) {
     )
 }
 
-#[cfg(target_os = "linux")]
 fn keytao_ime_ready_path(kde_native: bool) -> Option<PathBuf> {
     dirs::runtime_dir().map(|dir| {
         dir.join(if kde_native {
@@ -394,7 +374,6 @@ fn keytao_ime_ready_path(kde_native: bool) -> Option<PathBuf> {
     })
 }
 
-#[cfg(target_os = "linux")]
 fn matching_ready_pid(
     content: &str,
     processes: &[KeytaoImeProcess],
@@ -416,14 +395,12 @@ fn matching_ready_pid(
         .map(|process| process.pid)
 }
 
-#[cfg(target_os = "linux")]
 fn ready_keytao_ime_pid(processes: &[KeytaoImeProcess], kde_native: bool) -> Option<u32> {
     let content = std::fs::read_to_string(keytao_ime_ready_path(kde_native)?).ok()?;
     let pid = matching_ready_pid(&content, processes, kde_native)?;
     is_keytao_ime_executable(pid).then_some(pid)
 }
 
-#[cfg(target_os = "linux")]
 fn keytao_ime_launch_failure(reason: String) -> String {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -448,7 +425,6 @@ fn keytao_ime_launch_failure(reason: String) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
     let output = std::process::Command::new("pgrep")
         .args(["-af", "keytao-ime"])
@@ -483,13 +459,11 @@ fn keytao_ime_process_entries() -> Vec<KeytaoImeProcess> {
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "linux")]
 fn is_upgrade_deploy_command_line(args: &[u8]) -> bool {
     args.split(|byte| *byte == 0)
         .any(|arg| arg == keytao_core::LINUX_UPGRADE_DEPLOY_SUBCOMMAND.as_bytes())
 }
 
-#[cfg(target_os = "linux")]
 fn is_keytao_ime_executable(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
@@ -498,7 +472,6 @@ fn is_keytao_ime_executable(pid: u32) -> bool {
         .is_some_and(|name| name.starts_with("keytao-ime"))
 }
 
-#[cfg(target_os = "linux")]
 fn process_has_wayland_socket(pid: u32) -> bool {
     let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return false;
@@ -508,7 +481,6 @@ fn process_has_wayland_socket(pid: u32) -> bool {
         .any(|item| item.starts_with(b"WAYLAND_SOCKET="))
 }
 
-#[cfg(target_os = "linux")]
 fn stop_external_keytao_ime_processes(include_kde_native: bool) {
     let processes: Vec<KeytaoImeProcess> = keytao_ime_process_entries()
         .into_iter()
@@ -558,11 +530,9 @@ fn stop_external_keytao_ime_processes(include_kde_native: bool) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn process_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
-#[cfg(target_os = "linux")]
 pub fn launch_keytao_ime(
     core: &Core,
     host: &impl ImeHost,
@@ -610,7 +580,12 @@ pub fn launch_keytao_ime(
             Err(error) => break format!("无法检查 keytao-ime（pid={pid}）：{error}"),
             Ok(None) => {}
         }
-        if ready_keytao_ime_pid(&keytao_ime_process_entries(), false) == Some(pid) {
+        let process = KeytaoImeProcess {
+            pid,
+            line: String::new(),
+            kde_native: process_has_wayland_socket(pid),
+        };
+        if ready_keytao_ime_pid(&[process], false) == Some(pid) {
             match host.managed_helper().0.lock() {
                 Ok(mut slot) => *slot = Some(child),
                 Err(_) => break format!("无法管理 keytao-ime（pid={pid}）"),
@@ -629,12 +604,11 @@ pub fn launch_keytao_ime(
     stop_ime_child(&mut child);
     Err(keytao_ime_launch_failure(failure))
 }
-#[cfg(target_os = "linux")]
 pub fn linux_ime_status(core: &Core, host: &impl ImeHost) -> LinuxImeStatus {
     linux_ime_status_with_message(core, host, "已刷新 keytao-ime 状态".into())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::{KeytaoImeProcess, is_upgrade_deploy_command_line, matching_ready_pid};
 

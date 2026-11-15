@@ -309,6 +309,14 @@ impl WindowsTsfProfileManager {
 }
 
 #[cfg(target_os = "windows")]
+fn is_keytao(profile: &windows::Win32::UI::TextServices::TF_INPUTPROCESSORPROFILE) -> bool {
+    profile.dwProfileType == windows::Win32::UI::TextServices::TF_PROFILETYPE_INPUTPROCESSOR
+        && profile.langid == WINDOWS_LANGID_CHINESE_SIMPLIFIED
+        && profile.clsid == WINDOWS_TEXT_SERVICE_GUID
+        && profile.guidProfile == WINDOWS_PROFILE_GUID
+}
+
+#[cfg(target_os = "windows")]
 pub struct WindowsImeProfileDeploymentGuard {
     reactivate: bool,
 }
@@ -332,10 +340,7 @@ impl WindowsImeProfileDeploymentGuard {
             profile_manager
                 .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
                 .is_ok()
-        } && active.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR
-            && active.langid == WINDOWS_LANGID_CHINESE_SIMPLIFIED
-            && active.clsid == WINDOWS_TEXT_SERVICE_GUID
-            && active.guidProfile == WINDOWS_PROFILE_GUID;
+        } && is_keytao(&active);
 
         if reactivate {
             unsafe {
@@ -395,11 +400,7 @@ impl WindowsImeProfileDeploymentGuard {
                 .GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
         }
         .map_err(|error| format!("verify KeyTao TSF profile after deployment: {error}"))?;
-        if active.dwProfileType != TF_PROFILETYPE_INPUTPROCESSOR
-            || active.langid != WINDOWS_LANGID_CHINESE_SIMPLIFIED
-            || active.clsid != WINDOWS_TEXT_SERVICE_GUID
-            || active.guidProfile != WINDOWS_PROFILE_GUID
-        {
+        if !is_keytao(&active) {
             return Err("KeyTao TSF profile did not become active after deployment".into());
         }
         Ok(())
@@ -423,34 +424,18 @@ impl Drop for WindowsImeProfileDeploymentGuard {
 
 #[cfg(target_os = "windows")]
 fn windows_tsf_profile_enabled() -> Result<bool, String> {
-    use windows::{
-        Win32::{
-            System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
-            UI::{
-                Input::KeyboardAndMouse::HKL,
-                TextServices::{
-                    CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfileMgr,
-                    ITfInputProcessorProfiles, TF_INPUTPROCESSORPROFILE, TF_IPP_FLAG_ENABLED,
-                    TF_PROFILETYPE_INPUTPROCESSOR,
-                },
-            },
+    use windows::Win32::UI::{
+        Input::KeyboardAndMouse::HKL,
+        TextServices::{
+            TF_INPUTPROCESSORPROFILE, TF_IPP_FLAG_ENABLED, TF_PROFILETYPE_INPUTPROCESSOR,
         },
-        core::{IUnknown, Interface},
     };
 
-    let _com = windows_init_com_apartment()?;
+    let context = WindowsTsfProfileManager::open("for status")?;
     unsafe {
-        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
-            &CLSID_TF_InputProcessorProfiles,
-            None::<&IUnknown>,
-            CLSCTX_INPROC_SERVER,
-        )
-        .map_err(|e| format!("open TSF input processor profiles: {e}"))?;
-        let profile_mgr: ITfInputProcessorProfileMgr = profiles
-            .cast()
-            .map_err(|e| format!("open modern TSF profile manager: {e}"))?;
         let mut profile = TF_INPUTPROCESSORPROFILE::default();
-        profile_mgr
+        context
+            .profile_manager
             .GetProfile(
                 TF_PROFILETYPE_INPUTPROCESSOR,
                 WINDOWS_LANGID_CHINESE_SIMPLIFIED,
@@ -694,13 +679,13 @@ fn windows_x86_runtime_complete(dir: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_ime_x86_packaged_runtime_dir(core: &Core) -> Option<PathBuf> {
+fn windows_ime_x86_packaged_runtime_dir(core: &Core, native_dir: Option<&Path>) -> Option<PathBuf> {
     if !cfg!(target_pointer_width = "64") {
         return None;
     }
 
     let mut candidates = Vec::new();
-    if let Some(native_dir) = windows_ime_runtime_dir(core) {
+    if let Some(native_dir) = native_dir {
         if let Some(runtime_root) = native_dir.parent() {
             candidates.push(runtime_root.join("x86"));
         }
@@ -743,11 +728,11 @@ fn windows_ime_x86_packaged_runtime_dir(core: &Core) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_ime_x86_runtime_dir(core: &Core) -> Option<PathBuf> {
+fn windows_ime_x86_runtime_dir(core: &Core, native_dir: Option<&Path>) -> Option<PathBuf> {
     windows_registered_ime_path(true)
         .and_then(|path| PathBuf::from(path).parent().map(Path::to_path_buf))
         .filter(|dir| windows_x86_runtime_complete(dir))
-        .or_else(|| windows_ime_x86_packaged_runtime_dir(core))
+        .or_else(|| windows_ime_x86_packaged_runtime_dir(core, native_dir))
         .or_else(|| {
             windows_ime_x86_standard_runtime_dir().filter(|dir| windows_x86_runtime_complete(dir))
         })
@@ -878,7 +863,7 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
         .as_ref()
         .map(|dir| dir.join("keytao_windows_ime.dll"));
     let registered_path = windows_registered_ime_path(!cfg!(target_pointer_width = "64"));
-    let x86_runtime_dir = windows_ime_x86_runtime_dir(core);
+    let x86_runtime_dir = windows_ime_x86_runtime_dir(core, runtime_dir.as_deref());
     let x86_dll_path = x86_runtime_dir
         .as_ref()
         .map(|dir| dir.join("keytao_windows_ime.dll"));
@@ -887,29 +872,9 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
     } else {
         None
     };
-    let x86_packaged = !cfg!(target_pointer_width = "64")
-        || (x86_dll_path.as_ref().is_some_and(|path| path.is_file())
-            && x86_runtime_dir
-                .as_ref()
-                .is_some_and(|dir| dir.join("rime.dll").is_file())
-            && x86_runtime_dir
-                .as_ref()
-                .is_some_and(|dir| dir.join("rime-data").join("default.yaml").is_file())
-            && x86_runtime_dir
-                .as_ref()
-                .is_some_and(|dir| dir.join("default-theme.yaml").is_file()));
-    let packaged = dll_path.as_ref().is_some_and(|path| path.is_file())
-        && runtime_dir
-            .as_ref()
-            .is_some_and(|dir| dir.join("rime.dll").is_file())
-        && runtime_dir
-            .as_ref()
-            .is_some_and(|dir| dir.join("rime-data").join("default.yaml").is_file())
-        && runtime_dir
-            .as_ref()
-            .is_some_and(|dir| dir.join("default-theme.yaml").is_file())
-        && x86_packaged;
-    let native_registered_dll = match (&dll_path, &registered_path) {
+    let packaged =
+        runtime_dir.is_some() && (!cfg!(target_pointer_width = "64") || x86_runtime_dir.is_some());
+    let same_dll = |dll: &Option<PathBuf>, registered: &Option<String>| match (dll, registered) {
         (Some(dll), Some(path)) => {
             let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
             let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
@@ -918,19 +883,9 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
         }
         _ => false,
     };
-    let x86_registered_dll = if cfg!(target_pointer_width = "64") {
-        match (&x86_dll_path, &x86_registered_path) {
-            (Some(dll), Some(path)) => {
-                let lhs = std::fs::canonicalize(dll).unwrap_or_else(|_| dll.clone());
-                let rhs = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-                lhs.to_string_lossy()
-                    .eq_ignore_ascii_case(&rhs.to_string_lossy())
-            }
-            _ => false,
-        }
-    } else {
-        true
-    };
+    let native_registered_dll = same_dll(&dll_path, &registered_path);
+    let x86_registered_dll =
+        !cfg!(target_pointer_width = "64") || same_dll(&x86_dll_path, &x86_registered_path);
     let registered_dll = native_registered_dll && x86_registered_dll;
     let (profile_enabled, mut profile_status) = match windows_tsf_profile_enabled() {
         Ok(true) => (true, "TSF profile 已启用".to_string()),
@@ -967,8 +922,11 @@ fn windows_ime_status_with_message(core: &Core, message: String) -> WindowsImeSt
         "not_registered"
     }
     .to_string();
-    let (shared_data_dir, shared_data_source) =
-        shared_data_status(windows_app_shared_data_dir(core));
+    let (shared_data_dir, shared_data_source) = shared_data_status(
+        runtime_dir
+            .as_ref()
+            .map(|dir| windows_normal_path(&dir.join("rime-data"))),
+    );
     let (reload_stamp_path, reload_stamp_signature) = reload_stamp_status();
     let message = engine_error
         .as_ref()
@@ -1049,32 +1007,23 @@ fn windows_repair_ime_data_blocking(core: &Core) -> Result<WindowsImeStatus, Str
         ));
     }
 
-    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    let deployed_by_server = server::deploy_if_available()?;
-    let _engine_guard = if deployed_by_server {
-        None
-    } else {
-        Some(WindowsImeEngineInitGuard::acquire()?)
-    };
-    if !deployed_by_server {
-        write_keytao_ime_reload_stamp()
-            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
-        let invalidated = keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-        tracing::info!(
-            invalidated = invalidated.len(),
-            "invalidated Windows RIME build artifacts before repair"
-        );
-        let shared =
-            windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
-        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared)?;
-        write_keytao_ime_reload_stamp()
-            .map_err(|error| format!("通知现有输入法会话加载新词典失败：{error}"))?;
-    }
-    keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
-    profile_guard.resume()?;
+    windows_deploy_rime_blocking(
+        user_dir,
+        windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir),
+    )?;
 
     let message = "Windows 输入法词典修复完成，已重建旧构建产物".into();
     Ok(windows_ime_status_with_message(core, message))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_ime_data_repair(core: &Core) -> WindowsImeStatus {
+    WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(true, Ordering::SeqCst);
+    emit_windows_ime_status(core, windows_ime_repairing_status(core));
+    let status = windows_repair_ime_data_blocking(core)
+        .unwrap_or_else(|error| windows_ime_repair_failed_status(core, error));
+    WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(false, Ordering::SeqCst);
+    status
 }
 
 #[cfg(target_os = "windows")]
@@ -1086,10 +1035,7 @@ fn start_windows_ime_data_repair(core: &Arc<Core>) -> WindowsImeStatus {
 
     let task_app = core.clone();
     tokio::task::spawn_blocking(move || {
-        emit_windows_ime_status(&task_app, windows_ime_repairing_status(&task_app));
-        let final_status = windows_repair_ime_data_blocking(&task_app)
-            .unwrap_or_else(|error| windows_ime_repair_failed_status(&task_app, error));
-        WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(false, Ordering::SeqCst);
+        let final_status = run_windows_ime_data_repair(&task_app);
         emit_windows_ime_status(&task_app, final_status);
     });
     repairing
@@ -1325,9 +1271,10 @@ fn windows_register_ime_blocking(core: &Core) -> Result<WindowsImeStatus, String
     let native_runtime_dir = runtime_root.join(native_runtime_name);
     let mut targets = Vec::new();
     if cfg!(target_pointer_width = "64") {
-        let x86_source_runtime_dir = windows_ime_x86_packaged_runtime_dir(core)
-            .or_else(|| windows_ime_x86_runtime_dir(core))
-            .ok_or("安装包中未找到 x86 keytao_windows_ime.dll")?;
+        let x86_source_runtime_dir =
+            windows_ime_x86_packaged_runtime_dir(core, Some(&source_runtime_dir))
+                .or_else(|| windows_ime_x86_runtime_dir(core, Some(&source_runtime_dir)))
+                .ok_or("安装包中未找到 x86 keytao_windows_ime.dll")?;
         let x86_runtime_dir = runtime_root.join("x86");
         targets.push(WindowsImeRegistrationTarget {
             label: "x86",
@@ -1422,12 +1369,7 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
 
             let final_status = match registration_result {
                 Ok(_status) if windows_ime_data_repair_required() => {
-                    WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(true, Ordering::SeqCst);
-                    emit_windows_ime_status(&task_app, windows_ime_repairing_status(&task_app));
-                    let repaired = windows_repair_ime_data_blocking(&task_app)
-                        .unwrap_or_else(|error| windows_ime_repair_failed_status(&task_app, error));
-                    WINDOWS_IME_DATA_REPAIR_IN_PROGRESS.store(false, Ordering::SeqCst);
-                    repaired
+                    run_windows_ime_data_repair(&task_app)
                 }
                 Ok(status) => status,
                 Err(error) => {
