@@ -49,13 +49,6 @@ public struct KeyTaoPanelModel: Codable, Equatable {
     )
 }
 
-public struct KeyTaoModeHintModel: Codable, Equatable {
-    public var asciiMode: Bool
-    public var text: String
-
-    public static let empty = KeyTaoModeHintModel(asciiMode: false, text: "")
-}
-
 public struct KeyTaoImeState: Codable, Equatable {
     public var preedit: String
     /// Caret inside `preedit`, in Unicode scalars. Convert with
@@ -76,7 +69,6 @@ public struct KeyTaoImeState: Codable, Equatable {
     public var schemaName: String
     public var accepted: Bool
     public var candidatePanel: KeyTaoPanelModel
-    public var modeHint: KeyTaoModeHintModel
 
     public var hasComposition: Bool {
         !preedit.isEmpty || !candidates.isEmpty || !candidatePanel.candidates.isEmpty
@@ -104,8 +96,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         asciiMode: false,
         schemaName: "",
         accepted: false,
-        candidatePanel: .empty,
-        modeHint: .empty
+        candidatePanel: .empty
     )
 
     public enum CodingKeys: String, CodingKey {
@@ -125,7 +116,6 @@ public struct KeyTaoImeState: Codable, Equatable {
         case schemaName
         case accepted
         case candidatePanel
-        case modeHint
     }
 
     // Decoded field by field so that a runtime that adds or drops a key in the
@@ -150,7 +140,6 @@ public struct KeyTaoImeState: Codable, Equatable {
         schemaName = Self.field(container, .schemaName, empty.schemaName)
         accepted = Self.field(container, .accepted, empty.accepted)
         candidatePanel = Self.field(container, .candidatePanel, empty.candidatePanel)
-        modeHint = Self.field(container, .modeHint, empty.modeHint)
     }
 
     private static func field<Value: Decodable>(
@@ -177,8 +166,7 @@ public struct KeyTaoImeState: Codable, Equatable {
         schemaId: String = "",
         schemaName: String,
         accepted: Bool,
-        candidatePanel: KeyTaoPanelModel,
-        modeHint: KeyTaoModeHintModel
+        candidatePanel: KeyTaoPanelModel
     ) {
         self.preedit = preedit
         self.cursor = cursor
@@ -196,7 +184,6 @@ public struct KeyTaoImeState: Codable, Equatable {
         self.schemaName = schemaName
         self.accepted = accepted
         self.candidatePanel = candidatePanel
-        self.modeHint = modeHint
     }
 }
 

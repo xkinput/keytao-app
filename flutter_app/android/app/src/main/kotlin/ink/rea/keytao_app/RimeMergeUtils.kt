@@ -20,29 +20,7 @@ fun isSafeSchemaId(schema: String) =
     schema.isNotEmpty() && schema != "." && schema != ".." &&
         schema.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "_.-" }
 
-private fun dedupeSchemas(schemas: List<String>): List<String> {
-    val seen = linkedSetOf<String>()
-    for (schema in schemas) {
-        if (schema.isNotBlank()) seen.add(schema)
-    }
-    return seen.toList()
-}
-
-fun extractLuaRequire(line: String): String? {
-    val pos = line.indexOf("require").takeIf { it >= 0 } ?: return null
-    val after = line.substring(pos + 7).trimStart()
-    if (!after.startsWith('(')) return null
-    val inner = after.substring(1).trimStart()
-    val quote = inner.firstOrNull() ?: return null
-    if (quote != '"' && quote != '\'') return null
-    val content = inner.substring(1)
-    val end = content.indexOf(quote).takeIf { it >= 0 } ?: return null
-    return content.substring(0, end)
-}
-
-fun parseSchemas(content: String): List<String> = parseSchemas(content, decodeQuoted = true)
-
-private fun parseSchemas(content: String, decodeQuoted: Boolean): List<String> {
+fun parseSchemas(content: String): List<String> {
     val schemas = mutableListOf<String>()
     var inList = false
     for (line in content.lines()) {
@@ -50,15 +28,10 @@ private fun parseSchemas(content: String, decodeQuoted: Boolean): List<String> {
         when {
             t.contains("schema_list:") -> inList = true
             inList -> {
-                val m = if (decodeQuoted) {
-                    Regex("^- schema:\\s*(.+)$").find(t)
-                } else {
-                    Regex("^- schema:\\s*(\\S+)").find(t)
-                }
+                val m = Regex("^- schema:\\s*(.+)$").find(t)
                 if (m != null) {
                     val raw = m.groupValues[1].trim()
                     val schema = when {
-                        !decodeQuoted -> raw
                         raw.startsWith('"') -> {
                             val quoted = Regex("""^("(?:[^"\\]|\\.)*")(?:\s+#.*)?$""").find(raw)
                             quoted?.let {
@@ -79,94 +52,4 @@ private fun parseSchemas(content: String, decodeQuoted: Boolean): List<String> {
         }
     }
     return schemas
-}
-
-fun mergeRimeLua(
-    localContent: String,
-    zipContent: String,
-    zipLuaFilenames: Set<String>
-): RimeLuaMergeResult {
-    val zipRequires = buildSet<String> {
-        var inBlock = false
-        for (t in zipContent.lines().map { it.trim() }) {
-            when {
-                inBlock -> if (t.contains("--]]")) inBlock = false
-                t.startsWith("--[[") -> inBlock = true
-                t.isNotEmpty() && !t.startsWith("--") -> extractLuaRequire(t)?.let { add(it) }
-            }
-        }
-    }
-
-    val renames = mutableListOf<Pair<String, String>>()
-    val extraLines = mutableListOf<String>()
-    var inBlockComment = false
-
-    for (line in localContent.lines()) {
-        val t = line.trim()
-        when {
-            inBlockComment -> {
-                if (t.contains("--]]")) inBlockComment = false
-            }
-            t.startsWith("--[[") -> inBlockComment = true
-            t.isEmpty() || t.startsWith("--") -> { /* skip */ }
-            else -> {
-                val module = extractLuaRequire(t)
-                when {
-                    module == null -> extraLines.add(line)
-                    module in zipRequires -> { /* already in zip, skip */ }
-                    "$module.lua" in zipLuaFilenames -> {
-                        val newName = "${module}_user"
-                        val newLine = line
-                            .replace("\"$module\"", "\"$newName\"")
-                            .replace("'$module'", "'$newName'")
-                        renames.add(module to newName)
-                        extraLines.add(newLine)
-                    }
-                    else -> extraLines.add(line)
-                }
-            }
-        }
-    }
-
-    val merged = buildString {
-        append(zipContent)
-        if (extraLines.isNotEmpty()) {
-            if (!zipContent.endsWith('\n')) append('\n')
-            extraLines.forEach { appendLine(it) }
-        }
-    }
-
-    return RimeLuaMergeResult(merged, renames)
-}
-
-fun mergeDefaultCustom(existing: String?, zipContent: String): MergeResult {
-    val packageSchemas = parseSchemas(zipContent, decodeQuoted = false)
-    val existingSchemas = existing?.let { parseSchemas(it, decodeQuoted = false) }.orEmpty()
-    val userSchemas = existingSchemas.filter { !isManagedSchema(it) && !isAddonSchema(it) }
-    val addonSchemas = (existingSchemas + packageSchemas).filter(::isAddonSchema)
-    val allSchemas = dedupeSchemas(
-        userSchemas + packageSchemas.filterNot(::isAddonSchema) + addonSchemas,
-    )
-
-    val out = StringBuilder()
-    var inList = false
-    for (line in zipContent.lines()) {
-        val t = line.trim()
-        if (!inList) {
-            out.appendLine(line)
-            if (t.contains("schema_list:")) {
-                inList = true
-                allSchemas.forEach { out.appendLine("    - schema: $it") }
-            }
-        } else {
-            if (Regex("^- schema:").containsMatchIn(t)) {
-                // skip original entries
-            } else {
-                inList = false
-                out.appendLine(line)
-            }
-        }
-    }
-
-    return MergeResult(out.toString(), userSchemas)
 }
