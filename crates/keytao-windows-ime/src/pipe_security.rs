@@ -6,15 +6,17 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL},
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenIsAppContainer,
-            TokenUser, TOKEN_QUERY, TOKEN_USER,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, RevertToSelf,
+            TokenIsAppContainer, TokenUser, TOKEN_QUERY, TOKEN_USER,
         },
         System::{
+            Pipes::ImpersonateNamedPipeClient,
             Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY},
             RemoteDesktop::ProcessIdToSessionId,
             Threading::{
-                GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken,
+                OpenThreadToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
     },
@@ -50,6 +52,30 @@ pub fn process_identity(pid: u32) -> Result<Identity, String> {
             .map_err(|e| format!("open pipe peer: {e}"))?,
     );
     identity(process.0, pid)
+}
+
+/// Call only after reading a client frame, which establishes the pipe's security context.
+pub fn pipe_client_identity(pipe: HANDLE, pid: u32) -> Result<Identity, String> {
+    struct RevertGuard;
+    impl Drop for RevertGuard {
+        fn drop(&mut self) {
+            // Continuing under a client's token would cross the server's trust boundary.
+            if unsafe { RevertToSelf() }.is_err() {
+                std::process::abort();
+            }
+        }
+    }
+
+    let session_id = process_session_id(pid)?;
+    unsafe { ImpersonateNamedPipeClient(pipe) }
+        .map_err(|error| format!("identify pipe client: {error}"))?;
+    let _revert = RevertGuard;
+    let mut token = HANDLE::default();
+    // Query as the server even when the pipe supplied an identification-level token.
+    unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
+        .map_err(|error| format!("open pipe client token: {error}"))?;
+    let token = OwnedHandle(token);
+    token_identity(token.0, session_id)
 }
 
 pub fn process_image(process: HANDLE) -> windows::core::Result<PathBuf> {
@@ -103,19 +129,29 @@ pub fn keytao_install_root() -> Result<PathBuf, String> {
 }
 
 fn identity(process: HANDLE, pid: u32) -> Result<Identity, String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(|e| e.to_string())?;
+    let token = OwnedHandle(token);
+    token_identity(token.0, process_session_id(pid)?)
+}
+
+fn process_session_id(pid: u32) -> Result<u32, String> {
+    let mut session_id = 0;
+    unsafe { ProcessIdToSessionId(pid, &mut session_id) }.map_err(|error| error.to_string())?;
+    Ok(session_id)
+}
+
+fn token_identity(token: HANDLE, session_id: u32) -> Result<Identity, String> {
     unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(process, TOKEN_QUERY, &mut token).map_err(|e| e.to_string())?;
-        let token = OwnedHandle(token);
         let mut size = 0;
-        let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut size);
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
         if size == 0 {
             return Err("empty process token identity".into());
         }
         // TOKEN_USER requires pointer alignment, unlike Vec<u8>.
         let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
         GetTokenInformation(
-            token.0,
+            token,
             TokenUser,
             Some(buffer.as_mut_ptr().cast()),
             size,
@@ -129,15 +165,13 @@ fn identity(process: HANDLE, pid: u32) -> Result<Identity, String> {
         LocalFree(HLOCAL(sid_text.0.cast()));
         let mut appcontainer = 0u32;
         GetTokenInformation(
-            token.0,
+            token,
             TokenIsAppContainer,
             Some((&mut appcontainer as *mut u32).cast()),
             4,
             &mut size,
         )
         .map_err(|e| e.to_string())?;
-        let mut session_id = 0;
-        ProcessIdToSessionId(pid, &mut session_id).map_err(|e| e.to_string())?;
         Ok(Identity {
             sid: sid.map_err(|e| e.to_string())?,
             session_id,

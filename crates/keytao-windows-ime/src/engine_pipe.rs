@@ -28,6 +28,7 @@ use windows::{
         },
         Storage::FileSystem::{
             CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_MODE, OPEN_EXISTING,
+            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
         },
         System::{
             Pipes::GetNamedPipeServerProcessId,
@@ -256,7 +257,7 @@ impl Connection {
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 HANDLE::default(),
             )
         }

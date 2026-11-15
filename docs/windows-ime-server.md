@@ -82,8 +82,12 @@ Shift 释放今天会连续调两次 engine（press + `RIME_RELEASE_MASK`，key_
 
 server 对每个连接做以下检查：
 1. 用 `GetNamedPipeClientProcessId` 拿到客户端 PID，再用 `ProcessIdToSessionId` 确认它和 server 在同一个会话，否则断开。
-2. 打开客户端进程 token，确认 user SID 与 server 一致；读 `TokenIsAppContainer` 仅用于日志。桌面和 AC 连接都走 server 内唯一的 runtime 和桌面 userdb（见 2.10）。
+2. 先读完整 Hello，再用 `ImpersonateNamedPipeClient` / `OpenThreadToken(TOKEN_QUERY, OpenAsSelf=TRUE)` 查询连接 token 的 user SID 和 `TokenIsAppContainer`，随后通过 guard 恢复 server 身份；任何身份读取失败均拒绝连接。这样 medium server 无需打开 elevated App 的进程 token。App、DLL 和替换 server 打开 pipe 时均指定 `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`，只授权身份查询。桌面和 AC 连接都走 server 内唯一的 runtime 和桌面 userdb（见 2.10）。
 3. 每个连接独占一个 `ImeRuntimeSession`，不同连接之间不共享 preedit 或候选。
+
+有效首帧的认证、会话或版本拒绝均返回同 seq 的 `HelloErr(reason)`，不再静默关闭；损坏或未完成的首帧无法保证回复。恢复身份失败会终止 server，避免以客户端身份继续工作。
+
+Identification token 的 `TokenIsAppContainer=0` 不单独作为特权授权依据；`Deploy` 和 `Shutdown` 都另验客户端进程映像处于同一 KeyTao 安装树，`Deploy` 还要求 App role。
 
 client 对 server 做以下检查：
 - 用 `GetNamedPipeServerProcessId` 拿到 server PID，`QueryFullProcessImageNameW` 取 exe 路径，要求在安装目录 `%ProgramFiles%\KeyTao\` 下。
@@ -143,7 +147,7 @@ client 对 server 做以下检查：
 
 - 现状：App 在自己的进程里跑 `keytao_core::deploy`（ime_status/windows.rs:1459），宿主 stat stamp 文件来感知（state.rs:52, 557）。这本身就是第二个 userdb 写者。
 - Batch 2：deploy 仍由 App 执行；server 监听 InProc 使用的同一个 reload stamp，重新初始化唯一的 runtime 并递增 generation。reload 前创建的 session 随即失效，不能继续处理按键。
-- Batch 3：App 先发 `Deploy` RPC，pipe 不在时拉起 server、等待最多约 5s；仍不可达才走原进程内部署，RPC 已发送后的失败不重试部署。server 串行暂停全部 session，失效旧 generation，销毁旧 engine、deploy、reload，并沿用 core 写 `SCHEMA_SWITCH_APPLIED_FILE`。
+- Batch 3：Pipe 模式只由 server 部署，连接失败不转 App 进程内部署；只有显式 `EngineMode=0` 保留原路径，避免与 watchdog 拉起的 server 同时写 userdb。App 在写 `Deploy` 之前最多恢复一次：验证 pipe peer 的同会话、安装树、server 文件名并持有进程句柄；旧版本握手成功后请求 `Shutdown`，握手失败（包括不支持当前协议的 alpha.7）才终止该已验证进程。确认旧进程退出及旧 pipe 释放后，启动/连接当前安装 server 并重试握手。Shutdown 超时不强杀；一旦开始写 `Deploy`，写入失败或响应失败均不重试。watchdog 与 App 部署/恢复持同一生命周期锁。失败保留原始 `HelloErr` 原因；App 的 `TokenElevation` 为真时提示关闭后正常启动 KeyTao。
 - 客户端的 `reload_needed()` 改为向 server 请求 `Generation`，在 250ms 缓存内比较，宿主不再 stat 文件。generation 变了就走现有的 `begin_reload_if_changed` 流程，重建 session。
 - `ProfileDeploymentGuard::suspend()`（windows.rs:314）在 Batch 3 里保留，等 Windows 实机确认不需要后再删。
 - schema 切换请求文件和 `keytao-ime-engine.json` 由 server 读写，格式不变，所以 App 侧的读取代码不用改。
@@ -160,6 +164,7 @@ client 对 server 做以下检查：
 - server 调 `runtime_log::init(user_dir, "windows-ime-server")`，engine 侧的 `rt_log!` 和 diagnostic 都写到这里。
 - DLL 保留自己的 `runtime_log`（"windows-ime"），记录 TSF 和 UI 事件、IPC 超时和断开次数，在 deactivate 时随 `drain_key_stats()` 一起输出（text_service.rs:392）。
 - 日志不走 IPC。
+- 握手拒绝查 `ipc/hello_rejected` 的 `msg`、`client_pid`；监听失败查 `accept_failed`、`create_next_pipe_failed`、`client_thread_failed`，失败后保留监听继续接收。runtime logger 目前只有 Info/Verbose，因此警告通过 `severity="warn"` 标记；握手拒绝同时输出 stderr WARN。App 恢复查 `recovering IME server before Deploy`，包含 server PID、image 和握手状态。
 
 ## 3. 分批
 
@@ -213,7 +218,7 @@ client 对 server 做以下检查：
 - 两处 App deploy 均优先 RPC，保留 profile suspend；server 使用唯一桌面 runtime 和与 App 相同的已安装 shared data。部署完成后 generation 递增，旧 session 失效。
 - 默认 Pipe，显式 0 保留原 InProc；失败按 2.7 使用临时无学习回退和后台重连。
 - 协议升为 3，接受 3/2。新增 `Shutdown`，仅接受同用户且 exe 位于同一 `%ProgramFiles%\KeyTao\` 安装树的调用者；新实例握手、请求旧实例退出，再在 3s 内重试创建 pipe。已加载的旧 DLL 可继续使用协议 2。
-- Batch 2 server 尚不认识 `Shutdown`，首次从该版本迁移需先退出旧 server；后续支持该请求的 server 可直接热替换。
+- Batch 2 server 尚不认识 `Shutdown`；App 部署遇到旧协议握手拒绝时，可以在验证进程后终止旧 server 并恢复一次。正常握手的后续 server 通过 `Shutdown` 热替换。
 
 验收：
 - macOS：`cargo test -p keytao-ime-ipc`（Deploy、Shutdown 消息）通过；`cargo check` 覆盖三个 Windows target。
