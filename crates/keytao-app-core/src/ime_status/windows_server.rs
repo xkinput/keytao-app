@@ -50,6 +50,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_START: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
+static LAST_RUN_VALUE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(super) fn start_watchdog() {
     if !server_enabled() || WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
@@ -77,8 +78,19 @@ fn ensure_started() -> Result<(), String> {
     }
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
     let server = installed_server_exe()?;
-    if let Err(error) = write_run_value(&server) {
-        tracing::warn!(%error, "could not register IME server startup");
+    {
+        let mut last_run_value = LAST_RUN_VALUE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !last_run_value
+            .as_ref()
+            .is_some_and(|path| same_path(path, &server))
+        {
+            match write_run_value(&server) {
+                Ok(()) => *last_run_value = Some(server.clone()),
+                Err(error) => tracing::warn!(%error, "could not register IME server startup"),
+            }
+        }
     }
     let pipe = pipe_name()?;
     match OpenOptions::new().read(true).write(true).open(&pipe) {
@@ -328,15 +340,18 @@ fn server_image(file: &File) -> Result<PathBuf, String> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.components().count() == right.components().count()
-        && left
-            .components()
-            .zip(right.components())
-            .all(|(left, right)| {
-                left.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-            })
+    left.components().count() == right.components().count() && starts_with_ci(left, right)
+}
+
+fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
+    let mut components = path.components();
+    prefix.components().all(|prefix| {
+        components.next().is_some_and(|path| {
+            path.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&prefix.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 fn verify_installation_path(path: &Path) -> Result<(), String> {
@@ -344,16 +359,7 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
         .join("KeyTao")
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    if path.components().count() > root.components().count()
-        && root
-            .components()
-            .zip(path.components())
-            .all(|(left, right)| {
-                left.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-            })
-    {
+    if path.components().count() > root.components().count() && starts_with_ci(path, &root) {
         Ok(())
     } else {
         Err("IME server image is outside Program Files\\KeyTao".into())

@@ -222,22 +222,11 @@ fn prepare(core: &Core, scheme_key: &str, root: &Path) -> Result<PreparedUpload,
     return prepare_android(core, scheme_key, root);
     #[cfg(not(target_os = "android"))]
     {
-        #[cfg(target_os = "macos")]
-        let shared = crate::ime_status::macos::macos_app_shared_data_dir(core);
-        #[cfg(target_os = "linux")]
-        let shared = crate::ime_status::linux::linux_app_shared_data_dir(core);
-        #[cfg(target_os = "windows")]
-        let shared = crate::ime_status::windows::windows_app_shared_data_dir(core);
         #[cfg(target_os = "ios")]
-        let shared = crate::deploy::ios_app_shared_data_dir(core, root);
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "linux",
-            target_os = "windows",
-            target_os = "ios"
-        )))]
-        let shared: Option<String> = None;
-        let shared = shared.unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared = crate::deploy::ios_app_shared_data_dir(core, root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        #[cfg(not(target_os = "ios"))]
+        let shared = crate::ime_status::app_shared_data_dir(core);
         let runtime = keytao_core::ImeRuntime::with_dirs(root, &shared);
         let shared = (!shared.is_empty()).then(|| Path::new(&shared));
         prepare_with_smoke(core, scheme_key, root, shared, |id, key| {

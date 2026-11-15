@@ -7,46 +7,26 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 pub fn macos_app_shared_data_dir(core: &Core) -> Option<String> {
-    let mut candidates = Vec::new();
-
-    {
-        let resource_dir = core.env().resource_dir.clone();
-        candidates.extend([
-            resource_dir.join("rime-data"),
-            resource_dir.join("SharedSupport"),
-            resource_dir
-                .join("KeyTao.app")
-                .join("Contents")
-                .join("Resources")
-                .join("rime-data"),
-            resource_dir
-                .join("KeyTao.app")
-                .join("Contents")
-                .join("SharedSupport"),
-        ]);
-    }
-
+    let mut bases = vec![core.env().resource_dir.clone()];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(macos_dir) = exe.parent() {
             if let Some(contents_dir) = macos_dir.parent() {
-                let resources_dir = contents_dir.join("Resources");
-                candidates.extend([
-                    resources_dir.join("rime-data"),
-                    resources_dir.join("SharedSupport"),
-                    resources_dir
-                        .join("KeyTao.app")
-                        .join("Contents")
-                        .join("Resources")
-                        .join("rime-data"),
-                    resources_dir
-                        .join("KeyTao.app")
-                        .join("Contents")
-                        .join("SharedSupport"),
-                ]);
+                bases.push(contents_dir.join("Resources"));
             }
         }
     }
-
+    let mut candidates = Vec::new();
+    for base in bases {
+        candidates.extend(
+            [
+                "rime-data",
+                "SharedSupport",
+                "KeyTao.app/Contents/Resources/rime-data",
+                "KeyTao.app/Contents/SharedSupport",
+            ]
+            .map(|suffix| base.join(suffix)),
+        );
+    }
     candidates.extend([
         PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/Resources/rime-data"),
         PathBuf::from("/Library/Input Methods/KeyTao.app/Contents/SharedSupport"),
