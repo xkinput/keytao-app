@@ -87,7 +87,7 @@ matrix = desktop.dig('strategy', 'matrix', 'include')
 expected = {
   ['linux', 'x64'] => ['ubuntu-22.04', %w[deb rpm].map { |ext| "dist/keytao-app-#{version}-linux-x64.#{ext}" }],
   ['linux', 'arm64'] => ['ubuntu-24.04-arm', %w[deb rpm].map { |ext| "dist/keytao-app-#{version}-linux-arm64.#{ext}" }],
-  ['macos', 'universal'] => ['macos-15', ["target/keytao-macos-pkg/keytao-app-#{version}-macos.pkg"]],
+  ['macos', 'universal'] => ['macos-15', ["target/keytao-macos-pkg/keytao-app-#{version}-macos.dmg"]],
   ['windows', 'x64'] => ['windows-latest', ["target/release/bundle/nsis/keytao-app-#{version}-windows-x64-setup.exe"]]
 }
 check(matrix.map { |m| [m['os_name'], m['package_arch']] }.sort == expected.keys.sort, 'Expected exactly four desktop legs')
@@ -99,7 +99,7 @@ check(desktop.dig('strategy', 'fail-fast') == false, 'Run all desktop legs even 
 check(desktop['steps'].find { |s| s['uses'] == 'actions/upload-artifact@v4' }.dig('with', 'path') == '${{ matrix.artifacts }}', 'Desktop upload must use declared paths')
 {
   'linux' => %w[build-linux.sh verify-linux-bundles.sh],
-  'macos' => %w[build-macos.sh verify-macos-pkg.sh],
+  'macos' => %w[build-macos.sh verify-macos-pkg.sh verify-macos-dmg.sh],
   'windows' => %w[build-windows-flutter.ps1]
 }.each do |os, scripts|
   scripts.each do |script|
