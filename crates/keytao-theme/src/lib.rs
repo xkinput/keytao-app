@@ -9,6 +9,7 @@
 //! [`mobile_layout`], resolved from its own `keyboard.yaml` document.
 
 pub mod mobile_layout;
+pub mod panel_hit;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
