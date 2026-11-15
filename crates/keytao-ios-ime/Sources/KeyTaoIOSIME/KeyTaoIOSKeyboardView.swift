@@ -3873,6 +3873,11 @@ final class KeyTaoIOSKeyboardView: UIView {
         let verticalGapFloor = keyboardVerticalGap()
         let rowCount = CGFloat(rows.count)
         let availableHeight = max(0, bottom - top)
+        let screenBounds = window?.windowScene?.screen.bounds ?? UIScreen.main.bounds
+        let compactLandscape = layoutPresentation.mode == .full
+            && traitCollection.userInterfaceIdiom == .phone
+            && traitCollection.verticalSizeClass == .compact
+            && screenBounds.width > screenBounds.height
         var next: [KeyRect] = []
         let maximumRowWidth = max(1, bounds.width - keyboardOuterInset() * 2)
         let referenceUnitWidth = keyboardReferenceUnitWidth(rows: rows, horizontalGap: horizontalGap)
@@ -3991,8 +3996,9 @@ final class KeyTaoIOSKeyboardView: UIView {
 
         if usesCategorizedSymbolKeyboard(rows) {
             let targetVisibleRows = CGFloat(min(5, rows.count))
+            let minimumRowHeight = compactLandscape ? KeyTaoIOSKeyboardSizing.minimumLandscapeKeyHeight : 40
             let rowHeight = min(
-                max(40, (availableHeight - verticalGapFloor * (targetVisibleRows + 1)) / targetVisibleRows),
+                max(minimumRowHeight, (availableHeight - verticalGapFloor * (targetVisibleRows + 1)) / targetVisibleRows),
                 keyboardMaxKeyHeight()
             )
             let verticalGap = verticalGapFloor
@@ -4041,7 +4047,8 @@ final class KeyTaoIOSKeyboardView: UIView {
                 sticky: true
             )
         } else {
-            let naturalRowHeight = max(36, (availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
+            let minimumRowHeight = compactLandscape ? KeyTaoIOSKeyboardSizing.minimumLandscapeKeyHeight : 36
+            let naturalRowHeight = max(minimumRowHeight, (availableHeight - verticalGapFloor * (rowCount + 1)) / rowCount)
             let rowHeight = min(naturalRowHeight, keyboardMaxKeyHeight())
             let verticalGap = max(verticalGapFloor, (availableHeight - rowHeight * rowCount) / (rowCount + 1))
             keyboardScrollY = 0

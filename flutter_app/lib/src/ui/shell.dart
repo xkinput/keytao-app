@@ -142,6 +142,8 @@ class _AppShellState extends State<AppShell> {
       final shell = LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 720;
+          final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+          final availableHeight = constraints.maxHeight - keyboardInset;
           return FScaffold(
             scaffoldStyle: FScaffoldStyleDelta.delta(
               systemOverlayStyle: c.isAndroid
@@ -179,35 +181,36 @@ class _AppShellState extends State<AppShell> {
                     ],
                   )
                 : null,
-            header: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        c.activePage.title,
-                        style: context.theme.typography.display.xl2.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+            header: keyboardInset > 0 && availableHeight < 160
+                ? null
+                : SafeArea(
+                    bottom: false,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              c.activePage.title,
+                              style: context.theme.typography.display.xl2
+                                  .copyWith(fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                          FTooltip(
+                            tipBuilder: (_, _) => const Text('账号'),
+                            child: FButton.icon(
+                              variant: FButtonVariant.ghost,
+                              onPress: () => showAccountDialog(context, c),
+                              child: const Icon(
+                                FLucideIcons.user,
+                                semanticLabel: '账号',
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    FTooltip(
-                      tipBuilder: (_, _) => const Text('账号'),
-                      child: FButton.icon(
-                        variant: FButtonVariant.ghost,
-                        onPress: () => showAccountDialog(context, c),
-                        child: const Icon(
-                          FLucideIcons.user,
-                          semanticLabel: '账号',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+                  ),
             footer: wide
                 ? null
                 : SafeArea(

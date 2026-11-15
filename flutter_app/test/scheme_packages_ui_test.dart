@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/controller.dart'
     show DeployStep, DeployStepState;
+import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/login.dart' show showAccountDialog;
 import 'package:keytao/src/ui/scheme_page.dart';
@@ -140,6 +141,39 @@ List<String> _actionLabels(WidgetTester tester) => tester
     .toList();
 
 void main() {
+  testWidgets('scheme page avoids overflow above a tall landscape keyboard', (
+    tester,
+  ) async {
+    final c = _PackageController(BridgePlatform.ios)
+      ..activePage = AppPage.scheme;
+    addTearDown(c.dispose);
+    _size(tester, const Size(667, 375));
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpWidget(
+      KeyTaoApp(
+        controller: c,
+        initialOnboarding: const OnboardingDto(completed: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byIcon(FLucideIcons.user), findsOneWidget);
+    final input = find.byType(EditableText).last;
+    await tester.ensureVisible(input);
+    await tester.showKeyboard(input);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byIcon(FLucideIcons.user), findsNothing);
+    expect(tester.widget<EditableText>(input).focusNode.hasFocus, isTrue);
+    final viewport = tester.getRect(find.byKey(const PageStorageKey('scheme')));
+    expect(viewport.height, greaterThan(0));
+    expect(viewport.bottom, lessThanOrEqualTo(55));
+    tester.view.resetViewInsets();
+    await tester.pumpAndSettle();
+    expect(find.byIcon(FLucideIcons.user), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   testWidgets('scheme busy transitions preserve the page scroll offset', (
     tester,
   ) async {

@@ -347,7 +347,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
             updateThemeForCurrentAppearance()
         }
-        applyKeyboardPresentationIfOrientationChanged()
+        applyKeyboardPresentationIfOrientationChanged(
+            force: previousTraitCollection?.verticalSizeClass != traitCollection.verticalSizeClass
+        )
     }
 
     public override func viewWillTransition(
@@ -864,8 +866,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let normalized = layoutState.normalized()
         let isLandscape = currentInterfaceIsLandscape()
         let presentation = keyboardLayoutPresentation(state: normalized, isLandscape: isLandscape)
-        let profile = keyboardLayoutProfile(state: normalized, presentation: presentation)
-        let presented = config.scaledForFloating(profile, heightScale: normalized.heightScale)
+        let presented = presentedKeyboardConfig(config, state: normalized, presentation: presentation)
         keyboardView.update(settingsConfig: config)
         keyboardView.update(config: presented)
         let keyboardHeight = presented.effectiveKeyboardHeightDp + presented.candidateBarHeightDp
@@ -2047,11 +2048,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let fallbackProfile = config.floating.profile(isLandscape: isLandscape)
         let state = layoutStateStore.load(isLandscape: isLandscape, fallback: fallbackProfile)
         let presentation = keyboardLayoutPresentation(state: state, isLandscape: isLandscape)
-        let profile = keyboardLayoutProfile(state: state, presentation: presentation)
         if !force, lastPresentationLandscape == isLandscape,
            layoutState == state,
            layoutPresentation == presentation,
-           keyboardView.currentConfig() == config.scaledForFloating(profile, heightScale: state.heightScale) {
+           keyboardView.currentConfig() == presentedKeyboardConfig(config, state: state, presentation: presentation) {
             return
         }
         lastPresentationLandscape = isLandscape
@@ -2071,10 +2071,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let normalized = state.normalized()
         let isLandscape = currentInterfaceIsLandscape()
         let presentation = keyboardLayoutPresentation(state: normalized, isLandscape: isLandscape)
-        let profile = keyboardLayoutProfile(state: normalized, presentation: presentation)
         layoutState = normalized
         layoutPresentation = presentation
-        let presentedConfig = config.scaledForFloating(profile, heightScale: normalized.heightScale)
+        let presentedConfig = presentedKeyboardConfig(config, state: normalized, presentation: presentation)
         keyboardView.update(settingsConfig: config)
         keyboardView.update(config: presentedConfig)
         keyboardView.updateLayoutPresentation(presentation)
@@ -2216,6 +2215,23 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             scale: state.scale,
             orientation: state.orientation
         )
+    }
+
+    private func presentedKeyboardConfig(
+        _ config: KeyTaoIOSImeConfig,
+        state: KeyTaoIOSKeyboardLayoutState,
+        presentation: KeyTaoIOSKeyboardLayoutPresentation
+    ) -> KeyTaoIOSImeConfig {
+        let profile = keyboardLayoutProfile(state: state, presentation: presentation)
+        let presented = config.scaledForFloating(profile, heightScale: state.heightScale)
+        guard presentation.mode == .full,
+              traitCollection.userInterfaceIdiom == .phone,
+              traitCollection.verticalSizeClass == .compact,
+              currentInterfaceIsLandscape() else {
+            return presented
+        }
+        let bounds = view.window?.windowScene?.screen.bounds ?? UIScreen.main.bounds
+        return presented.fittedToCompactLandscape(screenHeight: bounds.height)
     }
 
     private func updateKeyboardPositionConstraints() {

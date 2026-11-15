@@ -690,6 +690,28 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         return next
     }
 
+    func fittedToCompactLandscape(screenHeight: CGFloat) -> KeyTaoIOSImeConfig {
+        let customRowCount = customRows.filter { $0.key != "symbols" && !$0.key.hasPrefix("symbols_") }.values.map(\.count).max() ?? 0
+        let heights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+            screenHeight: screenHeight,
+            keyboardHeight: effectiveKeyboardHeightDp,
+            candidateBarHeight: candidateBarHeightDp,
+            rowCount: max(rows.count + (numberRowEnabled ? 1 : 0), numberRows.count, customRowCount),
+            verticalGap: verticalGapDp
+        )
+        let scale = heights.keyboard / effectiveKeyboardHeightDp
+        var next = self
+        next.keyboardHeightDp *= scale
+        next.candidateBarHeightDp = heights.candidateBar
+        next.keyboardBottomInsetDp *= scale
+        next.verticalGapDp = heights.verticalGap
+        next.maxKeyHeightDp = max(
+            KeyTaoIOSKeyboardSizing.minimumLandscapeKeyHeight / keyboardHeightScaleFactor,
+            maxKeyHeightDp * scale
+        )
+        return next
+    }
+
     private static func applyRuntimeSettings(
         _ config: KeyTaoIOSImeConfig,
         url: URL?

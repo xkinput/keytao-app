@@ -148,6 +148,37 @@ expectScale(
     "the interactive resize stays below the screen edge"
 )
 
+let landscapeHeights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+    screenHeight: 375, keyboardHeight: 266, candidateBarHeight: 52, rowCount: 4, verticalGap: 5
+)
+expectScale(landscapeHeights.keyboard + landscapeHeights.candidateBar, 206.25, "SE3 full keyboard uses 55% of the landscape screen")
+let landscapeRowHeight = (landscapeHeights.keyboard - landscapeHeights.verticalGap * 5) / 4
+expect(landscapeRowHeight >= 32, "SE3 letter rows remain tappable")
+expect(landscapeHeights.candidateBar >= 32, "landscape toolbar remains tappable")
+
+let numberRowHeights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+    screenHeight: 375, keyboardHeight: 332.5, candidateBarHeight: 52, rowCount: 5, verticalGap: 5
+)
+expectScale((numberRowHeights.keyboard - numberRowHeights.verticalGap * 6) / 5, 32, "number row keeps the 32pt minimum")
+expectScale(numberRowHeights.keyboard + numberRowHeights.candidateBar, 206.25, "SE3 number row respects the screen cap")
+
+let alreadyShortHeights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+    screenHeight: 375, keyboardHeight: 150, candidateBarHeight: 36, rowCount: 4, verticalGap: 4
+)
+expectScale(alreadyShortHeights.keyboard, 150, "already short keyboards keep their height")
+expectScale(alreadyShortHeights.candidateBar, 36, "already short toolbars keep their height")
+
+let shortNumberRowHeights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+    screenHeight: 375, keyboardHeight: 170, candidateBarHeight: 36, rowCount: 5, verticalGap: 5
+)
+expectScale((shortNumberRowHeights.keyboard - shortNumberRowHeights.verticalGap * 6) / 5, 32, "small height settings cannot squeeze number keys below 32pt")
+
+let largeGapHeights = KeyTaoIOSKeyboardSizing.compactLandscapeHeights(
+    screenHeight: 375, keyboardHeight: 160, candidateBarHeight: 36, rowCount: 6, verticalGap: 24
+)
+expectScale(largeGapHeights.keyboard + largeGapHeights.candidateBar, 228, "large gaps cannot inflate the keyboard beyond the tappable row minimum")
+expectScale(largeGapHeights.verticalGap, 0, "large gaps yield to tappable keys")
+
 #if canImport(UIKit)
 // Include KeyTaoIOSConfig.swift and its dependencies when running on iOS.
 do {

@@ -1,5 +1,33 @@
 import Foundation
 
+enum KeyTaoIOSKeyboardSizing {
+    static let minimumLandscapeKeyHeight: CGFloat = 32
+
+    static func compactLandscapeHeights(
+        screenHeight: CGFloat,
+        keyboardHeight: CGFloat,
+        candidateBarHeight: CGFloat,
+        rowCount: Int,
+        verticalGap: CGFloat
+    ) -> (keyboard: CGFloat, candidateBar: CGFloat, verticalGap: CGFloat) {
+        guard screenHeight > 0, keyboardHeight > 0 else {
+            return (keyboardHeight, candidateBarHeight, verticalGap)
+        }
+        let totalHeight = keyboardHeight + candidateBarHeight
+        let targetHeight = min(totalHeight, screenHeight * 0.55)
+        let candidateHeight = min(candidateBarHeight, max(32, candidateBarHeight * targetHeight / totalHeight))
+        let rows = CGFloat(max(1, rowCount))
+        let targetKeyboardHeight = targetHeight - candidateHeight
+        let minimumKeyboardHeight = minimumLandscapeKeyHeight * rows
+        let gap = min(
+            verticalGap * targetKeyboardHeight / keyboardHeight,
+            max(0, (targetKeyboardHeight - minimumKeyboardHeight) / (rows + 1))
+        )
+        // Reduce gaps before compromising tappable keys on short screens.
+        return (max(targetKeyboardHeight, minimumKeyboardHeight), candidateHeight, gap)
+    }
+}
+
 /// Which orientation a floating / one-handed keyboard profile belongs to.
 ///
 /// `keytao-theme::mobile_layout` sanitises the shared layout with a different
