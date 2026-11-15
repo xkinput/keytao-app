@@ -5,7 +5,7 @@ use keytao_core::{
     InputContextPolicy, KeyProcessResult, ReloadStamp, WINDOWS_IME_ENGINE_INIT_MUTEX_NAME,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -42,6 +42,58 @@ pub trait ImeEngineBackend: Send + Sync {
     fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String>;
 }
 
+pub(crate) fn build_backend() -> Result<
+    (
+        Arc<dyn ImeEngineBackend>,
+        EngineHandle,
+        Option<PathBuf>,
+        Option<String>,
+    ),
+    String,
+> {
+    if read_engine_mode() == crate::engine_config::EngineMode::Pipe {
+        let pipe = crate::engine_pipe::PipeEngine::default();
+        match pipe.build() {
+            Ok(handle) => {
+                return Ok((Arc::new(pipe), handle, None, None));
+            }
+            Err(error) => keytao_core::rt_log!(
+                keytao_core::runtime_log::Level::Info,
+                "ipc",
+                "inproc_fallback",
+                msg = error
+            ),
+        }
+    }
+    let engine = Arc::new(InProcEngine::default());
+    let handle = engine.build()?;
+    let (path, signature) = engine.reload_stamp();
+    Ok((engine, handle, path, signature))
+}
+
+fn read_engine_mode() -> crate::engine_config::EngineMode {
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, REG_VALUE_TYPE, RRF_RT_REG_DWORD,
+    };
+    let mut value = [0u8; 4];
+    let mut size = value.len() as u32;
+    let mut kind = REG_VALUE_TYPE::default();
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows::core::w!("Software\\KeyTao\\Ime"),
+            windows::core::w!("EngineMode"),
+            RRF_RT_REG_DWORD,
+            Some(&mut kind),
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    crate::engine_config::EngineMode::from_registry(
+        (result.is_ok() && size == 4).then_some((kind.0, value.as_slice())),
+    )
+}
+
 #[derive(Default)]
 pub struct InProcEngine {
     inner: Mutex<InProcState>,
@@ -53,10 +105,48 @@ struct InProcState {
     session: Option<ImeRuntimeSession>,
     reload_stamp_path: Option<PathBuf>,
     reload_stamp_signature: Option<String>,
-    rime_dll: Option<LoadedRimeDll>,
+    rime_dll: Option<Arc<LoadedRimeDll>>,
 }
 
 impl InProcEngine {
+    /// The server always initializes the desktop directories, including for AC clients.
+    pub fn build_server(&self) -> Result<EngineHandle, String> {
+        self.install(Self::try_build_engine(false)?)
+    }
+
+    /// Reload externally deployed artifacts without moving deployment out of the App.
+    pub fn reload_server(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let _init_guard = EngineInitGuard::acquire(false)?;
+        let signature = inner
+            .reload_stamp_path
+            .as_ref()
+            .and_then(|path| ReloadStamp::signature_at(path));
+        inner
+            .runtime
+            .as_ref()
+            .ok_or("server runtime is not ready")?
+            .reload_without_deploy()?;
+        inner.reload_stamp_signature = signature;
+        Ok(())
+    }
+
+    /// A server owns one initialized runtime; each connection gets its own session.
+    pub fn fork_session(&self) -> Result<Self, String> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let runtime = inner.runtime.clone().ok_or("server runtime is not ready")?;
+        let session = runtime.create_session()?;
+        Ok(Self {
+            inner: Mutex::new(InProcState {
+                runtime: Some(runtime),
+                session: Some(session),
+                reload_stamp_path: inner.reload_stamp_path.clone(),
+                reload_stamp_signature: inner.reload_stamp_signature.clone(),
+                rime_dll: inner.rime_dll.clone(),
+            }),
+        })
+    }
+
     /// Retain stamp checks when a failed reload has already dropped its engine.
     pub(crate) fn with_reload_stamp(path: Option<PathBuf>, signature: Option<String>) -> Self {
         Self {
@@ -87,9 +177,16 @@ impl InProcEngine {
             .clone()
     }
 
-    fn try_build_engine() -> Result<InProcState, String> {
-        let sandboxed = crate::appcontainer::is_appcontainer()
-            .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
+    fn install(&self, inner: InProcState) -> Result<EngineHandle, String> {
+        let schema_id = inner.session.as_ref().unwrap().state().schema_id;
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = inner;
+        Ok(EngineHandle { schema_id })
+    }
+
+    fn try_build_engine(sandboxed: bool) -> Result<InProcState, String> {
         let _init_guard = EngineInitGuard::acquire(sandboxed)?;
         let sandbox = if sandboxed {
             Some(crate::appcontainer::prepare_data()?)
@@ -101,7 +198,7 @@ impl InProcEngine {
             None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
         };
         let shared = bundled_shared_data_dir().unwrap_or_else(default_shared_data_dir);
-        let rime_dll = preload_rime_dll(&shared)?;
+        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
         let reload_stamp_path = sandbox.as_ref().map_or_else(
             || ReloadStamp::path(&user_dir),
             |data| data.reload_stamp_path.clone(),
@@ -137,13 +234,9 @@ impl InProcEngine {
 
 impl ImeEngineBackend for InProcEngine {
     fn build(&self) -> Result<EngineHandle, String> {
-        let inner = Self::try_build_engine()?;
-        let schema_id = inner.session.as_ref().unwrap().state().schema_id;
-        *self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = inner;
-        Ok(EngineHandle { schema_id })
+        let sandboxed = crate::appcontainer::is_appcontainer()
+            .map_err(|error| format!("inspect host AppContainer token: {error}"))?;
+        self.install(Self::try_build_engine(sandboxed)?)
     }
 
     fn reload_needed(&self) -> bool {
@@ -219,6 +312,7 @@ struct EngineInitGuard(HANDLE);
 // SAFETY: The handle is retained only to keep the lazily loaded module alive
 // while the TSF text service owns the librime runtime. It is not dereferenced.
 unsafe impl Send for LoadedRimeDll {}
+unsafe impl Sync for LoadedRimeDll {}
 
 unsafe impl Send for EngineInitGuard {}
 

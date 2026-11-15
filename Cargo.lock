@@ -1660,6 +1660,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keytao-ime-ipc"
+version = "0.1.0"
+dependencies = [
+ "keytao-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "keytao-linux-ime"
 version = "1.2.5-alpha.6"
 dependencies = [
@@ -1711,11 +1720,22 @@ dependencies = [
  "embed-resource",
  "fontdue",
  "keytao-core",
+ "keytao-ime-ipc",
  "keytao-theme",
  "tiny-skia",
  "tracing",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "keytao-windows-ime-server"
+version = "1.2.5-alpha.6"
+dependencies = [
+ "keytao-core",
+ "keytao-ime-ipc",
+ "keytao-windows-ime",
+ "windows",
 ]
 
 [[package]]

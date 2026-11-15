@@ -340,7 +340,7 @@ function Find-WindowsRuntimeDll([string]$Name, [string]$WindowsArch) {
     return $null
 }
 
-$cargoArgs = @("build", "-p", "keytao-windows-ime", "--target", $target)
+$cargoArgs = @("build", "-p", "keytao-windows-ime", "-p", "keytao-windows-ime-server", "--target", $target)
 if (-not $DebugBuild) {
     $cargoArgs += "--release"
 }
@@ -373,10 +373,12 @@ $cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
     Join-Path $repoRoot "target"
 }
 $dll = Join-Path $cargoTargetRoot "$target\$profile\keytao_windows_ime.dll"
+$server = Join-Path $cargoTargetRoot "$target\$profile\keytao-windows-ime-server.exe"
 $runtimeDir = Join-Path $repoRoot "target\keytao-windows-ime-runtime\$Arch"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $runtimeDir
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
 Copy-Item -Force -LiteralPath $dll -Destination $runtimeDir
+Copy-Item -Force -LiteralPath $server -Destination $runtimeDir
 Copy-Item -Force -LiteralPath (Join-Path $repoRoot "crates\keytao-theme\default-theme.yaml") -Destination $runtimeDir
 Copy-Item -Force -LiteralPath (Join-Path $vendorDir "librime-features.txt") -Destination $runtimeDir
 Copy-Item -Force -Path (Join-Path $vendorDir "bin\*.dll") -Destination $runtimeDir

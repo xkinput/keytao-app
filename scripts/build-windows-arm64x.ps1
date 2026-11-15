@@ -19,9 +19,10 @@ if (-not $OutputDir) {
 
 $x64Dll = Join-Path $X64RuntimeDir "keytao_windows_ime.dll"
 $arm64Dll = Join-Path $Arm64RuntimeDir "keytao_windows_ime.dll"
+$arm64Server = Join-Path $Arm64RuntimeDir "keytao-windows-ime-server.exe"
 $arm64RimeDll = Join-Path $Arm64RuntimeDir "rime-arm64.dll"
 $arm64LibrimeFeatures = Join-Path $Arm64RuntimeDir "librime-features.txt"
-foreach ($required in @($x64Dll, $arm64Dll, $arm64RimeDll, $arm64LibrimeFeatures)) {
+foreach ($required in @($x64Dll, $arm64Dll, $arm64Server, $arm64RimeDll, $arm64LibrimeFeatures)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing ARM64X input: $required"
     }
@@ -57,6 +58,7 @@ Move-Item -Force -LiteralPath (Join-Path $OutputDir "keytao_windows_ime.dll") `
     -Destination (Join-Path $OutputDir "keytao_windows_ime_x64.dll")
 Copy-Item -Force -LiteralPath $arm64Dll `
     -Destination (Join-Path $OutputDir "keytao_windows_ime_arm64.dll")
+Copy-Item -Force -LiteralPath $arm64Server -Destination $OutputDir
 Copy-Item -Force -LiteralPath $arm64RimeDll -Destination $OutputDir
 Copy-Item -Force -LiteralPath $arm64LibrimeFeatures `
     -Destination (Join-Path $OutputDir "librime-arm64-features.txt")

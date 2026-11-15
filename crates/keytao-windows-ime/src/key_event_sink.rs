@@ -2004,7 +2004,7 @@ fn prepare_engine_for_key(
         return Ok(None);
     }
 
-    apply_pending_session_reset(shared_state);
+    let reset_acknowledged = apply_pending_session_reset(shared_state);
     // The context policy is decided on focus changes, but the engine is built
     // in the background and may only have arrived since.
     sync_input_policy(shared_state);
@@ -2031,7 +2031,7 @@ fn prepare_engine_for_key(
         )?;
     }
 
-    if reload_started || reload_in_progress {
+    if !reset_acknowledged || reload_started || reload_in_progress {
         return Ok(None);
     }
 

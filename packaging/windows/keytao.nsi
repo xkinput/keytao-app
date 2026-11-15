@@ -33,6 +33,7 @@ Unicode true
 !define MANUFACTURER "rea"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeyTao"
 !define MANUPRODUCTKEY "Software\rea\KeyTao"
+!define KEYTAO_IME_SERVER_EXE "keytao-windows-ime-server.exe"
 !include "nsis-hooks.nsh"
 
 Name "${PRODUCTNAME}"

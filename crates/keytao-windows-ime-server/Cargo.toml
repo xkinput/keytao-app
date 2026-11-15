@@ -1,0 +1,12 @@
+[package]
+name = "keytao-windows-ime-server"
+version.workspace = true
+edition = "2021"
+description = "Per-user-session KeyTao Windows IME engine server"
+
+[target.'cfg(windows)'.dependencies]
+keytao-core = { path = "../keytao-core" }
+keytao-ime-ipc = { path = "../keytao-ime-ipc" }
+keytao-windows-ime = { path = "../keytao-windows-ime" }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
+

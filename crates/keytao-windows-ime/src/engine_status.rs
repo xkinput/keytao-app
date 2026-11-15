@@ -13,11 +13,7 @@ pub(crate) fn retry_delay(failures: u32) -> Duration {
     Duration::from_secs((5_u64 << failures.saturating_sub(1).min(4)).min(60))
 }
 
-pub(crate) fn write_status(
-    user_dir: &Path,
-    error: Option<&str>,
-    schema: Option<&str>,
-) -> io::Result<()> {
+pub fn write_status(user_dir: &Path, error: Option<&str>, schema: Option<&str>) -> io::Result<()> {
     fs::create_dir_all(user_dir)?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)

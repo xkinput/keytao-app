@@ -37,6 +37,12 @@
     DetailPrint "KeyTao input method staging runtime is missing: $4"
     Return
   ${EndIf}
+  ; Keep the server in the installed payload: clients reject ProgramData paths.
+  ${IfNot} ${FileExists} "$4\${KEYTAO_IME_SERVER_EXE}"
+    WriteRegStr HKLM "${KEYTAO_IME_REG_KEY}" "WindowsImeInstallStatus" "missing IME server: $4"
+    DetailPrint "KeyTao input method server is missing from the installation: $4"
+    Return
+  ${EndIf}
 
   ClearErrors
   GetTempFileName $R7

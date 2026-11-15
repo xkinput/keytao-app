@@ -52,7 +52,7 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set +e
-          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
+          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -p keytao-ime-ipc -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
           result=$?
           cat ime-regressions.log
           if [ "$result" -ne 0 ]; then
@@ -84,10 +84,57 @@ jobs:
           fi
           exit "$result"
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read Rust toolchain pin
+        id: rust
+        shell: bash
+        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          targets: x86_64-pc-windows-msvc
+      - name: Install Windows system deps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install 7zip llvm -y --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Windows dependency installation failed" }
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Fetch pinned Windows x64 librime
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-librime-windows.ps1 -Arch x64
+      - name: Test Windows IME
+        shell: pwsh
+        run: |
+          . ./vendor/librime/windows-x64/env.ps1
+          cargo test -p keytao-windows-ime -p keytao-windows-ime-server -- --test-threads=1
+
   apple-policy:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Read Rust toolchain pin
+        id: rust
+        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - name: Fetch pinned macOS librime
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/fetch-librime.sh --platform macos --destination "$GITHUB_WORKSPACE/vendor/librime/macos-universal"
+      - name: Test shared IPC protocol
+        run: |
+          source vendor/librime/macos-universal/env.sh
+          export DYLD_LIBRARY_PATH="$RIME_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          cargo test --locked -p keytao-ime-ipc -- --test-threads=1
       - name: Typecheck iOS keyboard with device SDK
         run: bash crates/keytao-ios-ime/check-swift-sdk.sh
       - name: Test macOS input context lifetime

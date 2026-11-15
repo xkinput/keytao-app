@@ -350,9 +350,8 @@ impl TsfState {
     }
 
     fn try_build_engine() -> Result<EngineBundle, String> {
-        let runtime = Arc::new(InProcEngine::default());
-        let session = runtime.build()?;
-        let (reload_stamp_path, reload_stamp_signature) = runtime.reload_stamp();
+        let (runtime, session, reload_stamp_path, reload_stamp_signature) =
+            crate::engine_backend::build_backend()?;
         Ok(EngineBundle {
             runtime,
             session,
@@ -421,7 +420,7 @@ impl TsfState {
         if self.engine_building || self.reload_in_progress || !self.reload_needed() {
             return false;
         }
-        if self.reload_stamp_path.is_none() {
+        if self.runtime.is_none() && self.reload_stamp_path.is_none() {
             return false;
         }
         let now = Instant::now();
@@ -737,19 +736,25 @@ pub(crate) fn refresh_engine_for_focus(shared_state: &SharedState) {
     }
 }
 
-pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) {
+pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) -> bool {
     let session = {
         let mut state = shared_state.borrow_mut();
         if !std::mem::take(&mut state.session_reset_pending) {
-            return;
+            return true;
         }
         state.session()
     };
-    if let Some(session) = session {
-        let ime_state = session.reset();
-        shared_state.borrow_mut().ime_state = ime_state;
+    let ime_state = session.and_then(|session| session.reset());
+    let acknowledged = ime_state.is_some();
+    let mut state = shared_state.borrow_mut();
+    state.ime_state = ime_state;
+    // A busy pipe must not carry the previous context's preedit into the next key.
+    state.session_reset_pending |= !acknowledged;
+    drop(state);
+    if acknowledged {
         append_diagnostic("session reset applied");
     }
+    acknowledged
 }
 
 /// Push the input policy of the focused context onto the running session.
@@ -778,9 +783,10 @@ pub(crate) fn sync_input_policy(shared_state: &SharedState) {
     };
     // Turning composing off discards whatever librime was holding; the cached
     // state has to go with it so nothing is drawn for the sensitive context.
-    let _ = session.set_input_policy(policy);
+    let acknowledged = session.set_input_policy(policy).is_some();
     let mut st = shared_state.borrow_mut();
-    st.input_policy_applied = Some(sensitive);
+    // Pipe contention may skip the RPC entirely; retry until the server acknowledges it.
+    st.input_policy_applied = acknowledged.then_some(sensitive);
     if sensitive {
         st.ime_state = None;
     }

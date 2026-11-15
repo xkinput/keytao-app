@@ -5,10 +5,12 @@ members = [
   "crates/keytao-app-bridge",
   "crates/keytao-core",
   "crates/keytao-core-ffi",
+  "crates/keytao-ime-ipc",
   "crates/keytao-theme",
   "crates/keytao-schema-logo",
   "crates/keytao-linux-ime",
   "crates/keytao-windows-ime",
+  "crates/keytao-windows-ime-server",
 ]
 
 [workspace.package]

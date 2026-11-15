@@ -255,13 +255,14 @@ foreach ($dll in Get-ChildItem -LiteralPath (Join-Path $repoRoot "target\keytao-
 foreach ($runtime in @("current", "x86", "arm64x")) {
     $root = Join-Path $ReleaseDir "keytao-windows-ime-runtime\$runtime"
     Require-MatchingTree (Join-Path $repoRoot "target\keytao-windows-ime-runtime\$runtime") $root
-    foreach ($file in @("keytao_windows_ime.dll", "rime.dll", "rime-data\default.yaml", "default-theme.yaml", "msvcp140.dll", "vcruntime140.dll")) {
+    foreach ($file in @("keytao_windows_ime.dll", "keytao-windows-ime-server.exe", "rime.dll", "rime-data\default.yaml", "default-theme.yaml", "msvcp140.dll", "vcruntime140.dll")) {
         Require-File (Join-Path $root $file) "Missing $runtime TSF payload: $file"
     }
     Require-MergedLuaManifest (Join-Path $root "librime-features.txt")
     Require-AsciiMarkers (Join-Path $root "rime.dll") @("lua_translator", "lua_filter", "lua_processor")
     $machine = switch ($runtime) { "current" { 0x8664 }; "x86" { 0x014C }; "arm64x" { 0xAA64 } }
     Require-PeMachine (Join-Path $root "keytao_windows_ime.dll") ([UInt16]$machine) "$runtime TSF"
+    Require-PeMachine (Join-Path $root "keytao-windows-ime-server.exe") ([UInt16]$machine) "$runtime IME server"
     if ($runtime -ne "arm64x") {
         foreach ($dll in Get-ChildItem -LiteralPath $root -Filter "*.dll" -File) {
             Require-PeMachine $dll.FullName ([UInt16]$machine) "$runtime dependency"
