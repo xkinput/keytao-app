@@ -157,6 +157,7 @@ void main() {
   AppController? controller;
   final iosCalls = <String>[];
   final androidCalls = <String>[];
+  late Map<String, dynamic> iosKeyboardStatus;
 
   AppController create(BridgePlatform platform) => controller = AppController(
     info: BridgeInfo(
@@ -173,6 +174,7 @@ void main() {
     RustLib.initMock(api: core);
     iosCalls.clear();
     androidCalls.clear();
+    iosKeyboardStatus = {'enabled': true, 'fullAccess': true};
     messenger.setMockMethodCallHandler(IosHost.channel, (call) async {
       iosCalls.add(call.method);
       if (call.method == 'openUrl') {
@@ -185,6 +187,7 @@ void main() {
           'cacheDir': '/ios/cache',
           'userRoot': '/ios/group/keytao',
         },
+        'keyboardStatus' => iosKeyboardStatus,
         'openSettings' => null,
         _ => throw StateError('Unexpected iOS method: ${call.method}'),
       };
@@ -436,7 +439,7 @@ void main() {
     expect(core.mobileSettings.longPressDelayMs, 350);
     expect(await c.openInputMethodSettings(), isTrue);
     expect(await c.open('https://example.com/keytao'), isTrue);
-    expect(iosCalls, ['openSettings', 'openUrl']);
+    expect(iosCalls, ['keyboardStatus', 'openSettings', 'openUrl']);
     const urls = DownloadUrlsDto(windows: 'win', linux: 'linux', ios: 'ios');
     c.latestRelease = const ReleaseInfoDto(
       version: '1',
@@ -468,5 +471,45 @@ void main() {
       );
       other.dispose();
     }
+  });
+
+  test('iOS detects keyboard prerequisites at startup and after resume', () async {
+    final c = create(BridgePlatform.ios);
+    iosKeyboardStatus = {'enabled': false, 'fullAccess': true};
+    expect(await c.refreshState(), isTrue);
+    expect(c.iosKeyboardEnabled, isFalse);
+    expect(c.iosKeyboardFullAccess, isNull);
+    expect(SetupStep.enable.isComplete(c), isFalse);
+    expect(SetupStep.fullAccess.isComplete(c), isFalse);
+
+    for (final status in [
+      <String, dynamic>{'enabled': true},
+      <String, dynamic>{'enabled': true, 'fullAccess': false},
+    ]) {
+      iosKeyboardStatus = status;
+      expect(await c.refreshState(), isTrue);
+      expect(c.iosKeyboardEnabled, isTrue);
+      expect(c.iosKeyboardFullAccess, isFalse);
+      expect(SetupStep.enable.isComplete(c), isTrue);
+      expect(SetupStep.fullAccess.isComplete(c), isFalse);
+    }
+
+    iosKeyboardStatus = {'enabled': true, 'fullAccess': true};
+    c.onResume();
+    await settle();
+    expect(c.iosKeyboardEnabled, isTrue);
+    expect(c.iosKeyboardFullAccess, isTrue);
+    expect(SetupStep.fullAccess.isComplete(c), isTrue);
+
+    iosKeyboardStatus = {'enabled': false, 'fullAccess': null};
+    c.onResume();
+    await settle();
+    expect(c.iosKeyboardEnabled, isFalse);
+    expect(c.iosKeyboardFullAccess, isNull);
+    expect(SetupStep.enable.isComplete(c), isFalse);
+    expect(SetupStep.fullAccess.isComplete(c), isFalse);
+    expect(iosCalls, List.filled(5, 'keyboardStatus'));
+    expect(androidCalls, isEmpty);
+    expect(c.error, isNull);
   });
 }

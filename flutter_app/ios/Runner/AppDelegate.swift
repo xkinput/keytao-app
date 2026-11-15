@@ -122,6 +122,7 @@ enum KeyTaoIOSBundledData {
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
+  private static let appGroupIdentifier = "group.ink.rea.keytao-app"
   private var iosChannel: FlutterMethodChannel?
   private let pathsQueue = DispatchQueue(label: "ink.rea.keytao-app.paths")
   private var preparedPaths: [String: String]?
@@ -143,6 +144,8 @@ enum KeyTaoIOSBundledData {
     iosChannel = channel
     channel.setMethodCallHandler { [self] call, result in
       switch call.method {
+      case "keyboardStatus":
+        result(Self.keyboardStatus())
       case "getPaths":
         pathsQueue.async {
           do {
@@ -184,6 +187,28 @@ enum KeyTaoIOSBundledData {
         result(FlutterMethodNotImplemented)
       }
     }
+  }
+
+  private static func keyboardStatus() -> [String: Any] {
+    guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+      return ["enabled": false, "fullAccess": NSNull()]
+    }
+    let keyboardIdentifier = bundleIdentifier + ".keyboard"
+    let enabled: Bool
+    if let keyboards = UserDefaults.standard.object(forKey: "AppleKeyboards") as? [String] {
+      enabled = keyboards.contains(keyboardIdentifier)
+    } else {
+      let identifierSelector = NSSelectorFromString("identifier")
+      enabled = UITextInputMode.activeInputModes.contains { mode in
+        let object = mode as NSObject
+        guard object.responds(to: identifierSelector) else { return false }
+        return object.value(forKey: "identifier") as? String == keyboardIdentifier
+      }
+    }
+    let fullAccess: Any = enabled
+      ? (UserDefaults(suiteName: appGroupIdentifier)?.bool(forKey: "keyboardFullAccess") == true) as Any
+      : NSNull()
+    return ["enabled": enabled, "fullAccess": fullAccess]
   }
 
   private func importLocalSchemeDirectory(_ result: @escaping FlutterResult) {
@@ -280,7 +305,7 @@ enum KeyTaoIOSBundledData {
   private static func preparePaths() throws -> [String: String] {
     let manager = FileManager.default
     guard let group = manager.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.ink.rea.keytao-app"
+      forSecurityApplicationGroupIdentifier: appGroupIdentifier
     ) else {
       // A private fallback would break the frozen shared-root contract.
       throw NSError(domain: "keytao/ios", code: 1, userInfo: [

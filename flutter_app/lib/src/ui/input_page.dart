@@ -190,27 +190,36 @@ class IosImeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Section(
-    title: AppStrings.iosOnboarding,
+    title:
+        controller.iosKeyboardEnabled &&
+            controller.iosKeyboardFullAccess == true
+        ? AppStrings.iosKeyboardReady
+        : AppStrings.iosOnboarding,
     icon: FLucideIcons.keyboard,
     children: [
-      const Text(AppStrings.iosOpenApp),
-      const Text(AppStrings.iosAddKeyboard),
-      const Text(AppStrings.iosChooseKeyboard),
-      const Text(AppStrings.iosEnableFullAccess),
-      const Text(AppStrings.iosFullAccessDescription),
-      const Text(AppStrings.iosInstallDeploy),
-      const Text(AppStrings.iosGlobe),
-      ActionRow(
-        children: [
-          ActionButton(
-            AppStrings.openSystemSettings,
-            icon: FLucideIcons.settings,
-            onPress: controller.busy
-                ? null
-                : controller.openInputMethodSettings,
-          ),
-        ],
-      ),
+      if (!controller.iosKeyboardEnabled) ...[
+        const Text(AppStrings.iosAddKeyboard),
+        const Text(AppStrings.iosChooseKeyboard),
+      ] else if (controller.iosKeyboardFullAccess != true) ...[
+        const Text(AppStrings.iosEnableFullAccess),
+        const Text(AppStrings.iosFullAccessDescription),
+        const Text(AppStrings.iosKeyboardStatusRefresh),
+      ] else ...[
+        const Text(AppStrings.iosGlobe),
+      ],
+      if (!controller.iosKeyboardEnabled ||
+          controller.iosKeyboardFullAccess != true)
+        ActionRow(
+          children: [
+            ActionButton(
+              AppStrings.openSystemSettings,
+              icon: FLucideIcons.settings,
+              onPress: controller.busy
+                  ? null
+                  : controller.openInputMethodSettings,
+            ),
+          ],
+        ),
     ],
   );
 }
