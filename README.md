@@ -2,23 +2,13 @@
   <img src="packaging/icons/icon.png" width="128" alt="KeyTao 键道">
 </p>
 
-# 键道 KeyTao
+<h1 align="center">键道 KeyTao</h1>
+
+<p align="center">
+  <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与 Android 上的输入与设置界面">
+</p>
 
 键道输入方案的安装工具与各平台系统输入法：App 负责下载、安装、合并和部署 Rime 方案，系统输入法通过同一套 librime 核心输入。
-
-## 界面预览
-
-### 桌面端（macOS）
-
-| 候选窗 · 夜间 | 候选窗 · 白天 | 设置 |
-| :---: | :---: | :---: |
-| <img src="docs/images/macos-candidates-dark.png" width="160" alt="macOS 候选窗夜间模式"> | <img src="docs/images/macos-candidates-light.png" width="160" alt="macOS 候选窗白天模式"> | <img src="docs/images/macos-settings.jpg" width="420" alt="macOS 输入法设置"> |
-
-### 移动端（Android）
-
-| 键盘输入 | 方案管理 | 键盘设置 |
-| :---: | :---: | :---: |
-| <img src="docs/images/android-keyboard.png" width="240" alt="Android 键盘输入"> | <img src="docs/images/android-app-schemes.png" width="240" alt="Android 方案管理"> | <img src="docs/images/android-app-settings.png" width="240" alt="Android 键盘设置"> |
 
 | 平台 | 系统输入法形态 | Release 产物 |
 | --- | --- | --- |
