@@ -13,16 +13,12 @@ if (process.argv[2] === "--set" && !explicitVersion) {
 function readWorkspaceVersion() {
   const cargoToml = fs.readFileSync(workspaceCargoPath, "utf8")
   const match = cargoToml.match(
-    /^\[workspace\.package\]\s*?\n([\s\S]*?)(?=^\[|\s*$)/m
+    /^\[workspace\.package\]\s*?\n(?:(?!^\[)[\s\S])*?^version\s*=\s*"([^"]+)"/m
   )
   if (!match) {
-    throw new Error("Cargo.toml is missing [workspace.package]")
-  }
-  const version = match[1].match(/^version\s*=\s*"([^"]+)"/m)?.[1]
-  if (!version) {
     throw new Error("Cargo.toml is missing [workspace.package].version")
   }
-  return version
+  return match[1]
 }
 
 function writeWorkspaceVersion(version) {

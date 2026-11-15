@@ -33,7 +33,7 @@ xkbcommon = { version = "0.7", features = ["wayland", "x11"] }
 xim = { version = "0.5", features = ["x11rb-server", "x11rb-xcb"] }
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 libc = "0.2"
-dirs = "5"
+dirs.workspace = true
 
 # Candidate panel rendering (software rasteriser, no GPU required)
 tiny-skia = "0.11"

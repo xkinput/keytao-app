@@ -13,11 +13,11 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], defau
 futures-util = "0.3"
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate", "time"] }
-tokio = { version = "1", features = ["full"] }
+tokio.workspace = true
 keytao-core = { path = "../keytao-core" }
 keytao-theme = { path = "../keytao-theme" }
 tracing = "0.1"
-dirs = "5"
+dirs.workspace = true
 time = { version = "0.3", features = ["parsing"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
