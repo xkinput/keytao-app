@@ -157,17 +157,6 @@ ensure_release_json() {
     fi
 }
 
-release_tag() {
-    ensure_release_json
-    python3 - "$RELEASE_JSON" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle).get("tag_name", ""))
-PY
-}
-
 read_release_asset() {
     local kind="$1"
     local asset_substring="$2"
