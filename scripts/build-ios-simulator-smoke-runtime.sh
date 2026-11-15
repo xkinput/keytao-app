@@ -181,26 +181,6 @@ static char *state_json(KeytaoSmokeSession *session, const char *committed, bool
   return out;
 }
 
-static struct KeytaoState *state_struct(KeytaoSmokeSession *session, const char *committed, bool accepted) {
-  struct KeytaoState *state = (struct KeytaoState *)calloc(1, sizeof(struct KeytaoState));
-  if (!state) {
-    return NULL;
-  }
-  state->preedit = dup_cstr("");
-  state->cursor = 0;
-  state->candidate_texts = NULL;
-  state->candidate_comments = NULL;
-  state->candidate_count = 0;
-  state->highlighted_candidate_index = 0;
-  state->page = 0;
-  state->is_last_page = true;
-  state->committed = dup_cstr(committed);
-  state->select_keys = dup_cstr("1234567890");
-  state->ascii_mode = session ? session->ascii_mode : false;
-  state->accepted = accepted;
-  return state;
-}
-
 static KeytaoSmokeSession *session_or_singleton(void *session) {
   if (session) {
     return (KeytaoSmokeSession *)session;
@@ -235,47 +215,8 @@ void keytao_destroy_session(void *session) {
   free(session);
 }
 
-struct KeytaoState *keytao_session_state(void *session) {
-  return state_struct(session_or_singleton(session), "", false);
-}
-
-struct KeytaoState *keytao_session_process_key(void *session, uint32_t keyval, uint32_t modifiers) {
-  (void)modifiers;
-  KeytaoSmokeSession *handle = session_or_singleton(session);
-  char committed[8] = {0};
-  bool accepted = false;
-  if (keyval >= 0x20 && keyval < 0x7f) {
-    committed[0] = (char)keyval;
-    accepted = true;
-  } else if (keyval == 0xff0d) {
-    committed[0] = '\n';
-    accepted = true;
-  }
-  return state_struct(handle, committed, accepted);
-}
-
-struct KeytaoState *keytao_session_select_candidate(void *session, uint32_t index) {
-  (void)index;
-  return state_struct(session_or_singleton(session), "", true);
-}
-
-struct KeytaoState *keytao_session_change_page(void *session, bool backward) {
-  (void)backward;
-  return state_struct(session_or_singleton(session), "", true);
-}
-
-struct KeytaoState *keytao_session_reset(void *session) {
-  return state_struct(session_or_singleton(session), "", true);
-}
-
 bool keytao_session_get_ascii_mode(void *session) {
   return session_or_singleton(session)->ascii_mode;
-}
-
-struct KeytaoState *keytao_session_set_ascii_mode(void *session, bool enabled) {
-  KeytaoSmokeSession *handle = session_or_singleton(session);
-  handle->ascii_mode = enabled;
-  return state_struct(handle, "", true);
 }
 
 void keytao_set_theme_paths(const char *default_theme_path, const char *user_theme_path) {
@@ -356,33 +297,6 @@ void keytao_free_string(char *ptr) {
   free(ptr);
 }
 
-struct KeytaoState *keytao_process_key(uint32_t keyval, uint32_t modifiers) {
-  return keytao_session_process_key(&g_singleton, keyval, modifiers);
-}
-
-struct KeytaoState *keytao_select_candidate(uint32_t index) {
-  return keytao_session_select_candidate(&g_singleton, index);
-}
-
-struct KeytaoState *keytao_change_page(bool backward) {
-  return keytao_session_change_page(&g_singleton, backward);
-}
-
-struct KeytaoState *keytao_reset(void) {
-  return keytao_session_reset(&g_singleton);
-}
-
-void keytao_free_state(struct KeytaoState *ptr) {
-  if (!ptr) {
-    return;
-  }
-  free(ptr->preedit);
-  free(ptr->committed);
-  free(ptr->select_keys);
-  free(ptr->candidate_texts);
-  free(ptr->candidate_comments);
-  free(ptr);
-}
 EOF
 
     cat > "$BUILD_ROOT/mock_librime.c" <<'EOF'

@@ -1876,28 +1876,11 @@ mod desktop {
     }
 
     impl Engine {
-        /// Create a new session. `deploy()` must have succeeded first.
-        pub fn new() -> Result<Self, String> {
-            Self::new_with_user_data_dir(None)
-        }
-
         /// What this librime can do natively, see [`EngineCapabilities`].
         pub fn capabilities(&self) -> EngineCapabilities {
             let mut capabilities = engine_capabilities();
             capabilities.candidate_deletion &= self.user_dictionary_source_available;
             capabilities
-        }
-
-        /// Whether [`Engine::change_page`] pages through librime instead of
-        /// replaying the `-`/`=` bindings.
-        pub fn supports_native_paging(&self) -> bool {
-            engine_capabilities().supports_native_paging()
-        }
-
-        /// Whether [`Engine::select_candidate_on_page`] selects through librime
-        /// instead of sending a select key.
-        pub fn supports_candidate_selection(&self) -> bool {
-            engine_capabilities().supports_candidate_selection()
         }
 
         pub(crate) fn prepare_switch_request(
@@ -1913,19 +1896,15 @@ mod desktop {
             Ok(request)
         }
 
-        pub(crate) fn new_with_user_data_dir(user_data_dir: Option<&Path>) -> Result<Self, String> {
+        pub(crate) fn new_with_user_data_dir(user_data_dir: &Path) -> Result<Self, String> {
             // Locating and checking the compiled schema is file I/O; the
             // librime lock is only taken once the session is actually created.
             let preferred = preferred_schema_location(user_data_dir);
             if let Some((dir, schema_id)) = &preferred {
                 require_compiled_schema(&compiled_schema_path(dir, schema_id), schema_id)?;
             }
-            let effective_user_data_dir = user_data_dir
-                .map(Path::to_path_buf)
-                .or_else(|| preferred.as_ref().map(|(dir, _)| dir.clone()))
-                .or_else(default_user_data_dir);
             let user_dictionary_source_available =
-                user_dictionary_cache_available_for(effective_user_data_dir.as_deref());
+                user_dictionary_cache_available_for(Some(user_data_dir));
             let _rime = rime_api_lock();
             let session = create_session().map_err(|e| format!("{e:?}"))?;
             if let Some((_, schema_id)) = &preferred {
@@ -1937,13 +1916,9 @@ mod desktop {
             }
             Ok(Self {
                 session: ManuallyDrop::new(session),
-                user_data_dir: effective_user_data_dir,
+                user_data_dir: Some(user_data_dir.to_path_buf()),
                 user_dictionary_source_available,
             })
-        }
-
-        pub fn process_key(&self, keycode: u32, mask: u32) -> ImeState {
-            self.process_key_result(keycode, mask).state
         }
 
         pub fn process_key_result(&self, keycode: u32, mask: u32) -> KeyProcessResult {
@@ -1989,13 +1964,6 @@ mod desktop {
         pub fn state(&self) -> ImeState {
             let _rime = rime_api_lock();
             extract_state_readonly(&self.session)
-        }
-
-        /// Pick the `index`-th candidate of the current page.
-        ///
-        /// Kept as the historical name of [`Engine::select_candidate_on_page`].
-        pub fn select_candidate(&self, index: usize) -> ImeState {
-            self.select_candidate_on_page(index)
         }
 
         /// Pick the `index`-th candidate of the current page through librime's
@@ -2147,6 +2115,9 @@ mod desktop {
         }
 
         fn remember_committed_user_phrase(&self, state: &ImeState) {
+            if !self.user_dictionary_source_available {
+                return;
+            }
             let Some(committed) = state.committed.as_ref().filter(|text| !text.is_empty()) else {
                 return;
             };
@@ -3122,7 +3093,16 @@ pub use desktop::deploy_for_upgrade;
     target_os = "android",
     target_os = "ios"
 ))]
-pub use desktop::{deploy, setup_only, Engine};
+pub use desktop::{deploy, setup_only};
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+pub(crate) use desktop::Engine;
 
 #[cfg(any(
     target_os = "linux",
@@ -4291,7 +4271,7 @@ impl ImeRuntime {
             } else {
                 None
             };
-            let engine = Engine::new_with_user_data_dir(Some(&dirs.user))?;
+            let engine = Engine::new_with_user_data_dir(&dirs.user)?;
             let mut english_mode = english_mode::EnglishModeController::default();
             english_mode.configure(
                 english_mode::read_english_mode(&dirs.user),
@@ -4452,10 +4432,6 @@ impl ImeRuntimeSession {
                 engine.state()
             }
         })
-    }
-
-    pub fn select_candidate(&self, index: usize) -> Option<ImeState> {
-        self.select_candidate_on_page(index)
     }
 
     pub fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
@@ -4682,7 +4658,7 @@ impl ImeRuntimeSession {
                 inner.carried_ascii_mode = Some(engine.is_ascii_mode());
                 inner.carried_english_mode = Some(inner.english_mode.is_english(&engine));
             }
-            let engine = Engine::new_with_user_data_dir(Some(root))?;
+            let engine = Engine::new_with_user_data_dir(root)?;
             inner
                 .english_mode
                 .configure(english_mode::read_english_mode(root), engine.list_schemas());
@@ -4720,14 +4696,8 @@ impl ImeRuntimeSession {
     }
 }
 
-fn preferred_schema_location(user_data_dir: Option<&Path>) -> Option<(PathBuf, String)> {
-    if let Some(dir) = user_data_dir {
-        if let Some(schema) = deployed_schema_id_from_dir(dir) {
-            return Some((dir.to_path_buf(), schema));
-        }
-    }
-    default_user_data_dir()
-        .and_then(|dir| deployed_schema_id_from_dir(&dir).map(|schema| (dir, schema)))
+fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> {
+    deployed_schema_id_from_dir(user_data_dir).map(|schema| (user_data_dir.to_path_buf(), schema))
 }
 
 fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
@@ -5065,15 +5035,12 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
 
 fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(), String> {
     let build = user_data_dir.join("build");
-    let temporary = build.join(format!("{DEPLOYED_FILE}.{}.tmp", std::process::id()));
     let marker = DeploymentMarker {
         fingerprint: deployment_fingerprint(user_data_dir)?,
         schemas: schemas.to_vec(),
     };
     let content = serde_json::to_vec(&marker).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, content)
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
-    std::fs::rename(&temporary, build.join(DEPLOYED_FILE))
+    write_file_atomic(&build.join(DEPLOYED_FILE), &content)
         .map_err(|error| format!("publish deployment marker: {error}"))
 }
 
@@ -5250,23 +5217,8 @@ pub fn mark_windows_rime_build_repair_complete(user_data_dir: &Path) -> Result<(
     std::fs::create_dir_all(user_data_dir)
         .map_err(|error| format!("create {}: {error}", user_data_dir.display()))?;
     let marker = user_data_dir.join(WINDOWS_RIME_BUILD_REPAIR_MARKER);
-    let temporary = user_data_dir.join(format!(
-        "{WINDOWS_RIME_BUILD_REPAIR_MARKER}.{}.tmp",
-        std::process::id()
-    ));
-    std::fs::write(&temporary, WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT)
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
-    if marker.exists() {
-        std::fs::remove_file(&marker)
-            .map_err(|error| format!("remove {}: {error}", marker.display()))?;
-    }
-    std::fs::rename(&temporary, &marker).map_err(|error| {
-        format!(
-            "rename {} to {}: {error}",
-            temporary.display(),
-            marker.display()
-        )
-    })
+    write_file_atomic(&marker, WINDOWS_RIME_BUILD_REPAIR_MARKER_CONTENT.as_bytes())
+        .map_err(|error| format!("write {}: {error}", marker.display()))
 }
 
 /// Invalidate the selected managed schemas and their dependency graph before a
@@ -6826,6 +6778,51 @@ mod tests {
             patched.contains("use_preset_vocabulary: false # KeyTao Android auxiliary deployment")
         );
         assert!(patch_android_auxiliary_dictionary(&patched).is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn preferred_schema_location_does_not_fall_back_to_default_root() {
+        const ROOT_ENV: &str = "KEYTAO_SCHEMA_LOCATION_TEST_ROOT";
+        if let Some(root) = std::env::var_os(ROOT_ENV) {
+            let root = std::path::PathBuf::from(root);
+            let default = super::default_user_data_dir().unwrap();
+            assert!(default.starts_with(&root));
+            std::fs::create_dir_all(&default).unwrap();
+            std::fs::write(
+                default.join("default.custom.yaml"),
+                "patch:\n  schema_list:\n    - schema: keytao\n",
+            )
+            .unwrap();
+            let custom = root.join("custom");
+            std::fs::create_dir_all(&custom).unwrap();
+            assert!(super::preferred_schema_location(&custom).is_none());
+            return;
+        }
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("keytao-schema-root-{suffix}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::preferred_schema_location_does_not_fall_back_to_default_root",
+            ])
+            .env(ROOT_ENV, &root)
+            .env("HOME", root.join("home"))
+            .env("XDG_DATA_HOME", root.join("xdg"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

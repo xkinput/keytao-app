@@ -214,10 +214,10 @@ fn deployment_completion_keeps_sentinel_when_marker_write_fails() {
     let dir = installed_schema();
     compiled_schema(&dir);
     begin_deployment(&dir).unwrap();
-    fs::create_dir(dir.join(format!("build/.keytao-deployed.{}.tmp", std::process::id()))).unwrap();
+    fs::create_dir(dir.join("build/.keytao-deployed")).unwrap();
     assert!(complete_deployment(&dir).is_err());
     assert!(!schema_install_state(&dir).deployed);
-    assert!(!dir.join("build/.keytao-deployed").exists());
+    assert!(dir.join("build/.keytao-deployed").is_dir());
     assert!(dir.join("build/.keytao-deploying").is_file());
     fs::remove_dir_all(dir).unwrap();
 }

@@ -1,66 +1,32 @@
-#[cfg(not(target_os = "android"))]
+#![cfg(not(target_os = "android"))]
+
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::c_char;
-#[cfg(not(target_os = "android"))]
 use std::os::raw::c_void;
 use std::panic::AssertUnwindSafe;
-#[cfg(not(target_os = "android"))]
 use std::path::{Path, PathBuf};
-#[cfg(not(target_os = "android"))]
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-#[cfg(not(target_os = "android"))]
 use keytao_core::{
     key_policy, EngineCapabilities, ImeRuntime, ImeRuntimeSession, ImeState, InputContextPolicy,
     KeyProcessResult, ReloadStamp,
 };
-#[cfg(not(target_os = "android"))]
 use keytao_theme::{
     resolve_theme_from_paths, resolve_theme_from_paths_with_system_scheme, resolved_theme_json,
     EffectiveColorScheme, ThemeResolver,
 };
 
-// ── C-compatible state struct ─────────────────────────────────────────────────
+// ── Module-level runtime ─────────────────────────────────────────────────────
 
-/// Flat view of IME state returned to C callers.
-/// All strings are null-terminated UTF-8. Free with keytao_free_state().
-#[repr(C)]
-pub struct KeytaoState {
-    pub preedit: *mut c_char,
-    /// Caret position inside `preedit`, counted in Unicode scalars. Use
-    /// keytao_utf16_offset_from_chars() to map it to UTF-16 units.
-    pub cursor: u32,
-    /// Start of the selected (already converted) range inside `preedit`, in
-    /// Unicode scalars. Equal to `sel_end` when nothing is selected.
-    pub sel_start: u32,
-    /// End of the selected range inside `preedit`, in Unicode scalars.
-    pub sel_end: u32,
-    pub candidate_texts: *mut *mut c_char,
-    pub candidate_comments: *mut *mut c_char,
-    pub candidate_count: u32,
-    pub highlighted_candidate_index: u32,
-    pub page: u32,
-    pub is_last_page: bool,
-    pub committed: *mut c_char,
-    pub select_keys: *mut c_char,
-    pub ascii_mode: bool,
-    pub accepted: bool,
-}
-
-// ── Module-level singleton runtime session ────────────────────────────────────
-
-#[cfg(not(target_os = "android"))]
 struct Global {
     initialized: bool,
     /// The directories the runtime was initialized for, so that a repeated
     /// keytao_init() for the same ones is recognized as a no-op.
     dirs: Option<InitDirs>,
     runtime: Option<ImeRuntime>,
-    singleton_session: Option<ImeRuntimeSession>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[derive(Clone, PartialEq, Eq)]
 struct InitDirs {
     user: PathBuf,
@@ -74,19 +40,16 @@ struct InitDirs {
 /// a deployment, and a panic in there would poison the lock the whole library
 /// depends on. Handles and runtimes are cloned out, and the clone is what the
 /// core call runs on.
-#[cfg(not(target_os = "android"))]
 static GLOBAL: Mutex<Global> = Mutex::new(Global {
     initialized: false,
     dirs: None,
     runtime: None,
-    singleton_session: None,
 });
 
 /// Serializes keytao_init(). Frontends do initialize concurrently — iOS runs a
 /// synchronous and an asynchronous startup path against the same engine — and
 /// two inits interleaving would install one init's runtime under the other's
 /// session. Taken before `SESSION_EPOCH` and `GLOBAL`, never while holding one.
-#[cfg(not(target_os = "android"))]
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Which generation of handles keytao_create_session() is currently handing
@@ -106,7 +69,6 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 /// may take `SESSION_EPOCH` while holding `GLOBAL` or a keytao-core lock.
 /// `RELOAD_SIGNAL`, `THEME_SOURCES` and `UI_CAPABILITIES` are leaves: they are
 /// never held while any of the above is.
-#[cfg(not(target_os = "android"))]
 static SESSION_EPOCH: RwLock<u64> = RwLock::new(0);
 
 /// The reload signal keytao_init() installed for the directories it brought up,
@@ -114,10 +76,8 @@ static SESSION_EPOCH: RwLock<u64> = RwLock::new(0);
 ///
 /// It sits outside `GLOBAL` because checking it stats and reads a file: a stamp
 /// poll on a timer thread must not be able to hold a key up behind a disk read.
-#[cfg(not(target_os = "android"))]
 static RELOAD_SIGNAL: Mutex<Option<ReloadSignal>> = Mutex::new(None);
 
-#[cfg(not(target_os = "android"))]
 struct ReloadSignal {
     path: PathBuf,
     /// Signature of the stamp the deployment in memory was loaded for. `None`
@@ -125,7 +85,6 @@ struct ReloadSignal {
     loaded: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 impl ReloadSignal {
     /// The deployment keytao_init() is about to load is the one on disk now, so
     /// a stamp that already exists is not a request to reload again right away.
@@ -136,7 +95,6 @@ impl ReloadSignal {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 struct SessionHandle {
     session: ImeRuntimeSession,
     epoch: u64,
@@ -144,13 +102,11 @@ struct SessionHandle {
 
 /// A handle that is still current, plus the read guard that keeps keytao_init()
 /// from retiring it while the call below is inside keytao-core.
-#[cfg(not(target_os = "android"))]
 struct ActiveSession<'a> {
     handle: &'a SessionHandle,
     _epoch: RwLockReadGuard<'a, u64>,
 }
 
-#[cfg(not(target_os = "android"))]
 impl std::ops::Deref for ActiveSession<'_> {
     type Target = SessionHandle;
 
@@ -163,36 +119,16 @@ impl std::ops::Deref for ActiveSession<'_> {
 /// contained the panic and returned a failure to the caller, and refusing every
 /// later call would leave the user without an input method until the process
 /// restarts.
-#[cfg(not(target_os = "android"))]
 fn lock_ignore_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(not(target_os = "android"))]
 fn read_ignore_poison<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(not(target_os = "android"))]
 fn write_ignore_poison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Run `action` on the session behind the legacy singleton API.
-///
-/// The session is cloned out so that librime is never called while `GLOBAL` is
-/// held: the call can take as long as a deployment and a panic in there would
-/// poison the lock every other exported function needs. The epoch guard is held
-/// for the same reason a per-client handle holds it — keytao_init() must not be
-/// able to take librime down mid-call.
-#[cfg(not(target_os = "android"))]
-fn with_singleton_session<T>(default: T, action: impl FnOnce(&ImeRuntimeSession) -> T) -> T {
-    let _epoch = read_ignore_poison(&SESSION_EPOCH);
-    let session = lock_ignore_poison(&GLOBAL).singleton_session.clone();
-    match session {
-        Some(session) => action(&session),
-        None => default,
-    }
 }
 
 /// Create a session, giving a lost directory race one more chance.
@@ -203,12 +139,10 @@ fn with_singleton_session<T>(default: T, action: impl FnOnce(&ImeRuntimeSession)
 /// time rather than to hand the frontend a null handle. A second failure is
 /// reported: retrying past that would be a loop against whoever keeps
 /// switching.
-#[cfg(not(target_os = "android"))]
 fn create_session_retrying_a_switch(runtime: &ImeRuntime) -> Result<ImeRuntimeSession, String> {
     retry_once_on_directory_switch(|| runtime.create_session())
 }
 
-#[cfg(not(target_os = "android"))]
 fn retry_once_on_directory_switch<T>(attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
     match attempt() {
         Err(e) if librime_switched_directories(&e) => attempt(),
@@ -219,7 +153,6 @@ fn retry_once_on_directory_switch<T>(attempt: impl Fn() -> Result<T, String>) ->
 /// Whether keytao-core refused because librime is up for a different pair of
 /// data directories. keytao-core reports its failures as strings, so the
 /// message is the only thing there is to recognize it by.
-#[cfg(not(target_os = "android"))]
 fn librime_switched_directories(error: &str) -> bool {
     error.contains("other data directories")
 }
@@ -227,7 +160,6 @@ fn librime_switched_directories(error: &str) -> bool {
 /// Theme sources for the JSON state helpers plus the resolver built from them.
 /// Holding a resolver (instead of the raw paths) keeps the key path free of
 /// YAML parsing and disk reads: it only re-reads when the theme files change.
-#[cfg(not(target_os = "android"))]
 struct ThemeSources {
     default_theme_path: Option<PathBuf>,
     user_theme_path: Option<PathBuf>,
@@ -237,7 +169,6 @@ struct ThemeSources {
     resolver: ThemeResolver,
 }
 
-#[cfg(not(target_os = "android"))]
 impl ThemeSources {
     fn new(
         default_theme_path: Option<PathBuf>,
@@ -257,15 +188,12 @@ impl ThemeSources {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 static THEME_SOURCES: Mutex<Option<ThemeSources>> = Mutex::new(None);
 
 /// What the frontend can render, declared through keytao_set_ui_capabilities().
 /// `None` keeps the soft-keyboard shape the JSON API has always produced.
-#[cfg(not(target_os = "android"))]
 static UI_CAPABILITIES: Mutex<Option<keytao_theme::UiCapabilities>> = Mutex::new(None);
 
-#[cfg(not(target_os = "android"))]
 fn current_ui_capabilities() -> keytao_theme::UiCapabilities {
     if let Some(capabilities) = lock_ignore_poison(&UI_CAPABILITIES).as_ref() {
         return capabilities.clone();
@@ -285,7 +213,6 @@ fn current_ui_capabilities() -> keytao_theme::UiCapabilities {
 /// input method means the frontend disappears mid-typing, so every exported
 /// function funnels through here.
 fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
-    #[cfg(not(target_os = "android"))]
     let started =
         (!matches!(
             name,
@@ -298,7 +225,6 @@ fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
         .then(std::time::Instant::now);
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => {
-            #[cfg(not(target_os = "android"))]
             if let Some(started) = started {
                 let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     keytao_core::rt_log!(
@@ -314,7 +240,6 @@ fn guard<T>(name: &str, default: T, body: impl FnOnce() -> T) -> T {
         }
         Err(payload) => {
             let message = panic_message(&payload);
-            #[cfg(not(target_os = "android"))]
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 keytao_core::rt_log!(
                     keytao_core::runtime_log::Level::Info,
@@ -361,7 +286,6 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 /// Whether a runtime log level is enabled (0 = off, 1 = info, 2 = verbose).
 /// Invalid levels are disabled.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_log_enabled(level: i32) -> bool {
     guard("keytao_log_enabled", false, || {
         let level = match level {
@@ -378,7 +302,6 @@ pub extern "C" fn keytao_log_enabled(level: i32) -> bool {
 /// `cat` and `ev` must be non-null, null-terminated UTF-8 strings.
 /// Fields must contain only metadata, never typed, candidate or committed text.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_log_event(
     level: i32,
     cat: *const c_char,
@@ -421,7 +344,6 @@ pub extern "C" fn keytao_log_event(
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_log_keystroke(ms: f64) {
     guard("keytao_log_keystroke", (), || {
         keytao_core::runtime_log::record_keystroke(ms);
@@ -429,7 +351,6 @@ pub extern "C" fn keytao_log_keystroke(ms: f64) {
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_log_drain_key_stats() {
     guard("keytao_log_drain_key_stats", (), || {
         keytao_core::runtime_log::drain_key_stats();
@@ -438,7 +359,6 @@ pub extern "C" fn keytao_log_drain_key_stats() {
 
 /// Wait up to `timeout_ms` for queued runtime log events to be written, without fsync.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
     guard("keytao_log_flush", (), || {
         keytao_core::runtime_log::flush_blocking(std::time::Duration::from_millis(
@@ -457,7 +377,6 @@ pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
 /// librime down and back up: sessions created before the switch stop answering
 /// and have to be recreated with keytao_create_session().
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char) -> bool {
     guard("keytao_init", false, || {
         let user = match c_string_arg(user_dir, "user_dir") {
@@ -489,7 +408,7 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             (
                 g.dirs.clone(),
                 g.runtime.clone(),
-                g.initialized && g.dirs.as_ref() == Some(&dirs) && g.singleton_session.is_some(),
+                g.initialized && g.dirs.as_ref() == Some(&dirs),
             )
         };
         if same_ready_runtime
@@ -511,8 +430,8 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
             retire_unavailable_runtime(previous_runtime.as_ref(), &mut epoch);
             return false;
         }
-        let singleton_session = match create_session_retrying_a_switch(&runtime) {
-            Ok(session) => session,
+        match create_session_retrying_a_switch(&runtime) {
+            Ok(session) => drop(session),
             Err(e) => {
                 log_error(format_args!(
                     "keytao_init: runtime.create_session failed: {e}"
@@ -532,21 +451,14 @@ pub extern "C" fn keytao_init(user_dir: *const c_char, shared_dir: *const c_char
         // Reads the stamp, so it is built before the lock is taken.
         let signal = ReloadSignal::new(&dirs.user);
         *lock_ignore_poison(&RELOAD_SIGNAL) = Some(signal);
-        let stale = {
-            let mut g = lock_ignore_poison(&GLOBAL);
-            g.initialized = true;
-            g.dirs = Some(dirs);
-            g.runtime = Some(runtime);
-            g.singleton_session.replace(singleton_session)
-        };
-        // Dropping a session destroys a librime session, so it happens outside
-        // the lock like every other core call.
-        drop(stale);
+        let mut g = lock_ignore_poison(&GLOBAL);
+        g.initialized = true;
+        g.dirs = Some(dirs);
+        g.runtime = Some(runtime);
         true
     })
 }
 
-#[cfg(not(target_os = "android"))]
 fn retire_unavailable_runtime(previous: Option<&ImeRuntime>, epoch: &mut u64) {
     if previous.is_some_and(|runtime| !runtime.is_initialized()) {
         *epoch += 1;
@@ -554,23 +466,20 @@ fn retire_unavailable_runtime(previous: Option<&ImeRuntime>, epoch: &mut u64) {
     }
 }
 
-/// Forget the runtime, the session and the reload signal, for when librime went
+/// Forget the runtime and the reload signal, for when librime went
 /// down under them. The pieces are dropped after the lock is released.
-#[cfg(not(target_os = "android"))]
 fn clear_global() {
     lock_ignore_poison(&RELOAD_SIGNAL).take();
-    let (runtime, session) = {
+    let runtime = {
         let mut g = lock_ignore_poison(&GLOBAL);
         g.initialized = false;
         g.dirs = None;
-        (g.runtime.take(), g.singleton_session.take())
+        g.runtime.take()
     };
     drop(runtime);
-    drop(session);
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_is_initialized() -> bool {
     guard("keytao_is_initialized", false, || {
         lock_ignore_poison(&GLOBAL).initialized
@@ -581,12 +490,10 @@ pub extern "C" fn keytao_is_initialized() -> bool {
 /// this library drops its engine first, so librime re-reads the deployment
 /// instead of serving its cached config and dictionaries.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reload() -> bool {
     guard("keytao_reload", false, reload_now)
 }
 
-#[cfg(not(target_os = "android"))]
 fn reload_now() -> bool {
     // A reload finalizes librime and brings it back up for the runtime it was
     // started from. Held for reading so that keytao_init() cannot switch to
@@ -623,7 +530,6 @@ fn reload_now() -> bool {
 
 /// Where keytao_init() installed the reload signal, copied out so that the stat
 /// and read that follow happen without the lock held.
-#[cfg(not(target_os = "android"))]
 fn watched_stamp_path() -> Option<PathBuf> {
     lock_ignore_poison(&RELOAD_SIGNAL)
         .as_ref()
@@ -632,7 +538,6 @@ fn watched_stamp_path() -> Option<PathBuf> {
 
 /// Signature of the stamp the loaded deployment corresponds to, next to the
 /// path it was read from.
-#[cfg(not(target_os = "android"))]
 fn loaded_deployment() -> Option<(PathBuf, Option<String>)> {
     lock_ignore_poison(&RELOAD_SIGNAL)
         .as_ref()
@@ -646,7 +551,6 @@ fn loaded_deployment() -> Option<(PathBuf, Option<String>)> {
 /// afterwards would mark a deployment that finished while the reload was
 /// running as loaded, and the frontend would keep serving the old dictionaries
 /// until the next deploy.
-#[cfg(not(target_os = "android"))]
 fn begin_reload() -> Option<(PathBuf, Option<String>)> {
     let path = watched_stamp_path()?;
     let signature = ReloadStamp::signature_at(&path);
@@ -655,7 +559,6 @@ fn begin_reload() -> Option<(PathBuf, Option<String>)> {
 
 /// Record `signature` as the deployment now in memory, unless keytao_init()
 /// swapped the signal out for a different directory in the meantime.
-#[cfg(not(target_os = "android"))]
 fn mark_deployment_loaded(path: &Path, signature: Option<String>) {
     let mut signal = lock_ignore_poison(&RELOAD_SIGNAL);
     if let Some(signal) = signal.as_mut() {
@@ -668,7 +571,6 @@ fn mark_deployment_loaded(path: &Path, signature: Option<String>) {
 /// Path of the reload signal inside `user_dir`, for frontends that watch the
 /// file before keytao_init() has succeeded. Free with keytao_free_string().
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reload_stamp_path_at(user_dir: *const c_char) -> *mut c_char {
     guard("keytao_reload_stamp_path_at", std::ptr::null_mut(), || {
         let Ok(user_dir) = c_string_arg(user_dir, "user_dir") else {
@@ -678,43 +580,8 @@ pub extern "C" fn keytao_reload_stamp_path_at(user_dir: *const c_char) -> *mut c
     })
 }
 
-/// Signature of the reload signal inside `user_dir`, or null when no deployment
-/// has requested a reload yet. Free with keytao_free_string().
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_reload_stamp_signature_at(user_dir: *const c_char) -> *mut c_char {
-    guard(
-        "keytao_reload_stamp_signature_at",
-        std::ptr::null_mut(),
-        || {
-            let Ok(user_dir) = c_string_arg(user_dir, "user_dir") else {
-                return std::ptr::null_mut();
-            };
-            ReloadStamp::current_signature(&PathBuf::from(user_dir))
-                .map(|signature| to_cstring(&signature))
-                .unwrap_or(std::ptr::null_mut())
-        },
-    )
-}
-
-/// Whether the reload signal changed since the last call, which also marks it as
-/// seen. Frontends that want to schedule the reload themselves use this;
-/// keytao_reload_if_stamp_changed() does both in one step.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_reload_stamp_changed() -> bool {
-    guard("keytao_reload_stamp_changed", false, || {
-        let Some((path, current)) = stamp_changed_peek() else {
-            return false;
-        };
-        mark_deployment_loaded(&path, Some(current));
-        true
-    })
-}
-
 /// The pending reload request, without marking it as seen: the stamp path and
 /// the signature that differs from what is loaded.
-#[cfg(not(target_os = "android"))]
 fn stamp_changed_peek() -> Option<(PathBuf, String)> {
     let (path, loaded) = loaded_deployment()?;
     // A missing stamp is not a reload request, so only an existing one that
@@ -726,7 +593,6 @@ fn stamp_changed_peek() -> Option<(PathBuf, String)> {
 /// Reload when the app requested one, returning true only if a reload actually
 /// ran. Cheap enough for a timer, but not for the key path: it stats a file.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
     guard("keytao_reload_if_stamp_changed", false, || {
         // The request is only marked as seen once the reload really ran, so a
@@ -742,7 +608,6 @@ pub extern "C" fn keytao_reload_if_stamp_changed() -> bool {
 /// a later init for different ones retires it, and every call on it then
 /// returns null or false.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_create_session() -> *mut c_void {
     guard("keytao_create_session", std::ptr::null_mut(), || {
         // Taken before `GLOBAL` and held across the core call, so the handle
@@ -778,7 +643,6 @@ pub extern "C" fn keytao_create_session() -> *mut c_void {
 /// Destroy a session created by keytao_create_session(). Retired handles are
 /// freed too; only their librime session is already gone.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_destroy_session(session: *mut c_void) {
     guard("keytao_destroy_session", (), || {
         if session.is_null() {
@@ -795,99 +659,7 @@ pub extern "C" fn keytao_destroy_session(session: *mut c_void) {
     })
 }
 
-/// Return current state for a per-client session.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_state(session: *mut c_void) -> *mut KeytaoState {
-    guard("keytao_session_state", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(state_to_c(handle.session.state(), false)))
-    })
-}
-
-/// Process a key event on a per-client session.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_process_key(
-    session: *mut c_void,
-    keyval: u32,
-    modifiers: u32,
-) -> *mut KeytaoState {
-    guard("keytao_session_process_key", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(result) = handle.session.process_key_result(keyval, modifiers) else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(result_to_c(result)))
-    })
-}
-
-/// Handle `Return` the way every frontend must: librime decides, and only if it
-/// passes the key back is the raw input committed.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_process_enter(session: *mut c_void) -> *mut KeytaoState {
-    guard("keytao_session_process_enter", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(result) = handle.session.process_enter() else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(result_to_c(result)))
-    })
-}
-
-/// Select a candidate in a per-client session.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_select_candidate(
-    session: *mut c_void,
-    index: u32,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_select_candidate",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.select_candidate_on_page(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
-/// Move the highlight without committing, for hover and arrow-key navigation.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_highlight_candidate(
-    session: *mut c_void,
-    index: u32,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_highlight_candidate",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.highlight_candidate_on_page(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_candidate_is_user_phrase(
     session: *mut c_void,
     index: u32,
@@ -903,127 +675,8 @@ pub extern "C" fn keytao_session_candidate_is_user_phrase(
     })
 }
 
-/// Flip to the next/previous candidate page in a per-client session.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_change_page(
-    session: *mut c_void,
-    backward: bool,
-) -> *mut KeytaoState {
-    guard("keytao_session_change_page", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(state) = handle.session.change_page(backward) else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(state_to_c(state, true)))
-    })
-}
-
-/// Clear current composition in a per-client session.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_reset(session: *mut c_void) -> *mut KeytaoState {
-    guard("keytao_session_reset", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(state) = handle.session.reset() else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(state_to_c(state, true)))
-    })
-}
-
-/// Commit what is being composed. The path to take when the input context ends
-/// and the composition must not be lost.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_commit_composition(session: *mut c_void) -> *mut KeytaoState {
-    guard(
-        "keytao_session_commit_composition",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.commit_composition() else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
-/// Discard what is being composed. The path to take when the input context ends
-/// and the composition must not reach the client.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_clear_composition(session: *mut c_void) -> *mut KeytaoState {
-    guard(
-        "keytao_session_clear_composition",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.clear_composition() else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
-/// Declare what the current input context allows. Password and PIN fields pass
-/// `composing = false`, which stops keys from reaching librime at all, so no
-/// preedit appears and nothing is learned. Returns the state to apply.
-///
-/// A null return means there was no state to hand back — the handle was
-/// retired, or no engine was up — **not** that the policy was rejected. The
-/// policy is recorded either way and applies to every later key, so a frontend
-/// must never read null as "still composing" and fall back to sending the
-/// password to librime.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_set_input_policy(
-    session: *mut c_void,
-    composing: bool,
-    learning: bool,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_set_input_policy",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.set_input_policy(InputContextPolicy {
-                composing,
-                learning,
-            }) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
-/// Whether the current input context still lets keys reach librime.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_input_policy_composing(session: *mut c_void) -> bool {
-    guard("keytao_session_input_policy_composing", false, || {
-        session_handle(session)
-            .map(|handle| handle.session.input_policy().composing)
-            .unwrap_or(false)
-    })
-}
-
 /// Return whether a per-client session is in ASCII mode.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_get_ascii_mode(session: *mut c_void) -> bool {
     guard("keytao_session_get_ascii_mode", false, || {
         let Some(handle) = session_handle(session) else {
@@ -1033,34 +686,11 @@ pub extern "C" fn keytao_session_get_ascii_mode(session: *mut c_void) -> bool {
     })
 }
 
-/// Set ASCII mode on a per-client session and return the updated state.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_set_ascii_mode(
-    session: *mut c_void,
-    enabled: bool,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_set_ascii_mode",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.set_ascii_mode(enabled) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        },
-    )
-}
-
 // ── Engine capabilities ───────────────────────────────────────────────────────
 
 /// Logical English input (ASCII or the configured English dictionary schema).
 /// The existing get_ascii_mode export continues to mean raw pass-through.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_get_english_mode(session: *mut c_void) -> bool {
     guard("keytao_session_get_english_mode", false, || {
         session_handle(session).is_some_and(|handle| handle.session.is_english_mode())
@@ -1068,45 +698,15 @@ pub extern "C" fn keytao_session_get_english_mode(session: *mut c_void) -> bool 
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_set_english_mode(
-    session: *mut c_void,
-    enabled: bool,
-) -> *mut KeytaoState {
-    guard(
-        "keytao_session_set_english_mode",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            match handle.session.set_english_mode(enabled) {
-                Ok(state) => Box::into_raw(Box::new(state_to_c(state, true))),
-                Err(_) => std::ptr::null_mut(),
-            }
-        },
-    )
-}
-
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_set_english_mode_json(
     session: *mut c_void,
     enabled: bool,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_set_english_mode_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            match handle.session.set_english_mode(enabled) {
-                Ok(state) => to_cstring(&state_json(state, true)),
-                Err(_) => std::ptr::null_mut(),
-            }
-        },
-    )
+    session_json("keytao_session_set_english_mode_json", session, |s| {
+        s.set_english_mode(enabled)
+            .ok()
+            .map(|state| state_json(state, true))
+    })
 }
 
 // The values are written as plain literals rather than shifts because these go
@@ -1135,7 +735,6 @@ pub const KEYTAO_CAP_COMMIT_COMPOSITION: u32 = 32;
 /// Bit 6. `RimeClearComposition`. Without it, discarding sends `Escape`.
 pub const KEYTAO_CAP_CLEAR_COMPOSITION: u32 = 64;
 
-#[cfg(not(target_os = "android"))]
 fn capability_bits(capabilities: EngineCapabilities) -> u32 {
     let mut bits = 0;
     for (bit, present) in [
@@ -1179,7 +778,6 @@ fn capability_bits(capabilities: EngineCapabilities) -> u32 {
 ///
 /// Answerable before keytao_init(): it only inspects the ABI.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_engine_capabilities() -> u32 {
     guard("keytao_engine_capabilities", 0, || {
         capability_bits(keytao_core::engine_capabilities())
@@ -1192,37 +790,12 @@ pub extern "C" fn keytao_engine_capabilities() -> u32 {
 /// safe answer: a handle that cannot reach librime cannot select or page
 /// either.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_capabilities(session: *mut c_void) -> u32 {
     guard("keytao_session_capabilities", 0, || {
         session_handle(session)
             .map(|handle| capability_bits(handle.session.capabilities()))
             .unwrap_or(0)
     })
-}
-
-/// Same capabilities as keytao_engine_capabilities(), as a JSON object with the
-/// camelCase keys the other JSON helpers use. Free with keytao_free_string().
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_engine_capabilities_json() -> *mut c_char {
-    guard(
-        "keytao_engine_capabilities_json",
-        std::ptr::null_mut(),
-        || {
-            let capabilities = keytao_core::engine_capabilities();
-            let value = serde_json::json!({
-                "candidateSelection": capabilities.candidate_selection,
-                "globalCandidateSelection": capabilities.global_candidate_selection,
-                "candidateHighlight": capabilities.candidate_highlight,
-                "candidateDeletion": capabilities.candidate_deletion,
-                "nativePaging": capabilities.native_paging,
-                "commitComposition": capabilities.commit_composition,
-                "clearComposition": capabilities.clear_composition,
-            });
-            to_cstring(&serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()))
-        },
-    )
 }
 
 // ── key_policy, the one implementation every frontend shares ──────────────────
@@ -1233,7 +806,6 @@ pub extern "C" fn keytao_engine_capabilities_json() -> *mut c_char {
 /// Latin-1 maps onto itself and everything else uses X11's `0x01000000 | cp`
 /// encoding, so `（` (U+FF08) never arrives as `XK_BackSpace`.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_text_to_keysym(text: *const c_char) -> u32 {
     guard("keytao_text_to_keysym", 0, || {
         let Ok(text) = c_string_arg(text, "text") else {
@@ -1245,7 +817,6 @@ pub extern "C" fn keytao_text_to_keysym(text: *const c_char) -> u32 {
 
 /// Whether a keysym is `Return` or keypad `Return`.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_key_policy_is_enter(keyval: u32) -> bool {
     guard("keytao_key_policy_is_enter", false, || {
         key_policy::is_enter_key(keyval)
@@ -1258,7 +829,6 @@ pub extern "C" fn keytao_key_policy_is_enter(keyval: u32) -> bool {
 /// `ascii_composer` to see the key, and Control/Alt chords carry Rime's own
 /// switcher hotkeys, so only window-system modifiers pass through early.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_key_policy_should_bypass(
     session: *mut c_void,
     keyval: u32,
@@ -1276,7 +846,6 @@ pub extern "C" fn keytao_key_policy_should_bypass(
 /// Map a Unicode scalar offset into `text` to a UTF-16 code unit offset, the
 /// unit IMKit, TSF and Android's InputConnection count in.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_utf16_offset_from_chars(text: *const c_char, char_offset: u32) -> u32 {
     guard("keytao_utf16_offset_from_chars", 0, || {
         let Ok(text) = c_string_arg(text, "text") else {
@@ -1292,7 +861,6 @@ pub extern "C" fn keytao_utf16_offset_from_chars(text: *const c_char, char_offse
 /// and an IMKit panel disagree on this, and the theme layer needs to know which
 /// one it is building a model for.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_set_ui_capabilities(
     supports_custom_colors: bool,
     supports_vertical: bool,
@@ -1316,7 +884,6 @@ pub extern "C" fn keytao_set_ui_capabilities(
 
 /// Configure optional default/user theme paths used by JSON state helpers.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_set_theme_paths(
     default_theme_path: *const c_char,
     user_theme_path: *const c_char,
@@ -1334,7 +901,6 @@ pub extern "C" fn keytao_set_theme_paths(
 /// the IME process never probes the system itself. Pass null to go back to
 /// keytao-theme's own detection.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_set_system_color_scheme(system_color_scheme: *const c_char) {
     guard("keytao_set_system_color_scheme", (), || {
         let system_scheme = optional_effective_color_scheme_arg(system_color_scheme);
@@ -1355,7 +921,6 @@ pub extern "C" fn keytao_set_system_color_scheme(system_color_scheme: *const c_c
 /// Rebuild the resolver only when the sources really changed: an unconditional
 /// rebuild would throw away the parsed theme on every call and put YAML parsing
 /// back on the key path.
-#[cfg(not(target_os = "android"))]
 fn install_theme_sources(
     slot: &mut Option<ThemeSources>,
     default_theme_path: Option<PathBuf>,
@@ -1381,7 +946,6 @@ fn install_theme_sources(
 /// normalized JSON theme. The caller must free the string with
 /// keytao_free_string().
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_resolve_theme_json(
     default_theme_path: *const c_char,
     user_theme_path: *const c_char,
@@ -1398,7 +962,6 @@ pub extern "C" fn keytao_resolve_theme_json(
 /// normalized JSON theme. The caller must free the string with
 /// keytao_free_string().
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
     default_theme_path: *const c_char,
     user_theme_path: *const c_char,
@@ -1428,7 +991,6 @@ pub extern "C" fn keytao_resolve_theme_json_with_system_scheme(
 /// Persist the mobile theme color scheme and optionally its accent. A null
 /// accent preserves the key; an empty accent removes it.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_write_theme_ui(
     path: *const c_char,
     color_scheme: *const c_char,
@@ -1460,7 +1022,6 @@ pub extern "C" fn keytao_write_theme_ui(
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {
     guard("keytao_default_keyboard_yaml", std::ptr::null_mut(), || {
         to_cstring(keytao_theme::default_keyboard_yaml())
@@ -1468,7 +1029,6 @@ pub extern "C" fn keytao_default_keyboard_yaml() -> *mut c_char {
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_resolve_keyboard_json(
     default_keyboard_path: *const c_char,
     user_keyboard_path: *const c_char,
@@ -1492,7 +1052,6 @@ pub extern "C" fn keytao_resolve_keyboard_json(
     })
 }
 
-#[cfg(not(target_os = "android"))]
 fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
     match resolved_theme_json(theme) {
         Ok(json) => to_cstring(&json),
@@ -1507,252 +1066,162 @@ fn theme_json_cstring(theme: &keytao_theme::ResolvedImeTheme) -> *mut c_char {
 
 // ── JSON session API ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_state_json(session: *mut c_void) -> *mut c_char {
-    guard("keytao_session_state_json", std::ptr::null_mut(), || {
+fn session_json(
+    name: &str,
+    session: *mut c_void,
+    action: impl FnOnce(&ImeRuntimeSession) -> Option<String>,
+) -> *mut c_char {
+    guard(name, std::ptr::null_mut(), || {
         let Some(handle) = session_handle(session) else {
             return std::ptr::null_mut();
         };
-        to_cstring(&state_json(handle.session.state(), false))
+        action(&handle.session)
+            .map(|json| to_cstring(&json))
+            .unwrap_or(std::ptr::null_mut())
     })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_state_json(session: *mut c_void) -> *mut c_char {
+    session_json("keytao_session_state_json", session, |s| {
+        Some(state_json(s.state(), false))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn keytao_session_process_key_json(
     session: *mut c_void,
     keyval: u32,
     modifiers: u32,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_process_key_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(result) = handle.session.process_key_result(keyval, modifiers) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&result_json(result))
-        },
-    )
+    session_json("keytao_session_process_key_json", session, |s| {
+        s.process_key_result(keyval, modifiers).map(result_json)
+    })
 }
 
+/// Handle `Return` the way every frontend must: librime decides, and only if it
+/// passes the key back is the raw input committed.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_process_enter_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_process_enter_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(result) = handle.session.process_enter() else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&result_json(result))
-        },
-    )
+    session_json("keytao_session_process_enter_json", session, |s| {
+        s.process_enter().map(result_json)
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_select_candidate_json(
     session: *mut c_void,
     index: u32,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_select_candidate_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.select_candidate_on_page(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
+    session_json("keytao_session_select_candidate_json", session, |s| {
+        s.select_candidate_on_page(index as usize)
+            .map(|state| state_json(state, true))
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_delete_candidate_json(
     session: *mut c_void,
     index: u32,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_delete_candidate_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some((state, deleted)) = handle
-                .session
-                .delete_candidate_on_page_result(index as usize)
-            else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, deleted))
-        },
-    )
+    session_json("keytao_session_delete_candidate_json", session, |s| {
+        s.delete_candidate_on_page_result(index as usize)
+            .map(|(state, deleted)| state_json(state, deleted))
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_select_candidate_global_json(
     session: *mut c_void,
     index: u32,
 ) -> *mut c_char {
-    guard(
+    session_json(
         "keytao_session_select_candidate_global_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.select_candidate_global(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
+        session,
+        |s| {
+            s.select_candidate_global(index as usize)
+                .map(|state| state_json(state, true))
         },
     )
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_all_candidates_json(
     session: *mut c_void,
     limit: u32,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_all_candidates_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(candidates) = handle.session.all_candidates_limited(limit as usize) else {
-                return std::ptr::null_mut();
-            };
-            let json = serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".into());
-            to_cstring(&json)
-        },
-    )
+    session_json("keytao_session_all_candidates_json", session, |s| {
+        s.all_candidates_limited(limit as usize)
+            .map(|candidates| serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".into()))
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_list_schemas_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_list_schemas_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(schemas) = handle.session.list_schemas() else {
-                return std::ptr::null_mut();
-            };
-            match serde_json::to_string(&schemas) {
-                Ok(json) => to_cstring(&json),
-                Err(error) => {
-                    log_error(format_args!(
-                        "keytao_session_list_schemas_json: serialize failed: {error}"
-                    ));
-                    std::ptr::null_mut()
-                }
+    session_json("keytao_session_list_schemas_json", session, |s| {
+        let value = s.list_schemas()?;
+        match serde_json::to_string(&value) {
+            Ok(json) => Some(json),
+            Err(error) => {
+                log_error(format_args!(
+                    "keytao_session_list_schemas_json: serialize failed: {error}"
+                ));
+                None
             }
-        },
-    )
+        }
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_schema_switches_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_schema_switches_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(switches) = handle.session.schema_switches() else {
-                return std::ptr::null_mut();
-            };
-            match serde_json::to_string(&switches) {
-                Ok(json) => to_cstring(&json),
-                Err(error) => {
-                    log_error(format_args!(
-                        "keytao_session_schema_switches_json: serialize failed: {error}"
-                    ));
-                    std::ptr::null_mut()
-                }
+    session_json("keytao_session_schema_switches_json", session, |s| {
+        let value = s.schema_switches()?;
+        match serde_json::to_string(&value) {
+            Ok(json) => Some(json),
+            Err(error) => {
+                log_error(format_args!(
+                    "keytao_session_schema_switches_json: serialize failed: {error}"
+                ));
+                None
             }
-        },
-    )
+        }
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_current_schema_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_current_schema_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(schema) = handle.session.current_schema() else {
-                return std::ptr::null_mut();
-            };
-            match serde_json::to_string(&schema) {
-                Ok(json) => to_cstring(&json),
-                Err(error) => {
-                    log_error(format_args!(
-                        "keytao_session_current_schema_json: serialize failed: {error}"
-                    ));
-                    std::ptr::null_mut()
-                }
+    session_json("keytao_session_current_schema_json", session, |s| {
+        let value = s.current_schema()?;
+        match serde_json::to_string(&value) {
+            Ok(json) => Some(json),
+            Err(error) => {
+                log_error(format_args!(
+                    "keytao_session_current_schema_json: serialize failed: {error}"
+                ));
+                None
             }
-        },
-    )
+        }
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_select_schema_json(
     session: *mut c_void,
     schema_id: *const c_char,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_select_schema_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Ok(schema_id) = c_string_arg(schema_id, "schema_id") else {
-                return std::ptr::null_mut();
-            };
-            match handle.session.select_schema(&schema_id) {
-                Ok(state) => to_cstring(&state_json(state, false)),
-                Err(error) => {
-                    log_error(format_args!("keytao_session_select_schema_json: {error}"));
-                    std::ptr::null_mut()
-                }
+    session_json("keytao_session_select_schema_json", session, |s| {
+        let schema_id = c_string_arg(schema_id, "schema_id").ok()?;
+        match s.select_schema(&schema_id) {
+            Ok(state) => Some(state_json(state, false)),
+            Err(error) => {
+                log_error(format_args!("keytao_session_select_schema_json: {error}"));
+                None
             }
-        },
-    )
+        }
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_get_option(
     session: *mut c_void,
     option_name: *const c_char,
@@ -1769,246 +1238,88 @@ pub extern "C" fn keytao_session_get_option(
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_set_option_json(
     session: *mut c_void,
     option_name: *const c_char,
     enabled: bool,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_set_option_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Ok(option_name) = c_string_arg(option_name, "option_name") else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.set_option(&option_name, enabled) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, false))
-        },
-    )
-}
-
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_change_page_json(
-    session: *mut c_void,
-    backward: bool,
-) -> *mut c_char {
-    guard(
-        "keytao_session_change_page_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.change_page(backward) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
-}
-
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_session_reset_json(session: *mut c_void) -> *mut c_char {
-    guard("keytao_session_reset_json", std::ptr::null_mut(), || {
-        let Some(handle) = session_handle(session) else {
-            return std::ptr::null_mut();
-        };
-        let Some(state) = handle.session.reset() else {
-            return std::ptr::null_mut();
-        };
-        to_cstring(&state_json(state, true))
+    session_json("keytao_session_set_option_json", session, |s| {
+        let option_name = c_string_arg(option_name, "option_name").ok()?;
+        s.set_option(&option_name, enabled)
+            .map(|state| state_json(state, false))
     })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
+pub extern "C" fn keytao_session_change_page_json(
+    session: *mut c_void,
+    backward: bool,
+) -> *mut c_char {
+    session_json("keytao_session_change_page_json", session, |s| {
+        s.change_page(backward).map(|state| state_json(state, true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn keytao_session_reset_json(session: *mut c_void) -> *mut c_char {
+    session_json("keytao_session_reset_json", session, |s| {
+        s.reset().map(|state| state_json(state, true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn keytao_session_commit_composition_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_commit_composition_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.commit_composition() else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
+    session_json("keytao_session_commit_composition_json", session, |s| {
+        s.commit_composition().map(|state| state_json(state, true))
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_clear_composition_json(session: *mut c_void) -> *mut c_char {
-    guard(
-        "keytao_session_clear_composition_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.clear_composition() else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
+    session_json("keytao_session_clear_composition_json", session, |s| {
+        s.clear_composition().map(|state| state_json(state, true))
+    })
 }
 
+/// Declare what the current input context allows. Password and PIN fields pass
+/// `composing = false`, which stops keys from reaching librime at all, so no
+/// preedit appears and nothing is learned. Returns the state to apply.
+///
+/// A null return means there was no state to hand back — the handle was
+/// retired, or no engine was up — **not** that the policy was rejected. The
+/// policy is recorded either way and applies to every later key, so a frontend
+/// must never read null as "still composing" and fall back to sending the
+/// password to librime.
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_set_input_policy_json(
     session: *mut c_void,
     composing: bool,
     learning: bool,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_set_input_policy_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.set_input_policy(InputContextPolicy {
-                composing,
-                learning,
-            }) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
+    session_json("keytao_session_set_input_policy_json", session, |s| {
+        s.set_input_policy(InputContextPolicy {
+            composing,
+            learning,
+        })
+        .map(|state| state_json(state, true))
+    })
 }
 
 #[no_mangle]
-#[cfg(not(target_os = "android"))]
 pub extern "C" fn keytao_session_set_ascii_mode_json(
     session: *mut c_void,
     enabled: bool,
 ) -> *mut c_char {
-    guard(
-        "keytao_session_set_ascii_mode_json",
-        std::ptr::null_mut(),
-        || {
-            let Some(handle) = session_handle(session) else {
-                return std::ptr::null_mut();
-            };
-            let Some(state) = handle.session.set_ascii_mode(enabled) else {
-                return std::ptr::null_mut();
-            };
-            to_cstring(&state_json(state, true))
-        },
-    )
+    session_json("keytao_session_set_ascii_mode_json", session, |s| {
+        s.set_ascii_mode(enabled)
+            .map(|state| state_json(state, true))
+    })
 }
 
 /// Free a UTF-8 string returned by keytao-core-ffi.
 #[no_mangle]
 pub extern "C" fn keytao_free_string(ptr: *mut c_char) {
     guard("keytao_free_string", (), || unsafe { free_cstring(ptr) })
-}
-
-// ── Singleton session API ─────────────────────────────────────────────────────
-
-/// Process a key event. Returns heap-allocated KeytaoState; caller must free
-/// with keytao_free_state(). Returns null if the runtime is not initialized.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_process_key(keyval: u32, modifiers: u32) -> *mut KeytaoState {
-    guard("keytao_process_key", std::ptr::null_mut(), || {
-        with_singleton_session(std::ptr::null_mut(), |session| {
-            let Some(result) = session.process_key_result(keyval, modifiers) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(result_to_c(result)))
-        })
-    })
-}
-
-/// Select a candidate by 0-based index. Returns new state; caller must free.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_select_candidate(index: u32) -> *mut KeytaoState {
-    guard("keytao_select_candidate", std::ptr::null_mut(), || {
-        with_singleton_session(std::ptr::null_mut(), |session| {
-            let Some(state) = session.select_candidate_on_page(index as usize) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        })
-    })
-}
-
-/// Flip to the next/previous candidate page. Returns new state; caller must free.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_change_page(backward: bool) -> *mut KeytaoState {
-    guard("keytao_change_page", std::ptr::null_mut(), || {
-        with_singleton_session(std::ptr::null_mut(), |session| {
-            let Some(state) = session.change_page(backward) else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        })
-    })
-}
-
-/// Clear current composition. Returns new state; caller must free.
-#[no_mangle]
-#[cfg(not(target_os = "android"))]
-pub extern "C" fn keytao_reset() -> *mut KeytaoState {
-    guard("keytao_reset", std::ptr::null_mut(), || {
-        with_singleton_session(std::ptr::null_mut(), |session| {
-            let Some(state) = session.reset() else {
-                return std::ptr::null_mut();
-            };
-            Box::into_raw(Box::new(state_to_c(state, true)))
-        })
-    })
-}
-
-/// Free a KeytaoState returned by any keytao_* function.
-#[no_mangle]
-pub extern "C" fn keytao_free_state(ptr: *mut KeytaoState) {
-    guard("keytao_free_state", (), || {
-        if ptr.is_null() {
-            return;
-        }
-        unsafe {
-            let s = Box::from_raw(ptr);
-            free_cstring(s.preedit);
-            free_cstring(s.committed);
-            free_cstring(s.select_keys);
-            if !s.candidate_texts.is_null() {
-                let texts = Vec::from_raw_parts(
-                    s.candidate_texts,
-                    s.candidate_count as usize,
-                    s.candidate_count as usize,
-                );
-                for t in texts {
-                    free_cstring(t);
-                }
-            }
-            if !s.candidate_comments.is_null() {
-                let comments = Vec::from_raw_parts(
-                    s.candidate_comments,
-                    s.candidate_count as usize,
-                    s.candidate_count as usize,
-                );
-                for c in comments {
-                    free_cstring(c);
-                }
-            }
-        }
-    })
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -2018,7 +1329,6 @@ pub extern "C" fn keytao_free_state(ptr: *mut KeytaoState) {
 /// The returned guard keeps the epoch pinned for as long as the caller holds
 /// it, which is what makes the check more than advisory: keytao_init() cannot
 /// take librime down between this check and the keytao-core call that follows.
-#[cfg(not(target_os = "android"))]
 fn session_handle<'a>(session: *mut c_void) -> Option<ActiveSession<'a>> {
     if session.is_null() {
         return None;
@@ -2034,58 +1344,10 @@ fn session_handle<'a>(session: *mut c_void) -> Option<ActiveSession<'a>> {
     })
 }
 
-#[cfg(not(target_os = "android"))]
-fn result_to_c(result: KeyProcessResult) -> KeytaoState {
-    state_to_c(result.state, result.accepted)
-}
-
-#[cfg(not(target_os = "android"))]
-fn state_to_c(state: ImeState, accepted: bool) -> KeytaoState {
-    let count = state.candidates.len();
-    let (texts_ptr, comments_ptr) = if count == 0 {
-        (std::ptr::null_mut(), std::ptr::null_mut())
-    } else {
-        let mut texts: Vec<*mut c_char> = state
-            .candidates
-            .iter()
-            .map(|c| to_cstring(&c.text))
-            .collect();
-        let mut comments: Vec<*mut c_char> = state
-            .candidates
-            .iter()
-            .map(|c| to_cstring(c.comment.as_deref().unwrap_or("")))
-            .collect();
-        let tp = texts.as_mut_ptr();
-        let cp = comments.as_mut_ptr();
-        std::mem::forget(texts);
-        std::mem::forget(comments);
-        (tp, cp)
-    };
-
-    KeytaoState {
-        preedit: to_cstring(&state.preedit),
-        cursor: state.cursor as u32,
-        sel_start: state.sel_start as u32,
-        sel_end: state.sel_end as u32,
-        candidate_texts: texts_ptr,
-        candidate_comments: comments_ptr,
-        candidate_count: count as u32,
-        highlighted_candidate_index: state.highlighted_candidate_index as u32,
-        page: state.page as u32,
-        is_last_page: state.is_last_page,
-        committed: to_cstring(state.committed.as_deref().unwrap_or("")),
-        select_keys: to_cstring(state.select_keys.as_deref().unwrap_or("")),
-        ascii_mode: state.ascii_mode,
-        accepted,
-    }
-}
-
-#[cfg(not(target_os = "android"))]
 fn result_json(result: KeyProcessResult) -> String {
     state_json(result.state, result.accepted)
 }
 
-#[cfg(not(target_os = "android"))]
 fn state_json(state: ImeState, accepted: bool) -> String {
     let theme = current_theme();
     let ui_capabilities = current_ui_capabilities();
@@ -2132,7 +1394,6 @@ fn state_json(state: ImeState, accepted: bool) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
 }
 
-#[cfg(not(target_os = "android"))]
 fn current_theme() -> keytao_theme::ResolvedImeTheme {
     let mut sources = lock_ignore_poison(&THEME_SOURCES);
     // Without keytao_set_theme_paths() the bundled theme is the whole story, but
@@ -2143,7 +1404,6 @@ fn current_theme() -> keytao_theme::ResolvedImeTheme {
         .current()
 }
 
-#[cfg(not(target_os = "android"))]
 fn c_string_arg(ptr: *const c_char, name: &str) -> Result<String, String> {
     if ptr.is_null() {
         return Err(format!("{name} is null"));
@@ -2154,7 +1414,6 @@ fn c_string_arg(ptr: *const c_char, name: &str) -> Result<String, String> {
         .map_err(|e| format!("{name} is not UTF-8: {e}"))
 }
 
-#[cfg(not(target_os = "android"))]
 fn optional_path_arg(ptr: *const c_char) -> Option<PathBuf> {
     if ptr.is_null() {
         return None;
@@ -2166,7 +1425,6 @@ fn optional_path_arg(ptr: *const c_char) -> Option<PathBuf> {
     (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
-#[cfg(not(target_os = "android"))]
 fn optional_effective_color_scheme_arg(ptr: *const c_char) -> Option<EffectiveColorScheme> {
     if ptr.is_null() {
         return None;
@@ -2181,7 +1439,6 @@ fn optional_effective_color_scheme_arg(ptr: *const c_char) -> Option<EffectiveCo
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn to_cstring(s: &str) -> *mut c_char {
     CString::new(s)
         .map(|cs| cs.into_raw())
@@ -2194,19 +1451,19 @@ unsafe fn free_cstring(ptr: *mut c_char) {
     }
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 #[path = "../../keytao-core/tests/support/smoke_fixture.rs"]
 /// cbindgen:ignore
 mod smoke_fixture;
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn an_uninstalled_directory_does_not_retire_the_working_runtime() {
         const CHILD: &str = "KEYTAO_FFI_INVALID_INIT_CHILD";
-        // This test needs a real singleton runtime; keep it out of the process
+        // This test needs a real runtime; keep it out of the process
         // running the existing ABI tests, which deliberately start uninitialized.
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -2230,9 +1487,9 @@ mod tests {
         let session = keytao_create_session();
         assert!(!session.is_null());
         for ch in smoke_fixture::CODE.chars() {
-            let state = keytao_session_process_key(session, ch as u32, 0);
+            let state = keytao_session_process_key_json(session, ch as u32, 0);
             assert!(!state.is_null());
-            keytao_free_state(state);
+            keytao_free_string(state);
         }
         let undeployed = dir.join("undeployed");
         smoke_fixture::write(&undeployed).unwrap();
@@ -2240,18 +1497,19 @@ mod tests {
             let invalid = CString::new(invalid.to_string_lossy().as_ref()).unwrap();
             assert!(!keytao_init(invalid.as_ptr(), invalid.as_ptr()));
             assert!(keytao_is_initialized());
-            let state = keytao_session_state(session);
+            let state = keytao_session_state_json(session);
             assert!(
                 !state.is_null(),
                 "failed validation must preserve the old handle"
             );
             assert_eq!(
-                unsafe { CStr::from_ptr((*state).preedit) }
-                    .to_str()
-                    .unwrap(),
+                serde_json::from_str::<serde_json::Value>(
+                    unsafe { CStr::from_ptr(state) }.to_str().unwrap()
+                )
+                .unwrap()["preedit"],
                 smoke_fixture::CODE
             );
-            keytao_free_state(state);
+            keytao_free_string(state);
         }
 
         // A genuine switch still retires the old handle and creates a usable
@@ -2263,13 +1521,19 @@ mod tests {
             .unwrap();
         let arg = CString::new(second.to_string_lossy().as_ref()).unwrap();
         assert!(keytao_init(arg.as_ptr(), arg.as_ptr()));
-        assert!(keytao_session_state(session).is_null());
+        assert!(keytao_session_state_json(session).is_null());
         let replacement = keytao_create_session();
         assert!(!replacement.is_null());
-        let state = keytao_session_process_key(replacement, b'a' as u32, 0);
+        let state = keytao_session_process_key_json(replacement, b'a' as u32, 0);
         assert!(!state.is_null());
-        assert!(unsafe { (*state).accepted });
-        keytao_free_state(state);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                unsafe { CStr::from_ptr(state) }.to_str().unwrap()
+            )
+            .unwrap()["accepted"],
+            true
+        );
+        keytao_free_string(state);
         keytao_destroy_session(session);
         keytao_destroy_session(replacement);
         let _ = std::fs::remove_dir_all(dir);
@@ -2361,9 +1625,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let dir_arg = CString::new(dir.to_string_lossy().as_ref()).unwrap();
 
-        // No deployment has asked for a reload yet.
-        assert!(keytao_reload_stamp_signature_at(dir_arg.as_ptr()).is_null());
-
         let stamp = keytao_core::ReloadStamp::write(&dir).unwrap();
         let path = keytao_reload_stamp_path_at(dir_arg.as_ptr());
         assert!(!path.is_null());
@@ -2373,15 +1634,6 @@ mod tests {
         );
         keytao_free_string(path);
 
-        let signature = keytao_reload_stamp_signature_at(dir_arg.as_ptr());
-        assert!(!signature.is_null());
-        assert_eq!(
-            unsafe { CStr::from_ptr(signature) }.to_str().unwrap(),
-            keytao_core::ReloadStamp::current_signature(&dir).unwrap()
-        );
-        keytao_free_string(signature);
-
-        assert!(keytao_reload_stamp_signature_at(std::ptr::null()).is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2406,7 +1658,7 @@ mod tests {
 
         assert!(keytao_is_initialized());
         assert!(keytao_create_session().is_null());
-        assert!(keytao_reset().is_null());
+        assert!(keytao_session_reset_json(std::ptr::null_mut()).is_null());
         assert!(!keytao_reload());
 
         lock_ignore_poison(&GLOBAL).initialized = false;
@@ -2470,8 +1722,8 @@ mod tests {
                 scope.spawn(|| {
                     for _ in 0..50 {
                         assert!(keytao_create_session().is_null());
-                        assert!(keytao_reset().is_null());
-                        assert!(keytao_session_state(std::ptr::null_mut()).is_null());
+                        assert!(keytao_session_reset_json(std::ptr::null_mut()).is_null());
+                        assert!(keytao_session_state_json(std::ptr::null_mut()).is_null());
                         keytao_destroy_session(std::ptr::null_mut());
                     }
                 });
@@ -2599,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_reach_the_c_abi_as_bits_and_json() {
+    fn capabilities_reach_the_c_abi_as_bits() {
         let expected = keytao_core::engine_capabilities();
         let bits = keytao_engine_capabilities();
         assert_eq!(bits, capability_bits(expected));
@@ -2610,15 +1862,6 @@ mod tests {
 
         // A handle that cannot reach librime cannot select or page either.
         assert_eq!(keytao_session_capabilities(std::ptr::null_mut()), 0);
-
-        let json = keytao_engine_capabilities_json();
-        assert!(!json.is_null());
-        let parsed: serde_json::Value =
-            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
-        keytao_free_string(json);
-        assert_eq!(parsed["nativePaging"], expected.native_paging);
-        assert_eq!(parsed["candidateSelection"], expected.candidate_selection);
-        assert_eq!(parsed["candidateHighlight"], expected.candidate_highlight);
     }
 
     #[test]
@@ -2654,11 +1897,6 @@ mod tests {
             "a reload that saw the latest stamp settles"
         );
 
-        // The consuming accessor answers once per request.
-        std::fs::write(&path, "deployed a third time\n").unwrap();
-        assert!(keytao_reload_stamp_changed());
-        assert!(!keytao_reload_stamp_changed());
-
         *lock_ignore_poison(&RELOAD_SIGNAL) = None;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2678,18 +1916,16 @@ mod tests {
 
     #[test]
     fn session_exports_refuse_a_null_handle() {
-        assert!(keytao_session_state(std::ptr::null_mut()).is_null());
-        assert!(keytao_session_process_key(std::ptr::null_mut(), 0x61, 0).is_null());
-        assert!(keytao_session_process_enter(std::ptr::null_mut()).is_null());
-        assert!(keytao_session_select_candidate(std::ptr::null_mut(), 0).is_null());
-        assert!(keytao_session_change_page(std::ptr::null_mut(), false).is_null());
-        assert!(keytao_session_commit_composition(std::ptr::null_mut()).is_null());
-        assert!(keytao_session_clear_composition(std::ptr::null_mut()).is_null());
-        assert!(keytao_session_set_input_policy(std::ptr::null_mut(), false, false).is_null());
-        assert!(!keytao_session_input_policy_composing(std::ptr::null_mut()));
+        assert!(keytao_session_state_json(std::ptr::null_mut()).is_null());
+        assert!(keytao_session_process_key_json(std::ptr::null_mut(), 0x61, 0).is_null());
+        assert!(keytao_session_process_enter_json(std::ptr::null_mut()).is_null());
+        assert!(keytao_session_select_candidate_json(std::ptr::null_mut(), 0).is_null());
+        assert!(keytao_session_change_page_json(std::ptr::null_mut(), false).is_null());
+        assert!(keytao_session_commit_composition_json(std::ptr::null_mut()).is_null());
+        assert!(keytao_session_clear_composition_json(std::ptr::null_mut()).is_null());
+        assert!(keytao_session_set_input_policy_json(std::ptr::null_mut(), false, false).is_null());
         assert!(!keytao_session_get_ascii_mode(std::ptr::null_mut()));
         assert!(!keytao_session_get_english_mode(std::ptr::null_mut()));
-        assert!(keytao_session_set_english_mode(std::ptr::null_mut(), true).is_null());
         assert!(keytao_session_set_english_mode_json(std::ptr::null_mut(), true).is_null());
         // Destroying nothing is not an error either.
         keytao_destroy_session(std::ptr::null_mut());
