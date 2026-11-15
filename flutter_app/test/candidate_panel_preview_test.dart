@@ -317,6 +317,7 @@ void main() {
                   orientation: sample.vertical
                       ? PanelOrientationDto.vertical
                       : PanelOrientationDto.horizontal,
+                  showPreedit: true,
                 ),
               ),
             ),

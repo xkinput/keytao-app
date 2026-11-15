@@ -395,6 +395,7 @@ class _SettingsCardState extends State<SettingsCard> {
                     MediaQuery.platformBrightnessOf(context) == Brightness.dark,
               ),
               orientation: _previewOrientation ?? s.orientation,
+              showPreedit: !s.effectiveEmbeddedComposition,
             ),
           ],
           if (s.themePath case final path?)

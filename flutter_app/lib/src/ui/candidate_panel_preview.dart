@@ -9,10 +9,13 @@ class CandidatePanelPreview extends StatelessWidget {
     super.key,
     required this.theme,
     required this.orientation,
+    required this.showPreedit,
   });
 
   final Map<String, dynamic> theme;
   final PanelOrientationDto orientation;
+  // The IME shows the preedit in the panel only when it is not embedded.
+  final bool showPreedit;
 
   static const _candidates = ['这', '之', '支', '只能', '服从', '中国'];
   static const _comments = ['🚫', '', '', '~a', '~c', '~g'];
@@ -287,13 +290,15 @@ class CandidatePanelPreview extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          'f',
-                          semanticsLabel: '预编辑 zu',
-                          style: preeditStyle,
-                          textScaler: TextScaler.noScaling,
-                        ),
-                        SizedBox(height: _metric(panel, 'preeditGap')),
+                        if (showPreedit) ...[
+                          Text(
+                            'f',
+                            semanticsLabel: '预编辑 f',
+                            style: preeditStyle,
+                            textScaler: TextScaler.noScaling,
+                          ),
+                          SizedBox(height: _metric(panel, 'preeditGap')),
+                        ],
                         SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           child: candidateList,
