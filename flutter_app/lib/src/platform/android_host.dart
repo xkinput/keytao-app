@@ -54,6 +54,8 @@ class AndroidHost {
   Future<String?> pickDirectory() async =>
       (await _channel.invokeMapMethod<String, dynamic>('pickDirectory'))?['uri']
           as String?;
+  Future<Map<String, dynamic>?> importLocalSchemeDirectory() =>
+      _channel.invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
   Future<Map<String, dynamic>> listFiles(String treeUri) =>
       _map('listFiles', {'treeUri': treeUri});
   Future<Map<String, dynamic>> readLocalSchemas(String treeUri) =>

@@ -7,6 +7,9 @@ class IosHost {
   Future<Map<String, dynamic>> paths() async =>
       (await channel.invokeMapMethod<String, dynamic>('getPaths'))!;
 
+  Future<Map<String, dynamic>?> importLocalSchemeDirectory() =>
+      channel.invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
+
   Future<void> openSettings() => channel.invokeMethod<void>('openSettings');
 
   Future<void> openUrl(String url) =>

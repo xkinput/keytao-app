@@ -26,7 +26,7 @@ String schemeDisplayName(String key) => switch (key) {
 };
 const logoAsset = 'assets/logo.png';
 const schemeAssets = {
-  'keytao': 'keytao-linux',
+  'keytao': '键道6',
   'xmjd': 'xmjd6.zip',
   'xmjd-feiding': 'feiding-xmjd6.zip',
   'txjx': 'txjx.zip',
@@ -139,14 +139,16 @@ extension AppViewOptions on AppController {
       SetupStep.fullAccess,
       SetupStep.install,
       SetupStep.deploy,
-    ] else ...[
-      if (isAndroid)
-        SetupStep.storage
-      else
-        SetupStep.component,
+    ] else if (isAndroid) ...[
+      SetupStep.enable,
+      SetupStep.select,
+      SetupStep.storage,
       SetupStep.install,
       SetupStep.deploy,
-      if (isAndroid) ...[SetupStep.enable, SetupStep.select],
+    ] else ...[
+      SetupStep.component,
+      SetupStep.install,
+      SetupStep.deploy,
       SetupStep.finish,
     ],
   ];

@@ -13,14 +13,10 @@ abstract final class AppStrings {
   static const localSchemeTitle = '本地方案';
   static const addonTitle = '附加方案';
   static const imeSettings = '输入法设置';
-  static const account = 'KeyTao 账号';
   static const username = '用户名';
   static const password = '密码';
   static const login = '登录';
   static const loggingIn = '登录中…';
-  static const syncUserDictionary = '同步用户词库';
-  static const syncing = '同步中…';
-  static const logout = '退出';
   static const macosIme = 'macOS 系统输入法';
   static const windowsIme = 'Windows 系统输入法';
   static const linuxIme = 'Linux 系统输入法';
@@ -129,8 +125,6 @@ abstract final class AppStrings {
   static const apply = '应用';
   static const refresh = '刷新';
   static const embedded = '嵌入模式';
-  static const embeddedDescription =
-      '开启后在输入框内直接显示拼写字母；关闭时仅在候选窗口显示，完成后整体上屏（默认关闭）';
   static const on = '开启';
   static const off = '关闭';
   static const englishMode = '英文模式';
@@ -140,8 +134,6 @@ abstract final class AppStrings {
   static const auto = '自动';
   static const light = '白天';
   static const dark = '夜间';
-  static const horizontal = '横排';
-  static const vertical = '竖排';
   static const candidateFontSize = '候选字号';
   static const accentColor = '主题色';
   static const chooseAccentColor = '选择主题色';
@@ -251,7 +243,6 @@ abstract final class AppStrings {
 
   static String currentVersion(String version) => '当前 v$version';
   static String changelogTitle(String release) => '$release 更新内容';
-  static String deployedVersion(String version) => '已部署 v$version';
   static String itemCount(int count) => '$count 个项目';
   static String verifyFailures(int count) => '⚠ 有 $count 个文件校验失败';
   static String installLogCount(int count) => '安装日志（$count 条）';
