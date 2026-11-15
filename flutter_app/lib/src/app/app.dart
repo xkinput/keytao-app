@@ -42,9 +42,8 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
       controller: widget.controller,
       child: AppErrorPresenter(
         controller: widget.controller,
-        child: ListenableBuilder(
-          listenable: widget.controller,
-          builder: (context, _) => AnimatedSwitcher(
+        child: Builder(
+          builder: (context) => AnimatedSwitcher(
             duration: MediaQuery.disableAnimationsOf(context)
                 ? Duration.zero
                 : const Duration(milliseconds: 240),

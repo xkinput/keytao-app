@@ -468,8 +468,8 @@ Future<LinuxImeStatusDto> linuxImeStatus() =>
     RustLib.instance.api.crateApiCoreLinuxImeStatus();
 
 /// The daemon outlives the app; there is intentionally no stop-on-exit hook.
-Future<LinuxImeStatusDto> linuxStartIme({required bool restart}) =>
-    RustLib.instance.api.crateApiCoreLinuxStartIme(restart: restart);
+Future<LinuxImeStatusDto> linuxStartIme() =>
+    RustLib.instance.api.crateApiCoreLinuxStartIme();
 
 Future<ComponentVersionsDto> getComponentVersions() =>
     RustLib.instance.api.crateApiCoreGetComponentVersions();

@@ -171,6 +171,8 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   ${If} $UpdateMode != 1
+    RMDir /r /REBOOTOK "$PROGRAMFILES64\KeyTao\keytao-windows-ime-runtime"
+    RMDir /REBOOTOK "$PROGRAMFILES64\KeyTao"
     Delete "$SMPROGRAMS\KeyTao.lnk"
     Delete "$DESKTOP\KeyTao.lnk"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeyTao"

@@ -1,4 +1,4 @@
-use crate::account::{API_BASE, ApiClient};
+use crate::account::{API_BASE, ApiClient, account_id, same_account};
 use crate::{Core, CoreError, CoreEvent, events::CloudTransferProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,22 +15,6 @@ fn cloud_error(error: CoreError) -> CoreError {
     } else {
         error
     }
-}
-
-fn account_id(core: &Core) -> Option<i64> {
-    core.state()
-        .user
-        .as_ref()
-        .and_then(|user| user["id"].as_i64())
-}
-
-fn same_account(state: &crate::AppState, expected: Option<i64>) -> bool {
-    expected.is_some_and(|id| id > 0)
-        && state.user.as_ref().and_then(|user| user["id"].as_i64()) == expected
-        && state
-            .auth_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty())
 }
 
 fn ensure_account(core: &Core, expected: Option<i64>) -> Result<(), CoreError> {
@@ -238,22 +222,11 @@ fn prepare(core: &Core, scheme_key: &str, root: &Path) -> Result<PreparedUpload,
     return prepare_android(core, scheme_key, root);
     #[cfg(not(target_os = "android"))]
     {
-        #[cfg(target_os = "macos")]
-        let shared = crate::ime_status::macos::macos_app_shared_data_dir(core);
-        #[cfg(target_os = "linux")]
-        let shared = crate::ime_status::linux::linux_app_shared_data_dir(core);
-        #[cfg(target_os = "windows")]
-        let shared = crate::ime_status::windows::windows_app_shared_data_dir(core);
         #[cfg(target_os = "ios")]
-        let shared = crate::deploy::ios_app_shared_data_dir(core, root);
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "linux",
-            target_os = "windows",
-            target_os = "ios"
-        )))]
-        let shared: Option<String> = None;
-        let shared = shared.unwrap_or_else(keytao_core::default_shared_data_dir);
+        let shared = crate::deploy::ios_app_shared_data_dir(core, root)
+            .unwrap_or_else(keytao_core::default_shared_data_dir);
+        #[cfg(not(target_os = "ios"))]
+        let shared = crate::ime_status::app_shared_data_dir(core);
         let runtime = keytao_core::ImeRuntime::with_dirs(root, &shared);
         let shared = (!shared.is_empty()).then(|| Path::new(&shared));
         prepare_with_smoke(core, scheme_key, root, shared, |id, key| {
@@ -595,6 +568,7 @@ pub(crate) async fn download_at(
         core,
         &package.scheme_key,
         package.version.as_deref(),
+        "cloud",
         Some(&package.name),
         &bytes,
         user_root,

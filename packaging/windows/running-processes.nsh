@@ -35,7 +35,8 @@ LangString PreflightBlocked ${LANG_SIMPCHINESE} "未能结束 KeyTao 程序。�
 
 ; Use the same gate for installation, ordinary uninstall and /S /UPDATE.
 ; Only KeyTao executables at this installation's verified paths qualify.
-; Weasel is a separate input method; KeyTao loads its own in-process librime.
+; Weasel is separate; KeyTao uses its own engine server by default.
+; In-process: explicit EngineMode=0 or no-learning fallback; see docs/windows-ime-server.md.
 ; Loading a TIP DLL does not give ownership of a browser/editor process.
 !macro DefineRunningProcesses Prefix
 Function ${Prefix}CheckRunningProcesses

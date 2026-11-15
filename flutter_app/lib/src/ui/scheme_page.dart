@@ -8,6 +8,32 @@ import 'settings.dart' show showCloudPackageTransfer;
 import 'user_words.dart';
 import 'widgets.dart';
 
+void showChangelog(BuildContext context, AppController c, String body) {
+  showFDialog<void>(
+    context: context,
+    builder: (context, _, animation) => AppDialog(
+      title: c.changelogTitle!,
+      animation: animation,
+      actions: [
+        ActionButton(
+          AppStrings.close,
+          primary: true,
+          onPress: () => Navigator.pop(context),
+        ),
+      ],
+      child: SizedBox(
+        width: 560,
+        child: SelectableText(
+          body,
+          style: context.theme.typography.body.sm.copyWith(
+            fontFamily: 'monospace',
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class SchemePage extends StatefulWidget {
   const SchemePage({super.key, required this.controller});
   final AppController controller;
@@ -436,36 +462,7 @@ class SchemePackageRow extends StatelessWidget {
                               ? null
                               : () {
                                   popover.hide();
-                                  showFDialog<void>(
-                                    context: context,
-                                    builder: (context, _, animation) =>
-                                        AppDialog(
-                                          title: c.changelogTitle!,
-                                          animation: animation,
-                                          actions: [
-                                            ActionButton(
-                                              AppStrings.close,
-                                              primary: true,
-                                              onPress: () =>
-                                                  Navigator.pop(context),
-                                            ),
-                                          ],
-                                          child: SizedBox(
-                                            width: 560,
-                                            child: SelectableText(
-                                              changelogBody,
-                                              style: context
-                                                  .theme
-                                                  .typography
-                                                  .body
-                                                  .sm
-                                                  .copyWith(
-                                                    fontFamily: 'monospace',
-                                                  ),
-                                            ),
-                                          ),
-                                        ),
-                                  );
+                                  showChangelog(context, c, changelogBody);
                                 },
                         ),
                       if (package != null) ...[
@@ -722,29 +719,7 @@ class VersionPicker extends StatelessWidget {
                 ActionButton(
                   AppStrings.changelog,
                   tooltip: AppStrings.changelog,
-                  onPress: () => showFDialog<void>(
-                    context: context,
-                    builder: (context, _, animation) => AppDialog(
-                      title: c.changelogTitle!,
-                      animation: animation,
-                      actions: [
-                        ActionButton(
-                          AppStrings.close,
-                          primary: true,
-                          onPress: () => Navigator.pop(context),
-                        ),
-                      ],
-                      child: SizedBox(
-                        width: 560,
-                        child: SelectableText(
-                          c.changelogBody!,
-                          style: context.theme.typography.body.sm.copyWith(
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                  onPress: () => showChangelog(context, c, c.changelogBody!),
                 ),
             ],
           ),

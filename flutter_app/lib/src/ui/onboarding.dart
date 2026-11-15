@@ -25,15 +25,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
   bool _finished = false;
   bool _retargetPending = false;
   late final AppLifecycleListener _lifecycle;
-  List<SetupStep> get _steps => widget.controller.isAndroid
-      ? const [
-          SetupStep.enable,
-          SetupStep.select,
-          SetupStep.storage,
-          SetupStep.install,
-          SetupStep.deploy,
-        ]
-      : widget.controller.setupSteps;
+  List<SetupStep> get _steps => widget.controller.setupSteps;
   bool _done(SetupStep step) => step.isComplete(widget.controller);
   int get _firstIncomplete => _steps.indexWhere((step) => !_done(step));
   int get _initialIndex {

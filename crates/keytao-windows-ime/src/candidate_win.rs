@@ -22,6 +22,7 @@ use keytao_core::{
     runtime_log::{self, Level},
     ImeState,
 };
+use keytao_theme::panel_hit::{PanelClick as PanelHit, PanelHitAreas};
 use windows::{
     core::Result,
     Win32::{
@@ -54,7 +55,7 @@ use crate::{
     globals::DLL_INSTANCE,
     guard,
     key_event_sink::{handle_panel_click, PanelClick},
-    panel::{candidate_panel_model, PanelHitAreas, PanelRenderer},
+    panel::{candidate_panel_model, PanelRenderer},
     state::{append_diagnostic, current_theme, diagnostics_enabled, WeakState},
 };
 
@@ -211,24 +212,6 @@ fn click_target<'a>(hwnd: HWND) -> Option<&'a ClickTarget> {
     Some(unsafe { &*(raw as *const ClickTarget) })
 }
 
-fn click_at(hit_areas: &PanelHitAreas, x: i32, y: i32) -> Option<PanelClick> {
-    if let Some(rect) = hit_areas.previous_page {
-        if rect.contains(x, y) {
-            return Some(PanelClick::PreviousPage);
-        }
-    }
-    if let Some(rect) = hit_areas.next_page {
-        if rect.contains(x, y) {
-            return Some(PanelClick::NextPage);
-        }
-    }
-    hit_areas
-        .candidates
-        .iter()
-        .position(|rect| rect.contains(x, y))
-        .map(PanelClick::Candidate)
-}
-
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -279,7 +262,11 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let clicked = click_target(hwnd).and_then(|target| {
-                let click = click_at(&target.hit_areas.borrow(), x, y)?;
+                let click = match target.hit_areas.borrow().click_at(x as f64, y as f64)? {
+                    PanelHit::Candidate(index) => PanelClick::Candidate(index),
+                    PanelHit::PreviousPage => PanelClick::PreviousPage,
+                    PanelHit::NextPage => PanelClick::NextPage,
+                };
                 Some((target.state.clone(), click))
             });
             if let Some((state, click)) = clicked {
@@ -879,13 +866,10 @@ mod tests {
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        can_skip_panel_upload, caret_retry_delay_ms, click_at, popup_position_in,
-        render_scale_for_dpi, subtract_touch_keyboard, value_signature, PanelUploadSignature,
+        can_skip_panel_upload, caret_retry_delay_ms, popup_position_in, render_scale_for_dpi,
+        subtract_touch_keyboard, value_signature, PanelUploadSignature,
     };
-    use crate::{
-        key_event_sink::PanelClick,
-        panel::{PanelHitAreas, PanelRect},
-    };
+    use keytao_theme::panel_hit::{PanelClick, PanelHitAreas, PanelRect};
 
     fn work_area() -> RECT {
         RECT {
@@ -1222,38 +1206,44 @@ mod tests {
         let hit_areas = PanelHitAreas {
             candidates: vec![
                 PanelRect {
-                    x: 0,
-                    y: 0,
-                    width: 50,
-                    height: 30,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 50.0,
+                    height: 30.0,
                 },
                 PanelRect {
-                    x: 50,
-                    y: 0,
-                    width: 50,
-                    height: 30,
+                    x: 50.0,
+                    y: 0.0,
+                    width: 50.0,
+                    height: 30.0,
                 },
             ],
             previous_page: Some(PanelRect {
-                x: 100,
-                y: 0,
-                width: 20,
-                height: 30,
+                x: 100.0,
+                y: 0.0,
+                width: 20.0,
+                height: 30.0,
             }),
             next_page: Some(PanelRect {
-                x: 120,
-                y: 0,
-                width: 20,
-                height: 30,
+                x: 120.0,
+                y: 0.0,
+                width: 20.0,
+                height: 30.0,
             }),
         };
-        assert_eq!(click_at(&hit_areas, 10, 10), Some(PanelClick::Candidate(0)));
-        assert_eq!(click_at(&hit_areas, 60, 10), Some(PanelClick::Candidate(1)));
         assert_eq!(
-            click_at(&hit_areas, 105, 10),
+            hit_areas.click_at(10.0, 10.0),
+            Some(PanelClick::Candidate(0))
+        );
+        assert_eq!(
+            hit_areas.click_at(60.0, 10.0),
+            Some(PanelClick::Candidate(1))
+        );
+        assert_eq!(
+            hit_areas.click_at(105.0, 10.0),
             Some(PanelClick::PreviousPage)
         );
-        assert_eq!(click_at(&hit_areas, 125, 10), Some(PanelClick::NextPage));
-        assert_eq!(click_at(&hit_areas, 300, 10), None);
+        assert_eq!(hit_areas.click_at(125.0, 10.0), Some(PanelClick::NextPage));
+        assert_eq!(hit_areas.click_at(300.0, 10.0), None);
     }
 }

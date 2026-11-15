@@ -19,8 +19,8 @@
 use crate::{
     engine::{ibus_cursor_pos, CoreEngine, ImeSession},
     ibus_shared::{
-        self, ibus_lookup_table_value, ibus_text_value, ibus_text_variant, state_to_panel_model,
-        ContentTypeState, KeyOutcome, ModeIndicator,
+        self, ibus_engine_desc, ibus_lookup_table_value, ibus_text_as_variant, ibus_text_variant,
+        state_to_panel_model, ContentTypeState, KeyOutcome, ModeIndicator,
     },
     panel::{spawn_x11_overlay_panel, OverlayPanelMessage},
 };
@@ -96,14 +96,14 @@ fn ibus_property_variant(
         .append_field(Value::Dict(empty_dict))
         .add_field(key.to_owned())
         .add_field(IBUS_PROP_TYPE_NORMAL)
-        .append_field(Value::Value(Box::new(ibus_text_variant(label))))
+        .append_field(ibus_text_as_variant(label))
         .add_field(String::new()) // icon
-        .append_field(Value::Value(Box::new(ibus_text_variant(tooltip))))
+        .append_field(ibus_text_as_variant(tooltip))
         .add_field(true) // sensitive
         .add_field(true) // visible
         .add_field(IBUS_PROP_STATE_UNCHECKED)
         .append_field(Value::Value(Box::new(ibus_prop_list_variant(Vec::new()))))
-        .append_field(Value::Value(Box::new(ibus_text_variant(symbol))))
+        .append_field(ibus_text_as_variant(symbol))
         .build();
     Value::Structure(property)
 }
@@ -115,35 +115,6 @@ fn ibus_mode_property_variant(ascii_mode: bool) -> zvariant::Value<'static> {
         ("中文", "中")
     };
     ibus_property_variant(MODE_PROPERTY_KEY, label, symbol, label)
-}
-
-/// Build an IBusEngineDesc OwnedValue.
-fn ibus_engine_desc() -> zvariant::OwnedValue {
-    use zvariant::{Dict, Signature, StructureBuilder, Value};
-    let sig_s = Signature::try_from("s").unwrap();
-    let sig_v = Signature::try_from("v").unwrap();
-    let empty_dict = Dict::new(sig_s, sig_v);
-    let engine = StructureBuilder::new()
-        .add_field("IBusEngineDesc".to_owned())
-        .append_field(Value::Dict(empty_dict))
-        .add_field("keytao".to_owned())
-        .add_field("键道".to_owned())
-        .add_field("KeyTao Input Method".to_owned())
-        .add_field("zh".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .add_field("default".to_owned())
-        .add_field(0u32)
-        .add_field("".to_owned())
-        .add_field("键".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .add_field("".to_owned())
-        .build();
-    zvariant::OwnedValue::try_from(Value::Structure(engine)).expect("ibus_engine_desc")
 }
 
 /// Build an IBusComponent OwnedValue containing the keytao engine descriptor.
@@ -352,10 +323,7 @@ impl IBusEngine {
                     IBUS_ENGINE_PREEDIT_CLEAR,
                 )
                 .await;
-                let ov = ibus_text_value(text);
-                if let Ok(v) = zvariant::Value::try_from(&ov) {
-                    let _ = IBusEngine::commit_text(ctxt, v).await;
-                }
+                let _ = IBusEngine::commit_text(ctxt, ibus_text_variant(text)).await;
             }
         }
 
@@ -365,17 +333,14 @@ impl IBusEngine {
             // IBusText cursors count characters, which is also the unit
             // `ImeState::cursor` uses.
             let cursor = ibus_cursor_pos(&ime_state);
-            let ov = ibus_text_value(&ime_state.preedit);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = IBusEngine::update_preedit_text(
-                    ctxt,
-                    v,
-                    cursor,
-                    true,
-                    IBUS_ENGINE_PREEDIT_CLEAR,
-                )
-                .await;
-            }
+            let _ = IBusEngine::update_preedit_text(
+                ctxt,
+                ibus_text_variant(&ime_state.preedit),
+                cursor,
+                true,
+                IBUS_ENGINE_PREEDIT_CLEAR,
+            )
+            .await;
         }
 
         if ime_state.candidates.is_empty() || hide_candidate_panel {
@@ -383,12 +348,14 @@ impl IBusEngine {
             self.overlay(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
-            let ov = ibus_lookup_table_value(&model);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                // Either the desktop panel renders the table or we draw it, never
-                // both.
-                let _ = IBusEngine::update_lookup_table(ctxt, v, !self.draws_candidates()).await;
-            }
+            // Either the desktop panel renders the table or we draw it, never
+            // both.
+            let _ = IBusEngine::update_lookup_table(
+                ctxt,
+                ibus_lookup_table_value(&model),
+                !self.draws_candidates(),
+            )
+            .await;
             let cx = self.cursor_x.load(Ordering::Relaxed);
             let cy = self.cursor_y.load(Ordering::Relaxed);
             self.overlay(OverlayPanelMessage::Show {

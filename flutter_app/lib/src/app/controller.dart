@@ -108,9 +108,14 @@ String errorText(Object error) => error is PlatformException
     : '$error';
 
 class AppController extends ChangeNotifier {
-  AppController({required this.info, this.android = const AndroidHost()});
+  AppController({
+    required this.info,
+    this.android = const AndroidHost(),
+    this.pickDesktopDirectory = getDirectoryPath,
+  });
   final BridgeInfo info;
   final AndroidHost android;
+  final Future<String?> Function() pickDesktopDirectory;
   bool get isAndroid => info.platform == BridgePlatform.android;
   bool get isWindows => info.platform == BridgePlatform.windows;
   bool get isLinux => info.platform == BridgePlatform.linux;
@@ -447,7 +452,7 @@ class AppController extends ChangeNotifier {
   /// 星猫键道有两个发行包（顶功 / 非顶功），它们同属一个方案族。
   String get schemeFamily => scheme == 'xmjd-feiding' ? 'xmjd' : scheme;
   String get selectedSchemeAsset => scheme == 'keytao'
-      ? schemeAssets[scheme]!
+      ? Uri.tryParse(downloadUrl ?? '')?.pathSegments.lastOrNull ?? ''
       : schemeRelease?.assetName ?? schemeAssets[scheme] ?? '';
   String get schemeSelectionText =>
       '${AppStrings.selection}${schemes[schemeFamily] ?? scheme}'
@@ -829,7 +834,7 @@ class AppController extends ChangeNotifier {
       await read(() async {
         try {
           linuxIme = await core.linuxImeStatus();
-          linuxImeError = linuxIme!.error;
+          linuxImeError = null;
         } catch (failure) {
           linuxImeError = errorText(failure);
           rethrow;
@@ -904,8 +909,8 @@ class AppController extends ChangeNotifier {
           }
         } else if (isLinux) {
           try {
-            linuxIme = await core.linuxStartIme(restart: false);
-            linuxImeError = linuxIme!.error;
+            linuxIme = await core.linuxStartIme();
+            linuxImeError = null;
           } catch (failure) {
             startupImeError = errorText(failure);
           }
@@ -1374,9 +1379,9 @@ class AppController extends ChangeNotifier {
         final String directoryPath;
         final String displayName;
         if (isMobile) {
-          final selected = await MethodChannel(
-            isAndroid ? 'keytao/android' : 'keytao/ios',
-          ).invokeMapMethod<String, dynamic>('importLocalSchemeDirectory');
+          final selected = isAndroid
+              ? await android.importLocalSchemeDirectory()
+              : await const IosHost().importLocalSchemeDirectory();
           if (selected == null) return;
           temporaryDirectory =
               selected['temporaryDirectory'] as String? ??
@@ -1671,7 +1676,12 @@ class AppController extends ChangeNotifier {
       source = value;
     }
     if (_schemeSettings['selected_scheme'] case final String value) {
-      scheme = value;
+      if (value != scheme) {
+        scheme = value;
+        schemeRelease = null;
+        latestRelease = null;
+        if (_startupStarted) unawaited(refreshRelease());
+      }
       _manuallySelectedScheme = true;
     }
   }
@@ -1972,7 +1982,12 @@ class AppController extends ChangeNotifier {
   Future<void> _applyCloudSettings(Map<String, dynamic> settings) async {
     if (settings['download_source'] case final String value) source = value;
     if (settings['selected_scheme'] case final String value) {
-      scheme = value;
+      if (value != scheme) {
+        scheme = value;
+        schemeRelease = null;
+        latestRelease = null;
+        if (_startupStarted) unawaited(refreshRelease());
+      }
       _manuallySelectedScheme = true;
     }
     if (isMobile && settings['android'] is Map) {
@@ -2311,8 +2326,7 @@ class AppController extends ChangeNotifier {
     try {
       final selected = isAndroid
           ? await android.pickDirectory()
-          : await const MethodChannel('ink.rea.keytao/window')
-                .invokeMethod<String>('pickDirectory');
+          : await pickDesktopDirectory();
       if (selected == null || selected.isEmpty) return;
       selectedTreeUri = isAndroid ? selected : null;
       selectedDirectory = isAndroid ? _safDisplayPath(selected) : selected;

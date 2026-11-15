@@ -28,6 +28,8 @@ mod wayland_backend;
 #[cfg(target_os = "linux")]
 mod wayland_backend_kde;
 #[cfg(target_os = "linux")]
+mod wayland_common;
+#[cfg(target_os = "linux")]
 mod x11_backend;
 
 #[cfg(target_os = "linux")]
@@ -200,53 +202,6 @@ fn remove_legacy_kde_env_file() {
     }
 }
 
-/// Peek/commit view of the reload signal keytao-core's `ReloadStamp` writes.
-///
-/// `ReloadStampWatcher::has_changed` marks the signal as seen the moment it is
-/// asked, which is wrong for a watcher that still has to act on it: a reload
-/// that fails right afterwards — the App was halfway through writing the
-/// deployment out, say — would never be retried, and the daemon would keep
-/// serving the previous dictionaries until the next deployment. The baseline
-/// therefore only moves in `commit`, and it moves to exactly the signature that
-/// was loaded, so a stamp written while librime was reloading is still picked up
-/// on the next tick.
-#[cfg(target_os = "linux")]
-struct ReloadStampGate {
-    path: std::path::PathBuf,
-    loaded_signature: Option<String>,
-}
-
-#[cfg(target_os = "linux")]
-impl ReloadStampGate {
-    /// Seeded with what is on disk: a stamp older than this process describes
-    /// the deployment the daemon just started up on, not a pending request.
-    fn new(user_data_dir: &std::path::Path) -> Self {
-        let path = keytao_core::ReloadStamp::path(user_data_dir);
-        let loaded_signature = keytao_core::ReloadStamp::signature_at(&path);
-        Self {
-            path,
-            loaded_signature,
-        }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.path
-    }
-
-    /// The signature a reload is pending for, without consuming the request.
-    /// A missing stamp is not a request, so a not yet deployed install never
-    /// triggers one.
-    fn pending(&self) -> Option<String> {
-        let current = keytao_core::ReloadStamp::signature_at(&self.path)?;
-        (self.loaded_signature.as_deref() != Some(current.as_str())).then_some(current)
-    }
-
-    /// Record the signature a reload actually loaded.
-    fn commit(&mut self, signature: String) {
-        self.loaded_signature = Some(signature);
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
     let Some(user_data_dir) = keytao_core::default_user_data_dir() else {
@@ -259,7 +214,7 @@ fn install_reload_watcher(engine: engine::CoreEngine) -> bool {
     // disk still describes the deployment the daemon actually loaded. A stamp
     // written while the thread was waiting to be scheduled would otherwise be
     // adopted as already loaded and never reloaded.
-    let mut gate = ReloadStampGate::new(&user_data_dir);
+    let mut gate = keytao_core::ReloadStampGate::new(&user_data_dir);
 
     if let Err(e) = std::thread::Builder::new()
         .name("reload-watcher".into())
@@ -670,9 +625,6 @@ async fn enforce_single_instance() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::ReloadStampGate;
-    use keytao_core::ReloadStamp;
-
     #[test]
     fn a_stopped_non_kwin_backend_exits_nonzero() {
         use std::process::{Command, Stdio};
@@ -742,54 +694,5 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("keytao-reload-gate-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
-    }
-
-    #[test]
-    fn a_failed_reload_keeps_the_request_pending() {
-        let dir = temp_dir("retry");
-        let mut gate = ReloadStampGate::new(&dir);
-        assert_eq!(gate.pending(), None, "a missing stamp is not a request");
-
-        ReloadStamp::write(&dir).expect("write stamp");
-        let requested = gate.pending().expect("the first stamp is a request");
-        // Peeking must not consume the request: a reload that failed because the
-        // deployment was still being written has to be retried on the next tick.
-        assert_eq!(gate.pending().as_deref(), Some(requested.as_str()));
-        assert_eq!(gate.pending().as_deref(), Some(requested.as_str()));
-
-        gate.commit(requested);
-        assert_eq!(gate.pending(), None, "a loaded stamp fires once");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_stamp_written_during_the_reload_is_not_swallowed() {
-        let dir = temp_dir("overlap");
-        ReloadStamp::write(&dir).expect("write stamp");
-        // Startup adopts what is on disk: that is the deployment librime was
-        // just initialised on.
-        let mut gate = ReloadStampGate::new(&dir);
-        assert_eq!(gate.pending(), None);
-
-        ReloadStamp::write(&dir).expect("rewrite stamp");
-        let requested = gate.pending().expect("a rewritten stamp is a request");
-
-        // The App deploys again while librime is still reloading. Committing the
-        // signature the reload started from must leave the newer one pending.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        ReloadStamp::write(&dir).expect("rewrite stamp during reload");
-        gate.commit(requested);
-        assert!(gate.pending().is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

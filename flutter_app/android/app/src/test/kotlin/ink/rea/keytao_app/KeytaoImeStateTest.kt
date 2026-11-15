@@ -30,8 +30,7 @@ class KeytaoImeStateTest {
                   { "index": 0, "label": "1.", "text": "键道6", "comment": null, "selected": true }
                 ],
                 "navigation": { "canGoPrevious": false, "canGoNext": true }
-              },
-              "modeHint": { "asciiMode": false, "text": "中" }
+              }
             }
             """.trimIndent()
         )!!

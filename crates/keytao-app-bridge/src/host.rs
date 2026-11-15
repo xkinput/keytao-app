@@ -45,9 +45,13 @@ where
             keytao_app_core::deploy::record_result(&self.host.core, &self.host.root, false)
                 .map_err(|error| error.to_string())?;
             let error = deploy().await;
+            keytao_app_core::deploy::record_android_result(
+                &self.host.core,
+                &self.host.root,
+                error.is_empty(),
+            )
+            .map_err(|error| error.to_string())?;
             if error.is_empty() {
-                keytao_app_core::deploy::record_result(&self.host.core, &self.host.root, true)
-                    .map_err(|error| error.to_string())?;
                 Ok(())
             } else {
                 Err(error)
@@ -129,41 +133,14 @@ impl BridgeHost {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux", test))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn deploy_paths(&self) -> (PathBuf, PathBuf) {
-        #[cfg(target_os = "macos")]
-        let shared = keytao_app_core::ime_status::macos::macos_app_shared_data_dir(&self.core)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(keytao_core::default_shared_data_dir()));
-        #[cfg(target_os = "linux")]
-        let shared = keytao_app_core::ime_status::linux::linux_app_shared_data_dir(&self.core)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(keytao_core::default_shared_data_dir()));
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let shared = {
-            let resources = self.core.env().resource_dir.join("rime-data");
-            if resources.join("default.yaml").is_file() {
-                resources
-            } else {
-                self.root.clone()
-            }
-        };
+        let shared = PathBuf::from(keytao_app_core::ime_status::app_shared_data_dir(&self.core));
         (self.root.clone(), shared)
     }
     pub(crate) async fn deploy_default(
         &self,
     ) -> Result<keytao_app_core::deploy::DeployResult, String> {
-        keytao_app_core::deploy::record_result(&self.core, &self.root, false)
-            .map_err(|error| error.to_string())?;
-        let result = self.deploy_default_inner().await;
-        if result.as_ref().is_ok_and(|result| result.success) {
-            keytao_app_core::deploy::record_result(&self.core, &self.root, true)
-                .map_err(|error| error.to_string())?;
-        }
-        result
-    }
-
-    async fn deploy_default_inner(&self) -> Result<keytao_app_core::deploy::DeployResult, String> {
         #[cfg(target_os = "windows")]
         {
             self.require_default_windows_root()?;
@@ -188,6 +165,8 @@ impl BridgeHost {
                     .await
                     .map_err(|error| error.to_string());
             }
+            keytao_app_core::deploy::record_result(&self.core, &self.root, false)
+                .map_err(|error| error.to_string())?;
             let (user, shared) = self.deploy_paths();
             self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
                 "正在部署 librime...".into(),
@@ -204,6 +183,8 @@ impl BridgeHost {
             self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
                 "部署完成".into(),
             ));
+            keytao_app_core::deploy::record_result(&self.core, &self.root, true)
+                .map_err(|error| error.to_string())?;
             Ok(keytao_app_core::deploy::DeployResult {
                 success: true,
                 message: "部署成功".into(),
@@ -305,7 +286,7 @@ mod tests {
     use keytao_app_core::{AppEnv, Platform};
 
     #[tokio::test]
-    async fn install_host_deploy_maps_delegate_error_and_success() {
+    async fn install_host_android_deploy_verifies_every_schema_artifact() {
         let temp = tempfile::tempdir().unwrap();
         let core = Core::new(
             AppEnv {
@@ -318,21 +299,46 @@ mod tests {
             Arc::new(crate::runtime::BridgeEvents::default()),
         )
         .unwrap();
-        std::fs::create_dir_all(temp.path().join("user")).unwrap();
-        let host = BridgeHost::new(core, temp.path().join("user"));
-        for message in ["platform deploy failed", ""] {
-            // Select the Android delegate on host builds without invoking an IME.
-            let wrapper = InstallHost {
-                host: host.clone(),
-                android_deploy: Some(|| std::future::ready(message.to_string())),
-            };
-            let expected = if message.is_empty() {
-                Ok(())
-            } else {
-                Err(message.to_string())
-            };
-            assert_eq!(wrapper.deploy().await, expected);
+        let root = temp.path().join("user");
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        for (name, content) in [
+            (
+                "default.custom.yaml",
+                "patch:\n  schema_list:\n    - schema: primary\n    - schema: easy_en\n",
+            ),
+            (
+                "build/primary.schema.yaml",
+                "schema:\n  schema_id: primary\n",
+            ),
+            (
+                "build/easy_en.schema.yaml",
+                "schema:\n  schema_id: easy_en\ntranslator:\n  dictionary: easy_en\n",
+            ),
+            ("build/easy_en.table.bin", "compiled"),
+            ("build/easy_en.reverse.bin", "compiled"),
+        ] {
+            std::fs::write(root.join(name), content).unwrap();
         }
+        let host = BridgeHost::new(core.clone(), root.clone());
+        // Select the Android delegate on host builds without invoking an IME.
+        let failed = InstallHost {
+            host: host.clone(),
+            android_deploy: Some(|| std::future::ready("platform deploy failed".to_string())),
+        };
+        assert_eq!(failed.deploy().await, Err("platform deploy failed".into()));
+        assert!(!core.state().last_deploy.unwrap().success);
+
+        let successful = InstallHost {
+            host,
+            android_deploy: Some(|| std::future::ready(String::new())),
+        };
+        let error = successful.deploy().await.unwrap_err();
+        assert!(error.contains("build/easy_en.prism.bin"), "{error}");
+        assert!(!core.state().last_deploy.unwrap().success);
+
+        std::fs::write(root.join("build/easy_en.prism.bin"), "compiled").unwrap();
+        assert_eq!(successful.deploy().await, Ok(()));
+        assert!(core.state().last_deploy.unwrap().success);
     }
 
     #[test]
@@ -354,6 +360,7 @@ mod tests {
         let host = BridgeHost::new(core, resolved);
         assert_eq!(SchemeHost::user_root(&host).unwrap(), root);
         assert_eq!(ImeHost::user_root(&host).unwrap(), root);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(host.deploy_paths().0, root);
         let unrelated = temp.path().join("must-not-be-used");
         let expected = Some(keytao_core::ReloadStamp::path(&root));

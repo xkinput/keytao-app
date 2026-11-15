@@ -34,15 +34,19 @@ KeyTao processes in that directory, and installs the Flutter payload with the
 same HKLM uninstall key. Existing Flutter installations are updated in place,
 including partially completed upgrades and versions whose old uninstaller
 incorrectly blocked browsers holding input method DLLs. Their complete old
-ProgramData runtimes remain available to running applications; each install
-registers a fresh runtime directory. Superseded Flutter payload files can remain
-until a future cleanup. Legacy Tauri installs still run their uninstaller with
-`/S /UPDATE _?=...`. User data at
+`%ProgramFiles%\KeyTao\keytao-windows-ime-runtime` directories remain available
+to running applications; each install registers a fresh runtime directory.
+Runtimes from older releases may still be under
+`%ProgramData%\KeyTao\keytao-windows-ime-runtime`. Superseded Flutter payload
+files can remain until a future cleanup. Legacy Tauri installs still run their
+uninstaller with `/S /UPDATE _?=...`. User data at
 `%LOCALAPPDATA%\ink.rea.keytao-app` and `%APPDATA%\keytao` is never removed.
 `nsis-hooks.nsh` owns the IME installation hooks, including
-versioned ProgramData runtimes, AppContainer RX, protocol ownership and TSF
-registration/unregistration. New uninstallers delete only the generated list
-of installed files; unrelated files in a custom install directory are retained.
+versioned `%ProgramFiles%\KeyTao\keytao-windows-ime-runtime` directories,
+AppContainer RX, protocol ownership and TSF registration/unregistration.
+Ordinary uninstall removes files from the generated manifest and the complete
+Program Files runtime tree; unrelated files in a custom install directory are
+retained.
 `replace-payload.nsh` writes files from the generated install manifest. An
 existing destination is first renamed to a unique backup in the same directory;
 if copying the new file fails, that file is restored. This also replaces a
@@ -61,8 +65,10 @@ methods alone may leave an old DLL loaded.
 `check-running-processes.ps1` recognizes only `keytao-app.exe` and the legacy
 `keytao.exe` at exact paths within the selected KeyTao installation. It does not
 inspect Weasel registration or stop WeaselServer/WeaselDeployer, even if those
-executables happen to be in the same directory. KeyTao uses its own in-process
-librime library; it does not depend on Weasel's Rime server.
+executables happen to be in the same directory. KeyTao runs librime in
+`keytao-windows-ime-server.exe` by default; in-process mode is used only for
+explicit `EngineMode=0` or the no-learning fallback. See
+[Windows IME engine server](../../docs/windows-ime-server.md).
 `-StopOwnedProcesses` enables stopping;
 without it, the helper only previews. Before terminating a process it rechecks
 its executable path and creation time using the same held handle, and never
@@ -71,7 +77,8 @@ payload changes, including silent installation/uninstallation. Exit code 32
 means a target KeyTao program remains running; 1 means detection/stopping
 failed. These failures preserve installed files and registration. Interactive
 users can retry or cancel. Loading an input method DLL is never proof that the
-host process belongs to KeyTao.
+host process belongs to KeyTao. The pre-uninstall hook also stops
+`keytao-windows-ime-server.exe` by image name with `taskkill /IM ... /F`.
 
 The native runner sends only `appArgs(List<String>)` on `keytao/windows`.
 First-launch arguments still use `dart_entrypoint_arguments`. Forwarded launches

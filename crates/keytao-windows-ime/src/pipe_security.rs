@@ -1,5 +1,6 @@
 //! Process/token identity checks for the per-user, per-session pipe.
 
+use std::path::PathBuf;
 use windows::{
     core::PWSTR,
     Win32::{
@@ -9,9 +10,11 @@ use windows::{
             TokenUser, TOKEN_QUERY, TOKEN_USER,
         },
         System::{
+            Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY},
             RemoteDesktop::ProcessIdToSessionId,
             Threading::{
-                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
     },
@@ -47,6 +50,56 @@ pub fn process_identity(pid: u32) -> Result<Identity, String> {
             .map_err(|e| format!("open pipe peer: {e}"))?,
     );
     identity(process.0, pid)
+}
+
+pub fn process_image(process: HANDLE) -> windows::core::Result<PathBuf> {
+    let mut image = vec![0u16; 32768];
+    let mut length = image.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(image.as_mut_ptr()),
+            &mut length,
+        )
+    }?;
+    Ok(PathBuf::from(String::from_utf16_lossy(
+        &image[..length as usize],
+    )))
+}
+
+pub fn keytao_install_root() -> Result<PathBuf, String> {
+    let mut value = vec![0u16; 32768];
+    let mut size = (value.len() * std::mem::size_of::<u16>()) as u32;
+    // The native registry view is independent of the TSF host's bitness and environment.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
+            windows::core::w!("ProgramFilesDir"),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if result.is_err() || size < 4 || size as usize > value.len() * 2 || size % 2 != 0 {
+        return Err("cannot determine native Program Files directory".into());
+    }
+    let value = &value[..size as usize / 2];
+    let length = value
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or("unterminated Program Files directory")?;
+    let path = String::from_utf16(&value[..length])
+        .map_err(|error| format!("decode Program Files directory: {error}"))?;
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("Program Files directory is not absolute".into());
+    }
+    path.join("KeyTao")
+        .canonicalize()
+        .map_err(|error| format!("resolve KeyTao installation directory: {error}"))
 }
 
 fn identity(process: HANDLE, pid: u32) -> Result<Identity, String> {

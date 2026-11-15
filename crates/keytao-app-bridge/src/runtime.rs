@@ -159,7 +159,6 @@ impl From<CoreEvent> for BridgeEvent {
             CoreEvent::WindowsImeStatus(status) => {
                 dto.kind = BridgeEventKind::WindowsImeStatus;
                 dto.windows_ime_status = Some(WindowsImeStatusDto {
-                    supported: status.supported,
                     packaged: status.packaged,
                     registered: status.registered,
                     registered_dll: status.registered_dll,
@@ -168,14 +167,8 @@ impl From<CoreEvent> for BridgeEvent {
                     registration_state: status.registration_state,
                     registration_error: status.registration_error,
                     runtime_dir: status.runtime_dir,
-                    dll_path: status.dll_path,
                     registered_path: status.registered_path,
                     profile_status: status.profile_status,
-                    user_data_dir: status.user_data_dir,
-                    shared_data_dir: status.shared_data_dir,
-                    shared_data_source: status.shared_data_source,
-                    reload_stamp_path: status.reload_stamp_path,
-                    reload_stamp_signature: status.reload_stamp_signature,
                     message: status.message,
                 });
             }

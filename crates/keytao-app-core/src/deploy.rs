@@ -8,11 +8,9 @@ use crate::CoreEvent;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 use crate::ime_paths::*;
 #[cfg(target_os = "linux")]
-use crate::ime_status::linux::{launch_keytao_ime, linux_app_shared_data_dir};
-#[cfg(target_os = "macos")]
-use crate::ime_status::macos::macos_app_shared_data_dir;
+use crate::ime_status::linux::launch_keytao_ime;
 #[cfg(target_os = "windows")]
-use crate::ime_status::windows::{windows_app_shared_data_dir, windows_deploy_rime_blocking};
+use crate::ime_status::windows::windows_deploy_rime_blocking;
 use crate::{Core, CoreError, ime_host::ImeHost};
 use serde::Serialize;
 #[cfg(target_os = "ios")]
@@ -162,15 +160,7 @@ pub(crate) async fn rime_deploy_default_inner(
     record_result(core, &dest, false).map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "windows"))]
     let user = dest.to_string_lossy().into_owned();
-    #[cfg(target_os = "windows")]
-    let shared =
-        windows_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
-    #[cfg(target_os = "macos")]
-    let shared =
-        macos_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
-    #[cfg(target_os = "linux")]
-    let shared =
-        linux_app_shared_data_dir(core).unwrap_or_else(keytao_core::default_shared_data_dir);
+    let shared = crate::ime_status::app_shared_data_dir(core);
 
     core.emit(CoreEvent::DeployProgress("正在部署 librime...".into()));
 

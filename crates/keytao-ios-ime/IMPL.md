@@ -212,7 +212,7 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 
 ## 敏感输入（D9）
 
-系统会在 secure text entry 场景把键盘临时换成系统键盘，但本扩展仍做防御性处理：`isSecureTextEntry` 或上表中的直通类 `keyboardType` 出现时，调用 `keytao_session_set_input_policy(session, composing: false, learning: false)`，按键完全不进 librime，不产生 preedit/候选，也不可能发生用户词学习；同时清空剪贴板历史与退格恢复栈。
+系统会在 secure text entry 场景把键盘临时换成系统键盘，但本扩展仍做防御性处理：`isSecureTextEntry` 或上表中的直通类 `keyboardType` 出现时，调用 `keytao_session_set_input_policy_json(session, composing: false, learning: false)`，按键完全不进 librime，不产生 preedit/候选，也不可能发生用户词学习；同时清空剪贴板历史与退格恢复栈。
 
 剪贴板读取需要完全访问：`currentClipboardText()` 先 `guard hasFullAccess`，再用 `UIPasteboard.general.hasStrings` 预检（metadata 访问，不会触发 iOS 16 起的系统粘贴授权弹窗），未授权时给出明确提示而不是误报「剪贴板为空」。剪贴板历史绑定当前输入上下文，`textWillChange` / `selectionWillChange` / `viewWillDisappear` 都会清空。
 
@@ -228,8 +228,8 @@ engine 因 App Group/schema/runtime 不可用而无法进入正式 Rime session 
 
 队列已有待处理文字时，后续退格、退格手势、直输文字和文档编辑命令也按顺序排队，避免「输入 a → 退格」先删除宿主旧文、随后又重放 a，或直输 Emoji 跑到待输入文字前面。队列为空时这些操作仍即时执行；布局、Shift、面板与键盘切换不因此延迟。初始化回调先复位 `runtimeStarting`，重放时先取走队列快照，避免命令再次入队。
 
-- `keytao_init` + `keytao_create_session` + App Group 目录种子写入在专用串行队列上执行（`KeyTaoIOSEngine.ensureReadyAsync`），只有 session 指针回到主队列安装，`viewDidLoad` 不再同步阻塞首帧；加载期间候选栏显示「正在加载键道方案…」。
-- `keyboard.yaml` 只在文件缺失或为空时种子写入，不再按字符串启发式覆盖用户已经编辑过的布局。
+- `keytao_init` and `keytao_create_session` run on the dedicated serial queue in `KeyTaoIOSEngine.ensureReadyAsync`; only the session pointer returns to the main queue for installation, keeping runtime initialization off the first-frame path. The candidate bar shows its loading status while initialization is pending.
+- The containing app seeds `keyboard.yaml` when it is missing or empty, and refreshes untouched defaults when their hash matches `.keyboard.seed`, or a known legacy default hash when no seed hash exists. Edited layouts with other hashes are preserved; the extension does not seed shared files.
 - `didReceiveMemoryWarning` 释放可重建缓存：剪贴板历史、按键重放队列、展开候选、logo 图片、theme/config 缓存；session 与已部署方案不动，打字不受影响。
 - App Group 共享文件可能正被主 App 写入，`resolveTheme` / `loadConfig` 解析结果为空时保留上一次成功的 theme/config，而不是回退到内置默认值。
 
@@ -347,7 +347,7 @@ iOS 由于不能在键盘 view 外绘制候选窗，候选栏固定在键盘顶�
 | --- | --- | --- |
 | `KEYTAO_CAP_NATIVE_PAGING` | 合成 `-`/`=` | `applyEngineCapabilities(to:)` 在布局解析阶段丢掉 `nextCandidatePage` / `previousCandidatePage` 键（整行被丢空就连行去掉；整套布局只剩翻页键时保留原布局，否则会把强制注入的 🌐 键一起弄没）；滑动、长按、键位栈里的同名 command 由 `changeCandidatePage(backward:)` 兜住，提示「当前 RIME 运行库不支持候选翻页」 |
 | `KEYTAO_CAP_CANDIDATE_SELECTION` / `KEYTAO_CAP_GLOBAL_CANDIDATE_SELECTION` | 合成 select key | `KeyTaoIOSKeyboardView.isSelectable(_:)` 按位判断（面板功能行自带 command，不过 librime，不受影响）：不可选时候选不再是 accessibility button 而是 `.staticText`，点击不收起展开面板、不触发触感，只交给 `keyboardView(_:didSelectCandidate:global:)` 提示「当前 RIME 运行库不支持点击选词」 |
-| `KEYTAO_CAP_CANDIDATE_HIGHLIGHT` | 高亮移动降级为 no-op，**不伪造按键** | 候选上画的高亮是 librime 自己的 `highlighted_candidate_index`（即 Space 会上屏的那一条），缺这个位也依然真实，所以**不撤**；这个位真正管的是「前端主动移动高亮」（hover、方向键），iOS 软键盘没有这类手势，也不画 hover 态，因此没有可关的东西。日后如果加了会调 `keytao_session_highlight_candidate` 的交互，必须先查这个位——`selectedGlobalCandidateIndex()` 上的注释锁了这条约束 |
+| `KEYTAO_CAP_CANDIDATE_HIGHLIGHT` | 高亮移动降级为 no-op，**不伪造按键** | 候选上画的高亮是 librime 自己的 `highlighted_candidate_index`（即 Space 会上屏的那一条），缺这个位也依然真实，所以**不撤**；这个位真正管的是「前端主动移动高亮」（hover、方向键），iOS 软键盘没有这类手势，也不画 hover 态，因此没有可关的东西。C ABI 未暴露主动移动候选高亮的入口；日后若增加该入口和交互，必须先查这个位 |
 | `KEYTAO_CAP_CANDIDATE_DELETION` | — | iOS 目前没有「忘掉这个词」手势，未接入 |
 
 ### 判断方式

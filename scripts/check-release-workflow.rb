@@ -98,7 +98,7 @@ end
 check(desktop.dig('strategy', 'fail-fast') == false, 'Run all desktop legs even if one fails')
 check(desktop['steps'].find { |s| s['uses'] == 'actions/upload-artifact@v4' }.dig('with', 'path') == '${{ matrix.artifacts }}', 'Desktop upload must use declared paths')
 {
-  'linux' => %w[build-linux.sh verify-linux-bundles.sh],
+  'linux' => %w[build-linux.sh],
   'macos' => %w[build-macos.sh verify-macos-pkg.sh verify-macos-dmg.sh],
   'windows' => %w[build-windows-flutter.ps1]
 }.each do |os, scripts|
@@ -106,6 +106,7 @@ check(desktop['steps'].find { |s| s['uses'] == 'actions/upload-artifact@v4' }.di
     check(desktop['steps'].any? { |s| s['if'] == "matrix.os_name == '#{os}'" && s.fetch('run', '').include?("scripts/#{script}") }, "Missing #{os} entrypoint: #{script}")
   end
 end
+check(File.read('scripts/container-build.sh').include?('bash scripts/verify-linux-bundles.sh "$WORK_DIR/packages/bundle" "$VERSION" --inside-container'), 'Linux container entrypoint must verify its bundles')
 check(File.read('scripts/build-windows-flutter.ps1').include?('"verify-windows-bundle.ps1") -ReleaseDir $bundleDir -InstallerPath $installer'), 'Windows entrypoint must verify its installer')
 check(desktop['steps'].any? { |s| s['if'] == "matrix.os_name == 'macos'" && s['run'] == 'bash crates/keytao-macos-ime/test-input-context.sh' }, 'macOS must run input-context regressions before packaging')
 
@@ -153,12 +154,12 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   }
   const create = new (Object.getPrototypeOf(async function() {}).constructor)('context', 'github', process.argv[2])
   ;(async () => {
-    for (const tag of ['v1.2.1-alpha.89', 'v2.3.4']) {
+    for (const [tag, prerelease] of [['v1.2.1-alpha.89', true], ['v2.3.4-beta.1', true], ['v2.3.4-rc.1', true], ['v2.3.4', false]]) {
       let payload
       await create({ref: `refs/tags/${tag}`, repo: {owner: 'test', repo: 'test'}}, {
         rest: {repos: {createRelease: async value => { payload = value; return {data: {id: 1}} }}}
       })
-      assert.equal(payload.prerelease, tag.includes('alpha'))
+      assert.equal(payload.prerelease, prerelease)
       assert.equal(payload.tag_name, tag)
       assert.equal(payload.draft, false)
       assert.equal(payload.generate_release_notes, true)
@@ -166,4 +167,4 @@ output, status = Open3.capture2e('node', '-e', <<~'JS', metadata, release_code)
   })().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 check(status.success?, "Metadata/release decision checks: #{output}")
-puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input and alpha detection"
+puts "PASS: YAML, #{paths.length} script paths, 6 release build legs + Nix pre-run and release pin sync, 10 asset names, SDK pins, dispatch isolation, version input and prerelease detection"

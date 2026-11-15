@@ -5,11 +5,14 @@
 //!
 use keytao_core::ImeState;
 use keytao_theme::{
+    panel_hit::{layout, PanelGeometry, PanelHitAreas},
     scaled_candidate_panel, CandidatePanelInput, CandidatePanelModel, PanelOrientation,
     ResolvedImeTheme, RgbaColor, ThemeCandidate, ThemeResolver, UiCapabilities,
 };
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use tiny_skia::*;
+
+use crate::globals::dll_related_dirs;
 
 // ── Font loader ───────────────────────────────────────────────────────────────
 
@@ -93,40 +96,6 @@ pub fn load_font() -> Option<FontSet> {
 
 pub struct PanelRenderer {
     fonts: Vec<fontdue::Font>,
-}
-
-/// A clickable area inside the rendered panel, in panel-local pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PanelRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-impl PanelRect {
-    fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x: x.floor() as i32,
-            y: y.floor() as i32,
-            width: width.ceil() as i32,
-            height: height.ceil() as i32,
-        }
-    }
-
-    pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
-
-/// Where the candidate options and the paging buttons ended up, so the window
-/// can turn a click into `select_candidate` / `change_page`.
-#[derive(Clone, Debug, Default)]
-pub struct PanelHitAreas {
-    /// Index-aligned with the candidates of the current page.
-    pub candidates: Vec<PanelRect>,
-    pub previous_page: Option<PanelRect>,
-    pub next_page: Option<PanelRect>,
 }
 
 pub struct RenderedPanel {
@@ -250,7 +219,6 @@ impl PanelRenderer {
             tracing::warn!("candidate panel: failed to allocate pixmap {width}x{height}");
             return RenderedPanel::empty();
         };
-        let mut hit_areas = PanelHitAreas::default();
         pm.fill(Color::from_rgba8(0, 0, 0, 0));
         draw_rounded_rect(
             &mut pm,
@@ -277,91 +245,55 @@ impl PanelRenderer {
             y += preedit_height;
         }
 
-        if model.orientation == PanelOrientation::Vertical {
-            let mut row_y = y;
-            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
-                self.draw_candidate_option(
+        let mut hit_areas = layout(&PanelGeometry {
+            vertical: model.orientation == PanelOrientation::Vertical,
+            pad_x: panel_pad_x,
+            top: y,
+            gap: panel_gap,
+            option_widths: &option_widths,
+            option_height,
+            nav_button,
+            can_go_previous: model.navigation.can_go_previous,
+            can_go_next: model.navigation.can_go_next,
+        });
+        for (candidate, rect) in model.candidates.iter().zip(hit_areas.candidates.iter()) {
+            self.draw_candidate_option(
+                &mut pm,
+                candidate,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                label_size,
+                font_size,
+                comment_size,
+                scale,
+                &theme,
+            );
+        }
+        for (rect, glyph) in [(hit_areas.previous_page, "‹"), (hit_areas.next_page, "›")] {
+            if let Some(rect) = rect {
+                self.draw_text(
                     &mut pm,
-                    candidate,
-                    panel_pad_x,
-                    row_y,
-                    *option_width,
-                    option_height,
-                    label_size,
+                    glyph,
+                    rect.x + rect.width * 0.35,
+                    rect.y + (rect.height + font_size) * 0.5 - 3.0 * scale,
+                    bgra(theme.navigation.foreground),
                     font_size,
-                    comment_size,
-                    scale,
-                    &theme,
-                );
-                hit_areas.candidates.push(PanelRect::new(
-                    panel_pad_x,
-                    row_y,
-                    *option_width,
-                    option_height,
-                ));
-                row_y += option_height + panel_gap;
-            }
-            if nav_count > 0 {
-                self.draw_navigation_row(
-                    &mut pm,
-                    panel_pad_x,
-                    row_y,
-                    nav_button,
-                    font_size,
-                    scale,
-                    &model.navigation,
-                    &theme,
-                );
-                navigation_hit_areas(
-                    &mut hit_areas,
-                    panel_pad_x,
-                    row_y,
-                    nav_button,
-                    panel_gap,
-                    &model.navigation,
                 );
             }
-        } else {
-            let mut x = panel_pad_x;
-            for (candidate, option_width) in model.candidates.iter().zip(option_widths.iter()) {
-                self.draw_candidate_option(
-                    &mut pm,
-                    candidate,
-                    x,
-                    y,
-                    *option_width,
-                    option_height,
-                    label_size,
-                    font_size,
-                    comment_size,
-                    scale,
-                    &theme,
-                );
-                hit_areas
-                    .candidates
-                    .push(PanelRect::new(x, y, *option_width, option_height));
-                x += option_width + panel_gap;
-            }
-            if nav_count > 0 {
-                self.draw_navigation_row(
-                    &mut pm,
-                    x + panel_gap,
-                    y,
-                    nav_button,
-                    font_size,
-                    scale,
-                    &model.navigation,
-                    &theme,
-                );
-                navigation_hit_areas(
-                    &mut hit_areas,
-                    x + panel_gap,
-                    y,
-                    nav_button,
-                    panel_gap,
-                    &model.navigation,
-                );
-            }
+        }
+        // Preserve Windows' integer-pixel hit bounds after drawing at subpixel positions.
+        for rect in hit_areas
+            .candidates
+            .iter_mut()
+            .chain(hit_areas.previous_page.iter_mut())
+            .chain(hit_areas.next_page.iter_mut())
+        {
+            rect.x = rect.x.floor() as i32 as f32;
+            rect.y = rect.y.floor() as i32 as f32;
+            rect.width = rect.width.ceil() as i32 as f32;
+            rect.height = rect.height.ceil() as i32 as f32;
         }
 
         // Convert tiny-skia RGBA → BGRA (platform convention for both Windows and Linux)
@@ -528,42 +460,6 @@ impl PanelRenderer {
         }
     }
 
-    fn draw_navigation_row(
-        &self,
-        pm: &mut Pixmap,
-        x: f32,
-        y: f32,
-        button_size: f32,
-        font_size: f32,
-        scale: f32,
-        navigation: &keytao_theme::PageNavigationModel,
-        theme: &keytao_theme::ResolvedImeTheme,
-    ) {
-        let mut nav_x = x;
-        let baseline = y + (button_size + font_size) * 0.5 - 3.0 * scale;
-        if navigation.can_go_previous {
-            self.draw_text(
-                pm,
-                "‹",
-                nav_x + button_size * 0.35,
-                baseline,
-                bgra(theme.navigation.foreground),
-                font_size,
-            );
-            nav_x += button_size + theme.panel.gap;
-        }
-        if navigation.can_go_next {
-            self.draw_text(
-                pm,
-                "›",
-                nav_x + button_size * 0.35,
-                baseline,
-                bgra(theme.navigation.foreground),
-                font_size,
-            );
-        }
-    }
-
     fn draw_text(
         &self,
         pm: &mut Pixmap,
@@ -667,25 +563,6 @@ impl PanelRenderer {
     }
 }
 
-/// Mirrors the button placement in `PanelRenderer::draw_navigation_row`.
-fn navigation_hit_areas(
-    hit_areas: &mut PanelHitAreas,
-    x: f32,
-    y: f32,
-    button_size: f32,
-    gap: f32,
-    navigation: &keytao_theme::PageNavigationModel,
-) {
-    let mut nav_x = x;
-    if navigation.can_go_previous {
-        hit_areas.previous_page = Some(PanelRect::new(nav_x, y, button_size, button_size));
-        nav_x += button_size + gap;
-    }
-    if navigation.can_go_next {
-        hit_areas.next_page = Some(PanelRect::new(nav_x, y, button_size, button_size));
-    }
-}
-
 // fontdue does not shape emoji sequences; isolated modifiers render as missing-glyph boxes.
 fn is_zero_width_emoji_component(ch: char) -> bool {
     matches!(
@@ -752,34 +629,6 @@ pub(crate) fn windows_theme_resolver() -> ThemeResolver {
         windows_bundled_default_theme_path().or_else(keytao_theme::default_bundled_theme_path),
         keytao_theme::default_user_theme_path(),
     )
-}
-
-fn dll_related_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(hmodule) = crate::globals::DLL_INSTANCE.get().copied() {
-        let mut buf = vec![0u16; 32768];
-        let len = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleFileNameW(
-                windows::Win32::Foundation::HMODULE(hmodule as _),
-                &mut buf,
-            )
-        } as usize;
-        if len > 0 {
-            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
-
-    if let Some(parent) = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(FsPath::to_path_buf))
-    {
-        dirs.push(parent);
-    }
-
-    dirs
 }
 
 #[inline]

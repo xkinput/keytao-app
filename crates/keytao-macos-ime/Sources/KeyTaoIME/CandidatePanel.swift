@@ -85,8 +85,8 @@ class CandidatePanel: NSPanel {
     /// Renders the panel model keytao-theme already built: labels, highlight and
     /// page availability are decided there, so every frontend shows the same
     /// candidate list.
-    func update(model: KeyTaoPanelModel, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
-        let theme = ImeThemeManager.shared.theme().scaledCandidatePanel()
+    func update(model: KeyTaoPanelModel, theme: ImeTheme, windowLevel: NSWindow.Level, near cursorRect: NSRect) {
+        let theme = theme.scaledCandidatePanel()
         level = windowLevel
         apply(theme, orientation: model.orientation)
         let screen = NSScreen.screen(containing: cursorRect) ?? NSScreen.main

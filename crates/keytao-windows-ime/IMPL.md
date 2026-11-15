@@ -33,9 +33,9 @@ Windows 输入法实现为 TSF TIP DLL：
 
 `DllUnregisterServer` 会先用 `InstallLayoutOrTip` 的 uninstall flag 从当前用户输入法列表移除 KeyTao，再反向移除 TSF profile、category 和 CLSID 注册表树。
 
-x64 安装包同时携带 `current` x64、`x86` 和 `arm64x` runtime。ARM64X runtime 由 ARM64X forwarder、原生 ARM64 TIP + `rime-arm64.dll`、x64 TIP + `rime.dll` 组成；Windows on ARM 的原生和模拟进程会经同一个 COM 路径加载匹配目标。NSIS 先把完整 runtime 复制到 `%ProgramData%\KeyTao\keytao-windows-ime-runtime\<version>\<unique>`，再先注册 x86、最后注册 native/ARM64X。每次安装使用新目录，避免 `ctfmon`、浏览器或 WebView 已加载旧 TIP 时覆盖 DLL 失败。活动目录写入 `HKLM\Software\KeyTao`，卸载时反注册后用 `/REBOOTOK` 清理已加载旧文件。
+x64 安装包同时携带 `current` x64、`x86` 和 `arm64x` runtime。ARM64X runtime 由 ARM64X forwarder、原生 ARM64 TIP + `rime-arm64.dll`、x64 TIP + `rime.dll` 组成；Windows on ARM 的原生和模拟进程会经同一个 COM 路径加载匹配目标。NSIS 先把完整 runtime 复制到 `%ProgramFiles%\KeyTao\keytao-windows-ime-runtime\<version>-<unique>`，再先注册 x86、最后注册 native/ARM64X。每次安装使用新目录，避免 `ctfmon`、浏览器或 WebView 已加载旧 TIP 时覆盖 DLL 失败。活动目录写入 `HKLM\Software\KeyTao`，卸载时反注册后用 `/REBOOTOK` 清理已加载旧文件。
 
-Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染界面，再通过后台任务检查 TSF 状态。若 COM DLL 已完整注册但当前 profile 未启用，App 会在未提权的当前用户进程先调用 `InstallLayoutOrTip`、再调用 `EnableLanguageProfile` 并验证最终状态；这也覆盖标准用户用另一管理员账户确认 UAC、导致安装器无法修改原用户输入列表的情况。只有 COM/runtime 不完整时才异步触发提升权限 PowerShell 流程。该流程把 native/ARM64X 与 x86 runtime 一起复制到新的 `%ProgramData%` 版本目录，再按位数注册；状态通过 Rust bridge 状态事件回传到界面。界面只保留刷新入口，不提供手动重装 TSF 或卸载按钮，避免注册流程阻塞首屏显示。
+Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染界面，再通过后台任务检查 TSF 状态。若 COM DLL 已完整注册但当前 profile 未启用，App 会在未提权的当前用户进程先调用 `InstallLayoutOrTip`、再调用 `EnableLanguageProfile` 并验证最终状态；这也覆盖标准用户用另一管理员账户确认 UAC、导致安装器无法修改原用户输入列表的情况。只有 COM/runtime 不完整时才异步触发提升权限 PowerShell 流程。该流程把 native/ARM64X 与 x86 runtime 一起复制到新的 `%ProgramFiles%\KeyTao\keytao-windows-ime-runtime` 版本目录，再按位数注册；状态通过 Rust bridge 状态事件回传到界面。界面只保留刷新入口，不提供手动重装 TSF 或卸载按钮，避免注册流程阻塞首屏显示。
 主 App 状态检查通过 Unicode Registry API 和显式 `KEY_WOW64_32KEY` / `KEY_WOW64_64KEY` 分开读取 x64/x86 COM view，再核对 DLL path 和 TSF profile enabled 状态：`registered=true` 必须同时满足两套已打包 DLL 路径匹配注册表，并且 TSF profile 已启用。这样既不会受 `reg.exe` 输出代码页影响，也不会把“某一个 COM DLL 注册表存在”误报成“输入法在所有应用中可切换”。
 
 ## TSF 官方契约对齐点
@@ -120,9 +120,9 @@ Flutter 主 App 在启动后会先完成 Rust bridge 状态事件监听并渲染
 1. TSF 调用 `DllGetClassObject`。
 2. `ClassFactory::CreateInstance` 创建 `TextService`。
 3. `TextService::Activate` 只保存 `ITfThreadMgr` / `client_id` / active flags，并注册 foreground `ITfKeyEventSink`、`ITfThreadMgrEventSink` 和 `ITfThreadFocusSink`；不在激活时初始化 librime，避免输入法全局切换时多个宿主进程同时争抢 CPU、磁盘和用户数据锁。
-4. 文档 focus/context push 完成后检查 engine mailbox 和 reload stamp，并按需启动后台 warmup/reload；如果 profile 激活前宿主已经有焦点文档，则在 `Activate` 完成全部 TSF 接线后只调度后台任务，不在 `Activate`、key focus 或 thread focus 回调的 UI 线程中初始化引擎。后台任务不持有 `TsfState`，只创建 `keytao_core::ImeRuntime`、调用 `init_without_deploy()`、创建 `ImeRuntimeSession` 并把结果写入 engine mailbox。跨进程命名互斥量会串行化同一 Windows session 内的初始化和 reload，避免多个宿主同时争用 Rime 用户数据。按键测试回调也会在尚未启动时兜底调度，但当前按键继续放行；TIP 绝不在宿主应用进程里运行 Rime deployment。
+4. 文档 focus/context push 完成后检查 engine mailbox 和 reload 状态，并按需启动后台 warmup/reload；如果 profile 激活前宿主已经有焦点文档，则在 `Activate` 完成全部 TSF 接线后只调度后台任务，不在 `Activate`、key focus 或 thread focus 回调的 UI 线程中初始化引擎。后台任务不持有 `TsfState`，默认通过 pipe 连接 `keytao-windows-ime-server.exe` 并创建 session；显式 `EngineMode=0` 或连接失败后的 no-learning 回退才在进程内创建 `ImeRuntime` 和 session，结果写入 engine mailbox。详见 [Windows IME engine server](../../docs/windows-ime-server.md)。按键测试回调也会在尚未启动时兜底调度，但当前按键继续放行。
 5. warmup 未完成或 reload 正在运行时，`OnTestKeyDown` 与 `OnKeyDown` 都放行按键，不让测试回调和真实回调产生相反的接管状态。首次 warmup 失败后，测试回调按 5 秒退避重新启动后台 warmup；检测到 reload stamp 变化时，测试回调直接启动后台 reload，避免因测试结果为 false 而永远进不了真实按键回调。
-6. 后续按键通过 `KeyEventSink::OnKeyDown` 进入通用 runtime，再由 `keytao-core` 操作 librime。
+6. 后续按键通过 `KeyEventSink::OnKeyDown` 进入 engine backend，默认由 server 中的 `keytao-core` 操作 librime。
 
 `Activate` 只做轻量 TSF 接线，前台 focus 到来后才调度预热，避免 Windows 在输入法切换、枚举或批量加载 TIP DLL 时触发多进程 librime 初始化。初始化失败时按键会放行并记录错误，不会让 TSF 激活本身失败。
 

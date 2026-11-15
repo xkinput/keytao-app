@@ -404,6 +404,7 @@ async fn downloading_identical_local_package_reuses_key() {
             &core,
             "local-rime",
             Some("v1"),
+            "cloud",
             Some("Stored name"),
             &bytes,
             &root

@@ -350,14 +350,6 @@ done
 
 echo "==> Signing macOS IME bundle..."
 ENTITLEMENTS="$SCRIPT_DIR/dev.entitlements.plist"
-cat > "$ENTITLEMENTS" << 'ENTEOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>com.apple.security.app-sandbox</key><false/>
-<key>com.apple.security.cs.disable-library-validation</key><true/>
-</dict></plist>
-ENTEOF
 
 APPLE_DEV_CERT=""
 if [ "${CI:-}" != "true" ]; then

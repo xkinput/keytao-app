@@ -1,5 +1,6 @@
 //! Global DLL state: HMODULE handle + reference counters.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 use windows::{
@@ -7,7 +8,7 @@ use windows::{
     Win32::{
         Foundation::HMODULE,
         System::LibraryLoader::{
-            GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             GET_MODULE_HANDLE_EX_FLAG_PIN,
         },
     },
@@ -15,6 +16,29 @@ use windows::{
 
 #[cfg(target_os = "windows")]
 pub static DLL_INSTANCE: OnceLock<isize> = OnceLock::new();
+
+pub(crate) fn dll_related_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(hmodule) = DLL_INSTANCE.get().copied() {
+        let mut buf = vec![0u16; 32768];
+        let len = unsafe { GetModuleFileNameW(HMODULE(hmodule as _), &mut buf) } as usize;
+        if len > 0 {
+            if let Some(parent) = PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        dirs.push(parent);
+    }
+
+    dirs
+}
 
 /// Counts live COM objects and worker activities executing code from this DLL.
 static DLL_OBJ_COUNT: AtomicI32 = AtomicI32::new(0);

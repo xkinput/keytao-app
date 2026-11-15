@@ -40,11 +40,6 @@ data class KeytaoPanelModel(
     val navigation: KeytaoPanelNavigation = KeytaoPanelNavigation(),
 )
 
-data class KeytaoModeHintModel(
-    val asciiMode: Boolean = false,
-    val text: String = "",
-)
-
 /**
  * `cursor`, `selStart` and `selEnd` are Unicode scalar offsets into [preedit],
  * the unit keytao-core publishes. `InputConnection` counts UTF-16 units, so
@@ -68,7 +63,6 @@ data class KeytaoImeState(
     val schemaName: String = "",
     val accepted: Boolean = false,
     val candidatePanel: KeytaoPanelModel = KeytaoPanelModel(),
-    val modeHint: KeytaoModeHintModel = KeytaoModeHintModel(),
 ) {
     val hasComposition: Boolean
         get() = preedit.isNotEmpty() || candidates.isNotEmpty()
@@ -101,7 +95,6 @@ data class KeytaoImeState(
                     schemaName = root.safeString("schemaName"),
                     accepted = root.optBoolean("accepted"),
                     candidatePanel = parsePanelModel(root.optJSONObject("candidatePanel")),
-                    modeHint = parseModeHint(root.optJSONObject("modeHint")),
                 )
             }.getOrNull()
         }
@@ -154,14 +147,6 @@ data class KeytaoImeState(
                     canGoPrevious = navigationJson?.optBoolean("canGoPrevious") ?: false,
                     canGoNext = navigationJson?.optBoolean("canGoNext") ?: false,
                 ),
-            )
-        }
-
-        private fun parseModeHint(json: JSONObject?): KeytaoModeHintModel {
-            if (json == null) return KeytaoModeHintModel()
-            return KeytaoModeHintModel(
-                asciiMode = json.optBoolean("asciiMode"),
-                text = json.safeString("text"),
             )
         }
 

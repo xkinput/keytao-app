@@ -229,7 +229,6 @@ struct AndroidImeStateJson {
     schema_name: String,
     accepted: bool,
     candidate_panel: keytao_theme::CandidatePanelModel,
-    mode_hint: keytao_theme::ModeHintModel,
 }
 
 #[cfg(target_os = "android")]
@@ -255,7 +254,6 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
         },
         &ui_capabilities,
     );
-    let mode_hint = theme.mode_hint_model(state.ascii_mode);
     let value = AndroidImeStateJson {
         preedit: state.preedit,
         cursor: state.cursor,
@@ -273,7 +271,6 @@ fn android_state_json(state: keytao_core::ImeState, accepted: bool) -> String {
         schema_name: state.schema_name,
         accepted,
         candidate_panel,
-        mode_hint,
     };
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
 }
@@ -601,6 +598,29 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativePrepare
             jni_string(&mut env, &json)
         },
     )
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeMergeDefaultCustom(
+    mut env: JNIEnv<'_>,
+    _receiver: JObject<'_>,
+    existing: JString<'_>,
+    package_content: JString<'_>,
+) -> jstring {
+    android_jni_guard("nativeMergeDefaultCustom", std::ptr::null_mut(), || {
+        let has_existing = !existing.is_null();
+        let existing = optional_jni_raw_text(&mut env, existing);
+        if has_existing && existing.is_none() {
+            return std::ptr::null_mut();
+        }
+        let Some(package) = optional_jni_raw_text(&mut env, package_content) else {
+            return std::ptr::null_mut();
+        };
+        let (merged, schemas) = crate::install::merge_default_custom(existing.as_deref(), &package);
+        let json = serde_json::json!({"mergedContent": merged, "userSchemas": schemas});
+        jni_string(&mut env, &json.to_string())
+    })
 }
 
 #[cfg(target_os = "android")]

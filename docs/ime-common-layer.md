@@ -17,7 +17,7 @@
 
 除 librime 调度外，下面这些此前分散在平台层的规则现在也只有通用层一份实现，平台必须调用而不是复制：
 
-- reload stamp 的路径、签名与变更检测（`ReloadStamp` / `ReloadStampWatcher`，见《Reload 规范》）。
+- reload stamp 的路径、签名与变更检测（`ReloadStamp` / `ReloadStampGate`，见《Reload 规范》）。
 - 候选选择、高亮、删除、翻页、提交、清空、Enter（走 librime 官方 API，见《候选交互规范》）。
 - 文本到 keysym 的映射、Enter 判定、空 composition bypass 判定、CapsLock 归一（`key_policy`，见《按键事件规范》）。
 - 光标与选区的偏移单位换算（`char_offset_from_utf8` / `utf16_offset_from_chars`，见《统一状态模型》）。
@@ -147,13 +147,13 @@ native key event
 
 - 一个 `Engine` 对应一个 librime session。
 - 每个输入上下文必须独立创建 session，不能多个客户端共享一个 session（已登记的平台偏离见《不变量》）。
-- `Engine` / `ImeRuntimeSession` 的公开操作是唯一的 session 状态入口：
+- 平台通过 `ImeRuntimeSession` 的公开操作访问 session 状态，`Engine` 仅供 core 内部使用：
 
 | 分类 | 操作 |
 | --- | --- |
 | 按键 | `process_key_result(keycode, mask)`、`process_enter()` |
 | 只读 | `state()`、`raw_input()`、`is_ascii_mode()`、`input_policy()`、`all_candidates_limited(max)` |
-| 候选 | `select_candidate_on_page(index)`（`select_candidate` 是其别名）、`highlight_candidate_on_page(index)`、`delete_candidate_on_page_result(index)`、`change_page(backward)` |
+| 候选 | `select_candidate_on_page(index)`、`highlight_candidate_on_page(index)`、`delete_candidate_on_page_result(index)`、`change_page(backward)` |
 | 组字收尾 | `commit_composition()`、`clear_composition()`（`reset()` 是其别名）、`commit_raw_input()` |
 | 模式与策略 | `set_ascii_mode(enabled)`、`set_input_policy(policy)` |
 
@@ -208,34 +208,35 @@ native key event
 
 ### panic 边界
 
-- `keytao-core-ffi` 的**全部** `extern "C"` 导出（含 `keytao_free_string` / `keytao_free_state`）与 `keytao-app-core::android_jni` 的**全部** `Java_*` JNI 导出都在 `catch_unwind(AssertUnwindSafe(..))` 内。
+- `keytao-core-ffi` 的**全部** `extern "C"` 导出（含 `keytao_free_string`）与 `keytao-app-core::android_jni` 的**全部** `Java_*` JNI 导出都在 `catch_unwind(AssertUnwindSafe(..))` 内。
 - panic 时返回 null / false / 0，并记一条 error 日志：C 侧写 stderr，Android 侧写 logcat（TAG=`KeytaoNative`）。日志只含 panic 消息，不含按键与提交内容。
 - **不变量**：平台拿到 null / false 必须按“本次操作没有发生”处理，保留上一次的 UI 状态，不能当成崩溃或据此销毁 session。
 
 ### 返回值所有权
 
-1. 每个返回的 `KeytaoState*` 必须调用 `keytao_free_state()`。
-2. 每个返回的 `char *`（含所有 `*_json` 入口）必须调用 `keytao_free_string()`。
-3. `KeytaoState` 内所有字符串都是 UTF-8 C string；`committed` 和 `select_keys` 用空字符串表示无值。
-4. 平台前端持有 session handle 时，应在输入上下文销毁、失焦彻底结束或进程退出时 `keytao_destroy_session()`。
+1. 每个返回的非 null `char *`（含所有 `*_json` 入口）都是 UTF-8 C string，必须调用 `keytao_free_string()`。
+2. JSON 状态的 `committed` 和 `selectKeys` 用空字符串表示无值；null 返回值表示本次操作未完成，平台必须保留上一次状态。
+3. 平台前端持有 session handle 时，应在输入上下文销毁、失焦彻底结束或进程退出时 `keytao_destroy_session()`。
 
 ### C ABI 分组
 
 | 分组 | 入口 |
 | --- | --- |
 | 生命周期 | `keytao_init(user_dir, shared_dir)`、`keytao_is_initialized()`、`keytao_reload()`、`keytao_create_session()`、`keytao_destroy_session(session)` |
-| 按键 | `keytao_session_process_key(session, keyval, modifiers)`、`keytao_session_process_enter(session)` |
-| 候选 | `keytao_session_select_candidate(session, index)`、`keytao_session_highlight_candidate(session, index)`、`keytao_session_change_page(session, backward)`、`keytao_session_all_candidates_json(session, limit)` |
-| 组字收尾 | `keytao_session_commit_composition(session)`、`keytao_session_clear_composition(session)`、`keytao_session_reset(session)` |
-| 状态与模式 | `keytao_session_state(session)`、`keytao_session_get_ascii_mode(session)`、`keytao_session_set_ascii_mode(session, enabled)` |
-| 输入策略 | `keytao_session_set_input_policy(session, composing, learning)`、`keytao_session_input_policy_composing(session)` |
+| 按键 | `keytao_session_process_key_json(session, keyval, modifiers)`、`keytao_session_process_enter_json(session)` |
+| 候选 | `keytao_session_select_candidate_json(session, index)`、`keytao_session_select_candidate_global_json(session, index)`、`keytao_session_delete_candidate_json(session, index)`、`keytao_session_candidate_is_user_phrase(session, index)`、`keytao_session_change_page_json(session, backward)`、`keytao_session_all_candidates_json(session, limit)` |
+| 组字收尾 | `keytao_session_commit_composition_json(session)`、`keytao_session_clear_composition_json(session)`、`keytao_session_reset_json(session)` |
+| 状态与模式 | `keytao_session_state_json(session)`、`keytao_session_get_ascii_mode(session)`、`keytao_session_set_ascii_mode_json(session, enabled)`、`keytao_session_get_english_mode(session)`、`keytao_session_set_english_mode_json(session, enabled)` |
+| 方案与选项 | `keytao_session_list_schemas_json(session)`、`keytao_session_schema_switches_json(session)`、`keytao_session_current_schema_json(session)`、`keytao_session_select_schema_json(session, schema_id)`、`keytao_session_get_option(session, name)`、`keytao_session_set_option_json(session, name, value)` |
+| 能力 | `keytao_engine_capabilities()`、`keytao_session_capabilities(session)` |
+| 输入策略 | `keytao_session_set_input_policy_json(session, composing, learning)`；返回 null 时保留上一次 UI 状态 |
 | key policy | `keytao_text_to_keysym(utf8)`、`keytao_key_policy_is_enter(keyval)`、`keytao_key_policy_should_bypass(session, keyval, modifiers)`、`keytao_utf16_offset_from_chars(text, char_offset)` |
-| reload stamp | `keytao_reload_stamp_path_at(user_dir)` / `_signature_at(user_dir)`、`keytao_reload_stamp_changed()`、`keytao_reload_if_stamp_changed()` |
+| reload stamp | `keytao_reload_stamp_path_at(user_dir)`、`keytao_reload_if_stamp_changed()` |
 | 进程级注入 | `keytao_set_ui_capabilities(...)`、`keytao_set_theme_paths(default, user)`、`keytao_set_system_color_scheme("dark"/"light"/null)` |
 | 主题 | `keytao_resolve_theme_json(...)`、`keytao_resolve_keyboard_json(...)`、`keytao_default_keyboard_yaml()` |
-| 释放 | `keytao_free_state(state)`、`keytao_free_string(ptr)` |
+| 释放 | `keytao_free_string(ptr)` |
 
-上表中除只读查询与释放外，绝大多数入口都另有一个 `*_json` 版本，返回带 `CandidatePanelModel` / `ModeHintModel` 的完整 UI JSON，供自绘前端使用。
+状态操作通过 `*_json` 入口返回带 `CandidatePanelModel` / `ModeHintModel` 的完整 UI JSON，供自绘前端使用；返回字符串的所有权遵循上文规则。
 
 ### 进程级注入必须在第一次取 UI model 之前完成
 
@@ -248,10 +249,6 @@ JSON 状态路径的三项进程级设置默认值是为软键盘候选条准备
 ### JNI 侧对应关系
 
 Kotlin 用到的入口与 C 侧一一对应，命名去掉 `keytao_` 前缀改为 `native` 驼峰：`nativeProcessKey` / `nativeProcessEnter` / `nativeSelectCandidate` / `nativeDeleteCandidate` / `nativeChangePage` / `nativeCommitComposition` / `nativeClearComposition` / `nativeReset` / `nativeSetInputPolicy` / `nativeInputPolicyComposing` / `nativeInputPolicyLearning` / `nativeTextToKeysym` / `nativeShouldBypassKey` / `nativeUtf16OffsetFromChars` / `nativeReloadStampPath(userDir)` / `nativeReloadStampSignature(userDir)` / `nativeAllCandidates(session, limit)`。
-
-### 旧 singleton 入口
-
-FFI 里仍保留旧的 module-level singleton API（`keytao_process_key()`、`keytao_select_candidate()`、`keytao_change_page()`、`keytao_reset()`）；它们内部也复用一个 `ImeRuntimeSession`。新平台前端不要使用这些旧入口，除非是单上下文工具。
 
 ## 统一状态模型
 
@@ -431,9 +428,9 @@ Windows 的时序约束值得单列：`Deactivate` 返回后 TSF 立即释放 cl
 通用层提供 `InputContextPolicy { composing: bool, learning: bool }`：
 
 - `Default` 是两者皆 true；`InputContextPolicy::sensitive()` 是两者皆 false。
-- `set_input_policy(policy)`（FFI `keytao_session_set_input_policy`，JNI `nativeSetInputPolicy`）。从 `composing = true` 切到 false 时，core 会先 `clear_composition()` 并把要应用的状态返回给平台清 UI。
+- `set_input_policy(policy)`（FFI `keytao_session_set_input_policy_json`，JNI `nativeSetInputPolicy`）。从 `composing = true` 切到 false 时，core 会先 `clear_composition()` 并把要应用的状态返回给平台清 UI。
 - `composing == false` 时按键**完全不进 librime**，直接返回 `accepted = false` 加一份只读快照（保留 `ascii_mode` / `schema_name` 供模式提示），因此不产生 preedit/候选，也不可能发生用户词学习。
-- 只读查询：`input_policy()` / `keytao_session_input_policy_composing` / `_learning` / `nativeInputPolicyComposing` / `nativeInputPolicyLearning`。
+- 只读查询：Rust `input_policy()`，JNI `nativeInputPolicyComposing` / `nativeInputPolicyLearning`。
 - 策略存在 session 内部，跨 Engine 重建（reload）存活。
 
 **已知限制**：librime 没有 per-session 关闭用户词记忆的开关（`memorize` 是 translator 的 schema 级配置）。因此 `learning = false` 只有在 `composing = false` 时被真正强制；单独把 `learning` 置 false 而保持 `composing = true` 时，它只是一个交给平台自律的标志，用于关闭剪贴板记忆、建议和输入历史。
@@ -530,19 +527,19 @@ macOS release CI 必须执行 `scripts/build-macos.sh`、`scripts/verify-macos-p
 
 ### 唯一实现在 `keytao-core`
 
-路径、写入、签名、变更检测都只有一份实现，**平台与 App 都不得再自己拼**：
+路径、写入与签名统一由 `ReloadStamp` 实现，**平台与 App 都不得再自己拼**。Linux 的变更检测使用 `ReloadStampGate`，FFI 根据已加载的 deployment 状态执行 peek/commit：
 
 | 用途 | Rust | C ABI | JNI |
 | --- | --- | --- | --- |
 | 路径 | `ReloadStamp::path(user_dir)` / `default_path()` | `keytao_reload_stamp_path_at(user_dir)` | `nativeReloadStampPath(userDir)` |
 | 写入（只有 App 调） | `ReloadStamp::write(user_dir)` / `write_default()` | — | — |
-| 签名 | `ReloadStamp::current_signature(user_dir)` / `signature_at(path)` | `keytao_reload_stamp_signature_at(user_dir)` | `nativeReloadStampSignature(userDir)` |
-| 变更检测 | `ReloadStampWatcher::has_changed()` | `keytao_reload_stamp_changed()` | — |
+| 签名 | `ReloadStamp::current_signature(user_dir)` / `signature_at(path)` | — | `nativeReloadStampSignature(userDir)` |
+| 变更检测 | `ReloadStampGate::pending()` / `commit(signature)` | — | — |
 | 检测并 reload | — | `keytao_reload_if_stamp_changed()` | — |
 
-签名格式固定为 `<len>:<mtime_nanos>:<fnv1a64 hex16>`，同时挡住“粗粒度时间戳”和“长度与 mtime 相同但内容变了”两种漏检。**stamp 缺失不算 reload 请求**（`signature` 返回空，`has_changed()` 返回 false）。
+签名格式固定为 `<len>:<mtime_nanos>:<fnv1a64 hex16>`，同时挡住“粗粒度时间戳”和“长度与 mtime 相同但内容变了”两种漏检。**stamp 缺失不算 reload 请求**（`signature` 与 `pending()` 返回空）。`ReloadStampGate::new()` 以启动时已加载的 stamp 建立基线；只有 reload 成功后才 `commit()` 本次加载的签名，失败及加载期间产生的新请求都会保留。FFI 使用 `keytao_reload_if_stamp_changed()` 完成同样的检测与成功后提交。
 
-带 `_at(user_dir)` 的入口不依赖 `keytao_init` 是否成功，供前端在初始化之前建立基线、或用于文件系统事件监听。`keytao_reload_if_stamp_changed()` 只在 reload 真的执行成功后才把请求标记为已消费，一次失败的 reload 会在下个 tick 重试而不是被吞掉。
+`keytao_reload_stamp_path_at(user_dir)` 不依赖 `keytao_init` 是否成功，供前端在初始化之前建立文件系统事件监听。`keytao_reload_if_stamp_changed()` 只在 reload 真的执行成功后才把请求标记为已消费，一次失败的 reload 会在下个 tick 重试而不是被吞掉。
 
 App 侧同理：`ReloadStamp::write()` 是唯一写入口，此前 App 写纳秒、Android 写毫秒、iOS 写纳秒三套格式已合并，App 报给前端的 `reloadStampSignature` 和输入法比较的签名从此是同一个函数算出来的。
 
@@ -552,7 +549,7 @@ reload 会持全局锁并短暂阻塞该 runtime 的全部 session 调用（macO
 
 | 平台 | 检测方式 |
 | --- | --- |
-| Linux daemon | 独立线程上的 `ReloadStampWatcher::has_changed()`，每秒一次 |
+| Linux daemon | 独立线程上的 `ReloadStampGate::pending()`，每秒一次；reload 成功后 `commit()` |
 | macOS | 后台队列上的 `DispatchSource`（文件存在时监听文件、不存在时监听其目录），`activateServer` 异步兜底检查一次；按键路径没有任何文件 I/O |
 | Windows | 按键路径的 `stat` 有 250ms 节流，focus / context / thread focus 回调强制失效缓存 |
 | Android | `onStartInputView` 触发检测，但执行在后台线程 |
@@ -596,7 +593,7 @@ ResolvedImeTheme + Model
 
 兼容口径：旧 `theme.yaml` 里的根级 `keyboard:` 段**仍可解析**，把该文件路径传给 `resolve_mobile_layout_from_paths` 即可继续生效（它同时接受 `keyboard.yaml` 文档与带 `keyboard:` 段的 `theme.yaml`）；但 `light:` / `dark:` 变体不再能覆盖键盘布局。
 
-`keyboard.yaml` 的种子写入按分层约定应由 App 负责。当前只有 iOS 键盘扩展在做（且已改为“仅在文件缺失或为空时写、且不在冷启动主线程”），在 App 补上之前扩展侧不能删这段逻辑，否则用户会失去可编辑的布局文件。
+Both Android and iOS apps seed `keyboard.yaml` when it is missing or empty and refresh untouched defaults by hash. On iOS, the existing hash must match the saved seed hash; known legacy default hashes are considered only when the saved seed hash is absent or empty. User-edited layouts with other hashes are preserved. The iOS keyboard extension only reads the shared configuration; it does not seed it.
 
 `theme.yaml` v2 只表达跨平台可落地语义：
 
@@ -705,7 +702,7 @@ KeyTao App 的理想操作方式：
 3. Session：为每个输入上下文创建独立 `ImeRuntimeSession`，并在上下文销毁时释放。
 4. Key map：把平台原生 key event 转为 X11 keysym + Rime modifier mask；文本到 keysym 一律调 `keytao_text_to_keysym` / `nativeTextToKeysym`，返回 0 时直接上屏。
 5. Bypass：调 `keytao_key_policy_should_bypass` / `nativeShouldBypassKey`；ascii 模式本身不是放行理由。Windows TSF 在此之前执行平台应用快捷键策略（见 Windows IMPL），其它平台保留各自的系统快捷键处理。
-6. Process：调用 `ImeRuntimeSession::process_key_result()` 或 `keytao_session_process_key()`；Enter 走 `process_enter()`。
+6. Process：调用 `ImeRuntimeSession::process_key_result()` 或 `keytao_session_process_key_json()`；Enter 走 `process_enter()`。
 7. Apply state：按固定顺序应用 `committed`、`preedit`、`cursor`、`candidates`、`ascii_mode`；`cursor` / `sel_start` / `sel_end` 用 `keytao_utf16_offset_from_chars` 之类的官方换算。
 8. Candidate actions：实现 select candidate on page、highlight、change page、clear/commit composition，包括鼠标点选。
 9. Mode switch：实现 solo Shift release，必要时提供 ascii mode fallback。
@@ -740,7 +737,7 @@ KeyTao App 的理想操作方式：
 已收敛：
 
 - `keytao-core::key_policy` 现在还收敛了 text→keysym（`keysym_for_char` / `keysym_for_text` / `char_for_keysym`，非 Latin-1 用 `0x01000000|cp`）、CapsLock 归一（`normalize_key_for_modifiers`）、Enter 决策（`enter_action`）、系统保留修饰键判定（`is_system_reserved_modifier`）以及空 composition bypass。Swift/Kotlin 侧经 FFI/JNI（`keytao_text_to_keysym` / `keytao_key_policy_should_bypass` / `keytao_key_policy_is_enter` 及 `native*` 对应项）调用，五端不再各写一份。
-- reload stamp 的路径、写入、签名与变更检测唯一实现在 `keytao-core::ReloadStamp` / `ReloadStampWatcher`；五平台与 App 的私有签名逻辑（此前 App 纳秒 / Android 毫秒 / iOS 纳秒三套）已全部删除改调该 API。macOS 已改用后台 `DispatchSource` + `keytao_reload_if_stamp_changed()`，不再在 Swift 层每次 handle 前比较 stamp；Windows 按键路径 stat 加 250ms 节流并由 focus/context 回调失效缓存；Android 在 `onStartInputView` 触发但执行在后台线程；iOS / Linux daemon 同步接入。
+- reload stamp 的路径、写入与签名统一实现在 `keytao-core::ReloadStamp`；Linux daemon 使用 `ReloadStampGate` 的 peek/commit API，FFI 的 `keytao_reload_if_stamp_changed()` 根据已加载的 deployment 状态提交成功的 reload。五平台与 App 的私有签名逻辑（此前 App 纳秒 / Android 毫秒 / iOS 纳秒三套）已全部删除改调该 API。macOS 使用后台 `DispatchSource` + `keytao_reload_if_stamp_changed()`，不再在 Swift 层每次 handle 前比较 stamp；Windows 按键路径 stat 加 250ms 节流并由 focus/context 回调失效缓存；Android 在 `onStartInputView` 触发但执行在后台线程；iOS 同步接入。
 - macOS `commitComposition` 与普通 Return 路径都使用 `XK_Return`/`0xff0d`；五端 Enter 只有 `ImeRuntimeSession::process_enter()` 一个实现。候选/翻页/清空/提交走 librime 官方 API；数字/选择键不再本地拦截；失焦收尾只有 `commit_composition()` / `clear_composition()`，不再伪造 Enter/Escape。
 - macOS 消费 FFI 的 `CandidatePanelModel` / `ModeHintModel`（cross-9），删除 Swift 侧重写的 label/高亮/分页逻辑；theme 层的移动端软键盘布局已从共享 `ResolvedImeTheme` 分家到 `keytao-theme::mobile_layout`（`keyboard.yaml`）。
 - Linux daemon 日志已从 `/tmp/keytao-ime.log` 固定路径移到 `$XDG_STATE_HOME/keytao/log`（目录 0700，启动时清理旧 `/tmp` 日志）；全平台 release 默认级别不打按键、preedit 全文与 keysym 明细。

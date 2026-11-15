@@ -84,6 +84,33 @@ fn payload(request: &str) -> Value {
     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
 
+#[test]
+fn submission_account_requires_positive_id_and_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path());
+    for (id, token, expected) in [
+        (Some(7), Some("stored-token"), Some(7)),
+        (Some(0), Some("stored-token"), None),
+        (Some(-1), Some("stored-token"), None),
+        (None, Some("stored-token"), None),
+        (Some(7), Some(" \t"), None),
+        (Some(7), None, None),
+    ] {
+        core.update_state(|state| {
+            state.user = id.map(|id| json!({"id": id}));
+            state.auth_token = token.map(str::to_owned);
+        })
+        .unwrap();
+        match expected {
+            Some(id) => assert_eq!(account_id(&core).unwrap(), id),
+            None => assert!(matches!(
+                account_id(&core),
+                Err(CoreError::Permission(message)) if message == "请先登录 KeyTao 账号"
+            )),
+        }
+    }
+}
+
 #[tokio::test]
 async fn submit_follows_server_payload_and_warning_snapshot_contract() {
     let dir = tempfile::tempdir().unwrap();

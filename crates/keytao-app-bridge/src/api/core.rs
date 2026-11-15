@@ -303,14 +303,8 @@ pub async fn lookup_user_word(
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     runtime::dto(
-        keytao_app_core::user_words::lookup_user_word(
-            &state.core,
-            &scheme_key,
-            &state.host.user_root()?,
-            &word,
-            &code,
-        )
-        .map_err(|error| error.to_string())?,
+        keytao_app_core::user_words::lookup_user_word(&state.core, &scheme_key, &word, &code)
+            .map_err(|error| error.to_string())?,
     )
 }
 
@@ -1229,21 +1223,18 @@ pub fn linux_ime_status() -> Result<LinuxImeStatusDto, String> {
 }
 
 /// The daemon outlives the app; there is intentionally no stop-on-exit hook.
-pub fn linux_start_ime(restart: bool) -> Result<LinuxImeStatusDto, String> {
+pub fn linux_start_ime() -> Result<LinuxImeStatusDto, String> {
     #[cfg(target_os = "linux")]
     {
         let state = runtime::state()?;
         runtime::dto(keytao_app_core::ime_status::linux::launch_keytao_ime(
             &state.core,
             &state.host,
-            restart,
+            false,
         )?)
     }
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = restart;
-        Err("Linux IME is only available on Linux".into())
-    }
+    Err("Linux IME is only available on Linux".into())
 }
 
 pub fn get_component_versions() -> Result<ComponentVersionsDto, String> {

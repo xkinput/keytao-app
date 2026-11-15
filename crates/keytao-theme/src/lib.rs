@@ -9,6 +9,7 @@
 //! [`mobile_layout`], resolved from its own `keyboard.yaml` document.
 
 pub mod mobile_layout;
+pub mod panel_hit;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -512,31 +513,49 @@ impl ThemeResolver {
     }
 
     pub fn current(&self) -> ResolvedImeTheme {
-        let signature = self.signature();
-        let system_scheme = self
-            .system_scheme
-            .unwrap_or_else(cached_system_effective_color_scheme);
         let Ok(mut cache) = self.cache.lock() else {
             return resolve_theme_from_paths_with_system_scheme(
                 self.default_theme_path.as_deref(),
                 self.user_theme_path.as_deref(),
-                system_scheme,
+                self.system_scheme
+                    .unwrap_or_else(cached_system_effective_color_scheme),
             );
         };
+        let mut system_scheme = match cache.theme.ui.color_scheme {
+            UiColorScheme::Auto => self
+                .system_scheme
+                .unwrap_or_else(cached_system_effective_color_scheme),
+            UiColorScheme::Light => EffectiveColorScheme::Light,
+            UiColorScheme::Dark => EffectiveColorScheme::Dark,
+        };
+        let mut signature = self.signature(system_scheme);
         if cache.signature == signature {
             return cache.theme.clone();
         }
-        let theme = resolve_theme_from_paths_with_system_scheme(
+        let mut theme = resolve_theme_from_paths_with_system_scheme(
             self.default_theme_path.as_deref(),
             self.user_theme_path.as_deref(),
             system_scheme,
         );
+        if theme.ui.color_scheme == UiColorScheme::Auto
+            && cache.theme.ui.color_scheme != UiColorScheme::Auto
+        {
+            system_scheme = self
+                .system_scheme
+                .unwrap_or_else(cached_system_effective_color_scheme);
+            signature = self.signature(system_scheme);
+            theme = resolve_theme_from_paths_with_system_scheme(
+                self.default_theme_path.as_deref(),
+                self.user_theme_path.as_deref(),
+                system_scheme,
+            );
+        }
         cache.signature = signature;
         cache.theme = theme.clone();
         theme
     }
 
-    fn signature(&self) -> String {
+    fn signature(&self, system_scheme: EffectiveColorScheme) -> String {
         let mut parts = [
             self.default_theme_path.as_deref(),
             self.user_theme_path.as_deref(),
@@ -545,11 +564,7 @@ impl ThemeResolver {
         .flatten()
         .map(path_signature)
         .collect::<Vec<_>>();
-        parts.push(format!(
-            "system:{:?}",
-            self.system_scheme
-                .unwrap_or_else(cached_system_effective_color_scheme)
-        ));
+        parts.push(format!("system:{system_scheme:?}"));
         parts.join("|")
     }
 }
@@ -626,7 +641,7 @@ pub fn resolve_theme_from_paths(
     default_theme_path: Option<&Path>,
     user_theme_path: Option<&Path>,
 ) -> ResolvedImeTheme {
-    resolve_theme_from_paths_with_system(
+    resolve_theme_from_paths_with_system_scheme(
         default_theme_path,
         user_theme_path,
         cached_system_effective_color_scheme(),
@@ -743,50 +758,6 @@ fn resolve_theme_with_pending_settings(
         theme.apply_accent_color(accent_color);
     }
 
-    theme.sanitized()
-}
-
-fn resolve_theme_from_paths_with_system(
-    default_theme_path: Option<&Path>,
-    user_theme_path: Option<&Path>,
-    system_scheme: EffectiveColorScheme,
-) -> ResolvedImeTheme {
-    resolve_theme_from_paths_with_system_scheme(default_theme_path, user_theme_path, system_scheme)
-}
-
-fn builtin_default_theme(system_scheme: EffectiveColorScheme) -> ResolvedImeTheme {
-    let mut partials = Vec::new();
-    if let Ok(partial) = serde_yaml::from_str::<PartialTheme>(DEFAULT_THEME_YAML) {
-        partials.push(partial);
-    }
-
-    let mut ui = UiTheme::default();
-    for partial in &partials {
-        if let Some(partial_ui) = partial.ui.clone() {
-            ui.apply(partial_ui);
-        }
-    }
-    ui.effective_color_scheme = match ui.color_scheme {
-        UiColorScheme::Auto => system_scheme,
-        UiColorScheme::Light => EffectiveColorScheme::Light,
-        UiColorScheme::Dark => EffectiveColorScheme::Dark,
-    };
-
-    let mut theme = ResolvedImeTheme::schema_base(ui.clone());
-    for partial in partials {
-        theme.apply(partial.clone());
-        if ui.effective_color_scheme == EffectiveColorScheme::Light {
-            if let Some(light) = partial.light {
-                theme.apply_variant(light);
-            }
-        } else if let Some(dark) = partial.dark {
-            theme.apply_variant(dark);
-        }
-    }
-    theme.ui = ui.clone();
-    if let Some(accent_color) = ui.accent_color {
-        theme.apply_accent_color(accent_color);
-    }
     theme.sanitized()
 }
 
@@ -1034,7 +1005,7 @@ impl ResolvedImeTheme {
 
 impl Default for ResolvedImeTheme {
     fn default() -> Self {
-        builtin_default_theme(EffectiveColorScheme::Light)
+        resolve_theme_with_pending_settings(None, None, EffectiveColorScheme::Light, None)
     }
 }
 
@@ -1834,10 +1805,51 @@ mod tests {
         )
         .unwrap();
 
-        let theme =
-            resolve_theme_from_paths_with_system(None, Some(&path), EffectiveColorScheme::Dark);
+        let theme = resolve_theme_from_paths_with_system_scheme(
+            None,
+            Some(&path),
+            EffectiveColorScheme::Dark,
+        );
         fs::remove_file(path).ok();
 
+        assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
+        assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
+        assert_eq!(theme.candidate.foreground, rgba(0x0a, 0x0b, 0x0c, 0xff));
+    }
+
+    #[test]
+    fn resolver_ignores_system_changes_until_auto_is_selected() {
+        let path = std::env::temp_dir().join(format!(
+            "keytao-theme-resolver-scheme-{}-{}.yaml",
+            std::process::id(),
+            line!()
+        ));
+        fs::write(&path, "ui:\n  colorScheme: light\n").unwrap();
+        let mut resolver = ThemeResolver::with_system_scheme(
+            None,
+            Some(path.clone()),
+            Some(EffectiveColorScheme::Light),
+        );
+        assert_eq!(
+            resolver.current().ui.effective_color_scheme,
+            EffectiveColorScheme::Light
+        );
+        let fixed_signature = resolver.cache.lock().unwrap().signature.clone();
+
+        resolver.system_scheme = Some(EffectiveColorScheme::Dark);
+        assert_eq!(
+            resolver.current().ui.effective_color_scheme,
+            EffectiveColorScheme::Light
+        );
+        assert_eq!(resolver.cache.lock().unwrap().signature, fixed_signature);
+
+        fs::write(
+            &path,
+            "ui:\n  colorScheme: auto\ndark:\n  candidate:\n    foreground: '#0A0B0C'\n",
+        )
+        .unwrap();
+        let theme = resolver.current();
+        fs::remove_file(path).ok();
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert_eq!(theme.ui.effective_color_scheme, EffectiveColorScheme::Dark);
         assert_eq!(theme.candidate.foreground, rgba(0x0a, 0x0b, 0x0c, 0xff));
@@ -1985,7 +1997,8 @@ mod tests {
 
     #[test]
     fn accent_color_derives_highlight_colors() {
-        let theme = resolve_theme_from_paths_with_system(None, None, EffectiveColorScheme::Light);
+        let theme =
+            resolve_theme_from_paths_with_system_scheme(None, None, EffectiveColorScheme::Light);
         let mut theme = theme;
         theme.ui.accent_color = Some(rgba(0x12, 0x34, 0x56, 0xff));
         theme.apply_accent_color(rgba(0x12, 0x34, 0x56, 0xff));

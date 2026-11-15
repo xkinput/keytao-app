@@ -30,17 +30,32 @@ jobs:
             clang libclang-dev cmake ninja-build g++ pkg-config gdb \
             libboost-regex-dev libsnappy-dev libfreetype6-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libdbus-1-dev
+      - name: Read runner image version
+        id: image
+        run: printf 'os=%s\nversion=%s\n' "${ImageOS:?}" "${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+      - name: Cache Linux librime
+        id: linux-librime
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/keytao-librime
+          key: linux-librime-${{ runner.os }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('scripts/build-linux-librime.sh', 'scripts/librime-versions.env') }}
       - name: Build pinned librime with merged Lua
+        if: steps.linux-librime.outputs.cache-hit != 'true'
+        run: bash scripts/build-linux-librime.sh "$RUNNER_TEMP/keytao-librime"
+      - name: Configure Linux librime
         run: |
           prefix="$RUNNER_TEMP/keytao-librime"
-          bash scripts/build-linux-librime.sh "$prefix"
-          echo "RIME_INCLUDE_DIR=$prefix/include" >> "$GITHUB_ENV"
-          echo "RIME_LIB_DIR=$prefix/lib" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          {
+            echo "RIME_INCLUDE_DIR=$prefix/include"
+            echo "RIME_LIB_DIR=$prefix/lib"
+            echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          } >> "$GITHUB_ENV"
       - name: Read Rust toolchain pin
         id: rust
-        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+        run: |
+          sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+          sed -n 's/^channel = "\(.*\)"/RUSTUP_TOOLCHAIN=\1/p' rust-toolchain.toml >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
@@ -52,7 +67,7 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set +e
-          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -p keytao-ime-ipc -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
+          cargo test --locked -p keytao-core -p keytao-core-ffi -p keytao-linux-ime -p keytao-ime-ipc -p keytao-app-core -- --test-threads=1 --nocapture > ime-regressions.log 2>&1
           result=$?
           cat ime-regressions.log
           if [ "$result" -ne 0 ]; then
@@ -91,11 +106,16 @@ jobs:
       - name: Read Rust toolchain pin
         id: rust
         shell: bash
-        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+        run: |
+          sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+          sed -n 's/^channel = "\(.*\)"/RUSTUP_TOOLCHAIN=\1/p' rust-toolchain.toml >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-ime-regressions
       - name: Install Windows system deps
         shell: pwsh
         run: |
@@ -114,7 +134,7 @@ jobs:
         shell: pwsh
         run: |
           . ./vendor/librime/windows-x64/env.ps1
-          cargo test -p keytao-windows-ime -p keytao-windows-ime-server -- --test-threads=1
+          cargo test --locked -p keytao-windows-ime -p keytao-windows-ime-server -p keytao-ime-ipc -- --test-threads=1
 
   apple-policy:
     runs-on: macos-15
@@ -122,19 +142,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Read Rust toolchain pin
         id: rust
-        run: sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+        run: |
+          sed -n 's/^channel = "\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+          sed -n 's/^channel = "\(.*\)"/RUSTUP_TOOLCHAIN=\1/p' rust-toolchain.toml >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: apple-policy-regressions
       - name: Fetch pinned macOS librime
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/fetch-librime.sh --platform macos --destination "$GITHUB_WORKSPACE/vendor/librime/macos-universal"
-      - name: Test shared IPC protocol
-        run: |
-          source vendor/librime/macos-universal/env.sh
-          export DYLD_LIBRARY_PATH="$RIME_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-          cargo test --locked -p keytao-ime-ipc -- --test-threads=1
       - name: Typecheck iOS keyboard with device SDK
         run: bash crates/keytao-ios-ime/check-swift-sdk.sh
       - name: Test macOS input context lifetime
@@ -144,3 +164,4 @@ jobs:
           bash crates/keytao-ios-ime/test-interaction-policy.sh
           bash crates/keytao-ios-ime/test-floating-layout.sh
           bash crates/keytao-ios-ime/test-touch-rollover.sh
+          bash crates/keytao-ios-ime/test-deployment-state.sh

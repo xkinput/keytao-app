@@ -83,6 +83,19 @@ object KeytaoNativeBridge {
         )
     }
 
+    fun mergeDefaultCustom(existing: String?, packageContent: String): MergeResult {
+        check(loaded) { "KeyTao native bridge is unavailable" }
+        val json = runCatching { nativeMergeDefaultCustom(existing, packageContent) }
+            .getOrElse { throw IllegalStateException("Failed to merge scheme configuration", it) }
+            ?: error("Failed to merge scheme configuration")
+        val result = JSONObject(json)
+        val userSchemas = result.getJSONArray("userSchemas")
+        return MergeResult(
+            result.getString("mergedContent"),
+            (0 until userSchemas.length()).map { userSchemas.getString(it) },
+        )
+    }
+
     fun mergeLocalDefaultCustom(existing: String?, packageContent: String): MergeResult {
         check(loaded) { "KeyTao native bridge is unavailable" }
         val json = runCatching { nativeMergeLocalDefaultCustom(existing, packageContent) }
@@ -375,6 +388,8 @@ object KeytaoNativeBridge {
     ): String?
 
     external fun nativePrepareProtectedFileInstall(relative: String, existing: ByteArray?): String?
+
+    external fun nativeMergeDefaultCustom(existing: String?, packageContent: String): String?
 
     external fun nativeMergeLocalDefaultCustom(existing: String?, packageContent: String): String?
 

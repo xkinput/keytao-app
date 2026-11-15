@@ -351,6 +351,14 @@ pub struct PanelRenderer {
     theme_resolver: ThemeResolver,
 }
 
+struct GlyphLayout<'a> {
+    glyph: &'a freetype::GlyphSlot,
+    scale: f32,
+    width: usize,
+    rows: usize,
+    advance: f32,
+}
+
 pub enum OverlayPanelMessage {
     Show { state: ImeState, x: i32, y: i32 },
     ModeHint { ascii_mode: bool, x: i32, y: i32 },
@@ -901,6 +909,65 @@ impl PanelRenderer {
         value * self.scale
     }
 
+    fn layout_glyph(&self, ch: char, size: f32) -> Option<GlyphLayout<'_>> {
+        let face = self.face_for_char(ch)?;
+        let color_face = face.has_color();
+        let load_flags = if color_face {
+            LoadFlag::RENDER | LoadFlag::COLOR
+        } else {
+            LoadFlag::TARGET_NORMAL
+        };
+        if face.set_pixel_sizes(0, size.ceil() as u32).is_err() {
+            let _ = face.select_size(0);
+        }
+        face.load_char(ch as usize, load_flags).ok()?;
+        if !color_face {
+            let slot = face.glyph().raw() as *const _ as ffi::FT_GlyphSlot;
+            unsafe {
+                ffi::FT_GlyphSlot_Embolden(slot);
+                if ffi::FT_Render_Glyph(slot, ffi::FT_RENDER_MODE_NORMAL) != 0 {
+                    return None;
+                }
+            }
+        }
+
+        let glyph = face.glyph();
+        let bitmap = glyph.bitmap();
+        let width = bitmap.width().max(0) as usize;
+        let rows = bitmap.rows().max(0) as usize;
+        let advance = (glyph.advance().x as f32 / 64.0).max(size * 0.35);
+        if width == 0 || rows == 0 || bitmap.buffer().is_empty() {
+            return Some(GlyphLayout {
+                glyph,
+                scale: 1.0,
+                width: 0,
+                rows: 0,
+                advance,
+            });
+        }
+        let color_glyph = bitmap.pixel_mode().ok() == Some(PixelMode::Bgra);
+        let scale = if color_glyph {
+            (size * COLOR_GLYPH_HEIGHT_FACTOR / rows as f32)
+                .min(size * COLOR_GLYPH_WIDTH_FACTOR / width as f32)
+                .min(1.0)
+        } else {
+            1.0
+        };
+        let width = ((width as f32 * scale).ceil() as usize).max(1);
+        let rows = ((rows as f32 * scale).ceil() as usize).max(1);
+        Some(GlyphLayout {
+            glyph,
+            scale,
+            width,
+            rows,
+            advance: if color_glyph {
+                width as f32 + size * 0.1
+            } else {
+                advance
+            },
+        })
+    }
+
     fn draw_text(
         &self,
         pm: &mut Pixmap,
@@ -910,74 +977,29 @@ impl PanelRenderer {
         color: [u8; 4],
         size: f32,
     ) {
-        for ch in text.chars() {
-            if is_zero_width_selector(ch) {
-                continue;
-            }
-            let Some(face) = self.face_for_char(ch) else {
+        for ch in text.chars().filter(|ch| !is_zero_width_selector(*ch)) {
+            let Some(layout) = self.layout_glyph(ch, size) else {
                 x += size * 0.5;
                 continue;
             };
-            let color_face = face.has_color();
-            let load_flags = if color_face {
-                LoadFlag::RENDER | LoadFlag::COLOR
-            } else {
-                LoadFlag::TARGET_NORMAL
-            };
-            if face.set_pixel_sizes(0, size.ceil() as u32).is_err() {
-                let _ = face.select_size(0);
-            }
-            if face.load_char(ch as usize, load_flags).is_err() {
-                x += size * 0.5;
-                continue;
-            }
-
-            if !color_face {
-                let slot = face.glyph().raw() as *const _ as ffi::FT_GlyphSlot;
-                unsafe {
-                    ffi::FT_GlyphSlot_Embolden(slot);
-                    if ffi::FT_Render_Glyph(slot, ffi::FT_RENDER_MODE_NORMAL) != 0 {
-                        x += size * 0.5;
-                        continue;
-                    }
-                }
-            }
-
-            let glyph = face.glyph();
-            let bitmap = glyph.bitmap();
+            let bitmap = layout.glyph.bitmap();
             let width = bitmap.width().max(0) as usize;
             let rows = bitmap.rows().max(0) as usize;
             let pitch = bitmap.pitch().unsigned_abs() as usize;
             let buffer = bitmap.buffer();
             let pixel_mode = bitmap.pixel_mode().ok();
-            if width == 0 || rows == 0 || buffer.is_empty() {
-                x += (glyph.advance().x as f32 / 64.0).max(size * 0.35);
-                continue;
-            }
-            let color_glyph = pixel_mode == Some(PixelMode::Bgra);
-            let scale = if color_glyph && width > 0 && rows > 0 {
-                let max_height = size * COLOR_GLYPH_HEIGHT_FACTOR;
-                let max_width = size * COLOR_GLYPH_WIDTH_FACTOR;
-                (max_height / rows as f32)
-                    .min(max_width / width as f32)
-                    .min(1.0)
-            } else {
-                1.0
-            };
-            let draw_width = ((width as f32 * scale).ceil() as usize).max(1);
-            let draw_rows = ((rows as f32 * scale).ceil() as usize).max(1);
-            let gx = (x + glyph.bitmap_left() as f32 * scale) as i32;
-            let gy = (baseline - glyph.bitmap_top() as f32 * scale) as i32;
+            let gx = (x + layout.glyph.bitmap_left() as f32 * layout.scale) as i32;
+            let gy = (baseline - layout.glyph.bitmap_top() as f32 * layout.scale) as i32;
 
-            for row in 0..draw_rows {
-                let scaled_row = (row as f32 / scale).floor() as usize;
+            for row in 0..layout.rows {
+                let scaled_row = (row as f32 / layout.scale).floor() as usize;
                 let source_row = if bitmap.pitch() >= 0 {
                     scaled_row.min(rows - 1)
                 } else {
                     rows - scaled_row.min(rows - 1) - 1
                 };
-                for col in 0..draw_width {
-                    let source_col = (col as f32 / scale).floor() as usize;
+                for col in 0..layout.width {
+                    let source_col = (col as f32 / layout.scale).floor() as usize;
                     let source_col = source_col.min(width - 1);
                     let (r, g, b, alpha) = match pixel_mode {
                         Some(PixelMode::Bgra) => {
@@ -1012,50 +1034,16 @@ impl PanelRenderer {
                     blend_pixel(pm, px, py, r, g, b, alpha as f32 / 255.0);
                 }
             }
-            x += if color_glyph {
-                draw_width as f32 + size * 0.1
-            } else {
-                (glyph.advance().x as f32 / 64.0).max(size * 0.35)
-            };
+            x += layout.advance;
         }
     }
 
     fn text_width(&self, text: &str, size: f32) -> f32 {
         text.chars()
-            .map(|c| {
-                if is_zero_width_selector(c) {
-                    return 0.0;
-                }
-                let Some(face) = self.face_for_char(c) else {
-                    return size * 0.5;
-                };
-                if face.set_pixel_sizes(0, size.ceil() as u32).is_err() {
-                    let _ = face.select_size(0);
-                }
-                let load_flags = if face.has_color() {
-                    LoadFlag::RENDER | LoadFlag::COLOR
-                } else {
-                    LoadFlag::DEFAULT
-                };
-                if face.load_char(c as usize, load_flags).is_ok() {
-                    let glyph = face.glyph();
-                    let bitmap = glyph.bitmap();
-                    if bitmap.pixel_mode().ok() == Some(PixelMode::Bgra)
-                        && bitmap.width() > 0
-                        && bitmap.rows() > 0
-                    {
-                        let width = bitmap.width() as f32;
-                        let rows = bitmap.rows() as f32;
-                        let scale = (size * COLOR_GLYPH_HEIGHT_FACTOR / rows)
-                            .min(size * COLOR_GLYPH_WIDTH_FACTOR / width)
-                            .min(1.0);
-                        (width * scale).ceil() + size * 0.1
-                    } else {
-                        (glyph.advance().x as f32 / 64.0).max(size * 0.35)
-                    }
-                } else {
-                    size * 0.5
-                }
+            .filter(|ch| !is_zero_width_selector(*ch))
+            .map(|ch| {
+                self.layout_glyph(ch, size)
+                    .map_or(size * 0.5, |layout| layout.advance)
             })
             .sum()
     }
@@ -1067,57 +1055,19 @@ impl PanelRenderer {
         let mut top = f32::INFINITY;
         let mut bottom = f32::NEG_INFINITY;
         for ch in text.chars().filter(|ch| !is_zero_width_selector(*ch)) {
-            let Some(face) = self.face_for_char(ch) else {
+            let Some(layout) = self.layout_glyph(ch, size) else {
                 x += size * 0.5;
                 continue;
             };
-            if face.set_pixel_sizes(0, size.ceil() as u32).is_err() {
-                let _ = face.select_size(0);
-            }
-            let load_flags = if face.has_color() {
-                LoadFlag::RENDER | LoadFlag::COLOR
-            } else {
-                LoadFlag::TARGET_NORMAL
-            };
-            if face.load_char(ch as usize, load_flags).is_err() {
-                x += size * 0.5;
-                continue;
-            }
-            if !face.has_color() {
-                let slot = face.glyph().raw() as *const _ as ffi::FT_GlyphSlot;
-                unsafe {
-                    ffi::FT_GlyphSlot_Embolden(slot);
-                    if ffi::FT_Render_Glyph(slot, ffi::FT_RENDER_MODE_NORMAL) != 0 {
-                        x += size * 0.5;
-                        continue;
-                    }
-                }
-            }
-            let glyph = face.glyph();
-            let bitmap = glyph.bitmap();
-            let width = bitmap.width().max(0) as f32;
-            let rows = bitmap.rows().max(0) as f32;
-            let color_glyph = bitmap.pixel_mode().ok() == Some(PixelMode::Bgra);
-            let scale = if color_glyph && width > 0.0 && rows > 0.0 {
-                (size * COLOR_GLYPH_HEIGHT_FACTOR / rows)
-                    .min(size * COLOR_GLYPH_WIDTH_FACTOR / width)
-                    .min(1.0)
-            } else {
-                1.0
-            };
-            if width > 0.0 && rows > 0.0 {
-                let glyph_left = x + glyph.bitmap_left() as f32 * scale;
-                let glyph_top = -glyph.bitmap_top() as f32 * scale;
+            if layout.width > 0 && layout.rows > 0 {
+                let glyph_left = x + layout.glyph.bitmap_left() as f32 * layout.scale;
+                let glyph_top = -layout.glyph.bitmap_top() as f32 * layout.scale;
                 left = left.min(glyph_left);
-                right = right.max(glyph_left + (width * scale).ceil());
+                right = right.max(glyph_left + layout.width as f32);
                 top = top.min(glyph_top);
-                bottom = bottom.max(glyph_top + (rows * scale).ceil());
+                bottom = bottom.max(glyph_top + layout.rows as f32);
             }
-            x += if color_glyph && width > 0.0 && rows > 0.0 {
-                (width * scale).ceil() + size * 0.1
-            } else {
-                (glyph.advance().x as f32 / 64.0).max(size * 0.35)
-            };
+            x += layout.advance;
         }
         if !top.is_finite() {
             top = -size;
@@ -1137,7 +1087,7 @@ fn is_zero_width_selector(ch: char) -> bool {
     matches!(ch, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
 }
 
-fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
+pub(crate) fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
     CandidatePanelInput {
         preedit: state.preedit.clone(),
         candidates: state

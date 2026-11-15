@@ -26,13 +26,34 @@
         # devShell evaluates on macOS too; on Linux the lists are unchanged.
         availableOnly = builtins.filter (pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform);
 
-        ndkVersion = "26.1.10909125"; # NDK r26b
+        runtimeLibs = availableOnly (with pkgs; [
+          librime
+          libxcb
+          libxkbcommon
+          wayland
+          dbus
+          gtk3
+          glib
+          gdk-pixbuf
+          pango
+          atk
+          cairo
+          harfbuzz
+          freetype
+          bzip2
+          xz
+          openssl
+          xdotool
+          ibus
+        ]);
+
+        ndkVersion = "27.0.12077973"; # NDK r27
         cmdLineToolsVer = "13.0";
 
         androidComposition = pkgs.androidenv.composeAndroidPackages {
           cmdLineToolsVersion = cmdLineToolsVer;
           platformToolsVersion = "37.0.1";
-          buildToolsVersions = [ "35.0.0" ];
+          buildToolsVersions = [ "36.0.0" ];
           platformVersions = [ "36" ];
           includeNDK = true;
           ndkVersions = [ ndkVersion ];
@@ -78,13 +99,10 @@
           buildInputs = with pkgs; [
             librime
             libxkbcommon
+            wayland
             libxcb
             libx11
             dbus
-            glib
-            gtk3
-            openssl
-            freetype
           ];
           doCheck = false;
           RIME_INCLUDE_DIR = "${pkgs.librime}/include";
@@ -222,30 +240,12 @@
           # automatically injects -L/-rpath into NIX_LDFLAGS, which cargo uses
           # when linking. This gives every compiled binary the correct RPATH
           # without needing patchelf.
-          buildInputs = availableOnly (with pkgs; [
-            librime
-            libxcb
-            libxkbcommon
-            wayland
-            dbus
-            gtk3
-            glib
-            gdk-pixbuf
+          buildInputs = runtimeLibs ++ availableOnly (with pkgs; [
             gdk-pixbuf.dev
-            pango
-            atk
-            cairo
-            harfbuzz
             harfbuzz.dev
-            freetype
             freetype.dev
-            bzip2
             bzip2.dev
-            xz
             xz.dev
-            openssl
-            xdotool
-            ibus # Added for IBus IM module
           ]);
 
           ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
@@ -260,29 +260,7 @@
 
           # Ensure runtime libs are findable even when cargo doesn't embed RPATH.
           # As a flake attribute (not shellHook), direnv's `use flake` exports this.
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (availableOnly (
-            with pkgs;
-            [
-              librime
-              libxcb
-              libxkbcommon
-              wayland
-              dbus
-              gtk3
-              glib
-              gdk-pixbuf
-              pango
-              atk
-              cairo
-              harfbuzz
-              freetype
-              bzip2
-              xz
-              openssl
-              xdotool
-              ibus
-            ]
-          ));
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
 
           shellHook = ''
             export JAVA_HOME="${pkgs.jdk17}"
@@ -312,33 +290,7 @@
                         # so the dynamic linker finds the libs at runtime even outside the shell.
                         # Note: Rust on Linux defaults to lld (-fuse-ld=lld via gcc-ld wrapper),
                         # so no explicit linker selection is needed here.
-                        export RUSTFLAGS="-C link-arg=-Wl,-rpath,${
-                          pkgs.lib.makeLibraryPath (availableOnly (
-                            with pkgs;
-                            [
-                              librime
-                              libxcb
-                              libxkbcommon
-                              wayland
-                              dbus
-                              gtk3
-                              glib
-                              gdk-pixbuf
-                              pango
-                              atk
-                              cairo
-                              harfbuzz
-                              freetype
-                              bzip2
-                              openssl
-                              ibus
-                            ]
-                          ))
-                        }"
-                        # Install Android Rust cross-compilation targets (idempotent)
-                        for _t in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
-                          rustup target add "$_t" 2>/dev/null || true
-                        done
+                        export RUSTFLAGS="-C link-arg=-Wl,-rpath,${pkgs.lib.makeLibraryPath runtimeLibs}"
 
                         # Nix's mkShell sets DEVELOPER_DIR / SDKROOT to the Nix apple-sdk, which
                         # lacks libiconv.tbd stubs. Cargo is configured to use /usr/bin/clang as

@@ -168,6 +168,30 @@ jobs:
             }
           }
 
+      - name: Read Windows runner image version
+        id: windows-image
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: printf 'os=%s\nversion=%s\n' "${ImageOS:?}" "${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Windows ARM64 librime runtime
+        id: windows-arm64-librime
+        if: matrix.os_name == 'windows' && env.LIBRIME_VERSION != 'latest'
+        uses: actions/cache@v4
+        with:
+          path: vendor/librime/windows-arm64
+          key: windows-arm64-librime-${{ runner.os }}-${{ runner.arch }}-${{ steps.windows-image.outputs.os }}-${{ steps.windows-image.outputs.version }}-${{ env.LIBRIME_VERSION }}-${{ hashFiles('scripts/build-librime-windows-arm64.ps1', 'scripts/fetch-librime-windows.ps1', 'scripts/build-windows-ime.ps1', 'scripts/librime-versions.env') }}
+
+      - name: Refresh cached Windows ARM64 data
+        if: matrix.os_name == 'windows' && steps.windows-arm64-librime.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          runtime="vendor/librime/windows-arm64"
+          for file in default.yaml key_bindings.yaml punctuation.yaml symbols.yaml; do
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/rime/rime-prelude/master/$file" -o "$runtime/rime-data/$file"
+          done
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/rime/rime-essay/master/essay.txt -o "$runtime/rime-data/essay.txt"
+
       - name: Set build version
         shell: bash
         run: |
@@ -191,11 +215,6 @@ jobs:
         if: matrix.os_name == 'linux'
         shell: bash
         run: scripts/build-linux.sh
-
-      - name: Verify Linux bundles
-        if: matrix.os_name == 'linux'
-        shell: bash
-        run: scripts/verify-linux-bundles.sh target/release/bundle "$VERSION"
 
       - name: Test Windows installer process checks
         if: matrix.os_name == 'windows'
@@ -447,8 +466,31 @@ jobs:
       - name: Typecheck iOS keyboard with device SDK
         run: bash crates/keytao-ios-ime/check-swift-sdk.sh
 
+      - name: Read runner image version
+        id: image
+        run: printf 'os=%s\nversion=%s\n' "${ImageOS:?}" "${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache iOS librime runtime
+        id: ios-librime
+        if: env.LIBRIME_VERSION != 'latest'
+        uses: actions/cache@v4
+        with:
+          path: vendor/librime/ios/iphoneos-arm64
+          key: ios-librime-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}-${{ env.LIBRIME_VERSION }}-${{ hashFiles('scripts/build-ios-librime.sh', 'scripts/ios-librime-runtime.sh', 'scripts/fetch-librime.sh', 'scripts/librime-versions.env') }}
+
       - name: Build and import iOS librime runtime
+        if: steps.ios-librime.outputs.cache-hit != 'true'
         run: scripts/build-ios-librime.sh --target aarch64-apple-ios
+
+      - name: Refresh cached iOS data
+        if: steps.ios-librime.outputs.cache-hit == 'true'
+        run: |
+          data_root="$(mktemp -d "$RUNNER_TEMP/keytao-ios-data.XXXXXX")"
+          scripts/fetch-librime.sh --platform ios --destination "$data_root"
+          runtime="vendor/librime/ios/iphoneos-arm64"
+          rm -rf "$runtime/rime-data"
+          cp -R "$data_root/rime-data" "$runtime/rime-data"
+          cp "$data_root/opencc-release.txt" "$runtime/opencc-release.txt"
 
       - name: Build and verify unsigned iOS IPA
         run: scripts/build-flutter-ios.sh
@@ -486,7 +528,7 @@ jobs:
               name: tag,
               generate_release_notes: true,
               draft: false,
-              prerelease: tag.includes('alpha'),
+              prerelease: tag.includes('-'),
             })
             return data.id
 

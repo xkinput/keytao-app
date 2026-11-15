@@ -726,7 +726,7 @@ class KeytaoAndroidChannel(
                     val dcMergeResult = zipDcContent?.let {
                         val existing = readFileFromTree(root, "default.custom.yaml")
                             ?: readFileFromTree(root, "default-custom.yaml")
-                        mergeDefaultCustom(existing, it)
+                        KeytaoNativeBridge.mergeDefaultCustom(existing, it)
                     }
                     val rimeLuaMergeResult = KeytaoNativeBridge.prepareRimeLuaInstall(
                         readFileFromTree(root, "rime.lua"),
@@ -947,7 +947,7 @@ class KeytaoAndroidChannel(
                         if (zipFile.name.startsWith("local-")) {
                             KeytaoNativeBridge.mergeLocalDefaultCustom(existing, zipContent)
                         } else {
-                            mergeDefaultCustom(existing, zipContent)
+                            KeytaoNativeBridge.mergeDefaultCustom(existing, zipContent)
                         }
                     }
 

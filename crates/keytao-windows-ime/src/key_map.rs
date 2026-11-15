@@ -4,6 +4,7 @@
 //! The Wayland backend converts hardware keycodes via xkbcommon; here we convert
 //! Windows VK codes directly.
 
+use keytao_core::key_policy::keysym_for_char;
 pub use keytao_core::{
     key_policy, RIME_MOD_ALT, RIME_MOD_CONTROL, RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER,
     RIME_RELEASE_MASK,
@@ -174,16 +175,10 @@ fn translated_printable_keysym(vk: u16, lparam: isize) -> PrintableTranslation {
         let Some(ch) = char::from_u32(buffer[0] as u32) else {
             return PrintableTranslation::Unavailable;
         };
-        PrintableTranslation::Character(unicode_to_keysym(ch))
-    }
-}
-
-fn unicode_to_keysym(ch: char) -> u32 {
-    let value = ch as u32;
-    if value <= 0xff {
-        value
-    } else {
-        0x0100_0000 | value
+        match keysym_for_char(ch) {
+            Some(keysym) => PrintableTranslation::Character(keysym),
+            None => PrintableTranslation::Unavailable,
+        }
     }
 }
 
@@ -514,7 +509,7 @@ fn packet_keysym() -> Option<u32> {
         Some(match raw {
             TOUCH_KEYBOARD_NEXT_PAGE => XK_PAGE_DOWN,
             TOUCH_KEYBOARD_PREVIOUS_PAGE => XK_PAGE_UP,
-            _ => raw,
+            _ => char::from_u32(raw).and_then(keysym_for_char)?,
         })
     }
 }
@@ -579,7 +574,7 @@ mod tests {
     use super::{
         ascii_mode_rejects_key, fallback_printable_keysym, is_application_shortcut,
         letters_are_uppercase, shift_pending_after_key_down, should_bypass_empty_composition,
-        should_eat_key, unicode_to_keysym, vk_to_keysym,
+        should_eat_key, vk_to_keysym,
     };
 
     fn composing_state() -> ImeState {
@@ -607,8 +602,13 @@ mod tests {
 
     #[test]
     fn unicode_keysym_uses_x11_unicode_encoding() {
-        assert_eq!(unicode_to_keysym('a'), 0x61);
-        assert_eq!(unicode_to_keysym('键'), 0x0100_0000 | '键' as u32);
+        assert_eq!(key_policy::keysym_for_char('a'), Some(0x61));
+        assert_eq!(
+            key_policy::keysym_for_char('键'),
+            Some(0x0100_0000 | '键' as u32)
+        );
+        assert_eq!(key_policy::keysym_for_char('（'), Some(0x0100_ff08));
+        assert_eq!(key_policy::keysym_for_char('\n'), None);
     }
 
     #[test]

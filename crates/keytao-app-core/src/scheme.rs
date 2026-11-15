@@ -5,7 +5,6 @@ const API_BASE: &str = "https://keytao.rea.ink";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ReleaseCache {
-    etag: String,
     cached_at: u64,
     release: ReleaseInfo,
 }
@@ -41,7 +40,7 @@ pub async fn fetch_latest_release(core: &Core) -> Result<ReleaseInfo, CoreError>
             .unwrap_or_default()
             .as_secs();
 
-        // Check disk cache (5 min TTL, no ETag for our proxy API)
+        // Check disk cache (5 min TTL).
         let cached: Option<ReleaseCache> = cache_path.as_ref().and_then(|p| {
             std::fs::read_to_string(p)
                 .ok()
@@ -57,35 +56,39 @@ pub async fn fetch_latest_release(core: &Core) -> Result<ReleaseInfo, CoreError>
             }
         }
 
-        let client = build_client(core)?;
-        let url = format!("{API_BASE}/api/install/latest-release");
+        let fetched: Result<serde_json::Value, String> = async {
+            let client = build_client(core)?;
+            let url = format!("{API_BASE}/api/install/latest-release");
 
-        let response = client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| format!("网络请求失败: {e}"))?;
+            let response = client
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| format!("网络请求失败: {e}"))?;
 
-        if !response.status().is_success() {
-            tracing::warn!(
-                "[fetch_latest_release] HTTP {} after {}ms",
-                response.status(),
-                t0.elapsed().as_millis()
-            );
-            if let Some(c) = cached {
-                return Ok(c.release);
+            if !response.status().is_success() {
+                tracing::warn!(
+                    "[fetch_latest_release] HTTP {} after {}ms",
+                    response.status(),
+                    t0.elapsed().as_millis()
+                );
+                return Err(format!("获取版本信息失败，HTTP {}", response.status()));
             }
-            return Err(format!("获取版本信息失败，HTTP {}", response.status()));
-        }
 
-        let data: serde_json::Value = response.json().await.map_err(|e| {
-            tracing::warn!(
-                "[fetch_latest_release] body parse failed after {}ms: {e}",
-                t0.elapsed().as_millis()
-            );
-            format!("解析响应失败: {e}")
-        })?;
+            response.json().await.map_err(|e| {
+                tracing::warn!(
+                    "[fetch_latest_release] body parse failed after {}ms: {e}",
+                    t0.elapsed().as_millis()
+                );
+                format!("解析响应失败: {e}")
+            })
+        }
+        .await;
+        let data = match fetched {
+            Ok(data) => data,
+            Err(error) => return cached.map(|cache| cache.release).ok_or(error),
+        };
 
         let github_version = data["github"]["version"].as_str().unwrap_or("").to_string();
         let github = if !github_version.is_empty() {
@@ -126,7 +129,6 @@ pub async fn fetch_latest_release(core: &Core) -> Result<ReleaseInfo, CoreError>
                 std::fs::create_dir_all(dir).ok();
             }
             let cache = ReleaseCache {
-                etag: String::new(),
                 cached_at: now,
                 release: info.clone(),
             };
@@ -333,6 +335,36 @@ mod tests {
                 .as_deref(),
             Some("v1")
         );
+    }
+
+    #[tokio::test]
+    async fn stale_release_cache_survives_request_setup_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(
+            crate::AppEnv {
+                data_dir: dir.path().join("state"),
+                cache_dir: dir.path().to_owned(),
+                resource_dir: dir.path().join("resources"),
+                app_version: "invalid\nuser-agent".into(),
+                platform: crate::Platform::MacOs,
+            },
+            std::sync::Arc::new(NullSink),
+        )
+        .unwrap();
+        assert!(build_client(&core).is_err());
+        let release = serde_json::json!({
+            "version": "v1", "name": "release", "published_at": "date", "body": "notes",
+            "github": null, "gitee": null,
+        });
+        let cache = serde_json::json!({
+            "cached_at": 0, "release": release,
+        });
+        let path = dir.path().join("release_cache.json");
+        let bytes = serde_json::to_vec(&cache).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let actual = fetch_latest_release(&core).await.unwrap();
+        assert_eq!(serde_json::to_value(actual).unwrap(), release);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[tokio::test]

@@ -371,8 +371,10 @@ final class KeyTaoIOSEngine {
     private var lastDisplaySchemaName = ""
     private var lastDisplaySchemaId = ""
     private var lastTheme: KeyTaoImeTheme?
+    private var lastThemeSignature: String?
     private var lastThemeColorScheme: KeyTaoEffectiveColorScheme?
     private var lastConfig: KeyTaoIOSImeConfig?
+    private var lastConfigSignature: String?
     private let startupQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.startup", qos: .userInitiated)
     private var startupInFlight = false
     private var startupCompletions: [(Bool) -> Void] = []
@@ -532,41 +534,63 @@ final class KeyTaoIOSEngine {
     /// extension may be reading them, so a resolve that comes back empty (a
     /// half-written YAML) keeps the last good result instead of snapping the UI
     /// back to the built-in defaults.
-    func resolveTheme(systemColorScheme: KeyTaoEffectiveColorScheme?) -> KeyTaoImeTheme {
+    func resolveTheme(systemColorScheme: KeyTaoEffectiveColorScheme?) -> (theme: KeyTaoImeTheme, cacheKey: String?) {
         let userTheme = KeyTaoIOSPaths.themeFile(userRoot: userRoot)
-        let path = FileManager.default.fileExists(atPath: userTheme.path) ? userTheme.path : nil
+        let themeSignature = fileSignature(userTheme)
+        let signature = "\(themeSignature)|\(systemColorScheme?.rawValue ?? "auto")"
+        if let lastTheme, lastThemeSignature == signature {
+            return (lastTheme, signature)
+        }
+        let path = themeSignature == "missing" ? nil : userTheme.path
         guard let json = KeyTaoIOSThemeResolver.resolveJson(
             userThemePath: path,
             systemColorScheme: systemColorScheme
         ), let theme = KeyTaoIOSThemeResolver.decode(json: json) else {
             if let lastTheme, lastThemeColorScheme == systemColorScheme {
-                return lastTheme
+                return (lastTheme, lastThemeSignature)
             }
-            return KeyTaoIOSThemeResolver.resolve(
+            return (KeyTaoIOSThemeResolver.resolve(
                 userThemePath: path,
                 systemColorScheme: systemColorScheme
-            )
+            ), nil)
         }
         lastTheme = theme
+        lastThemeSignature = signature
         lastThemeColorScheme = systemColorScheme
-        return theme
+        return (theme, signature)
     }
 
     func loadConfig() -> KeyTaoIOSImeConfig {
         let userKeyboard = KeyTaoIOSPaths.keyboardFile(userRoot: userRoot)
         let userConfig = KeyTaoIOSPaths.configFile(userRoot: userRoot)
+        let keyboardSignature = fileSignature(userKeyboard)
+        let configSignature = fileSignature(userConfig)
+        let signature = "\(keyboardSignature)|\(configSignature)"
+        if let lastConfig, lastConfigSignature == signature {
+            return lastConfig
+        }
         let resolvedKeyboardJson = KeyTaoIOSKeyboardConfigResolver.resolveJson(
-            userKeyboardPath: FileManager.default.fileExists(atPath: userKeyboard.path) ? userKeyboard.path : nil
+            userKeyboardPath: keyboardSignature == "missing" ? nil : userKeyboard.path
         )
         if resolvedKeyboardJson == nil, let lastConfig {
             return lastConfig
         }
         let config = KeyTaoIOSImeConfig.load(
             resolvedKeyboardJson: resolvedKeyboardJson,
-            userConfigURL: FileManager.default.fileExists(atPath: userConfig.path) ? userConfig : nil
+            userConfigURL: configSignature == "missing" ? nil : userConfig
         )
         lastConfig = config
+        lastConfigSignature = signature
         return config
+    }
+
+    private func fileSignature(_ url: URL) -> String {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let modified = attributes[.modificationDate] as? Date,
+              let size = attributes[.size] as? NSNumber else {
+            return "missing"
+        }
+        return "\(modified.timeIntervalSince1970):\(size.uint64Value)"
     }
 
     func persistToolbarCustomization(order: [String], pinnedCount: Int) -> Bool {
@@ -591,6 +615,7 @@ final class KeyTaoIOSEngine {
             let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: url, options: .atomic)
             lastConfig = nil
+            lastConfigSignature = nil
             return true
         } catch {
             KeyTaoLog.configWriteFailed("toolbar")
@@ -622,6 +647,7 @@ final class KeyTaoIOSEngine {
             let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: url, options: .atomic)
             lastConfig = nil
+            lastConfigSignature = nil
             return true
         } catch {
             KeyTaoLog.configWriteFailed("settings")
@@ -643,6 +669,7 @@ final class KeyTaoIOSEngine {
         }
         if written {
             lastTheme = nil
+            lastThemeSignature = nil
             lastThemeColorScheme = nil
         } else {
             KeyTaoLog.configWriteFailed("theme_ui")
@@ -654,8 +681,10 @@ final class KeyTaoIOSEngine {
     /// deployed schemas stay put so that typing keeps working.
     func releaseCaches() {
         lastTheme = nil
+        lastThemeSignature = nil
         lastThemeColorScheme = nil
         lastConfig = nil
+        lastConfigSignature = nil
     }
 
     func state() -> KeyTaoImeState {

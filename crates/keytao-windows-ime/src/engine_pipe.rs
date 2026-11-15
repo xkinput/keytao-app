@@ -2,7 +2,6 @@
 
 use std::{
     io::Cursor,
-    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -20,8 +19,8 @@ use windows::{
     core::{PCWSTR, PWSTR},
     Win32::{
         Foundation::{
-            CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
-            GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0,
+            LocalFree, ERROR_ACCESS_DENIED, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, GENERIC_READ,
+            GENERIC_WRITE, HANDLE, HLOCAL, WAIT_OBJECT_0,
         },
         Security::{
             Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT},
@@ -32,10 +31,8 @@ use windows::{
         },
         System::{
             Pipes::GetNamedPipeServerProcessId,
-            Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY},
             Threading::{
-                CreateEventW, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
-                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                CreateEventW, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
             },
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         },
@@ -43,6 +40,8 @@ use windows::{
 };
 
 use crate::engine_backend::{EngineHandle, ImeEngineBackend};
+use crate::engine_config::is_descendant;
+use crate::pipe_security::{keytao_install_root, process_image, OwnedHandle};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(80);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -406,21 +405,6 @@ impl Connection {
     }
 }
 
-struct OwnedHandle(HANDLE);
-
-// SAFETY: These handles are owned, never dereferenced, and Windows permits their
-// use and closure on a different thread from the one that opened them.
-unsafe impl Send for OwnedHandle {}
-unsafe impl Sync for OwnedHandle {}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
 struct PendingIo {
     pipe: Arc<OwnedHandle>,
     event: OwnedHandle,
@@ -545,26 +529,16 @@ fn verify_server_image(
         }
         Err(error) => return Err(format!("open engine server process: {error}")),
     };
-    let mut image = vec![0_u16; 32768];
-    let mut length = image.len() as u32;
-    if let Err(error) = unsafe {
-        QueryFullProcessImageNameW(
-            process.0,
-            PROCESS_NAME_WIN32,
-            PWSTR(image.as_mut_ptr()),
-            &mut length,
-        )
-    } {
-        if identity.is_appcontainer && error.code() == ERROR_ACCESS_DENIED.to_hresult() {
+    let image = match process_image(process.0) {
+        Ok(image) => image,
+        Err(error)
+            if identity.is_appcontainer && error.code() == ERROR_ACCESS_DENIED.to_hresult() =>
+        {
             return verify_pipe_owner(pipe, &identity.sid);
         }
-        return Err(format!("read engine server image path: {error}"));
-    }
-    let image = PathBuf::from(String::from_utf16_lossy(&image[..length as usize]));
-    let root = program_files_dir()?
-        .join("KeyTao")
-        .canonicalize()
-        .map_err(|error| format!("resolve KeyTao installation directory: {error}"))?;
+        Err(error) => return Err(format!("read engine server image path: {error}")),
+    };
+    let root = keytao_install_root()?;
     let image = image
         .canonicalize()
         .map_err(|error| format!("resolve engine server image path: {error}"))?;
@@ -618,49 +592,6 @@ fn log_server_verification(check: &str) {
         "server_identity_verified",
         check = check
     );
-}
-
-fn program_files_dir() -> Result<PathBuf, String> {
-    let mut value = vec![0_u16; 32768];
-    let mut size = (value.len() * std::mem::size_of::<u16>()) as u32;
-    // The native registry view is independent of the TSF host's bitness and environment.
-    let result = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
-            windows::core::w!("ProgramFilesDir"),
-            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
-            None,
-            Some(value.as_mut_ptr().cast()),
-            Some(&mut size),
-        )
-    };
-    if result.is_err() || size < 4 || size as usize > value.len() * 2 || size % 2 != 0 {
-        return Err("cannot determine native Program Files directory".into());
-    }
-    let value = &value[..size as usize / 2];
-    let length = value
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or("unterminated Program Files directory")?;
-    let path = String::from_utf16(&value[..length])
-        .map_err(|error| format!("decode Program Files directory: {error}"))?;
-    let path = PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err("Program Files directory is not absolute".into());
-    }
-    Ok(path)
-}
-
-fn is_descendant(image: &Path, root: &Path) -> bool {
-    let image: Vec<_> = image.components().collect();
-    let root: Vec<_> = root.components().collect();
-    image.len() > root.len()
-        && root.iter().zip(&image).all(|(left, right)| {
-            left.as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-        })
 }
 
 fn wide(value: &str) -> Vec<u16> {

@@ -49,38 +49,6 @@
 #define KEYTAO_CAP_CLEAR_COMPOSITION 64
 
 /**
- * Flat view of IME state returned to C callers.
- * All strings are null-terminated UTF-8. Free with keytao_free_state().
- */
-typedef struct KeytaoState {
-  char *preedit;
-  /**
-   * Caret position inside `preedit`, counted in Unicode scalars. Use
-   * keytao_utf16_offset_from_chars() to map it to UTF-16 units.
-   */
-  uint32_t cursor;
-  /**
-   * Start of the selected (already converted) range inside `preedit`, in
-   * Unicode scalars. Equal to `sel_end` when nothing is selected.
-   */
-  uint32_t sel_start;
-  /**
-   * End of the selected range inside `preedit`, in Unicode scalars.
-   */
-  uint32_t sel_end;
-  char **candidate_texts;
-  char **candidate_comments;
-  uint32_t candidate_count;
-  uint32_t highlighted_candidate_index;
-  uint32_t page;
-  bool is_last_page;
-  char *committed;
-  char *select_keys;
-  bool ascii_mode;
-  bool accepted;
-} KeytaoState;
-
-/**
  * Whether a runtime log level is enabled (0 = off, 1 = info, 2 = verbose).
  * Invalid levels are disabled.
  */
@@ -136,19 +104,6 @@ bool keytao_reload(void);
 char *keytao_reload_stamp_path_at(const char *user_dir);
 
 /**
- * Signature of the reload signal inside `user_dir`, or null when no deployment
- * has requested a reload yet. Free with keytao_free_string().
- */
-char *keytao_reload_stamp_signature_at(const char *user_dir);
-
-/**
- * Whether the reload signal changed since the last call, which also marks it as
- * seen. Frontends that want to schedule the reload themselves use this;
- * keytao_reload_if_stamp_changed() does both in one step.
- */
-bool keytao_reload_stamp_changed(void);
-
-/**
  * Reload when the app requested one, returning true only if a reload actually
  * ran. Cheap enough for a timer, but not for the key path: it stats a file.
  */
@@ -170,73 +125,7 @@ void *keytao_create_session(void);
  */
 void keytao_destroy_session(void *session);
 
-/**
- * Return current state for a per-client session.
- */
-struct KeytaoState *keytao_session_state(void *session);
-
-/**
- * Process a key event on a per-client session.
- */
-struct KeytaoState *keytao_session_process_key(void *session, uint32_t keyval, uint32_t modifiers);
-
-/**
- * Handle `Return` the way every frontend must: librime decides, and only if it
- * passes the key back is the raw input committed.
- */
-struct KeytaoState *keytao_session_process_enter(void *session);
-
-/**
- * Select a candidate in a per-client session.
- */
-struct KeytaoState *keytao_session_select_candidate(void *session, uint32_t index);
-
-/**
- * Move the highlight without committing, for hover and arrow-key navigation.
- */
-struct KeytaoState *keytao_session_highlight_candidate(void *session, uint32_t index);
-
 bool keytao_session_candidate_is_user_phrase(void *session, uint32_t index);
-
-/**
- * Flip to the next/previous candidate page in a per-client session.
- */
-struct KeytaoState *keytao_session_change_page(void *session, bool backward);
-
-/**
- * Clear current composition in a per-client session.
- */
-struct KeytaoState *keytao_session_reset(void *session);
-
-/**
- * Commit what is being composed. The path to take when the input context ends
- * and the composition must not be lost.
- */
-struct KeytaoState *keytao_session_commit_composition(void *session);
-
-/**
- * Discard what is being composed. The path to take when the input context ends
- * and the composition must not reach the client.
- */
-struct KeytaoState *keytao_session_clear_composition(void *session);
-
-/**
- * Declare what the current input context allows. Password and PIN fields pass
- * `composing = false`, which stops keys from reaching librime at all, so no
- * preedit appears and nothing is learned. Returns the state to apply.
- *
- * A null return means there was no state to hand back — the handle was
- * retired, or no engine was up — **not** that the policy was rejected. The
- * policy is recorded either way and applies to every later key, so a frontend
- * must never read null as "still composing" and fall back to sending the
- * password to librime.
- */
-struct KeytaoState *keytao_session_set_input_policy(void *session, bool composing, bool learning);
-
-/**
- * Whether the current input context still lets keys reach librime.
- */
-bool keytao_session_input_policy_composing(void *session);
 
 /**
  * Return whether a per-client session is in ASCII mode.
@@ -244,17 +133,10 @@ bool keytao_session_input_policy_composing(void *session);
 bool keytao_session_get_ascii_mode(void *session);
 
 /**
- * Set ASCII mode on a per-client session and return the updated state.
- */
-struct KeytaoState *keytao_session_set_ascii_mode(void *session, bool enabled);
-
-/**
  * Logical English input (ASCII or the configured English dictionary schema).
  * The existing get_ascii_mode export continues to mean raw pass-through.
  */
 bool keytao_session_get_english_mode(void *session);
-
-struct KeytaoState *keytao_session_set_english_mode(void *session, bool enabled);
 
 char *keytao_session_set_english_mode_json(void *session, bool enabled);
 
@@ -279,12 +161,6 @@ uint32_t keytao_engine_capabilities(void);
  * either.
  */
 uint32_t keytao_session_capabilities(void *session);
-
-/**
- * Same capabilities as keytao_engine_capabilities(), as a JSON object with the
- * camelCase keys the other JSON helpers use. Free with keytao_free_string().
- */
-char *keytao_engine_capabilities_json(void);
 
 /**
  * The X11 keysym a soft keyboard key should send, or 0 when the text is not a
@@ -370,6 +246,10 @@ char *keytao_session_state_json(void *session);
 
 char *keytao_session_process_key_json(void *session, uint32_t keyval, uint32_t modifiers);
 
+/**
+ * Handle `Return` the way every frontend must: librime decides, and only if it
+ * passes the key back is the raw input committed.
+ */
 char *keytao_session_process_enter_json(void *session);
 
 char *keytao_session_select_candidate_json(void *session, uint32_t index);
@@ -400,6 +280,17 @@ char *keytao_session_commit_composition_json(void *session);
 
 char *keytao_session_clear_composition_json(void *session);
 
+/**
+ * Declare what the current input context allows. Password and PIN fields pass
+ * `composing = false`, which stops keys from reaching librime at all, so no
+ * preedit appears and nothing is learned. Returns the state to apply.
+ *
+ * A null return means there was no state to hand back — the handle was
+ * retired, or no engine was up — **not** that the policy was rejected. The
+ * policy is recorded either way and applies to every later key, so a frontend
+ * must never read null as "still composing" and fall back to sending the
+ * password to librime.
+ */
 char *keytao_session_set_input_policy_json(void *session, bool composing, bool learning);
 
 char *keytao_session_set_ascii_mode_json(void *session, bool enabled);
@@ -408,31 +299,5 @@ char *keytao_session_set_ascii_mode_json(void *session, bool enabled);
  * Free a UTF-8 string returned by keytao-core-ffi.
  */
 void keytao_free_string(char *ptr);
-
-/**
- * Process a key event. Returns heap-allocated KeytaoState; caller must free
- * with keytao_free_state(). Returns null if the runtime is not initialized.
- */
-struct KeytaoState *keytao_process_key(uint32_t keyval, uint32_t modifiers);
-
-/**
- * Select a candidate by 0-based index. Returns new state; caller must free.
- */
-struct KeytaoState *keytao_select_candidate(uint32_t index);
-
-/**
- * Flip to the next/previous candidate page. Returns new state; caller must free.
- */
-struct KeytaoState *keytao_change_page(bool backward);
-
-/**
- * Clear current composition. Returns new state; caller must free.
- */
-struct KeytaoState *keytao_reset(void);
-
-/**
- * Free a KeytaoState returned by any keytao_* function.
- */
-void keytao_free_state(struct KeytaoState *ptr);
 
 #endif  /* KEYTAO_CORE_H */

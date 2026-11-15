@@ -85,10 +85,8 @@ class PlatformCore extends FakeCore {
   }
 
   @override
-  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme({
-    required bool restart,
-  }) async {
-    calls.add('linuxStart:$restart');
+  Future<LinuxImeStatusDto> crateApiCoreLinuxStartIme() async {
+    calls.add('linuxStart');
     if (failStart) throw StateError('offline Linux start');
     return linuxStatus;
   }
@@ -357,7 +355,7 @@ void main() {
       await c.refreshState();
       expect(c.linuxImeError, isNull);
       expect(core.calls.where((call) => call.startsWith('linuxStart')), [
-        'linuxStart:false',
+        'linuxStart',
       ]);
     },
   );
@@ -419,7 +417,7 @@ void main() {
     c.onResume();
     await settle();
     expect(core.calls.where((call) => call.startsWith('linuxStart')), [
-      'linuxStart:false',
+      'linuxStart',
     ]);
     expect(core.calls.where((call) => call == 'linuxStatus'), hasLength(3));
     expect(c.linuxIme, linuxStatus);

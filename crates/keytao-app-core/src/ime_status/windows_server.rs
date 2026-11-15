@@ -14,7 +14,8 @@ use std::{
 };
 
 use keytao_ime_ipc::{
-    ClientRole, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response, write_frame,
+    ClientRole, EngineMode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response,
+    write_frame,
 };
 use windows::{
     Win32::{
@@ -50,6 +51,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_START: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
+static LAST_RUN_VALUE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(super) fn start_watchdog() {
     if !server_enabled() || WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
@@ -77,8 +79,19 @@ fn ensure_started() -> Result<(), String> {
     }
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
     let server = installed_server_exe()?;
-    if let Err(error) = write_run_value(&server) {
-        tracing::warn!(%error, "could not register IME server startup");
+    {
+        let mut last_run_value = LAST_RUN_VALUE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !last_run_value
+            .as_ref()
+            .is_some_and(|path| same_path(path, &server))
+        {
+            match write_run_value(&server) {
+                Ok(()) => *last_run_value = Some(server.clone()),
+                Err(error) => tracing::warn!(%error, "could not register IME server startup"),
+            }
+        }
     }
     let pipe = pipe_name()?;
     match OpenOptions::new().read(true).write(true).open(&pipe) {
@@ -183,7 +196,9 @@ fn server_enabled() -> bool {
             Some(&mut size),
         )
     };
-    !(result.is_ok() && size == 4 && value == 0)
+    EngineMode::from_registry(
+        (result.is_ok() && size == 4).then_some((REG_DWORD.0, value.to_le_bytes().as_slice())),
+    ) == EngineMode::Pipe
 }
 
 fn initialize_engine_mode() -> Result<(), String> {
@@ -293,7 +308,7 @@ fn pipe_name() -> Result<String, String> {
             let mut session = 0;
             ProcessIdToSessionId(std::process::id(), &mut session)
                 .map_err(|error| error.to_string())?;
-            Ok(format!(r"\\.\pipe\KeyTao.Ime.{sid}.{session}.v1"))
+            Ok(keytao_ime_ipc::pipe_name(&sid, session))
         })();
         let _ = CloseHandle(token);
         result
@@ -328,15 +343,18 @@ fn server_image(file: &File) -> Result<PathBuf, String> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.components().count() == right.components().count()
-        && left
-            .components()
-            .zip(right.components())
-            .all(|(left, right)| {
-                left.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-            })
+    left.components().count() == right.components().count() && starts_with_ci(left, right)
+}
+
+fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
+    let mut components = path.components();
+    prefix.components().all(|prefix| {
+        components.next().is_some_and(|path| {
+            path.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&prefix.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 fn verify_installation_path(path: &Path) -> Result<(), String> {
@@ -344,16 +362,7 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
         .join("KeyTao")
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    if path.components().count() > root.components().count()
-        && root
-            .components()
-            .zip(path.components())
-            .all(|(left, right)| {
-                left.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-            })
-    {
+    if path.components().count() > root.components().count() && starts_with_ci(path, &root) {
         Ok(())
     } else {
         Err("IME server image is outside Program Files\\KeyTao".into())

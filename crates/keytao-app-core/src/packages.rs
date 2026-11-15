@@ -69,7 +69,6 @@ where
     Download: FnOnce(String) -> DownloadFuture,
     DownloadFuture: std::future::Future<Output = Result<String, CoreError>>,
 {
-    use std::io::Read;
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     if core.state().active_scheme.as_deref() == Some(scheme_key) {
         return Err(CoreError::Other(
@@ -81,32 +80,15 @@ where
     let archive_path = download(url).await?;
     let result = (|| {
         let bytes = fs::read(&archive_path)?;
-        let paths = archive_paths(&bytes, &checked_store_dir(core)?).map_err(CoreError::Other)?;
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
-            .map_err(|error| CoreError::Other(error.to_string()))?;
-        let mut manifest = BTreeMap::new();
-        for relative in paths {
-            if excluded_from_manifest(&relative) {
-                continue;
-            }
-            let mut content = Vec::new();
-            archive
-                .by_name(&relative)
-                .map_err(|error| CoreError::Other(error.to_string()))?
-                .read_to_end(&mut content)?;
-            manifest.insert(relative, format!("{:x}", Sha256::digest(&content)));
-        }
-        stage_install(core, &bytes, manifest, String::new())?;
-        finalize_pending(core, scheme_key, Some(&version), false)?;
-        core.update_state(|state| {
-            state.installed_packages.insert(
-                scheme_key.into(),
-                crate::state::InstalledPackage {
-                    version: Some(version),
-                },
-            );
-        })?;
-        crate::user_words::remember_reconciliation(core, scheme_key, user_root, false);
+        store_cloud_archive(
+            core,
+            scheme_key,
+            Some(&version),
+            "official",
+            None,
+            &bytes,
+            user_root,
+        )?;
         core.emit(crate::CoreEvent::InstallProgress(
             crate::events::InstallProgress {
                 stage: "done".into(),
@@ -292,6 +274,7 @@ pub(crate) fn store_cloud_archive(
     core: &Core,
     scheme_key: &str,
     version: Option<&str>,
+    source: &str,
     display_name: Option<&str>,
     zip_bytes: &[u8],
     user_root: &Path,
@@ -306,7 +289,8 @@ pub(crate) fn store_cloud_archive(
     if archive.len() > 10_000 {
         return Err(CoreError::Other("方案包文件过多".into()));
     }
-    let paths = archive_paths(zip_bytes, user_root).map_err(CoreError::Other)?;
+    let paths = archive_paths(zip_bytes, if source == "official" { &dir } else { user_root })
+        .map_err(CoreError::Other)?;
     let mut read_bytes = 0u64;
     for relative in paths {
         let mut file = archive
@@ -351,6 +335,7 @@ pub(crate) fn store_cloud_archive(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
         .filter(|meta| meta.zip_sha256.eq_ignore_ascii_case(&digest));
+    let preserve_cloud_id = existing.is_some();
     if crate::scheme::is_local_scheme_key(scheme_key) && occupied(scheme_key) {
         if existing.is_none() {
             let mut number = 2u64;
@@ -370,15 +355,20 @@ pub(crate) fn store_cloud_archive(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        source: if crate::scheme::is_local_scheme_key(scheme_key) {
+        source: if source == "official" {
+            existing.as_ref().map_or(source, |meta| meta.source.as_str())
+        } else if crate::scheme::is_local_scheme_key(scheme_key) {
             "local"
         } else {
-            "cloud"
+            source
         }
         .into(),
-        display_name: if crate::scheme::is_local_scheme_key(scheme_key) {
+        display_name: if source == "official" {
+            existing.as_ref().and_then(|meta| meta.display_name.clone())
+        } else if crate::scheme::is_local_scheme_key(scheme_key) {
             existing
-                .and_then(|meta| meta.display_name)
+                .as_ref()
+                .and_then(|meta| meta.display_name.clone())
                 .or_else(|| display_name.map(str::to_owned))
         } else {
             // Built-in names and variants resolve through the UI catalogue.
@@ -416,6 +406,9 @@ pub(crate) fn store_cloud_archive(
                 version: version.map(str::to_owned),
             },
         );
+        if source == "official" && !preserve_cloud_id {
+            state.scheme_cloud_ids.remove(scheme_key);
+        }
     })?;
     drop(store_guard);
     crate::user_words::remember_reconciliation(core, scheme_key, user_root, false);
@@ -1039,6 +1032,139 @@ mod tests {
         assert_eq!(meta.version.as_deref(), Some("20261105"));
         assert_eq!(meta.manifest.len(), 1);
         assert!(!store_dir(&core).join("active-manifest.json").exists());
+    }
+
+    #[tokio::test]
+    async fn download_scheme_package_preserves_pending_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        let pending_bytes = user_words_package();
+        let manifest = BTreeMap::from([("txjx.schema.yaml".into(), "pending hash".into())]);
+        stage_install(
+            &core,
+            &pending_bytes,
+            manifest.clone(),
+            root.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let archive = dir.path().join("download.zip");
+        fs::write(&archive, &pending_bytes).unwrap();
+
+        download_scheme_package_with(
+            &core,
+            "xmjd",
+            &root,
+            || std::future::ready(Ok(("v2".into(), "local".into()))),
+            |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
+        )
+        .await
+        .unwrap();
+
+        assert!(core.pending_package.lock().unwrap().is_some());
+        record_package(&core, "txjx", Some("v1"), true).unwrap();
+        let (stored, metadata) = stored_archive(&core, "txjx").unwrap();
+        assert_eq!(stored, pending_bytes);
+        assert_eq!(metadata.manifest, manifest);
+        let active: ActiveManifest = serde_json::from_slice(
+            &fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(active.scheme_key, "txjx");
+        assert_eq!(active.manifest, manifest);
+    }
+
+    #[tokio::test]
+    async fn download_scheme_package_preserves_cloud_reference_only_for_identical_archive() {
+        for identical in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = open_core(dir.path());
+            let root = dir.path().join("rime");
+            let original = user_words_package();
+            store_cloud_archive(&core, "txjx", Some("v1"), "cloud", None, &original, &root)
+                .unwrap();
+            let metadata_path = store_dir(&core).join("txjx.json");
+            let mut previous: PackageMeta =
+                serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+            previous.display_name = Some("Existing name".into());
+            fs::write(&metadata_path, serde_json::to_vec(&previous).unwrap()).unwrap();
+            core.update_state(|state| {
+                state.scheme_cloud_ids.insert("txjx".into(), "21".into());
+            })
+            .unwrap();
+            let bytes = if identical {
+                original.clone()
+            } else {
+                let mut zip =
+                    zip::ZipWriter::new_append(std::io::Cursor::new(original)).unwrap();
+                zip.set_comment("Changed archive");
+                zip.finish().unwrap().into_inner()
+            };
+            let archive = dir.path().join("download.zip");
+            fs::write(&archive, &bytes).unwrap();
+
+            download_scheme_package_with(
+                &core,
+                "txjx",
+                &root,
+                || std::future::ready(Ok(("v2".into(), "local".into()))),
+                |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
+            )
+            .await
+            .unwrap();
+
+            let (stored, metadata) = stored_archive(&core, "txjx").unwrap();
+            assert_eq!(stored, bytes);
+            assert_eq!(metadata.version.as_deref(), Some("v2"));
+            assert_eq!(metadata.source, if identical { "cloud" } else { "official" });
+            assert_eq!(
+                metadata.display_name.as_deref(),
+                identical.then_some("Existing name")
+            );
+            assert_eq!(
+                core.state().scheme_cloud_ids.get("txjx").map(String::as_str),
+                identical.then_some("21")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_scheme_package_enforces_archive_expansion_limits() {
+        let mut oversized = user_words_package();
+        let entry = oversized
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .unwrap();
+        // Declare an oversized entry without allocating its advertised content.
+        oversized[entry + 24..entry + 28]
+            .copy_from_slice(&(512u32 * 1024 * 1024 + 1).to_le_bytes());
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..10_001 {
+            zip.start_file(index.to_string(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+        }
+        let many_files = zip.finish().unwrap().into_inner();
+        for (bytes, expected) in [(oversized, "方案包解压后过大"), (many_files, "方案包文件过多")] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = open_core(dir.path());
+            let archive = dir.path().join("download.zip");
+            fs::write(&archive, bytes).unwrap();
+
+            let error = download_scheme_package_with(
+                &core,
+                "txjx",
+                &dir.path().join("rime"),
+                || std::future::ready(Ok(("v2".into(), "local".into()))),
+                |_| std::future::ready(Ok(archive.to_string_lossy().into_owned())),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.to_string(), expected);
+            assert!(core.state().installed_packages.is_empty());
+            assert!(!store_dir(&core).join("txjx.zip").exists());
+        }
     }
 
     fn user_words_package() -> Vec<u8> {

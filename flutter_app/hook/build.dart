@@ -24,6 +24,7 @@ void main(List<String> args) async {
       vendor.path,
       ndkRoot,
     );
+    output.dependencies.addAll(rime.dependencies);
 
     await FlutterRustBridgeNativeAssetsBuilder(
       cratePath: '../crates/keytao-app-bridge',
@@ -37,9 +38,7 @@ void main(List<String> args) async {
     ).run(input: input, output: output);
 
     for (final library in rime.bundledLibraries) {
-      if (code.targetOS == OS.android) {
-        output.dependencies.add(Uri.file(library));
-      }
+      output.dependencies.add(Uri.file(library));
       final file = Uri.file(library).pathSegments.last;
       output.assets.code.add(
         CodeAsset(
@@ -53,9 +52,10 @@ void main(List<String> args) async {
   });
 }
 
-String? _releaseVersion(String path) {
+String? _releaseVersion(String path, List<Uri> dependencies) {
   final file = File(path);
   if (!file.existsSync()) return null;
+  dependencies.add(file.uri);
   for (final line in file.readAsLinesSync()) {
     if (line.startsWith('version=')) {
       return line.substring('version='.length).trim();
@@ -65,25 +65,34 @@ String? _releaseVersion(String path) {
 }
 
 class _Rime {
-  const _Rime(this.cargoEnvironment, [this.bundledLibraries = const []]);
+  const _Rime(
+    this.cargoEnvironment, {
+    this.bundledLibraries = const [],
+    this.dependencies = const [],
+  });
 
   final Map<String, String> cargoEnvironment;
   final List<String> bundledLibraries;
+  final List<Uri> dependencies;
 }
 
 _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
+  final dependencies = <Uri>[];
   Map<String, String> sdk(String root) => {
     'RIME_INCLUDE_DIR': '$root/include',
     'RIME_LIB_DIR': '$root/lib',
     'BINDGEN_EXTRA_CLANG_ARGS': '-I$root/include',
     // The bridge embeds this via option_env!; the hook scrubs the caller's env.
-    'OPENCC_VERSION': ?_releaseVersion('$root/opencc-release.txt'),
+    'OPENCC_VERSION': ?_releaseVersion(
+      '$root/opencc-release.txt',
+      dependencies,
+    ),
   };
 
   switch (os) {
     case OS.macOS:
       final root = '${vendor}macos-universal';
-      return _Rime(sdk(root));
+      return _Rime(sdk(root), dependencies: dependencies);
     case OS.iOS:
       return _Rime({
         'KEYTAO_IOS_RIME_ROOT': '${vendor}ios',
@@ -93,9 +102,12 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
             'iphonesimulator-arm64',
             'iphonesimulator-x86_64',
           ])
-            _releaseVersion('${vendor}ios/$target/opencc-release.txt'),
+            _releaseVersion(
+              '${vendor}ios/$target/opencc-release.txt',
+              dependencies,
+            ),
         ].nonNulls.firstOrNull,
-      });
+      }, dependencies: dependencies);
     case OS.android:
       final abi = switch (arch) {
         Architecture.arm64 => 'arm64-v8a',
@@ -114,11 +126,13 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
           'ANDROID_NDK_HOME': ?ndkRoot,
           'OPENCC_VERSION': ?_releaseVersion(
             '${vendor}android/$abi/opencc-release.txt',
+            dependencies,
           ),
         },
-        [
+        bundledLibraries: [
           for (final name in ['librime.so', 'libc++_shared.so']) '$lib/$name',
         ],
+        dependencies: dependencies,
       );
     case OS.windows:
       final windowsArch = switch (arch) {
@@ -161,16 +175,20 @@ _Rime _rimeFor(OS os, Architecture arch, String vendor, String? ndkRoot) {
         }
         libraries[name] = file.path;
       }
-      return _Rime({
-        ...sdk(root.path),
-        'KEYTAO_RIME_LIB_NAME': libName,
-        'KEYTAO_RIME_DLL_NAME': '$libName.dll',
-      }, libraries.values.toList()..sort());
+      return _Rime(
+        {
+          ...sdk(root.path),
+          'KEYTAO_RIME_LIB_NAME': libName,
+          'KEYTAO_RIME_DLL_NAME': '$libName.dll',
+        },
+        bundledLibraries: libraries.values.toList()..sort(),
+        dependencies: dependencies,
+      );
     case OS.linux:
       // build-linux-librime.sh installs the pinned source build at these paths.
       // container-build.sh packages librime with merged Lua in runtime/lib;
       // leave that library to the Linux packager, not CodeAssets.
-      return _Rime(sdk('/usr'));
+      return _Rime(sdk('/usr'), dependencies: dependencies);
     default:
       return const _Rime({});
   }
