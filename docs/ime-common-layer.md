@@ -17,7 +17,7 @@
 
 除 librime 调度外，下面这些此前分散在平台层的规则现在也只有通用层一份实现，平台必须调用而不是复制：
 
-- reload stamp 的路径、签名与变更检测（`ReloadStamp` / `ReloadStampWatcher`，见《Reload 规范》）。
+- reload stamp 的路径、签名与变更检测（`ReloadStamp` / `ReloadStampGate`，见《Reload 规范》）。
 - 候选选择、高亮、删除、翻页、提交、清空、Enter（走 librime 官方 API，见《候选交互规范》）。
 - 文本到 keysym 的映射、Enter 判定、空 composition bypass 判定、CapsLock 归一（`key_policy`，见《按键事件规范》）。
 - 光标与选区的偏移单位换算（`char_offset_from_utf8` / `utf16_offset_from_chars`，见《统一状态模型》）。
@@ -530,17 +530,17 @@ macOS release CI 必须执行 `scripts/build-macos.sh`、`scripts/verify-macos-p
 
 ### 唯一实现在 `keytao-core`
 
-路径、写入、签名、变更检测都只有一份实现，**平台与 App 都不得再自己拼**：
+路径、写入与签名统一由 `ReloadStamp` 实现，**平台与 App 都不得再自己拼**。Linux 的变更检测使用 `ReloadStampGate`，FFI 根据已加载的 deployment 状态执行 peek/commit：
 
 | 用途 | Rust | C ABI | JNI |
 | --- | --- | --- | --- |
 | 路径 | `ReloadStamp::path(user_dir)` / `default_path()` | `keytao_reload_stamp_path_at(user_dir)` | `nativeReloadStampPath(userDir)` |
 | 写入（只有 App 调） | `ReloadStamp::write(user_dir)` / `write_default()` | — | — |
 | 签名 | `ReloadStamp::current_signature(user_dir)` / `signature_at(path)` | `keytao_reload_stamp_signature_at(user_dir)` | `nativeReloadStampSignature(userDir)` |
-| 变更检测 | `ReloadStampWatcher::has_changed()` | `keytao_reload_stamp_changed()` | — |
+| 变更检测 | `ReloadStampGate::pending()` / `commit(signature)` | `keytao_reload_stamp_changed()`（检测到变更即消费请求） | — |
 | 检测并 reload | — | `keytao_reload_if_stamp_changed()` | — |
 
-签名格式固定为 `<len>:<mtime_nanos>:<fnv1a64 hex16>`，同时挡住“粗粒度时间戳”和“长度与 mtime 相同但内容变了”两种漏检。**stamp 缺失不算 reload 请求**（`signature` 返回空，`has_changed()` 返回 false）。
+签名格式固定为 `<len>:<mtime_nanos>:<fnv1a64 hex16>`，同时挡住“粗粒度时间戳”和“长度与 mtime 相同但内容变了”两种漏检。**stamp 缺失不算 reload 请求**（`signature` 与 `pending()` 返回空）。`ReloadStampGate::new()` 以启动时已加载的 stamp 建立基线；只有 reload 成功后才 `commit()` 本次加载的签名，失败及加载期间产生的新请求都会保留。FFI 使用 `keytao_reload_if_stamp_changed()` 完成同样的检测与成功后提交。
 
 带 `_at(user_dir)` 的入口不依赖 `keytao_init` 是否成功，供前端在初始化之前建立基线、或用于文件系统事件监听。`keytao_reload_if_stamp_changed()` 只在 reload 真的执行成功后才把请求标记为已消费，一次失败的 reload 会在下个 tick 重试而不是被吞掉。
 
@@ -552,7 +552,7 @@ reload 会持全局锁并短暂阻塞该 runtime 的全部 session 调用（macO
 
 | 平台 | 检测方式 |
 | --- | --- |
-| Linux daemon | 独立线程上的 `ReloadStampWatcher::has_changed()`，每秒一次 |
+| Linux daemon | 独立线程上的 `ReloadStampGate::pending()`，每秒一次；reload 成功后 `commit()` |
 | macOS | 后台队列上的 `DispatchSource`（文件存在时监听文件、不存在时监听其目录），`activateServer` 异步兜底检查一次；按键路径没有任何文件 I/O |
 | Windows | 按键路径的 `stat` 有 250ms 节流，focus / context / thread focus 回调强制失效缓存 |
 | Android | `onStartInputView` 触发检测，但执行在后台线程 |
@@ -740,7 +740,7 @@ KeyTao App 的理想操作方式：
 已收敛：
 
 - `keytao-core::key_policy` 现在还收敛了 text→keysym（`keysym_for_char` / `keysym_for_text` / `char_for_keysym`，非 Latin-1 用 `0x01000000|cp`）、CapsLock 归一（`normalize_key_for_modifiers`）、Enter 决策（`enter_action`）、系统保留修饰键判定（`is_system_reserved_modifier`）以及空 composition bypass。Swift/Kotlin 侧经 FFI/JNI（`keytao_text_to_keysym` / `keytao_key_policy_should_bypass` / `keytao_key_policy_is_enter` 及 `native*` 对应项）调用，五端不再各写一份。
-- reload stamp 的路径、写入、签名与变更检测唯一实现在 `keytao-core::ReloadStamp` / `ReloadStampWatcher`；五平台与 App 的私有签名逻辑（此前 App 纳秒 / Android 毫秒 / iOS 纳秒三套）已全部删除改调该 API。macOS 已改用后台 `DispatchSource` + `keytao_reload_if_stamp_changed()`，不再在 Swift 层每次 handle 前比较 stamp；Windows 按键路径 stat 加 250ms 节流并由 focus/context 回调失效缓存；Android 在 `onStartInputView` 触发但执行在后台线程；iOS / Linux daemon 同步接入。
+- reload stamp 的路径、写入与签名统一实现在 `keytao-core::ReloadStamp`；Linux daemon 使用 `ReloadStampGate` 的 peek/commit API，FFI 的 `keytao_reload_if_stamp_changed()` 根据已加载的 deployment 状态提交成功的 reload。五平台与 App 的私有签名逻辑（此前 App 纳秒 / Android 毫秒 / iOS 纳秒三套）已全部删除改调该 API。macOS 使用后台 `DispatchSource` + `keytao_reload_if_stamp_changed()`，不再在 Swift 层每次 handle 前比较 stamp；Windows 按键路径 stat 加 250ms 节流并由 focus/context 回调失效缓存；Android 在 `onStartInputView` 触发但执行在后台线程；iOS 同步接入。
 - macOS `commitComposition` 与普通 Return 路径都使用 `XK_Return`/`0xff0d`；五端 Enter 只有 `ImeRuntimeSession::process_enter()` 一个实现。候选/翻页/清空/提交走 librime 官方 API；数字/选择键不再本地拦截；失焦收尾只有 `commit_composition()` / `clear_composition()`，不再伪造 Enter/Escape。
 - macOS 消费 FFI 的 `CandidatePanelModel` / `ModeHintModel`（cross-9），删除 Swift 侧重写的 label/高亮/分页逻辑；theme 层的移动端软键盘布局已从共享 `ResolvedImeTheme` 分家到 `keytao-theme::mobile_layout`（`keyboard.yaml`）。
 - Linux daemon 日志已从 `/tmp/keytao-ime.log` 固定路径移到 `$XDG_STATE_HOME/keytao/log`（目录 0700，启动时清理旧 `/tmp` 日志）；全平台 release 默认级别不打按键、preedit 全文与 keysym 明细。

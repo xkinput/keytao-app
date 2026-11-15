@@ -27,6 +27,7 @@ use xim::{
 
 use crate::{
     engine::{shift_key_modifiers, CoreEngine, ImeSession},
+    ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
@@ -47,10 +48,6 @@ fn commit_text(server: &mut MyServer, ic: &InputContext, text: &str) -> Result<(
     tracing::debug!("XIM commit text: {} chars", text.chars().count());
     tracing::trace!("XIM commit text: {text:?}");
     server.commit(ic, text)
-}
-
-fn is_shift_key(sym: u32) -> bool {
-    sym == 0xffe1 || sym == 0xffe2
 }
 
 /// Pick a keysym out of a `GetKeyboardMapping` reply.

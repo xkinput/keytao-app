@@ -14,11 +14,9 @@
 //! only publish the outcome over their own interface.
 
 use crate::engine::{ibus_content_type_policy, shift_key_modifiers, ImeSession};
+use crate::panel::state_to_panel_input;
 use keytao_core::{key_policy, ImeState, InputContextPolicy, KeyProcessResult, RIME_RELEASE_MASK};
-use keytao_theme::{
-    CandidateOptionModel, CandidatePanelInput, CandidatePanelModel, ThemeCandidate, ThemeResolver,
-    UiCapabilities,
-};
+use keytao_theme::{CandidateOptionModel, CandidatePanelModel, ThemeResolver, UiCapabilities};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use zbus::zvariant;
 
@@ -287,6 +285,37 @@ impl ModeIndicator {
 
 pub const IBUS_ORIENTATION_SYSTEM: i32 = 2;
 
+/// Build the engine descriptor shared by the shim and the GNOME engine.
+pub fn ibus_engine_desc() -> zvariant::OwnedValue {
+    use zvariant::{Dict, Signature, StructureBuilder, Value};
+
+    let empty_dict = Dict::new(
+        Signature::try_from("s").unwrap(),
+        Signature::try_from("v").unwrap(),
+    );
+    let engine = StructureBuilder::new()
+        .add_field("IBusEngineDesc".to_owned())
+        .append_field(Value::Dict(empty_dict))
+        .add_field("keytao".to_owned()) // name
+        .add_field("键道".to_owned()) // longname
+        .add_field("KeyTao Input Method".to_owned()) // description
+        .add_field("zh".to_owned()) // language
+        .add_field("".to_owned()) // license
+        .add_field("".to_owned()) // author
+        .add_field("".to_owned()) // icon
+        .add_field("default".to_owned()) // layout
+        .add_field(0u32) // rank
+        .add_field("".to_owned()) // hotkeys
+        .add_field("键".to_owned()) // symbol
+        .add_field("".to_owned()) // setup
+        .add_field("".to_owned()) // layout_variant
+        .add_field("".to_owned()) // layout_option
+        .add_field("".to_owned()) // version
+        .add_field("".to_owned()) // textdomain
+        .build();
+    zvariant::OwnedValue::try_from(Value::Structure(engine)).expect("ibus_engine_desc")
+}
+
 /// Build an IBusText structure: `("IBusText", a{sv}, s, v)` where the trailing
 /// variant is an empty `("IBusAttrList", a{sv}, av)`.
 ///
@@ -322,10 +351,6 @@ pub fn ibus_text_as_variant(text: &str) -> zvariant::Value<'static> {
     zvariant::Value::Value(Box::new(ibus_text_variant(text)))
 }
 
-pub fn ibus_text_value(text: &str) -> zvariant::OwnedValue {
-    zvariant::OwnedValue::try_from(ibus_text_variant(text)).expect("ibus_text_value")
-}
-
 pub fn candidate_display_text(candidate: &CandidateOptionModel) -> String {
     match candidate.comment.as_deref() {
         Some(comment) => format!("{} {}", candidate.text, comment),
@@ -339,27 +364,13 @@ pub fn state_to_panel_model(
 ) -> CandidatePanelModel {
     let theme = theme_resolver.current();
     theme.candidate_panel_model(
-        CandidatePanelInput {
-            preedit: state.preedit.clone(),
-            candidates: state
-                .candidates
-                .iter()
-                .map(|candidate| ThemeCandidate {
-                    text: candidate.text.clone(),
-                    comment: candidate.comment.clone(),
-                })
-                .collect(),
-            highlighted_candidate_index: state.highlighted_candidate_index,
-            page: state.page,
-            is_last_page: state.is_last_page,
-            select_keys: state.select_keys.clone(),
-        },
+        state_to_panel_input(state),
         &UiCapabilities::system_lookup_table(),
     )
 }
 
 /// Build an IBusLookupTable: `("IBusLookupTable", a{sv}, u, u, b, b, i, av, av)`.
-pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::OwnedValue {
+pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::Value<'static> {
     use zvariant::{Array, Dict, Signature, StructureBuilder, Value};
 
     let sig_s = Signature::try_from("s").unwrap();
@@ -399,7 +410,7 @@ pub fn ibus_lookup_table_value(model: &CandidatePanelModel) -> zvariant::OwnedVa
         .append_field(Value::Array(labels))
         .build();
 
-    zvariant::OwnedValue::try_from(Value::Structure(table)).expect("ibus_lookup_table_value")
+    Value::Structure(table)
 }
 
 #[cfg(test)]
@@ -621,13 +632,7 @@ mod tests {
         let model = state_to_panel_model(&composing_state(), &ThemeResolver::new(None, None));
         assert!(!model.candidates.is_empty());
         let table = ibus_lookup_table_value(&model);
-        assert_eq!(
-            zbus::zvariant::Value::try_from(&table)
-                .expect("lookup table value")
-                .value_signature()
-                .as_str(),
-            "(sa{sv}uubbiavav)"
-        );
+        assert_eq!(table.value_signature().as_str(), "(sa{sv}uubbiavav)");
         assert_eq!(
             ibus_text_variant("你").value_signature().as_str(),
             "(sa{sv}sv)"

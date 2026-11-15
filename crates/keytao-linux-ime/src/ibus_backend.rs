@@ -6,10 +6,10 @@
 
 use crate::engine::{ibus_cursor_pos, CoreEngine, ImeSession};
 use crate::ibus_shared::{
-    self, candidate_display_text, ibus_lookup_table_value, ibus_text_value, state_to_panel_model,
-    ContentTypeState, KeyOutcome, ModeIndicator,
+    self, candidate_display_text, ibus_engine_desc, ibus_lookup_table_value, ibus_text_variant,
+    state_to_panel_model, ContentTypeState, KeyOutcome, ModeIndicator,
 };
-use crate::kimpanel::mode_property as kimpanel_mode_property;
+use crate::kimpanel::{mode_property as kimpanel_mode_property, Kimpanel};
 use crate::panel::{spawn_x11_overlay_panel, OverlayPanelMessage};
 use keytao_core::{runtime_log, ImeState};
 use keytao_theme::ThemeResolver;
@@ -22,39 +22,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use zbus::{connection, interface, object_server::SignalContext, zvariant};
-
-/// Build an IBusEngineDesc value for the "keytao" engine.
-/// Structure: (sa{sv} name longname description language license author icon layout rank hotkeys symbol setup layout_variant layout_option version textdomain)
-fn ibus_engine_desc_value() -> zvariant::OwnedValue {
-    use zvariant::{Dict, Signature, StructureBuilder, Value};
-
-    let sig_s = Signature::try_from("s").unwrap();
-    let sig_v = Signature::try_from("v").unwrap();
-    let empty_dict = Dict::new(sig_s, sig_v);
-
-    let engine = StructureBuilder::new()
-        .add_field("IBusEngineDesc".to_owned())
-        .append_field(Value::Dict(empty_dict))
-        .add_field("keytao".to_owned()) // name
-        .add_field("KeyTao".to_owned()) // longname
-        .add_field("KeyTao Input Method".to_owned()) // description
-        .add_field("zh".to_owned()) // language
-        .add_field("".to_owned()) // license
-        .add_field("".to_owned()) // author
-        .add_field("".to_owned()) // icon
-        .add_field("default".to_owned()) // layout
-        .add_field(0u32) // rank
-        .add_field("".to_owned()) // hotkeys
-        .add_field("键".to_owned()) // symbol
-        .add_field("".to_owned()) // setup
-        .add_field("".to_owned()) // layout_variant
-        .add_field("".to_owned()) // layout_option
-        .add_field("".to_owned()) // version
-        .add_field("".to_owned()) // textdomain
-        .build();
-
-    zvariant::OwnedValue::try_from(Value::Structure(engine)).expect("ibus_engine_desc_value")
-}
 
 // ── InputContext D-Bus object ─────────────────────────────────────────────────
 
@@ -141,10 +108,7 @@ impl InputContext {
                 tracing::debug!("IBus CommitText: {} chars", text.chars().count());
                 tracing::trace!("IBus CommitText: {text:?}");
                 clear_preedit(ctxt, &self.kimpanel_ctxt).await;
-                let ov = ibus_text_value(text);
-                if let Ok(v) = zvariant::Value::try_from(&ov) {
-                    let _ = Self::commit_text(ctxt, v).await;
-                }
+                let _ = Self::commit_text(ctxt, ibus_text_variant(text)).await;
             }
         }
 
@@ -159,10 +123,13 @@ impl InputContext {
             // IBusText cursors count characters, which is also the unit
             // `ImeState::cursor` uses.
             let cursor = ibus_cursor_pos(&ime_state);
-            let ov = ibus_text_value(&ime_state.preedit);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = Self::update_preedit_text(ctxt, v, cursor, true).await;
-            }
+            let _ = Self::update_preedit_text(
+                ctxt,
+                ibus_text_variant(&ime_state.preedit),
+                cursor,
+                true,
+            )
+            .await;
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::update_preedit_text(kctxt, &ime_state.preedit, "").await;
                 let _ = Kimpanel::show_preedit(kctxt, true).await;
@@ -177,10 +144,7 @@ impl InputContext {
             let _ = self.x11_panel_tx.send(OverlayPanelMessage::Hide);
         } else {
             let model = state_to_panel_model(&ime_state, &self.theme_resolver);
-            let ov = ibus_lookup_table_value(&model);
-            if let Ok(v) = zvariant::Value::try_from(&ov) {
-                let _ = Self::update_lookup_table(ctxt, v, true).await;
-            }
+            let _ = Self::update_lookup_table(ctxt, ibus_lookup_table_value(&model), true).await;
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let labels: Vec<String> = model
                     .candidates
@@ -448,10 +412,7 @@ impl InputContextService {
 /// can correctly place the committed text without conflating it with the
 /// still-active preedit region.
 async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'static>>) {
-    let ov = ibus_text_value("");
-    if let Ok(v) = zvariant::Value::try_from(&ov) {
-        let _ = InputContext::update_preedit_text(ctxt, v, 0, false).await;
-    }
+    let _ = InputContext::update_preedit_text(ctxt, ibus_text_variant(""), 0, false).await;
     if let Some(kc) = kctxt {
         let _ = Kimpanel::update_preedit_text(kc, "", "").await;
         let _ = Kimpanel::show_preedit(kc, false).await;
@@ -459,45 +420,6 @@ async fn clear_preedit(ctxt: &SignalContext<'_>, kctxt: &Option<SignalContext<'s
 }
 
 // ── IBusBus D-Bus object ──────────────────────────────────────────────────────
-
-struct Kimpanel;
-
-#[interface(name = "org.kde.kimpanel.inputmethod")]
-impl Kimpanel {
-    #[zbus(signal)]
-    async fn update_spot_location(ctxt: &SignalContext<'_>, x: i32, y: i32) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn update_lookup_table(
-        ctxt: &SignalContext<'_>,
-        labels: &[&str],
-        candidates: &[&str],
-        attrs: &[&str],
-        has_prev: bool,
-        has_next: bool,
-    ) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn show_lookup_table(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn update_preedit_text(
-        ctxt: &SignalContext<'_>,
-        text: &str,
-        attr: &str,
-    ) -> zbus::Result<()>;
-
-    /// The Kimpanel visibility signal is `ShowPreedit` — no `Text` suffix,
-    /// unlike the IBus signal of a similar name above.
-    #[zbus(signal)]
-    async fn show_preedit(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn register_properties(ctxt: &SignalContext<'_>, props: &[&str]) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn update_property(ctxt: &SignalContext<'_>, prop: &str) -> zbus::Result<()>;
-}
 
 struct IBusBus {
     engine: CoreEngine,
@@ -562,15 +484,15 @@ impl IBusBus {
     }
 
     async fn get_engines(&self) -> Vec<zvariant::OwnedValue> {
-        vec![ibus_engine_desc_value()]
+        vec![ibus_engine_desc()]
     }
 
     async fn list_active_engines(&self) -> Vec<zvariant::OwnedValue> {
-        vec![ibus_engine_desc_value()]
+        vec![ibus_engine_desc()]
     }
 
     async fn get_global_engine(&self) -> zbus::fdo::Result<zvariant::OwnedValue> {
-        Ok(ibus_engine_desc_value())
+        Ok(ibus_engine_desc())
     }
 
     async fn set_global_engine(&self, name: &str) -> zbus::fdo::Result<()> {
@@ -703,9 +625,7 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
             return;
         }
     };
-    let engine_clone = engine.clone();
     let theme_resolver = Arc::new(ThemeResolver::from_default_locations());
-    let theme_resolver_clone = theme_resolver.clone();
     let builder = match builder.serve_at("/org/kde/kimpanel/inputmethod", Kimpanel) {
         Ok(b) => b,
         Err(e) => {
@@ -715,7 +635,6 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     };
 
     let (tx, rx) = std::sync::mpsc::channel::<OverlayPanelMessage>();
-    let tx_clone = tx.clone();
     spawn_x11_overlay_panel(rx);
 
     // Avoid reusing paths held by clients across re-exec, which keeps the PID.
@@ -725,23 +644,6 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
         .as_nanos() as u64
         ^ (u64::from(std::process::id()) << 32);
     let ctx_counter = Arc::new(AtomicU64::new(ctx_seed));
-    let builder = match builder.serve_at(
-        "/org/freedesktop/IBus",
-        IBusBus {
-            engine,
-            ctx_counter: ctx_counter.clone(),
-            kimpanel_ctxt: None, // Will fill after build
-            x11_panel_tx: tx,
-            theme_resolver,
-        },
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("IBus: failed to serve_at: {e}");
-            return;
-        }
-    };
-
     let conn = match builder.build().await {
         Ok(c) => c,
         Err(e) => {
@@ -749,6 +651,25 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
             return;
         }
     };
+
+    let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
+    if let Err(e) = conn
+        .object_server()
+        .at(
+            "/org/freedesktop/IBus",
+            IBusBus {
+                engine,
+                ctx_counter,
+                kimpanel_ctxt: kimpanel_ctxt.clone(),
+                x11_panel_tx: tx,
+                theme_resolver,
+            },
+        )
+        .await
+    {
+        tracing::error!("IBus: failed to register bus object: {e}");
+        return;
+    }
 
     if let Err(e) = conn.request_name("org.freedesktop.IBus").await {
         tracing::error!("IBus: failed to request IBus name: {e}");
@@ -762,8 +683,6 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
     let dbus_address = session_bus_address();
     write_ibus_address_files(&dbus_address);
 
-    let kimpanel_ctxt = SignalContext::new(&conn, "/org/kde/kimpanel/inputmethod").ok();
-
     // Announce the conversion-mode indicator once; every input context then
     // keeps it current with UpdateProperty.
     if let Some(kctxt) = &kimpanel_ctxt {
@@ -775,34 +694,6 @@ pub async fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) {
         if let Err(e) = Kimpanel::update_property(kctxt, &status).await {
             tracing::warn!("Kimpanel: update_property failed: {e}");
         }
-    }
-
-    // We need to update the IBusBus instance with the kimpanel_ctxt.
-    // However, IBusBus is owned by the ObjectServer. Instead of mutating it, we just set
-    // it properly before serving if possible, or use a shared state.
-    // Actually, we can just create the SignalContext from `conn` and share it!
-
-    // Let's re-register IBusBus with the valid kimpanel_ctxt.
-    let _ = conn
-        .object_server()
-        .remove::<IBusBus, _>("/org/freedesktop/IBus")
-        .await;
-    if let Err(e) = conn
-        .object_server()
-        .at(
-            "/org/freedesktop/IBus",
-            IBusBus {
-                engine: engine_clone,
-                ctx_counter,
-                kimpanel_ctxt,
-                x11_panel_tx: tx_clone,
-                theme_resolver: theme_resolver_clone,
-            },
-        )
-        .await
-    {
-        tracing::error!("IBus: failed to register bus object: {e}");
-        return;
     }
 
     // Notify any already-connected IBus clients that the keytao engine is active.

@@ -1,5 +1,7 @@
+use crate::ibus_shared::candidate_display_text;
+use crate::panel::state_to_panel_input;
 use keytao_core::ImeState;
-use keytao_theme::{CandidatePanelInput, ThemeCandidate, ThemeResolver, UiCapabilities};
+use keytao_theme::{ThemeResolver, UiCapabilities};
 use std::sync::Arc;
 use zbus::{connection, interface, object_server::SignalContext, Connection};
 
@@ -20,12 +22,19 @@ pub(crate) fn mode_property(ascii_mode: bool) -> String {
     format!("{KIMPANEL_STATUS_KEY}:KeyTao:input-keyboard:KeyTao:menu,label={label}")
 }
 
-struct Kimpanel;
+pub(crate) struct Kimpanel;
 
 #[interface(name = "org.kde.kimpanel.inputmethod")]
 impl Kimpanel {
     #[zbus(signal)]
-    async fn update_lookup_table(
+    pub(crate) async fn update_spot_location(
+        ctxt: &SignalContext<'_>,
+        x: i32,
+        y: i32,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub(crate) async fn update_lookup_table(
         ctxt: &SignalContext<'_>,
         labels: &[&str],
         candidates: &[&str],
@@ -35,13 +44,13 @@ impl Kimpanel {
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn show_lookup_table(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+    pub(crate) async fn show_lookup_table(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn update_lookup_table_cursor(ctxt: &SignalContext<'_>, pos: i32) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn update_preedit_text(
+    pub(crate) async fn update_preedit_text(
         ctxt: &SignalContext<'_>,
         text: &str,
         attr: &str,
@@ -54,7 +63,7 @@ impl Kimpanel {
     /// unlike the IBus signal of a similar name.  The Plasma applet listens
     /// for this name only.
     #[zbus(signal)]
-    async fn show_preedit(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
+    pub(crate) async fn show_preedit(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn show_aux(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
@@ -66,10 +75,13 @@ impl Kimpanel {
     async fn enable(ctxt: &SignalContext<'_>, b: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn register_properties(ctxt: &SignalContext<'_>, props: &[&str]) -> zbus::Result<()>;
+    pub(crate) async fn register_properties(
+        ctxt: &SignalContext<'_>,
+        props: &[&str],
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn update_property(ctxt: &SignalContext<'_>, prop: &str) -> zbus::Result<()>;
+    pub(crate) async fn update_property(ctxt: &SignalContext<'_>, prop: &str) -> zbus::Result<()>;
 }
 
 #[derive(Clone)]
@@ -284,31 +296,6 @@ impl KimpanelHandle {
             }
             Err(e) => Err(e),
         }
-    }
-}
-
-fn candidate_display_text(candidate: &keytao_theme::CandidateOptionModel) -> String {
-    match candidate.comment.as_deref() {
-        Some(comment) => format!("{} {}", candidate.text, comment),
-        None => candidate.text.clone(),
-    }
-}
-
-fn state_to_panel_input(state: &ImeState) -> CandidatePanelInput {
-    CandidatePanelInput {
-        preedit: state.preedit.clone(),
-        candidates: state
-            .candidates
-            .iter()
-            .map(|candidate| ThemeCandidate {
-                text: candidate.text.clone(),
-                comment: candidate.comment.clone(),
-            })
-            .collect(),
-        highlighted_candidate_index: state.highlighted_candidate_index,
-        page: state.page,
-        is_last_page: state.is_last_page,
-        select_keys: state.select_keys.clone(),
     }
 }
 

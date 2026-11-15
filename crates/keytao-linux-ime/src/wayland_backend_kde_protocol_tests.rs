@@ -6,6 +6,7 @@ use std::{
     io::Read,
     os::unix::net::UnixStream,
     sync::{Mutex, MutexGuard, OnceLock},
+    time::Duration,
 };
 use wayland_client::{protocol::wl_registry::WlRegistry, EventQueue};
 
@@ -119,7 +120,7 @@ impl Compositor {
             xkb_compatibility {};\n\
             xkb_symbols { key <AC01> { [ a ] }; key <SPCE> { [ space ] }; };\n\
         };\0";
-        let mut fd = tempfile().unwrap();
+        let mut fd = tempfile(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING).unwrap();
         fd.write_all(keymap).unwrap();
         let keyboard = self.app.keyboard.clone().unwrap();
         <App as Dispatch<WlKeyboard, ()>>::event(
@@ -235,15 +236,12 @@ fn repeated_focus_changes_keep_the_new_keyboard_working() {
         // always target the new context instead of losing input after a switch.
         assert_eq!(compositor.app.last_key_serial, index + 1);
         assert_eq!(compositor.requests(), vec![(context_id, 10)]);
-        compositor.app.key_repeat = Some(KeyRepeat {
-            key: 30,
-            next: Instant::now(),
-            interval: Duration::from_millis(40),
-        });
+        compositor.app.key_repeat.set_info(25, 0);
+        compositor.app.key_repeat.arm(30, true);
         compositor.event(compositor.input_method.id().protocol_id(), 1, &[context_id]);
         compositor.event(1, 1, &[keyboard_id]);
         compositor.dispatch();
-        assert!(compositor.app.key_repeat.is_none());
+        assert!(compositor.app.key_repeat.key().is_none());
         assert!(compositor.app.forwarded_keys.is_empty());
         assert_eq!(compositor.app.last_key_serial, 0);
         compositor.app.handle_reload();

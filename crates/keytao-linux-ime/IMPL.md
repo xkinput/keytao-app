@@ -123,7 +123,7 @@ App 部署成功后会写：
 
 daemon 每秒检查一次签名（`<len>:<mtime_nanos>:<内容哈希>`，格式与路径的唯一实现在 `keytao-core::ReloadStamp`，daemon 不再自己算），变化后调用 `CoreEngine::reload_without_deploy()`。core 会丢弃全部存活 session 的 Engine 并重新 finalize/initialize librime，因此已存在的输入上下文会在下一次访问 session 时自动刷新，并保留重建前的 ascii_mode。
 
-签名是 **peek/commit** 语义（`main.rs` 的 `ReloadStampGate`），不用消费式的 `ReloadStampWatcher::has_changed()`：后者一问就把签名标记为已见，如果这次 reload 因为部署文件还没写完而失败，请求就永久丢了，daemon 会一直用旧词库。`pending()` 只看不消费，`commit()` 在 reload 真的成功后才推进基线，并且推进到**本次加载的那个签名**，所以 reload 期间 App 又写一次 stamp 也不会被吞掉。这与 `keytao-core-ffi` 的 `stamp_changed_peek() && reload_now()` 一致。
+签名是 **peek/commit** 语义，统一使用 `keytao_core::ReloadStampGate`。`pending()` 只看不消费，`commit()` 在 reload 真的成功后才推进基线，并且推进到**本次加载的那个签名**，所以失败的 reload 会重试，reload 期间 App 又写一次 stamp 也不会被吞掉。这与 `keytao-core-ffi` 的 `stamp_changed_peek() && reload_now()` 一致。
 
 session 是懒刷新的，所以 reload 完成时屏幕上还留着旧词库产出的 preedit 和候选。`src/reload_bus.rs` 负责把这一步补上：watcher 在 `reload_without_deploy()` 成功后调 `reload_bus::notify()`，每个后端在启动时 `subscribe()` 拿到一个 eventfd 并把它挂进自己的 `poll()`，收到通知后执行与失焦相同的清理：
 
