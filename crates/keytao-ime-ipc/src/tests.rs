@@ -9,6 +9,7 @@ use super::*;
 fn state() -> ImeState {
     ImeState {
         preedit: "键🐱tao".into(),
+        commit_preview: String::new(),
         cursor: 2,
         sel_start: 0,
         sel_end: 2,

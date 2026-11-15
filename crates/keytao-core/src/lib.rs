@@ -130,6 +130,10 @@ pub fn linux_deploy_lock(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImeState {
     pub preedit: String,
+    /// librime's full commit preview, including converted segments; empty
+    /// when there is no candidate.
+    #[serde(default)]
+    pub commit_preview: String,
     /// Caret position inside `preedit`, counted in Unicode scalars.
     ///
     /// librime reports UTF-8 byte offsets; the conversion happens here so that
@@ -401,6 +405,7 @@ impl ImeState {
     pub fn empty() -> Self {
         Self {
             preedit: String::new(),
+            commit_preview: String::new(),
             cursor: 0,
             sel_start: 0,
             sel_end: 0,
@@ -546,7 +551,7 @@ mod desktop {
     use librime_sys::RimeFindModule;
     use librime_sys::{
         rime_get_api, RimeApi, RimeCandidateListIterator, RimeConfig, RimeConfigIterator,
-        RimeLeversApi, RimeTraits, RimeUserDictIterator,
+        RimeContext, RimeLeversApi, RimeTraits, RimeUserDictIterator,
     };
     use rime_api::{create_session, KeyEvent, KeyStatus};
     use std::cell::Cell;
@@ -652,9 +657,11 @@ mod desktop {
 
     #[cfg(test)]
     mod api_member_tests {
-        use super::{active_user_dictionary_text, api_has_member};
-        use librime_sys::RimeApi;
-        use std::ffi::c_int;
+        use super::{
+            active_user_dictionary_text, api_has_member, context_commit_preview, ImeState,
+        };
+        use librime_sys::{RimeApi, RimeContext};
+        use std::ffi::{c_int, CString};
         use std::mem::{offset_of, size_of};
 
         #[cfg(not(target_os = "android"))]
@@ -697,6 +704,23 @@ mod desktop {
             assert!(!api_has_member(&api, offset_of!(RimeApi, change_page)));
 
             assert!(!api_has_member(std::ptr::null(), 0));
+        }
+
+        #[test]
+        fn commit_preview_preserves_converted_prefix_and_requires_a_candidate() {
+            librime_sys::rime_struct!(context: RimeContext);
+            let preview = CString::new("已转换之").unwrap();
+            context.commit_text_preview = preview.as_ptr().cast_mut();
+            context.menu.num_candidates = 3;
+            context.menu.highlighted_candidate_index = 1;
+            assert_eq!(unsafe { context_commit_preview(&context) }, "已转换之");
+
+            // Rime may preview raw input even when the menu has no candidate.
+            let raw = CString::new("zz").unwrap();
+            context.commit_text_preview = raw.as_ptr().cast_mut();
+            context.menu.num_candidates = 0;
+            assert_eq!(unsafe { context_commit_preview(&context) }, "");
+            assert!(ImeState::empty().commit_preview.is_empty());
         }
 
         #[test]
@@ -3013,6 +3037,7 @@ mod desktop {
 
         ImeState {
             preedit,
+            commit_preview: unsafe { context_commit_preview(&ctx.raw()) },
             cursor,
             sel_start,
             sel_end,
@@ -3026,6 +3051,15 @@ mod desktop {
             ascii_mode,
             schema_id,
             schema_name,
+        }
+    }
+
+    /// The context must still own the preview pointer returned by librime.
+    unsafe fn context_commit_preview(context: &RimeContext) -> String {
+        if context.menu.num_candidates > 0 {
+            candidate_string(context.commit_text_preview)
+        } else {
+            String::new()
         }
     }
 

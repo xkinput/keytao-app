@@ -1373,6 +1373,7 @@ fn state_json(state: ImeState, accepted: bool) -> String {
     let mode_hint = theme.mode_hint_model(english_mode);
     let value = serde_json::json!({
         "preedit": state.preedit,
+        "commitPreview": state.commit_preview,
         "cursor": state.cursor,
         "selStart": state.sel_start,
         "selEnd": state.sel_end,

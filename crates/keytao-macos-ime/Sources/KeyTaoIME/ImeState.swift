@@ -46,6 +46,7 @@ struct KeyTaoModeHintModel: Decodable {
 /// being recomputed here.
 struct KeyTaoImeState: Decodable {
     var preedit: String
+    var commitPreview: String
     /// Caret inside `preedit`, counted in Unicode scalars. Map it with
     /// `keytao_utf16_offset_from_chars` before handing it to IMKit.
     var cursor: Int
@@ -65,6 +66,7 @@ struct KeyTaoImeState: Decodable {
 
     static let empty = KeyTaoImeState(
         preedit: "",
+        commitPreview: "",
         cursor: 0,
         selStart: 0,
         selEnd: 0,
@@ -78,6 +80,7 @@ struct KeyTaoImeState: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case preedit
+        case commitPreview
         case cursor
         case selStart
         case selEnd
@@ -96,6 +99,7 @@ struct KeyTaoImeState: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let empty = Self.empty
         preedit = Self.decode(container, .preedit, empty.preedit)
+        commitPreview = Self.decode(container, .commitPreview, empty.commitPreview)
         cursor = Self.decode(container, .cursor, empty.cursor)
         selStart = Self.decode(container, .selStart, empty.selStart)
         selEnd = Self.decode(container, .selEnd, empty.selEnd)
@@ -109,6 +113,7 @@ struct KeyTaoImeState: Decodable {
 
     init(
         preedit: String,
+        commitPreview: String,
         cursor: Int,
         selStart: Int,
         selEnd: Int,
@@ -120,6 +125,7 @@ struct KeyTaoImeState: Decodable {
         modeHint: KeyTaoModeHintModel
     ) {
         self.preedit = preedit
+        self.commitPreview = commitPreview
         self.cursor = cursor
         self.selStart = selStart
         self.selEnd = selEnd

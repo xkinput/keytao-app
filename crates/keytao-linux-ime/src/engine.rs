@@ -80,11 +80,26 @@ pub fn ibus_cursor_pos(state: &ImeState) -> u32 {
     state.cursor.min(state.preedit.chars().count()) as u32
 }
 
+/// Inline text and caret in Unicode scalars; Wayland converts the caret to bytes.
+pub fn inline_preedit(state: &ImeState, hide_candidate_panel: bool) -> (&str, usize) {
+    if hide_candidate_panel {
+        let text = if state.commit_preview.is_empty() {
+            &state.preedit
+        } else {
+            &state.commit_preview
+        };
+        (text, text.chars().count())
+    } else {
+        (&state.preedit, ibus_cursor_pos(state) as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ibus_content_type_policy, ibus_cursor_pos, shift_key_modifiers, unhandled_key_text,
-        ImeState, IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD, IBUS_INPUT_PURPOSE_PIN,
+        ibus_content_type_policy, ibus_cursor_pos, inline_preedit, shift_key_modifiers,
+        unhandled_key_text, ImeState, IBUS_INPUT_HINT_PRIVATE, IBUS_INPUT_PURPOSE_PASSWORD,
+        IBUS_INPUT_PURPOSE_PIN,
     };
     use keytao_core::rime_modifier_mask;
 
@@ -164,5 +179,19 @@ mod tests {
         assert_eq!(ibus_cursor_pos(&state), 4);
         state.preedit = String::new();
         assert_eq!(ibus_cursor_pos(&state), 0);
+    }
+
+    #[test]
+    fn hidden_inline_uses_commit_preview_and_an_end_caret() {
+        let mut state = ImeState::empty();
+        state.preedit = "你好f".into();
+        state.commit_preview = "你好这".into();
+        state.cursor = 2;
+        assert_eq!(inline_preedit(&state, true), ("你好这", 3));
+        assert_eq!(inline_preedit(&state, false), ("你好f", 2));
+        state.commit_preview.clear();
+        assert_eq!(inline_preedit(&state, true), ("你好f", 3));
+        state.preedit.clear();
+        assert_eq!(inline_preedit(&state, true), ("", 0));
     }
 }

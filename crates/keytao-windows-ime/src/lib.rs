@@ -85,6 +85,14 @@ pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID = GUID {
     data4: [0xb0, 0x63, 0x29, 0x2d, 0x4c, 0xe3, 0x7b, 0x91],
 };
 
+/// Display attribute used for the candidate preview in hidden mode.
+pub const GUID_DISPLAY_ATTRIBUTE_CONVERTED: GUID = GUID {
+    data1: 0xb3ad4ee6,
+    data2: 0x862d,
+    data3: 0x4f59,
+    data4: [0x81, 0x9a, 0x75, 0xe4, 0x8c, 0x2d, 0x64, 0xa0],
+};
+
 /// Windows Input Indicator identifies the tray's mode button by this GUID.
 pub const GUID_LANG_BAR_INPUT_MODE: GUID = windows::Win32::UI::TextServices::GUID_LBI_INPUTMODE;
 

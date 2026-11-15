@@ -4,10 +4,11 @@
 //! (e.g. WeChatAppEx) can use keytao as their IME without requiring a real
 //! IBus daemon.
 
-use crate::engine::{ibus_cursor_pos, CoreEngine, ImeSession};
+use crate::engine::{inline_preedit, CoreEngine, ImeSession};
 use crate::ibus_shared::{
-    self, candidate_display_text, ibus_engine_desc, ibus_lookup_table_value, ibus_text_variant,
-    state_to_panel_model, ContentTypeState, KeyOutcome, ModeIndicator,
+    self, candidate_display_text, ibus_engine_desc, ibus_lookup_table_value,
+    ibus_preedit_text_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
+    KeyOutcome, ModeIndicator,
 };
 use crate::kimpanel::{mode_property as kimpanel_mode_property, Kimpanel};
 use crate::panel::{spawn_x11_overlay_panel, OverlayPanelMessage};
@@ -112,7 +113,8 @@ impl InputContext {
             }
         }
 
-        if ime_state.preedit.is_empty() {
+        let (preedit, cursor) = inline_preedit(&ime_state, hide_candidate_panel);
+        if preedit.is_empty() {
             let _ = Self::hide_preedit_text(ctxt).await;
             if let Some(kctxt) = &self.kimpanel_ctxt {
                 let _ = Kimpanel::show_preedit(kctxt, false).await;
@@ -120,18 +122,18 @@ impl InputContext {
         } else {
             clear_preedit(ctxt, &None).await;
 
-            // IBusText cursors count characters, which is also the unit
-            // `ImeState::cursor` uses.
-            let cursor = ibus_cursor_pos(&ime_state);
             let _ = Self::update_preedit_text(
                 ctxt,
-                ibus_text_variant(&ime_state.preedit),
-                cursor,
+                ibus_preedit_text_variant(preedit, hide_candidate_panel, &self.theme_resolver),
+                cursor as u32,
                 true,
             )
             .await;
             if let Some(kctxt) = &self.kimpanel_ctxt {
-                let _ = Kimpanel::update_preedit_text(kctxt, &ime_state.preedit, "").await;
+                let _ = Kimpanel::update_preedit_text(kctxt, preedit, "").await;
+                if hide_candidate_panel {
+                    let _ = Kimpanel::update_preedit_caret(kctxt, cursor as i32).await;
+                }
                 let _ = Kimpanel::show_preedit(kctxt, true).await;
             }
         }

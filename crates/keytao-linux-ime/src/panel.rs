@@ -692,12 +692,29 @@ impl PanelRenderer {
         let mut y = panel_pad_y;
         if let Some(preedit) = model.preedit.as_ref() {
             let baseline = y + preedit_size;
+            if theme.ui.hide_candidate_panel {
+                draw_rounded_rect(
+                    &mut pm,
+                    panel_pad_x,
+                    y,
+                    self.text_width(preedit, preedit_size),
+                    preedit_size,
+                    0.0,
+                    theme.candidate.selected_background,
+                    theme.candidate.selected_background,
+                    0.0,
+                );
+            }
             self.draw_text(
                 &mut pm,
                 preedit,
                 panel_pad_x,
                 baseline,
-                bgra(theme.candidate.selected_label_color),
+                bgra(if theme.ui.hide_candidate_panel {
+                    theme.candidate.selected_foreground
+                } else {
+                    theme.candidate.selected_label_color
+                }),
                 preedit_size,
             );
             y += preedit_height;

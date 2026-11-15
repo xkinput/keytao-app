@@ -141,6 +141,80 @@ fn page_words(state: &ImeState) -> Vec<&str> {
 }
 
 #[test]
+fn commit_preview_follows_highlight_and_converted_segments() {
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("commit-preview");
+    smoke_fixture::write(&dir).unwrap();
+    let schema_path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let schema = std::fs::read_to_string(&schema_path).unwrap();
+    std::fs::write(
+        schema_path,
+        schema.replace("- express_editor", "- fluency_editor"),
+    )
+    .unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned());
+    runtime.init().expect("deploy the fixture");
+    let session = runtime.create_session().expect("create a session");
+
+    let first = type_code(&session);
+    assert_eq!(first.commit_preview, smoke_fixture::WORDS[0]);
+    let highlighted = session.highlight_candidate_on_page(1).unwrap();
+    assert_eq!(highlighted.commit_preview, smoke_fixture::WORDS[1]);
+
+    for character in smoke_fixture::CODE.chars() {
+        session.process_key_result(character as u32, 0).unwrap();
+    }
+    assert_eq!(session.state().preedit, smoke_fixture::CODE.repeat(2));
+    // Select the first code at the caret, leaving the second code unconverted.
+    for _ in smoke_fixture::CODE.chars() {
+        session
+            .process_key_result(keytao_core::key_policy::XK_LEFT, 0)
+            .unwrap();
+    }
+    let converted = session.select_candidate_on_page(1).unwrap();
+    assert!(converted.committed.is_none());
+    assert_eq!(
+        converted.preedit,
+        format!("{}{}", smoke_fixture::WORDS[1], smoke_fixture::CODE)
+    );
+    assert_eq!(converted.highlighted_candidate_index, 0);
+    assert_eq!(
+        converted.commit_preview,
+        format!(
+            "{}{}",
+            smoke_fixture::WORDS[1],
+            converted.candidates[0].text
+        )
+    );
+    let highlighted = session.highlight_candidate_on_page(2).unwrap();
+    assert!(highlighted.committed.is_none());
+    assert_eq!(highlighted.preedit, converted.preedit);
+    assert_eq!(highlighted.highlighted_candidate_index, 2);
+    assert_eq!(
+        highlighted.commit_preview,
+        format!(
+            "{}{}",
+            smoke_fixture::WORDS[1],
+            highlighted.candidates[2].text
+        )
+    );
+    assert_ne!(highlighted.commit_preview, converted.commit_preview);
+    let committed = session.commit_composition().unwrap();
+    assert_eq!(
+        committed.committed.as_deref(),
+        Some(highlighted.commit_preview.as_str())
+    );
+
+    session.reset().unwrap();
+    let no_candidate = session.process_key_result(b'z' as u32, 0).unwrap().state;
+    assert_eq!(no_candidate.preedit, "z");
+    assert!(no_candidate.candidates.is_empty());
+    assert!(no_candidate.commit_preview.is_empty());
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
 fn schema_switches_follow_the_active_schema() {
     let _serialized = serialized();
     let (runtime, dir) = deployed_runtime("schema-switches");

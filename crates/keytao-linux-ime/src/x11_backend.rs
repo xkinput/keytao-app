@@ -26,7 +26,7 @@ use xim::{
 };
 
 use crate::{
-    engine::{shift_key_modifiers, CoreEngine, ImeSession},
+    engine::{inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
@@ -414,6 +414,9 @@ impl KeyTaoHandler {
         let mut preedit_only;
         let state = if renderer.hide_candidate_panel() {
             preedit_only = state.clone();
+            let (text, cursor) = inline_preedit(state, true);
+            preedit_only.preedit = text.to_owned();
+            preedit_only.cursor = cursor;
             preedit_only.candidates.clear();
             preedit_only.page = 0;
             preedit_only.is_last_page = true;
@@ -504,7 +507,12 @@ impl KeyTaoHandler {
             commit_text(server, &user_ic.ic, text)?;
         }
         // Releases can clear or replace the preedit too (Shift commit_code).
-        draw_client_preedit(server, &mut user_ic.ic, &ime_state.preedit)?;
+        let hidden = self
+            .renderer
+            .as_ref()
+            .is_some_and(PanelRenderer::hide_candidate_panel);
+        let (preedit, _) = inline_preedit(&ime_state, hidden);
+        draw_client_preedit(server, &mut user_ic.ic, preedit)?;
         self.pressed_click = None;
         self.show_panel(user_ic, &ime_state);
         self.clicked_state = None;

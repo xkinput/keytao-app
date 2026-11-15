@@ -113,7 +113,8 @@ fn activate_service(
         .ok()
         .and_then(|manager| unsafe { manager.GetActiveFlags().ok() })
         .unwrap_or(0);
-    let display_attribute_atom = display_attribute::register_atom()?;
+    let (display_attribute_atom, converted_display_attribute_atom) =
+        display_attribute::register_atoms()?;
 
     {
         let mut st = state.borrow_mut();
@@ -127,6 +128,7 @@ fn activate_service(
         st.activation_flags = activation_flags;
         st.thread_mgr_flags = thread_mgr_flags;
         st.display_attribute_atom = Some(display_attribute_atom);
+        st.converted_display_attribute_atom = Some(converted_display_attribute_atom);
     }
 
     let key_sink = KeyEventSink {
@@ -145,6 +147,7 @@ fn activate_service(
         st.activation_flags = 0;
         st.thread_mgr_flags = 0;
         st.display_attribute_atom = None;
+        st.converted_display_attribute_atom = None;
         drop(st);
         append_diagnostic(format!("AdviseKeyEventSink failed: {error}"));
         return Err(error);
@@ -208,6 +211,7 @@ fn activate_service(
                 st.activation_flags = 0;
                 st.thread_mgr_flags = 0;
                 st.display_attribute_atom = None;
+                st.converted_display_attribute_atom = None;
                 drop(st);
                 append_diagnostic(format!("Advise ThreadFocusSink failed: {error}"));
                 return Err(error);
@@ -386,6 +390,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             st.activation_flags = 0;
             st.thread_mgr_flags = 0;
             st.display_attribute_atom = None;
+            st.converted_display_attribute_atom = None;
             drop(st);
             hide_ime_windows(&self.state);
 

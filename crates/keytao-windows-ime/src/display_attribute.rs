@@ -10,14 +10,18 @@ use windows::{
         UI::TextServices::{
             CLSID_TF_CategoryMgr, IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl,
             ITfCategoryMgr, ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT,
-            TF_CT_COLORREF, TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_LS_DOT,
+            TF_ATTR_TARGET_CONVERTED, TF_CT_COLORREF, TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0,
+            TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_SOLID,
         },
     },
 };
 
-use crate::{globals::DllActivityGuard, guard, GUID_DISPLAY_ATTRIBUTE_INPUT};
+use crate::{
+    globals::DllActivityGuard, guard, GUID_DISPLAY_ATTRIBUTE_CONVERTED,
+    GUID_DISPLAY_ATTRIBUTE_INPUT,
+};
 
-fn default_attribute() -> TF_DISPLAYATTRIBUTE {
+fn default_attribute(converted: bool) -> TF_DISPLAYATTRIBUTE {
     TF_DISPLAYATTRIBUTE {
         crText: TF_DA_COLOR {
             r#type: TF_CT_NONE,
@@ -27,7 +31,7 @@ fn default_attribute() -> TF_DISPLAYATTRIBUTE {
             r#type: TF_CT_NONE,
             Anonymous: TF_DA_COLOR_0 { cr: COLORREF(0) },
         },
-        lsStyle: TF_LS_DOT,
+        lsStyle: if converted { TF_LS_SOLID } else { TF_LS_DOT },
         fBoldLine: BOOL::from(false),
         crLine: TF_DA_COLOR {
             r#type: TF_CT_COLORREF,
@@ -35,20 +39,26 @@ fn default_attribute() -> TF_DISPLAYATTRIBUTE {
                 cr: COLORREF(0x00ce_6700),
             },
         },
-        bAttr: TF_ATTR_INPUT,
+        bAttr: if converted {
+            TF_ATTR_TARGET_CONVERTED
+        } else {
+            TF_ATTR_INPUT
+        },
     }
 }
 
 #[implement(ITfDisplayAttributeInfo)]
 struct DisplayAttributeInfo {
+    converted: bool,
     attribute: RefCell<TF_DISPLAYATTRIBUTE>,
     _dll_guard: DllActivityGuard,
 }
 
 impl DisplayAttributeInfo {
-    fn new() -> Self {
+    fn new(converted: bool) -> Self {
         Self {
-            attribute: RefCell::new(default_attribute()),
+            converted,
+            attribute: RefCell::new(default_attribute(converted)),
             _dll_guard: DllActivityGuard::new(),
         }
     }
@@ -56,11 +66,23 @@ impl DisplayAttributeInfo {
 
 impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
     fn GetGUID(&self) -> Result<GUID> {
-        guard(|| Ok(GUID_DISPLAY_ATTRIBUTE_INPUT))
+        guard(|| {
+            Ok(if self.converted {
+                GUID_DISPLAY_ATTRIBUTE_CONVERTED
+            } else {
+                GUID_DISPLAY_ATTRIBUTE_INPUT
+            })
+        })
     }
 
     fn GetDescription(&self) -> Result<BSTR> {
-        guard(|| Ok(BSTR::from("KeyTao composition input")))
+        guard(|| {
+            Ok(BSTR::from(if self.converted {
+                "KeyTao candidate preview"
+            } else {
+                "KeyTao composition input"
+            }))
+        })
     }
 
     fn GetAttributeInfo(&self, attribute: *mut TF_DISPLAYATTRIBUTE) -> Result<()> {
@@ -87,7 +109,7 @@ impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
 
     fn Reset(&self) -> Result<()> {
         guard(|| {
-            *self.attribute.borrow_mut() = default_attribute();
+            *self.attribute.borrow_mut() = default_attribute(self.converted);
             Ok(())
         })
     }
@@ -95,14 +117,14 @@ impl ITfDisplayAttributeInfo_Impl for DisplayAttributeInfo_Impl {
 
 #[implement(IEnumTfDisplayAttributeInfo)]
 struct DisplayAttributeEnumerator {
-    yielded: Cell<bool>,
+    position: Cell<u32>,
     _dll_guard: DllActivityGuard,
 }
 
 impl DisplayAttributeEnumerator {
-    fn new(yielded: bool) -> Self {
+    fn new(position: u32) -> Self {
         Self {
-            yielded: Cell::new(yielded),
+            position: Cell::new(position),
             _dll_guard: DllActivityGuard::new(),
         }
     }
@@ -110,7 +132,7 @@ impl DisplayAttributeEnumerator {
 
 impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
     fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        guard(|| Ok(DisplayAttributeEnumerator::new(self.yielded.get()).into()))
+        guard(|| Ok(DisplayAttributeEnumerator::new(self.position.get()).into()))
     }
 
     fn Next(
@@ -124,16 +146,19 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
                 return Err(E_INVALIDARG.into());
             }
 
-            let actual = u32::from(!self.yielded.get());
+            let position = self.position.get();
+            let actual = count.min(2 - position);
             unsafe {
                 if !fetched.is_null() {
                     *fetched = actual;
                 }
-                if actual == 1 {
-                    info.write(Some(DisplayAttributeInfo::new().into()));
+                for index in 0..actual {
+                    info.add(index as usize).write(Some(
+                        DisplayAttributeInfo::new(position + index == 1).into(),
+                    ));
                 }
             }
-            self.yielded.set(true);
+            self.position.set(position + actual);
 
             if actual == count {
                 Ok(())
@@ -145,7 +170,7 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
 
     fn Reset(&self) -> Result<()> {
         guard(|| {
-            self.yielded.set(false);
+            self.position.set(0);
             Ok(())
         })
     }
@@ -155,35 +180,39 @@ impl IEnumTfDisplayAttributeInfo_Impl for DisplayAttributeEnumerator_Impl {
             if count == 0 {
                 return Ok(());
             }
-            if self.yielded.get() {
-                Err(Error::from(S_FALSE))
+            let actual = count.min(2 - self.position.get());
+            self.position.set(self.position.get() + actual);
+            if actual == count {
+                Ok(())
             } else {
-                self.yielded.set(true);
-                if count == 1 {
-                    Ok(())
-                } else {
-                    Err(Error::from(S_FALSE))
-                }
+                Err(Error::from(S_FALSE))
             }
         })
     }
 }
 
-pub(crate) fn register_atom() -> Result<u32> {
+pub(crate) fn register_atoms() -> Result<(u32, u32)> {
     unsafe {
         let manager: ITfCategoryMgr =
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
-        manager.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE_INPUT)
+        Ok((
+            manager.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE_INPUT)?,
+            manager.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE_CONVERTED)?,
+        ))
     }
 }
 
 pub(crate) fn new_enumerator() -> IEnumTfDisplayAttributeInfo {
-    DisplayAttributeEnumerator::new(false).into()
+    DisplayAttributeEnumerator::new(0).into()
 }
 
 pub(crate) fn get_info(guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
-    if guid.is_null() || unsafe { *guid } != GUID_DISPLAY_ATTRIBUTE_INPUT {
+    if guid.is_null() {
         return Err(E_INVALIDARG.into());
     }
-    Ok(DisplayAttributeInfo::new().into())
+    let guid = unsafe { *guid };
+    if guid != GUID_DISPLAY_ATTRIBUTE_INPUT && guid != GUID_DISPLAY_ATTRIBUTE_CONVERTED {
+        return Err(E_INVALIDARG.into());
+    }
+    Ok(DisplayAttributeInfo::new(guid == GUID_DISPLAY_ATTRIBUTE_CONVERTED).into())
 }

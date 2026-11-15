@@ -1,3 +1,4 @@
+use crate::engine::inline_preedit;
 use crate::ibus_shared::candidate_display_text;
 use crate::panel::state_to_panel_input;
 use keytao_core::ImeState;
@@ -57,7 +58,10 @@ impl Kimpanel {
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn update_preedit_caret(ctxt: &SignalContext<'_>, pos: i32) -> zbus::Result<()>;
+    pub(crate) async fn update_preedit_caret(
+        ctxt: &SignalContext<'_>,
+        pos: i32,
+    ) -> zbus::Result<()>;
 
     /// The Kimpanel visibility signal is `ShowPreedit` — no `Text` suffix,
     /// unlike the IBus signal of a similar name.  The Plasma applet listens
@@ -152,15 +156,21 @@ impl KimpanelHandle {
             state.preedit.chars().count(),
             state.candidates.len()
         );
-        if state.preedit.is_empty() {
+        let theme = self.theme_resolver.current();
+        let (preedit, cursor) = inline_preedit(state, theme.ui.hide_candidate_panel);
+        if preedit.is_empty() {
             if let Err(e) = Kimpanel::show_preedit(&self.ctxt, false).await {
                 tracing::warn!("Kimpanel: show_preedit(false) failed: {e}");
             }
         } else {
-            if let Err(e) = Kimpanel::update_preedit_text(&self.ctxt, &state.preedit, "").await {
+            if let Err(e) = Kimpanel::update_preedit_text(&self.ctxt, preedit, "").await {
                 tracing::warn!("Kimpanel: update_preedit_text failed: {e}");
             }
-            let caret = state.preedit.chars().count() as i32;
+            let caret = if theme.ui.hide_candidate_panel {
+                cursor as i32
+            } else {
+                preedit.chars().count() as i32
+            };
             if let Err(e) = Kimpanel::update_preedit_caret(&self.ctxt, caret).await {
                 tracing::warn!("Kimpanel: update_preedit_caret failed: {e}");
             }
@@ -169,7 +179,6 @@ impl KimpanelHandle {
             }
         }
 
-        let theme = self.theme_resolver.current();
         if state.candidates.is_empty() || theme.ui.hide_candidate_panel {
             if let Err(e) = self.set_lookup_table(&[], &[], &[], false, false, -1).await {
                 tracing::warn!("Kimpanel: set_lookup_table(empty) failed: {e}");

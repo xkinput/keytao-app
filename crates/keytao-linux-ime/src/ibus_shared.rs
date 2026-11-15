@@ -323,16 +323,54 @@ pub fn ibus_engine_desc() -> zvariant::OwnedValue {
 /// signal argument gets `v(sa{sv}sv)`; `av` elements need the extra wrapper
 /// [`ibus_text_as_variant`] adds.
 pub fn ibus_text_variant(text: &str) -> zvariant::Value<'static> {
+    ibus_text_with_colors(text, None)
+}
+
+pub fn ibus_preedit_text_variant(
+    text: &str,
+    selected: bool,
+    resolver: &ThemeResolver,
+) -> zvariant::Value<'static> {
+    let colors = selected.then(|| {
+        let theme = resolver.current();
+        let rgb = |color: keytao_theme::RgbaColor| {
+            (u32::from(color.red) << 16) | (u32::from(color.green) << 8) | u32::from(color.blue)
+        };
+        (
+            rgb(theme.candidate.selected_foreground),
+            rgb(theme.candidate.selected_background),
+        )
+    });
+    ibus_text_with_colors(text, colors)
+}
+
+fn ibus_text_with_colors(text: &str, colors: Option<(u32, u32)>) -> zvariant::Value<'static> {
     use zvariant::{Array, Dict, Signature, StructureBuilder, Value};
 
     let sig_s = Signature::try_from("s").unwrap();
     let sig_v = Signature::try_from("v").unwrap();
     let empty_dict1 = Dict::new(sig_s.clone(), sig_v.clone());
-    let empty_array = Array::new(sig_v.clone());
+    let mut attributes = Array::new(sig_v.clone());
+    if let Some((foreground, background)) = colors {
+        // IBus foreground/background attributes span Unicode characters.
+        for (kind, color) in [(2u32, foreground), (3u32, background)] {
+            let attribute = StructureBuilder::new()
+                .add_field("IBusAttribute".to_owned())
+                .append_field(Value::Dict(Dict::new(sig_s.clone(), sig_v.clone())))
+                .add_field(kind)
+                .add_field(color)
+                .add_field(0u32)
+                .add_field(text.chars().count() as u32)
+                .build();
+            attributes
+                .append(Value::Value(Box::new(Value::Structure(attribute))))
+                .expect("IBusAttribute variant");
+        }
+    }
     let attr_list = StructureBuilder::new()
         .add_field("IBusAttrList".to_owned())
         .append_field(Value::Dict(empty_dict1))
-        .append_field(Value::Array(empty_array))
+        .append_field(Value::Array(attributes))
         .build();
     let attr_list_variant = Value::Value(Box::new(Value::Structure(attr_list)));
 

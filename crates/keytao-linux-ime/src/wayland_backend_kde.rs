@@ -14,6 +14,7 @@ use keytao_core::{
     key_policy, runtime_log, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL,
     RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
+use keytao_theme::ThemeResolver;
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -40,7 +41,7 @@ use wayland_protocols::wp::input_method::zv1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{shift_key_modifiers, CoreEngine, ImeSession},
+    engine::{inline_preedit, shift_key_modifiers, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
     kimpanel::KimpanelHandle,
     panel::{load_font, PanelRenderer},
@@ -92,6 +93,7 @@ fn retire_proxy(proxy: impl Proxy) {
 
 struct App {
     session: ImeSession,
+    theme_resolver: ThemeResolver,
     seat: Option<WlSeat>,
     input_method: Option<ZwpInputMethodV1>,
     context: Option<ZwpInputMethodContextV1>,
@@ -142,6 +144,7 @@ impl App {
         let renderer = load_font().and_then(PanelRenderer::new);
         Self {
             session,
+            theme_resolver: ThemeResolver::from_default_locations(),
             seat: None,
             input_method: None,
             context: None,
@@ -430,12 +433,17 @@ impl App {
             tracing::trace!("KDE commit_string: {committed:?}");
             ctx.commit_string(self.serial, committed.clone());
         }
-        let preedit = state.preedit.clone();
-        ctx.preedit_cursor(preedit_cursor_bytes(&preedit, state.cursor));
+        let hidden = self.theme_resolver.current().ui.hide_candidate_panel;
+        let (preedit, caret) = inline_preedit(state, hidden);
+        if hidden {
+            // text-input-v1 highlight style; the span is measured in UTF-8 bytes.
+            ctx.preedit_styling(0, preedit.len() as u32, 4);
+        }
+        ctx.preedit_cursor(preedit_cursor_bytes(preedit, caret));
         // The third argument is what the client commits if the text input is
         // reset while composing (typically on unfocus).  Passing an empty
         // string there throws away whatever the user had typed.
-        ctx.preedit_string(self.serial, preedit.clone(), preedit);
+        ctx.preedit_string(self.serial, preedit.to_owned(), state.preedit.clone());
     }
 
     fn clear_context_preedit(&self) {

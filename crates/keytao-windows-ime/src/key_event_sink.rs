@@ -52,13 +52,14 @@ use crate::{
     panel_anchor::{start_panel_anchor, PanelAnchor},
     state::{
         append_diagnostic, apply_pending_session_reset, clear_input_after_composition_terminated,
-        clear_input_for_blocked_context, clear_layout_sink, defer_ime_ui_hide, diagnostics_enabled,
-        embedded_composition, fallback_focus_window, flush_pending_ime_ui, hide_candidate_window,
-        host_is_uiless, input_is_blocked, layout_sink_context, poll_engine_builds,
-        post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus, refresh_input_context,
-        reset_input_for_focus_change, retry_input_context_if_unknown, start_engine_warmup,
-        start_reload_if_needed, store_layout_sink, sync_input_policy, update_ime_windows,
-        update_language_bar_mode, CaretPosition, LayoutSinkRegistration, SharedState, WeakState,
+        clear_input_for_blocked_context, clear_layout_sink, current_theme, defer_ime_ui_hide,
+        diagnostics_enabled, embedded_composition, fallback_focus_window, flush_pending_ime_ui,
+        hide_candidate_window, host_is_uiless, input_is_blocked, layout_sink_context,
+        poll_engine_builds, post_pending_ime_ui, prime_theme_resolver, refresh_engine_for_focus,
+        refresh_input_context, reset_input_for_focus_change, retry_input_context_if_unknown,
+        start_engine_warmup, start_reload_if_needed, store_layout_sink, sync_input_policy,
+        update_ime_windows, update_language_bar_mode, CaretPosition, LayoutSinkRegistration,
+        SharedState, WeakState,
     },
 };
 
@@ -1291,9 +1292,17 @@ fn apply_ime_state(
         _dll_guard: DllActivityGuard::new(),
     };
     let comp_sink_iface: ITfCompositionSink = comp_sink_obj.into();
+    let hide_candidate_panel = current_theme().ui.hide_candidate_panel;
     let (display_attribute_atom, uiless) = {
         let st = shared_state.borrow();
-        (st.display_attribute_atom, host_is_uiless(&st))
+        (
+            if hide_candidate_panel {
+                st.converted_display_attribute_atom
+            } else {
+                st.display_attribute_atom
+            },
+            host_is_uiless(&st),
+        )
     };
     // `BeginUIElement(pbShow=FALSE)` is only known after this apply. If UIless
     // coverage expands, cache CandidateUiManager::host_allows_window in
@@ -1313,7 +1322,7 @@ fn apply_ime_state(
     } else {
         None
     };
-    let plan = plan_composition(&ime_state, embedded);
+    let plan = plan_composition(&ime_state, embedded, hide_candidate_panel);
     if diagnostics_enabled() {
         let mode = if embedded { "embedded" } else { "panel" };
         let target = match plan.target {
@@ -1410,17 +1419,19 @@ fn apply_ime_state(
                     }
                 }
                 CompositionTarget::Preedit => {
+                    let (preedit, cursor) =
+                        composition_text(&ime_state_clone, hide_candidate_panel);
                     if let Some(comp) = composition.as_ref() {
                         append_key_diagnostic!(
                             "composition update mode=embedded text_len={}",
-                            ime_state_clone.preedit.chars().count()
+                            preedit.chars().count()
                         );
                         update_composition_text(
                             ec,
                             ctx,
                             comp,
-                            &ime_state_clone.preedit,
-                            ime_state_clone.cursor,
+                            preedit,
+                            cursor,
                             display_attribute_atom,
                             (&state_arc_for_session, input_generation),
                             &composition_owns_text,
@@ -1428,7 +1439,7 @@ fn apply_ime_state(
                     } else {
                         append_key_diagnostic!(
                             "composition start mode=embedded text_len={}",
-                            ime_state_clone.preedit.chars().count()
+                            preedit.chars().count()
                         );
                         composition = Some(start_composition(ec, ctx, &comp_sink_iface)?);
                         track_composition_in_flight(&state_arc_for_session, composition.as_ref());
@@ -1436,8 +1447,8 @@ fn apply_ime_state(
                             ec,
                             ctx,
                             composition.as_ref().unwrap(),
-                            &ime_state_clone.preedit,
-                            ime_state_clone.cursor,
+                            preedit,
+                            cursor,
                             display_attribute_atom,
                             (&state_arc_for_session, input_generation),
                             &composition_owns_text,
@@ -1861,9 +1872,26 @@ pub(crate) struct CompositionPlan {
     pub target: CompositionTarget,
 }
 
-fn plan_composition(state: &ImeState, embedded: bool) -> CompositionPlan {
+fn composition_text(state: &ImeState, hide_candidate_panel: bool) -> (&str, usize) {
+    if hide_candidate_panel {
+        let text = if state.commit_preview.is_empty() {
+            &state.preedit
+        } else {
+            &state.commit_preview
+        };
+        (text, text.chars().count())
+    } else {
+        (&state.preedit, state.cursor)
+    }
+}
+
+fn plan_composition(
+    state: &ImeState,
+    embedded: bool,
+    hide_candidate_panel: bool,
+) -> CompositionPlan {
     let target = if embedded {
-        if state.preedit.is_empty() {
+        if composition_text(state, hide_candidate_panel).0.is_empty() {
             CompositionTarget::None
         } else {
             CompositionTarget::Preedit
@@ -2458,7 +2486,7 @@ mod tests {
     use windows::Win32::UI::TextServices::{TF_LC_CHANGE, TF_LC_CREATE, TF_LC_DESTROY};
 
     use super::{
-        caret_is_inside_monitor, caret_probe_extent_is_usable, plan_composition,
+        caret_is_inside_monitor, caret_probe_extent_is_usable, composition_text, plan_composition,
         should_apply_processed_state, should_arm_caret_reprobe, should_consume_processed_state,
         should_schedule_layout_reposition, system_caret_extent_is_usable, AdjacentChar,
         CaretSource, CompositionPlan, CompositionTarget, ImeWriteSessionGuard,
@@ -2632,9 +2660,21 @@ mod tests {
     }
 
     #[test]
+    fn hidden_composition_uses_commit_preview_with_a_trailing_caret() {
+        let mut state = state_with_preedit("prefix f");
+        state.cursor = 0;
+        state.commit_preview = "converted这😀".into();
+        assert_eq!(composition_text(&state, true), ("converted这😀", 11));
+        assert_eq!(composition_text(&state, false), ("prefix f", 0));
+
+        state.commit_preview.clear();
+        assert_eq!(composition_text(&state, true), ("prefix f", 8));
+    }
+
+    #[test]
     fn embedded_preedit_goes_into_document() {
         assert_eq!(
-            plan_composition(&state_with_preedit("ni"), true),
+            plan_composition(&state_with_preedit("ni"), true, false),
             CompositionPlan {
                 commit: false,
                 target: CompositionTarget::Preedit,
@@ -2645,7 +2685,7 @@ mod tests {
     #[test]
     fn embedded_without_preedit_ends_composition() {
         assert_eq!(
-            plan_composition(&empty_state(), true),
+            plan_composition(&empty_state(), true, false),
             CompositionPlan {
                 commit: false,
                 target: CompositionTarget::None,
@@ -2656,7 +2696,7 @@ mod tests {
     #[test]
     fn panel_mode_never_creates_a_composition_for_preedit() {
         assert_eq!(
-            plan_composition(&state_with_preedit("ni"), false),
+            plan_composition(&state_with_preedit("ni"), false, false),
             CompositionPlan {
                 commit: false,
                 target: CompositionTarget::None,
@@ -2667,7 +2707,7 @@ mod tests {
     #[test]
     fn panel_mode_never_creates_a_composition_for_candidates_only() {
         assert_eq!(
-            plan_composition(&state_with_candidate("你"), false),
+            plan_composition(&state_with_candidate("你"), false, false),
             CompositionPlan {
                 commit: false,
                 target: CompositionTarget::None,
@@ -2683,8 +2723,8 @@ mod tests {
             target: CompositionTarget::None,
         };
 
-        assert_eq!(plan_composition(&state, true), expected);
-        assert_eq!(plan_composition(&state, false), expected);
+        assert_eq!(plan_composition(&state, true, false), expected);
+        assert_eq!(plan_composition(&state, false, false), expected);
     }
 
     #[test]
@@ -2692,14 +2732,14 @@ mod tests {
         let state = state_with_commit_and_preedit("缤", "c");
 
         assert_eq!(
-            plan_composition(&state, true),
+            plan_composition(&state, true, false),
             CompositionPlan {
                 commit: true,
                 target: CompositionTarget::Preedit,
             }
         );
         assert_eq!(
-            plan_composition(&state, false),
+            plan_composition(&state, false, false),
             CompositionPlan {
                 commit: true,
                 target: CompositionTarget::None,
@@ -2715,7 +2755,7 @@ mod tests {
             state_with_preedit("ni"),
             state_with_commit_and_preedit("你", "hao"),
         ] {
-            let plan = plan_composition(&state, true);
+            let plan = plan_composition(&state, true, false);
             assert_eq!(
                 plan.target,
                 if state.preedit.is_empty() {

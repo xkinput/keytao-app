@@ -297,10 +297,11 @@ final class KeyTaoInputController: IMKInputController {
             )
             return
         }
-        let preedit = state.preedit
+        let hidden = theme.ui.hideCandidatePanel
+        let preedit = hidden && !state.commitPreview.isEmpty ? state.commitPreview : state.preedit
         let length = preedit.utf16.count
         // ImeState counts in Unicode scalars, IMKit's NSRange counts UTF-16.
-        lastPreeditCursor = preedit.keytaoUtf16Offset(fromCharacterOffset: state.cursor)
+        lastPreeditCursor = hidden ? length : preedit.keytaoUtf16Offset(fromCharacterOffset: state.cursor)
         guard let client else { return }
 
         if preedit.isEmpty {
@@ -322,8 +323,10 @@ final class KeyTaoInputController: IMKInputController {
         let marked = NSMutableAttributedString(string: preedit)
         // What Rime already converted, what it is converting now, and what is
         // still raw input each get the style macOS input methods use for it.
-        mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
-        if selectionEnd > selectionStart {
+        if hidden {
+            mark(marked, NSRange(location: 0, length: length), style: kTSMHiliteConvertedText)
+        } else if selectionEnd > selectionStart {
+            mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
             mark(
                 marked,
                 NSRange(location: selectionStart, length: selectionEnd - selectionStart),
@@ -335,6 +338,7 @@ final class KeyTaoInputController: IMKInputController {
                 style: kTSMHiliteRawText
             )
         } else {
+            mark(marked, NSRange(location: 0, length: selectionStart), style: kTSMHiliteConvertedText)
             mark(
                 marked,
                 NSRange(location: selectionStart, length: length - selectionStart),

@@ -19,6 +19,7 @@ use keytao_core::{
     key_policy, runtime_log, ImeState, InputContextPolicy, RIME_MOD_ALT, RIME_MOD_CONTROL,
     RIME_MOD_LOCK, RIME_MOD_SHIFT, RIME_MOD_SUPER, RIME_RELEASE_MASK,
 };
+use keytao_theme::ThemeResolver;
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -48,7 +49,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 use xkbcommon::xkb;
 
 use crate::{
-    engine::{shift_key_modifiers, unhandled_key_text, CoreEngine, ImeSession},
+    engine::{inline_preedit, shift_key_modifiers, unhandled_key_text, CoreEngine, ImeSession},
     ibus_shared::is_shift_key,
     panel::{load_font, PanelRenderer},
     panel_hit::{PanelClick, PanelHitAreas},
@@ -105,6 +106,7 @@ fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
 struct App {
     session: ImeSession,
     renderer: Option<PanelRenderer>,
+    theme_resolver: ThemeResolver,
 
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
@@ -166,6 +168,7 @@ impl App {
         Self {
             session,
             renderer,
+            theme_resolver: ThemeResolver::from_default_locations(),
             compositor: None,
             shm: None,
             seat: None,
@@ -431,8 +434,11 @@ impl App {
                 im.commit_string(committed.clone());
             }
         }
-        let cursor = preedit_cursor_bytes(&state.preedit, state.cursor);
-        im.set_preedit_string(state.preedit.clone(), cursor, cursor);
+        let hidden = self.theme_resolver.current().ui.hide_candidate_panel;
+        let (preedit, caret) = inline_preedit(state, hidden);
+        let cursor = preedit_cursor_bytes(preedit, caret);
+        // v2 has no converted-span style; clients style preedit, so keep both caret ends together.
+        im.set_preedit_string(preedit.to_owned(), cursor, cursor);
         im.commit(self.serial);
     }
 

@@ -17,10 +17,11 @@
 //!      signals which the daemon proxies to the focused application.
 
 use crate::{
-    engine::{ibus_cursor_pos, CoreEngine, ImeSession},
+    engine::{inline_preedit, CoreEngine, ImeSession},
     ibus_shared::{
-        self, ibus_engine_desc, ibus_lookup_table_value, ibus_text_as_variant, ibus_text_variant,
-        state_to_panel_model, ContentTypeState, KeyOutcome, ModeIndicator,
+        self, ibus_engine_desc, ibus_lookup_table_value, ibus_preedit_text_variant,
+        ibus_text_as_variant, ibus_text_variant, state_to_panel_model, ContentTypeState,
+        KeyOutcome, ModeIndicator,
     },
     panel::{spawn_x11_overlay_panel, OverlayPanelMessage},
 };
@@ -327,16 +328,14 @@ impl IBusEngine {
             }
         }
 
-        if ime_state.preedit.is_empty() {
+        let (preedit, cursor) = inline_preedit(&ime_state, hide_candidate_panel);
+        if preedit.is_empty() {
             let _ = IBusEngine::hide_preedit_text(ctxt).await;
         } else {
-            // IBusText cursors count characters, which is also the unit
-            // `ImeState::cursor` uses.
-            let cursor = ibus_cursor_pos(&ime_state);
             let _ = IBusEngine::update_preedit_text(
                 ctxt,
-                ibus_text_variant(&ime_state.preedit),
-                cursor,
+                ibus_preedit_text_variant(preedit, hide_candidate_panel, &self.theme_resolver),
+                cursor as u32,
                 true,
                 IBUS_ENGINE_PREEDIT_CLEAR,
             )
