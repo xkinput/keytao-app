@@ -346,16 +346,18 @@ struct KeyTaoMarkedTextOwnership {
 
     init() {}
 
-    mutating func claim(_ documentIdentifier: UUID) {
+    mutating func claim(_ documentIdentifier: UUID?) {
         self.documentIdentifier = documentIdentifier
     }
 
-    func belongs(to currentDocument: UUID) -> Bool {
-        documentIdentifier == currentDocument
+    func belongs(to currentDocument: UUID?) -> Bool {
+        // Two unknown identifiers must never authorize writes using cached marked text.
+        guard let currentDocument else { return false }
+        return documentIdentifier == currentDocument
     }
 
-    mutating func release(for currentDocument: UUID) -> Bool {
-        let ownedCurrentDocument = documentIdentifier == currentDocument
+    mutating func release(for currentDocument: UUID?) -> Bool {
+        let ownedCurrentDocument = belongs(to: currentDocument)
         documentIdentifier = nil
         return ownedCurrentDocument
     }

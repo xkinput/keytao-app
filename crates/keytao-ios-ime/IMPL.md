@@ -167,7 +167,7 @@ iOS 不走 Android JNI，而是复用 `keytao-core-ffi` per-session C ABI。
 
 清 marked text 必须是「先 `setMarkedText("")` 再 `unmarkText()`」：`unmarkText()` 只是把 marked text 定稿成普通文本，不会删掉它，直接 unmark 会让 preedit 和 Rime 提交的文本同时留在输入框里。
 
-宿主 marked text 和退格选删会话都绑定 `UITextDocumentProxy.documentIdentifier`。输入框已切换时，只释放旧所有权，不对新文档清标记或恢复旧文档的选中文字；释放发生在宿主调用之前，避免同步重入重复处理。`setMarkedText` 清空与后续 `unmarkText` 之间也复核文档身份。
+宿主 marked text 和退格选删会话都绑定 `UITextDocumentProxy.documentIdentifier`，通过 Objective-C 可空读取避免 Swift 桥接 nil 崩溃；标识为 nil 时视为未知文档，清除旧缓存与所有权，不复用 marked text、退格会话或排队按键。输入框已切换时，只释放旧所有权，不对新文档清标记或恢复旧文档的选中文字；释放发生在宿主调用之前，避免同步重入重复处理。`setMarkedText` 清空与后续 `unmarkText` 之间也复核文档身份。
 
 普通按键、undo、选词/删除用户词、展开候选和剪贴板入口也复核文档身份；宿主 focus 通知延迟或遗漏时先清旧输入上下文并刷新新宿主策略，旧候选/媒体操作直接失效，不能把旧退格恢复栈或排队按键写进新框。
 
