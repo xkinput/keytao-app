@@ -16,6 +16,10 @@ use time::OffsetDateTime;
 mod server;
 
 #[cfg(any(target_os = "windows", test))]
+#[path = "windows_server_recovery.rs"]
+mod server_recovery;
+
+#[cfg(any(target_os = "windows", test))]
 #[derive(serde::Deserialize)]
 struct WindowsImeEngineStatus {
     ok: bool,

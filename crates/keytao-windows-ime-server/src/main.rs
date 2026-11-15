@@ -9,6 +9,9 @@ mod server;
 #[cfg(any(windows, test))]
 mod authorization;
 
+#[cfg(any(windows, test))]
+mod handshake;
+
 #[cfg(windows)]
 fn main() {
     if let Err(error) = server::run() {

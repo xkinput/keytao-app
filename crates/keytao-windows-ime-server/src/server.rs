@@ -1,14 +1,14 @@
 use keytao_core::runtime_log::{self, Level};
 use keytao_ime_ipc::{
-    negotiate_protocol, read_frame, read_response, write_frame, ClientRole, EngineError, Request,
-    RequestEnvelope, Response, PROTOCOL_VERSION,
+    read_frame, read_response, write_frame, ClientRole, EngineError, Request, RequestEnvelope,
+    Response, PROTOCOL_VERSION,
 };
 use keytao_windows_ime::{
     engine_backend::{ImeEngineBackend, InProcEngine},
     engine_status,
     pipe_security::{
-        current_identity, keytao_install_root, process_identity, process_image, Identity,
-        OwnedHandle,
+        current_identity, keytao_install_root, pipe_client_identity, process_identity,
+        process_image, Identity, OwnedHandle,
     },
 };
 use std::{
@@ -33,14 +33,14 @@ use windows::{
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
         Storage::FileSystem::{
-            CreateFileW, FlushFileBuffers, FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+            CreateFileW, FlushFileBuffers, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE,
+            OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
         },
         System::{
             Pipes::{
-                ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
-                GetNamedPipeServerProcessId, SetNamedPipeHandleState, PIPE_NOWAIT,
-                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+                ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
+                GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, SetNamedPipeHandleState,
+                PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
             },
             Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
@@ -133,7 +133,7 @@ fn request_shutdown(name: &str, identity: &Identity, deadline: Instant) -> Resul
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 HANDLE::default(),
             )
         };
@@ -365,75 +365,172 @@ pub fn run() -> Result<(), String> {
     let Some(mut listener) = acquire_listener(&name, &identity)? else {
         return Ok(());
     };
-    let watched_runtime = Arc::clone(&runtime);
-    std::thread::Builder::new()
-        .name("ime-runtime-reload".into())
-        .spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(100));
-            let result = {
-                let mut runtime = watched_runtime.lock().unwrap_or_else(|p| p.into_inner());
-                if runtime.engine.is_none() {
-                    continue;
+    loop {
+        let watched_runtime = Arc::clone(&runtime);
+        let started = std::thread::Builder::new()
+            .name("ime-runtime-reload".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let result = {
+                    let mut runtime = watched_runtime.lock().unwrap_or_else(|p| p.into_inner());
+                    if runtime.engine.is_none() {
+                        continue;
+                    }
+                    runtime.refresh()
+                };
+                if let Err(error) = result {
+                    keytao_core::rt_log!(Level::Info, "ipc", "reload_failed", msg = error);
+                    std::thread::sleep(Duration::from_secs(5));
                 }
-                runtime.refresh()
-            };
-            if let Err(error) = result {
-                keytao_core::rt_log!(Level::Info, "ipc", "reload_failed", msg = error);
-                std::thread::sleep(Duration::from_secs(5));
+            });
+        match started {
+            Ok(_) => break,
+            Err(error) => {
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "ipc",
+                    "reload_thread_failed",
+                    severity = "warn",
+                    msg = error.to_string()
+                );
+                std::thread::sleep(Duration::from_millis(100));
             }
-        })
-        .map_err(|e| e.to_string())?;
+        }
+    }
     loop {
         let connected = unsafe { ConnectNamedPipe(listener.0, None) };
-        // Create the next instance before handing off the last one, retaining ownership of the name.
-        let next = create_pipe(&name, &identity.sid, false).map_err(|e| e.to_string())?;
-        let connection = std::mem::replace(&mut listener, next);
         if let Err(error) = connected {
             if error.code() != ERROR_PIPE_CONNECTED.to_hresult() {
-                keytao_core::rt_log!(Level::Info, "ipc", "accept_failed", msg = error.to_string());
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "ipc",
+                    "accept_failed",
+                    severity = "warn",
+                    msg = error.to_string()
+                );
+                let _ = unsafe { DisconnectNamedPipe(listener.0) };
+                std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
         }
+        // Keep this instance open on failure so another process cannot acquire the pipe name.
+        let next = match create_pipe(&name, &identity.sid, false) {
+            Ok(next) => next,
+            Err(error) => {
+                keytao_core::rt_log!(
+                    Level::Info,
+                    "ipc",
+                    "create_next_pipe_failed",
+                    severity = "warn",
+                    msg = error.to_string()
+                );
+                let _ = unsafe { DisconnectNamedPipe(listener.0) };
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        let connection = Arc::new(Mutex::new(Some(std::mem::replace(&mut listener, next))));
+        let client_connection = Arc::clone(&connection);
         let identity = identity.clone();
         let runtime = runtime.clone();
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("ime-pipe-client".into())
             .spawn(move || {
+                let connection = client_connection
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .unwrap();
                 if let Err(error) = serve(connection, &identity, &runtime) {
                     keytao_core::rt_log!(Level::Info, "ipc", "connection_closed", msg = error);
                 }
             })
-            .map_err(|e| e.to_string())?;
+        {
+            keytao_core::rt_log!(
+                Level::Info,
+                "ipc",
+                "client_thread_failed",
+                severity = "warn",
+                msg = error.to_string()
+            );
+            if let Some(connection) = connection.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                reject_busy_connection(connection, &error.to_string());
+            }
+        }
+    }
+}
+
+fn reject_busy_connection(pipe: OwnedHandle, reason: &str) {
+    if unsafe { SetNamedPipeHandleState(pipe.0, Some(&PIPE_NOWAIT), None, None) }.is_err() {
+        return;
+    }
+    let file = unsafe { File::from_raw_handle(pipe.0 .0) };
+    std::mem::forget(pipe);
+    let mut pipe = DeadlinePipe {
+        file,
+        deadline: Instant::now() + Duration::from_millis(250),
+    };
+    let Ok(hello) = read_frame::<_, RequestEnvelope>(&mut pipe) else {
+        return;
+    };
+    if write_frame(
+        &mut pipe,
+        &hello.reply(Response::HelloErr(format!("server busy: {reason}"))),
+    )
+    .is_ok()
+    {
+        // Keep the reply alive until the client closes, without an unbounded FlushFileBuffers.
+        let _ = io::copy(&mut pipe, &mut io::sink());
     }
 }
 
 fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Result<(), String> {
-    let mut pid = 0;
-    unsafe { GetNamedPipeClientProcessId(pipe.0, &mut pid) }.map_err(|e| e.to_string())?;
-    let client = process_identity(pid)?;
-    if client.session_id != server.session_id || client.sid != server.sid {
-        return Err("pipe client user or session does not match".into());
-    }
-    let mut file = unsafe { File::from_raw_handle(pipe.0 .0) };
+    let handle = pipe.0;
+    let mut file = unsafe { File::from_raw_handle(handle.0) };
     std::mem::forget(pipe);
-    let hello: RequestEnvelope = match read_frame(&mut file) {
-        Ok(hello) => hello,
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-        Err(error) => return Err(error.to_string()),
+    let mut pid = 0;
+    let authenticated = crate::handshake::accept(
+        &mut file,
+        || {
+            unsafe { GetNamedPipeClientProcessId(handle, &mut pid) }
+                .map_err(|error| format!("read pipe client pid: {error}"))?;
+            let client = pipe_client_identity(handle, pid)?;
+            if !crate::authorization::same_user_session(
+                &client.sid,
+                &server.sid,
+                client.session_id,
+                server.session_id,
+            ) {
+                return Err("pipe client user or session does not match".into());
+            }
+            Ok(client)
+        },
+        env!("CARGO_PKG_VERSION"),
+    );
+    let (hello, client) = match authenticated {
+        Ok(Some(authenticated)) => authenticated,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            // The shared logger has no Warn level and reserves pid for the server process.
+            eprintln!("WARN KeyTao IME server rejected client {pid}: {error}");
+            keytao_core::rt_log!(
+                Level::Info,
+                "ipc",
+                "hello_rejected",
+                severity = "warn",
+                client_pid = pid,
+                msg = error.clone()
+            );
+            // Do not discard a rejection reply when closing the server end immediately.
+            let _ = unsafe { FlushFileBuffers(handle) };
+            return Err(error);
+        }
     };
-    let response = match &hello.message {
-        Request::Hello { protocol, .. } => negotiate_protocol(*protocol, env!("CARGO_PKG_VERSION")),
-        _ => Response::HelloErr("expected Hello".into()),
-    };
-    write_frame(&mut file, &hello.reply(response.clone())).map_err(|e| e.to_string())?;
-    if !matches!(response, Response::HelloOk { .. }) {
-        return Ok(());
-    }
     keytao_core::rt_log!(
         Level::Info,
         "ipc",
         "client_authenticated",
-        pid = pid,
+        client_pid = pid,
         is_appcontainer = client.is_appcontainer
     );
     let role = match hello.message {
@@ -467,10 +564,17 @@ fn serve(pipe: OwnedHandle, server: &Identity, runtime: &Mutex<Runtime>) -> Resu
                 ))
             }
         } else if matches!(request.message, Request::Deploy) {
-            if !client.is_appcontainer && role == ClientRole::App {
+            // Identification tokens' AppContainer flag cannot independently authorize deployment.
+            if crate::authorization::deployment_allowed(
+                role,
+                client.is_appcontainer,
+                installed_process(pid, &client.sid, &server.sid).is_ok(),
+            ) {
                 Response::Deployed(runtime.lock().unwrap_or_else(|p| p.into_inner()).deploy())
             } else {
-                Response::Deployed(Err("Deploy requires an authenticated App caller".into()))
+                Response::Deployed(Err(
+                    "Deploy requires an installed authenticated App caller".into()
+                ))
             }
         } else {
             dispatch(&request.message, &mut session, runtime)

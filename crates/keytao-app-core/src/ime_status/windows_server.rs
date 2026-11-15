@@ -3,7 +3,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
-    os::windows::{io::AsRawHandle, process::CommandExt},
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::server_recovery::{HelloFailure, can_manage_server};
 use keytao_ime_ipc::{
     ClientRole, EngineMode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response,
     write_frame,
@@ -21,11 +22,11 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY, HANDLE, HLOCAL,
-            LocalFree,
+            LocalFree, WAIT_OBJECT_0,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
-            TokenUser,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_ELEVATION,
+            TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
         },
         System::{
             Pipes::{GetNamedPipeServerProcessId, PIPE_NOWAIT, SetNamedPipeHandleState},
@@ -39,7 +40,8 @@ use windows::{
             Threading::{
                 CREATE_NO_WINDOW, DETACHED_PROCESS, GetCurrentProcess, OpenProcess,
                 OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-                QueryFullProcessImageNameW,
+                PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+                TerminateProcess, WaitForSingleObject,
             },
         },
     },
@@ -49,12 +51,17 @@ use windows::{
 const SERVER_EXE: &str = "keytao-windows-ime-server.exe";
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
+// Win32 SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION; never grant impersonation rights.
+const PIPE_SECURITY_QOS: u32 = 0x0010_0000 | 0x0001_0000;
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_START: Mutex<Option<(PathBuf, Instant)>> = Mutex::new(None);
 static LAST_RUN_VALUE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(super) fn start_watchdog() {
-    if !server_enabled() || WATCHDOG_STARTED.swap(true, Ordering::AcqRel) {
+    if !server_enabled()
+        || !can_manage_server(app_is_elevated().unwrap_or(true))
+        || WATCHDOG_STARTED.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     if let Err(error) = std::thread::Builder::new()
@@ -74,7 +81,7 @@ pub(super) fn start_watchdog() {
 }
 
 fn ensure_started() -> Result<(), String> {
-    if !server_enabled() {
+    if !server_enabled() || !can_manage_server(app_is_elevated()?) {
         return Ok(());
     }
     let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
@@ -94,7 +101,7 @@ fn ensure_started() -> Result<(), String> {
         }
     }
     let pipe = pipe_name()?;
-    match OpenOptions::new().read(true).write(true).open(&pipe) {
+    match open_pipe(&pipe) {
         Ok(file) => {
             let current = server_image(&file)?;
             if same_path(&current, &server) {
@@ -111,11 +118,18 @@ fn ensure_started() -> Result<(), String> {
     }) {
         return Ok(());
     }
-    Command::new(&server)
+    start_server(&server, &mut last_start)
+}
+
+fn start_server(server: &Path, last_start: &mut Option<(PathBuf, Instant)>) -> Result<(), String> {
+    if !can_manage_server(app_is_elevated()?) {
+        return Err("请正常启动 KeyTao（不要以管理员身份运行），再重试部署。".into());
+    }
+    Command::new(server)
         .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
         .spawn()
         .map_err(|error| format!("start installed IME server: {error}"))?;
-    *last_start = Some((server, Instant::now()));
+    *last_start = Some((server.to_path_buf(), Instant::now()));
     Ok(())
 }
 
@@ -280,10 +294,22 @@ fn write_run_value(server: &Path) -> Result<(), String> {
 }
 
 fn pipe_name() -> Result<String, String> {
+    Ok(keytao_ime_ipc::pipe_name(
+        &process_sid(unsafe { GetCurrentProcess() })?,
+        process_session(std::process::id())?,
+    ))
+}
+
+fn process_session(pid: u32) -> Result<u32, String> {
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(pid, &mut session) }.map_err(|error| error.to_string())?;
+    Ok(session)
+}
+
+fn process_sid(process: HANDLE) -> Result<String, String> {
     unsafe {
         let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-            .map_err(|error| error.to_string())?;
+        OpenProcessToken(process, TOKEN_QUERY, &mut token).map_err(|error| error.to_string())?;
         let result = (|| {
             let mut size = 0;
             let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
@@ -304,11 +330,7 @@ fn pipe_name() -> Result<String, String> {
             ConvertSidToStringSidW(user.User.Sid, &mut text).map_err(|error| error.to_string())?;
             let sid = text.to_string();
             LocalFree(HLOCAL(text.0.cast()));
-            let sid = sid.map_err(|error| error.to_string())?;
-            let mut session = 0;
-            ProcessIdToSessionId(std::process::id(), &mut session)
-                .map_err(|error| error.to_string())?;
-            Ok(keytao_ime_ipc::pipe_name(&sid, session))
+            sid.map_err(|error| error.to_string())
         })();
         let _ = CloseHandle(token);
         result
@@ -316,21 +338,49 @@ fn pipe_name() -> Result<String, String> {
 }
 
 fn server_image(file: &File) -> Result<PathBuf, String> {
+    Ok(verified_server(file)?.image)
+}
+
+struct ProcessHandle(HANDLE);
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+struct VerifiedServer {
+    process: ProcessHandle,
+    pid: u32,
+    image: PathBuf,
+}
+
+fn verified_server(file: &File) -> Result<VerifiedServer, String> {
     unsafe {
         let mut pid = 0;
         GetNamedPipeServerProcessId(HANDLE(file.as_raw_handle()), &mut pid)
             .map_err(|error| error.to_string())?;
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-            .map_err(|error| format!("open IME server process: {error}"))?;
+        let process = ProcessHandle(
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+            .map_err(|error| format!("open IME server process: {error}"))?,
+        );
+        if process_session(pid)? != process_session(std::process::id())? {
+            return Err("IME server session does not match".into());
+        }
         let mut image = vec![0u16; 32768];
         let mut size = image.len() as u32;
         let result = QueryFullProcessImageNameW(
-            process,
+            process.0,
             PROCESS_NAME_WIN32,
             PWSTR(image.as_mut_ptr()),
             &mut size,
         );
-        let _ = CloseHandle(process);
         result.map_err(|error| format!("read IME server image: {error}"))?;
         let image = PathBuf::from(
             String::from_utf16(&image[..size as usize]).map_err(|error| error.to_string())?,
@@ -338,7 +388,17 @@ fn server_image(file: &File) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| error.to_string())?;
         verify_installation_path(&image)?;
-        Ok(image)
+        if !image
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(SERVER_EXE))
+        {
+            return Err("pipe peer is not the installed IME server executable".into());
+        }
+        Ok(VerifiedServer {
+            process,
+            pid,
+            image,
+        })
     }
 }
 
@@ -369,43 +429,73 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// False means no server connection could be opened; never retry an uncertain deploy in-process.
+/// False permits in-process deployment only in InProc mode or with no server and no spawn.
 pub(super) fn deploy_if_available() -> Result<bool, String> {
     if !server_enabled() {
         return Ok(false);
     }
+    let elevated = app_is_elevated()?;
     start_watchdog();
-    if let Err(error) = ensure_started() {
-        tracing::warn!(%error, "IME server startup before deploy failed");
-    }
-    let pipe = pipe_name()?;
-    let deadline = Instant::now() + START_TIMEOUT;
-    let mut replacing_server = false;
-    let file = loop {
-        match OpenOptions::new().read(true).write(true).open(&pipe) {
-            Ok(file) => {
-                let image = server_image(&file)?;
-                if same_path(&image, &installed_server_exe()?) {
-                    break file;
-                }
-                replacing_server = true;
-                drop(file);
-                if Instant::now() >= deadline {
-                    return Err("current IME server did not become available for deployment".into());
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    // Serialize recovery/deploy with this App's watchdog, including the full deployment RPC.
+    let mut last_start = LAST_START.lock().unwrap_or_else(|error| error.into_inner());
+    deploy_via_server(&mut last_start, elevated)
+        .map_err(|error| {
+            if elevated {
+                format!(
+                    "无法通过输入法服务完成部署：{error}；当前 KeyTao 以管理员权限运行，请关闭后正常启动 KeyTao（不要以管理员身份运行），再重试部署。"
+                )
+            } else {
+                error
             }
+        })
+}
+
+fn open_pipe(name: &str) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(PIPE_SECURITY_QOS)
+        .open(name)
+}
+
+struct ServerConnection {
+    pipe: DeadlinePipe,
+    peer: VerifiedServer,
+}
+
+fn connect_for_deploy(
+    name: &str,
+    last_start: &mut Option<(PathBuf, Instant)>,
+    elevated: bool,
+) -> Result<Option<(ServerConnection, bool)>, String> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    let mut started = false;
+    let mut observed_server = false;
+    let file = loop {
+        match open_pipe(name) {
+            Ok(file) => break file,
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
-                if Instant::now() >= deadline {
-                    return if replacing_server {
-                        Err("replacement IME server did not become available for deployment".into())
+                if !can_manage_server(elevated) {
+                    return if observed_server {
+                        Err(
+                            "IME server pipe disappeared after being busy; deployment was not sent"
+                                .into(),
+                        )
                     } else {
-                        Ok(false)
+                        Ok(None)
                     };
+                }
+                if !started {
+                    start_server(&installed_server_exe()?, last_start)?;
+                    started = true;
+                }
+                if Instant::now() >= deadline {
+                    return Err("IME server did not become available for deployment; in-process deployment is disabled in Pipe mode".into());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                observed_server = true;
                 if Instant::now() >= deadline {
                     return Err("IME server deployment pipe remains busy".into());
                 }
@@ -414,14 +504,27 @@ pub(super) fn deploy_if_available() -> Result<bool, String> {
             Err(error) => return Err(format!("connect to IME server for deploy: {error}")),
         }
     };
+    let peer = verified_server(&file)?;
+    // Elevated Apps cannot replace a peer, so they need no current-version lookup.
+    let current = !elevated && same_path(&peer.image, &installed_server_exe()?);
     unsafe {
         SetNamedPipeHandleState(HANDLE(file.as_raw_handle()), Some(&PIPE_NOWAIT), None, None)
     }
     .map_err(|error| format!("set deployment pipe deadline mode: {error}"))?;
-    let mut pipe = DeadlinePipe {
-        file,
-        deadline: Instant::now() + START_TIMEOUT,
-    };
+    Ok(Some((
+        ServerConnection {
+            pipe: DeadlinePipe {
+                file,
+                deadline: Instant::now() + START_TIMEOUT,
+                bytes_read: 0,
+            },
+            peer,
+        },
+        current,
+    )))
+}
+
+fn hello(pipe: &mut DeadlinePipe) -> Result<(), HelloFailure> {
     let hello = RequestEnvelope {
         seq: 1,
         message: Request::Hello {
@@ -431,38 +534,155 @@ pub(super) fn deploy_if_available() -> Result<bool, String> {
             is_appcontainer: false,
         },
     };
-    write_frame(&mut pipe, &hello).map_err(|error| format!("send IME server hello: {error}"))?;
-    match read_response(&mut pipe, hello.seq)
-        .map_err(|error| format!("read IME server hello: {error}"))?
+    write_frame(pipe, &hello)
+        .map_err(|error| HelloFailure::other(format!("send IME server hello: {error}")))?;
+    let bytes_read = pipe.bytes_read;
+    match read_response(pipe, hello.seq)
+        .map_err(|error| HelloFailure::read(error, pipe.bytes_read - bytes_read))?
     {
-        Response::HelloOk { protocol, .. } if protocol == PROTOCOL_VERSION => {}
-        response => {
-            return Err(format!(
-                "IME server deployment handshake rejected: {response:?}"
-            ));
+        Response::HelloOk { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(()),
+        Response::HelloErr(reason) => Err(HelloFailure::other(format!(
+            "IME server deployment handshake rejected: {reason}"
+        ))),
+        response => Err(HelloFailure::other(format!(
+            "IME server deployment handshake rejected: {response:?}"
+        ))),
+    }
+}
+
+fn replace_before_deploy(
+    connection: ServerConnection,
+    authenticated: bool,
+    name: &str,
+) -> Result<(), String> {
+    if !can_manage_server(app_is_elevated()?) {
+        return Err("请正常启动 KeyTao（不要以管理员身份运行），再重试部署。".into());
+    }
+    let ServerConnection { mut pipe, peer } = connection;
+    tracing::warn!(server_pid = peer.pid, image = %peer.image.display(), authenticated, "recovering IME server before Deploy");
+    if authenticated {
+        // Shutdown waits behind another caller's deploy; a timeout must not become a forced kill.
+        pipe.deadline = Instant::now() + DEPLOY_TIMEOUT;
+        write_frame(
+            &mut pipe,
+            &RequestEnvelope {
+                seq: 2,
+                message: Request::Shutdown,
+            },
+        )
+        .map_err(|error| format!("send IME server shutdown: {error}"))?;
+        match read_response(&mut pipe, 2)
+            .map_err(|error| format!("read IME server shutdown: {error}"))?
+        {
+            Response::Ok => {}
+            response => return Err(format!("IME server rejected shutdown: {response:?}")),
+        }
+    } else {
+        // Recovery permits termination only for a stale image or EOF before any Hello reply.
+        // Holding the original process handle prevents PID reuse before the terminate handle opens.
+        if unsafe { WaitForSingleObject(peer.process.0, 0) } != WAIT_OBJECT_0 {
+            let process = ProcessHandle(
+                unsafe { OpenProcess(PROCESS_TERMINATE, false, peer.pid) }
+                    .map_err(|error| format!("open verified IME server for recovery: {error}"))?,
+            );
+            unsafe { TerminateProcess(process.0, 1) }
+                .map_err(|error| format!("stop verified IME server before deploy: {error}"))?;
         }
     }
-    pipe.deadline = Instant::now() + DEPLOY_TIMEOUT;
-    write_frame(
-        &mut pipe,
-        &RequestEnvelope {
-            seq: 2,
-            message: Request::Deploy,
+    if unsafe { WaitForSingleObject(peer.process.0, START_TIMEOUT.as_millis() as u32) }
+        != WAIT_OBJECT_0
+    {
+        return Err("old IME server has not exited; deployment was not sent".into());
+    }
+    drop(pipe);
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        match open_pipe(name) {
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
+                return Ok(());
+            }
+            Ok(file) => {
+                let replacement = verified_server(&file)?;
+                if replacement.pid != peer.pid {
+                    // Another App may already have started the replacement after the old writer exited.
+                    return Ok(());
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {}
+            Err(error) => return Err(format!("wait for old IME server pipe release: {error}")),
+        }
+        if Instant::now() >= deadline {
+            return Err("old IME server pipe was not released; deployment was not sent".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn deploy_via_server(
+    last_start: &mut Option<(PathBuf, Instant)>,
+    elevated: bool,
+) -> Result<bool, String> {
+    let name = pipe_name()?;
+    super::server_recovery::deploy_once(
+        elevated,
+        || connect_for_deploy(&name, last_start, elevated),
+        |connection| {
+            let result = hello(&mut connection.pipe);
+            if let Err(error) = &result {
+                tracing::warn!(server_pid = connection.peer.pid, error = %error.reason, "IME server handshake failed before Deploy");
+            }
+            result
+        },
+        |connection, authenticated| replace_before_deploy(connection, authenticated, &name),
+        |mut connection| {
+            let pipe = &mut connection.pipe;
+            // No retry or in-process fallback from this point: a failed write may have sent Deploy.
+            pipe.deadline = Instant::now() + DEPLOY_TIMEOUT;
+            write_frame(
+                pipe,
+                &RequestEnvelope {
+                    seq: 2,
+                    message: Request::Deploy,
+                },
+            )
+            .map_err(|error| format!("send IME server deploy: {error}"))?;
+            match read_response(pipe, 2)
+                .map_err(|error| format!("read IME server deploy: {error}"))?
+            {
+                Response::Deployed(result) => result,
+                response => Err(format!(
+                    "unexpected IME server deploy response: {response:?}"
+                )),
+            }
         },
     )
-    .map_err(|error| format!("send IME server deploy: {error}"))?;
-    match read_response(&mut pipe, 2).map_err(|error| format!("read IME server deploy: {error}"))? {
-        Response::Deployed(result) => result.map(|()| true),
-        response => Err(format!(
-            "unexpected IME server deploy response: {response:?}"
-        )),
+}
+
+fn app_is_elevated() -> Result<bool, String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+        .map_err(|error| error.to_string())?;
+    let token = ProcessHandle(token);
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut size = 0;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
     }
+    .map_err(|error| error.to_string())?;
+    Ok(elevation.TokenIsElevated != 0)
 }
 
 // PIPE_NOWAIT keeps each OS call bounded; framing retries only until the RPC deadline.
 struct DeadlinePipe {
     file: File,
     deadline: Instant,
+    bytes_read: usize,
 }
 
 impl DeadlinePipe {
@@ -491,7 +711,11 @@ impl Read for DeadlinePipe {
                 Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
                     self.wait()?
                 }
-                result => return result,
+                Ok(count) => {
+                    self.bytes_read += count;
+                    return Ok(count);
+                }
+                Err(error) => return Err(error),
             }
         }
     }
