@@ -67,8 +67,8 @@ class AccentPicker extends StatelessWidget {
                   ? Duration.zero
                   : const Duration(milliseconds: 150),
               curve: Curves.easeOutCubic,
-              width: 44,
-              height: 44,
+              width: touch ? 44 : 32,
+              height: touch ? 44 : 32,
               decoration: BoxDecoration(
                 color: isSelected
                     ? accent.withValues(alpha: .12)

@@ -273,12 +273,12 @@ class CandidatePanelPreview extends StatelessWidget {
           key: const ValueKey('candidate-preview-image'),
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final width = math.min(
-                math.max(
-                  naturalWidth + paddingX * 2,
+              final width = math.max(
+                naturalWidth + paddingX * 2,
+                math.min(
                   _metric(panel, 'minWidth'),
+                  _metric(panel, 'maxWidth'),
                 ),
-                _metric(panel, 'maxWidth'),
               );
               return Semantics(
                 container: true,
@@ -287,7 +287,7 @@ class CandidatePanelPreview extends StatelessWidget {
                   key: const ValueKey('candidate-panel-preview'),
                   width: math.min(width, constraints.maxWidth),
                   constraints: BoxConstraints(
-                    maxHeight: _metric(panel, 'maxHeight'),
+                    maxHeight: math.min(360, _metric(panel, 'maxHeight')),
                   ),
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
@@ -309,7 +309,9 @@ class CandidatePanelPreview extends StatelessWidget {
                     horizontal: paddingX,
                     vertical: paddingY,
                   ),
-                  child: SingleChildScrollView(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.topLeft,
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -323,10 +325,7 @@ class CandidatePanelPreview extends StatelessWidget {
                           ),
                           SizedBox(height: _metric(panel, 'preeditGap')),
                         ],
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: candidateList,
-                        ),
+                        candidateList,
                       ],
                     ),
                   ),

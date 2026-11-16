@@ -55,8 +55,8 @@ Future<void> _loadFonts() async {
   }
   for (final path in [
     '/System/Library/Fonts/PingFang.ttc',
-    '/System/Library/Fonts/Supplemental/Songti.ttc',
     '/System/Library/Fonts/STHeiti Medium.ttc',
+    '/System/Library/Fonts/Supplemental/Songti.ttc',
   ]) {
     final file = File(path);
     if (!file.existsSync()) continue;
@@ -84,17 +84,31 @@ void main() {
       name: 'desktop',
       size: const Size(1280, 900),
       platform: BridgePlatform.macOs,
+      candidateCount: 6,
     ),
     (
       name: 'phone',
       size: const Size(390, 844),
       platform: BridgePlatform.android,
+      candidateCount: 6,
+    ),
+    (
+      name: 'desktop',
+      size: const Size(1280, 900),
+      platform: BridgePlatform.macOs,
+      candidateCount: 9,
     ),
   ]) {
-    for (final brightness in Brightness.values) {
-      final name = '${device.name}-${brightness.name}';
+    for (final brightness
+        in device.candidateCount == 9
+            ? [Brightness.light]
+            : Brightness.values) {
+      final name =
+          '${device.name}-${brightness.name}'
+          '${device.candidateCount == 9 ? '-9' : ''}';
       testWidgets('capture input settings $name', (tester) async {
-        final controller = _ScreenshotController(device.platform);
+        final controller = _ScreenshotController(device.platform)
+          ..candidatePageSize = device.candidateCount;
         addTearDown(controller.dispose);
         tester.view.devicePixelRatio = 1;
         tester.view.physicalSize = device.size;
