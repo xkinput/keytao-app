@@ -9,9 +9,9 @@ use windows::{
         System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
         UI::TextServices::{
             CLSID_TF_CategoryMgr, IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl,
-            ITfCategoryMgr, ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT,
-            TF_ATTR_TARGET_CONVERTED, TF_CT_COLORREF, TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0,
-            TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_SOLID,
+            ITfCategoryMgr, ITfDisplayAttributeInfo, ITfDisplayAttributeInfo_Impl,
+            TF_ATTR_CONVERTED, TF_ATTR_INPUT, TF_CT_COLORREF, TF_CT_NONE, TF_DA_COLOR,
+            TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_SOLID,
         },
     },
 };
@@ -40,7 +40,7 @@ fn default_attribute(converted: bool) -> TF_DISPLAYATTRIBUTE {
             },
         },
         bAttr: if converted {
-            TF_ATTR_TARGET_CONVERTED
+            TF_ATTR_CONVERTED
         } else {
             TF_ATTR_INPUT
         },
