@@ -27,14 +27,22 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_keyboard::{self, WlKeyboard},
+        wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_registry,
         wl_seat::{self, WlSeat},
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
-        wl_surface::WlSurface,
+        wl_surface::{self, WlSurface},
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
+};
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
@@ -54,13 +62,13 @@ use crate::{
         CoreEngine, ImeSession,
     },
     ibus_shared::is_shift_key,
-    panel::{load_font, PanelRenderer},
+    panel::{load_font, PanelRenderer, WaylandPanel},
     panel_hit::{PanelClick, PanelHitAreas},
     reload_bus,
     surrounding::SurroundingText,
     wayland_common::{
         deadline_active, key_repeats, key_sym, mode_hint_deadline, poll_timeout_ms,
-        preedit_cursor_bytes, take_expired_deadline, tempfile, KeyRepeat,
+        preedit_cursor_bytes, take_expired_deadline, tempfile, KeyRepeat, WaylandPanelScale,
     },
 };
 
@@ -109,6 +117,7 @@ fn unhandled_keysym_text(sym: u32, mods: u32) -> Option<char> {
 struct App {
     session: ImeSession,
     renderer: Option<PanelRenderer>,
+    panel_scale: WaylandPanelScale,
     theme_resolver: ThemeResolver,
 
     compositor: Option<WlCompositor>,
@@ -171,6 +180,7 @@ impl App {
         Self {
             session,
             renderer,
+            panel_scale: WaylandPanelScale::default(),
             theme_resolver: ThemeResolver::from_default_locations(),
             compositor: None,
             shm: None,
@@ -275,11 +285,16 @@ impl App {
             return;
         }
         let surface = compositor.create_surface(qh, ());
+        self.panel_scale.attach_surface(&surface, qh);
         let popup = im.get_input_popup_surface(&surface, qh, ());
         let pool = shm.create_pool(file.as_fd(), 4, qh, ());
         let buf = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, qh, ());
         surface.attach(Some(&buf), 0, 0);
-        surface.damage_buffer(0, 0, 1, 1);
+        if surface.version() >= 4 {
+            surface.damage_buffer(0, 0, 1, 1);
+        } else {
+            surface.damage(0, 0, 1, 1);
+        }
         surface.commit();
 
         self.panel_buffer = Some(buf);
@@ -311,26 +326,30 @@ impl App {
             return;
         }
         let (Some(renderer), Some(shm), Some(surface)) = (
-            self.renderer.as_ref(),
+            self.renderer.as_mut(),
             self.shm.as_ref(),
             self.panel_surface.as_ref(),
         ) else {
             return;
         };
 
+        self.panel_scale.attach_surface(surface, qh);
         let show_hint = deadline_active(self.mode_hint_until);
-        let (pixels, w, h, hit_areas) = if let Some(state) = self
+        let state = self
             .ime_state
             .as_ref()
-            .filter(|state| !hide_candidates && !state.candidates.is_empty())
-        {
-            renderer.render_with_hit_areas(state)
-        } else if show_hint {
-            let (pixels, w, h) = renderer.render_mode_hint(self.ascii_mode);
-            (pixels, w, h, PanelHitAreas::default())
-        } else {
+            .filter(|state| !hide_candidates && !state.candidates.is_empty());
+        if state.is_none() && !show_hint {
             return;
-        };
+        }
+        let WaylandPanel {
+            pixels,
+            width: w,
+            height: h,
+            logical_width,
+            logical_height,
+            hit_areas,
+        } = renderer.render_wayland(state, self.ascii_mode, self.panel_scale.scale(surface));
         if w == 0 || h == 0 {
             return;
         }
@@ -359,8 +378,14 @@ impl App {
             (),
         );
 
+        self.panel_scale
+            .configure_surface(surface, logical_width, logical_height);
         surface.attach(Some(&buffer), 0, 0);
-        surface.damage_buffer(0, 0, w as i32, h as i32);
+        if surface.version() >= 4 {
+            surface.damage_buffer(0, 0, w as i32, h as i32);
+        } else {
+            surface.damage(0, 0, logical_width as i32, logical_height as i32);
+        }
         surface.commit();
 
         self.panel_hit_areas = hit_areas;
@@ -797,15 +822,33 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        if let wl_registry::Event::GlobalRemove { name } = &event {
+            state.panel_scale.remove_global(*name);
+            if state.panel_visible {
+                state.pressed_click = None;
+                state.redraw_panel(qh);
+            }
+            return;
+        }
         if let wl_registry::Event::Global {
             name,
             interface,
             version,
         } = event
         {
+            if state
+                .panel_scale
+                .bind_global(registry, name, &interface, version, qh)
+            {
+                if state.panel_visible {
+                    state.pressed_click = None;
+                    state.redraw_panel(qh);
+                }
+                return;
+            }
             match interface.as_str() {
                 "wl_compositor" => {
-                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+                    state.compositor = Some(registry.bind(name, version.min(6), qh, ()));
                 }
                 "wl_shm" => {
                     state.shm = Some(registry.bind(name, version.min(1), qh, ()));
@@ -1051,7 +1094,63 @@ delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore WlShm);
 delegate_noop!(App: ignore WlShmPool);
 delegate_noop!(App: ignore WlBuffer);
-delegate_noop!(App: ignore WlSurface);
+delegate_noop!(App: ignore WpFractionalScaleManagerV1);
+delegate_noop!(App: ignore WpViewporter);
+delegate_noop!(App: ignore WpViewport);
+
+impl Dispatch<WlSurface, ()> for App {
+    fn event(
+        state: &mut Self,
+        surface: &WlSurface,
+        event: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if state.panel_surface.as_ref() != Some(surface) {
+            return;
+        }
+        state.panel_scale.surface_event(&event);
+        if state.panel_visible {
+            state.pressed_click = None;
+            state.redraw_panel(qh);
+        }
+    }
+}
+
+impl Dispatch<WlOutput, u32> for App {
+    fn event(
+        state: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
+        _: &u32,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        state.panel_scale.output_event(output, &event);
+        if state.panel_visible && matches!(event, wl_output::Event::Scale { .. }) {
+            state.pressed_click = None;
+            state.redraw_panel(qh);
+        }
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        state.panel_scale.fractional_event(&event);
+        if state.panel_visible {
+            state.pressed_click = None;
+            state.redraw_panel(qh);
+        }
+    }
+}
 impl Dispatch<WlSeat, ()> for App {
     fn event(
         state: &mut Self,
@@ -1160,7 +1259,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
     let qh = queue.handle();
 
     let compositor: WlCompositor = globals
-        .bind(&qh, 1..=4, ())
+        .bind(&qh, 1..=6, ())
         .map_err(|e| format!("wl_compositor not advertised: {e}"))?;
     let shm: WlShm = globals
         .bind(&qh, 1..=1, ())
@@ -1187,6 +1286,7 @@ pub fn run(engine: CoreEngine, frontend: crate::frontend::Frontend) -> Result<()
         .ok();
 
     let mut app = App::new(session);
+    app.panel_scale.bind_initial(&globals, &qh);
     app.compositor = Some(compositor);
     app.shm = Some(shm);
     app.seat = Some(seat);

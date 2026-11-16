@@ -1,12 +1,222 @@
 //! Helpers shared by the two Wayland input-method protocols.
 
 use std::{
+    collections::{HashMap, HashSet},
     fs::File,
     os::fd::FromRawFd,
     time::{Duration, Instant},
 };
 
+use wayland_client::{
+    globals::GlobalList,
+    protocol::{
+        wl_output::{self, WlOutput},
+        wl_registry::WlRegistry,
+        wl_surface::{self, WlSurface},
+    },
+    Dispatch, Proxy, QueueHandle,
+};
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+};
 use xkbcommon::xkb;
+
+use crate::panel_scale::select_scale;
+
+pub struct WaylandPanelScale {
+    override_scale: Option<f32>,
+    fractional_manager: Option<WpFractionalScaleManagerV1>,
+    viewporter: Option<WpViewporter>,
+    fractional: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
+    fractional_scale: Option<f32>,
+    preferred_integer_scale: Option<i32>,
+    outputs: HashMap<u32, (WlOutput, i32)>,
+    entered_outputs: HashSet<u32>,
+}
+
+impl Default for WaylandPanelScale {
+    fn default() -> Self {
+        Self {
+            // An unparsable override must not silently disable output-scale following.
+            override_scale: std::env::var("KEYTAO_IME_PANEL_SCALE")
+                .ok()
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .map(|scale| scale.clamp(0.75, 4.0)),
+            fractional_manager: None,
+            viewporter: None,
+            fractional: None,
+            viewport: None,
+            fractional_scale: None,
+            preferred_integer_scale: None,
+            outputs: HashMap::new(),
+            entered_outputs: HashSet::new(),
+        }
+    }
+}
+
+impl WaylandPanelScale {
+    pub fn bind_initial<D>(&mut self, globals: &GlobalList, qh: &QueueHandle<D>)
+    where
+        D: Dispatch<WlOutput, u32>
+            + Dispatch<WpFractionalScaleManagerV1, ()>
+            + Dispatch<WpViewporter, ()>
+            + 'static,
+    {
+        // registry_queue_init does not forward the initial globals to Dispatch.
+        for global in globals.contents().clone_list() {
+            self.bind_global(
+                globals.registry(),
+                global.name,
+                &global.interface,
+                global.version,
+                qh,
+            );
+        }
+    }
+
+    pub fn bind_global<D>(
+        &mut self,
+        registry: &WlRegistry,
+        name: u32,
+        interface: &str,
+        version: u32,
+        qh: &QueueHandle<D>,
+    ) -> bool
+    where
+        D: Dispatch<WlOutput, u32>
+            + Dispatch<WpFractionalScaleManagerV1, ()>
+            + Dispatch<WpViewporter, ()>
+            + 'static,
+    {
+        if version == 0 {
+            return false;
+        }
+        match interface {
+            "wl_output" => {
+                self.outputs
+                    .entry(name)
+                    .or_insert_with(|| (registry.bind(name, version.min(4), qh, name), 1));
+            }
+            "wp_fractional_scale_manager_v1" => {
+                self.fractional_manager = Some(registry.bind(name, version.min(1), qh, ()));
+            }
+            "wp_viewporter" => {
+                self.viewporter = Some(registry.bind(name, version.min(1), qh, ()));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn remove_global(&mut self, name: u32) {
+        if let Some((output, _)) = self.outputs.remove(&name) {
+            self.entered_outputs.remove(&name);
+            if output.version() >= 3 {
+                output.release();
+            }
+        }
+    }
+
+    pub fn attach_surface<D>(&mut self, surface: &WlSurface, qh: &QueueHandle<D>)
+    where
+        D: Dispatch<WpFractionalScaleV1, ()> + Dispatch<WpViewport, ()> + 'static,
+    {
+        if self.viewport.is_none() {
+            self.viewport = self
+                .viewporter
+                .as_ref()
+                .map(|viewporter| viewporter.get_viewport(surface, qh, ()));
+        }
+        if self.fractional.is_none() && self.viewport.is_some() {
+            self.fractional = self
+                .fractional_manager
+                .as_ref()
+                .map(|manager| manager.get_fractional_scale(surface, qh, ()));
+        }
+    }
+
+    pub fn surface_event(&mut self, event: &wl_surface::Event) {
+        match event {
+            wl_surface::Event::Enter { output } => {
+                if let Some(name) = output.data::<u32>() {
+                    self.entered_outputs.insert(*name);
+                }
+            }
+            wl_surface::Event::Leave { output } => {
+                if let Some(name) = output.data::<u32>() {
+                    self.entered_outputs.remove(name);
+                }
+            }
+            wl_surface::Event::PreferredBufferScale { factor } => {
+                self.preferred_integer_scale = Some(*factor);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn output_event(&mut self, output: &WlOutput, event: &wl_output::Event) {
+        if let wl_output::Event::Scale { factor } = event {
+            if let Some((_, scale)) = output
+                .data::<u32>()
+                .and_then(|name| self.outputs.get_mut(name))
+            {
+                *scale = *factor;
+            }
+        }
+    }
+
+    pub fn fractional_event(&mut self, event: &wp_fractional_scale_v1::Event) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            self.fractional_scale = Some(*scale as f32 / 120.0);
+        }
+    }
+
+    pub fn scale(&self, surface: &WlSurface) -> f32 {
+        let scale = select_scale(
+            self.override_scale,
+            self.fractional_scale,
+            self.preferred_integer_scale,
+            self.entered_outputs
+                .iter()
+                .filter_map(|name| self.outputs.get(name).map(|(_, scale)| *scale)),
+        );
+        if self.viewport_active() {
+            scale
+        } else if surface.version() >= 3 {
+            scale.ceil()
+        } else {
+            1.0
+        }
+    }
+
+    pub fn configure_surface(&self, surface: &WlSurface, logical_width: u32, logical_height: u32) {
+        if self.viewport_active() {
+            if surface.version() >= 3 {
+                surface.set_buffer_scale(1);
+            }
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(logical_width as i32, logical_height as i32);
+            }
+        } else {
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(-1, -1);
+            }
+            if surface.version() >= 3 {
+                surface.set_buffer_scale(self.scale(surface) as i32);
+            }
+        }
+    }
+
+    fn viewport_active(&self) -> bool {
+        self.viewport.is_some() && (self.fractional.is_some() || self.override_scale.is_some())
+    }
+}
 
 /// Wayland preedit indices are byte offsets; `ImeState::cursor` counts scalars.
 pub fn preedit_cursor_bytes(preedit: &str, cursor: usize) -> i32 {

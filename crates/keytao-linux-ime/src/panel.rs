@@ -332,10 +332,6 @@ fn detect_explicit_panel_scale() -> Option<f32> {
     None
 }
 
-fn detect_panel_scale() -> f32 {
-    detect_explicit_panel_scale().unwrap_or(1.0)
-}
-
 fn detect_x11_panel_scale() -> f32 {
     detect_explicit_panel_scale()
         .or_else(xft_dpi_scale)
@@ -349,6 +345,15 @@ pub struct PanelRenderer {
     _library: Library,
     scale: f32,
     theme_resolver: ThemeResolver,
+}
+
+pub struct WaylandPanel {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub hit_areas: PanelHitAreas,
 }
 
 struct GlyphLayout<'a> {
@@ -552,7 +557,7 @@ pub fn spawn_x11_overlay_panel(rx: Receiver<OverlayPanelMessage>) {
 
 impl PanelRenderer {
     pub fn new(source: FontSource) -> Option<Self> {
-        Self::with_scale(source, detect_panel_scale())
+        Self::with_scale(source, 1.0)
     }
 
     pub fn new_x11(source: FontSource) -> Option<Self> {
@@ -582,6 +587,59 @@ impl PanelRenderer {
 
     pub fn candidate_panel_layout(&self) -> keytao_core::key_policy::CandidatePanelLayout {
         crate::engine::candidate_panel_layout(&self.theme_resolver.current())
+    }
+
+    pub fn render_wayland(
+        &mut self,
+        state: Option<&ImeState>,
+        ascii_mode: bool,
+        scale: f32,
+    ) -> WaylandPanel {
+        self.scale = scale;
+        let (pixels, width, height, mut hit_areas) = if let Some(state) = state {
+            self.render_with_hit_areas(state)
+        } else {
+            let (pixels, width, height) = self.render_mode_hint(ascii_mode);
+            (pixels, width, height, PanelHitAreas::default())
+        };
+        let logical_width = (width as f64 / scale as f64).ceil().max(1.0) as u32;
+        let logical_height = (height as f64 / scale as f64).ceil().max(1.0) as u32;
+        let buffer_width = crate::panel_scale::logical_to_physical(logical_width, scale);
+        let buffer_height = crate::panel_scale::logical_to_physical(logical_height, scale);
+        // Pad rather than stretch the raster; integer buffer scales require divisible sizes.
+        let pixels = if (buffer_width, buffer_height) == (width, height) {
+            pixels
+        } else {
+            let mut padded = vec![0; buffer_width as usize * buffer_height as usize * 4];
+            for (source, target) in pixels
+                .chunks_exact(width as usize * 4)
+                .zip(padded.chunks_exact_mut(buffer_width as usize * 4))
+            {
+                target[..source.len()].copy_from_slice(source);
+            }
+            padded
+        };
+        let x_scale = logical_width as f32 / buffer_width as f32;
+        let y_scale = logical_height as f32 / buffer_height as f32;
+        for rect in hit_areas
+            .candidates
+            .iter_mut()
+            .chain(hit_areas.previous_page.iter_mut())
+            .chain(hit_areas.next_page.iter_mut())
+        {
+            rect.x *= x_scale;
+            rect.y *= y_scale;
+            rect.width *= x_scale;
+            rect.height *= y_scale;
+        }
+        WaylandPanel {
+            pixels,
+            width: buffer_width,
+            height: buffer_height,
+            logical_width,
+            logical_height,
+            hit_areas,
+        }
     }
 
     /// Render panel to a BGRA byte buffer.  Returns (bytes, width, height).
