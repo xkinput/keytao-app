@@ -54,11 +54,15 @@ pub struct SchemeUpdateDto {
 }
 
 #[derive(serde::Deserialize)]
+#[flutter_rust_bridge::frb]
 pub struct UserWordDto {
     pub id: u32,
     pub word: String,
     pub code: String,
     pub weight: Option<String>,
+    #[serde(default)]
+    #[frb(default = false)]
+    pub remove: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -436,9 +440,12 @@ pub struct UserDictionarySyncDto {
     pub server_deletions: Vec<UserDictionaryDeletionDto>,
 }
 
+#[flutter_rust_bridge::frb]
 pub struct UserDictionaryDeletionDto {
     pub word: String,
     pub code: String,
+    #[frb(default = false)]
+    pub remove: bool,
 }
 
 pub struct UserDictionaryDeletionConfirmationDto {

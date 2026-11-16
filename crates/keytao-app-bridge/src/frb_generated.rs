@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1351873780;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1071620321;
 
 // Section: executor
 
@@ -2559,6 +2559,44 @@ fn wire__crate__api__core__resolve_candidate_panel_preview_impl(
         },
     )
 }
+fn wire__crate__api__core__search_stock_words_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_stock_words",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_query = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::core::search_stock_words(api_scheme_key, api_query).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__core__set_android_ime_input_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2855,6 +2893,51 @@ fn wire__crate__api__core__set_scheme_sync_preferences_impl(
                     )?;
                     std::result::Result::Ok(output_ok)
                 })())
+            }
+        },
+    )
+}
+fn wire__crate__api__core__set_user_word_removed_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_user_word_removed",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_scheme_key = <String>::sse_decode(&mut deserializer);
+            let api_word = <String>::sse_decode(&mut deserializer);
+            let api_code = <String>::sse_decode(&mut deserializer);
+            let api_remove = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::core::set_user_word_removed(
+                            api_scheme_key,
+                            api_word,
+                            api_code,
+                            api_remove,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
             }
         },
     )
@@ -4402,9 +4485,11 @@ impl SseDecode for crate::api::types::UserDictionaryDeletionDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_word = <String>::sse_decode(deserializer);
         let mut var_code = <String>::sse_decode(deserializer);
+        let mut var_remove = <bool>::sse_decode(deserializer);
         return crate::api::types::UserDictionaryDeletionDto {
             word: var_word,
             code: var_code,
+            remove: var_remove,
         };
     }
 }
@@ -4454,11 +4539,13 @@ impl SseDecode for crate::api::types::UserWordDto {
         let mut var_word = <String>::sse_decode(deserializer);
         let mut var_code = <String>::sse_decode(deserializer);
         let mut var_weight = <Option<String>>::sse_decode(deserializer);
+        let mut var_remove = <bool>::sse_decode(deserializer);
         return crate::api::types::UserWordDto {
             id: var_id,
             word: var_word,
             code: var_code,
             weight: var_weight,
+            remove: var_remove,
         };
     }
 }
@@ -4666,71 +4753,73 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         69 => wire__crate__api__core__remove_scheme_package_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__core__set_android_ime_input_settings_impl(
+        71 => wire__crate__api__core__search_stock_words_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__core__set_android_ime_input_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => {
+        73 => {
             wire__crate__api__core__set_desktop_english_mode_impl(port, ptr, rust_vec_len, data_len)
         }
-        73 => wire__crate__api__core__set_ime_embedded_composition_impl(
+        74 => wire__crate__api__core__set_ime_embedded_composition_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        74 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
+        75 => wire__crate__api__core__set_ime_hide_candidate_panel_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
-        76 => {
+        76 => wire__crate__api__core__set_ime_ui_settings_impl(port, ptr, rust_vec_len, data_len),
+        77 => {
             wire__crate__api__core__set_runtime_log_settings_impl(port, ptr, rust_vec_len, data_len)
         }
-        77 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__core__set_scheme_sync_preferences_impl(
+        78 => wire__crate__api__core__set_schema_switch_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__core__set_scheme_sync_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => {
+        80 => wire__crate__api__core__set_user_word_removed_impl(port, ptr, rust_vec_len, data_len),
+        81 => {
             wire__crate__api__core__take_user_words_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        80 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
-        84 => wire__crate__api__core__windows_dismiss_ime_action_impl(
+        82 => wire__crate__api__core__update_user_word_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__core__upload_cloud_package_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__core__upload_scheme_profile_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__core__wanxiang_status_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__core__windows_dismiss_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        85 => wire__crate__api__core__windows_ime_ensure_registered_impl(
+        87 => wire__crate__api__core__windows_ime_ensure_registered_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        86 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__core__windows_pending_ime_action_impl(
+        88 => wire__crate__api__core__windows_ime_status_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__core__windows_pending_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => wire__crate__api__core__windows_prepare_search_schemas_impl(
+        90 => wire__crate__api__core__windows_prepare_search_schemas_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__crate__api__core__windows_redeploy_ime_action_impl(
+        91 => wire__crate__api__core__windows_redeploy_ime_action_impl(
             port,
             ptr,
             rust_vec_len,
@@ -5664,6 +5753,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::UserDictionaryDeletion
         [
             self.word.into_into_dart().into_dart(),
             self.code.into_into_dart().into_dart(),
+            self.remove.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5735,6 +5825,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::UserWordDto {
             self.word.into_into_dart().into_dart(),
             self.code.into_into_dart().into_dart(),
             self.weight.into_into_dart().into_dart(),
+            self.remove.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6665,6 +6756,7 @@ impl SseEncode for crate::api::types::UserDictionaryDeletionDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.word, serializer);
         <String>::sse_encode(self.code, serializer);
+        <bool>::sse_encode(self.remove, serializer);
     }
 }
 
@@ -6703,6 +6795,7 @@ impl SseEncode for crate::api::types::UserWordDto {
         <String>::sse_encode(self.word, serializer);
         <String>::sse_encode(self.code, serializer);
         <Option<String>>::sse_encode(self.weight, serializer);
+        <bool>::sse_encode(self.remove, serializer);
     }
 }
 

@@ -17,6 +17,7 @@ pub fn is_protected_user_file(relative: &str) -> bool {
             || relative.ends_with(".user.yaml")
             || relative == "user.yaml"
             || relative == "user_dict.txt"
+            || relative == "keytao.user.remove.txt"
             || relative == keytao_core::ACTIVE_SCHEME_MANIFEST
             || relative.ends_with("_user.txt")
             || (relative.starts_with(".keytao-sync-base-") && relative.ends_with(".json")))
@@ -43,7 +44,7 @@ pub fn prepare_protected_file_install(
     if !decision.protected {
         return decision;
     }
-    if relative.starts_with(".keytao-sync-base-") {
+    if relative.starts_with(".keytao-sync-base-") || relative == "keytao.user.remove.txt" {
         decision.write = false;
         decision.log = Some(format!("[KEPT] {relative}"));
         return decision;
@@ -658,6 +659,8 @@ pub(crate) async fn smart_install_preserving_settings(
             }
         }
 
+        crate::remove_filter::ensure_remove_filter(&dest)?;
+
         #[cfg(not(target_os = "windows"))]
         logs.extend(
             keytao_core::invalidate_rime_build_artifacts(
@@ -743,6 +746,8 @@ pub fn finish_android_install(
     let root = std::fs::canonicalize(root)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.to_owned());
+    crate::remove_filter::ensure_remove_filter(std::path::Path::new(&root))
+        .map_err(CoreError::Other)?;
     crate::packages::stage_install(core, &std::fs::read(archive)?, manifest, root)?;
     core.emit(CoreEvent::InstallProgress(InstallProgress {
         stage: "done".into(),

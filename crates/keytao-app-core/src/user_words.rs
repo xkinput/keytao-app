@@ -1,7 +1,7 @@
 use crate::{Core, CoreError};
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{BufRead, Read, Write},
     path::{Component, Path, PathBuf},
@@ -15,6 +15,7 @@ pub struct UserWord {
     pub word: String,
     pub code: String,
     pub weight: Option<String>,
+    pub remove: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -114,6 +115,14 @@ impl PackageIndex {
     }
 
     fn compare(&self, entry: UserWord) -> UserWordComparison {
+        if entry.remove {
+            return UserWordComparison {
+                entry,
+                status: "removed".into(),
+                words: Vec::new(),
+                codes: Vec::new(),
+            };
+        }
         let identical = self
             .by_word
             .get(&entry.word)
@@ -418,9 +427,8 @@ pub fn compare_user_words(
         return Ok(Vec::new());
     }
     let index = package_index(&package)?;
-    let dictionary = Dictionary::parse(&fs::read(user_path(core, &package, root, true)?)?)?;
-    Ok(dictionary
-        .entries()
+    let (_, entries) = read_user_words_locked(core, &mut state, scheme, root)?;
+    Ok(entries
         .into_iter()
         .map(|entry| index.compare(entry))
         .collect())
@@ -443,7 +451,43 @@ pub fn lookup_user_word(
         word: word.into(),
         code: code.into(),
         weight: None,
+        remove: false,
     }))
+}
+
+pub fn search_stock_words(
+    core: &Core,
+    scheme: &str,
+    query: &str,
+) -> Result<Vec<UserWord>, CoreError> {
+    require_keytao_scheme(scheme)?;
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut state = core
+        .user_words
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let package = package_data(&mut state, core, scheme)?;
+    let index = package_index(&package)?;
+    let mut entries = Vec::new();
+    for (word, codes) in &index.by_word {
+        for code in codes {
+            if word.contains(query) || code.contains(query) {
+                entries.push(UserWord {
+                    id: 0,
+                    word: word.clone(),
+                    code: code.clone(),
+                    weight: None,
+                    remove: false,
+                });
+            }
+        }
+    }
+    entries.sort_by(|left, right| (&left.word, &left.code).cmp(&(&right.word, &right.code)));
+    entries.truncate(100);
+    Ok(entries)
 }
 
 pub fn reconcile_user_words(
@@ -583,6 +627,130 @@ fn validate_input(word: &str, code: &str, weight: Option<&str>) -> Result<(), Co
     Ok(())
 }
 
+fn require_keytao_scheme(scheme: &str) -> Result<(), CoreError> {
+    if !matches!(scheme, "keytao" | "keytao-dz" | "keytao-bj") {
+        return Err(CoreError::Unsupported(
+            "Stock word removal is only supported by KeyTao schemes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn removals_path(root: &Path) -> Result<PathBuf, CoreError> {
+    let path = root.join("keytao.user.remove.txt");
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(CoreError::Other(
+            "User word removals must not be a symlink".into(),
+        ));
+    }
+    Ok(path)
+}
+
+pub(crate) fn read_user_word_removals(root: &Path) -> Result<Vec<UserWord>, CoreError> {
+    let source = match fs::read_to_string(removals_path(root)?) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .map(|(id, line)| {
+            let (word, code) = line
+                .split_once('\t')
+                .ok_or_else(|| CoreError::Other("Invalid user word removal format".into()))?;
+            validate_input(word, code, None)?;
+            Ok(UserWord {
+                id: id
+                    .try_into()
+                    .map_err(|_| CoreError::Other("Too many user word removals".into()))?,
+                word: word.into(),
+                code: code.into(),
+                weight: None,
+                remove: true,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn write_user_word_removals(root: &Path, entries: &[UserWord]) -> Result<(), CoreError> {
+    let path = removals_path(root)?;
+    let mut removals = BTreeSet::new();
+    for entry in entries {
+        validate_input(&entry.word, &entry.code, None)?;
+        if !entry.remove {
+            return Err(CoreError::Other("Expected a user word removal".into()));
+        }
+        removals.insert((&entry.word, &entry.code));
+    }
+    fs::create_dir_all(root)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+    if let Ok(metadata) = fs::metadata(&path) {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?;
+    }
+    for (word, code) in removals {
+        writeln!(temporary, "{word}\t{code}")?;
+    }
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .map_err(|error| CoreError::Io(error.error))?;
+    Ok(())
+}
+
+pub fn set_user_word_removed(
+    core: &Core,
+    scheme: &str,
+    root: &Path,
+    word: &str,
+    code: &str,
+    remove: bool,
+) -> Result<(), CoreError> {
+    let mut state = core
+        .user_words
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    set_user_word_removed_locked(core, &mut state, scheme, root, word, code, remove)
+}
+
+pub(crate) fn set_user_word_removed_locked(
+    core: &Core,
+    state: &mut UserWordsState,
+    scheme: &str,
+    root: &Path,
+    word: &str,
+    code: &str,
+    remove: bool,
+) -> Result<(), CoreError> {
+    require_keytao_scheme(scheme)?;
+    validate_input(word, code, None)?;
+    let package = package_data(state, core, scheme)?;
+    user_path(core, &package, root, true)?;
+    let mut entries = read_user_word_removals(root)?;
+    let exists = entries
+        .iter()
+        .any(|entry| entry.word == word && entry.code == code);
+    if exists == remove {
+        return Ok(());
+    }
+    if remove {
+        crate::account::ensure_user_dictionary_imports(root).map_err(CoreError::Other)?;
+        entries.push(UserWord {
+            id: 0,
+            word: word.into(),
+            code: code.into(),
+            weight: None,
+            remove: true,
+        });
+    } else {
+        entries.retain(|entry| entry.word != word || entry.code != code);
+    }
+    write_user_word_removals(root, &entries)
+}
+
 struct Dictionary {
     lines: Vec<String>,
     data_start: usize,
@@ -660,6 +828,7 @@ impl Dictionary {
                         .and_then(|column| fields.get(column))
                         .filter(|value| !value.is_empty())
                         .map(|value| (*value).into()),
+                    remove: false,
                 })
             })
             .collect()
@@ -762,7 +931,10 @@ pub(crate) fn read_user_words_locked(
         return Ok((Vec::new(), Vec::new()));
     }
     let content = fs::read(user_path(core, &package, root, true)?)?;
-    let entries = Dictionary::parse(&content)?.entries();
+    let mut entries = Dictionary::parse(&content)?.entries();
+    if matches!(scheme, "keytao" | "keytao-dz" | "keytao-bj") {
+        entries.extend(read_user_word_removals(root)?);
+    }
     Ok((content, entries))
 }
 
@@ -794,6 +966,9 @@ pub(crate) fn add_user_word_locked(
     let package = package_data(state, core, scheme)?;
     let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
+    if matches!(scheme, "keytao" | "keytao-dz" | "keytao-bj") {
+        crate::account::ensure_user_dictionary_imports(root).map_err(CoreError::Other)?;
+    }
     if dictionary
         .entries()
         .iter()
@@ -941,7 +1116,20 @@ mod tests {
     fn keytao_variants_share_the_same_user_dictionary() {
         let (dir, core) = fixture();
         let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        for name in ["keytao", "keytao-dz", "keytao-bj", "xmjd6"] {
+            fs::write(
+                root.join(format!("{name}.extended.dict.yaml")),
+                format!("name: {name}.extended\nimport_tables:\n  - {name}.phrase\n"),
+            )
+            .unwrap();
+        }
         add_user_word(&core, "keytao-dz", &root, "自造词", "zici", None).unwrap();
+        for name in ["keytao", "keytao-dz", "keytao-bj", "xmjd6"] {
+            let content =
+                fs::read_to_string(root.join(format!("{name}.extended.dict.yaml"))).unwrap();
+            assert_eq!(content.contains("- keytao.user"), name != "xmjd6");
+        }
         let words = list_user_words(&core, "keytao-bj", &root).unwrap();
         assert_eq!(words.len(), 1);
         assert_eq!(words[0].word, "自造词");
@@ -965,6 +1153,151 @@ mod tests {
             archive.finish().unwrap().into_inner(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn removal_file_is_plain_word_code_pairs_and_validated_without_lua() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keytao.user.remove.txt");
+        assert!(read_user_word_removals(dir.path()).unwrap().is_empty());
+        fs::write(&path, "词语\tciyu\r\n恢复\thuif").unwrap();
+        let entries = read_user_word_removals(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.remove && entry.weight.is_none())
+        );
+        assert_eq!(
+            (&entries[0].word[..], &entries[0].code[..]),
+            ("词语", "ciyu")
+        );
+        write_user_word_removals(dir.path(), &[entries.clone(), entries].concat()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "恢复\thuif\n词语\tciyu\n"
+        );
+        for invalid in ["word", "word\t", "\tcode", "word\ta b", "word\tcode\t1"] {
+            fs::write(&path, invalid).unwrap();
+            assert!(read_user_word_removals(dir.path()).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn removals_coexist_with_personal_words_and_can_be_restored_across_variants() {
+        let (dir, core) = fixture();
+        package(
+            &core,
+            "keytao",
+            &[
+                (
+                    "keytao.extended.dict.yaml",
+                    "---\nname: keytao.extended\nimport_tables: [keytao.user, keytao.phrase]\n...\n",
+                ),
+                (
+                    "keytao.phrase.dict.yaml",
+                    "---\nname: keytao.phrase\n...\nother\txyz\n",
+                ),
+            ],
+        );
+        add_user_word(&core, "keytao", dir.path(), "shared", "abc", None).unwrap();
+        let dictionary = dir.path().join("keytao.user.dict.yaml");
+        let before = fs::read(&dictionary).unwrap();
+        set_user_word_removed(&core, "keytao-dz", dir.path(), "shared", "abc", true).unwrap();
+        set_user_word_removed(&core, "keytao-bj", dir.path(), "shared", "abc", true).unwrap();
+        let entries = list_user_words(&core, "keytao-bj", dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].remove);
+        assert!(entries[1].remove);
+        assert_eq!(entries[0].word, entries[1].word);
+        assert_eq!(entries[0].code, entries[1].code);
+        assert_eq!(fs::read(&dictionary).unwrap(), before);
+        let comparisons = compare_user_words(&core, "keytao", dir.path()).unwrap();
+        assert_eq!(comparisons[1].status, "removed");
+        assert!(
+            reconcile_user_words(&core, "keytao", dir.path(), true)
+                .unwrap()
+                .removed
+                .is_empty()
+        );
+        assert_eq!(read_user_word_removals(dir.path()).unwrap().len(), 1);
+        set_user_word_removed(&core, "keytao", dir.path(), "shared", "abc", false).unwrap();
+        assert_eq!(
+            list_user_words(&core, "keytao-dz", dir.path())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(fs::read(&dictionary).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("keytao.user.remove.txt")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn removals_are_keytao_only_and_reject_invalid_input_without_writing() {
+        let (dir, core) = fixture();
+        for scheme in ["xmjd", "xmjd-feiding", "txjx", "local-example", "../keytao"] {
+            assert!(set_user_word_removed(&core, scheme, dir.path(), "word", "abc", true).is_err());
+        }
+        for (word, code) in [("", "abc"), ("a\tb", "abc"), ("word", "a b")] {
+            assert!(set_user_word_removed(&core, "keytao", dir.path(), word, code, true).is_err());
+        }
+        assert!(!dir.path().join("keytao.user.remove.txt").exists());
+        assert!(!dir.path().join("keytao.user.dict.yaml").exists());
+    }
+
+    #[test]
+    fn stock_search_uses_the_package_index_and_excludes_user_dictionary() {
+        let (_dir, core) = fixture();
+        let mut table = "---\nname: keytao.phrase\n...\n".to_owned();
+        for row in (0..105).rev() {
+            table.push_str(&format!("word{row:03}\tcode{row:03}\n"));
+        }
+        package(
+            &core,
+            "keytao",
+            &[
+                (
+                    "keytao.extended.dict.yaml",
+                    "---\nname: keytao.extended\nimport_tables: [keytao.user, keytao.phrase]\n...\n",
+                ),
+                ("keytao.phrase.dict.yaml", &table),
+                (
+                    "keytao.user.dict.yaml",
+                    "---\nname: keytao.user\n...\npersonal\tprivate\n",
+                ),
+            ],
+        );
+        let entries = search_stock_words(&core, "keytao-dz", "word").unwrap();
+        assert_eq!(entries.len(), 100);
+        assert_eq!(entries.first().unwrap().word, "word000");
+        assert_eq!(entries.last().unwrap().word, "word099");
+        assert!(entries.iter().all(|entry| !entry.remove));
+        assert_eq!(
+            search_stock_words(&core, "keytao-bj", "code104").unwrap()[0].word,
+            "word104"
+        );
+        assert!(
+            search_stock_words(&core, "keytao", "personal")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(search_stock_words(&core, "keytao", " ").unwrap().is_empty());
+        assert!(search_stock_words(&core, "xmjd", "word").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_file_rejects_symlinks() {
+        let (dir, core) = fixture();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "outside\tabc\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("keytao.user.remove.txt")).unwrap();
+        assert!(set_user_word_removed(&core, "keytao", dir.path(), "word", "xyz", true).is_err());
+        assert!(read_user_word_removals(dir.path()).is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside\tabc\n");
     }
 
     #[test]

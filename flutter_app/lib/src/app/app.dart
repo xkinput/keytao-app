@@ -25,7 +25,12 @@ class _KeyTaoAppState extends State<KeyTaoApp> {
   @override
   void initState() {
     super.initState();
-    _lifecycle = AppLifecycleListener(onResume: widget.controller.onResume);
+    _lifecycle = AppLifecycleListener(
+      onResume: widget.controller.onResume,
+      onHide: widget.controller.onPause,
+      onPause: widget.controller.onPause,
+      onDetach: widget.controller.onPause,
+    );
   }
 
   @override
