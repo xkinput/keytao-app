@@ -23,8 +23,8 @@ use windows::{
     core::PCWSTR,
     Win32::{
         Foundation::{
-            LocalFree, ERROR_ACCESS_DENIED, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
-            GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
+            LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ,
+            GENERIC_WRITE, HANDLE, HLOCAL,
         },
         Security::{
             Authorization::{
@@ -33,8 +33,9 @@ use windows::{
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         },
         Storage::FileSystem::{
-            CreateFileW, FlushFileBuffers, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE,
-            OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+            CreateFileW, FlushFileBuffers, ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+            SECURITY_SQOS_PRESENT,
         },
         System::{
             Pipes::{
@@ -221,11 +222,20 @@ impl Read for DeadlinePipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
             self.check_deadline()?;
-            match self.file.read(buffer) {
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
-                    self.wait()?
-                }
-                result => return result,
+            let mut bytes_read = 0;
+            // File::read turns ERROR_NO_DATA into EOF before we can retry it.
+            let result = unsafe {
+                ReadFile(
+                    HANDLE(self.file.as_raw_handle()),
+                    Some(buffer),
+                    Some(&mut bytes_read),
+                    None,
+                )
+            }
+            .map_err(|error| error.code().0 & 0xffff);
+            match crate::pipe_io::classify_read(result, bytes_read)? {
+                Some(count) => return Ok(count),
+                None => self.wait()?,
             }
         }
     }
@@ -237,9 +247,6 @@ impl Write for DeadlinePipe {
             self.check_deadline()?;
             match self.file.write(buffer) {
                 Ok(0) if !buffer.is_empty() => self.wait()?,
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
-                    self.wait()?
-                }
                 result => return result,
             }
         }

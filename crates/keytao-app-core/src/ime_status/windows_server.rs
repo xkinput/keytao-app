@@ -13,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::server_recovery::{HelloFailure, can_manage_server};
+use super::{
+    pipe_io::classify_read,
+    server_recovery::{HelloFailure, can_manage_server},
+};
 use keytao_ime_ipc::{
     ClientRole, EngineMode, PROTOCOL_VERSION, Request, RequestEnvelope, Response, read_response,
     write_frame,
@@ -21,8 +24,8 @@ use keytao_ime_ipc::{
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY, HANDLE, HLOCAL,
-            LocalFree, WAIT_OBJECT_0,
+            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, HLOCAL, LocalFree,
+            WAIT_OBJECT_0,
         },
         Security::{
             AdjustTokenPrivileges, Authorization::ConvertSidToStringSidW, DuplicateTokenEx,
@@ -31,6 +34,7 @@ use windows::{
             TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
             TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenPrimary, TokenUser,
         },
+        Storage::FileSystem::ReadFile,
         System::{
             Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, IDispatch, IServiceProvider},
             Pipes::{GetNamedPipeServerProcessId, PIPE_NOWAIT, SetNamedPipeHandleState},
@@ -859,15 +863,23 @@ impl Read for DeadlinePipe {
                     "IME server RPC timed out",
                 ));
             }
-            match self.file.read(buffer) {
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
-                    self.wait()?
-                }
-                Ok(count) => {
+            let mut count = 0;
+            // File::read turns ERROR_NO_DATA into EOF; ReadFile preserves the raw failure.
+            let result = unsafe {
+                ReadFile(
+                    HANDLE(self.file.as_raw_handle()),
+                    Some(buffer),
+                    Some(&mut count),
+                    None,
+                )
+            }
+            .map_err(|error| error.code().0 & 0xffff);
+            match classify_read(result, count)? {
+                None => self.wait()?,
+                Some(count) => {
                     self.bytes_read += count;
                     return Ok(count);
                 }
-                Err(error) => return Err(error),
             }
         }
     }
@@ -884,9 +896,6 @@ impl Write for DeadlinePipe {
             }
             match self.file.write(buffer) {
                 Ok(0) if !buffer.is_empty() => self.wait()?,
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA.0 as i32) => {
-                    self.wait()?
-                }
                 result => return result,
             }
         }

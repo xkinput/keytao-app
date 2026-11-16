@@ -15,6 +15,9 @@ mod authorization;
 #[cfg(any(windows, test))]
 mod handshake;
 
+#[cfg(any(windows, test))]
+mod pipe_io;
+
 #[cfg(windows)]
 fn main() {
     if let Err(error) = server::run() {
