@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'about_page.dart';
+import 'color_picker.dart';
 import 'debug_page.dart';
 import 'extension_page.dart';
 import 'input_page.dart';
@@ -134,13 +135,7 @@ class _AppShellState extends State<AppShell> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      final accent = Color(
-        0xFF000000 |
-            int.parse(
-              (c.uiSettings?.accentColor ?? '#3B73D9').substring(1),
-              radix: 16,
-            ),
-      );
+      final accent = parseAccentColor(c.uiSettings?.accentColor ?? '#3B73D9');
       void select(int index) {
         if (index == c.activePage.index) return;
         FocusScope.of(context).unfocus();

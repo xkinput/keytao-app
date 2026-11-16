@@ -10,15 +10,39 @@ class CandidatePanelPreview extends StatelessWidget {
     required this.theme,
     required this.orientation,
     required this.showPreedit,
-  });
+    this.candidateCount = 6,
+  }) : assert(candidateCount >= 1 && candidateCount <= 10);
 
   final Map<String, dynamic> theme;
   final PanelOrientationDto orientation;
+  final int candidateCount;
   // The IME shows the preedit in the panel only when it is not embedded.
   final bool showPreedit;
 
-  static const _candidates = ['这', '之', '支', '只能', '服从', '中国'];
-  static const _comments = ['🚫', '', '', '~a', '~c', '~g'];
+  static const _candidates = [
+    '这',
+    '之',
+    '支',
+    '只能',
+    '服从',
+    '中国',
+    '支持',
+    '之间',
+    '之前',
+    '之后',
+  ];
+  static const _comments = [
+    '🚫',
+    '',
+    '',
+    '~a',
+    '~c',
+    '~g',
+    '~i',
+    '~j',
+    '~q',
+    '~h',
+  ];
 
   double _metric(Map<String, dynamic> section, String name) =>
       (section[name] as num).toDouble();
@@ -109,7 +133,7 @@ class CandidatePanelPreview extends StatelessWidget {
 
     final widths = <double>[];
     final candidates = <Widget>[];
-    for (var index = 0; index < _candidates.length; index++) {
+    for (var index = 0; index < candidateCount; index++) {
       final selected = index == 0;
       final label = '${index + 1}${option['labelSuffix']}';
       final comment = _comments[index];
@@ -230,7 +254,9 @@ class CandidatePanelPreview extends StatelessWidget {
     ];
     final naturalWidth = vertical
         ? widths.reduce(math.max)
-        : widths.reduce((a, b) => a + b) + gap * 6 + navSize * 2;
+        : widths.reduce((a, b) => a + b) +
+              gap * (candidateCount + 1) +
+              navSize * 2;
     final candidateList = Flex(
       key: const ValueKey('candidate-preview-candidates'),
       direction: vertical ? Axis.vertical : Axis.horizontal,

@@ -10,13 +10,14 @@ import 'user_words.dart';
 import 'widgets.dart';
 
 class _StatusBadge extends StatelessWidget {
-  const _StatusBadge(this.label, {required this.ready});
+  const _StatusBadge(this.label, {required this.ready, this.failed = false});
   final String label;
   final bool ready;
+  final bool failed;
 
   @override
   Widget build(BuildContext context) => FBadge(
-    variant: FBadgeVariant.outline,
+    variant: failed ? FBadgeVariant.destructive : FBadgeVariant.outline,
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -24,7 +25,9 @@ class _StatusBadge extends StatelessWidget {
           width: 6,
           height: 6,
           decoration: BoxDecoration(
-            color: ready
+            color: failed
+                ? context.theme.colors.destructive
+                : ready
                 ? successColor(context)
                 : context.theme.colors.mutedForeground,
             shape: BoxShape.circle,
@@ -79,6 +82,7 @@ class WindowsImeCard extends StatelessWidget {
       trailing: _StatusBadge(
         c.windowsRegistrationLabel,
         ready: !c.windowsRegistrationBusy && s?.registered == true,
+        failed: s?.registrationState == 'failed',
       ),
       children: [
         if (c.windowsRegistrationBusy) const FProgress(),
@@ -93,6 +97,7 @@ class WindowsImeCard extends StatelessWidget {
               _StatusBadge(
                 AppStrings.windowsRegistration(c.windowsRegistrationLabel),
                 ready: s.registered,
+                failed: s.registrationState == 'failed',
               ),
               _StatusBadge(
                 AppStrings.windowsDll(s.registeredDll),
@@ -147,9 +152,13 @@ class LinuxImeCard extends StatelessWidget {
           ValueRow(AppStrings.command, s.command),
           ActionRow(
             children: [
-              _StatusBadge(
-                s.kdeSession ? AppStrings.kdeSession : AppStrings.nonKdeSession,
-                ready: s.kdeSession,
+              FBadge(
+                variant: FBadgeVariant.outline,
+                child: Text(
+                  s.kdeSession
+                      ? AppStrings.kdeSession
+                      : AppStrings.nonKdeSession,
+                ),
               ),
               _StatusBadge(
                 AppStrings.kdeConfiguration(s.kdeConfigured),

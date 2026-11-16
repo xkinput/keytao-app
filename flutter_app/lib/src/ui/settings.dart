@@ -377,6 +377,7 @@ class _SettingsCardState extends State<SettingsCard> {
                       ),
                       orientation: _previewOrientation ?? s.orientation,
                       showPreedit: !s.effectiveEmbeddedComposition,
+                      candidateCount: c.candidatePageSize ?? 6,
                     ),
                   ),
                 ),

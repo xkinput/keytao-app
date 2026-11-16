@@ -6,8 +6,13 @@ import '../app/options.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-Color _parse(String hex) =>
-    Color(0xFF000000 | int.parse(hex.substring(1), radix: 16));
+Color parseAccentColor(String hex) {
+  final value = hex.startsWith('#') && hex.length == 7
+      ? int.tryParse(hex.substring(1), radix: 16)
+      : null;
+  return Color(0xFF000000 | (value ?? 0x3B73D9));
+}
+
 String _hex(Color color) =>
     '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
@@ -78,14 +83,16 @@ class AccentPicker extends StatelessWidget {
                   width: touch ? 32 : 28,
                   height: touch ? 32 : 28,
                   decoration: BoxDecoration(
-                    color: _parse(hex),
+                    color: parseAccentColor(hex),
                     borderRadius: BorderRadius.circular(custom ? 8 : 16),
                   ),
                   child: custom || selected == hex
                       ? Icon(
                           custom ? FLucideIcons.pipette : FLucideIcons.check,
                           size: touch ? 18 : 16,
-                          color: custom && _parse(hex).computeLuminance() > .5
+                          color:
+                              custom &&
+                                  parseAccentColor(hex).computeLuminance() > .5
                               ? Colors.black
                               : Colors.white,
                         )
@@ -122,7 +129,7 @@ class _ColorDialog extends StatefulWidget {
 }
 
 class _ColorDialogState extends State<_ColorDialog> {
-  late HSVColor _color = HSVColor.fromColor(_parse(widget.initial));
+  late HSVColor _color = HSVColor.fromColor(parseAccentColor(widget.initial));
   late final _text = TextEditingController(text: _hex(_color.toColor()));
   bool _valid = true;
   void _update(HSVColor color) => setState(() {
@@ -237,7 +244,9 @@ class _ColorDialogState extends State<_ColorDialog> {
             controller: _text,
             onChange: (value) => setState(() {
               _valid = RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(value.text);
-              if (_valid) _color = HSVColor.fromColor(_parse(value.text));
+              if (_valid) {
+                _color = HSVColor.fromColor(parseAccentColor(value.text));
+              }
             }),
           ),
           maxLength: 7,

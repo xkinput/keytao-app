@@ -1,0 +1,177 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:forui/forui.dart';
+import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/ui/input_page.dart';
+import 'package:keytao/src/ui/shell.dart';
+import 'package:keytao/src/ui/theme.dart';
+
+import '../view_fixture.dart';
+
+const _directory =
+    '/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/'
+    '348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/ui-shots';
+const _cjkFamily = 'SettingsScreenshotCjk';
+const _captureKey = ValueKey('settings-screenshot');
+
+class _ScreenshotController extends ViewController {
+  _ScreenshotController(super.platform) {
+    candidatePageSize = 6;
+  }
+
+  @override
+  Map<String, dynamic> resolveCandidatePanelPreview({
+    required UiColorSchemeDto colorScheme,
+    required String accentColor,
+    required double fontSize,
+    required bool systemDark,
+  }) {
+    final theme = super.resolveCandidatePanelPreview(
+      colorScheme: colorScheme,
+      accentColor: accentColor,
+      fontSize: fontSize,
+      systemDark: systemDark,
+    );
+    (theme['font'] as Map<String, dynamic>)['family'] = _cjkFamily;
+    return theme;
+  }
+}
+
+Future<void> _loadFonts() async {
+  final manifest =
+      jsonDecode(await rootBundle.loadString('FontManifest.json')) as List;
+  for (final entry in manifest) {
+    final loader = FontLoader(entry['family'] as String);
+    for (final font in entry['fonts'] as List) {
+      loader.addFont(rootBundle.load(font['asset'] as String));
+    }
+    await loader.load();
+  }
+  for (final path in [
+    '/System/Library/Fonts/PingFang.ttc',
+    '/System/Library/Fonts/Supplemental/Songti.ttc',
+    '/System/Library/Fonts/STHeiti Medium.ttc',
+  ]) {
+    final file = File(path);
+    if (!file.existsSync()) continue;
+    try {
+      await (FontLoader(
+        _cjkFamily,
+      )..addFont(file.readAsBytes().then(ByteData.sublistView))).load();
+      return;
+    } on Object catch (_) {
+      // Try the next system font when this font collection cannot be loaded.
+    }
+  }
+  throw StateError('No macOS CJK font could be loaded for screenshots.');
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final enabled = Platform.environment['SCREENSHOTS'] == '1';
+  setUpAll(() async {
+    if (enabled) await _loadFonts();
+  });
+
+  for (final device in [
+    (
+      name: 'desktop',
+      size: const Size(1280, 900),
+      platform: BridgePlatform.macOs,
+    ),
+    (
+      name: 'phone',
+      size: const Size(390, 844),
+      platform: BridgePlatform.android,
+    ),
+  ]) {
+    for (final brightness in Brightness.values) {
+      final name = '${device.name}-${brightness.name}';
+      testWidgets('capture input settings $name', (tester) async {
+        final controller = _ScreenshotController(device.platform);
+        addTearDown(controller.dispose);
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = device.size;
+        tester.platformDispatcher.platformBrightnessTestValue = brightness;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: _captureKey,
+            child: KeyTaoTheme(
+              platform: device.platform,
+              home: Builder(
+                builder: (context) {
+                  final theme = context.theme;
+                  final typeface = FTypeface.inherit(
+                    colors: theme.colors,
+                    touch: context.platformVariant.touch,
+                    fontFamilyFallback: const [_cjkFamily],
+                  );
+                  return FTheme(
+                    platform: context.platformVariant,
+                    data: FThemeData(
+                      colors: theme.colors,
+                      touch: context.platformVariant.touch,
+                      typography: FTypography(
+                        display: typeface,
+                        body: typeface,
+                      ),
+                    ),
+                    child: AppShell(controller: controller),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.getSize(find.byKey(_captureKey)), device.size);
+
+        final scrollable = tester.state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(InputPage),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        // Keep the viewport width and responsive layout while exposing all rows.
+        tester.view.physicalSize = Size(
+          device.size.width,
+          device.size.height + scrollable.position.maxScrollExtent.ceil(),
+        );
+        await tester.pumpAndSettle();
+        expect(scrollable.position.maxScrollExtent, lessThanOrEqualTo(1));
+        expect(tester.takeException(), isNull);
+
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(_captureKey),
+        );
+        await tester.runAsync(() async {
+          final image = await boundary.toImage();
+          try {
+            final png = await image.toByteData(format: ui.ImageByteFormat.png);
+            expect(png, isNotNull);
+            expect(png!.lengthInBytes, greaterThan(10000));
+            await Directory(_directory).create(recursive: true);
+            await File('$_directory/$name.png').writeAsBytes(
+              png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+            );
+          } finally {
+            image.dispose();
+          }
+        });
+        await tester.pumpWidget(const SizedBox.shrink());
+      }, skip: !enabled);
+    }
+  }
+}
