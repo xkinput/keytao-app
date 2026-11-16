@@ -3528,7 +3528,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             ]
             let size = hint.size(withAttributes: attributes)
             hint.draw(
-                at: CGPoint(x: keyRect.maxX - size.width - 7, y: keyRect.minY + 4),
+                at: CGPoint(x: keyRect.maxX - size.width - 4, y: keyRect.minY + 1.5),
                 withAttributes: attributes
             )
         }
