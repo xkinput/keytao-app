@@ -134,33 +134,33 @@ pub(crate) fn write_package_file(
     Ok(())
 }
 
-// Returns (merged_rime_lua, renames) where renames is [(old_module, new_module)].
-// Conflicting user modules are renamed to "<name>_user" to avoid overwrite by zip's lua files.
-pub(crate) fn merge_rime_lua(
-    local_content: &str,
-    zip_content: &str,
-    zip_lua_filenames: &std::collections::HashSet<String>,
-) -> (String, Vec<(String, String)>) {
-    keytao_core::merge_rime_lua_content(Some(local_content), zip_content, zip_lua_filenames)
+pub fn prepare_rime_lua_install(
+    package_content: Option<&str>,
+    addon_lines: &[&str],
+) -> Option<String> {
+    keytao_core::generate_rime_lua_content(package_content, addon_lines)
 }
 
-pub fn prepare_rime_lua_install(
-    local_content: Option<&str>,
+fn install_rime_lua(
+    root: &std::path::Path,
     package_content: Option<&str>,
-    package_lua_filenames: &HashSet<String>,
-) -> (Option<String>, Vec<(String, String)>) {
-    if let Some(package) = package_content {
-        let (merged, renames) = match local_content {
-            Some(local) => merge_rime_lua(local, package, package_lua_filenames),
-            None => (package.to_string(), Vec::new()),
-        };
-        return (Some(merged), renames);
+) -> Result<Option<String>, String> {
+    let content = prepare_rime_lua_install(
+        package_content,
+        keytao_core::installed_addon_rime_lua_lines(root),
+    );
+    let path = crate::packages::safe_path(root, "rime.lua")?;
+    match &content {
+        Some(content) => {
+            write_file_force(&path, content.as_bytes())?;
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        },
     }
-    let cleaned = local_content.and_then(|local| {
-        let cleaned = keytao_core::strip_rime_lua_gc_tuning(local);
-        (cleaned != local).then_some(cleaned)
-    });
-    (cleaned, Vec::new())
+    Ok(content)
 }
 
 pub fn merge_default_custom(existing: Option<&str>, zip_content: &str) -> (String, Vec<String>) {
@@ -232,6 +232,14 @@ fn verify_install(
                 note: format!("读取失败: {e}"),
             }),
         }
+    }
+
+    if expected_rl.is_none() {
+        entries.push(VerifyEntry {
+            path: "rime.lua".into(),
+            ok: !dest.join("rime.lua").exists(),
+            note: "当前方案和扩展无需 rime.lua".into(),
+        });
     }
 
     // Check that every non-empty zip entry (excluding the two merge-handled files) was written to disk
@@ -467,24 +475,22 @@ pub(crate) async fn smart_install_preserving_settings(
         let dest = PathBuf::from(&dest_path);
         let replacing_root = dest.canonicalize().ok();
         core.update_state(|state| {
-            if state.last_deploy.as_ref().is_some_and(|last| Some(&last.root) == replacing_root.as_ref()) {
+            if state
+                .last_deploy
+                .as_ref()
+                .is_some_and(|last| Some(&last.root) == replacing_root.as_ref())
+            {
                 state.last_deploy = None;
             }
-        }).map_err(|e| e.to_string())?;
+        })
+        .map_err(|e| e.to_string())?;
         // Validate the entire archive and manifest before deleting or writing files.
+        let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
         let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
 
-        // First pass: collect zip metadata and merge candidates
-        let (
-            merged_dc_path,
-            merged_dc_content,
-            merged_schemas,
-            merged_rime_lua_path,
-            merged_rime_lua_content,
-            renamed_lua_files,
-        ) = {
-            use std::collections::HashSet;
+        // First pass: merge default settings.
+        let (merged_dc_path, merged_dc_content, merged_schemas) = {
             use std::io::Read;
 
             let cursor = std::io::Cursor::new(&zip_bytes);
@@ -492,9 +498,6 @@ pub(crate) async fn smart_install_preserving_settings(
 
             let mut zip_dc_path: Option<String> = None;
             let mut zip_dc_content: Option<String> = None;
-            let mut zip_rime_lua_path: Option<String> = None;
-            let mut zip_rime_lua_content: Option<String> = None;
-            let mut zip_lua_filenames: HashSet<String> = HashSet::new();
 
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -510,16 +513,6 @@ pub(crate) async fn smart_install_preserving_settings(
                     file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
                     zip_dc_path = Some(relative);
                     zip_dc_content = Some(buf);
-                } else if filename == "rime.lua"
-                    && !relative.contains('/')
-                    && zip_rime_lua_path.is_none()
-                {
-                    let mut buf = String::new();
-                    file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-                    zip_rime_lua_path = Some(relative);
-                    zip_rime_lua_content = Some(buf);
-                } else if relative.starts_with("lua/") && !relative[4..].contains('/') {
-                    zip_lua_filenames.insert(filename);
                 }
             }
 
@@ -539,24 +532,7 @@ pub(crate) async fn smart_install_preserving_settings(
                     (None, None, Vec::new())
                 };
 
-            // Merge rime.lua
-            let local_rl = std::fs::read_to_string(dest.join("rime.lua")).ok();
-            let (rl_content, renames) = prepare_rime_lua_install(
-                local_rl.as_deref(),
-                zip_rime_lua_content.as_deref(),
-                &zip_lua_filenames,
-            );
-            // Read local Lua files before extraction overwrites them.
-            let renamed = renames
-                .iter()
-                .filter_map(|(old, new)| {
-                    std::fs::read(dest.join("lua").join(format!("{old}.lua")))
-                        .ok()
-                        .map(|bytes| (new.clone(), bytes))
-                })
-                .collect::<Vec<_>>();
-
-            (dc_path, dc_content, schemas, zip_rime_lua_path, rl_content, renamed)
+            (dc_path, dc_content, schemas)
         };
 
         // Second pass: smart extraction
@@ -598,17 +574,8 @@ pub(crate) async fn smart_install_preserving_settings(
                         }
                     }
                 }
-            } else if Some(&relative) == merged_rime_lua_path.as_ref() {
-                if let Some(ref mc) = merged_rime_lua_content {
-                    let out = dest.join(&relative);
-                    match write_file_force(&out, mc.as_bytes()) {
-                        Ok(tag) => logs.push(format!("[MERGED]{tag} {relative}")),
-                        Err(e) => {
-                            logs.push(format!("[ERROR] {relative}: {e}"));
-                            return Err(e);
-                        }
-                    }
-                }
+            } else if relative == "rime.lua" {
+                // Regenerate once after extraction, including packages without rime.lua.
             } else {
                 match write_package_file(&dest, &relative, &content, &mut logs) {
                     Ok(()) => {
@@ -636,28 +603,8 @@ pub(crate) async fn smart_install_preserving_settings(
             );
         }
 
-        if merged_rime_lua_path.is_none() {
-            if let Some(content) = &merged_rime_lua_content {
-                let tag = write_file_force(&dest.join("rime.lua"), content.as_bytes())?;
-                logs.push(format!("[MERGED]{tag} rime.lua"));
-            }
-        }
-
-        // Write renamed user lua files (saved before zip overwrote them)
-        for (new_module, bytes) in &renamed_lua_files {
-            let relative = format!("lua/{new_module}.lua");
-            let out = crate::packages::safe_path(&dest, &relative)?;
-            match write_file_force(&out, bytes) {
-                Ok(tag) => {
-                    manifest.remove(&relative);
-                    logs.push(format!("[RENAMED]{tag} lua/{new_module}.lua"));
-                }
-                Err(e) => {
-                    logs.push(format!("[ERROR] rename lua/{new_module}.lua: {e}"));
-                    return Err(e);
-                }
-            }
-        }
+        let merged_rime_lua_content = install_rime_lua(&dest, package_rime_lua.as_deref())?;
+        logs.push("[REGENERATED] rime.lua".into());
 
         crate::remove_filter::ensure_remove_filter(&dest)?;
 
@@ -746,9 +693,14 @@ pub fn finish_android_install(
     let root = std::fs::canonicalize(root)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.to_owned());
+    let zip_bytes = std::fs::read(archive)?;
+    let package_rime_lua =
+        crate::packages::rime_lua_from_archive(&zip_bytes).map_err(CoreError::Other)?;
+    install_rime_lua(std::path::Path::new(&root), package_rime_lua.as_deref())
+        .map_err(CoreError::Other)?;
     crate::remove_filter::ensure_remove_filter(std::path::Path::new(&root))
         .map_err(CoreError::Other)?;
-    crate::packages::stage_install(core, &std::fs::read(archive)?, manifest, root)?;
+    crate::packages::stage_install(core, &zip_bytes, manifest, root)?;
     core.emit(CoreEvent::InstallProgress(InstallProgress {
         stage: "done".into(),
         percent: 100,

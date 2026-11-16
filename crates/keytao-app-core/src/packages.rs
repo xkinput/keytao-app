@@ -29,6 +29,8 @@ struct ActiveManifest {
     #[serde(default)]
     scheme_key: String,
     manifest: BTreeMap<String, String>,
+    #[serde(default)]
+    rime_lua: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -270,6 +272,43 @@ pub(crate) fn stored_archive(
     Ok((bytes, meta))
 }
 
+pub(crate) fn rime_lua_from_archive(zip_bytes: &[u8]) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|error| error.to_string())?;
+    let mut file = match archive.by_name("rime.lua") {
+        Ok(file) => file,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(content))
+}
+
+pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let Some(scheme_key) = core.state().active_scheme else {
+        return Ok(());
+    };
+    let (bytes, meta) = match stored_archive(core, &scheme_key) {
+        Ok(archive) => archive,
+        Err(error) => {
+            tracing::warn!(%scheme_key, %error, "Skipping active rime.lua snapshot refresh: no verified stored archive");
+            return Ok(());
+        }
+    };
+    let active = ActiveManifest {
+        root: root.canonicalize()?.to_string_lossy().into_owned(),
+        scheme_key,
+        manifest: meta.manifest,
+        rime_lua: rime_lua_from_archive(&bytes).map_err(CoreError::Other)?,
+    };
+    let path = safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?;
+    crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec_pretty(&active)?)?;
+    keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other)
+}
+
 pub(crate) fn store_cloud_archive(
     core: &Core,
     scheme_key: &str,
@@ -504,6 +543,9 @@ pub(crate) fn finalize_pending(
             root: receipt.root.clone(),
             scheme_key: scheme_key.into(),
             manifest: receipt.manifest.clone(),
+            // Native IME processes deploy without access to the app's package store.
+            rime_lua: rime_lua_from_archive(&fs::read(receipt.archive.path())?)
+                .map_err(CoreError::Other)?,
         };
         if !receipt.root.is_empty() {
             let root = Path::new(&receipt.root);
@@ -859,6 +901,68 @@ mod tests {
             Arc::new(NullSink),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn deploy_preparation_migrates_legacy_lua_from_the_verified_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        let package_lua = "number_translator = require('xnumber')\r\n";
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("rime.lua", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(package_lua.as_bytes()).unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        store_cloud_archive(&core, "keytao", Some("v1"), "official", None, &bytes, &root)
+            .unwrap();
+        record_package(&core, "keytao", Some("v1"), true).unwrap();
+        fs::write(
+            root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
+            serde_json::json!({
+                "root": root.canonicalize().unwrap(),
+                "scheme_key": "keytao", "manifest": {},
+            }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("rime.lua"),
+            "number_translator = require('translators.xnumber')\n",
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            crate::deploy::record_result(&core, &root, false).unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("rime.lua")).unwrap(),
+                package_lua
+            );
+        }
+        let active: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(active["rime_lua"], package_lua);
+
+        let manifest_path = root.join(keytao_core::ACTIVE_SCHEME_MANIFEST);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        let archive_path = store_dir(&core).join("keytao.zip");
+        for archive_exists in [true, false] {
+            if archive_exists {
+                fs::write(&archive_path, b"corrupt archive").unwrap();
+            } else {
+                fs::remove_file(&archive_path).unwrap();
+            }
+            crate::deploy::record_result(&core, &root, true).unwrap();
+            crate::deploy::record_result(&core, &root, false).unwrap();
+            assert!(!core.state().last_deploy.unwrap().success);
+            assert_eq!(
+                fs::read_to_string(root.join("rime.lua")).unwrap(),
+                package_lua
+            );
+            assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        }
     }
 
     #[test]

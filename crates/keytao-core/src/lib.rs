@@ -988,6 +988,7 @@ mod desktop {
         runtime_log::init(Path::new(&user_data_dir), "android-deploy");
         let _deploy = lock_ignore_poison(&DEPLOY_LOCK);
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
+        regenerate_active_rime_lua(Path::new(&user_data_dir))?;
         setup_only(user_data_dir.clone(), shared_data_dir)?;
         let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
         if !source.is_file() {
@@ -5214,10 +5215,11 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("write {}: {error}", sentinel.display()))?;
     let marker = build.join(DEPLOYED_FILE);
     match std::fs::remove_file(&marker) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", marker.display())),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove {}: {error}", marker.display())),
     }
+    regenerate_active_rime_lua(user_data_dir)
 }
 
 fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(), String> {
@@ -5890,265 +5892,135 @@ pub fn patch_windows_lua_compatibility(user_data_dir: &Path) -> Result<Vec<Strin
     Ok(changed)
 }
 
-/// Remove standalone, single-line local GC tuning without changing other lines.
-pub fn strip_rime_lua_gc_tuning(content: &str) -> String {
-    fn lua_string(text: &str) -> Option<(&str, usize)> {
-        let first = *text.as_bytes().first()?;
-        if matches!(first, b'\'' | b'"') {
-            let mut escaped = false;
-            for (index, byte) in text.bytes().enumerate().skip(1) {
-                if !escaped && byte == first {
-                    return Some((&text[1..index], index + 1));
-                }
-                escaped = !escaped && byte == b'\\';
-            }
-        } else if first == b'[' {
-            let equals = text[1..].bytes().take_while(|&byte| byte == b'=').count();
-            let start = equals + 2;
-            if text.as_bytes().get(start - 1) == Some(&b'[') {
-                let closing = format!("]{}]", "=".repeat(equals));
-                let end = start + text[start..].find(&closing)?;
-                let value = &text[start..end];
-                let value = value
-                    .strip_prefix("\r\n")
-                    .or_else(|| value.strip_prefix("\n\r"))
-                    .or_else(|| value.strip_prefix(['\n', '\r']))
-                    .unwrap_or(value);
-                return Some((value, end + closing.len()));
-            }
-        }
-        None
-    }
-
-    fn comment_length(text: &str) -> Option<usize> {
-        let comment = text.strip_prefix("--")?;
-        Some(
-            lua_string(comment)
-                .filter(|_| comment.starts_with('['))
-                .map(|(_, length)| length + 2)
-                .unwrap_or_else(|| text.find('\n').unwrap_or(text.len())),
-        )
-    }
-
-    let mut cleaned = String::with_capacity(content.len());
-    let mut kept_start = 0;
-    let mut offset = 0;
-    let mut previous_token = "";
-    let mut delimiter_depth = 0usize;
-    while offset < content.len() {
-        let rest = &content[offset..];
-        if let Some(length) = comment_length(rest) {
-            offset += length;
-            continue;
-        }
-        if let Some((_, length)) = lua_string(rest) {
-            previous_token = &rest[..length];
-            offset += length;
-            continue;
-        }
-        let first = rest.chars().next().unwrap();
-        if first.is_alphabetic() || first == '_' {
-            let end = rest
-                .find(|ch: char| !ch.is_alphanumeric() && ch != '_')
-                .unwrap_or(rest.len());
-            let (name, after) = rest.split_at(end);
-            if name == "collectgarbage" {
-                let line_end = offset + rest.find('\n').unwrap_or(rest.len());
-                let after = after[..line_end - offset - end].trim_start();
-                let argument = after.strip_prefix('(').unwrap_or(after).trim_start();
-                if let Some(("setpause" | "setstepmul", length)) = lua_string(argument) {
-                    let mut call_end = line_end - argument.len() + length;
-                    let mut complete = true;
-                    if after.starts_with('(') {
-                        let mut depth = 1;
-                        while call_end < line_end && depth > 0 {
-                            let tail = &content[call_end..line_end];
-                            if let Some(length) = comment_length(tail) {
-                                call_end += length;
-                                continue;
-                            }
-                            if let Some((_, length)) = lua_string(tail) {
-                                call_end += length;
-                                continue;
-                            }
-                            let ch = tail.chars().next().unwrap();
-                            match ch {
-                                '(' => depth += 1,
-                                ')' => depth -= 1,
-                                _ => {}
-                            }
-                            call_end += ch.len_utf8();
-                        }
-                        complete = depth == 0;
-                    }
-                    let start = content[..offset].rfind('\n').map_or(0, |index| index + 1);
-                    let suffix = content[call_end..line_end].trim();
-                    let terminated = suffix.starts_with(';');
-                    let suffix = suffix.strip_prefix(';').unwrap_or(suffix).trim_start();
-                    let standalone_suffix = suffix.is_empty()
-                        || suffix.strip_prefix("--").is_some_and(|comment| {
-                            !comment.starts_with('[')
-                                || lua_string(comment)
-                                    .is_some_and(|(_, length)| length == comment.len())
-                        });
-                    let mut next = content[line_end..].trim_start();
-                    while let Some(length) = comment_length(next) {
-                        next = next[length..].trim_start();
-                    }
-                    let continuation = delimiter_depth > 0
-                        || (!terminated && next.starts_with(['.', ':', '[', '(', '{', '\'', '"']))
-                        || matches!(
-                            previous_token,
-                            "=" | "."
-                                | ":"
-                                | ","
-                                | "+"
-                                | "-"
-                                | "*"
-                                | "/"
-                                | "%"
-                                | "^"
-                                | "<"
-                                | ">"
-                                | "~"
-                                | "#"
-                                | "&"
-                                | "|"
-                                | "and"
-                                | "or"
-                                | "not"
-                                | "return"
-                                | "local"
-                                | "function"
-                                | "if"
-                                | "elseif"
-                                | "while"
-                                | "until"
-                                | "in"
-                        );
-                    if complete
-                        && !continuation
-                        && content[start..offset].trim().is_empty()
-                        && standalone_suffix
-                    {
-                        let end = line_end + usize::from(line_end < content.len());
-                        cleaned.push_str(&content[kept_start..start]);
-                        kept_start = end;
-                        offset = end;
-                        continue;
-                    }
-                }
-            }
-            previous_token = name;
-            offset += end;
-        } else {
-            if !first.is_whitespace() {
-                previous_token = &rest[..first.len_utf8()];
-                match first {
-                    '(' | '[' | '{' => delimiter_depth += 1,
-                    ')' | ']' | '}' => delimiter_depth = delimiter_depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            offset += first.len_utf8();
-        }
-    }
-    cleaned.push_str(&content[kept_start..]);
-    cleaned
+/// easy_en and wanxiang currently register without root rime.lua lines.
+pub fn installed_addon_rime_lua_lines(_user_data_dir: &Path) -> &'static [&'static str] {
+    &[]
 }
 
-pub fn merge_rime_lua_content(
-    local_content: Option<&str>,
-    package_content: &str,
-    package_lua_filenames: &HashSet<String>,
-) -> (String, Vec<(String, String)>) {
-    merge_rime_lua_content_impl(local_content, package_content, package_lua_filenames, false)
-}
-
-pub fn merge_rime_lua_content_preserving_local_lines(
-    local_content: Option<&str>,
-    package_content: &str,
-    package_lua_filenames: &HashSet<String>,
-) -> (String, Vec<(String, String)>) {
-    merge_rime_lua_content_impl(local_content, package_content, package_lua_filenames, true)
-}
-
-fn merge_rime_lua_content_impl(
-    local_content: Option<&str>,
-    package_content: &str,
-    package_lua_filenames: &HashSet<String>,
-    preserve_local_lines: bool,
-) -> (String, Vec<(String, String)>) {
-    let Some(local_content) = local_content else {
-        return (package_content.to_string(), Vec::new());
+/// Restore the active package snapshot before any platform starts deployment.
+pub fn regenerate_active_rime_lua(user_data_dir: &Path) -> Result<(), String> {
+    let manifest_path = user_data_dir.join(ACTIVE_SCHEME_MANIFEST);
+    let rime_lua_path = user_data_dir.join("rime.lua");
+    for path in [&manifest_path, &rime_lua_path] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("refuse symbolic link: {}", path.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+        }
+    }
+    let bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read {}: {error}", manifest_path.display())),
     };
-    let local_content = strip_rime_lua_gc_tuning(local_content);
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse {}: {error}", manifest_path.display()))?;
+    let Some(package_content) = manifest.get("rime_lua") else {
+        return Ok(());
+    };
+    let root = user_data_dir
+        .canonicalize()
+        .map_err(|error| format!("resolve {}: {error}", user_data_dir.display()))?;
+    if manifest["root"].as_str().map(Path::new) != Some(root.as_path()) {
+        return Err(format!(
+            "active scheme root does not match {}",
+            root.display()
+        ));
+    }
+    let package_content = match package_content {
+        serde_json::Value::String(content) => Some(content.as_str()),
+        serde_json::Value::Null => None,
+        _ => return Err("active scheme rime_lua must be a string or null".into()),
+    };
+    match generate_rime_lua_content(
+        package_content,
+        installed_addon_rime_lua_lines(user_data_dir),
+    ) {
+        Some(content) => write_file_atomic(&rime_lua_path, content.as_bytes())
+            .map_err(|error| format!("write {}: {error}", rime_lua_path.display())),
+        None => match std::fs::remove_file(&rime_lua_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {}: {error}", rime_lua_path.display())),
+        },
+    }
+}
 
-    let package_requires: HashSet<String> = parse_rime_lua_requires(package_content)
-        .into_iter()
-        .collect();
-    let mut seen_lines: HashSet<String> = package_content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("--"))
-        .map(ToOwned::to_owned)
-        .collect();
-    let mut renames = Vec::new();
-    let mut extra_lines = Vec::new();
+/// Regenerate the active package's Lua entry point with explicit add-on registrations.
+/// Add-on lines must be single-line assignments to global identifiers.
+pub fn generate_rime_lua_content(
+    package_content: Option<&str>,
+    addon_lines: &[&str],
+) -> Option<String> {
+    if addon_lines.is_empty() {
+        return package_content
+            .filter(|content| !content.is_empty())
+            .map(str::to_owned);
+    }
+
+    fn global_names(line: &str) -> Vec<&str> {
+        let names = if let Some(function) = line
+            .strip_prefix("function")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        {
+            function.split_once('(').map(|(name, _)| name)
+        } else {
+            line.split_once('=').map(|(names, _)| names)
+        };
+        names
+            .into_iter()
+            .flat_map(|names| names.split(','))
+            .map(str::trim)
+            .filter(|name| {
+                name.chars()
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            })
+            .collect()
+    }
+
+    let package_content = package_content.unwrap_or_default();
+    let mut content = package_content.to_string();
+    let mut scheme_globals = HashSet::new();
+    let mut seen_lines = HashSet::new();
     let mut in_block_comment = false;
-
-    for line in local_content.lines() {
-        let t = line.trim();
-        if preserve_local_lines && (in_block_comment || t.is_empty() || t.starts_with("--")) {
-            extra_lines.push(line.to_string());
-        }
+    for line in package_content.lines().map(str::trim) {
         if in_block_comment {
-            if t.contains("--]]") {
-                in_block_comment = false;
-            }
+            in_block_comment = !line.contains("]]");
             continue;
         }
-        if t.starts_with("--[[") {
-            in_block_comment = true;
+        if line.starts_with("--[[") {
+            in_block_comment = !line[4..].contains("]]");
             continue;
         }
-        if t.is_empty() || t.starts_with("--") {
+        if line.is_empty() || line.starts_with("--") {
             continue;
         }
-        if let Some(module) = extract_lua_require(t) {
-            if package_requires.contains(&module) {
-                continue;
-            }
-            let filename = format!("{module}.lua");
-            if package_lua_filenames.contains(&filename) {
-                let new_name = format!("{module}_user");
-                let new_line = line
-                    .replace(&format!("\"{}\"", module), &format!("\"{}\"", new_name))
-                    .replace(&format!("'{}'", module), &format!("'{}'", new_name));
-                renames.push((module, new_name));
-                if seen_lines.insert(new_line.trim().to_string()) {
-                    extra_lines.push(new_line);
-                }
-            } else if seen_lines.insert(t.to_string()) {
-                extra_lines.push(line.to_string());
-            }
-        } else if preserve_local_lines || seen_lines.insert(t.to_string()) {
-            extra_lines.push(line.to_string());
-        }
+        scheme_globals.extend(global_names(line));
+        seen_lines.insert(line);
     }
 
-    let mut merged = package_content.to_string();
-    if !extra_lines.is_empty() {
-        if !merged.ends_with('\n') {
-            merged.push('\n');
+    for line in addon_lines.iter().map(|line| line.trim()) {
+        let bindings = global_names(line);
+        if bindings.is_empty()
+            || bindings.iter().any(|name| scheme_globals.contains(name))
+            || !seen_lines.insert(line)
+        {
+            continue;
         }
-        for line in &extra_lines {
-            merged.push_str(line);
-            merged.push('\n');
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
         }
+        content.push_str(line);
+        content.push('\n');
     }
-
-    (merged, renames)
+    (!content.is_empty()).then_some(content)
 }
 
 // ── Platform path helpers (all platforms) ────────────────────────────────────
@@ -6529,16 +6401,15 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        caret_extent_is_usable, clear_windows_rime_build_repair_marker,
+        caret_extent_is_usable, clear_windows_rime_build_repair_marker, generate_rime_lua_content,
         invalidate_active_windows_rime_build, invalidate_rime_build_artifacts,
         mark_windows_rime_build_repair_complete, merge_default_custom_content,
-        merge_rime_lua_content, parse_rime_lua_requires, parse_schema_dependencies,
-        parse_schema_list, parse_schema_name, patch_android_auxiliary_dictionary,
-        patch_windows_lua_compatibility, preferred_schema_from_list, preferred_schema_id_from_dir,
-        rime_build_dirs, rime_log_dir, schema_install_state, windows_rime_build_repair_required,
-        ReloadStamp, ReloadStampGate, RELOAD_STAMP_FILE_NAME,
+        parse_rime_lua_requires, parse_schema_dependencies, parse_schema_list, parse_schema_name,
+        patch_android_auxiliary_dictionary, patch_windows_lua_compatibility,
+        preferred_schema_from_list, preferred_schema_id_from_dir, rime_build_dirs, rime_log_dir,
+        schema_install_state, windows_rime_build_repair_required, ReloadStamp, ReloadStampGate,
+        RELOAD_STAMP_FILE_NAME,
     };
-    use std::collections::HashSet;
     #[cfg(target_os = "windows")]
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
@@ -7211,162 +7082,192 @@ mod tests {
     }
 
     #[test]
-    fn merge_rime_lua_appends_user_module() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let package = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, renames) = merge_rime_lua_content(Some(local), package, &HashSet::new());
-        assert!(merged.contains("require(\"keytao_filter\")"));
-        assert!(merged.contains("require(\"my_mod\")"));
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn merge_rime_lua_renames_conflicting_user_module() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let package = "keytao = require(\"keytao\")\n";
-        let package_files: HashSet<String> = ["my_mod.lua".to_string()].into();
-        let (merged, renames) = merge_rime_lua_content(Some(local), package, &package_files);
+    fn generate_rime_lua_preserves_package_verbatim() {
+        let package = "-- Package settings\r\ncollectgarbage('setpause', 150)\r\ncollectgarbage('setstepmul', 200)";
         assert_eq!(
-            renames,
-            vec![("my_mod".to_string(), "my_mod_user".to_string())]
+            generate_rime_lua_content(Some(package), &[]).as_deref(),
+            Some(package)
         );
-        assert!(merged.contains("require(\"my_mod_user\")"));
+        assert_eq!(generate_rime_lua_content(None, &[]), None);
+        assert_eq!(generate_rime_lua_content(Some(""), &[]), None);
     }
 
     #[test]
-    fn merge_rime_lua_deduplicates_runtime_statements() {
-        let local = concat!(
-            "collectgarbage(\"setpause\", 50)\n",
-            "collectgarbage(\"setpause\", 50)\n",
-            "user_flag = true\n",
-            "user_flag = true\n",
-        );
-        let package = "package_module = require(\"package_module\")\n";
-        let (merged, _) = merge_rime_lua_content(Some(local), package, &HashSet::new());
-        assert!(!merged.contains("collectgarbage"));
-        assert_eq!(merged.matches("user_flag = true").count(), 1);
-    }
-
-    #[test]
-    fn merge_rime_lua_drops_local_gc_tuning_and_preserves_package_and_user_lines() {
-        let local = concat!(
-            "collectgarbage(\"setpause\", 50)\n",
-            " \tcollectgarbage \t( 'setstepmul' , 400 )\r\n",
-            "old_pause = collectgarbage([=[setpause]=], 50)\n",
-            "user_module = require('personal')\n",
-            "user_flag = true\n",
-            "collectgarbage('collect')\n",
-            "mycollectgarbage('setpause', 60)\n",
-            "message = 'collectgarbage(\"setpause\", 50)'\n",
-        );
-        let package = "collectgarbage('setpause', 150)\ncollectgarbage(\"setstepmul\", 200)\n";
-        let (merged, renames) = merge_rime_lua_content(Some(local), package, &HashSet::new());
+    fn generate_rime_lua_appends_each_addon_registration_once() {
+        let package = "scheme = require('scheme')";
+        let addon = "addon = require('addon')";
+        let generated = generate_rime_lua_content(
+            Some(package),
+            &[addon, "  addon = require('addon')  ", package],
+        )
+        .unwrap();
+        assert_eq!(generated, format!("{package}\n{addon}\n"));
         assert_eq!(
-            merged,
-            format!(
-                "{package}{}",
-                concat!(
-                    "old_pause = collectgarbage([=[setpause]=], 50)\n",
-                    "user_module = require('personal')\n",
-                    "user_flag = true\n",
-                    "collectgarbage('collect')\n",
-                    "mycollectgarbage('setpause', 60)\n",
-                    "message = 'collectgarbage(\"setpause\", 50)'\n",
-                )
-            )
+            generate_rime_lua_content(None, &[addon]).unwrap(),
+            format!("{addon}\n")
         );
-        assert!(renames.is_empty());
         assert_eq!(
-            merge_rime_lua_content(None, package, &HashSet::new()).0,
-            package
+            generate_rime_lua_content(Some(&generated), &[addon]).unwrap(),
+            generated,
         );
     }
 
     #[test]
-    fn android_merge_rime_lua_preserves_repeated_user_function_lines() {
-        let local = concat!(
-            "same = require('package')\n",
-            "custom = require('custom')\n",
-            "-- User functions\n\n",
-            "--[[\ncomment = require('ignored')\n--]]\n",
-            "function date_translator(input, seg)\n",
-            "  if input == 'date' then\n",
-            "    emit('😀 𠀀')\n",
-            "  end\n",
-            "end\n",
-            "function time_translator(input, seg)\n",
-            "  if input == 'time' then\n",
-            "    emit('😀 𠀀')\n",
-            "  end\n",
-            "end\n",
+    fn generate_rime_lua_keeps_scheme_globals_over_addons() {
+        let package = concat!(
+            "number_translator = require('xnumber')\n",
+            "flag = true\n",
+            "first, second = 1, 2\n",
+            "function translator(input, seg)\nend\n",
         );
-        let package = "same = require('package')\nfunction package_function()\nend\n";
-        let files = HashSet::from(["custom.lua".to_string()]);
-        let (merged, renames) =
-            super::merge_rime_lua_content_preserving_local_lines(Some(local), package, &files);
-        let expected_local = local
-            .strip_prefix("same = require('package')\n")
+        let addon_lines = [
+            "number_translator = require('translators.xnumber')",
+            "flag = false",
+            "second = require('addon')",
+            "translator = require('addon')",
+            "addon = require('addon')",
+        ];
+        assert_eq!(
+            generate_rime_lua_content(Some(package), &addon_lines).unwrap(),
+            format!("{package}addon = require('addon')\n"),
+        );
+    }
+
+    #[test]
+    fn generate_rime_lua_ignores_commented_scheme_bindings() {
+        let package = "--[[\naddon = false\n]]\n-- addon = false\n";
+        let addon = "addon = require('addon')";
+        assert_eq!(
+            generate_rime_lua_content(Some(package), &[addon]).unwrap(),
+            format!("{package}{addon}\n"),
+        );
+    }
+
+    #[test]
+    fn deployment_regenerates_active_rime_lua_idempotently() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap()
-            .replacen("require('custom')", "require('custom_user')", 1);
-        assert_eq!(merged, format!("{package}{expected_local}"));
-        assert_eq!(
-            renames,
-            vec![("custom".to_string(), "custom_user".to_string())]
-        );
-    }
-
-    #[test]
-    fn strip_rime_lua_gc_tuning_preserves_nonstandalone_calls() {
-        for content in [
-            "collectgarbage('setpause', 50); user_module = require('personal')\n",
-            "local a = 1; collectgarbage('setpause', 50)\nprint(a)\n",
-            "if low then collectgarbage('setpause', 50)\n  foo()\nend\n",
-            "local old =\n  collectgarbage('setpause', 50)\nuser_flag = true\n",
-            "local old = -- Keep the return value\n  collectgarbage('setpause', 50)\n",
-            "return\n  collectgarbage('setpause', 50)\n",
-            "if\n  collectgarbage('setpause', 50)\nthen\n  foo()\nend\n",
-            "if false then\nelseif\n  collectgarbage('setpause', 50)\nthen\nend\n",
-            "while\n  collectgarbage('setpause', 50)\ndo\n  foo()\nend\n",
-            "repeat\n  foo()\nuntil\n  collectgarbage('setpause', 50)\n",
-            "for value in\n  collectgarbage('setpause', 50)\ndo\nend\n",
-            "local value = 1 +\n  collectgarbage('setpause', 50)\n",
-            "local value = wrap(\n  collectgarbage('setpause', 50)\n)\n",
-            "collectgarbage('setpause', 50) --[[ note\n still ]]\nnext_call()\n",
-            "collectgarbage = function(...) return { foo = function() end } end\ncollectgarbage('setpause', 50)\n.foo()\n",
-            "collectgarbage('setpause', 50)\n-- continuation\n.field()\n",
-            "collectgarbage('setpause', 50)\n('argument')\n",
-            "collectgarbage (\n  [[setstepmul]], 400\n)\n",
-            "collectgarbage([[\nsetpause]], 50)\n",
-            "collectgarbage([=[\r\nsetstepmul]=], 400)\n",
-            "collectgarbage('setpause', -- ) explanation\n50)\n",
-            "collectgarbage('setstepmul', --[[ ( explanation ]]\n400)\n",
-            "collectgarbage('setpause', 50\n",
-            "obj.collectgarbage('setpause', 50)\n",
-            "-- collectgarbage('setpause', 50)\n",
-            "message = [[\ncollectgarbage('setpause', 50)\n]]\n",
-        ] {
-            assert_eq!(super::strip_rime_lua_gc_tuning(content), content, "{content:?}");
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-active-lua-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rime.lua");
+        let manifest_path = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        let package = "number_translator = require('xnumber')\ncollectgarbage('setpause', 150)";
+        let mut manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "rime_lua": package,
+        });
+        std::fs::write(
+            &path,
+            "number_translator = require('translators.xnumber')\n",
+        )
+        .unwrap();
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        for _ in 0..2 {
+            super::begin_deployment(&dir).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), package);
         }
+        manifest["rime_lua"] = serde_json::Value::Null;
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        for _ in 0..2 {
+            super::begin_deployment(&dir).unwrap();
+            assert!(!path.exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn strip_rime_lua_gc_tuning_removes_standalone_lines() {
-        let content = concat!(
-            "collectgarbage('setpause', 50)\n",
-            " \tcollectgarbage ( 'setstepmul', 400 ); -- stale\r\n",
-            "collectgarbage('setpause', 50) --[[ stale ]]\n",
-            "user_flag = true\r\n",
-            "collectgarbage('collect')\n",
-            "collectgarbage([=[setpause]=], 50)",
-        );
+    fn deployment_keeps_legacy_lua_without_snapshot() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-legacy-active-lua-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rime.lua");
+        let manifest_path = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        let existing = "existing = true\r\n";
+        let manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "scheme_key": "keytao", "manifest": {},
+        })
+        .to_string();
+        std::fs::write(&path, existing).unwrap();
+        std::fs::write(&manifest_path, &manifest).unwrap();
+        for _ in 0..2 {
+            super::begin_deployment(&dir).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+            assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), manifest);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deployment_keeps_lua_until_snapshot_is_valid() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-invalid-active-lua-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rime.lua");
+        let manifest_path = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        let existing = "existing = true\n";
+        std::fs::write(&path, existing).unwrap();
+        super::begin_deployment(&dir).unwrap();
+        let deployed_marker = dir.join("build").join(super::DEPLOYED_FILE);
+        std::fs::write(&deployed_marker, "previous deployment").unwrap();
+        for manifest in [
+            serde_json::json!({"root": dir.canonicalize().unwrap(), "rime_lua": 7}),
+            serde_json::json!({"root": dir.join("other"), "rime_lua": "bad = true"}),
+            serde_json::json!({"rime_lua": null}),
+        ] {
+            std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+            assert!(super::begin_deployment(&dir).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        }
+        assert!(!deployed_marker.exists());
+        std::fs::write(&manifest_path, "invalid json").unwrap();
+        assert!(super::begin_deployment(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        std::fs::remove_file(&manifest_path).unwrap();
+        std::fs::create_dir(&manifest_path).unwrap();
+        assert!(super::begin_deployment(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deployment_rejects_symlinked_active_lua_or_manifest() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("keytao-symlink-active-lua-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rime.lua");
+        let target = dir.join("other.lua");
+        let manifest_path = dir.join(super::ACTIVE_SCHEME_MANIFEST);
+        let manifest = serde_json::json!({
+            "root": dir.canonicalize().unwrap(), "rime_lua": "scheme = true\n",
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        std::fs::write(&target, "preserve = true\n").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(super::begin_deployment(&dir).is_err());
         assert_eq!(
-            super::strip_rime_lua_gc_tuning(content),
-            "user_flag = true\r\ncollectgarbage('collect')\n",
+            std::fs::read_to_string(&target).unwrap(),
+            "preserve = true\n"
         );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        std::os::unix::fs::symlink(&target, &manifest_path).unwrap();
+        assert!(super::begin_deployment(&dir).is_err());
         assert_eq!(
-            super::strip_rime_lua_gc_tuning("collectgarbage('setpause', 50);\n(next_call)()\n"),
-            "(next_call)()\n",
+            std::fs::read_to_string(&target).unwrap(),
+            "preserve = true\n"
         );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -526,6 +526,80 @@ async fn switching_packages_does_not_retain_removed_package_schemas() {
 }
 
 #[tokio::test]
+#[cfg(not(target_os = "android"))]
+async fn installing_switching_and_deploy_regeneration_use_only_the_active_package_lua() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rime");
+    let core = Core::new(
+        AppEnv {
+            data_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            resource_dir: dir.path().join("resources"),
+            app_version: "test".into(),
+            platform: Platform::MacOs,
+        },
+        Arc::new(ProgressSink::default()),
+    )
+    .unwrap();
+    let keydo = concat!(
+        "number_translator = require(\"translators.xnumber\")\n",
+        "keydo_only = true\n",
+    );
+    let keytao = "-- Active scheme\r\nnumber_translator = require(\"xnumber\")\r\n";
+    for (key, rime_lua) in [("keydo", keydo), ("keytao", keytao)] {
+        let archive = dir.path().join("package.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        for (name, content) in [
+            (
+                "default.custom.yaml".to_owned(),
+                format!("patch:\n  schema_list:\n    - schema: {key}\n"),
+            ),
+            (
+                format!("{key}.schema.yaml"),
+                format!("schema: {{schema_id: {key}}}\n"),
+            ),
+            ("rime.lua".to_owned(), rime_lua.to_owned()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let result = smart_install(
+            &core,
+            archive.to_string_lossy().into_owned(),
+            root.to_string_lossy().into_owned(),
+            #[cfg(target_os = "windows")]
+            |_, _, _, _| Ok(Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert!(result.verify.iter().all(|entry| entry.ok));
+        crate::packages::record_package(&core, key, Some("v1"), true).unwrap();
+        assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), rime_lua);
+        assert!(!archive.exists());
+    }
+
+    crate::packages::activate_scheme(
+        &core,
+        "keydo",
+        &root,
+        #[cfg(target_os = "windows")]
+        |_, _, _, _| Ok(Vec::new()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(core.state().active_scheme.as_deref(), Some("keydo"));
+    assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), keydo);
+
+    fs::write(root.join("rime.lua"), keytao).unwrap();
+    for _ in 0..2 {
+        keytao_core::regenerate_active_rime_lua(&root).unwrap();
+        assert_eq!(fs::read_to_string(root.join("rime.lua")).unwrap(), keydo);
+    }
+}
+
+#[tokio::test]
 async fn custom_install_preserves_default_package_and_state() {
     fn write_archive(path: &std::path::Path, version: &str) {
         let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
@@ -640,7 +714,7 @@ async fn custom_install_preserves_default_package_and_state() {
 }
 
 #[tokio::test]
-async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progress() {
+async fn archive_install_replaces_rime_lua_invalidates_build_and_emits_progress() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("rime");
     fs::create_dir_all(dest.join("lua")).unwrap();
@@ -670,7 +744,10 @@ async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progr
             "default.custom.yaml",
             "patch:\n  schema_list:\n    - schema: keydo\n",
         ),
-        ("rime.lua", "collectgarbage('setpause', 150)\npackage = require(\"package\")\n"),
+        (
+            "rime.lua",
+            "collectgarbage('setpause', 150)\npackage = require(\"package\")\n",
+        ),
         ("lua/custom.lua", "package code"),
         ("lua/package.lua", "package module"),
         ("keydo.schema.yaml", "schema: {schema_id: keydo}\n"),
@@ -717,23 +794,15 @@ async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progr
         ),
         vec!["personal", "keydo"]
     );
-    assert_eq!(
-        fs::read_to_string(dest.join("lua/custom_user.lua")).unwrap(),
-        "user code"
-    );
+    assert!(!dest.join("lua/custom_user.lua").exists());
     assert_eq!(
         fs::read_to_string(dest.join("lua/custom.lua")).unwrap(),
         "package code"
     );
-    assert!(
-        fs::read_to_string(dest.join("rime.lua"))
-            .unwrap()
-            .contains("require(\"custom_user\")")
+    assert_eq!(
+        fs::read_to_string(dest.join("rime.lua")).unwrap(),
+        entries[1].1
     );
-    let rime_lua = fs::read_to_string(dest.join("rime.lua")).unwrap();
-    assert!(rime_lua.starts_with(entries[1].1));
-    assert!(rime_lua.contains("user_flag = true"));
-    assert_eq!(rime_lua.matches("collectgarbage").count(), 1);
     assert!(!dest.join("build/keydo.schema.yaml").exists());
     assert!(!dest.join("build/keydo.table.bin").exists());
     assert_eq!(
@@ -741,7 +810,7 @@ async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progr
         "unrelated dictionary"
     );
     assert!(result.verify.iter().all(|entry| entry.ok));
-    assert!(result.logs.iter().any(|line| line.starts_with("[RENAMED]")));
+    assert!(!result.logs.iter().any(|line| line.starts_with("[RENAMED]")));
     assert!(!zip_path.exists());
     let progress = sink.0.lock().unwrap();
     assert_eq!(
@@ -759,34 +828,30 @@ async fn archive_install_preserves_user_merges_invalidates_build_and_emits_progr
 }
 
 #[tokio::test]
-async fn package_without_rime_lua_rewrites_only_changed_local_content() {
-    let preserved = concat!(
+async fn package_without_rime_lua_removes_all_previous_content() {
+    let previous = concat!(
         "-- User settings\r\n",
         "--[[\ncollectgarbage('setpause', 75)\n--]]\n",
         "message = [[\ncollectgarbage('setstepmul', 300)\n]]\n",
         "user_flag = true\r\n",
         "collectgarbage('collect')",
     );
-    let tuned = format!("collectgarbage ( 'setpause', 50 )\r\n{preserved}");
-    for local in [Some(tuned.as_str()), Some(preserved), None] {
+    let tuned = format!("collectgarbage ( 'setpause', 50 )\r\n{previous}");
+    for local in [Some(tuned.as_str()), Some(previous), Some(""), None] {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("rime");
         fs::create_dir_all(&dest).unwrap();
         let path = dest.join("rime.lua");
-        let old_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
         if let Some(local) = local {
             fs::write(&path, local).unwrap();
-            fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(old_mtime)
-                .unwrap();
         }
         let zip_path = dir.path().join("package.zip");
         let mut zip = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
-        zip.start_file("xmjd6.schema.yaml", zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(
+            "xmjd6.schema.yaml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
         zip.write_all(b"schema: {schema_id: xmjd6}\n").unwrap();
         zip.finish().unwrap();
         let core = Core::new(
@@ -809,14 +874,7 @@ async fn package_without_rime_lua_rewrites_only_changed_local_content() {
         )
         .await
         .unwrap();
-        let changed = local == Some(tuned.as_str());
-        if local.is_some() {
-            assert_eq!(fs::read_to_string(&path).unwrap(), preserved);
-            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap() != old_mtime, changed);
-        } else {
-            assert!(!path.exists());
-        }
-        assert_eq!(result.logs.iter().any(|line| line == "[MERGED] rime.lua"), changed);
+        assert!(!path.exists());
         assert!(result.verify.iter().all(|entry| entry.ok));
     }
 }
