@@ -6087,6 +6087,7 @@ fn merge_rime_lua_content_impl(
     let package_requires: HashSet<String> = parse_rime_lua_requires(package_content)
         .into_iter()
         .collect();
+    let package_bindings = parse_rime_lua_require_bindings(package_content);
     let mut seen_lines: HashSet<String> = package_content
         .lines()
         .map(str::trim)
@@ -6116,7 +6117,10 @@ fn merge_rime_lua_content_impl(
             continue;
         }
         if let Some(module) = extract_lua_require(t) {
-            if package_requires.contains(&module) {
+            if package_requires.contains(&module)
+                || t.split_once('=')
+                    .is_some_and(|(name, _)| package_bindings.contains_key(name.trim()))
+            {
                 continue;
             }
             let filename = format!("{module}.lua");
@@ -7218,6 +7222,24 @@ mod tests {
         assert!(merged.contains("require(\"keytao_filter\")"));
         assert!(merged.contains("require(\"my_mod\")"));
         assert!(renames.is_empty());
+    }
+
+    #[test]
+    fn merge_rime_lua_prefers_package_bindings_over_stale_local_bindings() {
+        let local = concat!(
+            "number_translator = require(\"xnumber\")\n",
+            "number_translator = require(\"translators.xnumber\")\n",
+            "my_mod = require(\"my_mod\")\n",
+        );
+        let package = "number_translator = require(\"xnumber\")\n";
+        for merge in [
+            merge_rime_lua_content,
+            super::merge_rime_lua_content_preserving_local_lines,
+        ] {
+            let (merged, renames) = merge(Some(local), package, &HashSet::new());
+            assert_eq!(merged, format!("{package}my_mod = require(\"my_mod\")\n"));
+            assert!(renames.is_empty());
+        }
     }
 
     #[test]
