@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import '../rust/api/types.dart';
+import 'theme.dart';
 
 class AppSystemBars extends StatelessWidget {
   const AppSystemBars({super.key, required this.child});
@@ -45,18 +46,22 @@ class Section extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Padding(
-        padding: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.only(bottom: 8),
         child: Row(
           children: [
             if (icon != null) ...[
-              Icon(icon, size: 17),
+              Icon(
+                icon,
+                size: context.platformVariant.touch ? 18 : 16,
+                color: context.theme.colors.mutedForeground,
+              ),
               const SizedBox(width: 8),
             ],
             Expanded(
               child: Text(
                 title,
                 style: context.theme.typography.body.sm.copyWith(
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
             ),
@@ -66,6 +71,16 @@ class Section extends StatelessWidget {
       ),
       if (children.isNotEmpty)
         FTileGroup(
+          style: FTileGroupStyleDelta.delta(
+            decoration: DecorationDelta.value(
+              ShapeDecoration(
+                shape: RoundedRectangleBorder(
+                  side: BorderSide(color: context.theme.colors.border),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
           divider: FItemDivider.full,
           children: [
             for (final child in children)
@@ -77,7 +92,10 @@ class Section extends StatelessWidget {
                   ),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.all(14),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: context.platformVariant.touch ? 16 : 12,
+                  ),
                   child: DefaultTextStyle.merge(
                     overflow: TextOverflow.visible,
                     child: child,
@@ -97,39 +115,35 @@ class SettingRow extends StatelessWidget {
     required this.child,
     this.description,
     this.stacked = false,
-    this.icon,
+    this.keepInline = false,
+    this.value,
+    this.controlMaxWidth,
+    this.minimumControlWidth = 0,
+    this.controlAlignment = Alignment.centerRight,
   });
   final String label;
   final Widget child;
   final String? description;
   final bool stacked;
-  final IconData? icon;
+  final bool keepInline;
+  final Widget? value;
+  final double? controlMaxWidth;
+  final double minimumControlWidth;
+  final Alignment controlAlignment;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final title = Row(
-        mainAxisSize: MainAxisSize.min,
+      final title = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (icon != null) ...[Icon(icon, size: 16), const SizedBox(width: 8)],
-          Flexible(child: Text(label)),
-        ],
-      );
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (stacked || constraints.maxWidth < 440) ...[
-            title,
-            const SizedBox(height: 10),
-            child,
-          ] else
-            Row(
-              children: [
-                Expanded(child: title),
-                const SizedBox(width: 16),
-                Flexible(flex: 2, child: child),
-              ],
+          Text(
+            label,
+            style: context.theme.typography.body.sm.copyWith(
+              color: context.theme.colors.foreground,
+              fontWeight: FontWeight.w400,
             ),
+          ),
           if (description != null) ...[
             const SizedBox(height: 8),
             Text(
@@ -141,6 +155,51 @@ class SettingRow extends StatelessWidget {
             ),
           ],
         ],
+      );
+      final inline =
+          !stacked &&
+          constraints.maxWidth >= 480 &&
+          constraints.maxWidth - 200 >= minimumControlWidth;
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 20),
+        child: keepInline && !inline
+            ? Row(
+                children: [
+                  Expanded(child: title),
+                  child,
+                ],
+              )
+            : inline
+            ? Row(
+                children: [
+                  SizedBox(width: 200, child: title),
+                  Expanded(
+                    child: Align(
+                      alignment: controlAlignment,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: controlMaxWidth ?? double.infinity,
+                        ),
+                        child: child,
+                      ),
+                    ),
+                  ),
+                  if (value != null) ...[const SizedBox(width: 8), value!],
+                ],
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: title),
+                      ?value,
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  child,
+                ],
+              ),
       );
     },
   );
@@ -155,8 +214,6 @@ class ChoiceSetting<T> extends StatelessWidget {
     this.onChanged,
     this.disabled = const {},
     this.hint,
-    this.currentLabel,
-    this.icons = const {},
   });
   final String label;
   final T value;
@@ -164,90 +221,109 @@ class ChoiceSetting<T> extends StatelessWidget {
   final Set<T> disabled;
   final ValueChanged<T>? onChanged;
   final String? hint;
-  final String? currentLabel;
-  final Map<T, IconData> icons;
 
   @override
-  Widget build(BuildContext context) => SettingRow(
-    label,
-    description: hint,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (currentLabel != null) ...[
-          Text(currentLabel!, style: context.theme.typography.body.xs),
-          const SizedBox(height: 6),
-        ],
-        if (disabled.isNotEmpty)
-          FSelectGroup<T>(
-            enabled: onChanged != null,
-            control: FMultiValueControl.lifted(
-              value: {value},
-              onChange: (values) {
-                if (values.isNotEmpty) onChanged?.call(values.last);
-              },
-            ),
-            children: [
-              for (final entry in options.entries)
-                FSelectGroupItemMixin.radio(
-                  value: entry.key,
-                  label: Text(entry.value),
-                  enabled: onChanged != null && !disabled.contains(entry.key),
-                ),
-            ],
-          )
-        else
-          Semantics(
+  Widget build(BuildContext context) {
+    final colors = context.theme.colors;
+    final accent = ChromeAccent.of(context);
+    var optionWidth = 64.0;
+    for (final option in options.values) {
+      final painter = TextPainter(
+        text: TextSpan(text: option, style: context.theme.typography.body.sm),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+      )..layout();
+      if (painter.width + 32 > optionWidth) optionWidth = painter.width + 32;
+      painter.dispose();
+    }
+    final minimumWidth = options.length * optionWidth + 8;
+    return SettingRow(
+      label,
+      description: hint,
+      stacked: minimumWidth > 360,
+      controlMaxWidth: 360,
+      minimumControlWidth: minimumWidth,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (disabled.isNotEmpty || minimumWidth > constraints.maxWidth) {
+            return FSelectGroup<T>(
+              enabled: onChanged != null,
+              control: FMultiValueControl.lifted(
+                value: {value},
+                onChange: (values) {
+                  if (values.isNotEmpty) onChanged?.call(values.last);
+                },
+              ),
+              children: [
+                for (final entry in options.entries)
+                  FSelectGroupItemMixin.radio(
+                    value: entry.key,
+                    label: Text(entry.value),
+                    enabled: onChanged != null && !disabled.contains(entry.key),
+                  ),
+              ],
+            );
+          }
+          return Semantics(
             enabled: onChanged != null,
             child: ExcludeFocus(
               excluding: onChanged == null,
               child: IgnorePointer(
                 ignoring: onChanged == null,
-                child: Opacity(
-                  opacity: onChanged == null ? .5 : 1,
-                  child: FTabs(
-                    control: FTabControl.lifted(
-                      index: options.keys
-                          .toList()
-                          .indexOf(value)
-                          .clamp(0, options.length - 1),
-                      onChange: (index) =>
-                          onChanged?.call(options.keys.elementAt(index)),
+                child: FTabs(
+                  control: FTabControl.lifted(
+                    index: options.keys
+                        .toList()
+                        .indexOf(value)
+                        .clamp(0, options.length - 1),
+                    onChange: (index) =>
+                        onChanged?.call(options.keys.elementAt(index)),
+                    motion: FTabMotion(
+                      duration: MediaQuery.disableAnimationsOf(context)
+                          ? Duration.zero
+                          : const Duration(milliseconds: 150),
+                      curve: Curves.easeOutCubic,
                     ),
-                    style: const FTabsStyleDelta.delta(
-                      spacing: 0,
-                      minHeight: 32,
-                    ),
-                    children: [
-                      for (final entry in options.entries)
-                        FTabEntry(
-                          label: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (icons[entry.key] case final icon?) ...[
-                                  Icon(icon, size: 14),
-                                  const SizedBox(width: 5),
-                                ],
-                                Text(
-                                  entry.value,
-                                  style: const TextStyle(fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          child: const SizedBox.shrink(),
-                        ),
-                    ],
                   ),
+                  style: FTabsStyleDelta.delta(
+                    spacing: 0,
+                    padding: const EdgeInsetsGeometryDelta.value(
+                      EdgeInsets.zero,
+                    ),
+                    // TabBar adds 2 px for its indicator below each tab.
+                    minHeight: context.platformVariant.touch ? 38 : 32,
+                    labelTextStyle: FVariants(
+                      context.theme.typography.body.sm.copyWith(
+                        color: onChanged == null
+                            ? colors.mutedForeground
+                            : colors.foreground,
+                        fontWeight: FontWeight.w400,
+                      ),
+                      variants: const {},
+                    ),
+                    indicatorDecoration: DecorationDelta.value(
+                      BoxDecoration(
+                        color: accent.withValues(alpha: .12),
+                        border: Border.all(color: accent),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                  children: [
+                    for (final entry in options.entries)
+                      FTabEntry(
+                        label: Text(entry.value),
+                        child: const SizedBox.shrink(),
+                      ),
+                  ],
                 ),
               ),
             ),
-          ),
-      ],
-    ),
-  );
+          );
+        },
+      ),
+    );
+  }
 }
 
 class SwitchSetting extends StatelessWidget {
@@ -257,45 +333,39 @@ class SwitchSetting extends StatelessWidget {
     required this.value,
     this.onChanged,
     this.hint,
-    this.stateLabel,
   });
   final String label;
   final bool value;
   final ValueChanged<bool>? onChanged;
   final String? hint;
-  final String? stateLabel;
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Row(
-        children: [
-          Expanded(child: Text(label)),
-          if (stateLabel != null) ...[
-            Text(stateLabel!),
-            const SizedBox(width: 8),
-          ],
-          FSwitch(
-            semanticsLabel: AppStrings.toggle(label),
-            value: value,
-            enabled: onChanged != null,
-            onChange: onChanged,
-          ),
-        ],
-      ),
-      if (hint != null) ...[
-        const SizedBox(height: 8),
-        Text(
-          hint!,
-          style: context.theme.typography.body.xs.copyWith(
-            color: context.theme.colors.mutedForeground,
-            height: 1.5,
+  Widget build(BuildContext context) {
+    final colors = context.theme.colors;
+    final accent = ChromeAccent.of(context);
+    return SettingRow(
+      label,
+      description: hint,
+      keepInline: true,
+      child: FSwitch(
+        semanticsLabel: AppStrings.toggle(label),
+        value: value,
+        enabled: onChanged != null,
+        onChange: onChanged,
+        style: FSwitchStyleDelta.delta(
+          trackColor: FVariants(
+            colors.secondary,
+            variants: {
+              [FSwitchVariant.selected]: accent,
+              [FSwitchVariant.disabled]: colors.disable(colors.secondary),
+              [FSwitchVariant.selected.and(FSwitchVariant.disabled)]: colors
+                  .disable(accent),
+            },
           ),
         ),
-      ],
-    ],
-  );
+      ),
+    );
+  }
 }
 
 class SliderSetting extends StatefulWidget {
@@ -310,7 +380,6 @@ class SliderSetting extends StatefulWidget {
     this.onChanged,
     this.onPreview,
     this.semanticLabel,
-    this.icon = FLucideIcons.slidersHorizontal,
   });
   final String label;
   final double value;
@@ -321,7 +390,6 @@ class SliderSetting extends StatefulWidget {
   final ValueChanged<double>? onChanged;
   final ValueChanged<double>? onPreview;
   final String? semanticLabel;
-  final IconData icon;
   @override
   State<SliderSetting> createState() => _SliderSettingState();
 }
@@ -345,41 +413,51 @@ class _SliderSettingState extends State<SliderSetting> {
   @override
   Widget build(BuildContext context) {
     final value = (_draft ?? widget.value).clamp(widget.min, widget.max);
-    return Column(
-      children: [
-        Row(
-          children: [
-            Icon(widget.icon, size: 16),
-            const SizedBox(width: 8),
-            Expanded(child: Text(widget.label)),
-            Text(_label(value)),
-          ],
+    final accent = ChromeAccent.of(context);
+    return SettingRow(
+      widget.label,
+      value: SizedBox(
+        width: 56,
+        child: Text(
+          _label(value),
+          textAlign: TextAlign.right,
+          style: context.theme.typography.body.xs.copyWith(
+            color: context.theme.colors.mutedForeground,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
         ),
-        const SizedBox(height: 12),
-        FSlider(
-          enabled: widget.onChanged != null,
-          control: FSliderControl.liftedContinuous(
-            value: FSliderValue(
-              max: (value - widget.min) / (widget.max - widget.min),
-            ),
-            stepPercentage: 1 / widget.divisions,
-            onChange: (value) {
-              final draft = _value(value.max);
-              setState(() => _draft = draft);
-              widget.onPreview?.call(draft);
+      ),
+      child: FSlider(
+        enabled: widget.onChanged != null,
+        style: FSliderStyleDelta.delta(
+          activeColor: FVariants(
+            accent,
+            variants: {
+              [FSliderVariant.disabled]: context.theme.colors.disable(accent),
             },
           ),
-          tooltipBuilder: (_, value) => Text(_label(_value(value))),
-          semanticValueFormatterCallback: (value) =>
-              '${widget.semanticLabel ?? widget.label} ${_label(_value(value))}',
-          onEnd: widget.onChanged == null
-              ? null
-              : (value) {
-                  widget.onChanged!(_value(value.max));
-                  if (mounted) setState(() => _draft = null);
-                },
         ),
-      ],
+        control: FSliderControl.liftedContinuous(
+          value: FSliderValue(
+            max: (value - widget.min) / (widget.max - widget.min),
+          ),
+          stepPercentage: 1 / widget.divisions,
+          onChange: (value) {
+            final draft = _value(value.max);
+            setState(() => _draft = draft);
+            widget.onPreview?.call(draft);
+          },
+        ),
+        tooltipBuilder: (_, value) => Text(_label(_value(value))),
+        semanticValueFormatterCallback: (value) =>
+            '${widget.semanticLabel ?? widget.label} ${_label(_value(value))}',
+        onEnd: widget.onChanged == null
+            ? null
+            : (value) {
+                widget.onChanged!(_value(value.max));
+                if (mounted) setState(() => _draft = null);
+              },
+      ),
     );
   }
 }
@@ -404,8 +482,10 @@ class ActionButton extends StatelessWidget {
       onPress: onPress,
       variant: primary ? FButtonVariant.primary : FButtonVariant.outline,
       mainAxisSize: MainAxisSize.min,
-      prefix: icon == null ? null : Icon(icon, size: 16),
-      child: Text(label),
+      prefix: icon == null
+          ? null
+          : Icon(icon, size: context.platformVariant.touch ? 18 : 16),
+      child: Flexible(child: Text(label)),
     );
     return tooltip == null
         ? button
@@ -426,23 +506,26 @@ class ActionRow extends StatelessWidget {
 }
 
 class ValueRow extends StatelessWidget {
-  const ValueRow(this.label, this.value, {super.key});
+  const ValueRow(this.label, this.value, {super.key, this.trailing});
   final String label;
   final String value;
+  final Widget? trailing;
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SizedBox(width: 100, child: Text(label)),
-      Expanded(
-        child: SelectableText(
-          value,
-          style: context.theme.typography.body.sm.copyWith(
-            color: context.theme.colors.mutedForeground,
+  Widget build(BuildContext context) => SettingRow(
+    label,
+    child: Row(
+      children: [
+        Expanded(
+          child: SelectableText(
+            value,
+            style: context.theme.typography.body.xs.copyWith(
+              color: context.theme.colors.mutedForeground,
+            ),
           ),
         ),
-      ),
-    ],
+        if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+      ],
+    ),
   );
 }
 
@@ -460,14 +543,16 @@ class AppPageBody extends StatelessWidget {
   Widget build(BuildContext context) => SingleChildScrollView(
     key: PageStorageKey(page.id),
     primary: false,
-    padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+    padding: context.platformVariant.touch
+        ? const EdgeInsets.fromLTRB(16, 8, 16, 24)
+        : const EdgeInsets.fromLTRB(32, 8, 32, 32),
     child: Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720),
+        constraints: const BoxConstraints(maxWidth: 760),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: 24,
+          spacing: 32,
           children: [
             if (controller.appUpdate?.hasUpdate == true)
               AppUpdateBanner(controller: controller),
@@ -493,8 +578,16 @@ class AppUpdateBanner extends StatelessWidget {
     return FTileGroup(
       children: [
         FTile(
-          prefix: const Icon(FLucideIcons.arrowUpCircle),
-          title: const Text(AppStrings.appUpdate),
+          prefix: Icon(
+            FLucideIcons.arrowUpCircle,
+            size: context.platformVariant.touch ? 18 : 16,
+          ),
+          title: Text(
+            AppStrings.appUpdate,
+            style: context.theme.typography.body.sm.copyWith(
+              fontWeight: FontWeight.w500,
+            ),
+          ),
           subtitle: Wrap(
             spacing: 8,
             runSpacing: 4,
@@ -530,13 +623,16 @@ class SchemeUpdateBanner extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Icon(FLucideIcons.arrowUpCircle, size: 20),
-                const SizedBox(width: 10),
+                Icon(
+                  FLucideIcons.arrowUpCircle,
+                  size: context.platformVariant.touch ? 18 : 16,
+                ),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     schemeDisplayName(update.schemeKey),
                     style: context.theme.typography.body.sm.copyWith(
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
@@ -594,7 +690,7 @@ class AppBrand extends StatelessWidget {
         height: compact ? 28 : 48,
         semanticLabel: 'KeyTao',
       ),
-      const SizedBox(width: 10),
+      const SizedBox(width: 12),
       Expanded(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -602,7 +698,7 @@ class AppBrand extends StatelessWidget {
             Text(
               AppStrings.title,
               style: context.theme.typography.body.sm.copyWith(
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w500,
               ),
             ),
             Text(
@@ -612,7 +708,7 @@ class AppBrand extends StatelessWidget {
               ),
             ),
             if (!compact) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: 8),
               Text(AppStrings.tagline, style: context.theme.typography.body.xs),
             ],
           ],
@@ -623,11 +719,11 @@ class AppBrand extends StatelessWidget {
 }
 
 Color successColor(BuildContext context) =>
-    Theme.of(context).brightness == Brightness.dark
+    context.theme.colors.brightness == Brightness.dark
     ? const Color(0xFF86EFAC)
     : const Color(0xFF166534);
 Color warningColor(BuildContext context) =>
-    Theme.of(context).brightness == Brightness.dark
+    context.theme.colors.brightness == Brightness.dark
     ? const Color(0xFFFCD34D)
     : const Color(0xFF92400E);
 
@@ -651,7 +747,7 @@ class StatusMessage extends StatelessWidget {
         children: [
           Icon(
             icon,
-            size: 16,
+            size: context.platformVariant.touch ? 18 : 16,
             color: color ?? context.theme.colors.mutedForeground,
           ),
           const SizedBox(width: 8),
@@ -779,7 +875,7 @@ class AppDialog extends StatelessWidget {
           Text(
             title,
             style: context.theme.typography.display.lg.copyWith(
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w500,
             ),
           ),
           const SizedBox(height: 16),

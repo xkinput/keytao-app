@@ -3,10 +3,16 @@ import 'package:forui/forui.dart';
 
 import '../app/controller.dart';
 import '../app/options.dart';
+import 'theme.dart';
 import 'widgets.dart';
 
-Color _parse(String hex) =>
-    Color(0xFF000000 | int.parse(hex.substring(1), radix: 16));
+Color parseAccentColor(String hex) {
+  final value = hex.startsWith('#') && hex.length == 7
+      ? int.tryParse(hex.substring(1), radix: 16)
+      : null;
+  return Color(0xFF000000 | (value ?? 0x3B73D9));
+}
+
 String _hex(Color color) =>
     '#${(color.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
@@ -34,40 +40,74 @@ class AccentPicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selected = controller.uiSettings!.accentColor.toUpperCase();
-    Widget swatch(String hex, {bool custom = false}) => FTooltip(
-      tipBuilder: (_, _) => Text(
-        custom ? AppStrings.chooseAccentColor : AppStrings.useColor(hex),
-      ),
-      child: Semantics(
-        selected: !custom && selected == hex,
-        label: custom ? AppStrings.chooseAccentColor : AppStrings.useColor(hex),
-        child: FTappable(
-          onPress: controller.busy
-              ? null
-              : () => custom ? _pick(context) : _save(hex),
-          child: Container(
-            width: custom ? 40 : 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: _parse(hex),
-              borderRadius: BorderRadius.circular(custom ? 6 : 14),
+    final touch = context.platformVariant.touch;
+    final accent = ChromeAccent.of(context);
+    Widget swatch(String hex, {bool custom = false}) {
+      final isSelected = custom
+          ? !themeAccents.containsKey(selected)
+          : selected == hex;
+      return FTooltip(
+        tipBuilder: (_, _) => Text(
+          custom ? AppStrings.chooseAccentColor : AppStrings.useColor(hex),
+        ),
+        child: Semantics(
+          selected: isSelected,
+          label: custom
+              ? AppStrings.chooseAccentColor
+              : AppStrings.useColor(hex),
+          child: FTappable(
+            focusedOutlineStyle: FFocusedOutlineStyleDelta.delta(
+              borderRadius: BorderRadius.circular(8),
             ),
-            child: custom || selected == hex
-                ? Icon(
-                    custom ? FLucideIcons.pipette : FLucideIcons.check,
-                    size: 16,
-                    color: custom && _parse(hex).computeLuminance() > .5
-                        ? Colors.black
-                        : Colors.white,
-                  )
-                : null,
+            onPress: controller.busy
+                ? null
+                : () => custom ? _pick(context) : _save(hex),
+            child: AnimatedContainer(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 150),
+              curve: Curves.easeOutCubic,
+              width: touch ? 44 : 32,
+              height: touch ? 44 : 32,
+              decoration: BoxDecoration(
+                color: isSelected
+                    ? accent.withValues(alpha: .12)
+                    : Colors.transparent,
+                border: Border.all(
+                  color: isSelected ? accent : Colors.transparent,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Center(
+                child: Container(
+                  width: touch ? 32 : 28,
+                  height: touch ? 32 : 28,
+                  decoration: BoxDecoration(
+                    color: parseAccentColor(hex),
+                    borderRadius: BorderRadius.circular(custom ? 8 : 16),
+                  ),
+                  child: custom || selected == hex
+                      ? Icon(
+                          custom ? FLucideIcons.pipette : FLucideIcons.check,
+                          size: touch ? 18 : 16,
+                          color:
+                              custom &&
+                                  parseAccentColor(hex).computeLuminance() > .5
+                              ? Colors.black
+                              : Colors.white,
+                        )
+                      : null,
+                ),
+              ),
+            ),
           ),
         ),
-      ),
-    );
+      );
+    }
+
     return SettingRow(
       AppStrings.accentColor,
-      icon: FLucideIcons.paintbrush,
+      controlAlignment: Alignment.centerLeft,
       child: Wrap(
         spacing: 8,
         runSpacing: 8,
@@ -89,7 +129,7 @@ class _ColorDialog extends StatefulWidget {
 }
 
 class _ColorDialogState extends State<_ColorDialog> {
-  late HSVColor _color = HSVColor.fromColor(_parse(widget.initial));
+  late HSVColor _color = HSVColor.fromColor(parseAccentColor(widget.initial));
   late final _text = TextEditingController(text: _hex(_color.toColor()));
   bool _valid = true;
   void _update(HSVColor color) => setState(() {
@@ -204,7 +244,9 @@ class _ColorDialogState extends State<_ColorDialog> {
             controller: _text,
             onChange: (value) => setState(() {
               _valid = RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(value.text);
-              if (_valid) _color = HSVColor.fromColor(_parse(value.text));
+              if (_valid) {
+                _color = HSVColor.fromColor(parseAccentColor(value.text));
+              }
             }),
           ),
           maxLength: 7,

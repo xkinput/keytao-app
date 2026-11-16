@@ -9,6 +9,37 @@ import 'progress.dart';
 import 'user_words.dart';
 import 'widgets.dart';
 
+class _StatusBadge extends StatelessWidget {
+  const _StatusBadge(this.label, {required this.ready, this.failed = false});
+  final String label;
+  final bool ready;
+  final bool failed;
+
+  @override
+  Widget build(BuildContext context) => FBadge(
+    variant: failed ? FBadgeVariant.destructive : FBadgeVariant.outline,
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(
+            color: failed
+                ? context.theme.colors.destructive
+                : ready
+                ? successColor(context)
+                : context.theme.colors.mutedForeground,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(label),
+      ],
+    ),
+  );
+}
+
 class InputPage extends StatelessWidget {
   const InputPage({super.key, required this.controller});
   final AppController controller;
@@ -48,18 +79,10 @@ class WindowsImeCard extends StatelessWidget {
     return Section(
       title: AppStrings.windowsIme,
       icon: FLucideIcons.keyboard,
-      trailing: FBadge(
-        variant: FBadgeVariant.outline,
-        child: Text(
-          c.windowsRegistrationLabel,
-          style: TextStyle(
-            color: !c.windowsRegistrationBusy && s?.registered == true
-                ? successColor(context)
-                : s?.registrationState == 'failed'
-                ? context.theme.colors.destructive
-                : null,
-          ),
-        ),
+      trailing: _StatusBadge(
+        c.windowsRegistrationLabel,
+        ready: !c.windowsRegistrationBusy && s?.registered == true,
+        failed: s?.registrationState == 'failed',
       ),
       children: [
         if (c.windowsRegistrationBusy) const FProgress(),
@@ -67,31 +90,22 @@ class WindowsImeCard extends StatelessWidget {
         if (s != null) ...[
           ActionRow(
             children: [
-              FBadge(
-                variant: s.packaged
-                    ? FBadgeVariant.primary
-                    : FBadgeVariant.outline,
-                child: Text(AppStrings.windowsPackage(s.packaged)),
+              _StatusBadge(
+                AppStrings.windowsPackage(s.packaged),
+                ready: s.packaged,
               ),
-              FBadge(
-                variant: s.registered
-                    ? FBadgeVariant.primary
-                    : FBadgeVariant.outline,
-                child: Text(
-                  AppStrings.windowsRegistration(c.windowsRegistrationLabel),
-                ),
+              _StatusBadge(
+                AppStrings.windowsRegistration(c.windowsRegistrationLabel),
+                ready: s.registered,
+                failed: s.registrationState == 'failed',
               ),
-              FBadge(
-                variant: s.registeredDll
-                    ? FBadgeVariant.primary
-                    : FBadgeVariant.outline,
-                child: Text(AppStrings.windowsDll(s.registeredDll)),
+              _StatusBadge(
+                AppStrings.windowsDll(s.registeredDll),
+                ready: s.registeredDll,
               ),
-              FBadge(
-                variant: s.profileEnabled
-                    ? FBadgeVariant.primary
-                    : FBadgeVariant.outline,
-                child: Text(AppStrings.windowsProfile(s.profileEnabled)),
+              _StatusBadge(
+                AppStrings.windowsProfile(s.profileEnabled),
+                ready: s.profileEnabled,
               ),
             ],
           ),
@@ -129,14 +143,9 @@ class LinuxImeCard extends StatelessWidget {
     return Section(
       title: AppStrings.linuxIme,
       icon: FLucideIcons.cpu,
-      trailing: FBadge(
-        variant: FBadgeVariant.outline,
-        child: Text(
-          s?.running == true ? AppStrings.running : AppStrings.notRunning,
-          style: TextStyle(
-            color: s?.running == true ? successColor(context) : null,
-          ),
-        ),
+      trailing: _StatusBadge(
+        s?.running == true ? AppStrings.running : AppStrings.notRunning,
+        ready: s?.running == true,
       ),
       children: [
         if (s != null) ...[
@@ -144,18 +153,16 @@ class LinuxImeCard extends StatelessWidget {
           ActionRow(
             children: [
               FBadge(
-                variant: FBadgeVariant.secondary,
+                variant: FBadgeVariant.outline,
                 child: Text(
                   s.kdeSession
                       ? AppStrings.kdeSession
                       : AppStrings.nonKdeSession,
                 ),
               ),
-              FBadge(
-                variant: s.kdeConfigured
-                    ? FBadgeVariant.primary
-                    : FBadgeVariant.outline,
-                child: Text(AppStrings.kdeConfiguration(s.kdeConfigured)),
+              _StatusBadge(
+                AppStrings.kdeConfiguration(s.kdeConfigured),
+                ready: s.kdeConfigured,
               ),
               if (s.managedPid != null && s.managedPid != 0)
                 FBadge(
@@ -231,16 +238,9 @@ class MacosImeCard extends StatelessWidget {
   Widget build(BuildContext context) => Section(
     title: AppStrings.macosIme,
     icon: FLucideIcons.keyboard,
-    trailing: FBadge(
-      variant: FBadgeVariant.outline,
-      child: Text(
-        controller.macosImeBadgeText,
-        style: TextStyle(
-          color: controller.macosImeBadge == ImeBadgeState.ready
-              ? successColor(context)
-              : null,
-        ),
-      ),
+    trailing: _StatusBadge(
+      controller.macosImeBadgeText,
+      ready: controller.macosImeBadge == ImeBadgeState.ready,
     ),
     children: [
       if (controller.macosIme?.appPath case final path?)
@@ -263,7 +263,7 @@ class AndroidImeCard extends StatelessWidget {
           size: 18,
           color: done ? successColor(context) : null,
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         Expanded(child: Text(label)),
       ],
     );
@@ -305,7 +305,6 @@ class AndroidImeCard extends StatelessWidget {
             ActionButton(
               AppStrings.recheck,
               icon: FLucideIcons.refreshCw,
-              tooltip: AppStrings.recheck,
               onPress: c.busy ? null : c.refreshState,
             ),
           ],

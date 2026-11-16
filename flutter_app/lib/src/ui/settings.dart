@@ -262,7 +262,7 @@ class _SettingsCardState extends State<SettingsCard> {
       controller.isMobile ? _mobile(context) : _desktop(context),
       if (controller.local?.deployed == true &&
           controller.schemaSwitches.isNotEmpty) ...[
-        const SizedBox(height: 24),
+        const SizedBox(height: 32),
         _schemaSwitches(),
       ],
     ],
@@ -304,10 +304,14 @@ class _SettingsCardState extends State<SettingsCard> {
     final enabled = !c.busy && (!c.isAndroid || c.storageReady);
     return SettingRow(
       '候选个数',
+      controlMaxWidth: 160,
       child: Semantics(
         label: '候选个数',
         enabled: enabled,
         child: FSelect<int>(
+          size: context.platformVariant.touch
+              ? FTextFieldSizeVariant.sm
+              : FTextFieldSizeVariant.md,
           enabled: enabled,
           control: FSelectControl.lifted(
             value: c.candidatePageSize ?? 0,
@@ -343,15 +347,46 @@ class _SettingsCardState extends State<SettingsCard> {
             ),
           )
         else ...[
+          if (!s.hideCandidatePanel)
+            LayoutBuilder(
+              builder: (context, constraints) => Container(
+                color: context.theme.colors.secondary,
+                padding: EdgeInsets.all(constraints.maxWidth < 480 ? 16 : 24),
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : const Duration(milliseconds: 160),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeOutCubic,
+                    layoutBuilder: (current, _) =>
+                        current ?? const SizedBox.shrink(),
+                    child: CandidatePanelPreview(
+                      key: ValueKey((
+                        _previewScheme ?? s.colorScheme,
+                        _previewAccent ?? s.accentColor,
+                        _previewOrientation ?? s.orientation,
+                      )),
+                      theme: c.resolveCandidatePanelPreview(
+                        colorScheme: _previewScheme ?? s.colorScheme,
+                        accentColor: _previewAccent ?? s.accentColor,
+                        fontSize: _previewFontSize ?? s.fontSize,
+                        systemDark:
+                            MediaQuery.platformBrightnessOf(context) ==
+                            Brightness.dark,
+                      ),
+                      orientation: _previewOrientation ?? s.orientation,
+                      showPreedit: !s.effectiveEmbeddedComposition,
+                      candidateCount: c.candidatePageSize ?? 6,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ChoiceSetting<UiColorSchemeDto>(
             label: '配色方案',
             value: s.colorScheme,
             options: colorSchemes,
-            icons: const {
-              UiColorSchemeDto.auto: FLucideIcons.monitor,
-              UiColorSchemeDto.light: FLucideIcons.sun,
-              UiColorSchemeDto.dark: FLucideIcons.moon,
-            },
             onChanged: c.busy
                 ? null
                 : (value) => _savePreview(colorScheme: value),
@@ -360,11 +395,6 @@ class _SettingsCardState extends State<SettingsCard> {
             label: '候选模式',
             value: s.hideCandidatePanel ? null : s.orientation,
             options: const {...orientations, null: '隐藏'},
-            icons: const {
-              PanelOrientationDto.horizontal: FLucideIcons.columns3,
-              PanelOrientationDto.vertical: FLucideIcons.rows3,
-              null: FLucideIcons.eyeOff,
-            },
             onChanged: c.busy
                 ? null
                 : (value) => value == null
@@ -387,9 +417,6 @@ class _SettingsCardState extends State<SettingsCard> {
             SwitchSetting(
               AppStrings.embedded,
               value: s.effectiveEmbeddedComposition,
-              stateLabel: s.effectiveEmbeddedComposition
-                  ? AppStrings.on
-                  : AppStrings.off,
               onChanged: c.busy || s.hideCandidatePanel ? null : c.saveEmbedded,
             ),
           if (!s.hideCandidatePanel) ...[
@@ -399,7 +426,6 @@ class _SettingsCardState extends State<SettingsCard> {
               min: candidateFontMin,
               max: candidateFontMax,
               divisions: candidateFontDivisions,
-              icon: FLucideIcons.type,
               onPreview: (value) => setState(() => _previewFontSize = value),
               onChanged: c.busy
                   ? null
@@ -411,35 +437,23 @@ class _SettingsCardState extends State<SettingsCard> {
                 if (mounted) setState(() => _previewAccent = value);
               },
             ),
-            CandidatePanelPreview(
-              theme: c.resolveCandidatePanelPreview(
-                colorScheme: _previewScheme ?? s.colorScheme,
-                accentColor: _previewAccent ?? s.accentColor,
-                fontSize: _previewFontSize ?? s.fontSize,
-                systemDark:
-                    MediaQuery.platformBrightnessOf(context) == Brightness.dark,
-              ),
-              orientation: _previewOrientation ?? s.orientation,
-              showPreedit: !s.effectiveEmbeddedComposition,
-            ),
           ],
           if (s.themePath case final path?)
-            Row(
-              children: [
-                Expanded(child: SelectableText('${AppStrings.theme}$path')),
-                const SizedBox(width: 8),
-                FTooltip(
-                  tipBuilder: (_, _) => const Text(AppStrings.openTheme),
-                  child: FButton.icon(
-                    onPress: c.canOpenTheme ? c.openTheme : null,
-                    variant: FButtonVariant.ghost,
-                    child: const Icon(
-                      FLucideIcons.folderOpen,
-                      semanticLabel: AppStrings.openTheme,
-                    ),
+            ValueRow(
+              AppStrings.theme,
+              path,
+              trailing: FTooltip(
+                tipBuilder: (_, _) => const Text(AppStrings.openTheme),
+                child: FButton.icon(
+                  onPress: c.canOpenTheme ? c.openTheme : null,
+                  variant: FButtonVariant.ghost,
+                  child: Icon(
+                    FLucideIcons.folderOpen,
+                    size: context.platformVariant.touch ? 18 : 16,
+                    semanticLabel: AppStrings.openTheme,
                   ),
                 ),
-              ],
+              ),
             ),
         ],
         if (c.imeUiError case final error?) ErrorMessage(error),
@@ -494,14 +508,13 @@ class _SettingsCardState extends State<SettingsCard> {
       label: label,
       value: value,
       options: options,
-      currentLabel: options[value],
       onChanged: enabled ? (value) => save(field, value) : null,
     );
     return Section(
       title: AppStrings.mobileKeyboard,
       icon: FLucideIcons.keyboard,
       children: [
-        const Text(AppStrings.gestures),
+        _mobileGroupLabel(context, AppStrings.gestures),
         slider(
           AppStrings.longPressDelay,
           'longPressDelayMs',
@@ -514,7 +527,6 @@ class _SettingsCardState extends State<SettingsCard> {
         ChoiceSetting<String>(
           label: AppStrings.englishMode,
           value: s?.englishMode ?? 'ascii',
-          currentLabel: c.englishModeLabel,
           hint: c.englishModeHint,
           options: c.androidEnglishModes,
           disabled: c.disabledAndroidEnglishModes,
@@ -570,7 +582,7 @@ class _SettingsCardState extends State<SettingsCard> {
           84,
           'dp',
         ),
-        const Text(AppStrings.layout),
+        _mobileGroupLabel(context, AppStrings.layout),
         toggle(
           portraitLabel,
           'floatingPortraitEnabled',
@@ -625,6 +637,16 @@ class _SettingsCardState extends State<SettingsCard> {
       ],
     );
   }
+
+  Widget _mobileGroupLabel(BuildContext context, String label) => Padding(
+    padding: const EdgeInsets.only(top: 16, bottom: 4),
+    child: Text(
+      label,
+      style: context.theme.typography.body.xs.copyWith(
+        color: context.theme.colors.mutedForeground,
+      ),
+    ),
+  );
 }
 
 class AccountCard extends StatelessWidget {
@@ -674,10 +696,17 @@ class AccountCard extends StatelessWidget {
           ValueRow('上次同步', cloudSyncDate(c.lastSchemeSyncAt)),
           SettingRow(
             '云端方案',
-            child: FButton.icon(
-              variant: FButtonVariant.ghost,
-              onPress: c.busy ? null : c.refreshCloudPackages,
-              child: const Icon(FLucideIcons.refreshCw, size: 16),
+            child: FTooltip(
+              tipBuilder: (_, _) => const Text('刷新云端方案'),
+              child: FButton.icon(
+                variant: FButtonVariant.ghost,
+                onPress: c.busy ? null : c.refreshCloudPackages,
+                child: Icon(
+                  FLucideIcons.refreshCw,
+                  size: context.platformVariant.touch ? 18 : 16,
+                  semanticLabel: '刷新云端方案',
+                ),
+              ),
             ),
           ),
           for (final package in c.cloudPackages)

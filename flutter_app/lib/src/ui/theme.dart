@@ -7,6 +7,19 @@ import 'package:forui/forui.dart';
 
 import '../rust/api/types.dart';
 
+class ChromeAccent extends InheritedWidget {
+  const ChromeAccent({super.key, required this.color, required super.child});
+
+  final Color color;
+
+  static Color of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ChromeAccent>()?.color ??
+      const Color(0xFF3B73D9);
+
+  @override
+  bool updateShouldNotify(ChromeAccent oldWidget) => color != oldWidget.color;
+}
+
 class KeyTaoTheme extends StatelessWidget {
   const KeyTaoTheme({super.key, required this.platform, required this.home});
   final BridgePlatform platform;

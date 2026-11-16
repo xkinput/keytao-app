@@ -10,6 +10,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/ui/candidate_panel_preview.dart';
+import 'package:keytao/src/ui/color_picker.dart';
 import 'package:keytao/src/ui/settings.dart';
 import 'package:keytao/src/ui/theme.dart';
 import 'package:keytao/src/ui/widgets.dart';
@@ -145,6 +146,53 @@ void main() {
       break;
     }
   });
+
+  test('accent parsing falls back safely for invalid settings', () {
+    expect(parseAccentColor('#ab12ef'), const Color(0xFFAB12EF));
+    for (final value in ['', '#', '#bad', '#GGGGGG', 'invalid']) {
+      expect(parseAccentColor(value), const Color(0xFF3B73D9));
+    }
+  });
+
+  for (final orientation in PanelOrientationDto.values) {
+    testWidgets('candidate count updates live in ${orientation.name}', (
+      tester,
+    ) async {
+      final controller = _PreviewController()
+        ..updateSettings(orientation: orientation);
+      await _pumpSettings(tester, controller);
+      for (final count in <int?>[
+        null,
+        ...List.generate(10, (i) => i + 1),
+        null,
+      ]) {
+        controller.candidatePageSize = count;
+        controller.updateSettings();
+        await tester.pumpAndSettle();
+        final expected = count ?? 6;
+        for (var index = 0; index < 10; index++) {
+          expect(
+            find.byKey(ValueKey('candidate-preview-text-$index')),
+            index < expected ? findsOneWidget : findsNothing,
+          );
+        }
+        expect(find.text('›'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+      expect(
+        [
+          for (var index = 0; index < 6; index++)
+            tester
+                .widget<Text>(
+                  find.byKey(ValueKey('candidate-preview-text-$index')),
+                )
+                .data,
+        ],
+        ['这', '之', '支', '只能', '服从', '中国'],
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+  }
 
   testWidgets(
     'settings preview follows a font drag before saving and changes direction',
