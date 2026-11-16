@@ -134,6 +134,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             hideSensitive = baseKeyboardConfig?.clipboardHideSensitive ?: true,
             sensitiveField = !privacyMode.allowsClipboard,
         )
+    private val clipboardSuggestionAllowed: Boolean
+        get() = clipboardConfigLoaded && clipboardCaptureAllowed && shouldSuggestClipboard(
+            historyEnabled = baseKeyboardConfig?.clipboardHistoryEnabled ?: true,
+            suggestionEnabled = baseKeyboardConfig?.clipboardSuggestionEnabled ?: true,
+            hideSensitive = baseKeyboardConfig?.clipboardHideSensitive ?: true,
+            sensitiveField = !privacyMode.allowsClipboard,
+        )
     private val clipboardCaptureAllowed: Boolean
         get() = !clipboardCaptureSuppressed || baseKeyboardConfig?.clipboardHideSensitive == false
     private var keyboardLayoutState = KeyboardLayoutState(
@@ -793,7 +800,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             if (previousLimit != clipboardHistory.limit) persistClipboardHistory()
         }
         if (!clipboardRecordingAllowed) cancelClipboardCaptures()
-        if (!clipboardHistoryVisible || !config.clipboardSuggestionEnabled) {
+        if (!clipboardSuggestionAllowed) {
             keyboardView?.clearRecentClipboardSuggestion()
         }
         if (inputViewShown && clipboardHistoryVisible) registerClipboardListener()
@@ -2397,7 +2404,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
-        if (!clipboardHistoryLoaded || !clipboardHistoryVisible || !clipboardCaptureAllowed || (!clipboardRecordingAllowed && !suggest)) return
+        if (!clipboardHistoryLoaded || !clipboardRecordingAllowed) return
         val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return
         if (clipboardRecordingAllowed && captureClipboardMedia(clip)) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
@@ -2697,13 +2704,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun offerCurrentClipboardSuggestionOnShow() {
-        if (!clipboardHistoryLoaded || !clipboardHistoryVisible) return
+        if (!clipboardHistoryLoaded || !clipboardSuggestionAllowed) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
         offerClipboardSuggestion(snapshot)
     }
 
     private fun offerClipboardSuggestion(snapshot: ClipboardSnapshot) {
-        if (!clipboardHistoryVisible || !clipboardCaptureAllowed || baseKeyboardConfig?.clipboardSuggestionEnabled == false) return
+        if (!clipboardSuggestionAllowed) return
         val now = System.currentTimeMillis()
         val timeoutMs = (baseKeyboardConfig?.clipboardSuggestionTimeoutSec ?: 30).coerceIn(5, 120) * 1_000L
         if (!shouldOfferClipboardSuggestion(
@@ -2735,15 +2742,13 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun rememberClipboardText(text: String, suggest: Boolean, timestamp: Long = 0L) {
         // Reject copies over 20K UTF-16 units instead of keeping or persisting a truncated secret.
-        if (!clipboardHistoryLoaded || text.length > clipboardTextMaxChars || text.isBlank() || !clipboardHistoryVisible || !clipboardCaptureAllowed) return
-        if (clipboardRecordingAllowed) {
-            val previous = clipboardHistory.items.firstOrNull { !it.isMedia && it.key == text }
-            clipboardHistory.remember(StoredClipboardItem(
-                key = text, text = text,
-                timestamp = timestamp.takeIf { it > 0 } ?: previous?.timestamp ?: System.currentTimeMillis(),
-            ))
-            persistClipboardHistory()
-        }
+        if (!clipboardHistoryLoaded || text.length > clipboardTextMaxChars || text.isBlank() || !clipboardRecordingAllowed) return
+        val previous = clipboardHistory.items.firstOrNull { !it.isMedia && it.key == text }
+        clipboardHistory.remember(StoredClipboardItem(
+            key = text, text = text,
+            timestamp = timestamp.takeIf { it > 0 } ?: previous?.timestamp ?: System.currentTimeMillis(),
+        ))
+        persistClipboardHistory()
         if (suggest) offerClipboardSuggestion(ClipboardSnapshot(text, timestamp))
     }
 

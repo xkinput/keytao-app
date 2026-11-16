@@ -144,6 +144,13 @@ internal fun shouldShowClipboardHistory(hideSensitive: Boolean, sensitiveField: 
 internal fun shouldRecordClipboard(historyEnabled: Boolean, hideSensitive: Boolean, sensitiveField: Boolean): Boolean =
     historyEnabled && shouldShowClipboardHistory(hideSensitive, sensitiveField)
 
+internal fun shouldSuggestClipboard(
+    historyEnabled: Boolean,
+    suggestionEnabled: Boolean,
+    hideSensitive: Boolean,
+    sensitiveField: Boolean,
+): Boolean = suggestionEnabled && shouldRecordClipboard(historyEnabled, hideSensitive, sensitiveField)
+
 internal fun shouldOfferClipboardSuggestion(
     text: String,
     timestamp: Long,

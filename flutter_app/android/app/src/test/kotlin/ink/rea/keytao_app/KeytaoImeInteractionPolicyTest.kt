@@ -33,6 +33,26 @@ class KeytaoImeInteractionPolicyTest {
     }
 
     @Test
+    fun `clipboard suggestions require recording and hints while pinned history keeps its privacy rule`() {
+        for (historyEnabled in listOf(false, true)) {
+            for (suggestionEnabled in listOf(false, true)) {
+                for (hideSensitive in listOf(false, true)) {
+                    for (sensitiveField in listOf(false, true)) {
+                        val visible = !hideSensitive || !sensitiveField
+                        val message = "history=$historyEnabled suggestion=$suggestionEnabled hideSensitive=$hideSensitive sensitiveField=$sensitiveField"
+                        assertEquals(
+                            message,
+                            historyEnabled && suggestionEnabled && visible,
+                            shouldSuggestClipboard(historyEnabled, suggestionEnabled, hideSensitive, sensitiveField),
+                        )
+                        assertEquals(message, visible, shouldShowClipboardHistory(hideSensitive, sensitiveField))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `clipboard suggestion accepts the exact configured timeout and rejects stale or future clips`() {
         val now = 1_000_000L
         for (timeoutSec in listOf(5, 30, 120)) {

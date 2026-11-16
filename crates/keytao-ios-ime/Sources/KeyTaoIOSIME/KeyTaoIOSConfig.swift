@@ -575,6 +575,14 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             }
             base = bundled ?? fallback
         }
+        return applyRuntimeSettings(base, url: userConfigURL) ?? base
+    }
+
+    static func loadIfAvailable(
+        resolvedKeyboardJson: String?,
+        userConfigURL: URL?
+    ) -> KeyTaoIOSImeConfig? {
+        guard let base = decodeKeyboard(json: resolvedKeyboardJson) else { return nil }
         return applyRuntimeSettings(base, url: userConfigURL)
     }
 
@@ -762,10 +770,10 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     private static func applyRuntimeSettings(
         _ config: KeyTaoIOSImeConfig,
         url: URL?
-    ) -> KeyTaoIOSImeConfig {
-        guard let url,
-              let data = try? Data(contentsOf: url),
-              let runtime = try? JSONDecoder().decode(KeyTaoIOSRuntimeSettings.self, from: data) else {
+    ) -> KeyTaoIOSImeConfig? {
+        guard let url else { return config }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let runtime = try? JSONDecoder().decode(KeyTaoIOSRuntimeSettings.self, from: data) else {
             return config
         }
         let preferences = try? JSONDecoder().decode(KeyTaoKeyboardPreferences.self, from: data)

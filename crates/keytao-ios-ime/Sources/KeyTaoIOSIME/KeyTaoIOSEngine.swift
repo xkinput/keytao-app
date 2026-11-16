@@ -375,6 +375,7 @@ final class KeyTaoIOSEngine {
     private var lastThemeColorScheme: KeyTaoEffectiveColorScheme?
     private var lastConfig: KeyTaoIOSImeConfig?
     private var lastConfigSignature: String?
+    private(set) var clipboardConfigLoaded = false
     private let startupQueue = DispatchQueue(label: "ink.rea.keytao-app.keyboard.startup", qos: .userInitiated)
     private var startupInFlight = false
     private var startupCompletions: [(Bool) -> Void] = []
@@ -572,13 +573,17 @@ final class KeyTaoIOSEngine {
         let resolvedKeyboardJson = KeyTaoIOSKeyboardConfigResolver.resolveJson(
             userKeyboardPath: keyboardSignature == "missing" ? nil : userKeyboard.path
         )
-        if resolvedKeyboardJson == nil, let lastConfig {
-            return lastConfig
-        }
-        let config = KeyTaoIOSImeConfig.load(
+        guard let config = KeyTaoIOSImeConfig.loadIfAvailable(
             resolvedKeyboardJson: resolvedKeyboardJson,
             userConfigURL: configSignature == "missing" ? nil : userConfig
-        )
+        ) else {
+            clipboardConfigLoaded = lastConfig != nil
+            return lastConfig ?? KeyTaoIOSImeConfig.load(
+                resolvedKeyboardJson: resolvedKeyboardJson,
+                userConfigURL: configSignature == "missing" ? nil : userConfig
+            )
+        }
+        clipboardConfigLoaded = true
         lastConfig = config
         lastConfigSignature = signature
         return config

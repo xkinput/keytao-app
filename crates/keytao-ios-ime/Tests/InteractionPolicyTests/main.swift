@@ -130,6 +130,12 @@ for item in clipboardAccessCases {
     let settings = "enabled=\(item.enabled), hideSensitive=\(item.hideSensitive), sensitive=\(item.sensitive)"
     expect(access.canRecord, item.record, "clipboard recording decision for \(settings)")
     expect(access.canShowHistory, item.show, "clipboard visibility decision for \(settings)")
+    for suggestionsEnabled in [false, true] {
+        expect(
+            access.canSuggest(enabled: suggestionsEnabled), suggestionsEnabled && item.record,
+            "clipboard suggestion decision for \(settings), suggestionsEnabled=\(suggestionsEnabled)"
+        )
+    }
 }
 
 var clipboard = KeyTaoClipboardHistory()
@@ -176,6 +182,37 @@ expect(duplicateHistory.records.first?.text, "New", "initial clipboard deduplica
 
 let clipboardLimitRecords = [KeyTaoClipboardRecord(key: "limit-pin", timestamp: 0, pinned: true)]
     + (1...210).map { KeyTaoClipboardRecord(key: "limit-\($0)", timestamp: Double($0)) }
+do {
+    let saved = KeyTaoClipboardHistory(records: clipboardLimitRecords, limit: 200)
+    var loading = try KeyTaoClipboardHistory(data: saved.encoded(), limit: 200)
+    for _ in 0..<2 {
+        expect(loading.setLimit(nil), false, "unknown configuration does not trim history below two hundred entries")
+        expect(loading.limit, 200, "history loading and presentation use the maximum cap before config loads")
+        expect(loading.records, saved.records, "unknown configuration preserves all two hundred entries and pins")
+    }
+    let historyFile = FileManager.default.temporaryDirectory.appendingPathComponent("keytao-clipboard-loading-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: historyFile) }
+    var editing = loading
+    editing.togglePin("limit-210")
+    try editing.encoded().write(to: historyFile, options: .atomic)
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile, limit: 200).records, editing.records, "pinning persists while configuration is unknown")
+    editing.togglePin("limit-210")
+    try editing.encoded().write(to: historyFile, options: .atomic)
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile, limit: 200).records, saved.records, "unpinning persists without trimming below two hundred entries while configuration is unknown")
+    editing.remove("limit-209")
+    try editing.encoded().write(to: historyFile, options: .atomic)
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile, limit: 200).records, editing.records, "deletion persists while configuration is unknown")
+    editing.clearUnpinned()
+    try editing.encoded().write(to: historyFile, options: .atomic)
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile, limit: 200).records, saved.records.filter(\.pinned), "clearing persists and preserves pins while configuration is unknown")
+    expect(loading.setLimit(200), false, "loading the user's two hundred entry limit preserves history")
+    expect(loading.records, saved.records, "the user's larger history survives config loading")
+    expect(loading.setLimit(50), true, "a known smaller user limit requests persistence of its trim")
+    expect(loading.records.filter { !$0.pinned }.count, 50, "a known smaller user limit trims unpinned history")
+    expect(loading.records.first?.key, "limit-pin", "applying a known limit preserves pins")
+} catch {
+    failures.append("clipboard history before config load failed: \(error)")
+}
 for (requested, expected) in [(10, 10), (200, 200), (-1, 10), (201, 200)] {
     let limited = KeyTaoClipboardHistory(records: clipboardLimitRecords, limit: requested)
     expect(limited.records.count, expected + 1, "requested limit \(requested) caps only unpinned records at \(expected)")

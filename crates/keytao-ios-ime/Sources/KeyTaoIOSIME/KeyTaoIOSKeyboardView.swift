@@ -649,8 +649,12 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private var visibleClipboardSuggestion: String? {
-        guard config.clipboardSuggestionEnabled, clipboardFullAccess,
-              !config.clipboardHideSensitive || !hostTraits.isSensitive,
+        let access = KeyTaoClipboardAccessPolicy(
+            historyEnabled: config.clipboardHistoryEnabled,
+            hideSensitive: config.clipboardHideSensitive,
+            isSensitive: hostTraits.isSensitive
+        )
+        guard access.canSuggest(enabled: config.clipboardSuggestionEnabled), clipboardFullAccess,
               Date().timeIntervalSince1970 - clipboardSuggestionCopiedAt
                 < TimeInterval(max(5, min(120, config.clipboardSuggestionTimeoutSec))) else { return nil }
         return clipboardSuggestion

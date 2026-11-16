@@ -1746,6 +1746,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         baseKeyboardConfig ?? .fallback
     }
 
+    private var clipboardConfigLoaded: Bool {
+        baseKeyboardConfig != nil && engine.clipboardConfigLoaded
+    }
+
     private var clipboardAccessPolicy: KeyTaoClipboardAccessPolicy {
         KeyTaoClipboardAccessPolicy(
             historyEnabled: clipboardConfig.clipboardHistoryEnabled,
@@ -1759,11 +1763,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private var clipboardCaptureAllowed: Bool {
-        hasFullAccess && clipboardAccessPolicy.canRecord
+        hasFullAccess && clipboardConfigLoaded && clipboardAccessPolicy.canRecord
     }
 
     private func loadClipboardHistoryIfNeeded() {
-        clipboardHistory.setLimit(clipboardConfig.clipboardHistoryLimit)
+        clipboardHistory.setLimit(clipboardConfigLoaded ? clipboardConfig.clipboardHistoryLimit : nil)
         guard !clipboardHistoryLoaded, let file = clipboardHistoryFile else { return }
         guard FileManager.default.fileExists(atPath: file.path) else {
             clipboardHistoryLoaded = true
@@ -1857,8 +1861,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func rememberCurrentClipboard(expectedChangeCount: Int) -> Bool {
-        guard clipboardReadAllowed,
-              clipboardConfig.clipboardHistoryEnabled || clipboardConfig.clipboardSuggestionEnabled,
+        guard clipboardCaptureAllowed,
               clipboardMediaSuppressionChangeCount != expectedChangeCount else {
             return false
         }
@@ -1866,7 +1869,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard let text = currentClipboardText(), text.utf8.count <= KeyTaoClipboardHistory.maxTextBytes else {
             return false
         }
-        guard generation == clipboardMediaLifetime.currentGeneration(), clipboardReadAllowed,
+        guard generation == clipboardMediaLifetime.currentGeneration(), clipboardCaptureAllowed,
               UIPasteboard.general.changeCount == expectedChangeCount else { return false }
         if let clipboardSuppression {
             guard text != clipboardSuppression.text
@@ -1879,7 +1882,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             clipboardObservedChangeCount = expectedChangeCount
             clipboardObservedAt = Date().timeIntervalSince1970
         }
-        keyboardView?.update(clipboardSuggestion: text, copiedAt: clipboardObservedAt)
+        keyboardView?.update(
+            clipboardSuggestion: clipboardAccessPolicy.canSuggest(enabled: clipboardConfig.clipboardSuggestionEnabled) ? text : nil,
+            copiedAt: clipboardObservedAt
+        )
         if clipboardCaptureAllowed {
             clipboardHistory.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: clipboardObservedAt))
             reconcileClipboardMedia()
@@ -2254,11 +2260,12 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         baseKeyboardConfig = config
-        let previousRecords = clipboardHistory.records
-        clipboardHistory.setLimit(config.clipboardHistoryLimit)
-        if previousRecords != clipboardHistory.records {
+        if clipboardHistory.setLimit(clipboardConfigLoaded ? config.clipboardHistoryLimit : nil) {
             reconcileClipboardMedia()
             persistClipboardHistory()
+        }
+        if !clipboardCaptureAllowed || !config.clipboardSuggestionEnabled {
+            keyboardView.update(clipboardSuggestion: nil, copiedAt: 0)
         }
         let isLandscape = currentInterfaceIsLandscape()
         let fallbackProfile = config.floating.profile(isLandscape: isLandscape)

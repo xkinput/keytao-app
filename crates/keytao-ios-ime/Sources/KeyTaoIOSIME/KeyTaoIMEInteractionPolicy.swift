@@ -125,6 +125,8 @@ struct KeyTaoClipboardAccessPolicy {
 
     var canShowHistory: Bool { !hideSensitive || !isSensitive }
     var canRecord: Bool { historyEnabled && canShowHistory }
+
+    func canSuggest(enabled: Bool) -> Bool { enabled && canRecord }
 }
 
 struct KeyTaoClipboardHistory {
@@ -162,9 +164,12 @@ struct KeyTaoClipboardHistory {
         try JSONEncoder().encode(records)
     }
 
-    mutating func setLimit(_ limit: Int) {
-        self.limit = max(10, min(200, limit))
+    @discardableResult
+    mutating func setLimit(_ limit: Int?) -> Bool {
+        let previousRecords = records
+        self.limit = max(10, min(200, limit ?? 200))
         normalize()
+        return limit != nil && records != previousRecords
     }
 
     mutating func upsert(_ record: KeyTaoClipboardRecord) {
