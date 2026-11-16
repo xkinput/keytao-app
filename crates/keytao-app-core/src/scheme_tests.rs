@@ -115,72 +115,6 @@ use std::collections::HashSet;
     }
 
     #[test]
-    fn test_merge_appends_unique_local_require() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(merged.contains("require(\"keytao_filter\")"));
-        assert!(merged.contains("require(\"my_mod\")"));
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_skips_require_already_in_zip() {
-        let local = "keytao_filter = require(\"keytao_filter\")\n";
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
-        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
-    }
-
-    #[test]
-    fn test_merge_renames_conflicting_module() {
-        let local = "my_mod = require(\"my_mod\")\n";
-        let zip = "keytao = require(\"keytao\")\n";
-        let filenames: HashSet<String> = ["my_mod.lua".to_string()].into();
-        let (merged, renames) = merge_rime_lua(local, zip, &filenames);
-        assert_eq!(
-            renames,
-            vec![("my_mod".to_string(), "my_mod_user".to_string())]
-        );
-        assert!(merged.contains("require(\"my_mod_user\")"));
-        assert!(!merged.contains("require(\"my_mod\")"));
-    }
-
-    #[test]
-    fn test_merge_ignores_block_comment_content() {
-        // Reproduces the Android bug: block comment lines such as ``` were
-        // appended verbatim to the merged output because the loop did not
-        // track --[[ ... --]] state.
-        let local = concat!(
-            "--[[\n",
-            "librime-lua 样例\n",
-            "```\n",
-            "  engine:\n",
-            "    translators:\n",
-            "```\n",
-            "--]]\n",
-            "--[[\n",
-            "各例可使用 `require` 引入。\n",
-            "```\n",
-            "  foo = require(\"bar\")\n",
-            "```\n",
-            "--]]\n",
-            "my_mod = require(\"my_mod\")\n",
-        );
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, renames) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(!merged.contains("librime-lua"), "block comment line leaked");
-        assert!(!merged.contains("engine:"), "block comment line leaked");
-        assert!(!merged.contains("```"), "block comment backticks leaked");
-        assert!(
-            !merged.contains("require(\"bar\")"),
-            "in-comment require leaked"
-        );
-        assert!(merged.contains("require(\"my_mod\")"));
-        assert!(renames.is_empty());
-    }
-
-    #[test]
     fn test_update_addon_schema_list_appends_after_package_schemas_and_preserves_patch() {
         let existing = concat!(
             "patch:\n",
@@ -337,122 +271,32 @@ use std::collections::HashSet;
         );
     }
 
-    #[test]
-    fn test_merge_reinstall_no_duplicates() {
-        // Installing over an existing identical rime.lua should produce the same file.
-        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(renames.is_empty());
-        // Every require should appear exactly once.
-        for module in &[
-            "date_time",
-            "keytao_filter",
-            "for_topup",
-            "for_hint",
-            "xnumber",
-            "smart_2",
-        ] {
-            let needle = format!("require(\"{module}\")");
-            assert_eq!(
-                merged.matches(needle.as_str()).count(),
-                1,
-                "require(\"{module}\") duplicated after reinstall"
-            );
-        }
-    }
 
     #[test]
-    fn test_merge_user_extra_module_appended() {
-        // User has the keytao rime.lua as local, plus one extra module.
-        let local = format!("{KEYTAO_RIME_LUA}my_custom = require(\"my_custom\")\n");
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(renames.is_empty());
-        assert!(merged.contains("require(\"my_custom\")"));
-        // Keytao requires still appear exactly once.
-        assert_eq!(merged.matches("require(\"keytao_filter\")").count(), 1);
-    }
-
-    #[test]
-    fn test_merge_user_extra_module_conflict_renamed() {
-        // User has a custom `date_time.lua` that would be overwritten by zip.
-        let local = format!("{KEYTAO_RIME_LUA}my_dt = require(\"my_dt\")\n");
-        let filenames: HashSet<String> = ["my_dt.lua".to_string()].into();
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &filenames);
+    fn rime_lua_install_preserves_package_verbatim() {
         assert_eq!(
-            renames,
-            vec![("my_dt".to_string(), "my_dt_user".to_string())]
+            prepare_rime_lua_install(Some(KEYTAO_RIME_LUA), &[]).as_deref(),
+            Some(KEYTAO_RIME_LUA)
         );
-        assert!(merged.contains("require(\"my_dt_user\")"));
-        assert!(!merged.contains("require(\"my_dt\")"));
+        assert_eq!(prepare_rime_lua_install(None, &[]), None);
     }
 
     #[test]
-    fn test_merge_zip_is_base_local_keytao_no_duplicates() {
-        // Local already has the same keytao rime.lua; merged must equal zip exactly.
-        let (merged, renames) = merge_rime_lua(KEYTAO_RIME_LUA, KEYTAO_RIME_LUA, &HashSet::new());
-        assert_eq!(merged, KEYTAO_RIME_LUA);
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_old_keytao_missing_module_zip_provides_it() {
-        // Local = older keytao rime.lua without smart_2.
-        // Zip = new keytao rime.lua with smart_2.
-        // smart_2 must appear exactly once in merged output.
-        let old_local: String = KEYTAO_RIME_LUA
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("smart_2"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (merged, renames) = merge_rime_lua(&old_local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert_eq!(merged.matches("require(\"smart_2\")").count(), 1);
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_user_extra_preserved_zip_overwrites_keytao_no_dups() {
-        // Local = keytao rime.lua + user-defined module.
-        // Zip = same keytao rime.lua (re-install / upgrade).
-        // merged must start with zip content; user module appended once;
-        // every keytao module appears exactly once.
-        let local = format!("{KEYTAO_RIME_LUA}user_plugin = require(\"user_plugin\")\n");
-        let (merged, renames) = merge_rime_lua(&local, KEYTAO_RIME_LUA, &HashSet::new());
-        assert!(merged.starts_with(KEYTAO_RIME_LUA));
-        assert!(merged.contains("require(\"user_plugin\")"));
-        for module in &[
-            "date_time",
-            "keytao_filter",
-            "for_topup",
-            "for_hint",
-            "xnumber",
-            "smart_2",
-        ] {
-            assert_eq!(
-                merged.matches(&format!("require(\"{module}\")")).count(),
-                1,
-                "require(\"{module}\") must appear exactly once"
-            );
-        }
-        assert!(renames.is_empty());
-    }
-
-    #[test]
-    fn test_merge_keytao_rime_lua_no_block_comment_leak() {
-        // Using actual keytao rime.lua as local; merged result must not contain
-        // any content from the --[[ ]] header blocks.
-        let local = KEYTAO_RIME_LUA;
-        let zip = "keytao_filter = require(\"keytao_filter\")\n";
-        let (merged, _) = merge_rime_lua(local, zip, &HashSet::new());
-        assert!(
-            !merged.contains("librime-lua"),
-            "block comment header leaked"
-        );
-        assert!(!merged.contains("engine:"), "block comment content leaked");
-        assert!(
-            !merged.contains("```"),
-            "backticks from block comment leaked"
-        );
-        assert!(
-            !merged.contains("require(\"bar\")"),
-            "in-comment require leaked"
+    fn rime_lua_install_appends_addons_once_without_rebinding_scheme_globals() {
+        let package = "number_translator = require(\"xnumber\")\n";
+        let addon = "addon_filter = require(\"addon_filter\")";
+        let generated = prepare_rime_lua_install(
+            Some(package),
+            &[
+                "number_translator = require(\"translators.xnumber\")",
+                addon,
+                addon,
+            ],
+        )
+        .unwrap();
+        assert_eq!(generated, format!("{package}{addon}\n"));
+        assert_eq!(
+            prepare_rime_lua_install(Some(&generated), &[addon]),
+            Some(generated)
         );
     }

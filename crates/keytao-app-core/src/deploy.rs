@@ -35,11 +35,16 @@ pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Resu
     };
     core.update_state(|state| {
         state.last_deploy = Some(DeployRecord {
-            root,
+            root: root.clone(),
             scheme_key: state.active_scheme.clone(),
             success,
         });
-    })
+    })?;
+    // Hosts also use this preparation before deploying through a native IME process.
+    if !success && root.is_dir() {
+        crate::packages::prepare_active_rime_lua(core, &root)?;
+    }
+    Ok(())
 }
 
 pub fn record_android_result(
