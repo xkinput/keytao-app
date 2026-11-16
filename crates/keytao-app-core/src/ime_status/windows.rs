@@ -16,6 +16,10 @@ use time::OffsetDateTime;
 mod server;
 
 #[cfg(any(target_os = "windows", test))]
+#[path = "windows_pipe_io.rs"]
+mod pipe_io;
+
+#[cfg(any(target_os = "windows", test))]
 #[path = "windows_server_recovery.rs"]
 mod server_recovery;
 
