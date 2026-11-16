@@ -426,6 +426,12 @@ class _SettingsCardState extends State<SettingsCard> {
     final c = controller;
     final s = c.androidSettings;
     final enabled = !c.busy && s != null;
+    final portraitLabel = c.isIos
+        ? AppStrings.oneHandedPortrait
+        : AppStrings.floatingPortrait;
+    final landscapeLabel = c.isIos
+        ? AppStrings.splitLandscape
+        : AppStrings.floatingLandscape;
     void save(String field, Object value) => c.saveAndroid({field: value});
     Widget slider(
       String label,
@@ -540,7 +546,7 @@ class _SettingsCardState extends State<SettingsCard> {
         ),
         const Text(AppStrings.layout),
         toggle(
-          AppStrings.floatingPortrait,
+          portraitLabel,
           'floatingPortraitEnabled',
           s?.floatingPortraitEnabled ?? false,
         ),
@@ -553,10 +559,10 @@ class _SettingsCardState extends State<SettingsCard> {
           30,
           '%',
           available: s?.floatingPortraitEnabled ?? false,
-          semanticLabel: AppStrings.floatingScale(AppStrings.floatingPortrait),
+          semanticLabel: AppStrings.floatingScale(portraitLabel),
         ),
         toggle(
-          AppStrings.floatingLandscape,
+          landscapeLabel,
           'floatingLandscapeEnabled',
           s?.floatingLandscapeEnabled ?? true,
         ),
@@ -569,7 +575,7 @@ class _SettingsCardState extends State<SettingsCard> {
           55,
           '%',
           available: s?.floatingLandscapeEnabled ?? true,
-          semanticLabel: AppStrings.floatingScale(AppStrings.floatingLandscape),
+          semanticLabel: AppStrings.floatingScale(landscapeLabel),
         ),
         choice(
           AppStrings.enterKey,
