@@ -2219,7 +2219,7 @@ class AppController extends ChangeNotifier {
   String _dictionarySyncDeletionKey(UserDictionarySyncDto sync) => jsonEncode([
     for (final entries in [sync.localDeletions, sync.serverDeletions])
       (entries
-          .map((entry) => jsonEncode([entry.word, entry.code]))
+          .map((entry) => jsonEncode([entry.word, entry.code, entry.remove]))
           .toSet()
           .toList()
         ..sort()),

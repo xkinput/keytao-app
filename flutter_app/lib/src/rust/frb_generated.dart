@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1351873780;
+  int get rustContentHash => 1071620321;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -295,6 +295,11 @@ abstract class RustLibApi extends BaseApi {
     required bool systemDark,
   });
 
+  Future<List<UserWordDto>> crateApiCoreSearchStockWords({
+    required String schemeKey,
+    required String query,
+  });
+
   Future<AndroidImeInputSettingsDto> crateApiCoreSetAndroidImeInputSettings({
     required AndroidImeInputSettingsDto settings,
   });
@@ -334,6 +339,13 @@ abstract class RustLibApi extends BaseApi {
     String? schemeKey,
     bool? sync_,
     String? settingsJson,
+  });
+
+  Future<void> crateApiCoreSetUserWordRemoved({
+    required String schemeKey,
+    required String word,
+    required String code,
+    required bool remove,
   });
 
   Future<UserWordsReportDto> crateApiCoreTakeUserWordsReport({
@@ -2523,6 +2535,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<UserWordDto>> crateApiCoreSearchStockWords({
+    required String schemeKey,
+    required String query,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(schemeKey, serializer);
+          sse_encode_String(query, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 71,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_user_word_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSearchStockWordsConstMeta,
+        argValues: [schemeKey, query],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSearchStockWordsConstMeta =>
+      const TaskConstMeta(
+        debugName: "search_stock_words",
+        argNames: ["schemeKey", "query"],
+      );
+
+  @override
   Future<AndroidImeInputSettingsDto> crateApiCoreSetAndroidImeInputSettings({
     required AndroidImeInputSettingsDto settings,
   }) {
@@ -2537,7 +2584,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 71,
+            funcId: 72,
             port: port_,
           );
         },
@@ -2570,7 +2617,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 72,
+            funcId: 73,
             port: port_,
           );
         },
@@ -2603,7 +2650,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 73,
+            funcId: 74,
             port: port_,
           );
         },
@@ -2636,7 +2683,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 74,
+            funcId: 75,
             port: port_,
           );
         },
@@ -2675,7 +2722,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 75,
+            funcId: 76,
             port: port_,
           );
         },
@@ -2710,7 +2757,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 77,
             port: port_,
           );
         },
@@ -2747,7 +2794,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 77,
+            funcId: 78,
             port: port_,
           );
         },
@@ -2786,7 +2833,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 79,
             port: port_,
           );
         },
@@ -2808,6 +2855,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiCoreSetUserWordRemoved({
+    required String schemeKey,
+    required String word,
+    required String code,
+    required bool remove,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(schemeKey, serializer);
+          sse_encode_String(word, serializer);
+          sse_encode_String(code, serializer);
+          sse_encode_bool(remove, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 80,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetUserWordRemovedConstMeta,
+        argValues: [schemeKey, word, code, remove],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetUserWordRemovedConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_user_word_removed",
+        argNames: ["schemeKey", "word", "code", "remove"],
+      );
+
+  @override
   Future<UserWordsReportDto> crateApiCoreTakeUserWordsReport({
     required String schemeKey,
   }) {
@@ -2819,7 +2905,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 81,
             port: port_,
           );
         },
@@ -2864,7 +2950,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 82,
             port: port_,
           );
         },
@@ -2914,7 +3000,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 83,
             port: port_,
           );
         },
@@ -2944,7 +3030,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 82,
+            funcId: 84,
             port: port_,
           );
         },
@@ -2971,7 +3057,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 85,
             port: port_,
           );
         },
@@ -2999,7 +3085,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 84,
+            funcId: 86,
             port: port_,
           );
         },
@@ -3029,7 +3115,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 85,
+            funcId: 87,
             port: port_,
           );
         },
@@ -3059,7 +3145,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 86,
+            funcId: 88,
             port: port_,
           );
         },
@@ -3086,7 +3172,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 87,
+            funcId: 89,
             port: port_,
           );
         },
@@ -3116,7 +3202,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 88,
+            funcId: 90,
             port: port_,
           );
         },
@@ -3149,7 +3235,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 89,
+            funcId: 91,
             port: port_,
           );
         },
@@ -4116,11 +4202,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return UserDictionaryDeletionDto(
       word: dco_decode_String(arr[0]),
       code: dco_decode_String(arr[1]),
+      remove: dco_decode_bool(arr[2]),
     );
   }
 
@@ -4158,13 +4245,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   UserWordDto dco_decode_user_word_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return UserWordDto(
       id: dco_decode_u_32(arr[0]),
       word: dco_decode_String(arr[1]),
       code: dco_decode_String(arr[2]),
       weight: dco_decode_opt_String(arr[3]),
+      remove: dco_decode_bool(arr[4]),
     );
   }
 
@@ -5327,7 +5415,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_word = sse_decode_String(deserializer);
     var var_code = sse_decode_String(deserializer);
-    return UserDictionaryDeletionDto(word: var_word, code: var_code);
+    var var_remove = sse_decode_bool(deserializer);
+    return UserDictionaryDeletionDto(
+      word: var_word,
+      code: var_code,
+      remove: var_remove,
+    );
   }
 
   @protected
@@ -5379,11 +5472,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_word = sse_decode_String(deserializer);
     var var_code = sse_decode_String(deserializer);
     var var_weight = sse_decode_opt_String(deserializer);
+    var var_remove = sse_decode_bool(deserializer);
     return UserWordDto(
       id: var_id,
       word: var_word,
       code: var_code,
       weight: var_weight,
+      remove: var_remove,
     );
   }
 
@@ -6433,6 +6528,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.word, serializer);
     sse_encode_String(self.code, serializer);
+    sse_encode_bool(self.remove, serializer);
   }
 
   @protected
@@ -6474,6 +6570,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.word, serializer);
     sse_encode_String(self.code, serializer);
     sse_encode_opt_String(self.weight, serializer);
+    sse_encode_bool(self.remove, serializer);
   }
 
   @protected

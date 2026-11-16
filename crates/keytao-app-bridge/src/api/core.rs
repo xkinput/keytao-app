@@ -308,6 +308,37 @@ pub async fn lookup_user_word(
     )
 }
 
+pub async fn search_stock_words(
+    scheme_key: String,
+    query: String,
+) -> Result<Vec<UserWordDto>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::user_words::search_stock_words(&state.core, &scheme_key, &query)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn set_user_word_removed(
+    scheme_key: String,
+    word: String,
+    code: String,
+    remove: bool,
+) -> Result<(), String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    keytao_app_core::user_words::set_user_word_removed(
+        &state.core,
+        &scheme_key,
+        &state.host.user_root()?,
+        &word,
+        &code,
+        remove,
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub async fn take_user_words_report(scheme_key: String) -> Result<UserWordsReportDto, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
@@ -448,6 +479,7 @@ pub async fn account_sync_user_dictionary(
                     .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
                         word: entry.word,
                         code: entry.code,
+                        remove: entry.remove,
                     })
                     .collect(),
                 server_deletions: confirmed
@@ -456,6 +488,7 @@ pub async fn account_sync_user_dictionary(
                     .map(|entry| keytao_app_core::account::UserDictionaryDeletion {
                         word: entry.word,
                         code: entry.code,
+                        remove: entry.remove,
                     })
                     .collect(),
             }
@@ -474,6 +507,7 @@ pub async fn account_sync_user_dictionary(
             .map(|entry| UserDictionaryDeletionDto {
                 word: entry.word,
                 code: entry.code,
+                remove: entry.remove,
             })
             .collect(),
         server_deletions: result
@@ -482,6 +516,7 @@ pub async fn account_sync_user_dictionary(
             .map(|entry| UserDictionaryDeletionDto {
                 word: entry.word,
                 code: entry.code,
+                remove: entry.remove,
             })
             .collect(),
     })

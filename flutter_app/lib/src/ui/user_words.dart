@@ -13,7 +13,8 @@ import 'widgets.dart';
 bool _hasConflict(UserWordComparisonDto comparison) =>
     comparison.status == 'code_taken' || comparison.status == 'word_has_code';
 
-String _wordKey(String word, String code) => jsonEncode([word, code]);
+String _wordKey(String word, String code, [bool remove = false]) =>
+    jsonEncode([word, code, remove]);
 
 List<Map<String, dynamic>> _submissionObjects(Object? value) =>
     (value as List<dynamic>).cast<Map<String, dynamic>>();
@@ -100,6 +101,10 @@ class _UserWordsPageState extends State<UserWordsPage> {
   late String _scheme = widget.schemeKey;
   late bool _conflictsOnly = widget.conflictsOnly;
   List<UserWordComparisonDto> _entries = [];
+  List<UserWordDto> _stockWords = [];
+  Timer? _stockDebounce;
+  int _stockRequest = 0;
+  bool _searchingStock = false;
   bool _loading = true;
   bool _saving = false;
   bool _comparisonAvailable = false;
@@ -133,6 +138,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
   void dispose() {
     widget.controller.removeListener(_controllerChanged);
     unawaited(_commitPendingDelete());
+    _stockDebounce?.cancel();
     _search.dispose();
     super.dispose();
   }
@@ -240,6 +246,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
     final entry = comparison.entry;
     final key = _wordKey(entry.word, entry.code);
     return widget.controller.accountUser != null &&
+        !entry.remove &&
+        comparison.status != 'stock' &&
         widget.controller.isKeytaoScheme(_scheme) &&
         _comparisonAvailable &&
         comparison.status != 'identical' &&
@@ -267,7 +275,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
         for (final word in words)
           UserWordComparisonDto(
             entry: word,
-            status: 'none',
+            status: word.remove ? 'removed' : 'none',
             words: const [],
             codes: const [],
           ),
@@ -302,9 +310,65 @@ class _UserWordsPageState extends State<UserWordsPage> {
           _loadedRevision = revision;
           _loading = false;
         });
+        _searchChanged();
         _controllerChanged();
       }
     }
+  }
+
+  void _searchChanged() {
+    _stockDebounce?.cancel();
+    final request = ++_stockRequest;
+    final scheme = _scheme;
+    final query = _search.text.trim();
+    setState(() {
+      _stockWords = [];
+      _searchingStock =
+          widget.controller.isKeytaoScheme(scheme) && query.isNotEmpty;
+    });
+    if (!_searchingStock) return;
+    _stockDebounce = Timer(const Duration(milliseconds: 180), () async {
+      try {
+        final words = await core.searchStockWords(
+          schemeKey: scheme,
+          query: query,
+        );
+        if (!mounted || request != _stockRequest) return;
+        setState(() => _stockWords = words);
+      } catch (failure) {
+        if (mounted && request == _stockRequest) {
+          setState(() => _error = errorText(failure));
+        }
+      } finally {
+        if (mounted && request == _stockRequest) {
+          setState(() => _searchingStock = false);
+        }
+      }
+    });
+  }
+
+  Future<void> _setRemoved(UserWordDto entry, bool remove) async {
+    if (!await _commitPendingDelete() || !mounted) return;
+    final scheme = _scheme;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await core.setUserWordRemoved(
+        schemeKey: scheme,
+        word: entry.word,
+        code: entry.code,
+        remove: remove,
+      );
+      widget.controller.markUserWordsChanged(scheme);
+    } catch (failure) {
+      if (mounted) setState(() => _error = errorText(failure));
+      return;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+    if (mounted) await _load();
   }
 
   Future<void> _edit([UserWordDto? entry]) async {
@@ -479,12 +543,16 @@ class _UserWordsPageState extends State<UserWordsPage> {
                 if (pending.localDeletions.isNotEmpty) ...[
                   Text('本地删除 ${pending.localDeletions.length} 条'),
                   for (final entry in pending.localDeletions)
-                    Text('${entry.word} · ${entry.code}'),
+                    Text(
+                      '${entry.word} · ${entry.code}${entry.remove ? ' · 已移除' : ''}',
+                    ),
                 ],
                 if (pending.serverDeletions.isNotEmpty) ...[
                   Text('云端删除 ${pending.serverDeletions.length} 条'),
                   for (final entry in pending.serverDeletions)
-                    Text('${entry.word} · ${entry.code}'),
+                    Text(
+                      '${entry.word} · ${entry.code}${entry.remove ? ' · 已移除' : ''}',
+                    ),
                 ],
                 Align(
                   alignment: Alignment.centerRight,
@@ -683,13 +751,35 @@ class _UserWordsPageState extends State<UserWordsPage> {
           _pendingLoading ||
           _deleteCommit != null;
       final query = _search.text.toLowerCase();
-      final entries = _entries.where((comparison) {
-        final entry = comparison.entry;
-        return entry.id != _pendingDelete?.id &&
-            (!_conflictsOnly || _hasConflict(comparison)) &&
-            (entry.word.toLowerCase().contains(query) ||
-                entry.code.toLowerCase().contains(query));
-      }).toList();
+      final removed = {
+        for (final comparison in _entries)
+          if (comparison.entry.remove)
+            _wordKey(comparison.entry.word, comparison.entry.code),
+      };
+      final entries =
+          [
+            ..._entries,
+            for (final word in _stockWords)
+              if (!removed.contains(_wordKey(word.word, word.code)))
+                UserWordComparisonDto(
+                  entry: word,
+                  status: 'stock',
+                  words: const [],
+                  codes: const [],
+                ),
+          ].where((comparison) {
+            final entry = comparison.entry;
+            return (_pendingDelete == null ||
+                    _wordKey(entry.word, entry.code, entry.remove) !=
+                        _wordKey(
+                          _pendingDelete!.word,
+                          _pendingDelete!.code,
+                          _pendingDelete!.remove,
+                        )) &&
+                (!_conflictsOnly || _hasConflict(comparison)) &&
+                (entry.word.toLowerCase().contains(query) ||
+                    entry.code.toLowerCase().contains(query));
+          }).toList();
       final schemeKeys = {
         _scheme,
         for (final package in c.installedPackages) package.schemeKey,
@@ -774,7 +864,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                           hint: '搜索词语或编码',
                           control: FTextFieldControl.managed(
                             controller: _search,
-                            onChange: (_) => setState(() {}),
+                            onChange: (_) => _searchChanged(),
                           ),
                         ),
                         ActionRow(
@@ -812,7 +902,7 @@ class _UserWordsPageState extends State<UserWordsPage> {
                               ),
                           ],
                         ),
-                        if (_loading) const FProgress(),
+                        if (_loading || _searchingStock) const FProgress(),
                         if (_error case final error?) ErrorMessage(error),
                         if (_error == null && c.isKeytaoScheme(_scheme))
                           if (c.accountError case final error?)
@@ -842,9 +932,15 @@ class _UserWordsPageState extends State<UserWordsPage> {
                             itemBuilder: (context, index) {
                               final comparison = entries[index];
                               final entry = comparison.entry;
-                              final key = _wordKey(entry.word, entry.code);
+                              final key = _wordKey(
+                                entry.word,
+                                entry.code,
+                                entry.remove,
+                              );
+                              final stock = comparison.status == 'stock';
                               final canSubmit = _canSubmit(comparison);
                               return Padding(
+                                key: ValueKey('$key:${comparison.status}'),
                                 padding: const EdgeInsets.symmetric(
                                   vertical: 4,
                                 ),
@@ -867,7 +963,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                     ],
                                     Expanded(
                                       child: FTappable(
-                                        onPress: blocked
+                                        onPress:
+                                            blocked || entry.remove || stock
                                             ? null
                                             : () => _edit(entry),
                                         child: Padding(
@@ -877,6 +974,14 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                           child: Row(
                                             children: [
                                               Expanded(child: Text(entry.word)),
+                                              if (entry.remove) ...[
+                                                FBadge(
+                                                  variant:
+                                                      FBadgeVariant.outline,
+                                                  child: const Text('已移除'),
+                                                ),
+                                                const SizedBox(width: 12),
+                                              ],
                                               if (c.isKeytaoScheme(_scheme) &&
                                                   (_pending.contains(key) ||
                                                       _submitted.contains(
@@ -927,17 +1032,25 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                       ),
                                     ),
                                     const SizedBox(width: 10),
-                                    FButton.icon(
-                                      variant: FButtonVariant.ghost,
-                                      onPress: blocked
-                                          ? null
-                                          : () => _delete(entry),
-                                      child: Icon(
-                                        FLucideIcons.trash2,
-                                        size: 16,
-                                        semanticLabel: '删除 ${entry.word}',
+                                    if (entry.remove || stock)
+                                      ActionButton(
+                                        entry.remove ? '恢复' : '移除',
+                                        onPress: blocked
+                                            ? null
+                                            : () => _setRemoved(entry, stock),
+                                      )
+                                    else
+                                      FButton.icon(
+                                        variant: FButtonVariant.ghost,
+                                        onPress: blocked
+                                            ? null
+                                            : () => _delete(entry),
+                                        child: Icon(
+                                          FLucideIcons.trash2,
+                                          size: 16,
+                                          semanticLabel: '删除 ${entry.word}',
+                                        ),
                                       ),
-                                    ),
                                   ],
                                 ),
                               );

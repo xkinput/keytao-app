@@ -126,6 +126,26 @@ void main() {
     expect(controller.pendingDictionarySync, isNull);
   });
 
+  test(
+    'automatic sync distinguishes removal markers from personal words',
+    () async {
+      await controller.syncUserDictionary();
+      controller.dismissDictionarySyncConfirmation();
+      core.result = pending(
+        local: [
+          const UserDictionaryDeletionDto(word: 'a', code: 'aa', remove: true),
+          b,
+          c,
+          d,
+        ],
+      );
+
+      await controller.syncUserDictionary(automatic: true);
+
+      expect(controller.pendingDictionarySync, same(core.result));
+    },
+  );
+
   test('cancelled deletion sets are scoped to the account', () async {
     await controller.syncUserDictionary();
     controller.dismissDictionarySyncConfirmation();

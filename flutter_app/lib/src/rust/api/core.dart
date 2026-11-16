@@ -162,6 +162,26 @@ Future<UserWordComparisonDto> lookupUserWord({
   code: code,
 );
 
+Future<List<UserWordDto>> searchStockWords({
+  required String schemeKey,
+  required String query,
+}) => RustLib.instance.api.crateApiCoreSearchStockWords(
+  schemeKey: schemeKey,
+  query: query,
+);
+
+Future<void> setUserWordRemoved({
+  required String schemeKey,
+  required String word,
+  required String code,
+  required bool remove,
+}) => RustLib.instance.api.crateApiCoreSetUserWordRemoved(
+  schemeKey: schemeKey,
+  word: word,
+  code: code,
+  remove: remove,
+);
+
 Future<UserWordsReportDto> takeUserWordsReport({required String schemeKey}) =>
     RustLib.instance.api.crateApiCoreTakeUserWordsReport(schemeKey: schemeKey);
 

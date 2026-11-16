@@ -156,6 +156,421 @@ fn local(core: &Core, host: &Host) -> Vec<(String, String)> {
     entries
 }
 
+fn save_base(
+    root: &Path,
+    account: i64,
+    entries: &BTreeSet<(String, String)>,
+) -> Result<(), CoreError> {
+    super::save_base(
+        root,
+        account,
+        &entries
+            .iter()
+            .map(|(word, code)| (word.clone(), code.clone(), false))
+            .collect(),
+    )
+}
+
+fn base_words(base: &DictionaryBase) -> BTreeSet<(String, String)> {
+    base.entries
+        .iter()
+        .filter(|entry| !entry.2)
+        .map(|entry| (entry.0.clone(), entry.1.clone()))
+        .collect()
+}
+
+fn remote_marker(word: &str, code: &str, id: i64) -> Value {
+    let mut entry = remote(word, code, id);
+    entry["remove"] = json!(true);
+    entry
+}
+
+#[test]
+fn old_remote_entries_and_sync_bases_default_to_personal_words() {
+    let entry: RemoteEntry = serde_json::from_value(remote("word", "aaaa", 12)).unwrap();
+    assert!(!entry.remove);
+    let base: DictionaryBase = serde_json::from_value(json!({
+        "instance": "legacy-instance",
+        "entries": [["word", "aaaa"]],
+    }))
+    .unwrap();
+    assert_eq!(
+        base.entries,
+        BTreeSet::from([("word".into(), "aaaa".into(), false)])
+    );
+}
+
+#[tokio::test]
+async fn regression_legacy_marker_posts_never_create_personal_rows() {
+    let (_dir, core, host) = fixture();
+    user_words::set_user_word_removed(&core, "keytao", &host.0, "stock", "aaaa", true).unwrap();
+    let mock = server(vec![
+        (
+            "200 OK",
+            json!({"entries":[remote("personal","bbbb",12)],"total":1}),
+        ),
+        ("200 OK", json!({"entry":remote("stock","aaaa",13)})),
+    ])
+    .await;
+    let result =
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
+    let requests = mock.finish().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "legacy servers must not receive marker POSTs"
+    );
+    result.unwrap();
+    assert!(
+        !std::fs::read_to_string(host.0.join("keytao.user.dict.yaml"))
+            .unwrap()
+            .contains("stock")
+    );
+}
+
+#[tokio::test]
+async fn regression_legacy_servers_keep_markers_local_and_sync_personal_words() {
+    for empty_remote in [false, true] {
+        for previously_synced in [false, true] {
+            let (_dir, core, host) = fixture();
+            user_words::set_user_word_removed(&core, "keytao", &host.0, "stock", "aaaa", true)
+                .unwrap();
+            user_words::add_user_word(&core, "keytao", &host.0, "personal", "cccc", None).unwrap();
+            let marker = ("stock".into(), "aaaa".into(), true);
+            if previously_synced {
+                super::save_base(&host.0, 7, &BTreeSet::from([marker.clone()])).unwrap();
+            }
+            let mut entries = Vec::new();
+            if !empty_remote {
+                entries.push(remote("remote", "bbbb", 12));
+            }
+            let mut synced = entries.clone();
+            synced.push(remote("personal", "cccc", 13));
+            let mock = server(vec![
+                ("200 OK", json!({"total":entries.len(),"entries":entries})),
+                ("200 OK", json!({"entry":remote("personal","cccc",13)})),
+                ("200 OK", json!({"total":synced.len(),"entries":synced})),
+            ])
+            .await;
+            for _ in 0..2 {
+                let result =
+                    sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+                        .await;
+                assert!(
+                    result.is_ok(),
+                    "legacy sync must succeed: {:?}",
+                    result.err()
+                );
+                let markers = user_words::read_user_word_removals(&host.0).unwrap();
+                assert_eq!(markers.len(), 1);
+                assert_eq!(markers[0].word, "stock");
+                let dictionary =
+                    std::fs::read_to_string(host.0.join("keytao.user.dict.yaml")).unwrap();
+                assert!(!dictionary.contains("stock"));
+                assert!(dictionary.contains("personal"));
+                assert_eq!(dictionary.contains("remote"), !empty_remote);
+                let base: DictionaryBase =
+                    serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+                assert_eq!(base.entries.contains(&marker), previously_synced);
+            }
+            let requests = mock.finish().await;
+            assert_eq!(requests.len(), 3);
+            assert_eq!(
+                serde_json::from_str::<Value>(requests[1].split("\r\n\r\n").nth(1).unwrap())
+                    .unwrap(),
+                json!({"word":"personal","code":"cccc","type":"Phrase","replacePublic":false})
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn regression_marker_upload_waits_for_explicit_server_support() {
+    let (_dir, core, host) = fixture();
+    user_words::set_user_word_removed(&core, "keytao", &host.0, "stock", "aaaa", true).unwrap();
+    let mut supported = remote("personal", "bbbb", 12);
+    supported["remove"] = json!(false);
+    let mock = server(vec![
+        ("200 OK", json!({"entries":[],"total":0})),
+        ("200 OK", json!({"entries":[supported],"total":1})),
+        ("200 OK", json!({"entry":remote_marker("stock","aaaa",13)})),
+    ])
+    .await;
+    for _ in 0..2 {
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
+    }
+    let requests = mock.finish().await;
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].starts_with("GET "));
+    assert!(requests[1].starts_with("GET "));
+    assert_eq!(
+        serde_json::from_str::<Value>(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+        json!({"word":"stock","code":"aaaa","type":"Phrase","remove":true,"replacePublic":false})
+    );
+    let dictionary = std::fs::read_to_string(host.0.join("keytao.user.dict.yaml")).unwrap();
+    assert!(!dictionary.contains("stock"));
+}
+
+#[tokio::test]
+async fn regression_marker_deletion_history_survives_legacy_server() {
+    let (_dir, core, host) = fixture();
+    super::save_base(
+        &host.0,
+        7,
+        &BTreeSet::from([("stock".into(), "aaaa".into(), true)]),
+    )
+    .unwrap();
+    let mut supported = remote("personal", "bbbb", 12);
+    supported["remove"] = json!(false);
+    let mock = server(vec![
+        (
+            "200 OK",
+            json!({"entries":[remote("personal","bbbb",12)],"total":1}),
+        ),
+        (
+            "200 OK",
+            json!({"entries":[supported,remote_marker("stock","aaaa",13)],"total":2}),
+        ),
+        ("200 OK", json!({"success":true})),
+    ])
+    .await;
+    for _ in 0..2 {
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
+        assert!(
+            user_words::read_user_word_removals(&host.0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let requests = mock.finish().await;
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].starts_with("DELETE /api/user/dictionary/13 HTTP/1.1"));
+    let base: DictionaryBase =
+        serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+    assert!(base.entries.iter().all(|key| !key.2));
+}
+
+#[tokio::test]
+async fn remove_markers_round_trip_without_becoming_dictionary_lines() {
+    let (_dir, core, host) = fixture();
+    user_words::set_user_word_removed(&core, "keytao", &host.0, "local", "aaaa", true).unwrap();
+    let mock = server(vec![
+        ("200 OK", json!({"entries":[remote_marker("remote","bbbb",12)],"total":1})),
+        ("200 OK", json!({"entry":remote_marker("local","aaaa",13)})),
+        ("200 OK", json!({"entries":[remote_marker("remote","bbbb",12),remote_marker("local","aaaa",13)],"total":2})),
+    ])
+    .await;
+    for _ in 0..2 {
+        let result = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
+        assert_eq!(result.count, 2);
+        let entries = user_words::list_user_words(&core, "keytao", &host.0).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.remove));
+    }
+    let requests = mock.finish().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        serde_json::from_str::<Value>(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+        json!({"word":"local","code":"aaaa","type":"Phrase","remove":true,"replacePublic":false})
+    );
+    let content = std::fs::read_to_string(host.0.join("keytao.user.dict.yaml")).unwrap();
+    assert!(!content.contains("local"));
+    assert!(!content.contains("remote"));
+    assert_eq!(
+        std::fs::read_to_string(host.0.join("keytao.user.remove.txt")).unwrap(),
+        "local\taaaa\nremote\tbbbb\n"
+    );
+}
+
+#[tokio::test]
+async fn marker_and_same_word_personal_entry_sync_independently() {
+    let (_dir, core, host) = fixture();
+    user_words::add_user_word(&core, "keytao", &host.0, "same", "aaaa", None).unwrap();
+    user_words::set_user_word_removed(&core, "keytao", &host.0, "same", "aaaa", true).unwrap();
+    let mut personal = remote("same", "aaaa", 12);
+    personal["remove"] = json!(false);
+    let mock = server(vec![
+        ("200 OK", json!({"entries":[personal],"total":1})),
+        ("200 OK", json!({"entry":remote_marker("same","aaaa",13)})),
+        (
+            "200 OK",
+            json!({"entries":[remote("same","aaaa",12),remote_marker("same","aaaa",13)],"total":2}),
+        ),
+    ])
+    .await;
+    for _ in 0..2 {
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
+    }
+    let requests = mock.finish().await;
+    assert_eq!(requests.len(), 3);
+    let entries = user_words::list_user_words(&core, "keytao", &host.0).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.iter().filter(|entry| entry.remove).count(), 1);
+    let content = std::fs::read_to_string(host.0.join("keytao.user.dict.yaml")).unwrap();
+    assert_eq!(
+        content
+            .lines()
+            .filter(|line| line.split('\t').nth(1) == Some("same"))
+            .count(),
+        1
+    );
+    let base: DictionaryBase =
+        serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+    assert_eq!(
+        base.entries,
+        BTreeSet::from([
+            ("same".into(), "aaaa".into(), false),
+            ("same".into(), "aaaa".into(), true),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn marker_deletions_preserve_same_word_personal_entries_on_both_sides() {
+    for delete_on_server in [false, true] {
+        let (_dir, core, host) = fixture();
+        user_words::add_user_word(&core, "keytao", &host.0, "same", "aaaa", None).unwrap();
+        user_words::set_user_word_removed(&core, "keytao", &host.0, "same", "aaaa", true).unwrap();
+        super::save_base(
+            &host.0,
+            7,
+            &BTreeSet::from([
+                ("same".into(), "aaaa".into(), false),
+                ("same".into(), "aaaa".into(), true),
+            ]),
+        )
+        .unwrap();
+        let mut entries = vec![remote("same", "aaaa", 12)];
+        entries[0]["remove"] = json!(false);
+        if delete_on_server {
+            user_words::set_user_word_removed(&core, "keytao", &host.0, "same", "aaaa", false)
+                .unwrap();
+            entries.push(remote_marker("same", "aaaa", 13));
+        }
+        let mock = server(vec![
+            ("200 OK", json!({"total":entries.len(),"entries":entries})),
+            ("200 OK", json!({"success":true})),
+        ])
+        .await;
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+            .await
+            .unwrap();
+        let requests = mock.finish().await;
+        assert_eq!(requests.len(), if delete_on_server { 2 } else { 1 });
+        if delete_on_server {
+            assert!(requests[1].starts_with("DELETE /api/user/dictionary/13 HTTP/1.1"));
+        }
+        let local = user_words::list_user_words(&core, "keytao", &host.0).unwrap();
+        assert_eq!(local.len(), 1);
+        assert!(!local[0].remove);
+        assert!(
+            user_words::read_user_word_removals(&host.0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn marker_edit_during_sync_rejects_stale_pull() {
+    let (_dir, core, host) = fixture();
+    user_words::add_user_word(&core, "keytao", &host.0, "upload", "aaaa", None).unwrap();
+    let editing_core = core.clone();
+    let root = host.0.clone();
+    let mock = server_with_hook(
+        vec![
+            (
+                "200 OK",
+                json!({"entries":[remote_marker("pulled","bbbb",12)],"total":1}),
+            ),
+            ("200 OK", json!({"entry":remote("upload","aaaa",13)})),
+        ],
+        move |request| {
+            if request.starts_with("POST /api/user/dictionary HTTP/1.1") {
+                user_words::set_user_word_removed(
+                    &editing_core,
+                    "keytao",
+                    &root,
+                    "edited",
+                    "cccc",
+                    true,
+                )
+                .unwrap();
+            }
+        },
+    )
+    .await;
+    let result =
+        sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None).await;
+    assert_eq!(mock.finish().await.len(), 2);
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("changed during sync")
+    );
+    let markers = user_words::read_user_word_removals(&host.0).unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].word, "edited");
+}
+
+#[tokio::test]
+async fn confirmed_deletions_match_remove_flag() {
+    for remove in [false, true] {
+        let (_dir, core, host) = fixture();
+        super::save_base(
+            &host.0,
+            7,
+            &BTreeSet::from([
+                ("same".into(), "aaaa".into(), false),
+                ("same".into(), "aaaa".into(), true),
+            ]),
+        )
+        .unwrap();
+        let mock = server(vec![
+            ("200 OK", json!({"entries":[remote("same","aaaa",12),remote_marker("same","aaaa",13)],"total":2})),
+            ("200 OK", json!({"success":true})),
+        ])
+        .await;
+        let result = sync_user_dictionary_at(
+            &core,
+            &host,
+            "fixture-token".into(),
+            &mock.url,
+            Some(UserDictionaryDeletionConfirmation {
+                local_deletions: Vec::new(),
+                server_deletions: vec![UserDictionaryDeletion {
+                    word: "same".into(),
+                    code: "aaaa".into(),
+                    remove,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!result.pending);
+        let requests = mock.finish().await;
+        assert_eq!(requests.len(), 2);
+        let id = if remove { 13 } else { 12 };
+        assert!(requests[1].starts_with(&format!("DELETE /api/user/dictionary/{id} HTTP/1.1")));
+        let base: DictionaryBase =
+            serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
+        assert_eq!(
+            base.entries,
+            BTreeSet::from([("same".into(), "aaaa".into(), !remove)])
+        );
+    }
+}
+
 #[tokio::test]
 async fn first_sync_unions_local_and_remote_preserving_file_and_remote_weight() {
     let (_dir, core, host) = fixture();
@@ -257,7 +672,7 @@ async fn interrupted_upload_preserves_base_for_later_local_deletion() {
         let saved: DictionaryBase =
             serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
         assert_eq!(
-            saved.entries,
+            base_words(&saved),
             BTreeSet::from([("B".into(), "bbbb".into()), ("keep".into(), "kkkk".into())])
         );
     }
@@ -376,7 +791,7 @@ async fn deleting_last_synced_word_propagates_to_server_and_empty_base() {
     );
     let saved: DictionaryBase =
         serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
-    assert!(saved.entries.is_empty());
+    assert!(base_words(&saved).is_empty());
     sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
         .await
         .unwrap();
@@ -421,7 +836,7 @@ async fn deleting_all_base_words_with_new_local_word_still_deletes_on_server() {
     let saved: DictionaryBase =
         serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
     assert_eq!(
-        saved.entries,
+        base_words(&saved),
         BTreeSet::from([("new".into(), "nnnn".into())])
     );
 }
@@ -469,7 +884,7 @@ async fn local_edit_during_sync_preserves_dictionary_and_records_uploaded_base()
         let saved: DictionaryBase =
             serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
         assert_eq!(
-            saved.entries,
+            base_words(&saved),
             BTreeSet::from([
                 ("KeyTaoTest".into(), "kttz".into()),
                 ("upload".into(), "uuuu".into()),
@@ -544,7 +959,7 @@ async fn review_readd_during_server_delete_survives_next_sync() {
         [("X".into(), "xxxx".into()), ("keep".into(), "kkkk".into())]
     );
     assert_eq!(
-        saved.entries,
+        base_words(&saved),
         BTreeSet::from([("keep".into(), "kkkk".into())])
     );
     let requests = mock.finish().await;
@@ -638,7 +1053,7 @@ async fn review_delete_during_upload_not_resurrected() {
             .unwrap();
         assert_eq!(local(&core, &host), [("keep".into(), "kkkk".into())]);
         assert_eq!(
-            saved.entries,
+            base_words(&saved),
             BTreeSet::from([("A".into(), "aaaa".into()), ("keep".into(), "kkkk".into())])
         );
         let requests = mock.finish().await;
@@ -758,7 +1173,7 @@ async fn three_way_merge_table_covers_every_local_remote_base_membership() {
         let key = ("word".into(), "aaaa".into());
         observed.push((
             local(&core, &host).contains(&key),
-            base.entries.contains(&key),
+            base_words(&base).contains(&key),
             action,
         ));
     }
@@ -842,7 +1257,7 @@ async fn rate_limit_stops_sync_with_only_acknowledged_uploads_in_base() {
     let saved: DictionaryBase =
         serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
     assert_eq!(
-        saved.entries,
+        base_words(&saved),
         BTreeSet::from([("first".into(), "aaaa".into())])
     );
     assert_eq!(local(&core, &host).len(), 3);
@@ -1075,7 +1490,7 @@ async fn listing_recreated_local_dictionary_restores_remote_without_deleting_sav
     );
     let saved: DictionaryBase =
         serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
-    assert_eq!(saved.entries, expected);
+    assert_eq!(base_words(&saved), expected);
     assert_eq!(result.unwrap().count, 3);
 }
 
@@ -1128,7 +1543,7 @@ async fn reset_local_dictionary_with_new_word_restores_remote_without_deleting_s
     );
     let saved: DictionaryBase =
         serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
-    assert_eq!(saved.entries, expected);
+    assert_eq!(base_words(&saved), expected);
     assert_eq!(result.unwrap().count, 4);
 }
 
@@ -1295,8 +1710,8 @@ async fn bulk_deletions_without_confirmation_leave_both_sides_and_base_unchanged
         assert_eq!(
             result[side],
             json!([
-                {"word":"A","code":"aaaa"}, {"word":"B","code":"bbbb"},
-                {"word":"C","code":"cccc"}, {"word":"D","code":"dddd"},
+                {"word":"A","code":"aaaa","remove":false}, {"word":"B","code":"bbbb","remove":false},
+                {"word":"C","code":"cccc","remove":false}, {"word":"D","code":"dddd","remove":false},
             ])
         );
     }
@@ -1403,7 +1818,8 @@ async fn confirmed_deletions_recheck_growth(delete_on_server: bool, extra: usize
         let saved: DictionaryBase =
             serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
         assert_eq!(
-            saved.entries, expected,
+            base_words(&saved),
+            expected,
             "deferred deletions must remain in the base"
         );
         if delete_on_server {
@@ -1474,6 +1890,7 @@ async fn confirmed_deletions_recheck_combined_excess_before_deleting() {
                 .map(|word| UserDictionaryDeletion {
                     word: word.into(),
                     code: word.into(),
+                    remove: false,
                 })
                 .into(),
             server_deletions: Vec::new(),
@@ -1521,10 +1938,12 @@ async fn confirmed_deletions_match_both_code_and_side() {
         let confirmed = vec![UserDictionaryDeletion {
             word: "same".into(),
             code: "old".into(),
+            remove: false,
         }];
         let wrong_side = vec![UserDictionaryDeletion {
             word: "same".into(),
             code: "new".into(),
+            remove: false,
         }];
         let (local_deletions, server_deletions) = if delete_on_server {
             (wrong_side, confirmed)
@@ -1565,7 +1984,7 @@ async fn confirmed_deletions_match_both_code_and_side() {
         let saved: DictionaryBase =
             serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
         assert_eq!(
-            saved.entries,
+            base_words(&saved),
             BTreeSet::from([
                 ("kept".into(), "zzzz".into()),
                 ("same".into(), "new".into()),
@@ -1634,7 +2053,7 @@ async fn bulk_deletions_matching_confirmation_apply_to_both_sides_and_update_bas
         let saved: DictionaryBase =
             serde_json::from_slice(&std::fs::read(base_path(&host.0, 7)).unwrap()).unwrap();
         assert_eq!(
-            saved.entries,
+            base_words(&saved),
             BTreeSet::from([("kept".into(), "zzzz".into())])
         );
     }

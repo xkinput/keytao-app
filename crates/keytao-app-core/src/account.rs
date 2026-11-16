@@ -54,6 +54,7 @@ pub struct UserDictionarySyncResult {
 pub struct UserDictionaryDeletion {
     pub word: String,
     pub code: String,
+    pub remove: bool,
 }
 
 pub struct UserDictionaryDeletionConfirmation {
@@ -366,7 +367,29 @@ fn base_path(root: &Path, account: i64) -> PathBuf {
 #[derive(Serialize, Deserialize)]
 struct DictionaryBase {
     instance: String,
-    entries: BTreeSet<(String, String)>,
+    #[serde(deserialize_with = "deserialize_base_entries")]
+    entries: BTreeSet<(String, String, bool)>,
+}
+
+fn deserialize_base_entries<'de, D>(
+    deserializer: D,
+) -> Result<BTreeSet<(String, String, bool)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Current((String, String, bool)),
+        Legacy((String, String)),
+    }
+    Ok(Vec::<Entry>::deserialize(deserializer)?
+        .into_iter()
+        .map(|entry| match entry {
+            Entry::Current(key) => key,
+            Entry::Legacy((word, code)) => (word, code, false),
+        })
+        .collect())
 }
 
 const INSTANCE_PREFIX: &str = "# keytao-sync-instance: ";
@@ -384,8 +407,8 @@ fn load_base(
     root: &Path,
     account: i64,
     content: &[u8],
-    local: &BTreeSet<(String, String)>,
-) -> Result<BTreeSet<(String, String)>, CoreError> {
+    local: &BTreeSet<(String, String, bool)>,
+) -> Result<BTreeSet<(String, String, bool)>, CoreError> {
     match std::fs::read(base_path(root, account)) {
         Ok(bytes) => {
             let saved: DictionaryBase = serde_json::from_slice(&bytes)?;
@@ -416,7 +439,9 @@ fn load_base(
     {
         return Ok(BTreeSet::new());
     }
-    let base = serde_json::from_slice(&std::fs::read(legacy)?)?;
+    let base = deserialize_base_entries(&mut serde_json::Deserializer::from_slice(
+        &std::fs::read(legacy)?,
+    ))?;
     // Only legacy bases lack an instance marker proving that an empty file is an edit.
     Ok(if local.is_disjoint(&base) {
         BTreeSet::new()
@@ -428,7 +453,7 @@ fn load_base(
 fn save_base(
     root: &Path,
     account: i64,
-    entries: &BTreeSet<(String, String)>,
+    entries: &BTreeSet<(String, String, bool)>,
 ) -> Result<(), CoreError> {
     let dictionary = root.join("keytao.user.dict.yaml");
     let content = std::fs::read_to_string(&dictionary)?;
@@ -510,6 +535,8 @@ struct RemoteEntry {
     user_id: i64,
     word: String,
     code: String,
+    #[serde(default)]
+    remove: bool,
     weight: i64,
     #[serde(rename = "type")]
     kind: String,
@@ -714,6 +741,7 @@ pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String
 
         patched |= ensure_import_table_entry(&path, "keytao.user")?;
     }
+    patched |= crate::remove_filter::ensure_remove_filter(root)?;
     Ok(patched)
 }
 
@@ -738,10 +766,15 @@ async fn sync_user_dictionary_at(
         return Err(CoreError::Permission("登录状态已更改".into()));
     }
     let account = api.account_id.unwrap();
-    let remote: RemoteDictionary = serde_json::from_value(
-        api.request(reqwest::Method::GET, "/api/user/dictionary", None)
-            .await?,
-    )?;
+    let remote = api
+        .request(reqwest::Method::GET, "/api/user/dictionary", None)
+        .await?;
+    let supports_removals = remote["entries"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.get("remove").and_then(Value::as_bool).is_some())
+    });
+    let remote: RemoteDictionary = serde_json::from_value(remote)?;
     let ids: BTreeSet<_> = remote.entries.iter().map(|entry| entry.id).collect();
     if remote.total != remote.entries.len()
         || ids.len() != remote.entries.len()
@@ -776,7 +809,7 @@ async fn sync_user_dictionary_at(
     api.token()?;
     let root = host.user_root().map_err(CoreError::Other)?;
     let dictionary = root.join("keytao.user.dict.yaml");
-    let (mut snapshot, local, local_set, base) = {
+    let (mut snapshot, marker_snapshot, local, local_set, base) = {
         let mut state = core
             .user_words
             .lock()
@@ -784,9 +817,10 @@ async fn sync_user_dictionary_at(
         let dictionary_existed = dictionary.try_exists()?;
         let (snapshot, local) =
             crate::user_words::read_user_words_locked(core, &mut state, "keytao", &root)?;
+        let marker_snapshot = crate::user_words::read_user_word_removals(&root)?;
         let local_set: BTreeSet<_> = local
             .iter()
-            .map(|entry| (entry.word.clone(), entry.code.clone()))
+            .map(|entry| (entry.word.clone(), entry.code.clone(), entry.remove))
             .collect();
         // A matching instance remains authoritative even after deleting every base entry.
         let base = if dictionary_existed {
@@ -794,58 +828,62 @@ async fn sync_user_dictionary_at(
         } else {
             BTreeSet::new()
         };
-        (snapshot, local, local_set, base)
+        (snapshot, marker_snapshot, local, local_set, base)
     };
-    let mut remote_by_key: BTreeMap<(String, String), Vec<&RemoteEntry>> = BTreeMap::new();
+    let mut remote_by_key: BTreeMap<(String, String, bool), Vec<&RemoteEntry>> = BTreeMap::new();
     for entry in &remote.entries {
         remote_by_key
-            .entry((entry.word.clone(), entry.code.clone()))
+            .entry((entry.word.clone(), entry.code.clone(), entry.remove))
             .or_default()
             .push(entry);
     }
     let local_deletions: Vec<_> = local
         .iter()
         .filter(|entry| {
-            let key = (entry.word.clone(), entry.code.clone());
-            base.contains(&key) && !remote_by_key.contains_key(&key)
+            let key = (entry.word.clone(), entry.code.clone(), entry.remove);
+            (!entry.remove || supports_removals)
+                && base.contains(&key)
+                && !remote_by_key.contains_key(&key)
         })
         .map(|entry| UserDictionaryDeletion {
             word: entry.word.clone(),
             code: entry.code.clone(),
+            remove: entry.remove,
         })
         .collect();
     let server_deletions: Vec<_> = remote
         .entries
         .iter()
         .filter(|entry| {
-            let key = (entry.word.clone(), entry.code.clone());
+            let key = (entry.word.clone(), entry.code.clone(), entry.remove);
             base.contains(&key) && !local_set.contains(&key)
         })
         .map(|entry| UserDictionaryDeletion {
             word: entry.word.clone(),
             code: entry.code.clone(),
+            remove: entry.remove,
         })
         .collect();
     let confirmed_local: BTreeSet<_> = confirmed_deletions
         .as_ref()
         .into_iter()
         .flat_map(|confirmed| &confirmed.local_deletions)
-        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .map(|entry| (entry.word.clone(), entry.code.clone(), entry.remove))
         .collect();
     let confirmed_server: BTreeSet<_> = confirmed_deletions
         .as_ref()
         .into_iter()
         .flat_map(|confirmed| &confirmed.server_deletions)
-        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .map(|entry| (entry.word.clone(), entry.code.clone(), entry.remove))
         .collect();
     let unconfirmed_local: BTreeSet<_> = local_deletions
         .iter()
-        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .map(|entry| (entry.word.clone(), entry.code.clone(), entry.remove))
         .filter(|key| !confirmed_local.contains(key))
         .collect();
     let unconfirmed_server: BTreeSet<_> = server_deletions
         .iter()
-        .map(|entry| (entry.word.clone(), entry.code.clone()))
+        .map(|entry| (entry.word.clone(), entry.code.clone(), entry.remove))
         .filter(|key| !confirmed_server.contains(key))
         .collect();
     let needs_confirmation = if confirmed_deletions.is_some() {
@@ -876,7 +914,9 @@ async fn sync_user_dictionary_at(
             .user_words
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if std::fs::read(&dictionary)? != snapshot {
+        if std::fs::read(&dictionary)? != snapshot
+            || crate::user_words::read_user_word_removals(&root)? != marker_snapshot
+        {
             return Err(CoreError::Other(
                 "User dictionary changed during sync; retry the sync".into(),
             ));
@@ -886,7 +926,9 @@ async fn sync_user_dictionary_at(
         snapshot = std::fs::read(&dictionary)?;
     }
     let mut completed_base = base.clone();
-    completed_base.retain(|key| local_set.contains(key) || remote_by_key.contains_key(key));
+    completed_base.retain(|key| {
+        (!supports_removals && key.2) || local_set.contains(key) || remote_by_key.contains_key(key)
+    });
     completed_base.extend(
         local_set
             .iter()
@@ -896,27 +938,31 @@ async fn sync_user_dictionary_at(
     let result = async {
         let mut resulting = local_set.clone();
         for key in &local_set {
+            if key.2 && !supports_removals {
+                continue;
+            }
             if !remote_by_key.contains_key(key) {
                 if base.contains(key) {
                     if confirmed_deletions.is_none() || confirmed_local.contains(key) {
                         resulting.remove(key);
                     }
                 } else {
+                    let mut body = serde_json::json!({
+                        "word": key.0,
+                        "code": key.1,
+                        "type": "Phrase",
+                        "replacePublic": false,
+                    });
+                    if key.2 {
+                        body["remove"] = Value::Bool(true);
+                    }
                     let uploaded = api
-                        .request(
-                            reqwest::Method::POST,
-                            "/api/user/dictionary",
-                            Some(serde_json::json!({
-                                "word": key.0,
-                                "code": key.1,
-                                "type": "Phrase",
-                                "replacePublic": false,
-                            })),
-                        )
+                        .request(reqwest::Method::POST, "/api/user/dictionary", Some(body))
                         .await?;
                     let uploaded: RemoteEntry = serde_json::from_value(uploaded["entry"].clone())?;
                     if uploaded.word != key.0
                         || uploaded.code != key.1
+                        || uploaded.remove != key.2
                         || uploaded.user_id != account
                         || uploaded.id <= 0
                         || uploaded.kind != "Phrase"
@@ -960,39 +1006,57 @@ async fn sync_user_dictionary_at(
                 .unwrap_or_else(|error| error.into_inner());
             // Hold the edit lock from the content check through dictionary and base writes.
             let current = std::fs::read(&dictionary)?;
-            if current != snapshot {
+            if current != snapshot
+                || crate::user_words::read_user_word_removals(&root)? != marker_snapshot
+            {
                 return Err(CoreError::Other(
                     "User dictionary changed during sync; retry the sync".into(),
                 ));
             }
             let import_table_patched =
                 ensure_user_dictionary_imports(&root).map_err(CoreError::Other)?;
-            for entry in local
-                .iter()
-                .rev()
-                .filter(|entry| !resulting.contains(&(entry.word.clone(), entry.code.clone())))
-            {
-                crate::user_words::delete_user_word_locked(
-                    core,
-                    &mut state,
-                    "keytao",
-                    &root,
-                    entry.id,
-                    &entry.word,
-                    &entry.code,
-                )?;
-            }
-            for (key, entries) in &remote_by_key {
-                if !local_set.contains(key) && resulting.contains(key) {
-                    crate::user_words::add_user_word_locked(
+            for entry in local.iter().rev().filter(|entry| {
+                !resulting.contains(&(entry.word.clone(), entry.code.clone(), entry.remove))
+            }) {
+                if entry.remove {
+                    crate::user_words::set_user_word_removed_locked(
                         core,
                         &mut state,
                         "keytao",
                         &root,
-                        &key.0,
-                        &key.1,
-                        Some(entries[0].weight.to_string()),
+                        &entry.word,
+                        &entry.code,
+                        false,
                     )?;
+                } else {
+                    crate::user_words::delete_user_word_locked(
+                        core,
+                        &mut state,
+                        "keytao",
+                        &root,
+                        entry.id,
+                        &entry.word,
+                        &entry.code,
+                    )?;
+                }
+            }
+            for (key, entries) in &remote_by_key {
+                if !local_set.contains(key) && resulting.contains(key) {
+                    if key.2 {
+                        crate::user_words::set_user_word_removed_locked(
+                            core, &mut state, "keytao", &root, &key.0, &key.1, true,
+                        )?;
+                    } else {
+                        crate::user_words::add_user_word_locked(
+                            core,
+                            &mut state,
+                            "keytao",
+                            &root,
+                            &key.0,
+                            &key.1,
+                            Some(entries[0].weight.to_string()),
+                        )?;
+                    }
                 }
             }
             let reload_stamp_path = host
@@ -1003,6 +1067,11 @@ async fn sync_user_dictionary_at(
             if confirmed_deletions.is_some() {
                 // Keep deferred deletions in the base so the next sync still detects them.
                 next_base.extend(unconfirmed_server);
+            }
+            if !supports_removals {
+                // Preserve marker history until GET explicitly advertises removal support.
+                next_base.retain(|key| !key.2);
+                next_base.extend(base.iter().filter(|key| key.2).cloned());
             }
             save_base(&root, account, &next_base)?;
             (import_table_patched, reload_stamp_path)

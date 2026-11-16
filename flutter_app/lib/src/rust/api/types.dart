@@ -1039,11 +1039,16 @@ class UserDictionaryDeletionConfirmationDto {
 class UserDictionaryDeletionDto {
   final String word;
   final String code;
+  final bool remove;
 
-  const UserDictionaryDeletionDto({required this.word, required this.code});
+  const UserDictionaryDeletionDto({
+    required this.word,
+    required this.code,
+    this.remove = false,
+  });
 
   @override
-  int get hashCode => word.hashCode ^ code.hashCode;
+  int get hashCode => word.hashCode ^ code.hashCode ^ remove.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1051,7 +1056,8 @@ class UserDictionaryDeletionDto {
       other is UserDictionaryDeletionDto &&
           runtimeType == other.runtimeType &&
           word == other.word &&
-          code == other.code;
+          code == other.code &&
+          remove == other.remove;
 }
 
 class UserDictionarySyncDto {
@@ -1126,17 +1132,23 @@ class UserWordDto {
   final String word;
   final String code;
   final String? weight;
+  final bool remove;
 
   const UserWordDto({
     required this.id,
     required this.word,
     required this.code,
     this.weight,
+    this.remove = false,
   });
 
   @override
   int get hashCode =>
-      id.hashCode ^ word.hashCode ^ code.hashCode ^ weight.hashCode;
+      id.hashCode ^
+      word.hashCode ^
+      code.hashCode ^
+      weight.hashCode ^
+      remove.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1146,7 +1158,8 @@ class UserWordDto {
           id == other.id &&
           word == other.word &&
           code == other.code &&
-          weight == other.weight;
+          weight == other.weight &&
+          remove == other.remove;
 }
 
 class UserWordMutationDto {

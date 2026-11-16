@@ -26,6 +26,7 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
         "keytao.user.yaml",
         "user.yaml",
         "user_dict.txt",
+        "keytao.user.remove.txt",
         "xmjd6_user.txt",
         ".keytao-sync-base-42.json",
     ] {
@@ -49,26 +50,27 @@ fn protected_user_file_matcher_only_matches_top_level_user_files() {
 }
 
 #[test]
-fn sync_base_is_never_written_by_package_install() {
+fn sync_base_and_markers_are_never_written_by_package_install() {
     let dir = tempfile::tempdir().unwrap();
-    let relative = ".keytao-sync-base-42.json";
-    let path = dir.path().join(relative);
-    let mut logs = Vec::new();
+    for relative in [".keytao-sync-base-42.json", "keytao.user.remove.txt"] {
+        let path = dir.path().join(relative);
+        let mut logs = Vec::new();
 
-    for existing in [
-        Some(b"[\"saved\"]".as_slice()),
-        Some(b"\xff\xfe".as_slice()),
-        None,
-    ] {
-        if let Some(content) = existing {
-            fs::write(&path, content).unwrap();
-        } else {
-            fs::remove_file(&path).unwrap();
+        for existing in [
+            Some(b"[\"saved\"]".as_slice()),
+            Some(b"\xff\xfe".as_slice()),
+            None,
+        ] {
+            if let Some(content) = existing {
+                fs::write(&path, content).unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+            crate::install::write_package_file(dir.path(), relative, b"[]", &mut logs).unwrap();
+            assert_eq!(fs::read(&path).ok().as_deref(), existing);
         }
-        crate::install::write_package_file(dir.path(), relative, b"[]", &mut logs).unwrap();
-        assert_eq!(fs::read(&path).ok().as_deref(), existing);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
 #[test]

@@ -24,6 +24,7 @@ pub mod scheme_host;
 pub mod scheme_types;
 pub mod update;
 pub mod user_words;
+mod remove_filter;
 pub mod wanxiang;
 #[cfg(target_os = "windows")]
 pub mod windows_public_schemas;
