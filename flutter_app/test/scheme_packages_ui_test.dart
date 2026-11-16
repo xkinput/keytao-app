@@ -515,13 +515,9 @@ void main() {
           ),
         ];
         await _pumpRow(tester, c, 'keydo');
-        if (active && !supportsUserWords) {
-          // Nothing left to offer without an account, so the menu is hidden.
-          expect(find.byIcon(FLucideIcons.ellipsis), findsNothing);
-          continue;
-        }
         await tester.tap(find.byIcon(FLucideIcons.ellipsis));
         await tester.pumpAndSettle();
+        expect(find.text('仓库地址'), findsOneWidget);
         expect(
           find.text('自造词'),
           supportsUserWords ? findsOneWidget : findsNothing,

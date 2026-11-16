@@ -442,6 +442,7 @@ class SchemePackageRow extends StatelessWidget {
                 onPress: c.canDeploy ? c.deploy : null,
               ),
             if (changelogBody != null ||
+                schemeRepositoryUrls[schemeKey] != null ||
                 (package != null &&
                     (package.supportsUserWords ||
                         isLocal ||

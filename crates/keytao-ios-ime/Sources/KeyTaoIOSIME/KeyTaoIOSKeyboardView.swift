@@ -3246,7 +3246,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 item.action.label,
                 in: rect,
                 color: pressed ? theme.candidate.selectedForeground.uiColor : theme.candidate.foreground.uiColor,
-                font: fittedFont(for: item.action.label, size: theme.font.labelSize, maxWidth: rect.width - 10),
+                font: fittedFont(for: item.action.label, size: theme.font.labelSize, maxWidth: rect.width - 10, weight: theme.font.weight),
                 alignment: .center
             )
         }
@@ -3507,7 +3507,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
         let label = displayLabel(key)
         let baseSize = keyLabelSize(for: label, keySize: keyRect.size)
-        let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10)
+        let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10, weight: keyLabelWeight)
         let color = keyForegroundColor(key, selected: selected, pressProgress: pressProgress)
         if config.mnemonicHintsEnabled,
            layerMode == .letters,
@@ -3521,7 +3521,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(label, in: keyRect, color: color, font: font, alignment: .center)
 
         if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
-            let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size), weight: .regular)
+            let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size), weight: keyLabelWeight)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: hintFont,
                 .foregroundColor: theme.candidate.commentColor.uiColor,
@@ -3551,7 +3551,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         font: UIFont
     ) {
         let contentRect = rect.insetBy(dx: 3, dy: 3)
-        let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)), weight: .regular)
+        let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)), weight: keyLabelWeight)
         let bottomLines = mnemonic.bottomLines
         let lineHeight = min(hintFont.lineHeight, contentRect.height * 0.22)
         let bodyHeight = lineHeight * CGFloat(bottomLines.count)
@@ -3606,7 +3606,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
             let label = stackLabelForMode(item)
             let baseSize = keyLabelSize(for: label, keySize: itemRect.size)
-            let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10)
+            let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10, weight: keyLabelWeight)
             let color = keyForegroundColor(key, selected: selected, pressProgress: itemPressProgress)
             drawText(label, in: itemRect, color: color, font: font, alignment: .center)
         }
@@ -6969,12 +6969,16 @@ final class KeyTaoIOSKeyboardView: UIView {
         ].contains(command.type)
     }
 
-    private func fittedFont(for text: String, size: CGFloat, maxWidth: CGFloat) -> UIFont {
+    private var keyLabelWeight: KeyTaoThemeFontWeight {
+        theme.font.weight.uiWeight.rawValue < UIFont.Weight.regular.rawValue ? theme.font.weight : .regular
+    }
+
+    private func fittedFont(for text: String, size: CGFloat, maxWidth: CGFloat, weight: KeyTaoThemeFontWeight) -> UIFont {
         var nextSize = size
-        var font = themedFont(size: nextSize, weight: theme.font.weight)
+        var font = themedFont(size: nextSize, weight: weight)
         while nextSize > 12 && text.size(withAttributes: [.font: font]).width > maxWidth {
             nextSize -= 1
-            font = themedFont(size: nextSize, weight: theme.font.weight)
+            font = themedFont(size: nextSize, weight: weight)
         }
         return font
     }
