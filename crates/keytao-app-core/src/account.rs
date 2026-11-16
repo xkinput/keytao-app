@@ -697,7 +697,7 @@ fn ensure_import_table_entry(path: &Path, import_name: &str) -> Result<bool, Str
     Ok(true)
 }
 
-fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
+pub(crate) fn ensure_user_dictionary_imports(root: &Path) -> Result<bool, String> {
     let mut patched = false;
     let entries = std::fs::read_dir(root).map_err(|e| format!("读取输入法目录失败: {e}"))?;
     for entry in entries.filter_map(|item| item.ok()) {
@@ -887,6 +887,12 @@ async fn sync_user_dictionary_at(
     }
     let mut completed_base = base.clone();
     completed_base.retain(|key| local_set.contains(key) || remote_by_key.contains_key(key));
+    completed_base.extend(
+        local_set
+            .iter()
+            .filter(|key| remote_by_key.contains_key(*key))
+            .cloned(),
+    );
     let result = async {
         let mut resulting = local_set.clone();
         for key in &local_set {
@@ -959,6 +965,8 @@ async fn sync_user_dictionary_at(
                     "User dictionary changed during sync; retry the sync".into(),
                 ));
             }
+            let import_table_patched =
+                ensure_user_dictionary_imports(&root).map_err(CoreError::Other)?;
             for entry in local
                 .iter()
                 .rev()
@@ -987,8 +995,6 @@ async fn sync_user_dictionary_at(
                     )?;
                 }
             }
-            let import_table_patched =
-                ensure_user_dictionary_imports(&root).map_err(CoreError::Other)?;
             let reload_stamp_path = host
                 .write_reload_stamp(&root)
                 .map_err(CoreError::Other)?
@@ -1011,18 +1017,21 @@ async fn sync_user_dictionary_at(
                 .user_words
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let current = std::fs::read(&dictionary)?;
+            let current = std::fs::read(&dictionary).ok();
             let instance = std::str::from_utf8(&snapshot)
                 .ok()
                 .and_then(dictionary_instance);
             if instance.is_some()
                 && instance
-                    == std::str::from_utf8(&current)
-                        .ok()
+                    == current
+                        .as_deref()
+                        .and_then(|content| std::str::from_utf8(content).ok())
                         .and_then(dictionary_instance)
             {
                 // Preserve acknowledged server changes without overwriting newer local edits.
-                save_base(&root, account, &completed_base)?;
+                if let Err(save_error) = save_base(&root, account, &completed_base) {
+                    tracing::warn!(%save_error, "Failed to persist user dictionary sync base");
+                }
             }
             return Err(error);
         }

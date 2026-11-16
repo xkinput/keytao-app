@@ -226,6 +226,10 @@ class AppController extends ChangeNotifier {
   Object? _pendingDictionarySyncAccountId;
   final Map<Object, Set<String>> _cancelledDictionarySyncDeletions = {};
   Timer? _dictionarySyncDebounce;
+  Timer? _dictionaryPullTimer;
+  Timer? _dictionaryPullCooldown;
+  Timer? _userWordsDeployDebounce;
+  bool _foreground = true;
   String? accountError;
   String? accountMessage;
   bool followAccountSync = false;
@@ -271,11 +275,30 @@ class AppController extends ChangeNotifier {
 
   void markUserWordsChanged(String key) {
     userWordsRevision++;
-    if (userWordsAffectActiveScheme(key)) {
+    if (isKeytaoScheme(key)) {
+      _scheduleUserWordsDeploy();
+      scheduleUserDictionarySync();
+    } else if (userWordsAffectActiveScheme(key)) {
       userWordsPendingDeploy.add(activeSchemeKey);
     }
     _changed();
-    if (isKeytaoScheme(key)) scheduleUserDictionarySync();
+  }
+
+  void _scheduleUserWordsDeploy() {
+    _userWordsDeployDebounce?.cancel();
+    if (_disposed ||
+        !isKeytaoScheme(activeSchemeKey) ||
+        local?.installed != true) {
+      return;
+    }
+    _userWordsDeployDebounce = Timer(const Duration(milliseconds: 800), () {
+      if (_disposed || !isKeytaoScheme(activeSchemeKey)) return;
+      if (busy) {
+        _scheduleUserWordsDeploy();
+      } else if (local?.installed == true) {
+        unawaited(deploy());
+      }
+    });
   }
 
   bool isKeytaoScheme(String key) =>
@@ -1087,10 +1110,36 @@ class AppController extends ChangeNotifier {
   });
 
   void onResume() {
+    _foreground = true;
+    _startUserDictionaryPull(resumed: true);
     if (busy) {
       _refreshWhenIdle = true;
     } else {
       unawaited(refreshState());
+    }
+  }
+
+  void onPause() {
+    _foreground = false;
+    _dictionaryPullTimer?.cancel();
+    _dictionarySyncDebounce?.cancel();
+  }
+
+  void _startUserDictionaryPull({bool resumed = false}) {
+    _dictionaryPullTimer?.cancel();
+    if (_disposed || !_foreground || accountUser == null) return;
+    if (!resumed || _dictionaryPullCooldown?.isActive != true) {
+      _scheduleUserDictionaryPull();
+    }
+    _dictionaryPullTimer = Timer.periodic(
+      const Duration(minutes: 5),
+      (_) => _scheduleUserDictionaryPull(),
+    );
+  }
+
+  void _scheduleUserDictionaryPull() {
+    if (installedPackages.any((package) => isKeytaoScheme(package.schemeKey))) {
+      scheduleUserDictionarySync();
     }
   }
 
@@ -1592,6 +1641,7 @@ class AppController extends ChangeNotifier {
     final previous = accountUser?.id;
     accountUser = value;
     if (previous == value?.id) return;
+    _dictionaryPullCooldown?.cancel();
     _schemeSyncDebounce?.cancel();
     _readySchemeSyncAccount = null;
     _checkingSchemeSyncAccount = null;
@@ -1615,6 +1665,7 @@ class AppController extends ChangeNotifier {
       debugPrint('Account refresh failed: ${errorText(failure)}');
     } finally {
       await reloadAccountSession();
+      _startUserDictionaryPull();
     }
   }
 
@@ -1642,6 +1693,7 @@ class AppController extends ChangeNotifier {
       _setAccountUser(await core.accountLogin(name: name, password: password));
       pendingDictionarySync = null;
       _pendingDictionarySyncAccountId = null;
+      _startUserDictionaryPull();
       await loadSchemeSyncState();
       await checkCloudProfileAfterLogin();
       return true;
@@ -1656,6 +1708,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> logout() async {
     _dictionarySyncDebounce?.cancel();
+    _dictionaryPullTimer?.cancel();
     _schemeSyncDebounce?.cancel();
     accountError = null;
     accountMessage = null;
@@ -2127,11 +2180,17 @@ class AppController extends ChangeNotifier {
 
   void scheduleUserDictionarySync() {
     _dictionarySyncDebounce?.cancel();
-    if (_disposed || accountUser == null || pendingDictionarySync != null) {
+    if (_disposed ||
+        !_foreground ||
+        accountUser == null ||
+        pendingDictionarySync != null) {
       return;
     }
     _dictionarySyncDebounce = Timer(const Duration(milliseconds: 800), () {
-      if (_disposed || accountUser == null || pendingDictionarySync != null) {
+      if (_disposed ||
+          !_foreground ||
+          accountUser == null ||
+          pendingDictionarySync != null) {
         return;
       }
       if (busy || syncingDictionary) {
@@ -2183,12 +2242,16 @@ class AppController extends ChangeNotifier {
     }
     final account = accountUser?.id;
     _dictionarySyncDebounce?.cancel();
-    busy = true;
+    if (!automatic) busy = true;
     syncingDictionary = true;
     accountError = null;
     accountMessage = null;
     _changed();
+    List<UserWordDto>? before;
+    var synced = false;
+    var syncCompleted = false;
     try {
+      before = await core.listUserWords(schemeKey: 'keytao');
       final result = await core.accountSyncUserDictionary(
         confirmedDeletions: confirmedDeletions == null
             ? null
@@ -2213,20 +2276,38 @@ class AppController extends ChangeNotifier {
           : null;
       if (!result.pending) {
         userWordsRevision++;
-        if (isKeytaoScheme(activeSchemeKey)) {
-          userWordsPendingDeploy.add(activeSchemeKey);
-        }
+        syncCompleted = true;
       }
-      return true;
+      synced = true;
     } catch (failure) {
       accountError = errorText(failure);
-      return false;
     } finally {
+      if (before != null) {
+        try {
+          final after = await core.listUserWords(schemeKey: 'keytao');
+          if (!listEquals(before, after)) {
+            if (!synced) userWordsRevision++;
+            _scheduleUserWordsDeploy();
+          }
+        } catch (failure) {
+          accountError ??= errorText(failure);
+          synced = false;
+        }
+      }
       await reloadAccountSession();
       syncingDictionary = false;
-      busy = false;
+      if (!automatic) busy = false;
+      if (automatic &&
+          synced &&
+          syncCompleted &&
+          !_disposed &&
+          accountUser?.id == account) {
+        _dictionaryPullCooldown?.cancel();
+        _dictionaryPullCooldown = Timer(const Duration(seconds: 60), () {});
+      }
       _changed();
     }
+    return synced;
   }
 
   // The bridge holds its install lock while invoking this callback. Never
@@ -2775,6 +2856,9 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _dictionarySyncDebounce?.cancel();
+    _dictionaryPullTimer?.cancel();
+    _dictionaryPullCooldown?.cancel();
+    _userWordsDeployDebounce?.cancel();
     _schemeSyncDebounce?.cancel();
     if (isWindows && _events != null) {
       _windowsChannel.setMethodCallHandler(null);

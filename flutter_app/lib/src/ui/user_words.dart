@@ -801,7 +801,8 @@ class _UserWordsPageState extends State<UserWordsPage> {
                                     : _submitSelected,
                               ),
                             ],
-                            if (c.userWordsAffectActiveScheme(_scheme) &&
+                            if (!c.isKeytaoScheme(_scheme) &&
+                                c.userWordsAffectActiveScheme(_scheme) &&
                                 c.userWordsPendingDeploy.contains(
                                   c.activeSchemeKey,
                                 ))

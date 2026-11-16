@@ -34,6 +34,9 @@ class FakeDictionaryCore implements RustLibApi {
     if (invocation.memberName == #crateApiCoreAccountSession) {
       return Future<AccountUserDto?>.value(account);
     }
+    if (invocation.memberName == #crateApiCoreListUserWords) {
+      return Future<List<UserWordDto>>.value(const []);
+    }
     throw StateError('Unexpected bridge call: ${invocation.memberName}');
   }
 }

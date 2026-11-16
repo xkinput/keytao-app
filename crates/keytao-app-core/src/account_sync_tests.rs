@@ -264,6 +264,79 @@ async fn interrupted_upload_preserves_base_for_later_local_deletion() {
 }
 
 #[tokio::test]
+async fn failed_sync_records_matching_entries_for_later_local_deletion() {
+    let (_dir, core, host) = fixture();
+    for (word, code) in [("shared", "ssss"), ("upload", "uuuu")] {
+        user_words::add_user_word(&core, "keytao", &host.0, word, code, None).unwrap();
+    }
+    let mock = server(vec![
+        (
+            "200 OK",
+            json!({"entries":[remote("shared","ssss",12)],"total":1}),
+        ),
+        (
+            "500 Internal Server Error",
+            json!({"error":"upload failed"}),
+        ),
+        (
+            "200 OK",
+            json!({"entries":[remote("shared","ssss",12)],"total":1}),
+        ),
+        ("200 OK", json!({"entry":remote("upload","uuuu",13)})),
+        ("200 OK", json!({"success":true})),
+    ])
+    .await;
+    let error = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("500"), "{error}");
+    let entry = user_words::list_user_words(&core, "keytao", &host.0)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.word == "shared")
+        .unwrap();
+    user_words::delete_user_word(&core, "keytao", &host.0, entry.id, &entry.word, &entry.code)
+        .unwrap();
+    sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+        .await
+        .unwrap();
+    let requests = mock.finish().await;
+    assert_eq!(local(&core, &host), [("upload".into(), "uuuu".into())]);
+    assert_eq!(requests.len(), 5);
+    assert!(requests[4].starts_with("DELETE /api/user/dictionary/12 HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn failed_sync_preserves_original_error_when_dictionary_disappears() {
+    let (_dir, core, host) = fixture();
+    user_words::add_user_word(&core, "keytao", &host.0, "upload", "uuuu", None).unwrap();
+    let dictionary = host.0.join("keytao.user.dict.yaml");
+    let mock = server_with_hook(
+        vec![
+            ("200 OK", json!({"entries":[],"total":0})),
+            (
+                "500 Internal Server Error",
+                json!({"error":"upload failed"}),
+            ),
+        ],
+        move |request| {
+            if request.starts_with("POST /api/user/dictionary HTTP/1.1") {
+                std::fs::remove_file(&dictionary).unwrap();
+            }
+        },
+    )
+    .await;
+    let error = sync_user_dictionary_at(&core, &host, "fixture-token".into(), &mock.url, None)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(mock.finish().await.len(), 2);
+    assert!(error.to_string().contains("500"), "{error}");
+    assert!(error.to_string().contains("upload failed"), "{error}");
+}
+
+#[tokio::test]
 async fn deleting_last_synced_word_propagates_to_server_and_empty_base() {
     let (_dir, core, host) = fixture();
     let path = host.0.join("keytao.user.dict.yaml");
@@ -566,11 +639,7 @@ async fn review_delete_during_upload_not_resurrected() {
         assert_eq!(local(&core, &host), [("keep".into(), "kkkk".into())]);
         assert_eq!(
             saved.entries,
-            if with_base {
-                BTreeSet::from([("A".into(), "aaaa".into()), ("keep".into(), "kkkk".into())])
-            } else {
-                BTreeSet::from([("A".into(), "aaaa".into())])
-            }
+            BTreeSet::from([("A".into(), "aaaa".into()), ("keep".into(), "kkkk".into())])
         );
         let requests = mock.finish().await;
         assert_eq!(

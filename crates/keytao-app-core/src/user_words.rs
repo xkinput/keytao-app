@@ -794,6 +794,9 @@ pub(crate) fn add_user_word_locked(
     let package = package_data(state, core, scheme)?;
     let path = user_path(core, &package, root, true)?;
     let mut dictionary = Dictionary::parse(&fs::read(&path)?)?;
+    if matches!(scheme, "keytao" | "keytao-dz" | "keytao-bj") {
+        crate::account::ensure_user_dictionary_imports(root).map_err(CoreError::Other)?;
+    }
     if dictionary
         .entries()
         .iter()
@@ -941,7 +944,20 @@ mod tests {
     fn keytao_variants_share_the_same_user_dictionary() {
         let (dir, core) = fixture();
         let root = dir.path().join("rime");
+        fs::create_dir_all(&root).unwrap();
+        for name in ["keytao", "keytao-dz", "keytao-bj", "xmjd6"] {
+            fs::write(
+                root.join(format!("{name}.extended.dict.yaml")),
+                format!("name: {name}.extended\nimport_tables:\n  - {name}.phrase\n"),
+            )
+            .unwrap();
+        }
         add_user_word(&core, "keytao-dz", &root, "自造词", "zici", None).unwrap();
+        for name in ["keytao", "keytao-dz", "keytao-bj", "xmjd6"] {
+            let content =
+                fs::read_to_string(root.join(format!("{name}.extended.dict.yaml"))).unwrap();
+            assert_eq!(content.contains("- keytao.user"), name != "xmjd6");
+        }
         let words = list_user_words(&core, "keytao-bj", &root).unwrap();
         assert_eq!(words.len(), 1);
         assert_eq!(words[0].word, "自造词");
