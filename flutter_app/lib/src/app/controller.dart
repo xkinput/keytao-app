@@ -209,6 +209,7 @@ class AppController extends ChangeNotifier {
   LinuxImeStatusDto? linuxIme;
   AndroidImeInputSettingsDto? androidSettings;
   ImeUiSettingsDto? uiSettings;
+  int? candidatePageSize;
   List<SchemaSwitchDto> schemaSwitches = [];
   EnglishModeDto desktopEnglishMode = EnglishModeDto.ascii;
   ComponentVersionsDto? versions;
@@ -889,6 +890,7 @@ class AppController extends ChangeNotifier {
     }
     local = null;
     addon = null;
+    candidatePageSize = null;
     await Future.wait([
       read(_readLocal),
       read(_readInstalledPackages),
@@ -903,6 +905,10 @@ class AppController extends ChangeNotifier {
       read(() async {
         versions = await core.getComponentVersions();
       }),
+      if (!isAndroid || storageReady)
+        read(() async {
+          candidatePageSize = await core.getCandidatePageSize();
+        }),
       if (isIos || (isAndroid && storageReady))
         read(() async {
           androidSettings = await core.getAndroidImeInputSettings();
@@ -2609,6 +2615,12 @@ class AppController extends ChangeNotifier {
           value: value,
         );
       });
+
+  Future<bool> saveCandidatePageSize(int? size) => run(() async {
+    if (isAndroid) await _requireStorage();
+    candidatePageSize = await core.setCandidatePageSize(size: size);
+    if (local?.installed == true) await _deploy();
+  });
 
   Map<String, dynamic> resolveCandidatePanelPreview({
     required UiColorSchemeDto colorScheme,

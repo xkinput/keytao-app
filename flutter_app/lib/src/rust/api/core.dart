@@ -409,6 +409,12 @@ Future<ImeUiSettingsDto> setImeHideCandidatePanel({required bool hide_}) =>
 Future<EnglishModeDto> getDesktopEnglishMode() =>
     RustLib.instance.api.crateApiCoreGetDesktopEnglishMode();
 
+Future<int?> getCandidatePageSize() =>
+    RustLib.instance.api.crateApiCoreGetCandidatePageSize();
+
+Future<int?> setCandidatePageSize({int? size}) =>
+    RustLib.instance.api.crateApiCoreSetCandidatePageSize(size: size);
+
 Future<EnglishModeDto> setDesktopEnglishMode({required EnglishModeDto mode}) =>
     RustLib.instance.api.crateApiCoreSetDesktopEnglishMode(mode: mode);
 

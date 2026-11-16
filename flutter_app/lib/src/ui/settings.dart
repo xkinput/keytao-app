@@ -299,6 +299,30 @@ class _SettingsCardState extends State<SettingsCard> {
     );
   }
 
+  Widget _candidatePageSize() {
+    final c = controller;
+    final enabled = !c.busy && (!c.isAndroid || c.storageReady);
+    return SettingRow(
+      '候选个数',
+      child: Semantics(
+        label: '候选个数',
+        enabled: enabled,
+        child: FSelect<int>(
+          enabled: enabled,
+          control: FSelectControl.lifted(
+            value: c.candidatePageSize ?? 0,
+            onChange: (value) =>
+                c.saveCandidatePageSize(value == 0 ? null : value),
+          ),
+          items: {
+            '跟随方案': 0,
+            for (var size = 1; size <= 10; size++) '$size': size,
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _desktop(BuildContext context) {
     final c = controller;
     final s = c.uiSettings;
@@ -358,6 +382,7 @@ class _SettingsCardState extends State<SettingsCard> {
             hint: c.englishModeHint,
             onChanged: c.busy ? null : c.saveDesktopEnglish,
           ),
+          _candidatePageSize(),
           if (c.showsEmbeddedComposition)
             SwitchSetting(
               AppStrings.embedded,
@@ -495,6 +520,7 @@ class _SettingsCardState extends State<SettingsCard> {
           disabled: c.disabledAndroidEnglishModes,
           onChanged: enabled ? (value) => save('englishMode', value) : null,
         ),
+        _candidatePageSize(),
         slider(
           AppStrings.keyboardHeight,
           'keyboardHeightScale',

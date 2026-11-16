@@ -163,6 +163,7 @@ pub(crate) async fn rime_deploy_default_inner(
     let dest =
         keytao_core::default_user_data_dir().ok_or("Cannot determine keytao data directory")?;
     crate::remove_filter::ensure_remove_filter(&dest)?;
+    crate::ime_settings::prepare_candidate_page_size(&dest)?;
     record_result(core, &dest, false).map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "windows"))]
     let user = dest.to_string_lossy().into_owned();
@@ -262,6 +263,7 @@ pub async fn rime_deploy_default(
     let result: Result<_, String> = async {
         let root = host.user_root()?;
         crate::remove_filter::ensure_remove_filter(&root)?;
+        crate::ime_settings::prepare_candidate_page_size(&root)?;
         record_result(core, &root, false).map_err(|e| e.to_string())?;
         let result: serde_json::Value = host.deploy_ime_data()?;
         if result["deployed"].as_bool() != Some(true) {
@@ -292,6 +294,7 @@ pub async fn rime_deploy_default(
     let result: Result<_, String> = async {
         let dest = host.user_root()?;
         crate::remove_filter::ensure_remove_filter(&dest)?;
+        crate::ime_settings::prepare_candidate_page_size(&dest)?;
         record_result(core, &dest, false).map_err(|e| e.to_string())?;
         let user = dest.to_string_lossy().into_owned();
         let shared = ios_app_shared_data_dir(core, &dest)

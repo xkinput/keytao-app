@@ -1400,6 +1400,7 @@ pub fn windows_deploy_rime_blocking(
     user_dir: PathBuf,
     shared_data_dir: String,
 ) -> Result<(), String> {
+    crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
     keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
     let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
     let deployed_by_server = server::deploy_if_available()?;
