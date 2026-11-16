@@ -772,6 +772,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         url: URL?
     ) -> KeyTaoIOSImeConfig? {
         guard let url else { return config }
+        // A missing file means defaults; only an unreadable existing file is unknown.
+        guard FileManager.default.fileExists(atPath: url.path) else { return config }
         guard let data = try? Data(contentsOf: url) else { return nil }
         guard let runtime = try? JSONDecoder().decode(KeyTaoIOSRuntimeSettings.self, from: data) else {
             return config
