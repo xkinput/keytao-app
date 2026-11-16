@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="packaging/icons/icon.png" width="128" alt="KeyTao 键道">
-</p>
-
-<h1 align="center">键道 KeyTao</h1>
+<h1><img src="packaging/icons/icon.png" width="40" align="center" alt=""> 键道 KeyTao</h1>
 
 <p align="center">
   <img src="docs/images/showcase.jpg" alt="KeyTao 在 macOS 与 Android 上的输入与设置界面">
