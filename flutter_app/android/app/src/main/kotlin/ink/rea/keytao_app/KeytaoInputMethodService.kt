@@ -26,6 +26,7 @@ import android.speech.SpeechRecognizer
 import android.text.InputType
 import android.text.Spanned
 import android.text.style.ReplacementSpan
+import android.util.Base64
 import android.util.Log
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -44,9 +45,12 @@ import androidx.core.view.inputmethod.InputConnectionCompat
 import androidx.core.view.inputmethod.InputContentInfoCompat
 import java.io.File
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -62,8 +66,22 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var speechRecognizer: SpeechRecognizer? = null
     private var voiceRecognitionAvailable = false
     private val candidateExecutor = Executors.newSingleThreadExecutor()
-    private val clipboardHistory = mutableListOf<String>()
-    private val clipboardHistoryTimestamps = mutableMapOf<String, Long>()
+    private var clipboardHistory = ClipboardHistoryState()
+    private val clipboardPreferences by lazy { getSharedPreferences("keytao_ime_clipboard", MODE_PRIVATE) }
+    private val clipboardExecutor = Executors.newSingleThreadExecutor()
+    private var clipboardHistoryLoaded = false
+    private data class ClipboardPersistence(
+        val items: List<StoredClipboardItem>,
+        val captureSuppressed: Boolean,
+        val suppressedFingerprint: String?,
+        val lastMediaFingerprint: String?,
+    )
+    private val clipboardPersistenceLock = Any()
+    private var pendingClipboardPersistence: ClipboardPersistence? = null
+    private var clipboardPersistenceRunning = false
+    private var clipboardCaptureSuppressed = false
+    private var clipboardSuppressionFingerprint: String? = null
+    private var lastClipboardMediaFingerprint: String? = null
     private data class ClipboardMedia(
         val id: String,
         val file: File,
@@ -85,10 +103,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var clipboardSuppression: ClipboardSnapshot? = null
     private var lastOfferedClip: ClipboardSuggestionOffer? = null
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
+        if (!clipboardHistoryLoaded || !privacyMode.allowsClipboard) return@OnPrimaryClipChangedListener
+        clipboardCaptureSuppressed = false
         // A clipboard change is a new user/system event even when it writes the
         // same text again, so a deletion suppression cannot survive it.
         clipboardSuppression = null
+        clipboardSuppressionFingerprint = null
         lastSeenClipboardMedia = null
+        lastClipboardMediaFingerprint = null
+        persistClipboardHistory()
         rememberCurrentClipboard(suggest = true)
     }
     private var clipboardManager: ClipboardManager? = null
@@ -125,8 +148,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             // past the end of one would aim setSelection at stale offsets.
             if (!value) composingRegionStart = -1
         }
+    private var selectionModeLocked = false
     private var selectionModeActive = false
+        set(value) {
+            field = value
+            if (!value) selectionModeLocked = false
+            keyboardView?.updateSelectionMode(value)
+        }
     private var hasKnownCursor = false
+    private var knownSelectionEnd = -1
+    private var emojiSearchQuery: String? = null
     private var shiftPressedWithoutKey = false
     private var pendingShiftKeyCode = 0
     private var inputAvailable = false
@@ -158,6 +189,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var lastReadiness: Readiness? = null
     private var presentationLoadedWithoutRoot = false
     private var inputViewShown = false
+    private var navigationResetOnShow = true
+    private var configurationChanging = false
+    private var panelBackDownConsumed = false
     private var serviceDestroyed = false
     private var readinessRetryCount = 0
     private var readinessRetryDelayMs = 500L
@@ -181,7 +215,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         KeytaoRuntimeLog.event("lifecycle", "ime_create")
         engine = KeytaoImeEngine(applicationContext)
         clipboardManager = getSystemService(ClipboardManager::class.java)
-        wipeClipboardMedia()
+        restoreClipboardHistory()
         scheduleAvailabilityRefresh()
     }
 
@@ -194,11 +228,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         editorUpdateGeneration++
         rimeOptionsGeneration++
         unregisterClipboardListener()
-        wipeClipboardMedia()
+        cancelClipboardCaptures()
         if (::engine.isInitialized) {
             engine.close()
         }
         candidateExecutor.shutdownNow()
+        clipboardExecutor.shutdown()
         super.onDestroy()
         KeytaoRuntimeLog.flush(200)
     }
@@ -233,6 +268,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
         view.updateTheme(resolvePresentationTheme())
         view.updateState(currentState)
+        view.updateSelectionMode(selectionModeActive)
         keyboardHost = host
         keyboardView = view
         applyKeyboardPresentation(loadPresentationConfig())
@@ -278,11 +314,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         voiceRecognitionAvailable = runCatching { SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
         val started = System.nanoTime()
         super.onStartInput(attribute, restarting)
+        if (restarting && configurationChanging) {
+            applyEditorInfo(attribute, reloadIfNeeded = true)
+            logStartInput("input", attribute, restarting, started)
+            return
+        }
         shiftPressedWithoutKey = false
         pendingShiftKeyCode = 0
         discardPendingHostBackspace(resetOutstanding = true)
         hasKnownCursor = (attribute?.initialSelStart ?: -1) >= 0 &&
             (attribute?.initialSelEnd ?: -1) >= 0
+        knownSelectionEnd = attribute?.initialSelEnd ?: -1
+        onEmojiSearchRequested(false)
         backspaceSelectionSession = null
         // doStartInput() skips doFinishInput() when restarting, so the editor can
         // still hold a composing region from the previous round.
@@ -291,10 +334,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
         // Hardware keyboards can start an editor without showing an input view.
         // They need the same deployment/reload check as the soft keyboard path.
-        applyEditorInfo(attribute, clearComposition = true, reloadIfNeeded = true)
         currentState = KeytaoImeState.empty(asciiMode = currentState.asciiMode)
         composing = false
-        selectionModeActive = false
+        applyEditorInfo(attribute, clearComposition = true, reloadIfNeeded = true)
+        if (!restarting && !configurationChanging) {
+            keyboardView?.resetNavigation()
+            navigationResetOnShow = true
+        }
+        if (!configurationChanging && (!restarting || navigationResetOnShow)) {
+            selectionModeActive = false
+        }
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false
         recentCommittedUnits.clear()
@@ -315,15 +364,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         mainHandler.removeCallbacks(readinessRetry)
         keyboardView?.beginRenderSession()
         applyEditorInfo(info, reloadIfNeeded = true)
+        val resetNavigationForShow = !configurationChanging && (navigationResetOnShow || !restarting)
+        if (resetNavigationForShow) {
+            keyboardView?.resetNavigation()
+            selectionModeActive = false
+            navigationResetOnShow = false
+        }
         registerClipboardListener()
-        offerCurrentClipboardSuggestionOnShow()
+        if (resetNavigationForShow) offerCurrentClipboardSuggestionOnShow()
         keyboardView?.updateTheme(resolvePresentationTheme())
         applyKeyboardPresentation(loadPresentationConfig())
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         keyboardView?.updateState(currentState)
         refreshVoiceInput()
-        scheduleAvailabilityRefresh()
+        if (!configurationChanging) scheduleAvailabilityRefresh()
         logStartInput("input_view", info, restarting, started)
         logMemorySnapshot("start_input_view")
         if (!startupLatencyLogged) {
@@ -336,11 +391,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         inputViewShown = false
+        if (!configurationChanging) onEmojiSearchRequested(false)
+        if (!configurationChanging) navigationResetOnShow = true
         cancelVoiceInput()
         mainHandler.removeCallbacks(readinessRetry)
         unregisterClipboardListener()
-        keyboardView?.clearRecentClipboardSuggestion()
-        keyboardView?.resetClipboardClearConfirmation()
+        if (!configurationChanging) {
+            keyboardView?.clearRecentClipboardSuggestion()
+            keyboardView?.resetClipboardClearConfirmation()
+        }
         super.onFinishInputView(finishingInput)
         flushSessionHistograms()
         logMemorySnapshot("finish_input_view")
@@ -375,6 +434,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onWindowHidden() {
         cancelVoiceInput()
+        if (!configurationChanging) navigationResetOnShow = true
+        panelBackDownConsumed = false
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         super.onWindowHidden()
@@ -462,11 +523,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             privacyMode = nextPrivacy
             refreshVoiceInput()
             if (!nextPrivacy.allowsClipboard) {
-                clipboardHistory.clear()
-                clipboardHistoryTimestamps.clear()
-                wipeClipboardMedia()
+                clipboardCaptureSuppressed = true
+                cancelClipboardCaptures()
+                persistClipboardHistory()
                 clipboardSuppression = null
                 keyboardView?.clearRecentClipboardSuggestion()
+                keyboardView?.refreshClipboardItems(emptyList())
             }
             if (!nextPrivacy.allowsTextRecall) {
                 discardPendingHostBackspace()
@@ -489,7 +551,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             if (bypass) true else currentState.asciiMode
         }
         currentState = currentState.copy(asciiMode = targetAsciiMode)
-        scheduleEditorUpdate(nextPrivacy, targetAsciiMode, clearComposition, reloadIfNeeded)
+        if (!configurationChanging) {
+            scheduleEditorUpdate(nextPrivacy, targetAsciiMode, clearComposition, reloadIfNeeded)
+        }
         val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
         keyboardView?.updateEditorPresentation(
             enterLabel = KeytaoEditorPolicy.resolveEnterLabel(
@@ -598,7 +662,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
         // A valid report makes buffer editing available for this input session.
         if (newSelStart >= 0 && newSelEnd >= 0) hasKnownCursor = true
-        selectionModeActive = newSelStart != newSelEnd
+        knownSelectionEnd = newSelEnd
+        if (emojiSearchQuery != null) return
+        selectionModeActive = selectionModeLocked || newSelStart != newSelEnd
         composingRegionStart = if (candidatesStart >= 0 && candidatesEnd >= candidatesStart) {
             candidatesStart
         } else {
@@ -628,7 +694,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
+        val previousView = keyboardView
+        val resetOnShow = navigationResetOnShow
+        configurationChanging = true
+        try {
+            super.onConfigurationChanged(newConfig)
+            if (previousView != null && keyboardView !== previousView) {
+                keyboardView?.restoreNavigationFrom(previousView)
+            }
+        } finally {
+            configurationChanging = false
+            navigationResetOnShow = resetOnShow
+        }
         keyboardView?.updateTheme(resolvePresentationTheme())
         applyKeyboardPresentation(loadPresentationConfig())
     }
@@ -744,7 +821,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun normalKeyboardHeightDp(config: KeytaoAndroidImeConfig): Float {
-        return config.effectiveKeyboardHeightDp + config.candidateBarHeightDp + androidBottomInsetDp(config)
+        val contentHeight = if (emojiSearchQuery != null) config.emojiSearchHeightDp() else config.effectiveKeyboardHeightDp
+        return contentHeight + config.candidateBarHeightDp + androidBottomInsetDp(config)
     }
 
     /**
@@ -759,6 +837,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onFinishInput() {
         cancelVoiceInput()
+        onEmojiSearchRequested(false)
         val started = System.nanoTime()
         discardPendingHostBackspace(resetOutstanding = true)
         editorUpdateGeneration++
@@ -791,6 +870,42 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         onUserInteraction()
         discardPendingHostBackspace()
         inputCounts.record("key_down")
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (panelBackDownConsumed || keyboardView?.closeOverlayPanel() == true) {
+                panelBackDownConsumed = true
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
+        if (emojiSearchQuery != null) {
+            if (isShiftKey(keyCode)) {
+                shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
+                pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
+            } else {
+                shiftPressedWithoutKey = false
+                pendingShiftKeyCode = 0
+                when (keyCode) {
+                    KeyEvent.KEYCODE_ESCAPE -> onEmojiSearchRequested(false)
+                    KeyEvent.KEYCODE_DEL -> handleBackspace()
+                    KeyEvent.KEYCODE_SPACE -> handleSpace()
+                    KeyEvent.KEYCODE_ENTER -> handleEnter()
+                    else -> if (!event.isCtrlPressed && !event.isMetaPressed && !event.isAltPressed) {
+                        val key = AndroidKeyMapper.fromAndroidKeyEvent(event)
+                        if (key != null && !bypassesComposition() && !engine.shouldBypassKey(key.keyCode, key.modifiers)) {
+                            val result = engine.processKey(key.keyCode, key.modifiers)
+                            applyState(result)
+                            if (!result.accepted && !result.hasComposition && event.unicodeChar > 0 &&
+                                Character.isValidCodePoint(event.unicodeChar)) {
+                                commitDirect(String(Character.toChars(event.unicodeChar)))
+                            }
+                        } else if (event.unicodeChar > 0 && Character.isValidCodePoint(event.unicodeChar)) {
+                            commitDirect(String(Character.toChars(event.unicodeChar)))
+                        }
+                    }
+                }
+            }
+            return true
+        }
         if (isShiftKey(keyCode)) {
             shiftPressedWithoutKey = AndroidKeyMapper.permitsSoloShift(event)
             pendingShiftKeyCode = if (shiftPressedWithoutKey) keyCode else 0
@@ -835,6 +950,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         inputCounts.record("key_up")
+        if (keyCode == KeyEvent.KEYCODE_BACK && panelBackDownConsumed) {
+            panelBackDownConsumed = false
+            return true
+        }
+        if (emojiSearchQuery != null && !isShiftKey(keyCode)) return true
         if (!isShiftKey(keyCode)) return super.onKeyUp(keyCode, event)
         val shouldToggle = shiftPressedWithoutKey && pendingShiftKeyCode == keyCode &&
             AndroidKeyMapper.permitsSoloShift(event)
@@ -921,6 +1041,39 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
     }
 
+    override fun onBeforeDirectInsertPage() {
+        commitCompositionBeforeDirectInput()
+    }
+
+    override fun onEmojiSearchRequested(active: Boolean) {
+        if (active == (emojiSearchQuery != null)) return
+        if (active) {
+            commitCompositionBeforeDirectInput()
+            cancelVoiceInput()
+            selectionModeActive = false
+            doubleSpacePeriodTracker.reset()
+            emojiSearchQuery = ""
+        } else {
+            emojiSearchQuery = null
+            currentState = if (!editorUpdatePending && ::engine.isInitialized && engine.nativeReady) {
+                engine.clearComposition().withoutTransientCommit()
+            } else KeytaoImeState.empty(asciiMode = currentState.asciiMode)
+            composing = false
+        }
+        keyboardView?.updateEmojiSearch(emojiSearchQuery)
+        keyboardView?.updateState(currentState)
+        baseKeyboardConfig?.let { applyKeyboardPresentation(it, keyboardLayoutState) }
+    }
+
+    override fun onEmojiSearchResult(emoji: String) {
+        if (emojiSearchQuery == null || emoji.isBlank()) return
+        val connection = currentInputConnection ?: return
+        if (connection.commitText(emoji, 1)) {
+            rememberCommittedText(emoji)
+            lastCommittedText = emoji.takeIf { privacyMode.allowsTextRecall }
+        }
+    }
+
     override fun onCandidateIsUserPhrase(index: Int): Boolean {
         return inputAvailable && engine.candidateIsUserPhrase(index)
     }
@@ -971,23 +1124,25 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
             clipboardMedia.remove(item)
             item.file.delete()
+            clipboardHistory.remove(key, media = true)
+            persistClipboardHistory()
             logClipboardMedia()
             return
         }
         // History is de-duplicated on insert, so text identity is stable while
         // the asynchronously rendered panel index may already be stale.
         clipboardHistory.remove(key)
-        clipboardHistoryTimestamps.remove(key)
         currentClipboardSnapshot()?.takeIf { it.text == key }?.let { clipboardSuppression = it }
+        clipboardSuppression?.let { clipboardSuppressionFingerprint = clipboardFingerprint(it.text, it.timestamp) }
+        persistClipboardHistory()
         keyboardView?.clearRecentClipboardSuggestion()
     }
 
     override fun onClearClipboardHistory() {
         if (!privacyMode.allowsClipboard) return
         val clip = runCatching { clipboardManager?.primaryClip }.getOrNull()
-        clipboardHistory.clear()
-        clipboardHistoryTimestamps.clear()
-        wipeClipboardMedia()
+        cancelClipboardCaptures()
+        clipboardHistory.clearUnpinned()
         // Only an explicit clear suppresses re-capturing the current media clip.
         lastSeenClipboardMedia = clip?.takeIf { it.itemCount > 0 }?.let {
             val uri = it.getItemAt(0).uri ?: return@let null
@@ -995,7 +1150,22 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ClipboardMediaSnapshot(uri.toString(), timestamp)
         }
         clipboardSuppression = currentClipboardSnapshot()
+        clipboardSuppressionFingerprint = clipboardSuppression?.let { clipboardFingerprint(it.text, it.timestamp) }
+        lastClipboardMediaFingerprint = lastSeenClipboardMedia?.let { clipboardFingerprint(it.uri, it.timestamp) }
+        persistClipboardHistory()
         keyboardView?.clearRecentClipboardSuggestion()
+    }
+
+    override fun onIsClipboardEntryPinned(key: String, media: Boolean): Boolean =
+        clipboardHistory.isPinned(key, media)
+
+    override fun onToggleClipboardPin(key: String, media: Boolean) {
+        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistory.togglePin(key, media, maxBytes = clipboardHistoryItemsMaxBytes)) {
+            Toast.makeText(this, "置顶空间已满，请先取消部分置顶", Toast.LENGTH_SHORT).show()
+            return
+        }
+        persistClipboardHistory()
     }
 
     override fun onCommitClipboardMedia(key: String) {
@@ -1010,6 +1180,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (editor != null && connection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1 &&
             mimeAccepted(item.mime, EditorInfoCompat.getContentMimeTypes(editor))
         ) {
+            commitCompositionBeforeDirectInput()
             val info = InputContentInfoCompat(uri, ClipDescription(item.name, arrayOf(item.mime)), null)
             val committed = runCatching {
                 InputConnectionCompat.commitContent(
@@ -1345,6 +1516,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleBackspace() {
+        emojiSearchQuery?.let { query ->
+            if (currentState.hasComposition && !bypassesComposition()) {
+                applyState(engine.processKey(AndroidKeyMapper.XK_BACK_SPACE, 0))
+            } else {
+                val lastUnit = textUnits(query).lastOrNull().orEmpty()
+                emojiSearchQuery = query.dropLast(lastUnit.length)
+                keyboardView?.updateEmojiSearch(emojiSearchQuery)
+            }
+            return
+        }
         if (outstandingHostBackspaces > 0) {
             discardPendingHostBackspace()
             sendTrackedHostBackspace()
@@ -1374,6 +1555,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleBackspaceGesture(action: String, countValue: String?) {
+        if (emojiSearchQuery != null) {
+            if (action in setOf("delete", "deleteSegment", "deleteAll", "commitSelection")) handleBackspace()
+            return
+        }
         val count = countValue
             ?.toIntOrNull()
             ?.coerceIn(1, maxBackspaceGestureBatchCount)
@@ -1674,6 +1859,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleSpace() {
+        if (emojiSearchQuery != null) {
+            if (currentState.hasComposition && !bypassesComposition()) applyState(engine.processKey(AndroidKeyMapper.XK_SPACE, 0))
+            else commitDirect(" ")
+            return
+        }
         if (currentState.hasComposition) {
             doubleSpacePeriodTracker.reset()
             applyState(engine.processKey(AndroidKeyMapper.XK_SPACE, 0))
@@ -1699,6 +1889,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleEnter() {
+        if (emojiSearchQuery != null) {
+            if (currentState.hasComposition && !bypassesComposition()) applyState(engine.processEnter())
+            return
+        }
         val behavior = keyboardView?.currentConfig()?.enterKeyBehavior ?: EnterKeyBehaviors.SYSTEM
         val editorInfo = currentInputEditorInfo
         val decision = KeytaoEditorPolicy.resolveEnterDecision(
@@ -1917,6 +2111,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun handleEditAction(action: String, value: String?) {
+        if (emojiSearchQuery != null) {
+            if (action == "paste") currentClipboardText()?.let { commitDirect(it) }
+            return
+        }
         when (action) {
             "copy" -> copySelection(cut = false)
             "cut" -> copySelection(cut = true)
@@ -1934,6 +2132,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             "clearAll" -> clearAllText()
             "selectAll" -> selectAllText()
             "toggleSelection" -> toggleSelectionMode()
+            "cancelSelection" -> exitSelectionMode()
+            "selectWord" -> selectAroundCursor(line = false)
+            "selectLine" -> selectAroundCursor(line = true)
             "selectLeft" -> extendSelection(left = true)
             "selectRight" -> extendSelection(left = false)
             "repeatCommit" -> lastCommittedText?.let { commitDirect(it) }
@@ -1974,7 +2175,45 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun toggleSelectionMode() {
         clearCompositionBeforeEdit()
-        selectionModeActive = !selectionModeActive
+        if (selectionModeActive) exitSelectionMode()
+        else {
+            selectionModeLocked = true
+            selectionModeActive = true
+        }
+    }
+
+    private fun exitSelectionMode() {
+        if (!selectionModeActive) return
+        selectionModeActive = false
+        val connection = currentInputConnection ?: return
+        val extracted = connection.getExtractedText(ExtractedTextRequest(), 0)
+        val cursor = extracted?.takeIf { it.startOffset >= 0 && it.selectionEnd >= 0 }
+            ?.let { it.startOffset + it.selectionEnd } ?: knownSelectionEnd
+        if (cursor >= 0) connection.setSelection(cursor, cursor)
+    }
+
+    private fun selectAroundCursor(line: Boolean) {
+        if (!privacyMode.allowsTextRecall) return
+        clearCompositionBeforeEdit()
+        val connection = currentInputConnection ?: return
+        val extracted = connection.getExtractedText(ExtractedTextRequest(), 0)
+        val cursor = extracted?.takeIf { it.startOffset >= 0 && it.selectionEnd >= 0 }
+            ?.let { it.startOffset + it.selectionEnd } ?: knownSelectionEnd
+        if (cursor < 0 || !connection.setSelection(cursor, cursor)) return
+        val limit = selectionContextLimit
+        val before = connection.getTextBeforeCursor(limit, 0)?.toString() ?: return
+        val after = connection.getTextAfterCursor(limit, 0)?.toString() ?: return
+        val range = selectionRangeAroundCursor(before, after, line) ?: return
+        if (cursor + range.first < 0 || (cursor > before.length && range.first == -before.length) ||
+            (after.length == limit && range.second == limit)) {
+            keyboardView?.showMessage("文本范围过长，无法完整选择")
+            return
+        }
+        if (connection.setSelection(cursor + range.first, cursor + range.second)) {
+            knownSelectionEnd = cursor + range.second
+            selectionModeLocked = true
+            selectionModeActive = true
+        }
     }
 
     private fun extendSelection(left: Boolean) {
@@ -1987,15 +2226,15 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun moveToLineBoundary(start: Boolean) {
-        clearCompositionBeforeEdit()
-        sendKeyStroke(if (start) KeyEvent.KEYCODE_MOVE_HOME else KeyEvent.KEYCODE_MOVE_END)
-        selectionModeActive = false
+        moveCursor(if (start) KeyEvent.KEYCODE_MOVE_HOME else KeyEvent.KEYCODE_MOVE_END)
     }
 
     private fun moveCursor(keyCode: Int) {
         clearCompositionBeforeEdit()
-        sendKeyStroke(keyCode, 0)
-        selectionModeActive = false
+        sendKeyStroke(
+            keyCode,
+            if (selectionModeActive) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0,
+        )
     }
 
     private fun forwardDelete() {
@@ -2034,6 +2273,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
      * cursor-move and Enter keys we inject can silently do nothing.
      */
     private fun sendKeyStroke(keyCode: Int, metaState: Int = 0) {
+        if (emojiSearchQuery != null) return
         val connection = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
         connection.sendKeyEvent(softKeyEvent(now, KeyEvent.ACTION_DOWN, keyCode, metaState))
@@ -2091,7 +2331,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun currentClipboardSnapshot(): ClipboardSnapshot? {
         inputCounts.record("clipboard_read")
-        if (!privacyMode.allowsClipboard) return null
+        if (!privacyMode.allowsClipboard || clipboardCaptureSuppressed) return null
         val clip = clipboardManager?.primaryClip ?: return null
         if (clip.itemCount <= 0) return null
         if (isSensitiveClip(clip.description)) return null
@@ -2103,11 +2343,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             }.getOrNull() ?: return null
             if (!mime.startsWith("text/")) return null
         }
-        val text = clip.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-            ?.takeIf { it.isNotEmpty() }
-            ?: return null
+        // Reject oversized text and URI coercion before allocating or retaining a history copy.
+        val value = clip.getItemAt(0).text ?: return null
+        if (value.isEmpty() || value.length > clipboardTextMaxChars) return null
+        val text = value.toString()
         val uri = clip.getItemAt(0).uri
         if (uri?.scheme == "content" && text == uri.toString()) return null
         val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -2124,12 +2363,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
      */
     private fun isSensitiveClip(description: ClipDescription?): Boolean {
         if (description == null) return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
-        return description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
+        return description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
-        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistoryLoaded || !privacyMode.allowsClipboard || clipboardCaptureSuppressed) return
         val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return
         if (captureClipboardMedia(clip)) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
@@ -2138,23 +2376,21 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         rememberClipboardText(snapshot.text, suggest, timestamp)
     }
 
-    private fun clipboardDirectory(): File? = KeytaoAndroidPaths.userRootOrNull(this)?.let { File(it, "clipboard") }
+    private fun clipboardDirectory(): File = File(filesDir, "clipboard-history")
 
     private fun clipboardEntries(): List<ClipboardEntry> {
         if (!privacyMode.allowsClipboard) return emptyList()
-        val text = clipboardHistory.map {
-            (clipboardHistoryTimestamps[it] ?: 0L) to ClipboardEntry(key = it, text = it)
+        return clipboardHistory.items.mapNotNull { stored ->
+            stored.text?.let { return@mapNotNull ClipboardEntry(key = stored.key, text = it) }
+            val media = clipboardMedia.firstOrNull { "media:${it.id}" == stored.key } ?: return@mapNotNull null
+            ClipboardEntry(stored.key, mime = media.mime, name = media.name,
+                size = media.size, width = media.width, height = media.height, thumb = media.thumb)
         }
-        val media = clipboardMedia.map {
-            it.ts to ClipboardEntry("media:${it.id}", mime = it.mime, name = it.name,
-                size = it.size, width = it.width, height = it.height, thumb = it.thumb)
-        }
-        return (media + text).sortedByDescending { it.first }.map { it.second }
     }
 
     /** Open the provider stream during the focused IME's clipboard callback grant window. */
     private fun captureClipboardMedia(clip: ClipData): Boolean {
-        if (!privacyMode.allowsClipboard || isSensitiveClip(clip.description)) return true
+        if (!privacyMode.allowsClipboard || clipboardCaptureSuppressed || isSensitiveClip(clip.description)) return true
         if (clip.itemCount == 0) return false
         val uri = clip.getItemAt(0).uri ?: return false
         if (uri.authority == "$packageName.fileprovider") return true
@@ -2166,9 +2402,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.clearRecentClipboardSuggestion()
         val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else 0L
         val snapshot = ClipboardMediaSnapshot(uri.toString(), timestamp)
-        if (snapshot == lastSeenClipboardMedia) return true
+        val fingerprint = clipboardFingerprint(snapshot.uri, snapshot.timestamp)
+        if (snapshot == lastSeenClipboardMedia || fingerprint == lastClipboardMediaFingerprint) return true
         val reservedBytes = (clipboardMediaStreams.size + 1L) * clipboardMediaMaxBytes
-        if (clipboardMediaStreams.size >= clipboardMediaLimit || reservedBytes > clipboardMediaTotalBytes) return true
+        val pinnedBytes = clipboardMedia.filter { clipboardHistory.isPinned("media:${it.id}", media = true) }.sumOf { it.size }
+        if (clipboardMediaStreams.size >= clipboardMediaLimit || pinnedBytes + reservedBytes > clipboardMediaTotalBytes) return true
         val name = runCatching {
             contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) cursor.getString(0) else null
@@ -2177,8 +2415,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         val stream = runCatching { contentResolver.openInputStream(uri) }.getOrNull() ?: return true
         // Reserve a full item budget for every opened stream, including jobs awaiting main completion.
         // This bounds backing files during capture as well as after insertion.
-        evictClipboardMedia(clipboardMedia, clipboardMediaLimit - clipboardMediaStreams.size - 1,
-            clipboardMediaTotalBytes - reservedBytes) { it.size }.forEach { it.file.delete() }
+        while (clipboardMedia.sumOf { it.size } + reservedBytes > clipboardMediaTotalBytes) {
+            val oldest = clipboardMedia.lastOrNull { !clipboardHistory.isPinned("media:${it.id}", media = true) }
+                ?: break
+            clipboardMedia.remove(oldest)
+            clipboardHistory.remove("media:${oldest.id}", media = true)
+            oldest.file.delete()
+        }
+        persistClipboardHistory()
         keyboardView?.refreshClipboardItems(clipboardEntries())
         val id = UUID.randomUUID().toString()
         val generation = clipboardMediaGeneration
@@ -2187,7 +2431,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             ?.takeIf { it.matches(Regex("[a-zA-Z0-9]{1,10}")) } ?: "bin"
         clipboardMediaStreams[id] = stream
         try {
-            candidateExecutor.execute {
+            clipboardExecutor.execute {
                 val media = snapshotClipboardStream(stream, id, extension, mime, name, capturedAt, generation)
                 mainHandler.post {
                     clipboardMediaStreams.remove(id)
@@ -2198,8 +2442,12 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     if (media != null) {
                         clipboardMedia.add(0, media)
                         clipboardMedia.sortByDescending { it.ts }
-                        evictClipboardMedia(clipboardMedia, clipboardMediaLimit, clipboardMediaTotalBytes) { it.size }
-                            .forEach { it.file.delete() }
+                        clipboardHistory.remember(StoredClipboardItem(
+                            key = "media:${media.id}", timestamp = media.ts, fileName = media.file.name,
+                            mime = media.mime, name = media.name, size = media.size, width = media.width, height = media.height,
+                        ))
+                        lastClipboardMediaFingerprint = fingerprint
+                        persistClipboardHistory()
                         keyboardView?.refreshClipboardItems(clipboardEntries())
                     }
                     logClipboardMedia()
@@ -2218,39 +2466,28 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         stream: InputStream, id: String, extension: String, mime: String, name: String,
         timestamp: Long, generation: Long,
     ): ClipboardMedia? {
-        val directory = clipboardDirectory() ?: run {
-            runCatching { stream.close() }
-            return null
-        }
+        val directory = clipboardDirectory()
         val file = File(directory, "$id.$extension")
         var retained = false
         try {
             stream.use { input ->
-                // Only file creation is locked. A wipe can unlink an in-flight copy immediately.
+                // Generation changes cancel captures without deleting persisted history.
+                val plain = ClipboardEncryption.readBounded(input, clipboardMediaMaxBytes.toInt())
+                val bytes = plain.size.toLong()
+                if (bytes == 0L || generation != clipboardMediaGeneration) return null
+                val encrypted = ClipboardEncryption.encrypt(plain)
                 val output = synchronized(clipboardMediaFileLock) {
                     if (generation != clipboardMediaGeneration) return null
                     file.parentFile?.mkdirs()
                     file.outputStream()
                 }
-                var bytes = 0L
-                output.use {
-                    val buffer = ByteArray(16 * 1024)
-                    while (true) {
-                        if (generation != clipboardMediaGeneration || Thread.currentThread().isInterrupted) return null
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        bytes += read
-                        if (bytes > clipboardMediaMaxBytes) return null
-                        it.write(buffer, 0, read)
-                    }
-                }
-                if (bytes == 0L || generation != clipboardMediaGeneration) return null
+                output.use { it.write(encrypted) }
                 var width = 0
                 var height = 0
                 var thumb: Bitmap? = null
                 if (mime.startsWith("image/")) {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(file.path, bounds)
+                    BitmapFactory.decodeByteArray(plain, 0, plain.size, bounds)
                     width = bounds.outWidth.coerceAtLeast(0)
                     height = bounds.outHeight.coerceAtLeast(0)
                     if (width > 0 && height > 0 && width.toLong() * height <= clipboardMaxPixels) {
@@ -2260,7 +2497,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                             inSampleSize = sample
                             inPreferredConfig = Bitmap.Config.RGB_565
                         }
-                        thumb = BitmapFactory.decodeFile(file.path, options)?.let { decoded ->
+                        thumb = BitmapFactory.decodeByteArray(plain, 0, plain.size, options)?.let { decoded ->
                             if (decoded.config == Bitmap.Config.RGB_565) decoded
                             else decoded.copy(Bitmap.Config.RGB_565, false).also { decoded.recycle() }
                         }
@@ -2284,18 +2521,131 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.refreshClipboardItems(clipboardEntries())
     }
 
-    private fun wipeClipboardMedia() {
+    private fun cancelClipboardCaptures() {
         synchronized(clipboardMediaFileLock) {
             clipboardMediaGeneration++
-            clipboardDirectory()?.deleteRecursively()
         }
         clipboardMediaStreams.values.forEach { runCatching { it.close() } }
         clipboardMediaStreams.clear()
-        clipboardMedia.clear()
         lastSeenClipboardMedia = null
-        keyboardView?.refreshClipboardItems(clipboardEntries())
-        logClipboardMedia()
     }
+
+    private fun restoreClipboardHistory() {
+        clipboardExecutor.execute {
+            val restored = ClipboardHistoryState()
+            val media = mutableListOf<ClipboardMedia>()
+            val payload = try {
+                val prefsFile = File(applicationInfo.dataDir, "shared_prefs/keytao_ime_clipboard.xml")
+                if (listOf(prefsFile, File("${prefsFile.path}.bak")).any { it.length() > clipboardPrefsMaxBytes }) {
+                    require(deleteSharedPreferences("keytao_ime_clipboard"))
+                }
+                val encoded = clipboardPreferences.getString("encryptedHistory", null)
+                if (encoded == null) null else {
+                    require(encoded.length <= clipboardPrefsMaxBytes)
+                    val plain = ClipboardEncryption.decrypt(Base64.decode(encoded, Base64.NO_WRAP))
+                    require(plain.size <= clipboardHistoryMaxBytes)
+                    JSONObject(String(plain, Charsets.UTF_8)).also {
+                        restored.restore(it.getJSONArray("history").toString())
+                    }
+                }
+            } catch (_: Exception) {
+                null
+            }
+            if (payload == null) restored.restore("[]")
+            restored.items.forEach { stored ->
+                if (!stored.isMedia) {
+                    if ((stored.text?.length ?: 0) > clipboardTextMaxChars || stored.key.length > clipboardTextMaxChars) {
+                        restored.remove(stored.key)
+                    }
+                    return@forEach
+                }
+                val file = File(clipboardDirectory(), stored.fileName ?: return@forEach)
+                val valid = runCatching {
+                    require(stored.size in 1..clipboardMediaMaxBytes)
+                    require(file.isFile && file.length() == stored.size + ClipboardEncryption.overheadBytes)
+                    require(media.sumOf { it.size } + stored.size <= clipboardMediaTotalBytes)
+                    require(stored.mime != null)
+                    val plain = file.inputStream().use {
+                        ClipboardEncryption.decrypt(ClipboardEncryption.readBounded(
+                            it, ClipboardEncryption.mediaMaxBytes + ClipboardEncryption.overheadBytes,
+                        ))
+                    }
+                    require(plain.size.toLong() == stored.size)
+                }.isSuccess
+                if (!valid) restored.remove(stored.key, media = true)
+                else media.add(ClipboardMedia(
+                    stored.key.removePrefix("media:"), file, stored.mime ?: return@forEach,
+                    stored.name ?: "剪贴板文件", stored.size, stored.width, stored.height, stored.timestamp, null,
+                ))
+            }
+            val retained = media.map { it.file.name }.toSet()
+            runCatching {
+                clipboardDirectory().listFiles()?.filter { it.isFile && it.name !in retained }?.forEach { it.delete() }
+            }
+            // Legacy plaintext history is discarded rather than reintroducing unencrypted records.
+            if (payload == null) runCatching { deleteSharedPreferences("keytao_ime_clipboard") }
+            mainHandler.post {
+                if (serviceDestroyed) return@post
+                clipboardHistory = restored
+                clipboardMedia.addAll(media.sortedByDescending { it.ts })
+                clipboardCaptureSuppressed = clipboardCaptureSuppressed || (payload?.optBoolean("captureSuppressed", false) ?: false)
+                clipboardSuppressionFingerprint = payload?.opt("suppressedFingerprint") as? String
+                lastClipboardMediaFingerprint = payload?.opt("lastMediaFingerprint") as? String
+                clipboardHistoryLoaded = true
+                persistClipboardHistory()
+                if (inputViewShown) {
+                    rememberCurrentClipboard(suggest = false)
+                    offerCurrentClipboardSuggestionOnShow()
+                }
+                keyboardView?.refreshClipboardItems(clipboardEntries())
+            }
+        }
+    }
+
+    private fun persistClipboardHistory() {
+        if (!clipboardHistoryLoaded || serviceDestroyed) return
+        val retained = clipboardHistory.items.filter { it.isMedia }.map { it.key }.toSet()
+        val removed = clipboardMedia.filter { "media:${it.id}" !in retained }
+        clipboardMedia.removeAll(removed.toSet())
+        if (removed.isNotEmpty()) clipboardExecutor.execute { removed.forEach { it.file.delete() } }
+        synchronized(clipboardPersistenceLock) {
+            pendingClipboardPersistence = ClipboardPersistence(
+                clipboardHistory.items, clipboardCaptureSuppressed,
+                clipboardSuppressionFingerprint, lastClipboardMediaFingerprint,
+            )
+            if (clipboardPersistenceRunning) return
+            clipboardPersistenceRunning = true
+        }
+        clipboardExecutor.execute {
+            while (true) {
+                val snapshot = synchronized(clipboardPersistenceLock) {
+                    val next = pendingClipboardPersistence
+                    pendingClipboardPersistence = null
+                    if (next == null) clipboardPersistenceRunning = false
+                    next
+                } ?: break
+                try {
+                    val history = ClipboardHistoryState()
+                    snapshot.items.asReversed().forEach { history.remember(it) }
+                    val payload = JSONObject().apply {
+                        put("history", JSONArray(history.encode(clipboardHistoryItemsMaxBytes)))
+                        put("captureSuppressed", snapshot.captureSuppressed)
+                        put("suppressedFingerprint", snapshot.suppressedFingerprint)
+                        put("lastMediaFingerprint", snapshot.lastMediaFingerprint)
+                    }.toString().toByteArray(Charsets.UTF_8)
+                    require(payload.size <= clipboardHistoryMaxBytes)
+                    val encrypted = Base64.encodeToString(ClipboardEncryption.encrypt(payload), Base64.NO_WRAP)
+                    clipboardPreferences.edit().clear().putString("encryptedHistory", encrypted).commit()
+                } catch (_: Exception) {
+                    runCatching { clipboardPreferences.edit().clear().commit() }
+                }
+            }
+        }
+    }
+
+    private fun clipboardFingerprint(value: String, timestamp: Long): String =
+        MessageDigest.getInstance("SHA-256").digest("$timestamp\u0000$value".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun logClipboardMedia() {
         val count = clipboardMedia.size
@@ -2307,6 +2657,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun offerCurrentClipboardSuggestionOnShow() {
+        if (!clipboardHistoryLoaded) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
         rememberClipboardText(snapshot.text, suggest = false, timestamp = snapshot.timestamp)
         if (!shouldOfferClipboardSuggestion(
@@ -2325,6 +2676,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun currentUnsuppressedClipboardSnapshot(): ClipboardSnapshot? {
         val snapshot = currentClipboardSnapshot()
+        if (snapshot != null && clipboardFingerprint(snapshot.text, snapshot.timestamp) == clipboardSuppressionFingerprint) return null
         clipboardSuppression?.let { suppressed ->
             val sameClipboardWrite = snapshot?.text == suppressed.text &&
                 (suppressed.timestamp == 0L || snapshot.timestamp == suppressed.timestamp)
@@ -2335,15 +2687,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     private fun rememberClipboardText(text: String, suggest: Boolean, timestamp: Long = 0L) {
-        if (text.isBlank() || !privacyMode.allowsClipboard) return
-        val wasFirst = clipboardHistory.firstOrNull() == text
-        clipboardHistory.remove(text)
-        clipboardHistory.add(0, text)
-        clipboardHistoryTimestamps[text] = timestamp.takeIf { it > 0 }
-            ?: clipboardHistoryTimestamps[text] ?: System.currentTimeMillis()
-        while (clipboardHistory.size > clipboardHistoryLimit) {
-            clipboardHistoryTimestamps.remove(clipboardHistory.removeAt(clipboardHistory.lastIndex))
-        }
+        // Reject copies over 20K UTF-16 units instead of keeping or persisting a truncated secret.
+        if (!clipboardHistoryLoaded || text.length > clipboardTextMaxChars || text.isBlank() ||
+            !privacyMode.allowsClipboard || clipboardCaptureSuppressed) return
+        val previous = clipboardHistory.items.firstOrNull { !it.isMedia && it.key == text }
+        val wasFirst = clipboardHistory.items.firstOrNull { !it.isMedia && !it.pinned }?.key == text
+        clipboardHistory.remember(StoredClipboardItem(
+            key = text, text = text,
+            timestamp = timestamp.takeIf { it > 0 } ?: previous?.timestamp ?: System.currentTimeMillis(),
+        ))
+        persistClipboardHistory()
         if (suggest && !wasFirst) {
             lastOfferedClip = ClipboardSuggestionOffer(text, timestamp)
             keyboardView?.showRecentClipboardSuggestion(text)
@@ -2564,11 +2917,46 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         return true
     }
 
+    private fun commitCompositionBeforeDirectInput() {
+        if (!composing && !currentState.hasComposition) return
+        if (currentInputConnection == null) return
+        var fallbackState = currentState
+        if (!editorUpdatePending && engine.nativeReady) {
+            val selected = if (currentState.candidates.isNotEmpty()) {
+                engine.selectCandidate(0)
+            } else {
+                engine.processEnter()
+            }
+            if (selected.committed.isNotEmpty() || selected.hasComposition) applyState(selected)
+            if (selected.committed.isNotEmpty() && !selected.hasComposition) return
+            if (selected.hasComposition) fallbackState = selected
+            val finished = engine.commitComposition()
+            if (finished.committed.isNotEmpty()) {
+                applyState(finished)
+                if (!finished.hasComposition) return
+                fallbackState = finished
+            }
+        }
+        val text = fallbackState.candidates.firstOrNull()?.text ?: fallbackState.preedit
+        val cleared = if (!editorUpdatePending && engine.nativeReady) {
+            engine.clearComposition().withoutTransientCommit()
+        } else {
+            KeytaoImeState.empty(asciiMode = currentState.asciiMode)
+        }
+        applyState(cleared.copy(committed = text))
+    }
+
     private fun commitDirect(text: String) {
         discardPendingHostBackspace()
         inputCounts.record("commit_direct")
+        if (emojiSearchQuery != null) {
+            commitCompositionBeforeDirectInput()
+            emojiSearchQuery = emojiSearchQuery.orEmpty() + text
+            keyboardView?.updateEmojiSearch(emojiSearchQuery)
+            return
+        }
         val connection = currentInputConnection ?: return
-        val hadComposition = composing || currentState.hasComposition
+        commitCompositionBeforeDirectInput()
         backspaceRestoreStack.clear()
         restoreAllOnNextDirectionalRestore = false
         connection.beginBatchEdit()
@@ -2580,18 +2968,24 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         connection.endBatchEdit()
         currentState = if (editorUpdatePending || !engine.nativeReady) {
             currentState.withoutTransientCommit()
-        } else if (hadComposition) {
-            engine.reset().withoutTransientCommit()
         } else {
             engine.state().withoutTransientCommit()
         }
         keyboardView?.updateState(currentState)
+        if (text.isNotEmpty()) keyboardView?.onDirectTextCommitted()
     }
 
     private fun applyState(state: KeytaoImeState) {
         if (state.hasComposition || state.committed.isNotEmpty()) discardPendingHostBackspace()
         val started = applyStateDurations.start()
         try {
+            if (emojiSearchQuery != null) {
+                emojiSearchQuery = emojiSearchQuery.orEmpty() + state.committed
+                currentState = state.withoutTransientCommit()
+                keyboardView?.updateState(currentState)
+                keyboardView?.updateEmojiSearch(emojiSearchQuery)
+                return
+            }
             val connection = currentInputConnection
             if (connection != null) {
                 connection.beginBatchEdit()
@@ -2709,8 +3103,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     companion object {
         private const val defaultUnavailableMessage = "请先在 KeyTao App 安装键道方案"
         private const val preparingMessage = "正在准备 KeyTao 输入法"
-        private const val clipboardHistoryLimit = 24
-        private const val clipboardMediaLimit = 12
+        private const val clipboardTextMaxChars = 20_000
+        private const val clipboardHistoryMaxBytes = 256 * 1024
+        private const val clipboardHistoryItemsMaxBytes = clipboardHistoryMaxBytes - 1024
+        private const val clipboardPrefsMaxBytes = 512 * 1024L
+        private const val clipboardMediaLimit = 50
         private const val clipboardMediaMaxBytes = 8L * 1024 * 1024
         private const val clipboardMediaTotalBytes = 48L * 1024 * 1024
         private const val clipboardThumbPx = 176
@@ -2720,6 +3117,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         /** `EditorInfo.MEMORY_EFFICIENT_TEXT_LENGTH`: the budget AOSP recommends
          *  for surrounding-text requests, which cross a binder on every call. */
         private const val backspaceContextLimit = 2048
+        // shortcut: selection reads 64K UTF-16 units per side; page context for larger words or lines.
+        private const val selectionContextLimit = 65_536
         private const val hostBackspaceContextLimit = 64
         private const val hostBackspaceTimeoutMs = 300L
         private const val maxBackspaceGestureBatchCount = 96

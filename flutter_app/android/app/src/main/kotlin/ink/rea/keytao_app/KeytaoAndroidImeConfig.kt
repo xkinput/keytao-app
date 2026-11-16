@@ -161,6 +161,11 @@ data class KeytaoAndroidImeConfig(
     val keyboardHeightScaleFactor: Float
         get() = keyboardHeightScale / 100f
 
+    fun emojiSearchHeightDp(): Float {
+        val rowCount = rows.size + 2 + if (numberRowEnabled && rows.isNotEmpty()) 1 else 0
+        return maxOf(effectiveKeyboardHeightDp, rowCount * 36f + (rowCount + 1) * verticalGapDp)
+    }
+
     fun rowsForLayer(layer: String): List<List<KeySpec>> {
         return when (layer) {
             "numbers" -> numberRows

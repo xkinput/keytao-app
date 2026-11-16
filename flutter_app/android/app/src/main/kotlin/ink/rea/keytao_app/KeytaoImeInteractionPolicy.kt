@@ -1,5 +1,7 @@
 package ink.rea.keytao_app
 
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.BreakIterator
 import java.util.Locale
 
@@ -486,4 +488,274 @@ internal object KeytaoColorMath {
     }
 
     private fun channel(value: Float): Int = kotlin.math.round(value * 255f).toInt().coerceIn(0, 255)
+}
+
+internal enum class KeyboardShiftState { OFF, ONCE, LOCKED }
+
+internal enum class KeyboardPanel { RIME, CLIPBOARD, SETTINGS, PHRASES, EXPANDED_CANDIDATES }
+
+internal class KeyboardNavigationState {
+    var layer: String = "letters"
+        private set
+    var panel: KeyboardPanel? = null
+        private set
+    var returnLayer: String = "letters"
+        private set
+    var lastSymbolCategory: String = "symbols"
+        private set
+    var lastEmojiCategory: String = "symbols_emoji_face"
+        private set
+    var shift: KeyboardShiftState = KeyboardShiftState.OFF
+
+    fun resolveLayer(value: String?): String = when (value) {
+        "back" -> returnLayer
+        "symbols:last" -> lastSymbolCategory
+        "emoji:last" -> lastEmojiCategory
+        else -> value?.takeIf(String::isNotBlank) ?: "letters"
+    }
+
+    fun shouldCommitBeforeNavigation(layer: String, panel: KeyboardPanel?, reset: Boolean = false): Boolean {
+        return !reset && (
+            (layer != this.layer && layer.isDirectInputPage()) ||
+                (panel != this.panel && panel in setOf(KeyboardPanel.CLIPBOARD, KeyboardPanel.PHRASES))
+            )
+    }
+
+    fun navigate(layer: String = this.layer, panel: KeyboardPanel? = null, reset: Boolean = false) {
+        if (reset) {
+            this.layer = layer
+            this.panel = null
+            returnLayer = "letters"
+            shift = KeyboardShiftState.OFF
+            return
+        }
+        if (layer != this.layer) {
+            returnLayer = when {
+                layer == "letters" || layer == returnLayer -> "letters"
+                this.layer.isDirectInputPage() && layer.isDirectInputPage() -> returnLayer
+                else -> this.layer
+            }
+            if (shift == KeyboardShiftState.ONCE) shift = KeyboardShiftState.OFF
+            this.layer = layer
+        }
+        this.panel = panel
+        when {
+            layer.startsWith("symbols_emoji_") -> lastEmojiCategory = layer
+            layer == "symbols" || layer.startsWith("symbols_") -> lastSymbolCategory = layer
+        }
+    }
+
+    fun layerAfterDirectCommit(symbolAutoReturn: Boolean): String? {
+        return "letters".takeIf {
+            symbolAutoReturn && panel == null &&
+                (layer == "symbols" || layer.startsWith("symbols_")) &&
+                !layer.startsWith("symbols_emoji_")
+        }
+    }
+
+    fun restoreFrom(previous: KeyboardNavigationState) {
+        layer = previous.layer
+        panel = previous.panel
+        returnLayer = previous.returnLayer
+        lastSymbolCategory = previous.lastSymbolCategory
+        lastEmojiCategory = previous.lastEmojiCategory
+        shift = previous.shift
+    }
+
+    private fun String.isDirectInputPage(): Boolean {
+        return this == "numbers" || this == "symbols" || startsWith("symbols_")
+    }
+}
+
+internal data class StoredClipboardItem(
+    val key: String,
+    val timestamp: Long,
+    val pinned: Boolean = false,
+    val text: String? = null,
+    val fileName: String? = null,
+    val mime: String? = null,
+    val name: String? = null,
+    val size: Long = 0,
+    val width: Int = 0,
+    val height: Int = 0,
+) {
+    val isMedia: Boolean get() = fileName != null
+
+    fun isValid(): Boolean {
+        if (key.isBlank()) return false
+        return if (text != null) {
+            text.isNotBlank() && fileName == null
+        } else {
+            fileName != null && fileName.isNotBlank() && fileName !in setOf(".", "..") &&
+                '/' !in fileName && '\\' !in fileName && '\u0000' !in fileName
+        }
+    }
+}
+
+internal class ClipboardHistoryState {
+    var items: List<StoredClipboardItem> = emptyList()
+        private set
+
+    fun remember(item: StoredClipboardItem) {
+        if (!item.isValid()) return
+        val previous = items.firstOrNull { it.key == item.key && it.isMedia == item.isMedia }
+        replace(listOf(item.copy(pinned = previous?.pinned ?: item.pinned)) + items.filterNot {
+            it.key == item.key && it.isMedia == item.isMedia
+        })
+    }
+
+    fun isPinned(key: String, media: Boolean = false): Boolean {
+        return items.any { it.key == key && it.isMedia == media && it.pinned }
+    }
+
+    fun togglePin(key: String, media: Boolean = false, maxBytes: Int = Int.MAX_VALUE): Boolean {
+        val item = items.firstOrNull { it.key == key && it.isMedia == media } ?: return true
+        if (!item.pinned) {
+            val pinned = items.filter { it.pinned } + item.copy(pinned = true)
+            val bytes = 2L + pinned.sumOf { encodeItem(it).toByteArray(Charsets.UTF_8).size.toLong() } + (pinned.size - 1)
+            if (bytes > maxBytes) return false
+        }
+        replace(items.map { if (it.key == key && it.isMedia == media) it.copy(pinned = !it.pinned) else it })
+        return true
+    }
+
+    fun remove(key: String, media: Boolean = false) {
+        items = items.filterNot { it.key == key && it.isMedia == media }
+    }
+
+    fun clearUnpinned() {
+        items = items.filter { it.pinned }
+    }
+
+    fun encode(maxBytes: Int = Int.MAX_VALUE): String {
+        require(maxBytes >= 2)
+        val encoded = StringBuilder("[")
+        var bytes = 2
+        for (item in items) {
+            val value = encodeItem(item)
+            val extra = value.toByteArray(Charsets.UTF_8).size + if (encoded.length > 1) 1 else 0
+            if (extra > maxBytes - bytes) continue
+            if (encoded.length > 1) encoded.append(',')
+            encoded.append(value)
+            bytes += extra
+        }
+        return encoded.append(']').toString()
+    }
+
+    private fun encodeItem(item: StoredClipboardItem): String = JSONObject().apply {
+        put("key", item.key)
+        put("timestamp", item.timestamp)
+        put("pinned", item.pinned)
+        if (item.text != item.key) put("text", item.text)
+        put("fileName", item.fileName)
+        put("mime", item.mime)
+        put("name", item.name)
+        put("size", item.size)
+        put("width", item.width)
+        put("height", item.height)
+    }.toString()
+
+    fun restore(encoded: String) {
+        val restored = runCatching {
+            val array = JSONArray(encoded)
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val key = item.opt("key") as? String ?: return@mapNotNull null
+                val fileName = item.opt("fileName") as? String
+                StoredClipboardItem(
+                    key = key,
+                    timestamp = item.optLong("timestamp", 0L).coerceAtLeast(0L),
+                    pinned = item.optBoolean("pinned", false),
+                    text = item.opt("text") as? String ?: key.takeIf { fileName == null },
+                    fileName = fileName,
+                    mime = item.opt("mime") as? String,
+                    name = item.opt("name") as? String,
+                    size = item.optLong("size", 0L).coerceAtLeast(0L),
+                    width = item.optInt("width", 0).coerceAtLeast(0),
+                    height = item.optInt("height", 0).coerceAtLeast(0),
+                ).takeIf { it.isValid() }
+            }
+        }.getOrDefault(emptyList())
+        replace(restored)
+    }
+
+    private fun replace(next: List<StoredClipboardItem>) {
+        val sorted = next.distinctBy { it.isMedia to it.key }.sortedByDescending { it.timestamp }
+        items = sorted.filter { it.pinned } + sorted.filterNot { it.pinned }.take(50)
+    }
+}
+
+internal fun rankEmojiSearch(
+    index: Map<String, List<String>>,
+    query: String,
+    recents: List<String>,
+    limit: Int = 24,
+): List<String> {
+    val count = limit.coerceAtLeast(0)
+    val needle = query.trim().lowercase(Locale.ROOT)
+    if (needle.isEmpty()) return recents.distinct().take(count)
+    val recentOrder = recents.distinct().withIndex().associate { it.value to it.index }
+    return index.mapNotNull { (emoji, keywords) ->
+        val tier = keywords.minOfOrNull { keyword ->
+            val normalized = keyword.lowercase(Locale.ROOT)
+            when {
+                normalized == needle -> 0
+                normalized.startsWith(needle) -> 1
+                needle in normalized -> 2
+                else -> 3
+            }
+        } ?: 3
+        if (tier < 3) emoji to tier else null
+    }.sortedWith(compareBy<Pair<String, Int>> { it.second }.thenBy { recentOrder[it.first] ?: Int.MAX_VALUE })
+        .take(count).map { it.first }
+}
+
+internal fun selectionRangeAroundCursor(
+    before: String,
+    after: String,
+    line: Boolean = false,
+): Pair<Int, Int>? {
+    if (line) {
+        val left = before.length - before.lastIndexOf('\n') - 1
+        val right = after.indexOf('\n').takeIf { it >= 0 } ?: after.length
+        return (-left to right).takeIf { left + right > 0 }
+    }
+    val rightClass = after.takeIf { it.isNotEmpty() }?.codePointAt(0)?.let(::selectionWordClass) ?: 0
+    val leftClass = before.takeIf { it.isNotEmpty() }?.codePointBefore(before.length)?.let(::selectionWordClass) ?: 0
+    val wordClass = if (rightClass != 0) rightClass else leftClass
+    if (wordClass == 0) return null
+    val cap = if (wordClass == 1) 32 else Int.MAX_VALUE
+    var leftUnits = 0
+    var leftCount = 0
+    while (leftUnits < before.length && leftCount < cap) {
+        val codePoint = before.codePointBefore(before.length - leftUnits)
+        if (selectionWordClass(codePoint) != wordClass) break
+        leftUnits += Character.charCount(codePoint)
+        leftCount++
+    }
+    var rightUnits = 0
+    var rightCount = 0
+    while (rightUnits < after.length && rightCount < cap) {
+        val codePoint = after.codePointAt(rightUnits)
+        if (selectionWordClass(codePoint) != wordClass) break
+        rightUnits += Character.charCount(codePoint)
+        rightCount++
+    }
+    if (wordClass == 1 && leftCount + rightCount > cap) {
+        rightCount = minOf(rightCount, maxOf(cap / 2, cap - leftCount))
+        leftCount = minOf(leftCount, cap - rightCount)
+        leftUnits = before.length - before.offsetByCodePoints(before.length, -leftCount)
+        rightUnits = after.offsetByCodePoints(0, rightCount)
+    }
+    return -leftUnits to rightUnits
+}
+
+private fun selectionWordClass(codePoint: Int): Int = when (Character.UnicodeScript.of(codePoint)) {
+    Character.UnicodeScript.HAN,
+    Character.UnicodeScript.HIRAGANA,
+    Character.UnicodeScript.KATAKANA,
+    Character.UnicodeScript.HANGUL,
+    Character.UnicodeScript.BOPOMOFO -> 1
+    Character.UnicodeScript.LATIN -> if (Character.isLetter(codePoint)) 2 else 0
+    else -> if (Character.isDigit(codePoint) || codePoint == '_'.code) 2 else 0
 }
