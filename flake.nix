@@ -74,10 +74,10 @@
       let
         version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
         # Update after each release with scripts/update-nix-release.sh.
-        releaseVersion = "1.2.5-alpha.12";
+        releaseVersion = "1.2.5-alpha.13";
         releaseHashes = {
-          x86_64-linux = "sha256-QxCqry/rTVS2tH0yvX7m03rPUVpFRZdV4WxSNLO2uls=";
-          aarch64-linux = "sha256-XC6oSmI6VayjKbSmjoZewhwJxLiaswr01lwqsO/2Dpo=";
+          x86_64-linux = "sha256-hMEXN4f1pMOI1s0j2iqEtIPCp6sJFLku9grgEhHD09g=";
+          aarch64-linux = "sha256-T+l03/jQaJmSzBMY3VggdlyJ3aT+DLVVfKkltD6qjo0=";
         };
       in
       let
