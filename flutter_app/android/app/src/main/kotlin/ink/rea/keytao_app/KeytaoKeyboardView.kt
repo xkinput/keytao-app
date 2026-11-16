@@ -176,7 +176,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val drawingRect: RectF = rect,
     )
     private data class KeyboardLayoutCache(val signature: String, val keys: List<KeyRect>)
-    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS }
+    private enum class ToolbarIcon { FUNCTION, SELECTION, CLIPBOARD, EMOJI, GLOBE, ONE_HANDED, FLOATING, BACK, EDIT, SETTINGS, ELLIPSIS }
     private enum class PanelItemStyle {
         DEFAULT, SECTION, SCHEMA, OPTION, SLIDER, SWATCHES, EMPTY, MEDIA,
         COLOR_HUE, COLOR_SQUARE, COLOR_PREVIEW,
@@ -533,6 +533,12 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         }
         if (!next.clipboardSuggestionEnabled || config.clipboardSuggestionTimeoutSec != next.clipboardSuggestionTimeoutSec) {
             clearRecentClipboardSuggestion()
+        }
+        if (!next.clipboardHistoryEnabled && pressedToolbar?.id == "clipboard") {
+            longPressHandler.removeCallbacks(toolbarLongPressRunnable)
+            pressedToolbar = null
+            toolbarTouchActive = false
+            toolbarDragActionId = null
         }
         config = next
         if (!toolbarEditMode) {
@@ -3708,6 +3714,13 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             ToolbarIcon.BACK -> drawBackToolbarIcon(canvas, iconRect)
             ToolbarIcon.EDIT -> drawEditToolbarIcon(canvas, iconRect)
             ToolbarIcon.SETTINGS -> drawSettingsToolbarIcon(canvas, iconRect)
+            ToolbarIcon.ELLIPSIS -> {
+                paint.style = Paint.Style.FILL
+                val radius = iconRect.width() * 0.075f
+                for (position in listOf(0.2f, 0.5f, 0.8f)) {
+                    canvas.drawCircle(iconRect.left + iconRect.width() * position, iconRect.centerY(), radius, paint)
+                }
+            }
         }
 
         paint.style = oldStyle
@@ -4922,12 +4935,14 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         val base = baseToolbarActions()
         val byId = base.mapNotNull { action -> action.id?.let { it to action } }.toMap()
         val configuredOrder = toolbarActionOrderOverride ?: configuredToolbarActionOrder
-        val orderedIds = (configuredOrder + base.mapNotNull(ToolbarAction::id)).distinct()
+        val orderedIds = config.visibleToolbarActionIds((configuredOrder + base.mapNotNull(ToolbarAction::id)).distinct())
         val ordered = orderedIds.mapNotNull(byId::get)
         val pinnedCount = (toolbarPinnedCountOverride ?: configuredToolbarPinnedCount).coerceIn(1, ordered.size.coerceAtLeast(1))
         val more = ToolbarAction(
             label = if (toolbarMoreExpanded) "收起" else "更多",
             command = KeyCommand.panel("toolbarMore"),
+            selected = toolbarMoreExpanded,
+            icon = ToolbarIcon.ELLIPSIS,
             longPressCommand = KeyCommand.panel("toolbarEdit"),
             customizable = false,
         )
@@ -4947,7 +4962,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             }
         }
         if (toolbarMoreExpanded) {
-            return ordered + ToolbarAction("编辑", KeyCommand.panel("toolbarEdit"), customizable = false)
+            return ordered + more + ToolbarAction("编辑", KeyCommand.panel("toolbarEdit"), customizable = false)
         }
         return ordered.take(pinnedCount) + more
     }
@@ -5015,9 +5030,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun currentToolbarOrder(): List<String> {
         val available = baseToolbarActions().mapNotNull(ToolbarAction::id)
-        return ((toolbarActionOrderOverride ?: configuredToolbarActionOrder) + available)
-            .distinct()
-            .filter(available::contains)
+        return config.visibleToolbarActionIds(
+            ((toolbarActionOrderOverride ?: configuredToolbarActionOrder) + available).distinct(),
+        ).filter(available::contains)
     }
 
     private fun currentToolbarPinnedCount(): Int {

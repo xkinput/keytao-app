@@ -248,6 +248,25 @@ class KeytaoAndroidImeConfigTest {
     }
 
     @Test
+    fun `toolbar hides clipboard from saved and fallback orders only while history is disabled`() {
+        val config = KeytaoAndroidImeConfig.parse("""{
+          "clipboardHistoryEnabled":false,
+          "toolbarActionOrder":["emoji","clipboard","rime","language"]
+        }""")
+        val expectedOrder = listOf("emoji", "rime", "language")
+        assertEquals(expectedOrder, config.visibleToolbarActionIds(config.toolbarActionOrder))
+        assertEquals(expectedOrder, config.visibleToolbarActionIds(expectedOrder + "clipboard"))
+        assertEquals(
+            KeytaoAndroidImeConfig.defaultSymbolToolbarActionOrder,
+            config.visibleToolbarActionIds(KeytaoAndroidImeConfig.defaultSymbolToolbarActionOrder),
+        )
+        assertEquals(
+            config.toolbarActionOrder,
+            config.copy(clipboardHistoryEnabled = true).visibleToolbarActionIds(config.toolbarActionOrder),
+        )
+    }
+
+    @Test
     fun `unseen toolbar actions enter their default position without reordering known actions`() {
         val saved = listOf("emoji", "rime", "clipboard", "language", "layout")
         val (order, pinned) = KeytaoAndroidImeConfig.mergeToolbarCustomization(saved, 3, saved.toSet())

@@ -10,6 +10,24 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String, line: I
     }
 }
 
+let toolbarIDs = ["rime", "language", "editor", "clipboard", "emoji", "layout"]
+let configuredToolbarIDs = ["clipboard", "emoji", "clipboard", "unknown", "rime"]
+expect(
+    keyTaoToolbarActionOrder(configuredToolbarIDs, available: toolbarIDs, clipboardHistoryEnabled: false),
+    ["emoji", "rime", "language", "editor", "layout"],
+    "disabled clipboard is excluded from toolbar and customization order while remaining items reflow"
+)
+expect(
+    keyTaoToolbarActionOrder(configuredToolbarIDs, available: toolbarIDs, clipboardHistoryEnabled: true),
+    ["clipboard", "emoji", "rime", "language", "editor", "layout"],
+    "re-enabling clipboard restores its configured toolbar position"
+)
+expect(
+    keyTaoToolbarActionOrder([], available: toolbarIDs, clipboardHistoryEnabled: false),
+    ["rime", "language", "editor", "emoji", "layout"],
+    "default toolbar order also excludes disabled clipboard"
+)
+
 let mathSymbols = KeyTaoKeyboardLayer("symbols_math")
 let animalEmoji = KeyTaoKeyboardLayer("symbols_emoji_animal")
 let editorPage = KeyTaoKeyboardLayer("editor")

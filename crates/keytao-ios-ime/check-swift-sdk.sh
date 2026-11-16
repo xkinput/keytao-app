@@ -26,7 +26,7 @@ xcrun --sdk "$SDK" swiftc \
 result=$?
 set -e
 cat "$LOG_FILE"
-if [ "$result" -ne 0 ]; then
+if [[ "$result" -ne 0 ]]; then
     # Public GitHub annotations truncate individual messages at 4096 chars.
     # Publish bounded chunks with the actual error tail first.
     python3 - "$LOG_FILE" <<'PY'

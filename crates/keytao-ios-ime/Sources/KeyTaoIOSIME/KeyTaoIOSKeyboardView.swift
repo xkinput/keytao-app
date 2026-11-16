@@ -74,6 +74,7 @@ private enum KeyTaoToolbarIcon {
     case back
     case edit
     case settings
+    case ellipsis
 }
 
 private enum SettingsPanelLayout {
@@ -457,6 +458,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         if self.config.keyboardHeightScale != config.keyboardHeightScale {
             clearActiveTouches()
             keyRects = []
+        }
+        if self.config.clipboardHistoryEnabled != config.clipboardHistoryEnabled {
+            clearCandidateOrPanelTouchState()
         }
         self.config = config
         scheduleClipboardSuggestionExpiry()
@@ -3500,6 +3504,16 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawEditIcon(in: iconRect)
         case .settings:
             drawSettingsIcon(in: iconRect)
+        case .ellipsis:
+            let diameter = iconRect.width * 0.15
+            for offset in [-0.30, 0.0, 0.30] {
+                UIBezierPath(ovalIn: CGRect(
+                    x: iconRect.midX + iconRect.width * CGFloat(offset) - diameter / 2,
+                    y: iconRect.midY - diameter / 2,
+                    width: diameter,
+                    height: diameter
+                )).fill()
+            }
         }
         context.restoreGState()
     }
@@ -4722,12 +4736,13 @@ final class KeyTaoIOSKeyboardView: UIView {
             let controlsWidth = functionPanelMode == .clipboard
                 ? pasteWidth + 6 + (clipboardItems.isEmpty ? 0 : clearWidth + 6)
                 : (functionPanelMode == .rime ? editWidth + 6 : 0)
-            let showsActiveEntry = !settingsColorPickerOpen
+            let hidesClipboardEntry = functionPanelMode == .clipboard && !config.clipboardHistoryEnabled
+            let showsActiveEntry = !settingsColorPickerOpen && !hidesClipboardEntry
                 && bounds.width >= leftPadding * 2 + backWidth + activeWidth + settingsWidth + controlsWidth + 12
             let activeOffset = showsActiveEntry ? activeWidth + 6 : 0
             var rects = [
                 ToolbarRect(
-                    action: showsActiveEntry || settingsColorPickerOpen ? backAction : activeAction,
+                    action: showsActiveEntry || settingsColorPickerOpen || hidesClipboardEntry ? backAction : activeAction,
                     rect: CGRect(x: leftPadding, y: top, width: backWidth, height: chipHeight)
                 ),
             ]
@@ -5402,15 +5417,13 @@ final class KeyTaoIOSKeyboardView: UIView {
         let byID = Dictionary(uniqueKeysWithValues: base.compactMap { action in
             action.id.map { ($0, action) }
         })
-        let configuredOrder = toolbarActionOrderOverride ?? config.toolbarActionOrder
-        let orderedIDs = (configuredOrder + base.compactMap(\.id)).reduce(into: [String]()) { result, id in
-            if !result.contains(id) { result.append(id) }
-        }
-        let ordered = orderedIDs.compactMap { byID[$0] }
+        let ordered = currentToolbarOrder().compactMap { byID[$0] }
         let pinnedCount = max(1, min(toolbarPinnedCountOverride ?? config.toolbarPinnedCount, max(1, ordered.count)))
         let more = ToolbarAction(
             label: toolbarMoreExpanded ? "收起" : "更多",
             command: .panel("toolbarMore"),
+            selected: toolbarMoreExpanded,
+            icon: .ellipsis,
             longPressCommand: .panel("toolbarEdit")
         )
         if toolbarEditMode {
@@ -5427,7 +5440,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             return actions
         }
         if toolbarMoreExpanded {
-            return ordered + [ToolbarAction(label: "编辑", command: .panel("toolbarEdit"))]
+            return ordered + [more, ToolbarAction(label: "编辑", command: .panel("toolbarEdit"))]
         }
         return Array(ordered.prefix(pinnedCount)) + [more]
     }
@@ -5474,11 +5487,11 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func currentToolbarOrder() -> [String] {
         let available = baseToolbarActions().compactMap(\.id)
-        return ((toolbarActionOrderOverride ?? config.toolbarActionOrder) + available).reduce(into: []) { result, id in
-            if available.contains(id), !result.contains(id) {
-                result.append(id)
-            }
-        }
+        return keyTaoToolbarActionOrder(
+            toolbarActionOrderOverride ?? config.toolbarActionOrder,
+            available: available,
+            clipboardHistoryEnabled: config.clipboardHistoryEnabled
+        )
     }
 
     private func currentToolbarPinnedCount() -> Int {

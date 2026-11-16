@@ -106,6 +106,14 @@ struct KeyTaoKeyboardNavigation {
     }
 }
 
+func keyTaoToolbarActionOrder(_ configuredOrder: [String], available: [String], clipboardHistoryEnabled: Bool) -> [String] {
+    (configuredOrder + available).reduce(into: []) { result, id in
+        if available.contains(id), clipboardHistoryEnabled || id != "clipboard", !result.contains(id) {
+            result.append(id)
+        }
+    }
+}
+
 struct KeyTaoClipboardRecord: Codable, Equatable {
     let key: String
     var text: String? = nil

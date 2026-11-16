@@ -167,6 +167,10 @@ data class KeytaoAndroidImeConfig(
     val keyboardHeightScaleFactor: Float
         get() = keyboardHeightScale / 100f
 
+    fun visibleToolbarActionIds(actionIds: List<String>): List<String> {
+        return actionIds.filter { clipboardHistoryEnabled || it != "clipboard" }
+    }
+
     fun emojiSearchHeightDp(): Float {
         val rowCount = rows.size + 2 + if (numberRowEnabled && rows.isNotEmpty()) 1 else 0
         return maxOf(effectiveKeyboardHeightDp, rowCount * 36f + (rowCount + 1) * verticalGapDp)
