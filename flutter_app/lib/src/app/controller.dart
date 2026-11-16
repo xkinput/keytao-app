@@ -1819,6 +1819,7 @@ class AppController extends ChangeNotifier {
           'font_size': ui.fontSize,
           'embedded_composition': ui.embeddedComposition,
           'hide_candidate_panel': ui.hideCandidatePanel,
+          if (isWindows) 'show_tray_mode_indicator': ui.showTrayModeIndicator,
         },
       'desktop_english_mode': desktopEnglishMode.name,
     };
@@ -2108,6 +2109,9 @@ class AppController extends ChangeNotifier {
       }
       if (ui['hide_candidate_panel'] case final bool value) {
         uiSettings = await core.setImeHideCandidatePanel(hide_: value);
+      }
+      if (ui['show_tray_mode_indicator'] case final bool value when isWindows) {
+        uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
       }
     }
     if (settings['desktop_english_mode'] case final String mode
@@ -2681,6 +2685,10 @@ class AppController extends ChangeNotifier {
   });
   Future<bool> saveHideCandidatePanel(bool value) => run(() async {
     uiSettings = await core.setImeHideCandidatePanel(hide_: value);
+    await _persistSchemeSettings();
+  });
+  Future<bool> saveShowTrayModeIndicator(bool value) => run(() async {
+    uiSettings = await core.setImeShowTrayModeIndicator(show_: value);
     await _persistSchemeSettings();
   });
   Future<bool> saveDesktopEnglish(EnglishModeDto value) => run(() async {

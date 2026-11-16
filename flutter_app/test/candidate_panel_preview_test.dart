@@ -36,6 +36,7 @@ class _PreviewController extends ViewController {
       orientation: orientation ?? current.orientation,
       embeddedComposition: current.embeddedComposition,
       hideCandidatePanel: current.hideCandidatePanel,
+      showTrayModeIndicator: current.showTrayModeIndicator,
       effectiveEmbeddedComposition: current.effectiveEmbeddedComposition,
       accentColor: accentColor ?? current.accentColor,
       fontSize: fontSize ?? current.fontSize,

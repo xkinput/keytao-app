@@ -60,6 +60,7 @@ pub struct ImeUiSettings {
     pub orientation: keytao_theme::PanelOrientation,
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
+    pub show_tray_mode_indicator: bool,
     pub effective_embedded_composition: bool,
     pub accent_color: String,
     pub font_size: f32,
@@ -97,6 +98,7 @@ fn ime_ui_settings_from_paths(
         orientation: theme.panel.orientation,
         embedded_composition: theme.ui.embedded_composition,
         hide_candidate_panel: theme.ui.hide_candidate_panel,
+        show_tray_mode_indicator: theme.ui.show_tray_mode_indicator,
         effective_embedded_composition: theme.ui.effective_embedded_composition(),
         accent_color: color_to_hex(accent_color),
         font_size: theme.font.size,
@@ -968,6 +970,24 @@ pub fn set_ime_hide_candidate_panel(hide: bool) -> Result<ImeUiSettings, CoreErr
         let reload_message = match write_keytao_ime_reload_stamp() {
             Ok(()) => "已保存无候选框模式设置并通知系统输入法重载".to_string(),
             Err(e) => format!("已保存无候选框模式设置，但系统输入法重载通知失败：{e}"),
+        };
+        ime_ui_settings_with_message(reload_message)
+    })();
+    result.map_err(CoreError::Other)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettings, CoreError> {
+    let result: Result<_, String> = (|| {
+        write_ime_ui_flag_to_path(
+            ime_theme_path()?,
+            "showTrayModeIndicator",
+            "show_tray_mode_indicator",
+            show,
+        )?;
+        let reload_message = match write_keytao_ime_reload_stamp() {
+            Ok(()) => "已保存输入法 UI 配置并通知系统输入法重载".to_string(),
+            Err(e) => format!("已保存输入法 UI 配置，但系统输入法重载通知失败：{e}"),
         };
         ime_ui_settings_with_message(reload_message)
     })();

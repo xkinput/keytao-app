@@ -13,7 +13,8 @@ use windows::{
                 ITfSource_Impl, ITfThreadMgr, TfLBIClick,
                 GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, TF_CONVERSIONMODE_NATIVE,
                 TF_LANGBARITEMINFO, TF_LBI_CLK_LEFT, TF_LBI_CLK_RIGHT, TF_LBI_ICON, TF_LBI_STATUS,
-                TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY, TF_LBI_TEXT, TF_LBI_TOOLTIP,
+                TF_LBI_STATUS_HIDDEN, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY,
+                TF_LBI_TEXT, TF_LBI_TOOLTIP,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, DestroyWindow,
@@ -48,6 +49,7 @@ const MODE_MENU_ITEMS: [(u32, &str); 2] =
 struct LanguageBarModel {
     // The icon must already reflect the current mode when AddItem queries it.
     english_mode: Option<bool>,
+    hidden: bool,
     sink: Option<ITfLangBarItemSink>,
     notification_pending: bool,
     notifying: bool,
@@ -290,12 +292,17 @@ impl ITfLangBarItem_Impl for LanguageBarButton_Impl {
     }
 
     fn GetStatus(&self) -> Result<u32> {
-        guard(|| Ok(0))
+        guard(|| {
+            Ok(if self.model.borrow().hidden {
+                TF_LBI_STATUS_HIDDEN
+            } else {
+                0
+            })
+        })
     }
 
     fn Show(&self, _show: BOOL) -> Result<()> {
-        // Without HIDDENSTATUSCONTROL, TSF owns visibility. Like SampleIME,
-        // do not retain a temporary Show(false) as the item's own hidden state.
+        // Keep the user's visibility setting independent of temporary TSF Show calls.
         // There is no model change to notify (and OnUpdate can call Show again).
         guard(|| Ok(()))
     }
@@ -425,11 +432,13 @@ impl LanguageBarItem {
         client_id: u32,
         state: WeakState,
         english_mode: bool,
+        show_tray_mode_indicator: bool,
     ) -> Result<Self> {
         let manager: ITfLangBarItemMgr = thread_mgr.cast()?;
         let model = Rc::new(RefCell::new(LanguageBarModel {
             // AddItem can query the icon before it returns.
             english_mode: Some(english_mode),
+            hidden: !show_tray_mode_indicator,
             sink: None,
             notification_pending: true,
             ..Default::default()
@@ -453,21 +462,29 @@ impl LanguageBarItem {
         })
     }
 
-    pub(crate) fn update_mode(&self, english_mode: bool) {
-        let changed = {
+    pub(crate) fn update_mode(&self, english_mode: bool, show_tray_mode_indicator: bool) {
+        let (changed, visibility_changed) = {
             let mut model = self.model.borrow_mut();
-            update_cached_mode(&mut model.english_mode, english_mode)
+            (
+                update_cached_mode(&mut model.english_mode, english_mode),
+                std::mem::replace(&mut model.hidden, !show_tray_mode_indicator)
+                    != !show_tray_mode_indicator,
+            )
         };
         if changed {
             self.update_input_mode_compartment(english_mode);
         }
-        if changed || self.model.borrow().notification_pending {
+        if changed || visibility_changed || self.model.borrow().notification_pending {
             notify_model(&self.model);
         }
     }
 
-    pub(crate) fn refresh_mode(&self, english_mode: bool) {
-        update_cached_mode(&mut self.model.borrow_mut().english_mode, english_mode);
+    pub(crate) fn refresh_mode(&self, english_mode: bool, show_tray_mode_indicator: bool) {
+        {
+            let mut model = self.model.borrow_mut();
+            update_cached_mode(&mut model.english_mode, english_mode);
+            model.hidden = !show_tray_mode_indicator;
+        }
         // A focus change or a delayed sink attachment needs a fresh snapshot
         // even when Rime stayed in the same Chinese/English mode.
         self.update_input_mode_compartment(english_mode);
@@ -635,6 +652,28 @@ mod tests {
             );
             source.UnadviseSink(cookie).unwrap();
         }
+    }
+
+    #[test]
+    fn hidden_setting_reports_status_and_notifies_the_sink() {
+        let (model, button) = button();
+        let item: ITfLangBarItem = button.cast().unwrap();
+        let source: ITfSource = button.cast().unwrap();
+        let observations = Rc::new(RefCell::new(Vec::new()));
+        let cookie = advise_recording_sink(&source, &model, &observations, false);
+        for hidden in [true, false] {
+            model.borrow_mut().hidden = hidden;
+            notify_model(&model);
+            unsafe {
+                item.Show(BOOL::from(true)).unwrap();
+                assert_eq!(
+                    item.GetStatus().unwrap(),
+                    if hidden { TF_LBI_STATUS_HIDDEN } else { 0 }
+                );
+            }
+            assert_ne!(observations.borrow().last().unwrap().0 & TF_LBI_STATUS, 0);
+        }
+        unsafe { source.UnadviseSink(cookie).unwrap() };
     }
 
     #[test]

@@ -12,6 +12,7 @@ ui:
   colorScheme: auto
   embeddedComposition: false
   hideCandidatePanel: false
+  showTrayModeIndicator: true
 
 font:
   family: ""

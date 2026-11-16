@@ -1247,6 +1247,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
         }
     }
     let _refresh_guard = RefreshGuard(Rc::clone(shared_state));
+    let show_tray_mode_indicator = with_current_theme(|theme| theme.ui.show_tray_mode_indicator);
     let language_bar = match existing {
         Some(item) => item,
         None => {
@@ -1258,6 +1259,7 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
                 client_id,
                 Rc::downgrade(shared_state),
                 english_mode,
+                show_tray_mode_indicator,
             ) {
                 Ok(item) => item,
                 Err(error) => {
@@ -1299,13 +1301,16 @@ pub(crate) fn refresh_language_bar(shared_state: &SharedState) {
         }
     };
     let english_mode = shared_state.borrow().english_mode;
-    language_bar.refresh_mode(english_mode);
+    language_bar.refresh_mode(english_mode, show_tray_mode_indicator);
 }
 
 pub(crate) fn update_language_bar_mode(shared_state: &SharedState, english_mode: bool) {
     let language_bar = shared_state.borrow().language_bar.clone();
     if let Some(language_bar) = language_bar {
-        language_bar.update_mode(english_mode);
+        language_bar.update_mode(
+            english_mode,
+            with_current_theme(|theme| theme.ui.show_tray_mode_indicator),
+        );
     }
 }
 

@@ -413,6 +413,12 @@ class _SettingsCardState extends State<SettingsCard> {
             onChanged: c.busy ? null : c.saveDesktopEnglish,
           ),
           _candidatePageSize(),
+          if (c.isWindows)
+            SwitchSetting(
+              '托盘显示中英状态',
+              value: s.showTrayModeIndicator,
+              onChanged: c.busy ? null : c.saveShowTrayModeIndicator,
+            ),
           if (c.showsEmbeddedComposition)
             SwitchSetting(
               AppStrings.embedded,

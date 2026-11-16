@@ -1030,6 +1030,22 @@ pub fn set_ime_hide_candidate_panel(hide: bool) -> Result<ImeUiSettingsDto, Stri
     }
 }
 
+pub fn set_ime_show_tray_mode_indicator(show: bool) -> Result<ImeUiSettingsDto, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        runtime::state()?.host.require_default_theme_root()?;
+        runtime::dto(
+            keytao_app_core::ime_settings::set_ime_show_tray_mode_indicator(show)
+                .map_err(|error| error.to_string())?,
+        )
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = show;
+        Err("Tray mode indicator settings are desktop only".into())
+    }
+}
+
 pub fn get_desktop_english_mode() -> Result<EnglishModeDto, String> {
     runtime::dto(
         keytao_app_core::ime_settings::get_desktop_english_mode(runtime::state()?.host.clone())

@@ -271,18 +271,20 @@ pub struct UiTheme {
     pub accent_color: Option<RgbaColor>,
     pub embedded_composition: bool,
     pub hide_candidate_panel: bool,
+    pub show_tray_mode_indicator: bool,
 }
 
 impl Serialize for UiTheme {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("UiTheme", 6)?;
+        let mut state = serializer.serialize_struct("UiTheme", 7)?;
         state.serialize_field("colorScheme", &self.color_scheme)?;
         state.serialize_field("effectiveColorScheme", &self.effective_color_scheme)?;
         state.serialize_field("accentColor", &self.accent_color)?;
         state.serialize_field("embeddedComposition", &self.embedded_composition)?;
         state.serialize_field("hideCandidatePanel", &self.hide_candidate_panel)?;
+        state.serialize_field("showTrayModeIndicator", &self.show_tray_mode_indicator)?;
         state.serialize_field(
             "effectiveEmbeddedComposition",
             &self.effective_embedded_composition(),
@@ -1017,6 +1019,7 @@ impl Default for UiTheme {
             accent_color: None,
             embedded_composition: false,
             hide_candidate_panel: false,
+            show_tray_mode_indicator: true,
         }
     }
 }
@@ -1061,6 +1064,8 @@ struct PartialUiTheme {
     embedded_composition: Option<bool>,
     #[serde(alias = "hide_candidate_panel")]
     hide_candidate_panel: Option<bool>,
+    #[serde(alias = "show_tray_mode_indicator")]
+    show_tray_mode_indicator: Option<bool>,
     #[serde(alias = "night_mode")]
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "optional_color")]
@@ -1197,6 +1202,9 @@ impl UiTheme {
         }
         if let Some(hide_candidate_panel) = partial.hide_candidate_panel {
             self.hide_candidate_panel = hide_candidate_panel;
+        }
+        if let Some(show_tray_mode_indicator) = partial.show_tray_mode_indicator {
+            self.show_tray_mode_indicator = show_tray_mode_indicator;
         }
     }
 }
@@ -1564,7 +1572,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "panel:\n  orientation: vertical\nfont:\n  size: 27\ncandidate:\n  labelSuffix: ')'\n",
+            "ui:\n  showTrayModeIndicator: false\npanel:\n  orientation: vertical\nfont:\n  size: 27\ncandidate:\n  labelSuffix: ')'\n",
         )
         .unwrap();
 
@@ -1574,6 +1582,7 @@ mod tests {
         fs::remove_file(path).ok();
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Dark);
         assert_eq!(theme.ui.accent_color, Some(rgba(0x12, 0x34, 0x56, 0xff)));
+        assert!(!theme.ui.show_tray_mode_indicator);
         assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
         assert_eq!(theme.font.size, 27.0);
         assert_eq!(theme.candidate.label_suffix, ")");
@@ -1630,6 +1639,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
+        fs::write(&path, "ui:\n  showTrayModeIndicator: false\n").unwrap();
 
         write_ime_ui_settings_to_path(
             &path,
@@ -1641,6 +1651,7 @@ mod tests {
         .unwrap();
         let theme = resolve_theme_from_paths(None, Some(&path));
         assert_eq!(theme.font.size, MAX_CANDIDATE_FONT_SIZE);
+        assert!(!theme.ui.show_tray_mode_indicator);
         assert!(write_ime_ui_settings_to_path(
             &path,
             UiColorScheme::Auto,
@@ -1659,6 +1670,7 @@ mod tests {
         assert_eq!(theme.ui.color_scheme, UiColorScheme::Auto);
         assert!(!theme.ui.embedded_composition);
         assert!(!theme.ui.hide_candidate_panel);
+        assert!(theme.ui.show_tray_mode_indicator);
         assert!(!theme.ui.effective_embedded_composition());
         assert_eq!(theme.panel.orientation, PanelOrientation::Vertical);
         assert_eq!(theme.panel.min_width, 128.0);
@@ -1670,6 +1682,34 @@ mod tests {
         );
         assert_eq!(theme.mode_hint.width, 72.0);
         assert_eq!(theme.mode_hint.height, 44.0);
+    }
+
+    #[test]
+    fn tray_mode_indicator_defaults_to_visible_when_omitted() {
+        let mut ui = UiTheme::default();
+        assert!(ui.show_tray_mode_indicator);
+        ui.apply(serde_yaml::from_str::<PartialUiTheme>("colorScheme: dark\n").unwrap());
+        assert!(ui.show_tray_mode_indicator);
+    }
+
+    #[test]
+    fn tray_mode_indicator_round_trips_and_preserves_explicit_false() {
+        for key in ["showTrayModeIndicator", "show_tray_mode_indicator"] {
+            for visible in [true, false] {
+                let mut ui = UiTheme::default();
+                ui.apply(
+                    serde_yaml::from_str::<PartialUiTheme>(&format!("{key}: {visible}\n")).unwrap(),
+                );
+                ui.apply(PartialUiTheme::default());
+                assert_eq!(ui.show_tray_mode_indicator, visible);
+                let serialized = serde_json::to_value(&ui).unwrap();
+                assert_eq!(serialized["showTrayModeIndicator"], visible);
+                assert!(serialized.get("show_tray_mode_indicator").is_none());
+                let mut restored = UiTheme::default();
+                restored.apply(serde_json::from_value(serialized).unwrap());
+                assert_eq!(restored.show_tray_mode_indicator, visible);
+            }
+        }
     }
 
     #[test]

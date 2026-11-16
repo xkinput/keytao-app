@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 392378909;
+  int get rustContentHash => -1124733816;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -318,6 +318,10 @@ abstract class RustLibApi extends BaseApi {
 
   Future<ImeUiSettingsDto> crateApiCoreSetImeHideCandidatePanel({
     required bool hide_,
+  });
+
+  Future<ImeUiSettingsDto> crateApiCoreSetImeShowTrayModeIndicator({
+    required bool show_,
   });
 
   Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
@@ -2767,6 +2771,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<ImeUiSettingsDto> crateApiCoreSetImeShowTrayModeIndicator({
+    required bool show_,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(show_, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 78,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_ime_ui_settings_dto,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCoreSetImeShowTrayModeIndicatorConstMeta,
+        argValues: [show_],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCoreSetImeShowTrayModeIndicatorConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_ime_show_tray_mode_indicator",
+        argNames: ["show_"],
+      );
+
+  @override
   Future<ImeUiSettingsDto> crateApiCoreSetImeUiSettings({
     required UiColorSchemeDto colorScheme,
     required PanelOrientationDto orientation,
@@ -2784,7 +2821,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 79,
             port: port_,
           );
         },
@@ -2819,7 +2856,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 80,
             port: port_,
           );
         },
@@ -2856,7 +2893,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 81,
             port: port_,
           );
         },
@@ -2895,7 +2932,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 82,
             port: port_,
           );
         },
@@ -2934,7 +2971,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 82,
+            funcId: 83,
             port: port_,
           );
         },
@@ -2967,7 +3004,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 84,
             port: port_,
           );
         },
@@ -3012,7 +3049,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 84,
+            funcId: 85,
             port: port_,
           );
         },
@@ -3062,7 +3099,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 85,
+            funcId: 86,
             port: port_,
           );
         },
@@ -3092,7 +3129,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 86,
+            funcId: 87,
             port: port_,
           );
         },
@@ -3119,7 +3156,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 87,
+            funcId: 88,
             port: port_,
           );
         },
@@ -3147,7 +3184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 88,
+            funcId: 89,
             port: port_,
           );
         },
@@ -3177,7 +3214,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 89,
+            funcId: 90,
             port: port_,
           );
         },
@@ -3207,7 +3244,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 90,
+            funcId: 91,
             port: port_,
           );
         },
@@ -3234,7 +3271,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 91,
+            funcId: 92,
             port: port_,
           );
         },
@@ -3264,7 +3301,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 92,
+            funcId: 93,
             port: port_,
           );
         },
@@ -3297,7 +3334,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 93,
+            funcId: 94,
             port: port_,
           );
         },
@@ -3796,22 +3833,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ImeUiSettingsDto dco_decode_ime_ui_settings_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return ImeUiSettingsDto(
       colorScheme: dco_decode_ui_color_scheme_dto(arr[0]),
       effectiveColorScheme: dco_decode_effective_color_scheme_dto(arr[1]),
       orientation: dco_decode_panel_orientation_dto(arr[2]),
       embeddedComposition: dco_decode_bool(arr[3]),
       hideCandidatePanel: dco_decode_bool(arr[4]),
-      effectiveEmbeddedComposition: dco_decode_bool(arr[5]),
-      accentColor: dco_decode_String(arr[6]),
-      fontSize: dco_decode_f_32(arr[7]),
-      themePath: dco_decode_opt_String(arr[8]),
-      themeExists: dco_decode_bool(arr[9]),
-      reloadStampPath: dco_decode_opt_String(arr[10]),
-      reloadStampSignature: dco_decode_opt_String(arr[11]),
-      message: dco_decode_String(arr[12]),
+      showTrayModeIndicator: dco_decode_bool(arr[5]),
+      effectiveEmbeddedComposition: dco_decode_bool(arr[6]),
+      accentColor: dco_decode_String(arr[7]),
+      fontSize: dco_decode_f_32(arr[8]),
+      themePath: dco_decode_opt_String(arr[9]),
+      themeExists: dco_decode_bool(arr[10]),
+      reloadStampPath: dco_decode_opt_String(arr[11]),
+      reloadStampSignature: dco_decode_opt_String(arr[12]),
+      message: dco_decode_String(arr[13]),
     );
   }
 
@@ -4860,6 +4898,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_orientation = sse_decode_panel_orientation_dto(deserializer);
     var var_embeddedComposition = sse_decode_bool(deserializer);
     var var_hideCandidatePanel = sse_decode_bool(deserializer);
+    var var_showTrayModeIndicator = sse_decode_bool(deserializer);
     var var_effectiveEmbeddedComposition = sse_decode_bool(deserializer);
     var var_accentColor = sse_decode_String(deserializer);
     var var_fontSize = sse_decode_f_32(deserializer);
@@ -4874,6 +4913,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       orientation: var_orientation,
       embeddedComposition: var_embeddedComposition,
       hideCandidatePanel: var_hideCandidatePanel,
+      showTrayModeIndicator: var_showTrayModeIndicator,
       effectiveEmbeddedComposition: var_effectiveEmbeddedComposition,
       accentColor: var_accentColor,
       fontSize: var_fontSize,
@@ -6105,6 +6145,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_panel_orientation_dto(self.orientation, serializer);
     sse_encode_bool(self.embeddedComposition, serializer);
     sse_encode_bool(self.hideCandidatePanel, serializer);
+    sse_encode_bool(self.showTrayModeIndicator, serializer);
     sse_encode_bool(self.effectiveEmbeddedComposition, serializer);
     sse_encode_String(self.accentColor, serializer);
     sse_encode_f_32(self.fontSize, serializer);

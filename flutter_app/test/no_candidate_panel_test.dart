@@ -48,6 +48,7 @@ class _PanelController extends ViewController {
       orientation: orientation ?? current.orientation,
       embeddedComposition: current.embeddedComposition,
       hideCandidatePanel: hide,
+      showTrayModeIndicator: current.showTrayModeIndicator,
       effectiveEmbeddedComposition: hide || current.embeddedComposition,
       accentColor: current.accentColor,
       fontSize: current.fontSize,

@@ -171,6 +171,7 @@ class FakeCore implements RustLibApi {
         orientation: PanelOrientationDto.horizontal,
         embeddedComposition: false,
         hideCandidatePanel: false,
+        showTrayModeIndicator: true,
         effectiveEmbeddedComposition: false,
         accentColor: '#3B73D9',
         fontSize: 20,

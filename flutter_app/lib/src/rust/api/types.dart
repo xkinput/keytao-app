@@ -516,6 +516,7 @@ class ImeUiSettingsDto {
   final PanelOrientationDto orientation;
   final bool embeddedComposition;
   final bool hideCandidatePanel;
+  final bool showTrayModeIndicator;
   final bool effectiveEmbeddedComposition;
   final String accentColor;
   final double fontSize;
@@ -531,6 +532,7 @@ class ImeUiSettingsDto {
     required this.orientation,
     required this.embeddedComposition,
     required this.hideCandidatePanel,
+    required this.showTrayModeIndicator,
     required this.effectiveEmbeddedComposition,
     required this.accentColor,
     required this.fontSize,
@@ -548,6 +550,7 @@ class ImeUiSettingsDto {
       orientation.hashCode ^
       embeddedComposition.hashCode ^
       hideCandidatePanel.hashCode ^
+      showTrayModeIndicator.hashCode ^
       effectiveEmbeddedComposition.hashCode ^
       accentColor.hashCode ^
       fontSize.hashCode ^
@@ -567,6 +570,7 @@ class ImeUiSettingsDto {
           orientation == other.orientation &&
           embeddedComposition == other.embeddedComposition &&
           hideCandidatePanel == other.hideCandidatePanel &&
+          showTrayModeIndicator == other.showTrayModeIndicator &&
           effectiveEmbeddedComposition == other.effectiveEmbeddedComposition &&
           accentColor == other.accentColor &&
           fontSize == other.fontSize &&
