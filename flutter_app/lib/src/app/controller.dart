@@ -481,7 +481,7 @@ class AppController extends ChangeNotifier {
       ? Uri.tryParse(downloadUrl ?? '')?.pathSegments.lastOrNull ?? ''
       : schemeRelease?.assetName ?? schemeAssets[scheme] ?? '';
   String get schemeSelectionText =>
-      '${AppStrings.selection}${schemes[schemeFamily] ?? scheme}'
+      '${AppStrings.selection} ${schemes[schemeFamily] ?? scheme}'
       '${releaseVersion == null ? '' : ' $releaseVersion'} · $selectedSchemeAsset';
   Map<String, String> get sourceVersions => {
     if (latestRelease?.github case final release?) 'github': release.version,

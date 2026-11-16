@@ -9,6 +9,7 @@ import 'extension_page.dart';
 import 'input_page.dart';
 import 'login.dart';
 import 'scheme_page.dart';
+import 'theme.dart';
 import 'widgets.dart';
 
 extension PageIcon on AppPage {
@@ -21,14 +22,14 @@ extension PageIcon on AppPage {
   };
 }
 
-Widget _navigationIcon(AppPage page, AppController controller) =>
+Widget _navigationIcon(AppPage page, AppController controller, double size) =>
     page == AppPage.scheme && controller.hasSchemeUpdates
     ? Semantics(
         label: AppStrings.checkUpdate,
         child: Stack(
           clipBehavior: Clip.none,
           children: [
-            Icon(page.icon),
+            Icon(page.icon, size: size),
             Positioned(
               top: -2,
               right: -3,
@@ -47,7 +48,7 @@ Widget _navigationIcon(AppPage page, AppController controller) =>
           ],
         ),
       )
-    : Icon(page.icon);
+    : Icon(page.icon, size: size);
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.controller});
@@ -133,6 +134,13 @@ class _AppShellState extends State<AppShell> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
+      final accent = Color(
+        0xFF000000 |
+            int.parse(
+              (c.uiSettings?.accentColor ?? '#3B73D9').substring(1),
+              radix: 16,
+            ),
+      );
       void select(int index) {
         if (index == c.activePage.index) return;
         FocusScope.of(context).unfocus();
@@ -142,6 +150,12 @@ class _AppShellState extends State<AppShell> {
       final shell = LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 720;
+          final touch = context.platformVariant.touch;
+          final iconSize = touch ? 18.0 : 16.0;
+          final display = context.theme.typography.display;
+          final titleStyle = (touch ? display.xl2 : display.xl).copyWith(
+            fontWeight: FontWeight.w500,
+          );
           final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final availableHeight = constraints.maxHeight - keyboardInset;
           return FScaffold(
@@ -154,16 +168,16 @@ class _AppShellState extends State<AppShell> {
             sidebar: wide
                 ? FSidebar(
                     style: const FSidebarStyleDelta.delta(
-                      constraints: BoxConstraints.tightFor(width: 210),
+                      constraints: BoxConstraints.tightFor(width: 216),
                       headerPadding: EdgeInsetsGeometryDelta.value(
                         EdgeInsets.zero,
                       ),
                       contentPadding: EdgeInsetsGeometryDelta.value(
-                        EdgeInsets.symmetric(horizontal: 10),
+                        EdgeInsets.symmetric(horizontal: 8),
                       ),
                     ),
                     header: Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 24, 12, 28),
+                      padding: const EdgeInsets.fromLTRB(16, 24, 12, 24),
                       child: AppBrand(
                         version: c.info.appVersion,
                         compact: true,
@@ -171,12 +185,38 @@ class _AppShellState extends State<AppShell> {
                     ),
                     children: [
                       for (final page in AppPage.values)
-                        FSidebarItem(
-                          key: ValueKey('nav-${page.id}'),
-                          icon: _navigationIcon(page, c),
-                          label: Text(page.title),
-                          selected: c.activePage == page,
-                          onPress: () => select(page.index),
+                        AnimatedContainer(
+                          duration: MediaQuery.disableAnimationsOf(context)
+                              ? Duration.zero
+                              : const Duration(milliseconds: 150),
+                          curve: Curves.easeOutCubic,
+                          decoration: BoxDecoration(
+                            color: c.activePage == page
+                                ? accent.withValues(alpha: .12)
+                                : const Color(0x00000000),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          foregroundDecoration: BoxDecoration(
+                            border: Border.all(
+                              color: c.activePage == page
+                                  ? accent
+                                  : const Color(0x00000000),
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: FSidebarItem(
+                            key: ValueKey('nav-${page.id}'),
+                            style: FSidebarItemStyleDelta.delta(
+                              backgroundColor: c.activePage == page
+                                  ? const FVariants.all(Color(0x00000000))
+                                  : null,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            icon: _navigationIcon(page, c, iconSize),
+                            label: Text(page.title),
+                            selected: c.activePage == page,
+                            onPress: () => select(page.index),
+                          ),
                         ),
                     ],
                   )
@@ -186,28 +226,39 @@ class _AppShellState extends State<AppShell> {
                 : SafeArea(
                     bottom: false,
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              c.activePage.title,
-                              style: context.theme.typography.display.xl2
-                                  .copyWith(fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          FTooltip(
-                            tipBuilder: (_, _) => const Text('账号'),
-                            child: FButton.icon(
-                              variant: FButtonVariant.ghost,
-                              onPress: () => showAccountDialog(context, c),
-                              child: const Icon(
-                                FLucideIcons.user,
-                                semanticLabel: '账号',
+                      padding: EdgeInsets.fromLTRB(
+                        touch ? 16 : 32,
+                        20,
+                        touch ? 16 : 32,
+                        12,
+                      ),
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 760),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  c.activePage.title,
+                                  style: titleStyle,
+                                ),
                               ),
-                            ),
+                              FTooltip(
+                                tipBuilder: (_, _) => const Text('账号'),
+                                child: FButton.icon(
+                                  variant: FButtonVariant.ghost,
+                                  onPress: () => showAccountDialog(context, c),
+                                  child: Icon(
+                                    FLucideIcons.user,
+                                    size: iconSize,
+                                    semanticLabel: '账号',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -222,7 +273,7 @@ class _AppShellState extends State<AppShell> {
                         for (final page in AppPage.values)
                           FBottomNavigationBarItem(
                             key: ValueKey('nav-${page.id}'),
-                            icon: _navigationIcon(page, c),
+                            icon: _navigationIcon(page, c, iconSize),
                             label: Text(page.title),
                           ),
                       ],
@@ -241,7 +292,10 @@ class _AppShellState extends State<AppShell> {
           );
         },
       );
-      return c.isAndroid ? AppSystemBars(child: shell) : shell;
+      return ChromeAccent(
+        color: accent,
+        child: c.isAndroid ? AppSystemBars(child: shell) : shell,
+      );
     },
   );
 }

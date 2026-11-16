@@ -1032,7 +1032,7 @@ void main() {
       );
       await settle();
       expect(controller.deploySteps.map((step) => step.message), [
-        '正在部署 librime...',
+        '正在部署 librime…',
         'compile',
         'reload',
       ]);

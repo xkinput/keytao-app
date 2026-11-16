@@ -243,8 +243,6 @@ class CandidatePanelPreview extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('候选窗预览'),
-        const SizedBox(height: 10),
         RepaintBoundary(
           key: const ValueKey('candidate-preview-image'),
           child: LayoutBuilder(
