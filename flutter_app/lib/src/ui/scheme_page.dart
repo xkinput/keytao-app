@@ -465,6 +465,17 @@ class SchemePackageRow extends StatelessWidget {
                                   showChangelog(context, c, changelogBody);
                                 },
                         ),
+                      if (schemeRepositoryUrls[schemeKey] case final url?)
+                        FItem(
+                          title: const Text('仓库地址'),
+                          prefix: const Icon(FLucideIcons.externalLink),
+                          onPress: c.busy
+                              ? null
+                              : () {
+                                  popover.hide();
+                                  c.open(url);
+                                },
+                        ),
                       if (package != null) ...[
                         if (package.supportsUserWords)
                           FItem(
