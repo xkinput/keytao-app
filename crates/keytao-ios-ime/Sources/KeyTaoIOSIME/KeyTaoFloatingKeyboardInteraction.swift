@@ -39,6 +39,18 @@ final class KeyTaoIOSKeyboardLayoutStateStore {
         let enabledKey = "\(prefix)_enabled"
         let scaleKey = "\(prefix)_scale"
         let heightScaleKey = "\(prefix)_height_scale"
+        let appEnabledKey = "\(prefix)_app_enabled"
+        let appScaleKey = "\(prefix)_app_scale"
+        if defaults.object(forKey: appEnabledKey) != nil,
+           defaults.object(forKey: appScaleKey) != nil,
+           defaults.bool(forKey: appEnabledKey) != fallback.enabled
+            || abs(defaults.double(forKey: appScaleKey) - Double(fallback.scale)) > 0.0001 {
+            defaults.removeObject(forKey: enabledKey)
+            defaults.removeObject(forKey: scaleKey)
+            defaults.removeObject(forKey: heightScaleKey)
+        }
+        defaults.set(fallback.enabled, forKey: appEnabledKey)
+        defaults.set(Double(fallback.scale), forKey: appScaleKey)
         let side = defaults.string(forKey: "\(prefix)_side")
             .flatMap(KeyTaoIOSKeyboardSide.init(rawValue:))
             ?? .right
