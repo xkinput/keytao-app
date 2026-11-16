@@ -157,6 +157,30 @@ fn sanitize_settings(input: &Value) -> Value {
         {
             settings["phrases"] = input[group]["phrases"].clone();
         }
+        if group == "android" {
+            for key in [
+                "clipboard_history_enabled",
+                "clipboard_suggestion_enabled",
+                "clipboard_return_after_paste",
+                "clipboard_hide_sensitive",
+            ] {
+                if let Some(value) = input[group].get(key) {
+                    settings[key] = json!(value.as_bool().unwrap_or(true));
+                }
+            }
+            for (key, default, min, max) in [
+                ("clipboard_history_limit", 50.0, 10.0, 200.0),
+                ("clipboard_suggestion_timeout_sec", 30.0, 5.0, 120.0),
+            ] {
+                if let Some(value) = input[group].get(key) {
+                    let value = value
+                        .as_f64()
+                        .filter(|value| value.is_finite() && value.fract() == 0.0)
+                        .unwrap_or(default);
+                    settings[key] = json!(value.clamp(min, max) as u16);
+                }
+            }
+        }
         output[group] = settings;
     }
     output

@@ -5,6 +5,7 @@ import 'package:forui/forui.dart';
 import 'package:keytao/src/app/app.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/rust/api/types.dart';
+import 'package:keytao/src/settings/android_settings.dart';
 import 'package:keytao/src/ui/widgets.dart';
 
 import 'view_fixture.dart';
@@ -28,6 +29,8 @@ class _EditingController extends ViewController {
   @override
   Future<bool> saveAndroid(Map<String, Object> patch) async {
     keyboardPatches.add(patch);
+    androidSettings = patchAndroidSettings(androidSettings!, patch);
+    notifyListeners();
     return true;
   }
 }
@@ -188,6 +191,53 @@ void main() {
       '我在路上',
     ]);
     expect(find.byType(FDialog), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+  testWidgets('clipboard controls follow history and suggestion switches', (
+    tester,
+  ) async {
+    final c = _EditingController(BridgePlatform.android);
+    await _pump(tester, c, const Size(400, 860));
+    SwitchSetting toggle(String label) =>
+        tester.widget<SwitchSetting>(find.widgetWithText(SwitchSetting, label));
+    SliderSetting slider(String label) =>
+        tester.widget<SliderSetting>(find.widgetWithText(SliderSetting, label));
+    for (final label in [
+      AppStrings.clipboardHistoryEnabled,
+      AppStrings.clipboardSuggestionEnabled,
+      AppStrings.clipboardReturnAfterPaste,
+      AppStrings.clipboardHideSensitive,
+    ]) {
+      expect(toggle(label).onChanged, isNotNull);
+      expect(toggle(label).hint, isNull);
+    }
+    expect(slider(AppStrings.clipboardHistoryLimit).onChanged, isNotNull);
+    expect(
+      slider(AppStrings.clipboardSuggestionTimeoutSec).onChanged,
+      isNotNull,
+    );
+
+    toggle(AppStrings.clipboardHistoryEnabled).onChanged!(false);
+    await tester.pumpAndSettle();
+    expect(toggle(AppStrings.clipboardHistoryEnabled).onChanged, isNotNull);
+    expect(toggle(AppStrings.clipboardSuggestionEnabled).onChanged, isNull);
+    expect(toggle(AppStrings.clipboardReturnAfterPaste).onChanged, isNull);
+    expect(toggle(AppStrings.clipboardHideSensitive).onChanged, isNull);
+    expect(slider(AppStrings.clipboardHistoryLimit).onChanged, isNull);
+    expect(slider(AppStrings.clipboardSuggestionTimeoutSec).onChanged, isNull);
+    expect(c.androidSettings!.clipboardHideSensitive, isTrue);
+
+    toggle(AppStrings.clipboardHistoryEnabled).onChanged!(true);
+    await tester.pumpAndSettle();
+    toggle(AppStrings.clipboardSuggestionEnabled).onChanged!(false);
+    await tester.pumpAndSettle();
+    expect(slider(AppStrings.clipboardSuggestionTimeoutSec).onChanged, isNull);
+    expect(slider(AppStrings.clipboardHistoryLimit).onChanged, isNotNull);
+    expect(toggle(AppStrings.clipboardReturnAfterPaste).onChanged, isNotNull);
+    expect(toggle(AppStrings.clipboardHideSensitive).onChanged, isNotNull);
+    expect(c.androidSettings!.clipboardSuggestionTimeoutSec, 30);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));

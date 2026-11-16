@@ -11,6 +11,83 @@ import java.nio.file.Files
 
 class KeytaoAndroidImeConfigTest {
     @Test
+    fun `clipboard settings default safely and reject unknown value types`() {
+        for (json in listOf("{}", """{
+          "clipboardHistoryEnabled":"false", "clipboardHistoryLimit":"25",
+          "clipboardSuggestionEnabled":0, "clipboardSuggestionTimeoutSec":12.5,
+          "clipboardReturnAfterPaste":{}, "clipboardHideSensitive":null
+        }""")) {
+            val config = KeytaoAndroidImeConfig.parse(json)
+            assertTrue(config.clipboardHistoryEnabled)
+            assertEquals(50, config.clipboardHistoryLimit)
+            assertTrue(config.clipboardSuggestionEnabled)
+            assertEquals(30, config.clipboardSuggestionTimeoutSec)
+            assertTrue(config.clipboardReturnAfterPaste)
+            assertTrue(config.clipboardHideSensitive)
+        }
+    }
+
+    @Test
+    fun `clipboard numeric settings clamp finite integers only`() {
+        for ((input, limit, timeout) in listOf(
+            Triple("-100", 10, 5), Triple("500", 200, 120),
+            Triple("50.0", 50, 50), Triple("1e100", 200, 120),
+            Triple("true", 50, 30), Triple("null", 50, 30),
+            Triple("{}", 50, 30), Triple("50.5", 50, 30),
+        )) {
+            val config = KeytaoAndroidImeConfig.parse("""{
+              "clipboardHistoryLimit":$input, "clipboardSuggestionTimeoutSec":$input
+            }""")
+            assertEquals(input, limit, config.clipboardHistoryLimit)
+            assertEquals(input, timeout, config.clipboardSuggestionTimeoutSec)
+        }
+    }
+
+    @Test
+    fun `clipboard explicit preferences survive persistence and partial runtime updates`() {
+        val bundled = JSONObject("{}")
+        val preferences = JSONObject("""{
+          "clipboardHistoryEnabled":false, "clipboardHistoryLimit":125,
+          "clipboardSuggestionEnabled":false, "clipboardSuggestionTimeoutSec":75,
+          "clipboardReturnAfterPaste":false, "clipboardHideSensitive":false
+        }""")
+        val directory = Files.createTempDirectory("keytao-clipboard-settings").toFile()
+        try {
+            val file = directory.resolve("android_ime.json")
+            val patch = preferences.keys().asSequence().associateWith { preferences.get(it) }
+            assertTrue(KeytaoAndroidImeConfig.persistSettings(file, patch))
+            assertTrue(KeytaoAndroidImeConfig.persistSettings(file, mapOf("keyPreviewEnabled" to false)))
+            val config = KeytaoAndroidImeConfig.parseSources(bundled, file.readText(), bundled)
+            assertFalse(config.clipboardHistoryEnabled)
+            assertEquals(125, config.clipboardHistoryLimit)
+            assertFalse(config.clipboardSuggestionEnabled)
+            assertEquals(75, config.clipboardSuggestionTimeoutSec)
+            assertFalse(config.clipboardReturnAfterPaste)
+            assertFalse(config.clipboardHideSensitive)
+            val partial = KeytaoAndroidImeConfig.parseSources(preferences, "{}", bundled)
+            assertFalse(partial.clipboardHistoryEnabled)
+            assertEquals(125, partial.clipboardHistoryLimit)
+            assertFalse(partial.clipboardSuggestionEnabled)
+            assertEquals(75, partial.clipboardSuggestionTimeoutSec)
+            assertFalse(partial.clipboardReturnAfterPaste)
+            assertFalse(partial.clipboardHideSensitive)
+            val malformed = KeytaoAndroidImeConfig.parseSources(preferences, """{
+              "clipboardHistoryEnabled":"false", "clipboardHistoryLimit":"125",
+              "clipboardSuggestionEnabled":0, "clipboardSuggestionTimeoutSec":12.5,
+              "clipboardReturnAfterPaste":{}, "clipboardHideSensitive":null
+            }""", bundled)
+            assertTrue(malformed.clipboardHistoryEnabled)
+            assertEquals(50, malformed.clipboardHistoryLimit)
+            assertTrue(malformed.clipboardSuggestionEnabled)
+            assertEquals(30, malformed.clipboardSuggestionTimeoutSec)
+            assertTrue(malformed.clipboardReturnAfterPaste)
+            assertTrue(malformed.clipboardHideSensitive)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `shared navigation commands survive parsing with safe target fallbacks`() {
         val config = KeytaoAndroidImeConfig.parse("""{
           "rows": [[

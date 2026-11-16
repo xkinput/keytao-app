@@ -256,6 +256,12 @@ pub struct AndroidImeInputSettingsDto {
     pub double_space_period_enabled: bool,
     pub symbol_auto_return: bool,
     pub phrases: Vec<String>,
+    pub clipboard_history_enabled: bool,
+    pub clipboard_history_limit: u16,
+    pub clipboard_suggestion_enabled: bool,
+    pub clipboard_suggestion_timeout_sec: u16,
+    pub clipboard_return_after_paste: bool,
+    pub clipboard_hide_sensitive: bool,
     pub floating_portrait_enabled: bool,
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
@@ -407,6 +413,12 @@ mod tests {
             double_space_period_enabled: false,
             symbol_auto_return: true,
             phrases: vec!["Custom phrase".into()],
+            clipboard_history_enabled: false,
+            clipboard_history_limit: 75,
+            clipboard_suggestion_enabled: false,
+            clipboard_suggestion_timeout_sec: 45,
+            clipboard_return_after_paste: false,
+            clipboard_hide_sensitive: false,
             floating_portrait_enabled: true,
             floating_portrait_scale: 85,
             floating_landscape_enabled: false,
@@ -423,7 +435,7 @@ mod tests {
             crate::runtime::dto(edited).unwrap();
         let actual: AndroidImeInputSettingsDto = crate::runtime::dto(saved).unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
-        assert_eq!(expected.as_object().unwrap().len(), 28);
+        assert_eq!(expected.as_object().unwrap().len(), 34);
     }
 }
 

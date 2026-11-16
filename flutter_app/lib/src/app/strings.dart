@@ -155,6 +155,13 @@ abstract final class AppStrings {
   static const doubleSpacePeriod = '双击空格输入句号';
   static const symbolAutoReturn = '输入符号后返回字母';
   static const phrases = '常用短语';
+  static const clipboard = '剪贴板';
+  static const clipboardHistoryEnabled = '记录剪贴板历史';
+  static const clipboardHistoryLimit = '剪贴板历史记录上限';
+  static const clipboardSuggestionEnabled = '显示剪贴板提示';
+  static const clipboardSuggestionTimeoutSec = '剪贴板提示超时';
+  static const clipboardReturnAfterPaste = '粘贴后返回';
+  static const clipboardHideSensitive = '隐藏敏感信息（如密码）';
   static const doubleSpaceHint = '1100ms 内连按两次';
   static const swipeThreshold = '滑动判定阈值';
   static const floatingPortrait = '竖屏悬浮键盘';

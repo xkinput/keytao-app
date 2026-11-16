@@ -118,38 +118,53 @@ struct KeyTaoClipboardRecord: Codable, Equatable {
     var pinned: Bool = false
 }
 
+struct KeyTaoClipboardAccessPolicy {
+    var historyEnabled: Bool
+    var hideSensitive: Bool
+    var isSensitive: Bool
+
+    var canShowHistory: Bool { !hideSensitive || !isSensitive }
+    var canRecord: Bool { historyEnabled && canShowHistory }
+}
+
 struct KeyTaoClipboardHistory {
-    static let unpinnedLimit = 50
     static let maxTextBytes = 64 * 1024
     static let maxHistoryBytes = 1024 * 1024
     private(set) var records: [KeyTaoClipboardRecord]
+    private(set) var limit: Int
 
-    init(records: [KeyTaoClipboardRecord] = []) {
+    init(records: [KeyTaoClipboardRecord] = [], limit: Int = 50) {
         self.records = records
+        self.limit = max(10, min(200, limit))
         normalize()
     }
 
-    init(data: Data) throws {
+    init(data: Data, limit: Int = 50) throws {
         guard data.count <= Self.maxHistoryBytes else {
-            self.init()
+            self.init(limit: limit)
             return
         }
-        self.init(records: try JSONDecoder().decode([KeyTaoClipboardRecord].self, from: data))
+        self.init(records: try JSONDecoder().decode([KeyTaoClipboardRecord].self, from: data), limit: limit)
     }
 
-    init(contentsOf file: URL) throws {
+    init(contentsOf file: URL, limit: Int = 50) throws {
         let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize
         guard let size, size <= Self.maxHistoryBytes else {
-            self.init()
+            self.init(limit: limit)
             return
         }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
-        try self.init(data: handle.read(upToCount: Self.maxHistoryBytes + 1) ?? Data())
+        try self.init(data: handle.read(upToCount: Self.maxHistoryBytes + 1) ?? Data(), limit: limit)
     }
 
     func encoded() throws -> Data {
         try JSONEncoder().encode(records)
+    }
+
+    mutating func setLimit(_ limit: Int) {
+        self.limit = max(10, min(200, limit))
+        normalize()
     }
 
     mutating func upsert(_ record: KeyTaoClipboardRecord) {
@@ -190,7 +205,7 @@ struct KeyTaoClipboardHistory {
         records = records.filter {
             guard ($0.text?.utf8.count ?? 0) <= Self.maxTextBytes,
                   keys.insert($0.key).inserted else { return false }
-            if !$0.pinned, unpinnedCount >= Self.unpinnedLimit { return false }
+            if !$0.pinned, unpinnedCount >= limit { return false }
             // Include JSON escaping, the text key, metadata and array separators.
             guard let data = try? encoder.encode($0), data.count + 1 <= remainingBytes else { return false }
             remainingBytes -= data.count + 1

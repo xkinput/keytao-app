@@ -31,6 +31,39 @@ fn fixture() -> (tempfile::TempDir, Arc<Core>) {
 }
 
 #[test]
+fn clipboard_sync_preserves_explicit_values_and_clamps_limits() {
+    let settings = json!({"android": {
+        "clipboard_history_enabled": false,
+        "clipboard_history_limit": -10,
+        "clipboard_suggestion_enabled": false,
+        "clipboard_suggestion_timeout_sec": 500,
+        "clipboard_return_after_paste": false,
+        "clipboard_hide_sensitive": false,
+    }});
+    let mut expected = settings.clone();
+    expected["android"]["clipboard_history_limit"] = json!(10);
+    expected["android"]["clipboard_suggestion_timeout_sec"] = json!(120);
+    assert_eq!(sanitize_settings(&settings), expected);
+    assert_eq!(sanitize_settings(&expected), expected);
+    assert_eq!(
+        sanitize_settings(&json!({"android": {
+            "clipboard_history_limit": "50", "clipboard_suggestion_timeout_sec": 5.5,
+            "clipboard_history_enabled": null, "clipboard_suggestion_enabled": 0,
+            "clipboard_return_after_paste": {}, "clipboard_hide_sensitive": "false",
+        }})),
+        json!({"android": {
+            "clipboard_history_limit": 50, "clipboard_suggestion_timeout_sec": 30,
+            "clipboard_history_enabled": true, "clipboard_suggestion_enabled": true,
+            "clipboard_return_after_paste": true, "clipboard_hide_sensitive": true,
+        }})
+    );
+    assert_eq!(
+        sanitize_settings(&json!({"android": {}})),
+        json!({"android": {}})
+    );
+}
+
+#[test]
 fn profile_serialization_excludes_secrets_paths_logs_and_banner_state() {
     let (_dir, core) = fixture();
     core.update_state(|state| {

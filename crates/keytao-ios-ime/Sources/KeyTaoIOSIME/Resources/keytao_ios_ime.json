@@ -4,6 +4,12 @@
   "keyboardBottomInsetDp": 0,
   "symbolAutoReturn": false,
   "phrases": ["谢谢", "好的", "收到", "稍等", "我在路上"],
+  "clipboardHistoryEnabled": true,
+  "clipboardHistoryLimit": 50,
+  "clipboardSuggestionEnabled": true,
+  "clipboardSuggestionTimeoutSec": 30,
+  "clipboardReturnAfterPaste": true,
+  "clipboardHideSensitive": true,
   "floating": {
     "margin": 8,
     "portrait": { "enabled": false, "scale": 0.88 },

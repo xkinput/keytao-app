@@ -22,6 +22,12 @@ const androidDefaults = <String, Object>{
   'doubleSpacePeriodEnabled': true,
   'symbolAutoReturn': false,
   'phrases': ['谢谢', '好的', '收到', '稍等', '我在路上'],
+  'clipboardHistoryEnabled': true,
+  'clipboardHistoryLimit': 50,
+  'clipboardSuggestionEnabled': true,
+  'clipboardSuggestionTimeoutSec': 30,
+  'clipboardReturnAfterPaste': true,
+  'clipboardHideSensitive': true,
   'floatingPortraitEnabled': false,
   'floatingPortraitScale': 88,
   'floatingLandscapeEnabled': true,
@@ -34,6 +40,19 @@ AndroidImeInputSettingsDto patchAndroidSettings(
   Map<String, Object> patch,
 ) {
   bool flag(String key, bool current) => patch[key] as bool? ?? current;
+  bool clipboardFlag(String key, bool current) => !patch.containsKey(key)
+      ? current
+      : patch[key] is bool
+      ? patch[key] as bool
+      : androidDefaults[key] as bool;
+  int clipboardInteger(String key, int current, int min, int max) {
+    if (!patch.containsKey(key)) return current;
+    final value = patch[key];
+    return value is num && value.isFinite
+        ? value.round().clamp(min, max)
+        : androidDefaults[key] as int;
+  }
+
   int integer(String key, int current, int min, int max) =>
       patch.containsKey(key)
       ? (patch[key] as num).round().clamp(min, max)
@@ -120,6 +139,34 @@ AndroidImeInputSettingsDto patchAndroidSettings(
     phrases: patch.containsKey('phrases')
         ? List<String>.from(patch['phrases'] as List)
         : original.phrases,
+    clipboardHistoryEnabled: clipboardFlag(
+      'clipboardHistoryEnabled',
+      original.clipboardHistoryEnabled,
+    ),
+    clipboardHistoryLimit: clipboardInteger(
+      'clipboardHistoryLimit',
+      original.clipboardHistoryLimit,
+      10,
+      200,
+    ),
+    clipboardSuggestionEnabled: clipboardFlag(
+      'clipboardSuggestionEnabled',
+      original.clipboardSuggestionEnabled,
+    ),
+    clipboardSuggestionTimeoutSec: clipboardInteger(
+      'clipboardSuggestionTimeoutSec',
+      original.clipboardSuggestionTimeoutSec,
+      5,
+      120,
+    ),
+    clipboardReturnAfterPaste: clipboardFlag(
+      'clipboardReturnAfterPaste',
+      original.clipboardReturnAfterPaste,
+    ),
+    clipboardHideSensitive: clipboardFlag(
+      'clipboardHideSensitive',
+      original.clipboardHideSensitive,
+    ),
     floatingPortraitEnabled: flag(
       'floatingPortraitEnabled',
       original.floatingPortraitEnabled,

@@ -1799,6 +1799,13 @@ class AppController extends ChangeNotifier {
           'double_space_period_enabled': input.doubleSpacePeriodEnabled,
           'symbol_auto_return': input.symbolAutoReturn,
           'phrases': input.phrases,
+          'clipboard_history_enabled': input.clipboardHistoryEnabled,
+          'clipboard_history_limit': input.clipboardHistoryLimit,
+          'clipboard_suggestion_enabled': input.clipboardSuggestionEnabled,
+          'clipboard_suggestion_timeout_sec':
+              input.clipboardSuggestionTimeoutSec,
+          'clipboard_return_after_paste': input.clipboardReturnAfterPaste,
+          'clipboard_hide_sensitive': input.clipboardHideSensitive,
           'floating_portrait_enabled': input.floatingPortraitEnabled,
           'floating_portrait_scale': input.floatingPortraitScale,
           'floating_landscape_enabled': input.floatingLandscapeEnabled,

@@ -59,6 +59,12 @@ class AndroidImeInputSettingsDto {
   final bool doubleSpacePeriodEnabled;
   final bool symbolAutoReturn;
   final List<String> phrases;
+  final bool clipboardHistoryEnabled;
+  final int clipboardHistoryLimit;
+  final bool clipboardSuggestionEnabled;
+  final int clipboardSuggestionTimeoutSec;
+  final bool clipboardReturnAfterPaste;
+  final bool clipboardHideSensitive;
   final bool floatingPortraitEnabled;
   final int floatingPortraitScale;
   final bool floatingLandscapeEnabled;
@@ -89,6 +95,12 @@ class AndroidImeInputSettingsDto {
     required this.doubleSpacePeriodEnabled,
     required this.symbolAutoReturn,
     required this.phrases,
+    required this.clipboardHistoryEnabled,
+    required this.clipboardHistoryLimit,
+    required this.clipboardSuggestionEnabled,
+    required this.clipboardSuggestionTimeoutSec,
+    required this.clipboardReturnAfterPaste,
+    required this.clipboardHideSensitive,
     required this.floatingPortraitEnabled,
     required this.floatingPortraitScale,
     required this.floatingLandscapeEnabled,
@@ -121,6 +133,12 @@ class AndroidImeInputSettingsDto {
       doubleSpacePeriodEnabled.hashCode ^
       symbolAutoReturn.hashCode ^
       phrases.hashCode ^
+      clipboardHistoryEnabled.hashCode ^
+      clipboardHistoryLimit.hashCode ^
+      clipboardSuggestionEnabled.hashCode ^
+      clipboardSuggestionTimeoutSec.hashCode ^
+      clipboardReturnAfterPaste.hashCode ^
+      clipboardHideSensitive.hashCode ^
       floatingPortraitEnabled.hashCode ^
       floatingPortraitScale.hashCode ^
       floatingLandscapeEnabled.hashCode ^
@@ -155,6 +173,13 @@ class AndroidImeInputSettingsDto {
           doubleSpacePeriodEnabled == other.doubleSpacePeriodEnabled &&
           symbolAutoReturn == other.symbolAutoReturn &&
           phrases == other.phrases &&
+          clipboardHistoryEnabled == other.clipboardHistoryEnabled &&
+          clipboardHistoryLimit == other.clipboardHistoryLimit &&
+          clipboardSuggestionEnabled == other.clipboardSuggestionEnabled &&
+          clipboardSuggestionTimeoutSec ==
+              other.clipboardSuggestionTimeoutSec &&
+          clipboardReturnAfterPaste == other.clipboardReturnAfterPaste &&
+          clipboardHideSensitive == other.clipboardHideSensitive &&
           floatingPortraitEnabled == other.floatingPortraitEnabled &&
           floatingPortraitScale == other.floatingPortraitScale &&
           floatingLandscapeEnabled == other.floatingLandscapeEnabled &&

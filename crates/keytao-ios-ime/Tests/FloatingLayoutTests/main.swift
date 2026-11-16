@@ -188,6 +188,28 @@ do {
     expect(!KeyTaoIOSImeConfig.fallback.mnemonicHintsEnabled, "mnemonic hints default to off")
     expect(!legacy.symbolAutoReturn, "symbol auto return defaults to off")
     expect(legacy.phrases == ["谢谢", "好的", "收到", "稍等", "我在路上"], "phrases have shared defaults")
+    expect(legacy.clipboardHistoryEnabled && legacy.clipboardSuggestionEnabled, "clipboard recording and suggestions default to on")
+    expect(legacy.clipboardHistoryLimit == 50 && legacy.clipboardSuggestionTimeoutSec == 30, "clipboard counts and timeouts have shared defaults")
+    expect(legacy.clipboardReturnAfterPaste && legacy.clipboardHideSensitive, "clipboard return and sensitive-field protection default to on")
+    for (input, limit, timeout) in [
+        ("-100", 10, 5), ("500", 200, 120), ("50.0", 50, 50), ("1e100", 200, 120),
+        ("true", 50, 30), ("null", 50, 30), ("{}", 50, 30), ("50.5", 50, 30), ("\"50\"", 50, 30),
+    ] {
+        let config = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("""
+        {"clipboardHistoryLimit":\(input),"clipboardSuggestionTimeoutSec":\(input)}
+        """.utf8))
+        expect(config.clipboardHistoryLimit == limit, "clipboard limit validates and clamps \(input)")
+        expect(config.clipboardSuggestionTimeoutSec == timeout, "clipboard timeout validates and clamps \(input)")
+    }
+    let malformedClipboardJSON = """
+    {"clipboardHistoryEnabled":"false","clipboardHistoryLimit":"125",
+     "clipboardSuggestionEnabled":0,"clipboardSuggestionTimeoutSec":12.5,
+     "clipboardReturnAfterPaste":{},"clipboardHideSensitive":null}
+    """
+    let malformedClipboard = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data(malformedClipboardJSON.utf8))
+    expect(malformedClipboard.clipboardHistoryEnabled && malformedClipboard.clipboardSuggestionEnabled, "unknown clipboard switches use defaults")
+    expect(malformedClipboard.clipboardHistoryLimit == 50 && malformedClipboard.clipboardSuggestionTimeoutSec == 30, "unknown clipboard numbers use defaults")
+    expect(malformedClipboard.clipboardReturnAfterPaste && malformedClipboard.clipboardHideSensitive, "unknown clipboard protection fails closed")
     let navigation = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("""
     {"rows":[[
       {"label":"返回","action":{"type":"keyboardMode","value":"back"}},
@@ -213,16 +235,43 @@ do {
         config.mnemonicHintsEnabled = enabled
         config.symbolAutoReturn = enabled
         config.phrases = enabled ? ["自定义", "收到"] : []
+        config.clipboardHistoryEnabled = enabled
+        config.clipboardHistoryLimit = 125
+        config.clipboardSuggestionEnabled = enabled
+        config.clipboardSuggestionTimeoutSec = 75
+        config.clipboardReturnAfterPaste = enabled
+        config.clipboardHideSensitive = enabled
         let data = try JSONEncoder().encode(config)
         let decoded = try decoder.decode(KeyTaoIOSImeConfig.self, from: data)
         expect(decoded.mnemonicHintsEnabled == enabled, "mnemonic hints survive a config round trip")
         expect(decoded.symbolAutoReturn == enabled, "symbol auto return survives a config round trip")
         expect(decoded.phrases == config.phrases, "phrases preserve order and intentional empty lists")
+        expect(decoded.clipboardHistoryEnabled == enabled && decoded.clipboardSuggestionEnabled == enabled, "clipboard switches preserve explicit values")
+        expect(decoded.clipboardHistoryLimit == 125 && decoded.clipboardSuggestionTimeoutSec == 75, "clipboard numbers survive a round trip")
+        expect(decoded.clipboardReturnAfterPaste == enabled && decoded.clipboardHideSensitive == enabled, "clipboard protection preserves explicit false")
         try data.write(to: configURL, options: .atomic)
         let loaded = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: "{}", userConfigURL: configURL)
         expect(loaded.mnemonicHintsEnabled == enabled, "runtime settings override the resolved layout default")
         expect(loaded.symbolAutoReturn == enabled && loaded.phrases == config.phrases, "shared runtime settings override layout defaults")
+        expect(loaded.clipboardHistoryEnabled == enabled && loaded.clipboardSuggestionEnabled == enabled, "runtime clipboard switches override defaults")
+        expect(loaded.clipboardHistoryLimit == 125 && loaded.clipboardSuggestionTimeoutSec == 75, "runtime clipboard numbers override defaults")
+        expect(loaded.clipboardReturnAfterPaste == enabled && loaded.clipboardHideSensitive == enabled, "runtime clipboard protection preserves explicit values")
     }
+    let clipboardKeyboardJSON = """
+    {"clipboardHistoryEnabled":false,"clipboardHistoryLimit":125,
+     "clipboardSuggestionEnabled":false,"clipboardSuggestionTimeoutSec":75,
+     "clipboardReturnAfterPaste":false,"clipboardHideSensitive":false}
+    """
+    try Data("{}".utf8).write(to: configURL, options: .atomic)
+    let partialClipboard = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: clipboardKeyboardJSON, userConfigURL: configURL)
+    expect(!partialClipboard.clipboardHistoryEnabled && !partialClipboard.clipboardSuggestionEnabled, "missing runtime switches preserve resolved preferences")
+    expect(partialClipboard.clipboardHistoryLimit == 125 && partialClipboard.clipboardSuggestionTimeoutSec == 75, "missing runtime numbers preserve resolved preferences")
+    expect(!partialClipboard.clipboardReturnAfterPaste && !partialClipboard.clipboardHideSensitive, "missing runtime protection preserves explicit false")
+    try Data(malformedClipboardJSON.utf8).write(to: configURL, options: .atomic)
+    let invalidClipboard = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: clipboardKeyboardJSON, userConfigURL: configURL)
+    expect(invalidClipboard.clipboardHistoryEnabled && invalidClipboard.clipboardSuggestionEnabled, "invalid runtime switches use shared defaults")
+    expect(invalidClipboard.clipboardHistoryLimit == 50 && invalidClipboard.clipboardSuggestionTimeoutSec == 30, "invalid runtime numbers use shared defaults")
+    expect(invalidClipboard.clipboardReturnAfterPaste && invalidClipboard.clipboardHideSensitive, "invalid runtime sensitive protection fails closed")
     let keyboard = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: """
     {"symbolAutoReturn":true,"phrases":["自定义"]}
     """, userConfigURL: nil)

@@ -3579,6 +3579,12 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
         let mut var_doubleSpacePeriodEnabled = <bool>::sse_decode(deserializer);
         let mut var_symbolAutoReturn = <bool>::sse_decode(deserializer);
         let mut var_phrases = <Vec<String>>::sse_decode(deserializer);
+        let mut var_clipboardHistoryEnabled = <bool>::sse_decode(deserializer);
+        let mut var_clipboardHistoryLimit = <u16>::sse_decode(deserializer);
+        let mut var_clipboardSuggestionEnabled = <bool>::sse_decode(deserializer);
+        let mut var_clipboardSuggestionTimeoutSec = <u16>::sse_decode(deserializer);
+        let mut var_clipboardReturnAfterPaste = <bool>::sse_decode(deserializer);
+        let mut var_clipboardHideSensitive = <bool>::sse_decode(deserializer);
         let mut var_floatingPortraitEnabled = <bool>::sse_decode(deserializer);
         let mut var_floatingPortraitScale = <u8>::sse_decode(deserializer);
         let mut var_floatingLandscapeEnabled = <bool>::sse_decode(deserializer);
@@ -3608,6 +3614,12 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
             double_space_period_enabled: var_doubleSpacePeriodEnabled,
             symbol_auto_return: var_symbolAutoReturn,
             phrases: var_phrases,
+            clipboard_history_enabled: var_clipboardHistoryEnabled,
+            clipboard_history_limit: var_clipboardHistoryLimit,
+            clipboard_suggestion_enabled: var_clipboardSuggestionEnabled,
+            clipboard_suggestion_timeout_sec: var_clipboardSuggestionTimeoutSec,
+            clipboard_return_after_paste: var_clipboardReturnAfterPaste,
+            clipboard_hide_sensitive: var_clipboardHideSensitive,
             floating_portrait_enabled: var_floatingPortraitEnabled,
             floating_portrait_scale: var_floatingPortraitScale,
             floating_landscape_enabled: var_floatingLandscapeEnabled,
@@ -5009,6 +5021,18 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::AndroidImeInputSetting
                 .into_dart(),
             self.symbol_auto_return.into_into_dart().into_dart(),
             self.phrases.into_into_dart().into_dart(),
+            self.clipboard_history_enabled.into_into_dart().into_dart(),
+            self.clipboard_history_limit.into_into_dart().into_dart(),
+            self.clipboard_suggestion_enabled
+                .into_into_dart()
+                .into_dart(),
+            self.clipboard_suggestion_timeout_sec
+                .into_into_dart()
+                .into_dart(),
+            self.clipboard_return_after_paste
+                .into_into_dart()
+                .into_dart(),
+            self.clipboard_hide_sensitive.into_into_dart().into_dart(),
             self.floating_portrait_enabled.into_into_dart().into_dart(),
             self.floating_portrait_scale.into_into_dart().into_dart(),
             self.floating_landscape_enabled.into_into_dart().into_dart(),
@@ -6103,6 +6127,12 @@ impl SseEncode for crate::api::types::AndroidImeInputSettingsDto {
         <bool>::sse_encode(self.double_space_period_enabled, serializer);
         <bool>::sse_encode(self.symbol_auto_return, serializer);
         <Vec<String>>::sse_encode(self.phrases, serializer);
+        <bool>::sse_encode(self.clipboard_history_enabled, serializer);
+        <u16>::sse_encode(self.clipboard_history_limit, serializer);
+        <bool>::sse_encode(self.clipboard_suggestion_enabled, serializer);
+        <u16>::sse_encode(self.clipboard_suggestion_timeout_sec, serializer);
+        <bool>::sse_encode(self.clipboard_return_after_paste, serializer);
+        <bool>::sse_encode(self.clipboard_hide_sensitive, serializer);
         <bool>::sse_encode(self.floating_portrait_enabled, serializer);
         <u8>::sse_encode(self.floating_portrait_scale, serializer);
         <bool>::sse_encode(self.floating_landscape_enabled, serializer);

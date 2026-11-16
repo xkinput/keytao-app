@@ -354,7 +354,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private var clipboardItemsLoading = false
     private var clipboardItems: List<ClipboardEntry> = emptyList()
     private var clipboardClearConfirmationPending = false
+    private var clipboardOrigin: KeyboardNavigationState? = null
     private var recentClipboardSuggestion: String? = null
+    private val hideClipboardSuggestionRunnable = Runnable { clearRecentClipboardSuggestion() }
     private var expandedCandidateScrollY = 0f
     private var expandedCandidateOverscrollY = 0f
     private var expandedCandidateContentHeight = 0f
@@ -528,6 +530,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         if (config.keyboardHeightScale != next.keyboardHeightScale) {
             clearActiveKeyTouches()
             keyRects = emptyList()
+        }
+        if (!next.clipboardSuggestionEnabled || config.clipboardSuggestionTimeoutSec != next.clipboardSuggestionTimeoutSec) {
+            clearRecentClipboardSuggestion()
         }
         config = next
         if (!toolbarEditMode) {
@@ -730,21 +735,20 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun showRecentClipboardSuggestion(text: String) {
-        val normalized = text
-            .replace(whitespaceRegex, " ")
-            .trim()
-            .takeIf { it.isNotEmpty() }
-            ?: return
-        recentClipboardSuggestion = normalized
+    fun showRecentClipboardSuggestion(text: String, remainingMs: Long) {
+        if (!config.clipboardSuggestionEnabled || text.isBlank() || remainingMs <= 0L) return
         if (functionPanelActive || candidatePanelExpanded) {
             closeCandidatePanel()
         }
+        recentClipboardSuggestion = text
+        longPressHandler.removeCallbacks(hideClipboardSuggestionRunnable)
+        longPressHandler.postDelayed(hideClipboardSuggestionRunnable, remainingMs)
         rebuildInteractiveRects()
         invalidate()
     }
 
     fun clearRecentClipboardSuggestion() {
+        longPressHandler.removeCallbacks(hideClipboardSuggestionRunnable)
         if (recentClipboardSuggestion == null) return
         recentClipboardSuggestion = null
         rebuildInteractiveRects()
@@ -906,6 +910,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         rimeOptionsState = previous.rimeOptionsState
         clipboardItems = previous.clipboardItems
         clipboardClearConfirmationPending = previous.clipboardClearConfirmationPending
+        clipboardOrigin = previous.clipboardOrigin
         settingsColorPickerOpen = previous.settingsColorPickerOpen
         colorPickerHsv = previous.colorPickerHsv
         colorPickerEntryAccent = previous.colorPickerEntryAccent
@@ -1326,6 +1331,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         verticalVelocityTracker?.recycle()
         verticalVelocityTracker = null
         longPressHandler.removeCallbacks(hideScrollIndicatorRunnable)
+        clearRecentClipboardSuggestion()
         scrollIndicatorFadeAnimator?.cancel()
         keyPressAnimatorsByIndex.values.toList().forEach(ValueAnimator::cancel)
         keyPressAnimatorsByIndex.clear()
@@ -3460,7 +3466,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
     private fun drawClipboardSuggestionBar(canvas: Canvas, barHeight: Float, leftPadding: Float) {
         val text = recentClipboardSuggestion ?: return
         toolbarRects.getOrNull(0)?.let { drawToolbarChip(canvas, it, forceAccent = true) }
-        toolbarRects.getOrNull(1)?.let { drawClipboardPasteChip(canvas, it, text) }
+        toolbarRects.getOrNull(1)?.let { drawClipboardPasteChip(canvas, it, it.secondaryLabel ?: text) }
     }
 
     private fun clipboardSuggestionToolbarLayout(barHeight: Float, leftPadding: Float): List<ToolbarRect> {
@@ -3478,7 +3484,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             "粘贴",
             KeyCommand.edit("pasteText", text),
             RectF(back.rect.right + gap, top, width - leftPadding, top + chipHeight),
-            secondaryLabel = text,
+            secondaryLabel = text.replace(whitespaceRegex, " ").trim(),
         )
         return listOf(back, paste)
     }
@@ -5244,6 +5250,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         rimeOptionsState = KeytaoRimeOptionsState.EMPTY
         rimeOptionsLoading = false
         clipboardClearConfirmationPending = false
+        clipboardOrigin = null
         recentClipboardSuggestion = null
         expandedCandidates = emptyList()
         cancelExpandedCandidateRequest()
@@ -5262,6 +5269,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
 
     private fun openFunctionPanel(mode: FunctionPanelMode) {
         val started = System.nanoTime()
+        if (mode == FunctionPanelMode.CLIPBOARD && navigation.panel != KeyboardPanel.CLIPBOARD) {
+            clipboardOrigin = KeyboardNavigationState().also { it.restoreFrom(navigation) }
+        }
         if (mode != FunctionPanelMode.CLIPBOARD || functionPanelMode != mode) {
             clipboardClearConfirmationPending = false
         }
@@ -5319,7 +5329,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         listener?.onKeyCommand(command)
         if (command.type == KeyCommandTypes.EDIT && command.value in setOf("paste", "pasteText") &&
             navigation.panel == KeyboardPanel.CLIPBOARD) {
-            closeCandidatePanel()
+            returnAfterClipboardPaste()
         }
     }
 
@@ -5357,6 +5367,7 @@ class KeytaoKeyboardView @JvmOverloads constructor(
             if (command.value?.startsWith("pasteMedia:") == true) {
                 listener?.onCommitClipboardMedia(command.value.removePrefix("pasteMedia:"))
                 performConfiguredSelectionFeedback()
+                returnAfterClipboardPaste()
                 return true
             }
             when (command.value) {
@@ -5427,7 +5438,9 @@ class KeytaoKeyboardView @JvmOverloads constructor(
                 performConfiguredSelectionFeedback()
                 dispatchKeyCommand(command)
             }
-            if (candidate.clipboardKey != null || functionPanelMode == FunctionPanelMode.PHRASES) {
+            if (candidate.clipboardKey != null) {
+                returnAfterClipboardPaste()
+            } else if (functionPanelMode == FunctionPanelMode.PHRASES) {
                 closeCandidatePanel()
             }
             return
@@ -5435,6 +5448,21 @@ class KeytaoKeyboardView @JvmOverloads constructor(
         closeCandidatePanel()
         performConfiguredSelectionFeedback()
         listener?.onCandidate(candidate.index, candidate.global)
+    }
+
+    private fun returnAfterClipboardPaste() {
+        if (!config.clipboardReturnAfterPaste || navigation.panel != KeyboardPanel.CLIPBOARD) return
+        val origin = clipboardOrigin
+        closeCandidatePanel()
+        if (origin != null) {
+            navigate(layer = origin.layer, expanded = false, panel = null, restore = origin)
+            if (origin.panel == KeyboardPanel.EXPANDED_CANDIDATES) requestExpandedCandidatesAsync()
+            if (origin.panel == KeyboardPanel.RIME) listener?.onKeyCommand(KeyCommand(KeyCommandTypes.RIME_MENU))
+            invalidateKeyboardLayoutCache()
+            invalidateExpandedCandidateItemsCache()
+            rebuildInteractiveRects()
+            invalidate()
+        }
     }
 
     private fun requestExpandedCandidatesAsync() {

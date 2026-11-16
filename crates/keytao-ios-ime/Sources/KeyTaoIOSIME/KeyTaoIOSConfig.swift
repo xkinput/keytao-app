@@ -230,6 +230,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var doubleSpacePeriodEnabled: Bool
     public var symbolAutoReturn: Bool
     public var phrases: [String]
+    public var clipboardHistoryEnabled: Bool
+    public var clipboardHistoryLimit: Int
+    public var clipboardSuggestionEnabled: Bool
+    public var clipboardSuggestionTimeoutSec: Int
+    public var clipboardReturnAfterPaste: Bool
+    public var clipboardHideSensitive: Bool
     /// Show the pending composition inside the host field via
     /// `UITextDocumentProxy.setMarkedText`. Off falls back to showing the
     /// preedit only in the candidate bar, for hosts whose proxy mishandles it.
@@ -287,6 +293,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case doubleSpacePeriodEnabled
         case symbolAutoReturn
         case phrases
+        case clipboardHistoryEnabled
+        case clipboardHistoryLimit
+        case clipboardSuggestionEnabled
+        case clipboardSuggestionTimeoutSec
+        case clipboardReturnAfterPaste
+        case clipboardHideSensitive
         case hostMarkedText
         case swipeThresholdDp
         case rows
@@ -334,6 +346,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         doubleSpacePeriodEnabled: Bool = true,
         symbolAutoReturn: Bool = false,
         phrases: [String] = ["谢谢", "好的", "收到", "稍等", "我在路上"],
+        clipboardHistoryEnabled: Bool = true,
+        clipboardHistoryLimit: Int = 50,
+        clipboardSuggestionEnabled: Bool = true,
+        clipboardSuggestionTimeoutSec: Int = 30,
+        clipboardReturnAfterPaste: Bool = true,
+        clipboardHideSensitive: Bool = true,
         hostMarkedTextEnabled: Bool = true,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
@@ -376,6 +394,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.doubleSpacePeriodEnabled = doubleSpacePeriodEnabled
         self.symbolAutoReturn = symbolAutoReturn
         self.phrases = phrases
+        self.clipboardHistoryEnabled = clipboardHistoryEnabled
+        self.clipboardHistoryLimit = Self.clampInt(clipboardHistoryLimit, min: 10, max: 200)
+        self.clipboardSuggestionEnabled = clipboardSuggestionEnabled
+        self.clipboardSuggestionTimeoutSec = Self.clampInt(clipboardSuggestionTimeoutSec, min: 5, max: 120)
+        self.clipboardReturnAfterPaste = clipboardReturnAfterPaste
+        self.clipboardHideSensitive = clipboardHideSensitive
         self.hostMarkedTextEnabled = hostMarkedTextEnabled
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
@@ -386,6 +410,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let preferences = try? KeyTaoKeyboardPreferences(from: decoder)
         let haptics = try? container.nestedContainer(keyedBy: HapticsCodingKeys.self, forKey: .haptics)
         self.keyboardHeightDp = Self.clamp(
             (try? container.decode(CGFloat.self, forKey: .keyboardHeightDp)) ?? Self.fallback.keyboardHeightDp,
@@ -499,6 +524,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.symbolAutoReturn = (try? container.decode(Bool.self, forKey: .symbolAutoReturn))
             ?? Self.fallback.symbolAutoReturn
         self.phrases = (try? container.decode([String].self, forKey: .phrases)) ?? Self.fallback.phrases
+        self.clipboardHistoryEnabled = preferences?.clipboardHistoryEnabled ?? Self.fallback.clipboardHistoryEnabled
+        self.clipboardHistoryLimit = preferences?.clipboardHistoryLimit ?? Self.fallback.clipboardHistoryLimit
+        self.clipboardSuggestionEnabled = preferences?.clipboardSuggestionEnabled ?? Self.fallback.clipboardSuggestionEnabled
+        self.clipboardSuggestionTimeoutSec = preferences?.clipboardSuggestionTimeoutSec ?? Self.fallback.clipboardSuggestionTimeoutSec
+        self.clipboardReturnAfterPaste = preferences?.clipboardReturnAfterPaste ?? Self.fallback.clipboardReturnAfterPaste
+        self.clipboardHideSensitive = preferences?.clipboardHideSensitive ?? Self.fallback.clipboardHideSensitive
         self.hostMarkedTextEnabled = (try? container.decode(Bool.self, forKey: .hostMarkedText))
             ?? Self.fallback.hostMarkedTextEnabled
         self.swipeThresholdDp = Self.clamp(
@@ -609,6 +640,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(doubleSpacePeriodEnabled, forKey: .doubleSpacePeriodEnabled)
         try container.encode(symbolAutoReturn, forKey: .symbolAutoReturn)
         try container.encode(phrases, forKey: .phrases)
+        try container.encode(clipboardHistoryEnabled, forKey: .clipboardHistoryEnabled)
+        try container.encode(clipboardHistoryLimit, forKey: .clipboardHistoryLimit)
+        try container.encode(clipboardSuggestionEnabled, forKey: .clipboardSuggestionEnabled)
+        try container.encode(clipboardSuggestionTimeoutSec, forKey: .clipboardSuggestionTimeoutSec)
+        try container.encode(clipboardReturnAfterPaste, forKey: .clipboardReturnAfterPaste)
+        try container.encode(clipboardHideSensitive, forKey: .clipboardHideSensitive)
         try container.encode(hostMarkedTextEnabled, forKey: .hostMarkedText)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
@@ -661,6 +698,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             doubleSpacePeriodEnabled: Self.fallback.doubleSpacePeriodEnabled,
             symbolAutoReturn: preferences?.symbolAutoReturn ?? Self.fallback.symbolAutoReturn,
             phrases: preferences?.phrases ?? Self.fallback.phrases,
+            clipboardHistoryEnabled: preferences?.clipboardHistoryEnabled ?? Self.fallback.clipboardHistoryEnabled,
+            clipboardHistoryLimit: preferences?.clipboardHistoryLimit ?? Self.fallback.clipboardHistoryLimit,
+            clipboardSuggestionEnabled: preferences?.clipboardSuggestionEnabled ?? Self.fallback.clipboardSuggestionEnabled,
+            clipboardSuggestionTimeoutSec: preferences?.clipboardSuggestionTimeoutSec ?? Self.fallback.clipboardSuggestionTimeoutSec,
+            clipboardReturnAfterPaste: preferences?.clipboardReturnAfterPaste ?? Self.fallback.clipboardReturnAfterPaste,
+            clipboardHideSensitive: preferences?.clipboardHideSensitive ?? Self.fallback.clipboardHideSensitive,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -803,6 +846,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         if let phrases = preferences?.phrases {
             next.phrases = phrases
         }
+        if let enabled = preferences?.clipboardHistoryEnabled { next.clipboardHistoryEnabled = enabled }
+        if let limit = preferences?.clipboardHistoryLimit { next.clipboardHistoryLimit = limit }
+        if let enabled = preferences?.clipboardSuggestionEnabled { next.clipboardSuggestionEnabled = enabled }
+        if let timeout = preferences?.clipboardSuggestionTimeoutSec { next.clipboardSuggestionTimeoutSec = timeout }
+        if let enabled = preferences?.clipboardReturnAfterPaste { next.clipboardReturnAfterPaste = enabled }
+        if let enabled = preferences?.clipboardHideSensitive { next.clipboardHideSensitive = enabled }
         if let hostMarkedText = runtime.hostMarkedText {
             next.hostMarkedTextEnabled = hostMarkedText
         }
@@ -1051,16 +1100,43 @@ private struct KeyTaoIOSRuntimeHaptics: Decodable {
 private struct KeyTaoKeyboardPreferences: Decodable {
     var symbolAutoReturn: Bool?
     var phrases: [String]?
+    var clipboardHistoryEnabled: Bool?
+    var clipboardHistoryLimit: Int?
+    var clipboardSuggestionEnabled: Bool?
+    var clipboardSuggestionTimeoutSec: Int?
+    var clipboardReturnAfterPaste: Bool?
+    var clipboardHideSensitive: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case symbolAutoReturn
         case phrases
+        case clipboardHistoryEnabled
+        case clipboardHistoryLimit
+        case clipboardSuggestionEnabled
+        case clipboardSuggestionTimeoutSec
+        case clipboardReturnAfterPaste
+        case clipboardHideSensitive
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         symbolAutoReturn = try? container.decode(Bool.self, forKey: .symbolAutoReturn)
         phrases = try? container.decode([String].self, forKey: .phrases)
+        func boolean(_ key: CodingKeys) -> Bool? {
+            container.contains(key) ? ((try? container.decode(Bool.self, forKey: key)) ?? true) : nil
+        }
+        func integer(_ key: CodingKeys, defaultValue: Int, minimum: Int, maximum: Int) -> Int? {
+            guard container.contains(key) else { return nil }
+            guard let value = try? container.decode(Double.self, forKey: key),
+                  value.isFinite, value.rounded(.towardZero) == value else { return defaultValue }
+            return Int(Swift.max(Double(minimum), Swift.min(Double(maximum), value)))
+        }
+        clipboardHistoryEnabled = boolean(.clipboardHistoryEnabled)
+        clipboardHistoryLimit = integer(.clipboardHistoryLimit, defaultValue: 50, minimum: 10, maximum: 200)
+        clipboardSuggestionEnabled = boolean(.clipboardSuggestionEnabled)
+        clipboardSuggestionTimeoutSec = integer(.clipboardSuggestionTimeoutSec, defaultValue: 30, minimum: 5, maximum: 120)
+        clipboardReturnAfterPaste = boolean(.clipboardReturnAfterPaste)
+        clipboardHideSensitive = boolean(.clipboardHideSensitive)
     }
 }
 

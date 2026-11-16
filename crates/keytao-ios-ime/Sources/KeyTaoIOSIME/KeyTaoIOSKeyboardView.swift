@@ -47,6 +47,7 @@ private enum KeyTaoCandidateBarContent {
     case fullHeightSymbolKeyboard
     case candidates
     case backspaceHint
+    case clipboardSuggestion
     case toolbar
 }
 
@@ -288,6 +289,11 @@ final class KeyTaoIOSKeyboardView: UIView {
     private var clipboardItemsLoading = false
     private var clipboardItems: [ClipboardEntry] = []
     private var clipboardClearConfirmationPending = false
+    private var clipboardFullAccess = false
+    private var clipboardSuggestion: String?
+    private var clipboardSuggestionCopiedAt: TimeInterval = 0
+    private var consumedClipboardSuggestionCopiedAt: TimeInterval?
+    private var clipboardSuggestionExpiryWorkItem: DispatchWorkItem?
     private var expandedCandidateItemsCacheSignature = ""
     private var expandedCandidateItemsCache: [CandidateDrawItem] = []
     private var expandedCandidateScrollY: CGFloat = 0
@@ -453,6 +459,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             keyRects = []
         }
         self.config = config
+        scheduleClipboardSuggestionExpiry()
         if !toolbarEditMode {
             toolbarActionOrderOverride = config.toolbarActionOrder.isEmpty ? nil : config.toolbarActionOrder
             toolbarPinnedCountOverride = config.toolbarPinnedCount
@@ -607,6 +614,48 @@ final class KeyTaoIOSKeyboardView: UIView {
         invalidateLayoutAndDisplay()
     }
 
+    func update(clipboardFullAccess: Bool) {
+        guard self.clipboardFullAccess != clipboardFullAccess else { return }
+        self.clipboardFullAccess = clipboardFullAccess
+        invalidateLayoutAndDisplay()
+    }
+
+    func update(clipboardSuggestion: String?, copiedAt: TimeInterval) {
+        guard self.clipboardSuggestion != clipboardSuggestion || clipboardSuggestionCopiedAt != copiedAt else { return }
+        self.clipboardSuggestion = clipboardSuggestion?.isEmpty == false && copiedAt != consumedClipboardSuggestionCopiedAt
+            ? clipboardSuggestion : nil
+        clipboardSuggestionCopiedAt = copiedAt
+        scheduleClipboardSuggestionExpiry()
+        invalidateLayoutAndDisplay()
+    }
+
+    private func scheduleClipboardSuggestionExpiry() {
+        clipboardSuggestionExpiryWorkItem?.cancel()
+        clipboardSuggestionExpiryWorkItem = nil
+        guard clipboardSuggestion != nil else { return }
+        let remaining = clipboardSuggestionCopiedAt + TimeInterval(max(5, min(120, config.clipboardSuggestionTimeoutSec)))
+            - Date().timeIntervalSince1970
+        guard remaining > 0 else {
+            clipboardSuggestion = nil
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.clipboardSuggestion = nil
+            self?.clipboardSuggestionExpiryWorkItem = nil
+            self?.invalidateLayoutAndDisplay()
+        }
+        clipboardSuggestionExpiryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: workItem)
+    }
+
+    private var visibleClipboardSuggestion: String? {
+        guard config.clipboardSuggestionEnabled, clipboardFullAccess,
+              !config.clipboardHideSensitive || !hostTraits.isSensitive,
+              Date().timeIntervalSince1970 - clipboardSuggestionCopiedAt
+                < TimeInterval(max(5, min(120, config.clipboardSuggestionTimeoutSec))) else { return nil }
+        return clipboardSuggestion
+    }
+
     /// Haptics need Full Access; without it `UIFeedbackGenerator` silently does
     /// nothing, so the keyboard stops asking for it.
     func update(hapticsAvailable: Bool) {
@@ -660,7 +709,7 @@ final class KeyTaoIOSKeyboardView: UIView {
     func didCommitDirectInput() {
         if navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: config.symbolAutoReturn) {
             navigate(to: .layer("letters"))
-        } else if functionPanelActive {
+        } else if functionPanelActive, functionPanelMode != .clipboard || config.clipboardReturnAfterPaste {
             navigate(to: .closePanel)
         }
     }
@@ -948,7 +997,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         toolbarDragging = false
         candidatePagingConsumed = false
         inlineCandidateTouchActive = false
-        let hasInlineCandidates = !state.candidatePanel.candidates.isEmpty
+        let hasInlineCandidates = !inlineCandidateRects.isEmpty
         candidateExpandPressed = !functionPanelActive
             && !state.candidatePanel.candidates.isEmpty
             && point.y < config.candidateBarHeightDp
@@ -971,7 +1020,7 @@ final class KeyTaoIOSKeyboardView: UIView {
            point.y < config.candidateBarHeightDp {
             inlineCandidateTouchActive = true
             pressedCandidate = inlineCandidateRects.first { $0.rect.contains(point) }
-            if pressedCandidate != nil {
+            if pressedCandidate != nil, pressedCandidate?.command == nil {
                 scheduleCandidateLongPress()
             }
         } else if pressedToolbar == nil && !candidateExpandPressed && candidatePanelExpanded && point.y >= config.candidateBarHeightDp {
@@ -1063,7 +1112,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 let maximum = maxCandidateScroll()
                 let requested = candidateTouchStartScrollX - deltaX
                 candidateScrollX = max(0, min(maximum, requested))
-                if !candidatePagingConsumed {
+                if !candidatePagingConsumed, !state.candidatePanel.candidates.isEmpty {
                     let navigation = state.candidatePanel.navigation
                     let command: KeyTaoKeyCommand?
                     if requested > maximum + dragSlop, navigation.canGoNext {
@@ -1212,7 +1261,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             clearCandidateOrPanelTouchState()
             if let command = candidate.command {
                 dispatchKeyCommand(command)
-                if candidate.clipboardKey != nil {
+                if candidate.clipboardKey != nil, config.clipboardReturnAfterPaste {
                     closeCandidatePanel()
                     invalidateLayoutAndDisplay()
                 }
@@ -1904,6 +1953,15 @@ final class KeyTaoIOSKeyboardView: UIView {
         switch barContent {
         case .candidates:
             inlineCandidateRects = inlineCandidateLayout()
+        case .clipboardSuggestion:
+            let rect = CGRect(x: theme.panel.gap * 1.5, y: 4,
+                              width: max(0, bounds.width - theme.panel.gap * 3),
+                              height: max(0, config.candidateBarHeightDp - 8))
+            inlineCandidateRects = [CandidateRect(identifierIndex: -6000, selectIndex: -6000,
+                rect: rect, global: false, command: .panel("pasteClipboardSuggestion"),
+                label: "粘贴：\(visibleClipboardSuggestion ?? "")")]
+            candidateContentWidth = rect.width
+            candidateViewportWidth = rect.width
         default:
             inlineCandidateRects = []
             candidateContentWidth = 0
@@ -1930,7 +1988,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         if usesFullHeightSymbolKeyboard() { return .fullHeightSymbolKeyboard }
         if !state.candidatePanel.candidates.isEmpty { return .candidates }
         if backspacePreviewText?.isEmpty == false { return .backspaceHint }
-        // iOS intentionally has no automatic clipboard-suggestion state; see IMPL.md.
+        if !candidatePanelExpanded, !hasActiveComposition, visibleClipboardSuggestion != nil {
+            return .clipboardSuggestion
+        }
         return .toolbar
     }
 
@@ -2025,7 +2085,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                 }
                 if let command = candidate.command {
                     self.dispatchKeyCommand(command)
-                    if candidate.clipboardKey != nil {
+                    if candidate.clipboardKey != nil, self.config.clipboardReturnAfterPaste {
                         self.closeCandidatePanel()
                         self.invalidateLayoutAndDisplay()
                     }
@@ -2058,6 +2118,17 @@ final class KeyTaoIOSKeyboardView: UIView {
                 }
                 return self != nil
             }
+            elements.append(element)
+        }
+        if functionPanelActive, functionPanelMode == .clipboard,
+           !clipboardFullAccess, clipboardPanelItems().isEmpty {
+            let element = UIAccessibilityElement(accessibilityContainer: self)
+            element.accessibilityTraits = .staticText
+            element.accessibilityLabel = expandedPanelEmptyMessage()
+            element.accessibilityFrameInContainerSpace = CGRect(
+                x: 0, y: config.candidateBarHeightDp, width: bounds.width,
+                height: max(0, keyboardBottom() - config.candidateBarHeightDp)
+            )
             elements.append(element)
         }
         for toolbar in toolbarRects {
@@ -2152,6 +2223,14 @@ final class KeyTaoIOSKeyboardView: UIView {
             return
         case .backspaceHint:
             drawBackspaceDeletionPreview()
+            return
+        case .clipboardSuggestion:
+            if let suggestion = inlineCandidateRects.first {
+                keyBackgroundColor().setFill()
+                UIBezierPath(roundedRect: suggestion.rect, cornerRadius: candidateCornerRadius()).fill()
+                drawTruncatedText(suggestion.label, in: suggestion.rect.insetBy(dx: candidatePaddingX(), dy: 0),
+                                  color: theme.candidate.foreground.uiColor, size: candidateTextSize(), alignment: .left)
+            }
             return
         case .toolbar:
             break
@@ -2386,12 +2465,16 @@ final class KeyTaoIOSKeyboardView: UIView {
 
         let items = expandedCandidateItems()
         if items.isEmpty {
-            drawText(
-                expandedPanelEmptyMessage(),
-                in: panelRect,
+            let message = expandedPanelEmptyMessage()
+            let messageRect = panelRect.insetBy(dx: theme.panel.gap * 1.5, dy: 0)
+            let messageSize = functionPanelActive && functionPanelMode == .clipboard && !clipboardFullAccess
+                ? min(theme.font.labelSize, theme.font.labelSize * messageRect.width / max(1, textWidth(message, size: theme.font.labelSize)))
+                : theme.font.labelSize
+            drawTruncatedText(
+                message,
+                in: messageRect,
                 color: theme.candidate.commentColor.uiColor,
-                size: theme.font.labelSize,
-                weight: theme.font.weight,
+                size: messageSize,
                 alignment: .center
             )
             return
@@ -4991,7 +5074,8 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func clipboardPanelItems() -> [CandidateDrawItem] {
-        clipboardItems.enumerated().map { index, entry in
+        guard !config.clipboardHideSensitive || !hostTraits.isSensitive else { return [] }
+        return clipboardItems.filter { config.clipboardHistoryEnabled || $0.pinned }.enumerated().map { index, entry in
             let isMedia = entry.text == nil
             let size = entry.size >= 1024 * 1024
                 ? String(format: "%.1f MB", Double(entry.size) / (1024 * 1024))
@@ -5500,12 +5584,15 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func dispatchKeyCommand(_ command: KeyTaoKeyCommand) {
+        let returnsAfterPaste = functionPanelActive && functionPanelMode == .clipboard
+            && config.clipboardReturnAfterPaste && command.type == KeyTaoCommandType.edit && command.value == "paste"
         if command.type == KeyTaoCommandType.keyboardMode {
             navigate(to: isEmojiSearching && command.value == "back" ? .endEmojiSearch : .layer(command.value))
         } else if !handlePanelCommand(command) {
             rememberRecentEmoji(command)
             delegate?.keyboardView(self, didTrigger: command)
         }
+        if returnsAfterPaste { closeCandidatePanel() }
     }
 
     @discardableResult
@@ -5534,7 +5621,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             if let value = command.value, value.hasPrefix("pasteMedia:") {
                 delegate?.keyboardView(self, commitClipboardMedia: String(value.dropFirst("pasteMedia:".count)))
                 performSelectionFeedback()
-                closeCandidatePanel()
+                if config.clipboardReturnAfterPaste { closeCandidatePanel() }
                 return true
             }
             switch command.value {
@@ -5549,6 +5636,12 @@ final class KeyTaoIOSKeyboardView: UIView {
                 delegate?.keyboardView(self, didTrigger: KeyTaoKeyCommand(type: KeyTaoCommandType.rimeMenu, value: nil, fallbackValue: nil))
             case "clipboard":
                 openFunctionPanel(.clipboard)
+            case "pasteClipboardSuggestion":
+                if let text = visibleClipboardSuggestion {
+                    consumedClipboardSuggestionCopiedAt = clipboardSuggestionCopiedAt
+                    update(clipboardSuggestion: nil, copiedAt: 0)
+                    delegate?.keyboardView(self, didTrigger: .directInput(text))
+                }
             case "phrases":
                 openFunctionPanel(.phrases)
             case "settings":
@@ -6123,6 +6216,9 @@ final class KeyTaoIOSKeyboardView: UIView {
     }
 
     private func expandedPanelEmptyMessage() -> String {
+        if functionPanelActive && functionPanelMode == .clipboard && !clipboardFullAccess {
+            return "需要在 设置 › 通用 › 键盘 › 键盘 › KeyTao 中开启“允许完全访问”"
+        }
         if clipboardItemsLoading {
             return "正在读取剪贴板"
         }

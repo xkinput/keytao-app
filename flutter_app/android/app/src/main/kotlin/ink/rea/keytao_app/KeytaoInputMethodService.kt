@@ -72,6 +72,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var clipboardHistoryLoaded = false
     private data class ClipboardPersistence(
         val items: List<StoredClipboardItem>,
+        val historyLimit: Int,
         val captureSuppressed: Boolean,
         val suppressedFingerprint: String?,
         val lastMediaFingerprint: String?,
@@ -103,7 +104,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private var clipboardSuppression: ClipboardSnapshot? = null
     private var lastOfferedClip: ClipboardSuggestionOffer? = null
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
-        if (!clipboardHistoryLoaded || !privacyMode.allowsClipboard) return@OnPrimaryClipChangedListener
+        if (!clipboardHistoryLoaded || !clipboardHistoryVisible) return@OnPrimaryClipChangedListener
         clipboardCaptureSuppressed = false
         // A clipboard change is a new user/system event even when it writes the
         // same text again, so a deletion suppression cannot survive it.
@@ -121,6 +122,20 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private val keyboardHostLocation = IntArray(2)
     private val keyboardLayoutStateStore by lazy { KeytaoKeyboardLayoutStateStore(applicationContext) }
     private var baseKeyboardConfig: KeytaoAndroidImeConfig? = null
+    private var clipboardConfigLoaded = false
+    private val clipboardHistoryVisible: Boolean
+        get() = clipboardConfigLoaded && shouldShowClipboardHistory(
+            hideSensitive = baseKeyboardConfig?.clipboardHideSensitive ?: true,
+            sensitiveField = !privacyMode.allowsClipboard,
+        )
+    private val clipboardRecordingAllowed: Boolean
+        get() = clipboardConfigLoaded && clipboardCaptureAllowed && shouldRecordClipboard(
+            historyEnabled = baseKeyboardConfig?.clipboardHistoryEnabled ?: true,
+            hideSensitive = baseKeyboardConfig?.clipboardHideSensitive ?: true,
+            sensitiveField = !privacyMode.allowsClipboard,
+        )
+    private val clipboardCaptureAllowed: Boolean
+        get() = !clipboardCaptureSuppressed || baseKeyboardConfig?.clipboardHideSensitive == false
     private var keyboardLayoutState = KeyboardLayoutState(
         mode = KeyboardLayoutMode.FULL,
         floatingScale = 1f,
@@ -370,10 +385,11 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             selectionModeActive = false
             navigationResetOnShow = false
         }
-        registerClipboardListener()
-        if (resetNavigationForShow) offerCurrentClipboardSuggestionOnShow()
         keyboardView?.updateTheme(resolvePresentationTheme())
         applyKeyboardPresentation(loadPresentationConfig())
+        registerClipboardListener()
+        rememberCurrentClipboard(suggest = false)
+        if (resetNavigationForShow) offerCurrentClipboardSuggestionOnShow()
         keyboardView?.updateInputMethodSwitching(canOfferNextInputMethod())
         applyAvailability()
         keyboardView?.updateState(currentState)
@@ -521,15 +537,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (nextPrivacy != privacyMode) {
             cancelVoiceInput()
             privacyMode = nextPrivacy
+            suppressSensitiveClipboardCapture()
             refreshVoiceInput()
-            if (!nextPrivacy.allowsClipboard) {
-                clipboardCaptureSuppressed = true
+            if (!clipboardHistoryVisible) {
+                unregisterClipboardListener()
                 cancelClipboardCaptures()
-                persistClipboardHistory()
-                clipboardSuppression = null
                 keyboardView?.clearRecentClipboardSuggestion()
-                keyboardView?.refreshClipboardItems(emptyList())
+            } else if (inputViewShown) {
+                registerClipboardListener()
             }
+            keyboardView?.refreshClipboardItems(clipboardEntries())
             if (!nextPrivacy.allowsTextRecall) {
                 discardPendingHostBackspace()
                 cancelBackspaceSelection()
@@ -717,7 +734,10 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun loadPresentationConfig(): KeytaoAndroidImeConfig {
         markPresentationLoad()
-        return KeytaoAndroidImeConfig.load(this)
+        val rootAvailable = KeytaoAndroidPaths.userRootOrNull(this) != null
+        val config = KeytaoAndroidImeConfig.load(this)
+        clipboardConfigLoaded = rootAvailable
+        return config
     }
 
     private fun resolvePresentationTheme(): KeytaoImeTheme {
@@ -728,6 +748,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun applyKeyboardPresentation(config: KeytaoAndroidImeConfig) {
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         baseKeyboardConfig = config
+        suppressSensitiveClipboardCapture()
         presentationIsLandscape = isLandscape
         keyboardLayoutState = keyboardLayoutStateStore.load(isLandscape, config.floating.profile(isLandscape))
         applyKeyboardPresentation(config, keyboardLayoutState)
@@ -766,6 +787,18 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         )
         keyboardView?.updateSettingsConfig(config)
         keyboardView?.updateConfig(presentedConfig)
+        if (clipboardConfigLoaded) {
+            val previousLimit = clipboardHistory.limit
+            clipboardHistory.updateLimit(config.clipboardHistoryLimit)
+            if (previousLimit != clipboardHistory.limit) persistClipboardHistory()
+        }
+        if (!clipboardRecordingAllowed) cancelClipboardCaptures()
+        if (!clipboardHistoryVisible || !config.clipboardSuggestionEnabled) {
+            keyboardView?.clearRecentClipboardSuggestion()
+        }
+        if (inputViewShown && clipboardHistoryVisible) registerClipboardListener()
+        else unregisterClipboardListener()
+        keyboardView?.refreshClipboardItems(clipboardEntries())
     }
 
     private fun handleKeyboardLayoutStateChanged(next: KeyboardLayoutState, finished: Boolean) {
@@ -1110,7 +1143,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onRequestClipboardHistory(callback: (List<ClipboardEntry>) -> Unit) {
-        if (!privacyMode.allowsClipboard) {
+        if (!clipboardHistoryVisible) {
             callback(emptyList())
             return
         }
@@ -1119,7 +1152,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onDeleteClipboardEntry(key: String, media: Boolean) {
-        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistoryVisible) return
         if (media) {
             val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
             clipboardMedia.remove(item)
@@ -1139,7 +1172,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     }
 
     override fun onClearClipboardHistory() {
-        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistoryVisible) return
         val clip = runCatching { clipboardManager?.primaryClip }.getOrNull()
         cancelClipboardCaptures()
         clipboardHistory.clearUnpinned()
@@ -1160,7 +1193,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         clipboardHistory.isPinned(key, media)
 
     override fun onToggleClipboardPin(key: String, media: Boolean) {
-        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistoryVisible) return
         if (!clipboardHistory.togglePin(key, media, maxBytes = clipboardHistoryItemsMaxBytes)) {
             Toast.makeText(this, "置顶空间已满，请先取消部分置顶", Toast.LENGTH_SHORT).show()
             return
@@ -1170,7 +1203,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     override fun onCommitClipboardMedia(key: String) {
         discardPendingHostBackspace()
-        if (!privacyMode.allowsClipboard) return
+        if (!clipboardHistoryVisible) return
         val item = clipboardMedia.firstOrNull { "media:${it.id}" == key } ?: return
         val uri = runCatching {
             FileProvider.getUriForFile(this, "$packageName.fileprovider", item.file)
@@ -2308,12 +2341,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         keyboardView?.updateState(currentState)
     }
 
-    /**
-     * The clipboard is only watched while an input view is up, and only for as
-     * long as the editor allows it — a password field must never see a paste chip.
-     */
+    /** Clipboard access follows the user's sensitive-field preference while the keyboard is visible. */
     private fun registerClipboardListener() {
-        if (clipboardListenerRegistered || !privacyMode.allowsClipboard) return
+        if (clipboardListenerRegistered || !clipboardHistoryVisible) return
         val manager = clipboardManager ?: return
         manager.addPrimaryClipChangedListener(clipboardListener)
         clipboardListenerRegistered = true
@@ -2331,8 +2361,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun currentClipboardSnapshot(): ClipboardSnapshot? {
         inputCounts.record("clipboard_read")
-        if (!privacyMode.allowsClipboard || clipboardCaptureSuppressed) return null
-        val clip = clipboardManager?.primaryClip ?: return null
+        if (!clipboardHistoryVisible || !clipboardCaptureAllowed) return null
+        val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return null
         if (clip.itemCount <= 0) return null
         if (isSensitiveClip(clip.description)) return null
         // Never coerce a media URI into a literal content:// text-history entry.
@@ -2362,16 +2392,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
      * clipboard consumer, the system preview included, not to show the content.
      */
     private fun isSensitiveClip(description: ClipDescription?): Boolean {
-        if (description == null) return false
+        if (baseKeyboardConfig?.clipboardHideSensitive == false || description == null) return false
         return description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true
     }
 
     private fun rememberCurrentClipboard(suggest: Boolean) {
-        if (!clipboardHistoryLoaded || !privacyMode.allowsClipboard || clipboardCaptureSuppressed) return
+        if (!clipboardHistoryLoaded || !clipboardHistoryVisible || !clipboardCaptureAllowed || (!clipboardRecordingAllowed && !suggest)) return
         val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return
-        if (captureClipboardMedia(clip)) return
+        if (clipboardRecordingAllowed && captureClipboardMedia(clip)) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
-        val timestamp = snapshot.timestamp.takeIf { it > 0 }
+        val timestamp = snapshot.timestamp.takeIf { it > 0L }
             ?: if (suggest) System.currentTimeMillis() else 0L
         rememberClipboardText(snapshot.text, suggest, timestamp)
     }
@@ -2379,8 +2409,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
     private fun clipboardDirectory(): File = File(filesDir, "clipboard-history")
 
     private fun clipboardEntries(): List<ClipboardEntry> {
-        if (!privacyMode.allowsClipboard) return emptyList()
+        if (!clipboardHistoryVisible) return emptyList()
         return clipboardHistory.items.mapNotNull { stored ->
+            if (baseKeyboardConfig?.clipboardHistoryEnabled == false && !stored.pinned) return@mapNotNull null
             stored.text?.let { return@mapNotNull ClipboardEntry(key = stored.key, text = it) }
             val media = clipboardMedia.firstOrNull { "media:${it.id}" == stored.key } ?: return@mapNotNull null
             ClipboardEntry(stored.key, mime = media.mime, name = media.name,
@@ -2390,7 +2421,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     /** Open the provider stream during the focused IME's clipboard callback grant window. */
     private fun captureClipboardMedia(clip: ClipData): Boolean {
-        if (!privacyMode.allowsClipboard || clipboardCaptureSuppressed || isSensitiveClip(clip.description)) return true
+        if (!clipboardRecordingAllowed || isSensitiveClip(clip.description)) return true
         if (clip.itemCount == 0) return false
         val uri = clip.getItemAt(0).uri ?: return false
         if (uri.authority == "$packageName.fileprovider") return true
@@ -2435,7 +2466,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                 val media = snapshotClipboardStream(stream, id, extension, mime, name, capturedAt, generation)
                 mainHandler.post {
                     clipboardMediaStreams.remove(id)
-                    if (generation != clipboardMediaGeneration || !privacyMode.allowsClipboard) {
+                    if (generation != clipboardMediaGeneration || !clipboardRecordingAllowed) {
                         media?.file?.delete()
                         return@post
                     }
@@ -2532,7 +2563,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun restoreClipboardHistory() {
         clipboardExecutor.execute {
-            val restored = ClipboardHistoryState()
+            // Keep up to the supported maximum until the current config is available on the main thread.
+            val restored = ClipboardHistoryState(200)
             val media = mutableListOf<ClipboardMedia>()
             val payload = try {
                 val prefsFile = File(applicationInfo.dataDir, "shared_prefs/keytao_ime_clipboard.xml")
@@ -2586,6 +2618,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             if (payload == null) runCatching { deleteSharedPreferences("keytao_ime_clipboard") }
             mainHandler.post {
                 if (serviceDestroyed) return@post
+                if (clipboardConfigLoaded) baseKeyboardConfig?.let { restored.updateLimit(it.clipboardHistoryLimit) }
                 clipboardHistory = restored
                 clipboardMedia.addAll(media.sortedByDescending { it.ts })
                 clipboardCaptureSuppressed = clipboardCaptureSuppressed || (payload?.optBoolean("captureSuppressed", false) ?: false)
@@ -2610,7 +2643,8 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         if (removed.isNotEmpty()) clipboardExecutor.execute { removed.forEach { it.file.delete() } }
         synchronized(clipboardPersistenceLock) {
             pendingClipboardPersistence = ClipboardPersistence(
-                clipboardHistory.items, clipboardCaptureSuppressed,
+                clipboardHistory.items, clipboardHistory.limit,
+                clipboardCaptureSuppressed,
                 clipboardSuppressionFingerprint, lastClipboardMediaFingerprint,
             )
             if (clipboardPersistenceRunning) return
@@ -2625,7 +2659,7 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     next
                 } ?: break
                 try {
-                    val history = ClipboardHistoryState()
+                    val history = ClipboardHistoryState(snapshot.historyLimit)
                     snapshot.items.asReversed().forEach { history.remember(it) }
                     val payload = JSONObject().apply {
                         put("history", JSONArray(history.encode(clipboardHistoryItemsMaxBytes)))
@@ -2656,22 +2690,35 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
         }
     }
 
+    private fun suppressSensitiveClipboardCapture() {
+        if (privacyMode.allowsClipboard || baseKeyboardConfig?.clipboardHideSensitive == false || clipboardCaptureSuppressed) return
+        clipboardCaptureSuppressed = true
+        persistClipboardHistory()
+    }
+
     private fun offerCurrentClipboardSuggestionOnShow() {
-        if (!clipboardHistoryLoaded) return
+        if (!clipboardHistoryLoaded || !clipboardHistoryVisible) return
         val snapshot = currentUnsuppressedClipboardSnapshot() ?: return
-        rememberClipboardText(snapshot.text, suggest = false, timestamp = snapshot.timestamp)
+        offerClipboardSuggestion(snapshot)
+    }
+
+    private fun offerClipboardSuggestion(snapshot: ClipboardSnapshot) {
+        if (!clipboardHistoryVisible || !clipboardCaptureAllowed || baseKeyboardConfig?.clipboardSuggestionEnabled == false) return
+        val now = System.currentTimeMillis()
+        val timeoutMs = (baseKeyboardConfig?.clipboardSuggestionTimeoutSec ?: 30).coerceIn(5, 120) * 1_000L
         if (!shouldOfferClipboardSuggestion(
                 text = snapshot.text,
                 timestamp = snapshot.timestamp,
-                now = System.currentTimeMillis(),
+                now = now,
                 lastOffered = lastOfferedClip,
-                windowMs = KeytaoImeInteractionTuning.CLIPBOARD_SUGGESTION_WINDOW_MS,
+                windowMs = timeoutMs,
             )
         ) {
             return
         }
         lastOfferedClip = ClipboardSuggestionOffer(snapshot.text, snapshot.timestamp)
-        keyboardView?.showRecentClipboardSuggestion(snapshot.text)
+        val remainingMs = if (snapshot.timestamp > 0L) timeoutMs - (now - snapshot.timestamp) else timeoutMs
+        keyboardView?.showRecentClipboardSuggestion(snapshot.text, remainingMs)
     }
 
     private fun currentUnsuppressedClipboardSnapshot(): ClipboardSnapshot? {
@@ -2688,19 +2735,16 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
 
     private fun rememberClipboardText(text: String, suggest: Boolean, timestamp: Long = 0L) {
         // Reject copies over 20K UTF-16 units instead of keeping or persisting a truncated secret.
-        if (!clipboardHistoryLoaded || text.length > clipboardTextMaxChars || text.isBlank() ||
-            !privacyMode.allowsClipboard || clipboardCaptureSuppressed) return
-        val previous = clipboardHistory.items.firstOrNull { !it.isMedia && it.key == text }
-        val wasFirst = clipboardHistory.items.firstOrNull { !it.isMedia && !it.pinned }?.key == text
-        clipboardHistory.remember(StoredClipboardItem(
-            key = text, text = text,
-            timestamp = timestamp.takeIf { it > 0 } ?: previous?.timestamp ?: System.currentTimeMillis(),
-        ))
-        persistClipboardHistory()
-        if (suggest && !wasFirst) {
-            lastOfferedClip = ClipboardSuggestionOffer(text, timestamp)
-            keyboardView?.showRecentClipboardSuggestion(text)
+        if (!clipboardHistoryLoaded || text.length > clipboardTextMaxChars || text.isBlank() || !clipboardHistoryVisible || !clipboardCaptureAllowed) return
+        if (clipboardRecordingAllowed) {
+            val previous = clipboardHistory.items.firstOrNull { !it.isMedia && it.key == text }
+            clipboardHistory.remember(StoredClipboardItem(
+                key = text, text = text,
+                timestamp = timestamp.takeIf { it > 0 } ?: previous?.timestamp ?: System.currentTimeMillis(),
+            ))
+            persistClipboardHistory()
         }
+        if (suggest) offerClipboardSuggestion(ClipboardSnapshot(text, timestamp))
     }
 
     /**
@@ -2735,7 +2779,9 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
             val rootAvailable = readiness != null && readiness != Readiness.STORAGE_NOT_READY &&
                 readiness != Readiness.PERMISSION_MISSING
             val recovered = reloadPresentation && rootAvailable
-            val config = if (recovered) runCatching { KeytaoAndroidImeConfig.load(this) }.getOrNull() else null
+            val config = if (recovered && KeytaoAndroidPaths.isUserRootResolved()) {
+                runCatching { KeytaoAndroidImeConfig.load(this) }.getOrNull()
+            } else null
             val theme = if (recovered) runCatching { KeytaoThemeResolver.resolve(this) }.getOrNull() else null
             mainHandler.post {
                 availabilityRefreshPending = false
@@ -2744,7 +2790,14 @@ class KeytaoInputMethodService : InputMethodService(), KeytaoKeyboardView.Listen
                     readinessRetryCount = 0
                     readinessRetryDelayMs = 500L
                 }
-                config?.let { applyKeyboardPresentation(it) }
+                config?.let {
+                    clipboardConfigLoaded = true
+                    applyKeyboardPresentation(it)
+                    if (inputViewShown) {
+                        rememberCurrentClipboard(suggest = false)
+                        offerCurrentClipboardSuggestionOnShow()
+                    }
+                }
                 theme?.let { keyboardView?.updateTheme(it) }
                 if (config != null && theme != null) presentationLoadedWithoutRoot = false
                 if (readiness != null) applyReadiness(readiness) else scheduleReadinessRetry()

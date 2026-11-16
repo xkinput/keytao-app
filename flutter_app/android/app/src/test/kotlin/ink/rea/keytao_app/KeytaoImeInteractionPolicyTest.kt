@@ -8,6 +8,44 @@ import org.junit.Test
 
 class KeytaoImeInteractionPolicyTest {
     @Test
+    fun `clipboard recording and history visibility honor every privacy setting combination`() {
+        val cases = listOf(
+            Triple(false, false, false) to (false to true),
+            Triple(false, false, true) to (false to true),
+            Triple(false, true, false) to (false to true),
+            Triple(false, true, true) to (false to false),
+            Triple(true, false, false) to (true to true),
+            Triple(true, false, true) to (true to true),
+            Triple(true, true, false) to (true to true),
+            Triple(true, true, true) to (false to false),
+        )
+
+        for ((settings, expected) in cases) {
+            val (historyEnabled, hideSensitive, sensitiveField) = settings
+            val message = "historyEnabled=$historyEnabled hideSensitive=$hideSensitive sensitiveField=$sensitiveField"
+            assertEquals(
+                message,
+                expected.first,
+                shouldRecordClipboard(historyEnabled, hideSensitive, sensitiveField),
+            )
+            assertEquals(message, expected.second, shouldShowClipboardHistory(hideSensitive, sensitiveField))
+        }
+    }
+
+    @Test
+    fun `clipboard suggestion accepts the exact configured timeout and rejects stale or future clips`() {
+        val now = 1_000_000L
+        for (timeoutSec in listOf(5, 30, 120)) {
+            val windowMs = timeoutSec * 1_000L
+
+            assertTrue(shouldOfferClipboardSuggestion("recent", now, now, null, windowMs))
+            assertTrue(shouldOfferClipboardSuggestion("boundary", now - windowMs, now, null, windowMs))
+            assertFalse(shouldOfferClipboardSuggestion("expired", now - windowMs - 1L, now, null, windowMs))
+            assertFalse(shouldOfferClipboardSuggestion("future", now + 1L, now, null, windowMs))
+        }
+    }
+
+    @Test
     fun `clipboard suggestion is offered only for a recent unoffered clip`() {
         val now = 1_000_000L
         val windowMs = 300_000L

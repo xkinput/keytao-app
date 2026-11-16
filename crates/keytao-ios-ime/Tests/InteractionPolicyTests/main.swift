@@ -113,6 +113,25 @@ for action in [KeyTaoNavigationAction.layer(.letters), .back, .panel(nil), .pane
     expect(action.requiresCompositionCommit, false, "non-insertion navigation leaves composition handling to its existing path")
 }
 
+let clipboardAccessCases: [(enabled: Bool, hideSensitive: Bool, sensitive: Bool, record: Bool, show: Bool)] = [
+    (false, false, false, false, true),
+    (false, false, true, false, true),
+    (false, true, false, false, true),
+    (false, true, true, false, false),
+    (true, false, false, true, true),
+    (true, false, true, true, true),
+    (true, true, false, true, true),
+    (true, true, true, false, false),
+]
+for item in clipboardAccessCases {
+    let access = KeyTaoClipboardAccessPolicy(
+        historyEnabled: item.enabled, hideSensitive: item.hideSensitive, isSensitive: item.sensitive
+    )
+    let settings = "enabled=\(item.enabled), hideSensitive=\(item.hideSensitive), sensitive=\(item.sensitive)"
+    expect(access.canRecord, item.record, "clipboard recording decision for \(settings)")
+    expect(access.canShowHistory, item.show, "clipboard visibility decision for \(settings)")
+}
+
 var clipboard = KeyTaoClipboardHistory()
 clipboard.upsert(KeyTaoClipboardRecord(key: "pinned", text: "Keep me", timestamp: 0))
 clipboard.togglePin("pinned")
@@ -154,6 +173,53 @@ let duplicateHistory = KeyTaoClipboardHistory(records: [
 ])
 expect(duplicateHistory.records.count, 1, "initial clipboard records are deduplicated")
 expect(duplicateHistory.records.first?.text, "New", "initial clipboard deduplication keeps the most recent value")
+
+let clipboardLimitRecords = [KeyTaoClipboardRecord(key: "limit-pin", timestamp: 0, pinned: true)]
+    + (1...210).map { KeyTaoClipboardRecord(key: "limit-\($0)", timestamp: Double($0)) }
+for (requested, expected) in [(10, 10), (200, 200), (-1, 10), (201, 200)] {
+    let limited = KeyTaoClipboardHistory(records: clipboardLimitRecords, limit: requested)
+    expect(limited.records.count, expected + 1, "requested limit \(requested) caps only unpinned records at \(expected)")
+    expect(limited.records.first?.key, "limit-pin", "requested limit \(requested) preserves an old pin")
+    expect(limited.records.dropFirst().first?.key, "limit-210", "requested limit \(requested) keeps the newest unpinned item")
+    expect(limited.records.last?.key, "limit-\(211 - expected)", "requested limit \(requested) evicts the oldest unpinned items")
+}
+var customClipboard = KeyTaoClipboardHistory(records: Array(clipboardLimitRecords.prefix(11)), limit: 10)
+customClipboard.upsert(KeyTaoClipboardRecord(key: "limit-11", timestamp: 11))
+expect(customClipboard.records.count, 11, "insertion applies the configured unpinned limit")
+expect(customClipboard.records.contains { $0.key == "limit-1" }, false, "insertion evicts the oldest unpinned item at the configured limit")
+customClipboard.togglePin("limit-2")
+customClipboard.upsert(KeyTaoClipboardRecord(key: "limit-12", timestamp: 12))
+expect(customClipboard.records.count, 12, "pinning frees an unpinned slot without evicting a record")
+expect(customClipboard.records.filter(\.pinned).map(\.key), ["limit-2", "limit-pin"], "configured limits preserve every pin")
+customClipboard.togglePin("limit-pin")
+expect(customClipboard.records.count, 11, "unpinning re-applies the configured limit")
+expect(customClipboard.records.contains { $0.key == "limit-pin" }, false, "unpinning an old item evicts it before recent entries")
+
+var resizedClipboard = KeyTaoClipboardHistory(records: clipboardLimitRecords, limit: 200)
+resizedClipboard.setLimit(10)
+expect(resizedClipboard.records.count, 11, "lowering the limit trims existing history immediately")
+expect(resizedClipboard.records.last?.key, "limit-201", "lowering the limit keeps the ten newest unpinned items")
+expect(resizedClipboard.records.first?.key, "limit-pin", "lowering the limit never evicts a pin")
+resizedClipboard.setLimit(-1)
+expect(resizedClipboard.records.count, 11, "changing the limit clamps below ten")
+resizedClipboard.setLimit(500)
+for index in 211...410 {
+    resizedClipboard.upsert(KeyTaoClipboardRecord(key: "limit-\(index)", timestamp: Double(index)))
+}
+expect(resizedClipboard.records.count, 201, "raising the limit clamps at two hundred and permits new entries")
+expect(resizedClipboard.records.last?.key, "limit-211", "raised limits retain the newest two hundred unpinned items")
+do {
+    let restoredLimited = try KeyTaoClipboardHistory(data: resizedClipboard.encoded(), limit: 10)
+    expect(restoredLimited.records.count, 11, "loading persisted history applies the current limit")
+    expect(restoredLimited.records.first?.key, "limit-pin", "loading with a smaller limit preserves pins")
+    expect(restoredLimited.records.last?.key, "limit-401", "loading with a smaller limit evicts oldest unpinned entries")
+    var restoredInsertion = restoredLimited
+    restoredInsertion.upsert(KeyTaoClipboardRecord(key: "limit-411", timestamp: 411))
+    expect(restoredInsertion.records.count, 11, "restored stores keep using their configured limit on insertion")
+    expect(restoredInsertion.records.last?.key, "limit-402", "restored store insertion evicts its oldest unpinned item")
+} catch {
+    failures.append("configured clipboard limit roundtrip failed: \(error)")
+}
 
 let mediaRecord = KeyTaoClipboardRecord(
     key: "media:image", mime: "image/png", name: "photo.png", size: 123,

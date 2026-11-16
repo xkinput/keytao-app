@@ -465,6 +465,7 @@ class _SettingsCardState extends State<SettingsCard> {
     final c = controller;
     final s = c.androidSettings;
     final enabled = !c.busy && s != null;
+    final clipboardEnabled = s?.clipboardHistoryEnabled ?? true;
     final portraitLabel = c.isIos
         ? AppStrings.oneHandedPortrait
         : AppStrings.floatingPortrait;
@@ -492,13 +493,18 @@ class _SettingsCardState extends State<SettingsCard> {
       semanticLabel: semanticLabel,
       onChanged: enabled && available ? (value) => save(field, value) : null,
     );
-    Widget toggle(String label, String field, bool value, {String? hint}) =>
-        SwitchSetting(
-          label,
-          value: value,
-          hint: hint,
-          onChanged: enabled ? (value) => save(field, value) : null,
-        );
+    Widget toggle(
+      String label,
+      String field,
+      bool value, {
+      String? hint,
+      bool available = true,
+    }) => SwitchSetting(
+      label,
+      value: value,
+      hint: hint,
+      onChanged: enabled && available ? (value) => save(field, value) : null,
+    );
     Widget choice(
       String label,
       String field,
@@ -600,6 +606,51 @@ class _SettingsCardState extends State<SettingsCard> {
           96,
           84,
           'dp',
+        ),
+        _mobileGroupLabel(context, AppStrings.clipboard),
+        toggle(
+          AppStrings.clipboardHistoryEnabled,
+          'clipboardHistoryEnabled',
+          clipboardEnabled,
+        ),
+        slider(
+          AppStrings.clipboardHistoryLimit,
+          'clipboardHistoryLimit',
+          s?.clipboardHistoryLimit ?? 50,
+          10,
+          200,
+          190,
+          '条',
+          available: clipboardEnabled,
+        ),
+        toggle(
+          AppStrings.clipboardSuggestionEnabled,
+          'clipboardSuggestionEnabled',
+          s?.clipboardSuggestionEnabled ?? true,
+          available: clipboardEnabled,
+        ),
+        slider(
+          AppStrings.clipboardSuggestionTimeoutSec,
+          'clipboardSuggestionTimeoutSec',
+          s?.clipboardSuggestionTimeoutSec ?? 30,
+          5,
+          120,
+          115,
+          '秒',
+          available:
+              clipboardEnabled && (s?.clipboardSuggestionEnabled ?? true),
+        ),
+        toggle(
+          AppStrings.clipboardReturnAfterPaste,
+          'clipboardReturnAfterPaste',
+          s?.clipboardReturnAfterPaste ?? true,
+          available: clipboardEnabled,
+        ),
+        toggle(
+          AppStrings.clipboardHideSensitive,
+          'clipboardHideSensitive',
+          s?.clipboardHideSensitive ?? true,
+          available: clipboardEnabled,
         ),
         _mobileGroupLabel(context, AppStrings.layout),
         toggle(

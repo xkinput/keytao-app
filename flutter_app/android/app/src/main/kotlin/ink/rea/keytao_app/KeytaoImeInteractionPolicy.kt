@@ -102,7 +102,6 @@ internal object KeytaoImeInteractionTuning {
     const val BACKSPACE_PREVIEW_VERTICAL_INSET_DP = 6f
     const val BACKSPACE_PREVIEW_TEXT_HORIZONTAL_PADDING_DP = 8f
     const val BACKSPACE_PREVIEW_MAX_TAIL_GRAPHEMES = 18
-    const val CLIPBOARD_SUGGESTION_WINDOW_MS = 5 * 60 * 1_000L
     const val COLOR_PREVIEW_THROTTLE_MS = 50L
 
     private val slowBackspace = BackspaceRepeatProfile(
@@ -138,6 +137,12 @@ internal data class ClipboardSuggestionOffer(
     val text: String,
     val timestamp: Long,
 )
+
+internal fun shouldShowClipboardHistory(hideSensitive: Boolean, sensitiveField: Boolean): Boolean =
+    !hideSensitive || !sensitiveField
+
+internal fun shouldRecordClipboard(historyEnabled: Boolean, hideSensitive: Boolean, sensitiveField: Boolean): Boolean =
+    historyEnabled && shouldShowClipboardHistory(hideSensitive, sensitiveField)
 
 internal fun shouldOfferClipboardSuggestion(
     text: String,
@@ -592,9 +597,16 @@ internal data class StoredClipboardItem(
     }
 }
 
-internal class ClipboardHistoryState {
+internal class ClipboardHistoryState(historyLimit: Int = 50) {
+    var limit: Int = historyLimit.coerceIn(10, 200)
+        private set
     var items: List<StoredClipboardItem> = emptyList()
         private set
+
+    fun updateLimit(historyLimit: Int) {
+        limit = historyLimit.coerceIn(10, 200)
+        replace(items)
+    }
 
     fun remember(item: StoredClipboardItem) {
         if (!item.isValid()) return
@@ -681,7 +693,7 @@ internal class ClipboardHistoryState {
 
     private fun replace(next: List<StoredClipboardItem>) {
         val sorted = next.distinctBy { it.isMedia to it.key }.sortedByDescending { it.timestamp }
-        items = sorted.filter { it.pinned } + sorted.filterNot { it.pinned }.take(50)
+        items = sorted.filter { it.pinned } + sorted.filterNot { it.pinned }.take(limit)
     }
 }
 

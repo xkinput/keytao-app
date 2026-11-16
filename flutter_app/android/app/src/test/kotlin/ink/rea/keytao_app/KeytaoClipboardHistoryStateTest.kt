@@ -10,6 +10,82 @@ import java.io.ByteArrayInputStream
 
 class KeytaoClipboardHistoryStateTest {
     @Test
+    fun `configured limits share text and media capacity without counting pinned items`() {
+        for (limit in listOf(10, 200)) {
+            val state = ClipboardHistoryState(historyLimit = limit)
+            state.remember(text("pinned text", 0).copy(pinned = true))
+            state.remember(media("pinned media", 1).copy(pinned = true))
+            repeat(limit + 3) { index ->
+                state.remember(if (index % 2 == 0) text("item-$index", index + 2L) else media("item-$index", index + 2L))
+            }
+
+            assertEquals(limit, state.limit)
+            assertEquals(2, state.items.count { it.pinned })
+            assertEquals(limit, state.items.count { !it.pinned })
+            assertEquals(
+                ((limit + 2) downTo 3).map { "item-$it" },
+                state.items.filterNot { it.pinned }.map { it.key },
+            )
+            val restored = ClipboardHistoryState(historyLimit = limit).apply { restore(state.encode()) }
+            assertEquals(state.items, restored.items)
+        }
+    }
+
+    @Test
+    fun `restore uses the current configured limit and preserves all pins`() {
+        val original = ClipboardHistoryState(historyLimit = 200)
+        original.remember(text("pinned text", 0).copy(pinned = true))
+        original.remember(media("pinned media", 1).copy(pinned = true))
+        repeat(20) { index -> original.remember(text("item-$index", index + 2L)) }
+        val restored = ClipboardHistoryState(historyLimit = 10)
+
+        restored.restore(original.encode())
+
+        assertEquals(original.items.filter { it.pinned }, restored.items.filter { it.pinned })
+        assertEquals((19 downTo 10).map { "item-$it" }, restored.items.filterNot { it.pinned }.map { it.key })
+    }
+
+    @Test
+    fun `reducing the limit immediately evicts oldest unpinned while preserving more pins than the limit`() {
+        val state = ClipboardHistoryState(historyLimit = 200)
+        repeat(12) { index -> state.remember(text("pin-$index", index.toLong()).copy(pinned = true)) }
+        repeat(25) { index -> state.remember(text("item-$index", index + 20L)) }
+        val pinned = state.items.filter { it.pinned }
+
+        state.updateLimit(10)
+
+        assertEquals(10, state.limit)
+        assertEquals(pinned, state.items.filter { it.pinned })
+        assertEquals((24 downTo 15).map { "item-$it" }, state.items.filterNot { it.pinned }.map { it.key })
+    }
+
+    @Test
+    fun `unpinning an old item at capacity evicts it as the oldest unpinned item`() {
+        val state = ClipboardHistoryState(historyLimit = 10)
+        state.remember(text("old pin", 0).copy(pinned = true))
+        repeat(10) { index -> state.remember(text("item-$index", index + 1L)) }
+
+        assertTrue(state.togglePin("old pin"))
+
+        assertEquals(10, state.items.size)
+        assertFalse(state.items.any { it.key == "old pin" })
+        assertEquals((9 downTo 0).map { "item-$it" }, state.items.map { it.key })
+    }
+
+    @Test
+    fun `constructor and updates clamp limits to the supported range`() {
+        assertEquals(50, ClipboardHistoryState().limit)
+        assertEquals(10, ClipboardHistoryState(historyLimit = Int.MIN_VALUE).limit)
+        val state = ClipboardHistoryState(historyLimit = Int.MAX_VALUE)
+        assertEquals(200, state.limit)
+
+        state.updateLimit(9)
+        assertEquals(10, state.limit)
+        state.updateLimit(201)
+        assertEquals(200, state.limit)
+    }
+
+    @Test
     fun `pinned items survive combined unpinned eviction and clear all`() {
         val state = ClipboardHistoryState()
         state.remember(text("pinned", 1))

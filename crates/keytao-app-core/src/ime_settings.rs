@@ -229,6 +229,12 @@ pub struct AndroidImeInputSettings {
     pub double_space_period_enabled: bool,
     pub symbol_auto_return: bool,
     pub phrases: Vec<String>,
+    pub clipboard_history_enabled: bool,
+    pub clipboard_history_limit: u16,
+    pub clipboard_suggestion_enabled: bool,
+    pub clipboard_suggestion_timeout_sec: u16,
+    pub clipboard_return_after_paste: bool,
+    pub clipboard_hide_sensitive: bool,
     pub floating_portrait_enabled: bool,
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
@@ -262,6 +268,74 @@ fn write_mobile_keyboard_preferences(
 ) {
     config.insert("symbolAutoReturn".into(), symbol_auto_return.into());
     config.insert("phrases".into(), phrases.into());
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+#[derive(Debug, PartialEq)]
+struct ClipboardPreferences {
+    history_enabled: bool,
+    history_limit: u16,
+    suggestion_enabled: bool,
+    suggestion_timeout_sec: u16,
+    return_after_paste: bool,
+    hide_sensitive: bool,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn clipboard_preferences(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> ClipboardPreferences {
+    let flag = |key| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    };
+    let integer = |key, default, min, max| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .unwrap_or(default)
+            .clamp(min, max) as u16
+    };
+    ClipboardPreferences {
+        history_enabled: flag("clipboardHistoryEnabled"),
+        history_limit: integer("clipboardHistoryLimit", 50.0, 10.0, 200.0),
+        suggestion_enabled: flag("clipboardSuggestionEnabled"),
+        suggestion_timeout_sec: integer("clipboardSuggestionTimeoutSec", 30.0, 5.0, 120.0),
+        return_after_paste: flag("clipboardReturnAfterPaste"),
+        hide_sensitive: flag("clipboardHideSensitive"),
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn write_clipboard_preferences(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    clipboard: ClipboardPreferences,
+) {
+    for (key, value) in [
+        ("clipboardHistoryEnabled", clipboard.history_enabled.into()),
+        (
+            "clipboardHistoryLimit",
+            clipboard.history_limit.clamp(10, 200).into(),
+        ),
+        (
+            "clipboardSuggestionEnabled",
+            clipboard.suggestion_enabled.into(),
+        ),
+        (
+            "clipboardSuggestionTimeoutSec",
+            clipboard.suggestion_timeout_sec.clamp(5, 120).into(),
+        ),
+        (
+            "clipboardReturnAfterPaste",
+            clipboard.return_after_paste.into(),
+        ),
+        ("clipboardHideSensitive", clipboard.hide_sensitive.into()),
+    ] {
+        config.insert(key.into(), value);
+    }
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -430,6 +504,7 @@ fn android_ime_haptics_settings_from_config(
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
     let (symbol_auto_return, phrases) = mobile_keyboard_preferences(&config, &keyboard);
+    let clipboard = clipboard_preferences(&config);
     let floating = config.get("floating").and_then(|value| value.as_object());
     let portrait = floating
         .and_then(|value| value.get("portrait"))
@@ -482,6 +557,12 @@ fn android_ime_haptics_settings_from_config(
         double_space_period_enabled,
         symbol_auto_return,
         phrases,
+        clipboard_history_enabled: clipboard.history_enabled,
+        clipboard_history_limit: clipboard.history_limit,
+        clipboard_suggestion_enabled: clipboard.suggestion_enabled,
+        clipboard_suggestion_timeout_sec: clipboard.suggestion_timeout_sec,
+        clipboard_return_after_paste: clipboard.return_after_paste,
+        clipboard_hide_sensitive: clipboard.hide_sensitive,
         floating_portrait_enabled,
         floating_portrait_scale,
         floating_landscape_enabled,
@@ -565,6 +646,12 @@ pub async fn set_android_ime_input_settings(
     double_space_period_enabled: bool,
     symbol_auto_return: bool,
     phrases: Vec<String>,
+    clipboard_history_enabled: bool,
+    clipboard_history_limit: u16,
+    clipboard_suggestion_enabled: bool,
+    clipboard_suggestion_timeout_sec: u16,
+    clipboard_return_after_paste: bool,
+    clipboard_hide_sensitive: bool,
     floating_portrait_enabled: bool,
     floating_portrait_scale: u8,
     floating_landscape_enabled: bool,
@@ -667,6 +754,17 @@ pub async fn set_android_ime_input_settings(
                 serde_json::Value::Bool(double_space_period_enabled),
             );
             write_mobile_keyboard_preferences(&mut config, symbol_auto_return, phrases);
+            write_clipboard_preferences(
+                &mut config,
+                ClipboardPreferences {
+                    history_enabled: clipboard_history_enabled,
+                    history_limit: clipboard_history_limit,
+                    suggestion_enabled: clipboard_suggestion_enabled,
+                    suggestion_timeout_sec: clipboard_suggestion_timeout_sec,
+                    return_after_paste: clipboard_return_after_paste,
+                    hide_sensitive: clipboard_hide_sensitive,
+                },
+            );
             let mut floating = config
                 .get("floating")
                 .and_then(|value| value.as_object())
@@ -965,6 +1063,93 @@ pub fn set_ime_ui_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_preferences_default_and_round_trip_without_overwriting_explicit_values() {
+        let mut config = serde_json::json!({"unrelated": {"keep": true}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            clipboard_preferences(&config),
+            ClipboardPreferences {
+                history_enabled: true,
+                history_limit: 50,
+                suggestion_enabled: true,
+                suggestion_timeout_sec: 30,
+                return_after_paste: true,
+                hide_sensitive: true,
+            }
+        );
+        for enabled in [false, true] {
+            let preferences = ClipboardPreferences {
+                history_enabled: enabled,
+                history_limit: 75,
+                suggestion_enabled: enabled,
+                suggestion_timeout_sec: 45,
+                return_after_paste: enabled,
+                hide_sensitive: enabled,
+            };
+            write_clipboard_preferences(&mut config, preferences);
+            let restored = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+            let actual = clipboard_preferences(&restored);
+            assert_eq!(
+                actual,
+                ClipboardPreferences {
+                    history_enabled: enabled,
+                    history_limit: 75,
+                    suggestion_enabled: enabled,
+                    suggestion_timeout_sec: 45,
+                    return_after_paste: enabled,
+                    hide_sensitive: enabled,
+                }
+            );
+            assert_eq!(restored["unrelated"]["keep"], true);
+        }
+    }
+
+    #[test]
+    fn clipboard_preferences_invalid_types_default_and_numbers_clamp() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("false"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(1.5),
+        ] {
+            let config = serde_json::json!({
+                "clipboardHistoryEnabled": value, "clipboardHistoryLimit": value,
+                "clipboardSuggestionEnabled": value, "clipboardSuggestionTimeoutSec": value,
+                "clipboardReturnAfterPaste": value, "clipboardHideSensitive": value,
+            });
+            assert_eq!(
+                clipboard_preferences(config.as_object().unwrap()),
+                clipboard_preferences(&serde_json::Map::new())
+            );
+        }
+        for (value, limit, timeout) in [(-1000.0, 10, 5), (1000.0, 200, 120), (60.0, 60, 60)] {
+            let mut config = serde_json::json!({
+                "clipboardHistoryLimit": value, "clipboardSuggestionTimeoutSec": value,
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let mut preferences = clipboard_preferences(&config);
+            assert_eq!(preferences.history_limit, limit);
+            assert_eq!(preferences.suggestion_timeout_sec, timeout);
+            preferences.history_limit = if value < 0.0 { 0 } else { u16::MAX };
+            preferences.suggestion_timeout_sec = preferences.history_limit;
+            write_clipboard_preferences(&mut config, preferences);
+            assert_eq!(
+                config["clipboardHistoryLimit"],
+                if value < 0.0 { 10 } else { 200 }
+            );
+            assert_eq!(
+                config["clipboardSuggestionTimeoutSec"],
+                if value < 0.0 { 5 } else { 120 }
+            );
+        }
+    }
 
     #[test]
     fn mobile_keyboard_preferences_round_trip_and_preserve_empty_phrases() {

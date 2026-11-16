@@ -147,6 +147,12 @@ data class KeytaoAndroidImeConfig(
     val toolbarSymbolPinnedCount: Int = 5,
     val symbolAutoReturn: Boolean = false,
     val phrases: List<String> = listOf("谢谢", "好的", "收到", "稍等", "我在路上"),
+    val clipboardHistoryEnabled: Boolean = true,
+    val clipboardHistoryLimit: Int = 50,
+    val clipboardSuggestionEnabled: Boolean = true,
+    val clipboardSuggestionTimeoutSec: Int = 30,
+    val clipboardReturnAfterPaste: Boolean = true,
+    val clipboardHideSensitive: Boolean = true,
 ) {
     val effectiveKeyboardHeightDp: Float
         get() {
@@ -498,6 +504,12 @@ data class KeytaoAndroidImeConfig(
                 phrases = phraseList(root.opt("phrases"))
                     ?: phraseList(fallbackRoot?.opt("phrases"))
                     ?: listOf("谢谢", "好的", "收到", "稍等", "我在路上"),
+                clipboardHistoryEnabled = clipboardBoolean(root, fallbackRoot, "clipboardHistoryEnabled"),
+                clipboardHistoryLimit = clipboardInteger(root, fallbackRoot, "clipboardHistoryLimit", 50, 10, 200),
+                clipboardSuggestionEnabled = clipboardBoolean(root, fallbackRoot, "clipboardSuggestionEnabled"),
+                clipboardSuggestionTimeoutSec = clipboardInteger(root, fallbackRoot, "clipboardSuggestionTimeoutSec", 30, 5, 120),
+                clipboardReturnAfterPaste = clipboardBoolean(root, fallbackRoot, "clipboardReturnAfterPaste"),
+                clipboardHideSensitive = clipboardBoolean(root, fallbackRoot, "clipboardHideSensitive"),
                 swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
@@ -728,6 +740,24 @@ data class KeytaoAndroidImeConfig(
                 },
                 symbolAutoReturn = runtimeRoot.optBoolean("symbolAutoReturn", config.symbolAutoReturn),
                 phrases = phraseList(runtimeRoot.opt("phrases")) ?: config.phrases,
+                clipboardHistoryEnabled = if (runtimeRoot.has("clipboardHistoryEnabled")) {
+                    clipboardBoolean(runtimeRoot, null, "clipboardHistoryEnabled")
+                } else config.clipboardHistoryEnabled,
+                clipboardHistoryLimit = if (runtimeRoot.has("clipboardHistoryLimit")) {
+                    clipboardInteger(runtimeRoot, null, "clipboardHistoryLimit", 50, 10, 200)
+                } else config.clipboardHistoryLimit,
+                clipboardSuggestionEnabled = if (runtimeRoot.has("clipboardSuggestionEnabled")) {
+                    clipboardBoolean(runtimeRoot, null, "clipboardSuggestionEnabled")
+                } else config.clipboardSuggestionEnabled,
+                clipboardSuggestionTimeoutSec = if (runtimeRoot.has("clipboardSuggestionTimeoutSec")) {
+                    clipboardInteger(runtimeRoot, null, "clipboardSuggestionTimeoutSec", 30, 5, 120)
+                } else config.clipboardSuggestionTimeoutSec,
+                clipboardReturnAfterPaste = if (runtimeRoot.has("clipboardReturnAfterPaste")) {
+                    clipboardBoolean(runtimeRoot, null, "clipboardReturnAfterPaste")
+                } else config.clipboardReturnAfterPaste,
+                clipboardHideSensitive = if (runtimeRoot.has("clipboardHideSensitive")) {
+                    clipboardBoolean(runtimeRoot, null, "clipboardHideSensitive")
+                } else config.clipboardHideSensitive,
                 floating = config.floating.copy(
                     marginDp = floating?.optDouble("margin", config.floating.marginDp.toDouble())
                         ?.toFloat()
@@ -779,6 +809,25 @@ data class KeytaoAndroidImeConfig(
             val array = value as? JSONArray ?: return null
             if ((0 until array.length()).any { array.opt(it) !is String }) return null
             return (0 until array.length()).map { array.getString(it) }
+        }
+
+        private fun clipboardBoolean(root: JSONObject, fallbackRoot: JSONObject?, name: String): Boolean {
+            val source = if (root.has(name)) root else fallbackRoot
+            return source?.opt(name) as? Boolean ?: true
+        }
+
+        private fun clipboardInteger(
+            root: JSONObject,
+            fallbackRoot: JSONObject?,
+            name: String,
+            defaultValue: Int,
+            minimum: Int,
+            maximum: Int,
+        ): Int {
+            val source = if (root.has(name)) root else fallbackRoot
+            val value = (source?.opt(name) as? Number)?.toDouble() ?: return defaultValue
+            if (!value.isFinite() || value % 1.0 != 0.0) return defaultValue
+            return value.coerceIn(minimum.toDouble(), maximum.toDouble()).toInt()
         }
 
         private fun stringList(array: JSONArray?): List<String> {
