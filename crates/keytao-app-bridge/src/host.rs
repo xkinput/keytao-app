@@ -167,6 +167,7 @@ impl BridgeHost {
             }
             keytao_app_core::deploy::record_result(&self.core, &self.root, false)
                 .map_err(|error| error.to_string())?;
+            keytao_app_core::ime_settings::prepare_candidate_page_size(&self.root)?;
             let (user, shared) = self.deploy_paths();
             self.core.emit(keytao_app_core::CoreEvent::DeployProgress(
                 "正在部署 librime...".into(),

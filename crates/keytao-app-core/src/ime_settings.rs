@@ -7,9 +7,50 @@ use crate::{
     scheme_files::write_file_atomic,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "android", target_os = "ios"))]
 use std::path::Path;
 use std::path::PathBuf;
+
+pub fn read_candidate_page_size(root: &Path) -> Option<u8> {
+    let config: serde_json::Value =
+        std::fs::read(root.join(keytao_core::english_mode::SETTINGS_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+    config["candidatePageSize"]
+        .as_u64()
+        .filter(|size| (1..=10).contains(size))
+        .map(|size| size as u8)
+}
+
+pub fn set_candidate_page_size(root: &Path, size: Option<u8>) -> Result<Option<u8>, String> {
+    if size.is_some_and(|size| !(1..=10).contains(&size)) {
+        return Err("Candidate page size must be between 1 and 10".into());
+    }
+    let path = crate::packages::safe_path(root, keytao_core::english_mode::SETTINGS_FILE)?;
+    let mut config: serde_json::Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let object = config
+        .as_object_mut()
+        .ok_or("IME settings must be an object")?;
+    if let Some(size) = size {
+        object.insert("candidatePageSize".into(), size.into());
+    } else {
+        object.remove("candidatePageSize");
+    }
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    write_file_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(size)
+}
+
+pub fn prepare_candidate_page_size(root: &Path) -> Result<bool, String> {
+    crate::candidate_page_size::apply_candidate_page_size(root, read_candidate_page_size(root))
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -890,6 +931,34 @@ pub fn set_ime_ui_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_page_size_defaults_and_preserves_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(keytao_core::english_mode::SETTINGS_FILE);
+        assert_eq!(read_candidate_page_size(dir.path()), None);
+        for value in ["null", "0", "11", "-1", "6.5", "\"6\"", "\"unknown\""] {
+            std::fs::write(&path, format!("{{\"candidatePageSize\":{value}}}")).unwrap();
+            assert_eq!(read_candidate_page_size(dir.path()), None, "{value}");
+        }
+        std::fs::write(&path, r#"{"englishMode":"schema","extra":{"keep":true}}"#).unwrap();
+        for size in [Some(1), Some(10), None] {
+            assert_eq!(set_candidate_page_size(dir.path(), size).unwrap(), size);
+            assert_eq!(read_candidate_page_size(dir.path()), size);
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["englishMode"], "schema");
+            assert_eq!(saved["extra"]["keep"], true);
+            assert_eq!(saved.get("candidatePageSize").is_some(), size.is_some());
+        }
+        for invalid in ["[", "[]"] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(set_candidate_page_size(dir.path(), Some(6)).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        }
+        assert!(set_candidate_page_size(dir.path(), Some(0)).is_err());
+        assert!(set_candidate_page_size(dir.path(), Some(11)).is_err());
+    }
 
     #[test]
     fn published_switches_include_only_the_request_and_its_generation() {

@@ -1029,6 +1029,19 @@ pub fn get_desktop_english_mode() -> Result<EnglishModeDto, String> {
     )
 }
 
+pub fn get_candidate_page_size() -> Result<Option<u8>, String> {
+    Ok(keytao_app_core::ime_settings::read_candidate_page_size(
+        &runtime::state()?.host.user_root()?,
+    ))
+}
+
+pub fn set_candidate_page_size(size: Option<u8>) -> Result<Option<u8>, String> {
+    keytao_app_core::ime_settings::set_candidate_page_size(
+        &runtime::state()?.host.user_root()?,
+        size,
+    )
+}
+
 pub async fn set_desktop_english_mode(mode: EnglishModeDto) -> Result<EnglishModeDto, String> {
     runtime::dto(
         keytao_app_core::ime_settings::set_desktop_english_mode(

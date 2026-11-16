@@ -787,10 +787,12 @@ pub extern "system" fn Java_ink_rea_keytao_1app_KeytaoNativeBridge_nativeDeployS
                 shared_dir,
                 schema_id,
             ),
-            None => keytao_core::deploy_android_config(
-                user_dir.to_string_lossy().into_owned(),
-                shared_dir,
-            ),
+            None => crate::ime_settings::prepare_candidate_page_size(&user_dir).and_then(|_| {
+                keytao_core::deploy_android_config(
+                    user_dir.to_string_lossy().into_owned(),
+                    shared_dir,
+                )
+            }),
         };
         let payload = match result {
             Ok(schemas) => serde_json::json!({ "success": true, "schemas": schemas }),

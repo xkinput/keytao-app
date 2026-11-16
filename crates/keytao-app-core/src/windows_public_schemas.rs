@@ -278,7 +278,8 @@ pub fn remove_schema(schema_id: &str, package_paths: &[PathBuf]) -> Result<(), S
 /// Publish input preferences without exposing private metadata or dictionaries.
 pub fn publish_english_settings(root: &Path, enabled: bool) -> Result<(), String> {
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "englishMode": if enabled { "schema" } else { "ascii" }
+        "englishMode": if enabled { "schema" } else { "ascii" },
+        "candidatePageSize": crate::ime_settings::read_candidate_page_size(root),
     }))
     .map_err(|error| error.to_string())?;
     publish_files(&[
@@ -417,6 +418,37 @@ fn publish_at(
                 .map_err(|error| error.to_string())?
                 .into_bytes(),
         );
+    }
+    if let Some(settings) = files.get(Path::new(keytao_core::english_mode::SETTINGS_FILE)) {
+        let size = serde_json::from_slice::<serde_json::Value>(settings)
+            .ok()
+            .and_then(|settings| settings["candidatePageSize"].as_u64())
+            .filter(|size| (1..=10).contains(size))
+            .map(|size| size as u8);
+        let custom_paths = files
+            .keys()
+            .filter(|path| path.components().count() == 1)
+            .filter_map(|path| path.to_str()?.strip_suffix(".schema.yaml"))
+            .map(|id| PathBuf::from(format!("{id}.custom.yaml")))
+            .collect::<Vec<_>>();
+        for path in custom_paths {
+            let result = (|| -> Result<(), String> {
+                let content = files
+                    .get(&path)
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or("");
+                let patched = crate::candidate_page_size::patch_candidate_page_size(content, size)?;
+                if patched != content {
+                    files.insert(path.clone(), patched.into_bytes());
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(path = %path.display(), %error, "Skipped public candidate page size override");
+            }
+        }
     }
     store_snapshot(root, &files, grant_access)
 }
