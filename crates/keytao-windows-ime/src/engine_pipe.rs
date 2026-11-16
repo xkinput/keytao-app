@@ -544,7 +544,7 @@ fn verify_server_image(
         .canonicalize()
         .map_err(|error| format!("resolve engine server image path: {error}"))?;
     if !is_descendant(&image, &root) {
-        return Err("engine server image is outside Program Files\\KeyTao".into());
+        return Err("engine server image is outside the KeyTao installation".into());
     }
     log_server_verification("exe_path");
     Ok(())

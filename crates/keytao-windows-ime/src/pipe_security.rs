@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use windows::{
-    core::PWSTR,
+    core::{PCWSTR, PWSTR},
     Win32::{
         Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL},
         Security::{
@@ -95,14 +95,37 @@ pub fn process_image(process: HANDLE) -> windows::core::Result<PathBuf> {
 }
 
 pub fn keytao_install_root() -> Result<PathBuf, String> {
+    let installed = [
+        (windows::core::w!("Software\\rea\\KeyTao"), PCWSTR::null()),
+        (
+            windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\KeyTao"),
+            windows::core::w!("InstallLocation"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, name)| machine_registry_string(key, name).map(PathBuf::from));
+    crate::engine_config::resolve_install_root(installed)
+        .or_else(|| {
+            let program_files = machine_registry_string(
+                windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
+                windows::core::w!("ProgramFilesDir"),
+            )?;
+            let program_files =
+                crate::engine_config::resolve_install_root([PathBuf::from(program_files)])?;
+            crate::engine_config::resolve_install_root([program_files.join("KeyTao")])
+        })
+        .ok_or_else(|| "cannot resolve KeyTao installation directory".into())
+}
+
+fn machine_registry_string(key: PCWSTR, name: PCWSTR) -> Option<String> {
     let mut value = vec![0u16; 32768];
     let mut size = (value.len() * std::mem::size_of::<u16>()) as u32;
-    // The native registry view is independent of the TSF host's bitness and environment.
+    // keytao.nsi's Context macro uses SetRegView 64, independent of the TSF host's bitness.
     let result = unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,
-            windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion"),
-            windows::core::w!("ProgramFilesDir"),
+            key,
+            name,
             RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
             None,
             Some(value.as_mut_ptr().cast()),
@@ -110,22 +133,10 @@ pub fn keytao_install_root() -> Result<PathBuf, String> {
         )
     };
     if result.is_err() || size < 4 || size as usize > value.len() * 2 || size % 2 != 0 {
-        return Err("cannot determine native Program Files directory".into());
+        return None;
     }
     let value = &value[..size as usize / 2];
-    let length = value
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or("unterminated Program Files directory")?;
-    let path = String::from_utf16(&value[..length])
-        .map_err(|error| format!("decode Program Files directory: {error}"))?;
-    let path = PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err("Program Files directory is not absolute".into());
-    }
-    path.join("KeyTao")
-        .canonicalize()
-        .map_err(|error| format!("resolve KeyTao installation directory: {error}"))
+    String::from_utf16(value.strip_suffix(&[0])?).ok()
 }
 
 fn identity(process: HANDLE, pid: u32) -> Result<Identity, String> {
