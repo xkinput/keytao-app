@@ -3518,7 +3518,22 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawMnemonicKeyLabel(label, mnemonic: mnemonic, rect: keyRect, color: color, font: font)
             return
         }
-        drawText(label, in: keyRect, color: color, font: font, alignment: .center)
+        if key.action?.type == KeyTaoCommandType.keyboardPicker {
+            let configuration = UIImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
+            if let image = UIImage(systemName: "globe", withConfiguration: configuration)?
+                .withTintColor(color, renderingMode: .alwaysOriginal) {
+                image.draw(in: CGRect(
+                    x: keyRect.midX - image.size.width / 2,
+                    y: keyRect.midY - image.size.height / 2,
+                    width: image.size.width,
+                    height: image.size.height
+                ))
+            } else {
+                drawText("🌐\u{FE0E}", in: keyRect, color: color, font: font, alignment: .center)
+            }
+        } else {
+            drawText(label, in: keyRect, color: color, font: font, alignment: .center)
+        }
 
         if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
             let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size), weight: keyLabelWeight)
