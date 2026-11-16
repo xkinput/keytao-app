@@ -21,15 +21,18 @@ use keytao_ime_ipc::{
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY,
-            ERROR_PRIVILEGE_NOT_HELD, HANDLE, HLOCAL, LocalFree, WAIT_OBJECT_0,
+            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY, HANDLE, HLOCAL,
+            LocalFree, WAIT_OBJECT_0,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, DuplicateTokenEx, GetTokenInformation,
-            SecurityImpersonation, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
-            TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenPrimary, TokenUser,
+            AdjustTokenPrivileges, Authorization::ConvertSidToStringSidW, DuplicateTokenEx,
+            GetTokenInformation, LookupPrivilegeValueW, SE_IMPERSONATE_NAME, SE_PRIVILEGE_ENABLED,
+            SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
+            TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+            TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenPrimary, TokenUser,
         },
         System::{
+            Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, IDispatch, IServiceProvider},
             Pipes::{GetNamedPipeServerProcessId, PIPE_NOWAIT, SetNamedPipeHandleState},
             Registry::{
                 HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE,
@@ -39,16 +42,24 @@ use windows::{
             },
             RemoteDesktop::ProcessIdToSessionId,
             Threading::{
-                CREATE_NO_WINDOW, CreateProcessWithTokenW, DETACHED_PROCESS, GetCurrentProcess,
-                LOGON_WITH_PROFILE, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
-                PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-                PROCESS_TERMINATE, QueryFullProcessImageNameW, STARTF_USESHOWWINDOW, STARTUPINFOW,
-                TerminateProcess, WaitForSingleObject,
+                CREATE_NO_WINDOW, CREATE_PROCESS_LOGON_FLAGS, CreateProcessWithTokenW,
+                DETACHED_PROCESS, GetCurrentProcess, OpenProcess, OpenProcessToken,
+                PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+                QueryFullProcessImageNameW, STARTF_USESHOWWINDOW, STARTUPINFOW, TerminateProcess,
+                WaitForSingleObject,
             },
         },
-        UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId, SW_HIDE},
+        UI::{
+            Shell::{
+                CSIDL_DESKTOP, IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows,
+                SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH,
+                ShellWindows,
+            },
+            WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId, SW_HIDE},
+        },
     },
-    core::{PCWSTR, PWSTR, w},
+    core::{BSTR, Interface, PCWSTR, PWSTR, VARIANT, w},
 };
 
 const SERVER_EXE: &str = "keytao-windows-ime-server.exe";
@@ -163,16 +174,19 @@ fn shell_primary_token() -> Result<ProcessHandle, String> {
         {
             return Err("interactive shell user or session does not match KeyTao".into());
         }
-        let access = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY;
         let mut token = HANDLE::default();
-        OpenProcessToken(process.0, access, &mut token)
+        OpenProcessToken(process.0, TOKEN_DUPLICATE, &mut token)
             .map_err(|error| format!("open interactive shell token: {error}"))?;
         let token = ProcessHandle(token);
         let mut primary = HANDLE::default();
         // Preserve the shell's token even when UAC is disabled and the shell itself is elevated.
         DuplicateTokenEx(
             token.0,
-            access,
+            TOKEN_QUERY
+                | TOKEN_ASSIGN_PRIMARY
+                | TOKEN_DUPLICATE
+                | TOKEN_ADJUST_DEFAULT
+                | TOKEN_ADJUST_SESSIONID,
             None,
             SecurityImpersonation,
             TokenPrimary,
@@ -183,6 +197,55 @@ fn shell_primary_token() -> Result<ProcessHandle, String> {
     }
 }
 
+fn enable_impersonate_privilege() -> windows::core::Result<()> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token)?;
+        let token = ProcessHandle(token);
+        let mut privileges = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            ..Default::default()
+        };
+        LookupPrivilegeValueW(
+            PCWSTR::null(),
+            SE_IMPERSONATE_NAME,
+            &mut privileges.Privileges[0].Luid,
+        )?;
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None)
+    }
+}
+
+fn start_server_via_explorer(path: &str, directory: &str) -> Result<(), String> {
+    let _com = super::windows_init_com_apartment()?;
+    (|| unsafe {
+        let shell_windows: IShellWindows =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
+        let mut hwnd = 0;
+        let desktop = shell_windows.FindWindowSW(
+            &VARIANT::from(CSIDL_DESKTOP as i32),
+            &VARIANT::default(),
+            SWC_DESKTOP,
+            &mut hwnd,
+            SWFO_NEEDDISPATCH,
+        )?;
+        let provider: IServiceProvider = desktop.cast()?;
+        let browser: IShellBrowser = provider.QueryService(&SID_STopLevelBrowser)?;
+        let view = browser.QueryActiveShellView()?;
+        let background: IDispatch = view.GetItemObject(SVGIO_BACKGROUND)?;
+        let folder: IShellFolderViewDual = background.cast()?;
+        let shell: IShellDispatch2 = folder.Application()?.cast()?;
+        shell.ShellExecute(
+            &BSTR::from(path),
+            &VARIANT::from(""),
+            &VARIANT::from(directory),
+            &VARIANT::from("open"),
+            &VARIANT::from(SW_HIDE.0),
+        )
+    })()
+    .map_err(|error: windows::core::Error| error.to_string())
+}
+
 fn start_server(
     server: &Path,
     last_start: &mut Option<(PathBuf, Instant)>,
@@ -190,7 +253,13 @@ fn start_server(
 ) -> Result<(), String> {
     if let Some(token) = &launcher.shell_token {
         let path = super::windows_normal_path(server);
+        let directory = super::windows_normal_path(
+            server
+                .parent()
+                .ok_or("installed IME server has no parent directory")?,
+        );
         let application: Vec<_> = path.encode_utf16().chain(Some(0)).collect();
+        let current_directory: Vec<_> = directory.encode_utf16().chain(Some(0)).collect();
         let mut command: Vec<_> = format!("\"{path}\"")
             .encode_utf16()
             .chain(Some(0))
@@ -202,32 +271,35 @@ fn start_server(
             ..Default::default()
         };
         let mut process = PROCESS_INFORMATION::default();
-        unsafe {
+        let _ = enable_impersonate_privilege();
+        let result = unsafe {
             CreateProcessWithTokenW(
                 token.0,
-                LOGON_WITH_PROFILE,
+                // The matching interactive shell already has the user's profile loaded.
+                CREATE_PROCESS_LOGON_FLAGS(0),
                 PCWSTR(application.as_ptr()),
                 PWSTR(command.as_mut_ptr()),
-                // This API defaults to CREATE_NEW_CONSOLE; hide it without DETACHED_PROCESS.
-                CREATE_NO_WINDOW,
+                // The server uses the Windows subsystem and never creates a console.
+                PROCESS_CREATION_FLAGS(0),
                 None,
-                PCWSTR::null(),
+                PCWSTR(current_directory.as_ptr()),
                 &startup,
                 &mut process,
             )
-        }
-        .map_err(|error| {
-            let reason = format!("start installed IME server with shell token: {error}");
-            if error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
-                || error.code() == windows::core::HRESULT::from_win32(ERROR_PRIVILEGE_NOT_HELD.0)
-            {
-                elevation_launch_error(reason)
-            } else {
-                reason
+        };
+        match result {
+            Ok(()) => {
+                drop(ProcessHandle(process.hThread));
+                drop(ProcessHandle(process.hProcess));
             }
-        })?;
-        drop(ProcessHandle(process.hThread));
-        drop(ProcessHandle(process.hProcess));
+            Err(error) => {
+                start_server_via_explorer(&path, &directory).map_err(|shell_error| {
+                    elevation_launch_error(format!(
+                        "start installed IME server with shell token: {error}; start installed IME server via Explorer: {shell_error}"
+                    ))
+                })?;
+            }
+        }
     } else {
         Command::new(server)
             .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
