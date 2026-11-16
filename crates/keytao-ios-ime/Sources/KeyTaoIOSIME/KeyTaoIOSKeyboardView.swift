@@ -3506,7 +3506,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawShiftStateDecoration(key, rect: keyRect)
 
         let label = displayLabel(key)
-        let baseSize = keyLabelSize(for: label)
+        let baseSize = keyLabelSize(for: label, keySize: keyRect.size)
         let font = fittedFont(for: label, size: baseSize, maxWidth: keyRect.width - 10)
         let color = keyForegroundColor(key, selected: selected, pressProgress: pressProgress)
         if config.mnemonicHintsEnabled,
@@ -3521,7 +3521,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         drawText(label, in: keyRect, color: color, font: font, alignment: .center)
 
         if config.keyHintVisible, let hint = key.hint, !hint.isEmpty {
-            let hintFont = themedFont(size: keyHintSize(keyHeight: keyRect.height), weight: .regular)
+            let hintFont = themedFont(size: keyHintSize(keySize: keyRect.size), weight: .regular)
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: hintFont,
                 .foregroundColor: theme.candidate.commentColor.uiColor,
@@ -3551,7 +3551,7 @@ final class KeyTaoIOSKeyboardView: UIView {
         font: UIFont
     ) {
         let contentRect = rect.insetBy(dx: 3, dy: 3)
-        let hintFont = themedFont(size: min(10, keyHintSize(keyHeight: rect.height)), weight: .regular)
+        let hintFont = themedFont(size: min(10, keyHintSize(keySize: rect.size)), weight: .regular)
         let bottomLines = mnemonic.bottomLines
         let lineHeight = min(hintFont.lineHeight, contentRect.height * 0.22)
         let bodyHeight = lineHeight * CGFloat(bottomLines.count)
@@ -3605,7 +3605,7 @@ final class KeyTaoIOSKeyboardView: UIView {
             drawKeyOutline(key, rect: itemRect, pressed: itemPressProgress > 0.01)
 
             let label = stackLabelForMode(item)
-            let baseSize = keyLabelSize(for: label)
+            let baseSize = keyLabelSize(for: label, keySize: itemRect.size)
             let font = fittedFont(for: label, size: baseSize, maxWidth: itemRect.width - 10)
             let color = keyForegroundColor(key, selected: selected, pressProgress: itemPressProgress)
             drawText(label, in: itemRect, color: color, font: font, alignment: .center)
@@ -6629,19 +6629,22 @@ final class KeyTaoIOSKeyboardView: UIView {
         return inlineHeight * 0.72
     }
 
-    private func keyLabelSize(for label: String) -> CGFloat {
+    private func keyLabelSize(for label: String, keySize: CGSize) -> CGFloat {
         if layerMode.id.isSymbolLayer && !containsCJK(label) && label.count <= 2 {
             return max(theme.font.size, 22)
         }
         if label.count > 2 || containsCJK(label) {
             return max(12, min(theme.font.labelSize, theme.font.size - 4, 16))
         }
+        if label.count == 1 {
+            return min(theme.font.size, keySize.width * 0.67, keySize.height * 0.45)
+        }
         return theme.font.size
     }
 
-    private func keyHintSize(keyHeight: CGFloat) -> CGFloat {
-        let base = max(10, min(theme.font.commentSize - 1, keyLabelSize(for: "中") - 2, 13))
-        return max(10, min(14, base * max(0.9, min(1.2, keyHeight / 54))))
+    private func keyHintSize(keySize: CGSize) -> CGFloat {
+        let base = max(10, min(theme.font.commentSize - 1, keyLabelSize(for: "中", keySize: keySize) - 2, 13))
+        return max(10, min(14, base * max(0.9, min(1.2, keySize.height / 54))))
     }
 
     private func containsCJK(_ text: String) -> Bool {

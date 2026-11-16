@@ -157,6 +157,8 @@ abstract final class AppStrings {
   static const swipeThreshold = '滑动判定阈值';
   static const floatingPortrait = '竖屏悬浮键盘';
   static const floatingLandscape = '横屏悬浮键盘';
+  static const oneHandedPortrait = '竖屏单手键盘';
+  static const splitLandscape = '横屏分离键盘';
   static const scale = '缩放';
   static const enterKey = '回车键';
   static const smartEnter = '智能判断';
