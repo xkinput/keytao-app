@@ -350,7 +350,7 @@ Future<DeployResultDto> deployDefault() =>
 Future<AndroidImeInputSettingsDto> getAndroidImeInputSettings() =>
     RustLib.instance.api.crateApiCoreGetAndroidImeInputSettings();
 
-/// Saves all 23 writable fields; returned path/message fields are read-only.
+/// Saves all writable fields; returned path/message fields are read-only.
 Future<AndroidImeInputSettingsDto> setAndroidImeInputSettings({
   required AndroidImeInputSettingsDto settings,
 }) => RustLib.instance.api.crateApiCoreSetAndroidImeInputSettings(

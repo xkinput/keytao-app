@@ -145,6 +145,8 @@ data class KeytaoAndroidImeConfig(
     val customRows: Map<String, List<List<KeySpec>>> = emptyMap(),
     val toolbarSymbolActionOrder: List<String> = emptyList(),
     val toolbarSymbolPinnedCount: Int = 5,
+    val symbolAutoReturn: Boolean = false,
+    val phrases: List<String> = listOf("谢谢", "好的", "收到", "稍等", "我在路上"),
 ) {
     val effectiveKeyboardHeightDp: Float
         get() {
@@ -173,7 +175,11 @@ data class KeytaoAndroidImeConfig(
     }
 
     fun normalizedLayer(layer: String?): String {
-        val value = layer?.takeIf { it.isNotBlank() } ?: "letters"
+        val value = when (layer) {
+            "symbols:last" -> "symbols"
+            "emoji:last" -> "symbols_emoji_face"
+            else -> layer?.takeIf { it.isNotBlank() } ?: "letters"
+        }
         return if (hasLayer(value)) value else "letters"
     }
 
@@ -483,6 +489,10 @@ data class KeytaoAndroidImeConfig(
                     .toFloat()
                     .coerceIn(0.8f, 1.4f),
                 doubleSpacePeriodEnabled = mergedBoolean(root, fallbackRoot, "doubleSpacePeriodEnabled", true),
+                symbolAutoReturn = mergedBoolean(root, fallbackRoot, "symbolAutoReturn", false),
+                phrases = phraseList(root.opt("phrases"))
+                    ?: phraseList(fallbackRoot?.opt("phrases"))
+                    ?: listOf("谢谢", "好的", "收到", "稍等", "我在路上"),
                 swipeThresholdDp = mergedDouble(root, fallbackRoot, "swipeThresholdDp", 34.0).toFloat().coerceIn(12f, 96f),
                 rows = rows.ifEmpty { defaultRows() },
                 numberRows = numberRows.ifEmpty { defaultNumberRows() },
@@ -711,6 +721,8 @@ data class KeytaoAndroidImeConfig(
                 } else {
                     config.doubleSpacePeriodEnabled
                 },
+                symbolAutoReturn = runtimeRoot.optBoolean("symbolAutoReturn", config.symbolAutoReturn),
+                phrases = phraseList(runtimeRoot.opt("phrases")) ?: config.phrases,
                 floating = config.floating.copy(
                     marginDp = floating?.optDouble("margin", config.floating.marginDp.toDouble())
                         ?.toFloat()
@@ -756,6 +768,12 @@ data class KeytaoAndroidImeConfig(
 
         private fun mergedStringList(root: JSONObject, fallbackRoot: JSONObject?, name: String): List<String> {
             return stringList(root.optJSONArray(name) ?: fallbackRoot?.optJSONArray(name))
+        }
+
+        private fun phraseList(value: Any?): List<String>? {
+            val array = value as? JSONArray ?: return null
+            if ((0 until array.length()).any { array.opt(it) !is String }) return null
+            return (0 until array.length()).map { array.getString(it) }
         }
 
         private fun stringList(array: JSONArray?): List<String> {
@@ -1072,7 +1090,7 @@ data class KeytaoAndroidImeConfig(
                     if (key.label == "#+=" && key.action.type == KeyCommandTypes.INPUT) {
                         key.copy(
                             value = "",
-                            action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols"),
+                            action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols:last"),
                         )
                     } else {
                         key
@@ -1258,12 +1276,12 @@ data class KeytaoAndroidImeConfig(
                 KeySpec(
                     label = "返回",
                     value = "",
-                    action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "letters"),
+                    action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "back"),
                 ),
                 KeySpec(
                     label = "#+=",
                     value = "",
-                    action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols"),
+                    action = KeyCommand(KeyCommandTypes.KEYBOARD_MODE, "symbols:last"),
                 ),
                 KeySpec(label = "0", value = "0"),
                 KeySpec(

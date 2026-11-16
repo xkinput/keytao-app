@@ -117,6 +117,8 @@ class ViewController extends AppController {
       numberRowEnabled: false,
       candidateFontScale: 1,
       doubleSpacePeriodEnabled: true,
+      symbolAutoReturn: false,
+      phrases: const ['谢谢', '好的', '收到', '稍等', '我在路上'],
       floatingPortraitEnabled: false,
       floatingPortraitScale: 88,
       floatingLandscapeEnabled: true,

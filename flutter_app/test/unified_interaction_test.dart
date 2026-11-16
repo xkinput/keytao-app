@@ -154,4 +154,41 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
+
+  testWidgets('mobile phrases editor adds removes and reorders before saving', (
+    tester,
+  ) async {
+    final c = _EditingController(BridgePlatform.android);
+    await _pump(tester, c, const Size(400, 860));
+    final row = find.widgetWithText(SettingRow, AppStrings.phrases);
+    await tester.ensureVisible(row);
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: row, matching: find.text('编辑')));
+    await tester.pumpAndSettle();
+    final field = find.descendant(
+      of: find.byType(FDialog),
+      matching: find.byType(EditableText),
+    );
+    await tester.enterText(field, '自定义');
+    await tester.tap(find.text('添加'));
+    await tester.pumpAndSettle();
+    tester
+        .widget<ReorderableListView>(find.byType(ReorderableListView))
+        .onReorderItem!(5, 0);
+    await tester.pumpAndSettle();
+    await tester.tap(find.bySemanticsLabel('移除短语').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(c.keyboardPatches.single['phrases'], [
+      '谢谢',
+      '好的',
+      '收到',
+      '稍等',
+      '我在路上',
+    ]);
+    expect(find.byType(FDialog), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 }

@@ -24,6 +24,8 @@ void main() {
       numberRowEnabled: true,
       candidateFontScale: 1.17,
       doubleSpacePeriodEnabled: false,
+      symbolAutoReturn: true,
+      phrases: ['Custom phrase'],
       floatingPortraitEnabled: true,
       floatingPortraitScale: 91,
       floatingLandscapeEnabled: false,
@@ -57,6 +59,8 @@ void main() {
         numberRowEnabled: original.numberRowEnabled,
         candidateFontScale: original.candidateFontScale,
         doubleSpacePeriodEnabled: original.doubleSpacePeriodEnabled,
+        symbolAutoReturn: original.symbolAutoReturn,
+        phrases: original.phrases,
         floatingPortraitEnabled: original.floatingPortraitEnabled,
         floatingPortraitScale: original.floatingPortraitScale,
         floatingLandscapeEnabled: original.floatingLandscapeEnabled,
@@ -66,5 +70,18 @@ void main() {
         message: original.message,
       ),
     );
+    final cleared = patchAndroidSettings(original, {
+      'symbolAutoReturn': false,
+      'phrases': <String>[],
+    });
+    expect(cleared.symbolAutoReturn, isFalse);
+    expect(cleared.phrases, isEmpty);
+    final reordered = patchAndroidSettings(original, {
+      'phrases': ['Second', 'First'],
+    });
+    expect(reordered.phrases, ['Second', 'First']);
+    expect(reordered.symbolAutoReturn, original.symbolAutoReturn);
+    expect(androidDefaults['symbolAutoReturn'], false);
+    expect(androidDefaults['phrases'], ['谢谢', '好的', '收到', '稍等', '我在路上']);
   });
 }

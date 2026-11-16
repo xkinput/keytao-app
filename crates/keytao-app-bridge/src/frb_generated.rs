@@ -3577,6 +3577,8 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
         let mut var_numberRowEnabled = <bool>::sse_decode(deserializer);
         let mut var_candidateFontScale = <f32>::sse_decode(deserializer);
         let mut var_doubleSpacePeriodEnabled = <bool>::sse_decode(deserializer);
+        let mut var_symbolAutoReturn = <bool>::sse_decode(deserializer);
+        let mut var_phrases = <Vec<String>>::sse_decode(deserializer);
         let mut var_floatingPortraitEnabled = <bool>::sse_decode(deserializer);
         let mut var_floatingPortraitScale = <u8>::sse_decode(deserializer);
         let mut var_floatingLandscapeEnabled = <bool>::sse_decode(deserializer);
@@ -3604,6 +3606,8 @@ impl SseDecode for crate::api::types::AndroidImeInputSettingsDto {
             number_row_enabled: var_numberRowEnabled,
             candidate_font_scale: var_candidateFontScale,
             double_space_period_enabled: var_doubleSpacePeriodEnabled,
+            symbol_auto_return: var_symbolAutoReturn,
+            phrases: var_phrases,
             floating_portrait_enabled: var_floatingPortraitEnabled,
             floating_portrait_scale: var_floatingPortraitScale,
             floating_landscape_enabled: var_floatingLandscapeEnabled,
@@ -5003,6 +5007,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::AndroidImeInputSetting
             self.double_space_period_enabled
                 .into_into_dart()
                 .into_dart(),
+            self.symbol_auto_return.into_into_dart().into_dart(),
+            self.phrases.into_into_dart().into_dart(),
             self.floating_portrait_enabled.into_into_dart().into_dart(),
             self.floating_portrait_scale.into_into_dart().into_dart(),
             self.floating_landscape_enabled.into_into_dart().into_dart(),
@@ -6095,6 +6101,8 @@ impl SseEncode for crate::api::types::AndroidImeInputSettingsDto {
         <bool>::sse_encode(self.number_row_enabled, serializer);
         <f32>::sse_encode(self.candidate_font_scale, serializer);
         <bool>::sse_encode(self.double_space_period_enabled, serializer);
+        <bool>::sse_encode(self.symbol_auto_return, serializer);
+        <Vec<String>>::sse_encode(self.phrases, serializer);
         <bool>::sse_encode(self.floating_portrait_enabled, serializer);
         <u8>::sse_encode(self.floating_portrait_scale, serializer);
         <bool>::sse_encode(self.floating_landscape_enabled, serializer);

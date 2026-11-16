@@ -5070,7 +5070,7 @@ final class KeyTaoIOSKeyboardView: UIView {
                     replacement.action = .edit("insertPair", fallbackValue: "“”")
                 case "toggleSelection":
                     replacement.label = "短语"
-                    replacement.action = .directInput("谢谢")
+                    replacement.action = .panel("phrases")
                 default:
                     return key
                 }

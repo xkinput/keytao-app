@@ -573,6 +573,25 @@ class _SettingsCardState extends State<SettingsCard> {
           s?.doubleSpacePeriodEnabled ?? true,
           hint: AppStrings.doubleSpaceHint,
         ),
+        toggle(
+          AppStrings.symbolAutoReturn,
+          'symbolAutoReturn',
+          s?.symbolAutoReturn ?? false,
+        ),
+        SettingRow(
+          AppStrings.phrases,
+          child: ActionButton(
+            '编辑',
+            onPress: enabled
+                ? () => showFDialog<void>(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (_, _, animation) =>
+                        _PhrasesEditor(controller: c, animation: animation),
+                  )
+                : null,
+          ),
+        ),
         slider(
           AppStrings.swipeThreshold,
           'swipeThresholdDp',
@@ -644,6 +663,118 @@ class _SettingsCardState extends State<SettingsCard> {
       label,
       style: context.theme.typography.body.xs.copyWith(
         color: context.theme.colors.mutedForeground,
+      ),
+    ),
+  );
+}
+
+class _PhrasesEditor extends StatefulWidget {
+  const _PhrasesEditor({required this.controller, required this.animation});
+  final AppController controller;
+  final Animation<double> animation;
+
+  @override
+  State<_PhrasesEditor> createState() => _PhrasesEditorState();
+}
+
+class _PhrasesEditorState extends State<_PhrasesEditor> {
+  late final _phrases = [...widget.controller.androidSettings!.phrases];
+  final _text = TextEditingController();
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _add() {
+    final phrase = _text.text.trim();
+    if (phrase.isEmpty) return;
+    setState(() => _phrases.add(phrase));
+    _text.clear();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final saved = await widget.controller.saveAndroid({'phrases': _phrases});
+    if (!mounted) return;
+    if (saved) {
+      Navigator.pop(context);
+    } else {
+      setState(() {
+        _saving = false;
+        _error = widget.controller.error ?? '保存失败';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_saving,
+    child: AppDialog(
+      title: AppStrings.phrases,
+      animation: widget.animation,
+      actions: [
+        ActionButton(
+          AppStrings.cancel,
+          onPress: _saving ? null : () => Navigator.pop(context),
+        ),
+        ActionButton('保存', primary: true, onPress: _saving ? null : _save),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: 12,
+        children: [
+          SizedBox(
+            height: 220,
+            child: ReorderableListView.builder(
+              itemCount: _phrases.length,
+              onReorderItem: (from, to) {
+                if (_saving) return;
+                setState(() {
+                  _phrases.insert(to, _phrases.removeAt(from));
+                });
+              },
+              itemBuilder: (context, index) => Padding(
+                key: ValueKey('$index:${_phrases[index]}'),
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  spacing: 8,
+                  children: [
+                    const Icon(
+                      FLucideIcons.gripVertical,
+                      size: 18,
+                      semanticLabel: '拖动排序',
+                    ),
+                    Expanded(child: Text(_phrases[index])),
+                    FButton.icon(
+                      variant: FButtonVariant.ghost,
+                      onPress: _saving
+                          ? null
+                          : () => setState(() => _phrases.removeAt(index)),
+                      child: const Icon(
+                        FLucideIcons.trash2,
+                        size: 18,
+                        semanticLabel: '移除短语',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          FTextField(
+            label: const Text('添加短语'),
+            control: FTextFieldControl.managed(controller: _text),
+            enabled: !_saving,
+            onSubmit: (_) => _add(),
+          ),
+          ActionButton('添加', onPress: _saving ? null : _add),
+          if (_error case final error?) ErrorMessage(error),
+        ],
       ),
     ),
   );

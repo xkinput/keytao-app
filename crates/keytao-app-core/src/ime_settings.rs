@@ -227,6 +227,8 @@ pub struct AndroidImeInputSettings {
     pub number_row_enabled: bool,
     pub candidate_font_scale: f32,
     pub double_space_period_enabled: bool,
+    pub symbol_auto_return: bool,
+    pub phrases: Vec<String>,
     pub floating_portrait_enabled: bool,
     pub floating_portrait_scale: u8,
     pub floating_landscape_enabled: bool,
@@ -234,6 +236,32 @@ pub struct AndroidImeInputSettings {
     pub config_path: Option<String>,
     pub reload_stamp_path: Option<String>,
     pub message: String,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn mobile_keyboard_preferences(
+    config: &serde_json::Map<String, serde_json::Value>,
+    keyboard: &keytao_theme::KeyboardTheme,
+) -> (bool, Vec<String>) {
+    let symbol_auto_return = config
+        .get("symbolAutoReturn")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(keyboard.symbol_auto_return);
+    let phrases = config
+        .get("phrases")
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_else(|| keyboard.phrases.clone());
+    (symbol_auto_return, phrases)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn write_mobile_keyboard_preferences(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    symbol_auto_return: bool,
+    phrases: Vec<String>,
+) {
+    config.insert("symbolAutoReturn".into(), symbol_auto_return.into());
+    config.insert("phrases".into(), phrases.into());
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -401,6 +429,7 @@ fn android_ime_haptics_settings_from_config(
         .get("doubleSpacePeriodEnabled")
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
+    let (symbol_auto_return, phrases) = mobile_keyboard_preferences(&config, &keyboard);
     let floating = config.get("floating").and_then(|value| value.as_object());
     let portrait = floating
         .and_then(|value| value.get("portrait"))
@@ -451,6 +480,8 @@ fn android_ime_haptics_settings_from_config(
         number_row_enabled,
         candidate_font_scale,
         double_space_period_enabled,
+        symbol_auto_return,
+        phrases,
         floating_portrait_enabled,
         floating_portrait_scale,
         floating_landscape_enabled,
@@ -532,6 +563,8 @@ pub async fn set_android_ime_input_settings(
     number_row_enabled: bool,
     candidate_font_scale: f32,
     double_space_period_enabled: bool,
+    symbol_auto_return: bool,
+    phrases: Vec<String>,
     floating_portrait_enabled: bool,
     floating_portrait_scale: u8,
     floating_landscape_enabled: bool,
@@ -633,6 +666,7 @@ pub async fn set_android_ime_input_settings(
                 "doubleSpacePeriodEnabled".into(),
                 serde_json::Value::Bool(double_space_period_enabled),
             );
+            write_mobile_keyboard_preferences(&mut config, symbol_auto_return, phrases);
             let mut floating = config
                 .get("floating")
                 .and_then(|value| value.as_object())
@@ -931,6 +965,41 @@ pub fn set_ime_ui_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_keyboard_preferences_round_trip_and_preserve_empty_phrases() {
+        let keyboard = keytao_theme::resolve_keyboard_from_paths(None, None);
+        let mut config = serde_json::json!({"unrelated": {"keep": true}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            mobile_keyboard_preferences(&config, &keyboard),
+            (
+                false,
+                vec!["谢谢", "好的", "收到", "稍等", "我在路上"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        config.insert("phrases".into(), serde_json::json!([42]));
+        config.insert("symbolAutoReturn".into(), serde_json::json!("invalid"));
+        assert_eq!(
+            mobile_keyboard_preferences(&config, &keyboard),
+            (keyboard.symbol_auto_return, keyboard.phrases.clone())
+        );
+        for (enabled, phrases) in [(true, vec!["Custom phrase".into()]), (false, vec![])] {
+            write_mobile_keyboard_preferences(&mut config, enabled, phrases.clone());
+            let serialized = serde_json::to_vec(&config).unwrap();
+            let restored = serde_json::from_slice(&serialized).unwrap();
+            assert_eq!(
+                mobile_keyboard_preferences(&restored, &keyboard),
+                (enabled, phrases)
+            );
+            assert_eq!(restored["unrelated"]["keep"], true);
+        }
+    }
 
     #[test]
     fn candidate_page_size_defaults_and_preserves_other_settings() {

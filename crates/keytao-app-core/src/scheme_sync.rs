@@ -82,6 +82,7 @@ fn sanitize_settings(input: &Value) -> Value {
                 "flick_keys_enabled",
                 "number_row_enabled",
                 "double_space_period_enabled",
+                "symbol_auto_return",
                 "floating_portrait_enabled",
                 "floating_landscape_enabled",
             ][..],
@@ -148,6 +149,13 @@ fn sanitize_settings(input: &Value) -> Value {
             })
         {
             settings["accent_color"] = input[group]["accent_color"].clone();
+        }
+        if group == "android"
+            && input[group]["phrases"]
+                .as_array()
+                .is_some_and(|values| values.iter().all(Value::is_string))
+        {
+            settings["phrases"] = input[group]["phrases"].clone();
         }
         output[group] = settings;
     }

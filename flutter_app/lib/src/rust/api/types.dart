@@ -57,6 +57,8 @@ class AndroidImeInputSettingsDto {
   final bool numberRowEnabled;
   final double candidateFontScale;
   final bool doubleSpacePeriodEnabled;
+  final bool symbolAutoReturn;
+  final List<String> phrases;
   final bool floatingPortraitEnabled;
   final int floatingPortraitScale;
   final bool floatingLandscapeEnabled;
@@ -85,6 +87,8 @@ class AndroidImeInputSettingsDto {
     required this.numberRowEnabled,
     required this.candidateFontScale,
     required this.doubleSpacePeriodEnabled,
+    required this.symbolAutoReturn,
+    required this.phrases,
     required this.floatingPortraitEnabled,
     required this.floatingPortraitScale,
     required this.floatingLandscapeEnabled,
@@ -115,6 +119,8 @@ class AndroidImeInputSettingsDto {
       numberRowEnabled.hashCode ^
       candidateFontScale.hashCode ^
       doubleSpacePeriodEnabled.hashCode ^
+      symbolAutoReturn.hashCode ^
+      phrases.hashCode ^
       floatingPortraitEnabled.hashCode ^
       floatingPortraitScale.hashCode ^
       floatingLandscapeEnabled.hashCode ^
@@ -147,6 +153,8 @@ class AndroidImeInputSettingsDto {
           numberRowEnabled == other.numberRowEnabled &&
           candidateFontScale == other.candidateFontScale &&
           doubleSpacePeriodEnabled == other.doubleSpacePeriodEnabled &&
+          symbolAutoReturn == other.symbolAutoReturn &&
+          phrases == other.phrases &&
           floatingPortraitEnabled == other.floatingPortraitEnabled &&
           floatingPortraitScale == other.floatingPortraitScale &&
           floatingLandscapeEnabled == other.floatingLandscapeEnabled &&

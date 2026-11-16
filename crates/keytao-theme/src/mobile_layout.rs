@@ -32,6 +32,8 @@ pub struct MobileLayout {
     pub vertical_gap: f32,
     pub outer_inset: f32,
     pub max_key_height: f32,
+    pub symbol_auto_return: bool,
+    pub phrases: Vec<String>,
     pub floating: MobileFloatingLayout,
     pub rows: Vec<Vec<MobileKey>>,
     pub number_rows: Vec<Vec<MobileKey>>,
@@ -148,6 +150,11 @@ impl Default for MobileLayout {
             vertical_gap: 5.0,
             outer_inset: 5.0,
             max_key_height: 54.0,
+            symbol_auto_return: false,
+            phrases: vec!["谢谢", "好的", "收到", "稍等", "我在路上"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             floating: MobileFloatingLayout::default(),
             rows: Vec::new(),
             number_rows: Vec::new(),
@@ -280,6 +287,8 @@ pub(crate) struct PartialMobileLayout {
     outer_inset: Option<f32>,
     #[serde(alias = "maxKeyHeightDp")]
     max_key_height: Option<f32>,
+    symbol_auto_return: Option<bool>,
+    phrases: Option<Vec<String>>,
     floating: Option<PartialMobileFloatingLayout>,
     rows: Option<Vec<Vec<MobileKey>>>,
     number_rows: Option<Vec<Vec<MobileKey>>>,
@@ -352,6 +361,8 @@ impl PartialMobileLayout {
             || self.vertical_gap.is_some()
             || self.outer_inset.is_some()
             || self.max_key_height.is_some()
+            || self.symbol_auto_return.is_some()
+            || self.phrases.is_some()
             || self.floating.is_some()
             || self.rows.is_some()
             || self.number_rows.is_some()
@@ -372,6 +383,8 @@ impl MobileLayout {
         assign(&mut self.vertical_gap, partial.vertical_gap);
         assign(&mut self.outer_inset, partial.outer_inset);
         assign(&mut self.max_key_height, partial.max_key_height);
+        assign(&mut self.symbol_auto_return, partial.symbol_auto_return);
+        assign(&mut self.phrases, partial.phrases);
         if let Some(floating) = partial.floating {
             self.floating.apply(floating);
         }
@@ -433,6 +446,43 @@ mod tests {
     }
 
     #[test]
+    fn layout_preserves_navigation_commands_and_keyboard_settings() {
+        let partial = parse_mobile_layout_yaml(
+            r#"
+symbolAutoReturn: true
+phrases: ["自定义", "收到"]
+rows:
+  - [
+      { label: "返回", action: { type: keyboardMode, value: back } },
+      { label: "符号", action: { type: keyboardMode, value: "symbols:last" } },
+      { label: "Emoji", action: { type: keyboardMode, value: "emoji:last" } },
+      { label: "短语", action: { type: panel, value: phrases } },
+      { label: "未知", action: { type: keyboardMode, value: future } }
+    ]
+"#,
+        )
+        .unwrap();
+        let mut layout = MobileLayout::default();
+        assert!(!layout.symbol_auto_return);
+        assert_eq!(layout.phrases, ["谢谢", "好的", "收到", "稍等", "我在路上"]);
+        layout.apply(partial);
+        let values: Vec<_> = layout.rows[0]
+            .iter()
+            .map(|key| key.action.as_ref().unwrap().value.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            ["back", "symbols:last", "emoji:last", "phrases", "future"]
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&mobile_layout_json(&layout).unwrap()).unwrap();
+        assert_eq!(json["symbolAutoReturn"], true);
+        assert_eq!(json["phrases"], serde_json::json!(["自定义", "收到"]));
+        layout.apply(parse_mobile_layout_yaml("phrases: []").unwrap());
+        assert!(layout.phrases.is_empty());
+    }
+
+    #[test]
     fn shipped_default_layout_has_valid_layer_references() {
         use std::collections::BTreeSet;
 
@@ -458,7 +508,8 @@ mod tests {
             "toggleSelection",
             "undo",
         ];
-        const KNOWN_PANELS: &[&str] = &["clipboard", "close", "home", "rime", "selection"];
+        const KNOWN_PANELS: &[&str] =
+            &["clipboard", "close", "home", "phrases", "rime", "selection"];
 
         fn collect_command_references(key: &MobileKey, references: &mut BTreeSet<String>) {
             fn collect(command: Option<&MobileCommand>, references: &mut BTreeSet<String>) {
@@ -534,7 +585,14 @@ mod tests {
             );
         }
 
-        let reserved = ["letters", "numbers", "symbols"];
+        let reserved = [
+            "letters",
+            "numbers",
+            "symbols",
+            "back",
+            "symbols:last",
+            "emoji:last",
+        ];
         assert!(
             !layers.is_empty(),
             "shipped default must define custom layers"

@@ -1797,6 +1797,8 @@ class AppController extends ChangeNotifier {
           'number_row_enabled': input.numberRowEnabled,
           'candidate_font_scale': input.candidateFontScale,
           'double_space_period_enabled': input.doubleSpacePeriodEnabled,
+          'symbol_auto_return': input.symbolAutoReturn,
+          'phrases': input.phrases,
           'floating_portrait_enabled': input.floatingPortraitEnabled,
           'floating_portrait_scale': input.floatingPortraitScale,
           'floating_landscape_enabled': input.floatingLandscapeEnabled,

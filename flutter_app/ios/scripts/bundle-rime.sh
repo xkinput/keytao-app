@@ -23,6 +23,7 @@ if [ ! -f "$RIME_DATA_DIR/default.yaml" ]; then
 fi
 CONFIG_DIR="$REPO_DIR/crates/keytao-ios-ime/Sources/KeyTaoIOSIME/Resources"
 KEYBOARD_YAML="$REPO_DIR/crates/keytao-theme/default-keyboard.yaml"
+KEYBOARD_RESOURCES_DIR="$REPO_DIR/crates/keytao-theme/resources"
 core_version="$(awk '
     /^\[package\]$/ { package_section = 1; next }
     /^\[/ { package_section = 0 }
@@ -47,6 +48,7 @@ fi
 required=("$RIME_DATA_DIR/default.yaml")
 if [ "${PRODUCT_NAME:?}" = "KeyTaoKeyboard" ]; then
     required+=("$CONFIG_DIR/keytao_ios_ime.json" "$CONFIG_DIR/keytao-logo.png")
+    required+=("$KEYBOARD_RESOURCES_DIR/emoji-keywords-zh.json" "$KEYBOARD_RESOURCES_DIR/LICENSE-UNICODE.txt")
 else
     required+=("$KEYBOARD_YAML")
 fi
@@ -63,6 +65,7 @@ ditto "$RIME_DATA_DIR" "$RESOURCES_DIR/rime-data"
 printf '%s' "$core_version" > "$RESOURCES_DIR/keytao-core-version"
 if [ "$PRODUCT_NAME" = "KeyTaoKeyboard" ]; then
     cp "$CONFIG_DIR/keytao_ios_ime.json" "$CONFIG_DIR/keytao-logo.png" "$RESOURCES_DIR/"
+    cp "$KEYBOARD_RESOURCES_DIR/emoji-keywords-zh.json" "$KEYBOARD_RESOURCES_DIR/LICENSE-UNICODE.txt" "$RESOURCES_DIR/"
 else
     cp "$KEYBOARD_YAML" "$RESOURCES_DIR/default-keyboard.yaml"
 fi

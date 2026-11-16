@@ -12,6 +12,11 @@ horizontalGap: 4
 verticalGap: 5
 outerInset: 5
 maxKeyHeight: 54
+symbolAutoReturn: false
+phrases: ["谢谢", "好的", "收到", "稍等", "我在路上"]
+
+# keyboardMode back returns to the origin layer; symbols:last and emoji:last
+# open the last category. Explicit category layer names still select that tab.
 
 # Floating mode stays inside the system IME window. Scale is relative to the
 # full keyboard and can be overridden independently for each orientation.
@@ -62,7 +67,7 @@ rows:
     ]
   - [
       { label: "123", weight: 1.15, action: { type: keyboardMode, value: numbers }, longPress: { type: nextInputMethod } },
-      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" }, alternates: [ { label: "！", action: { type: directInput, value: "！" } }, { label: "？", action: { type: directInput, value: "？" } }, { label: "；", action: { type: directInput, value: "；" } }, { label: "：", action: { type: directInput, value: "：" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: symbols } } ], asciiAlternates: [ { label: "!", action: { type: directInput, value: "!" } }, { label: "?", action: { type: directInput, value: "?" } }, { label: ";", action: { type: directInput, value: ";" } }, { label: ":", action: { type: directInput, value: ":" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: symbols } } ] },
+      { label: "，", value: "，", asciiLabel: ",", asciiValue: ",", hint: "!", longPress: { type: directInput, value: "！" }, asciiLongPress: { type: directInput, value: "!" }, alternates: [ { label: "！", action: { type: directInput, value: "！" } }, { label: "？", action: { type: directInput, value: "？" } }, { label: "；", action: { type: directInput, value: "；" } }, { label: "：", action: { type: directInput, value: "：" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: "symbols:last" } } ], asciiAlternates: [ { label: "!", action: { type: directInput, value: "!" } }, { label: "?", action: { type: directInput, value: "?" } }, { label: ";", action: { type: directInput, value: ";" } }, { label: ":", action: { type: directInput, value: ":" } }, { label: "⚙", action: { type: openPage, value: settings } }, { label: "布局", action: { type: floating } }, { label: "#+=", action: { type: keyboardMode, value: "symbols:last" } } ] },
       { label: "空格", weight: 4.6, action: { type: space }, swipeDown: { type: reset } },
       { label: "。", value: "。", asciiLabel: ".", asciiValue: ".", hint: "?", longPress: { type: directInput, value: "？" }, asciiLongPress: { type: directInput, value: "?" }, alternates: [ { label: "？", action: { type: directInput, value: "？" } }, { label: "…", action: { type: directInput, value: "…" } }, { label: "、", action: { type: directInput, value: "、" } }, { label: "~", action: { type: directInput, value: "~" } } ], asciiAlternates: [ { label: "?", action: { type: directInput, value: "?" } }, { label: "…", action: { type: directInput, value: "…" } }, { label: "/", action: { type: directInput, value: "/" } }, { label: "~", action: { type: directInput, value: "~" } } ] },
       { label: "↵", weight: 1.45, action: { type: enter }, alternates: [ { label: "↵", action: { type: enter } }, { label: "悬浮", action: { type: floating } } ] }
@@ -94,8 +99,8 @@ numberRows:
       { label: "=", value: "=" }
     ]
   - [
-      { label: "返回", action: { type: keyboardMode, value: letters } },
-      { label: "#+=", action: { type: keyboardMode, value: symbols } },
+      { label: "返回", action: { type: keyboardMode, value: back } },
+      { label: "#+=", action: { type: keyboardMode, value: "symbols:last" } },
       { label: "0", hint: ")", value: "0", alternates: [ { label: ")", value: ")" } ] },
       { label: "␣", action: { type: space } },
       { label: "发送", action: { type: enter }, alternates: [ { label: "发送", action: { type: enter } }, { label: "悬浮", action: { type: floating } } ] }
@@ -110,7 +115,7 @@ symbolRows:
       { label: "序号", action: { type: "keyboardMode", value: "symbols_numbers" } },
       { label: "拼音", action: { type: "keyboardMode", value: "symbols_pinyin" } },
       { label: "颜文", action: { type: "keyboardMode", value: "symbols_kaomoji" } },
-      { label: "Emoji", action: { type: "keyboardMode", value: "symbols_emoji_face" } }
+      { label: "Emoji", action: { type: "keyboardMode", value: "emoji:last" } }
     ]
   - [
       { label: "【", value: "【", asciiLabel: "[", asciiValue: "[", rimeValue: ";k" },
@@ -1255,7 +1260,7 @@ layers:
         { label: "😶‍🌫️", value: "😶‍🌫️" }
       ]
     - &emojiFooter [
-        { label: "符号", weight: 1.15, action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "符号", weight: 1.15, action: { type: "keyboardMode", value: "symbols:last" } },
         { label: "ABC", weight: 1.15, action: { type: "keyboardMode", value: "letters" } },
         { label: "空格", weight: 4.6, action: { type: "space" } },
         { label: "⌫", weight: 1.15, action: { type: "backspace" } },
@@ -3067,9 +3072,9 @@ layers:
     - [
         { label: "全选", action: { type: "edit", value: "selectAll" } },
         { label: "清除", action: { type: "edit", value: "clearAll" } },
-        { label: "英文", action: { type: "keyboardMode", value: "symbols_en" } },
-        { label: "中文", action: { type: "keyboardMode", value: "symbols_marks" } },
-        { label: "返回", action: { type: "keyboardMode", value: "letters" } }
+        { label: "符号", action: { type: "keyboardMode", value: "symbols:last" } },
+        { label: "符号", action: { type: "keyboardMode", value: "symbols:last" } },
+        { label: "返回", action: { type: "keyboardMode", value: "back" } }
       ]
     - [
         { label: "剪切", action: { type: "edit", value: "cut" } },
@@ -3093,7 +3098,7 @@ layers:
         { label: "数字", action: { type: "keyboardMode", value: "numbers" } }
       ]
     - [
-        { label: "符号", action: { type: "keyboardMode", value: "symbols_marks" } },
+        { label: "符号", action: { type: "keyboardMode", value: "symbols:last" } },
         { label: "Tab", action: { type: "edit", value: "tab" } },
         { label: "剪贴板", action: { type: "panel", value: "clipboard" } },
         { label: "重复", action: { type: "edit", value: "repeatCommit" } },

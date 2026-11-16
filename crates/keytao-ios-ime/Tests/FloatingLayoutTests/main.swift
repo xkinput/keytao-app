@@ -186,23 +186,71 @@ do {
     let legacy = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("{}".utf8))
     expect(!legacy.mnemonicHintsEnabled, "legacy config keeps mnemonic hints off")
     expect(!KeyTaoIOSImeConfig.fallback.mnemonicHintsEnabled, "mnemonic hints default to off")
+    expect(!legacy.symbolAutoReturn, "symbol auto return defaults to off")
+    expect(legacy.phrases == ["谢谢", "好的", "收到", "稍等", "我在路上"], "phrases have shared defaults")
+    let navigation = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("""
+    {"rows":[[
+      {"label":"返回","action":{"type":"keyboardMode","value":"back"}},
+      {"label":"符号","action":{"type":"keyboardMode","value":"symbols:last"}},
+      {"label":"Emoji","action":{"type":"keyboardMode","value":"emoji:last"}},
+      {"label":"短语","action":{"type":"panel","value":"phrases"}},
+      {"label":"剪贴板","action":{"type":"panel","value":"clipboard"}}
+    ]],"layers":{"symbols_emoji_face":[[{"label":"😀","value":"😀"}]]}}
+    """.utf8))
+    expect(navigation.rows[0].compactMap { $0.action?.value } == ["back", "symbols:last", "emoji:last", "phrases", "clipboard"], "shared command markers survive decoding")
+    expect(navigation.normalizedLayer("symbols:last").id == "symbols", "last symbols has a compatible initial target")
+    expect(navigation.normalizedLayer("emoji:last").id == "symbols_emoji_face", "last emoji has a compatible initial target")
+    expect(navigation.normalizedLayer("back").id == "letters", "back preserves the old return target until navigation owns the origin")
+    expect(navigation.normalizedLayer("unknown:last").id == "letters", "unknown targets safely fall back")
+    let malformed = try decoder.decode(KeyTaoIOSImeConfig.self, from: Data("""
+    {"symbolAutoReturn":{},"phrases":[42]}
+    """.utf8))
+    expect(!malformed.symbolAutoReturn && malformed.phrases == legacy.phrases, "malformed keyboard settings retain defaults")
     let configURL = FileManager.default.temporaryDirectory.appendingPathComponent("mnemonic-\(UUID().uuidString).json")
     defer { try? FileManager.default.removeItem(at: configURL) }
     for enabled in [true, false] {
         var config = legacy
         config.mnemonicHintsEnabled = enabled
+        config.symbolAutoReturn = enabled
+        config.phrases = enabled ? ["自定义", "收到"] : []
         let data = try JSONEncoder().encode(config)
         let decoded = try decoder.decode(KeyTaoIOSImeConfig.self, from: data)
         expect(decoded.mnemonicHintsEnabled == enabled, "mnemonic hints survive a config round trip")
+        expect(decoded.symbolAutoReturn == enabled, "symbol auto return survives a config round trip")
+        expect(decoded.phrases == config.phrases, "phrases preserve order and intentional empty lists")
         try data.write(to: configURL, options: .atomic)
         let loaded = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: "{}", userConfigURL: configURL)
         expect(loaded.mnemonicHintsEnabled == enabled, "runtime settings override the resolved layout default")
+        expect(loaded.symbolAutoReturn == enabled && loaded.phrases == config.phrases, "shared runtime settings override layout defaults")
     }
+    let keyboard = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: """
+    {"symbolAutoReturn":true,"phrases":["自定义"]}
+    """, userConfigURL: nil)
+    expect(keyboard.symbolAutoReturn && keyboard.phrases == ["自定义"], "resolved keyboard settings survive the shared parser")
+    let malformedLayout = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: """
+    {"height":310,"rows":[[{"label":"custom","value":"c"}]],"symbolAutoReturn":{},"phrases":[42]}
+    """, userConfigURL: nil)
+    expect(malformedLayout.keyboardHeightDp == 310 && malformedLayout.rows[0][0].label == "custom", "malformed new preferences preserve valid resolved layout fields")
+    expect(!malformedLayout.symbolAutoReturn && malformedLayout.phrases == legacy.phrases, "malformed resolved preferences individually fall back")
+    try Data("""
+    {"hapticsEnabled":false,"symbolAutoReturn":{},"phrases":[42]}
+    """.utf8).write(to: configURL, options: .atomic)
+    let malformedRuntime = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: """
+    {"height":310,"rows":[[{"label":"custom","value":"c"}]],"symbolAutoReturn":true,"phrases":["保留"]}
+    """, userConfigURL: configURL)
+    expect(!malformedRuntime.hapticsEnabled, "malformed new preferences preserve valid existing runtime settings")
+    expect(malformedRuntime.symbolAutoReturn && malformedRuntime.phrases == ["保留"], "malformed runtime preferences retain resolved values")
+    expect(malformedRuntime.keyboardHeightDp == 310 && malformedRuntime.rows[0][0].label == "custom", "malformed runtime preferences preserve layout rows")
+    try Data("""
+    {"symbolAutoReturn":true,"phrases":[42]}
+    """.utf8).write(to: configURL, options: .atomic)
+    let partialRuntime = KeyTaoIOSImeConfig.load(resolvedKeyboardJson: "{}", userConfigURL: configURL)
+    expect(partialRuntime.symbolAutoReturn && partialRuntime.phrases == legacy.phrases, "one malformed preference does not discard another valid preference")
 } catch {
-    failures.append("mnemonic config round trip failed: \(error)")
+    failures.append("keyboard config round trip failed: \(error)")
 }
 #else
-print("mnemonic config round trip requires UIKit; skipped on the host")
+print("keyboard command/settings round trips require UIKit; skipped on the host")
 #endif
 
 if failures.isEmpty {

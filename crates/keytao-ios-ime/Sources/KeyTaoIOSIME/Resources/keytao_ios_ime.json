@@ -2,6 +2,8 @@
   "keyboardHeightDp": 246,
   "candidateBarHeightDp": 52,
   "keyboardBottomInsetDp": 0,
+  "symbolAutoReturn": false,
+  "phrases": ["谢谢", "好的", "收到", "稍等", "我在路上"],
   "floating": {
     "margin": 8,
     "portrait": { "enabled": false, "scale": 0.88 },
@@ -107,8 +109,8 @@
       { "label": "=", "value": "=" }
     ],
     [
-      { "label": "返回", "action": { "type": "keyboardMode", "value": "letters" } },
-      { "label": "#+=", "action": { "type": "keyboardMode", "value": "symbols" } },
+      { "label": "返回", "action": { "type": "keyboardMode", "value": "back" } },
+      { "label": "#+=", "action": { "type": "keyboardMode", "value": "symbols:last" } },
       { "label": "0", "value": "0" },
       { "label": "␣", "action": { "type": "space" } },
       { "label": "发送", "action": { "type": "enter" } }

@@ -246,6 +246,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     public var numberRowEnabled: Bool
     public var candidateFontScale: CGFloat
     public var doubleSpacePeriodEnabled: Bool
+    public var symbolAutoReturn: Bool
+    public var phrases: [String]
     /// Show the pending composition inside the host field via
     /// `UITextDocumentProxy.setMarkedText`. Off falls back to showing the
     /// preedit only in the candidate bar, for hosts whose proxy mishandles it.
@@ -301,6 +303,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         case numberRowEnabled
         case candidateFontScale
         case doubleSpacePeriodEnabled
+        case symbolAutoReturn
+        case phrases
         case hostMarkedText
         case swipeThresholdDp
         case rows
@@ -346,6 +350,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         numberRowEnabled: Bool = false,
         candidateFontScale: CGFloat = 1,
         doubleSpacePeriodEnabled: Bool = true,
+        symbolAutoReturn: Bool = false,
+        phrases: [String] = ["谢谢", "好的", "收到", "稍等", "我在路上"],
         hostMarkedTextEnabled: Bool = true,
         swipeThresholdDp: CGFloat,
         rows: [[KeyTaoKeySpec]],
@@ -386,6 +392,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         self.numberRowEnabled = numberRowEnabled
         self.candidateFontScale = Self.clamp(candidateFontScale, min: 0.8, max: 1.4)
         self.doubleSpacePeriodEnabled = doubleSpacePeriodEnabled
+        self.symbolAutoReturn = symbolAutoReturn
+        self.phrases = phrases
         self.hostMarkedTextEnabled = hostMarkedTextEnabled
         self.swipeThresholdDp = swipeThresholdDp
         self.rows = Self.normalizeRows(rows)
@@ -506,6 +514,9 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         )
         self.doubleSpacePeriodEnabled = (try? container.decode(Bool.self, forKey: .doubleSpacePeriodEnabled))
             ?? Self.fallback.doubleSpacePeriodEnabled
+        self.symbolAutoReturn = (try? container.decode(Bool.self, forKey: .symbolAutoReturn))
+            ?? Self.fallback.symbolAutoReturn
+        self.phrases = (try? container.decode([String].self, forKey: .phrases)) ?? Self.fallback.phrases
         self.hostMarkedTextEnabled = (try? container.decode(Bool.self, forKey: .hostMarkedText))
             ?? Self.fallback.hostMarkedTextEnabled
         self.swipeThresholdDp = Self.clamp(
@@ -572,7 +583,13 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
     }
 
     public func normalizedLayer(_ value: String?) -> KeyTaoKeyboardLayer {
-        let layer = KeyTaoKeyboardLayer(value?.isEmpty == false ? value! : KeyTaoKeyboardLayer.letters.id)
+        let target: String?
+        switch value {
+        case "symbols:last": target = "symbols"
+        case "emoji:last": target = "symbols_emoji_face"
+        default: target = value
+        }
+        let layer = KeyTaoKeyboardLayer(target?.isEmpty == false ? target! : KeyTaoKeyboardLayer.letters.id)
         return hasLayer(layer) ? layer : .letters
     }
 
@@ -608,6 +625,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         try container.encode(numberRowEnabled, forKey: .numberRowEnabled)
         try container.encode(candidateFontScale, forKey: .candidateFontScale)
         try container.encode(doubleSpacePeriodEnabled, forKey: .doubleSpacePeriodEnabled)
+        try container.encode(symbolAutoReturn, forKey: .symbolAutoReturn)
+        try container.encode(phrases, forKey: .phrases)
         try container.encode(hostMarkedTextEnabled, forKey: .hostMarkedText)
         try container.encode(swipeThresholdDp, forKey: .swipeThresholdDp)
         try container.encode(rows, forKey: .rows)
@@ -631,6 +650,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
               let keyboard = try? JSONDecoder().decode(KeyTaoThemeKeyboard.self, from: data) else {
             return nil
         }
+        let preferences = try? JSONDecoder().decode(KeyTaoKeyboardPreferences.self, from: data)
         return KeyTaoIOSImeConfig(
             keyboardHeightDp: keyboard.height ?? Self.fallback.keyboardHeightDp,
             candidateBarHeightDp: keyboard.candidateBarHeight ?? Self.fallback.candidateBarHeightDp,
@@ -657,6 +677,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
             numberRowEnabled: Self.fallback.numberRowEnabled,
             candidateFontScale: Self.fallback.candidateFontScale,
             doubleSpacePeriodEnabled: Self.fallback.doubleSpacePeriodEnabled,
+            symbolAutoReturn: preferences?.symbolAutoReturn ?? Self.fallback.symbolAutoReturn,
+            phrases: preferences?.phrases ?? Self.fallback.phrases,
             swipeThresholdDp: Self.fallback.swipeThresholdDp,
             rows: keyboard.rows ?? Self.fallback.rows,
             numberRows: keyboard.numberRows ?? Self.fallback.numberRows,
@@ -721,6 +743,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
               let runtime = try? JSONDecoder().decode(KeyTaoIOSRuntimeSettings.self, from: data) else {
             return config
         }
+        let preferences = try? JSONDecoder().decode(KeyTaoKeyboardPreferences.self, from: data)
         var next = config
         next.hapticsEnabled = runtime.haptics?.enabled ?? runtime.hapticsEnabled ?? next.hapticsEnabled
         next.hapticIntensity = Self.clampInt(
@@ -792,6 +815,12 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
         if let doubleSpacePeriodEnabled = runtime.doubleSpacePeriodEnabled {
             next.doubleSpacePeriodEnabled = doubleSpacePeriodEnabled
         }
+        if let symbolAutoReturn = preferences?.symbolAutoReturn {
+            next.symbolAutoReturn = symbolAutoReturn
+        }
+        if let phrases = preferences?.phrases {
+            next.phrases = phrases
+        }
         if let hostMarkedText = runtime.hostMarkedText {
             next.hostMarkedTextEnabled = hostMarkedText
         }
@@ -826,7 +855,7 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 }
                 var next = key
                 next.value = nil
-                next.action = KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols", fallbackValue: nil)
+                next.action = KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols:last", fallbackValue: nil)
                 return next
             }
         }
@@ -975,8 +1004,8 @@ public struct KeyTaoIOSImeConfig: Codable, Equatable {
                 KeyTaoKeySpec(label: "=", value: "="),
             ],
             [
-                KeyTaoKeySpec(label: "返回", action: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "letters", fallbackValue: nil)),
-                KeyTaoKeySpec(label: "#+=", action: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols", fallbackValue: nil)),
+                KeyTaoKeySpec(label: "返回", action: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "back", fallbackValue: nil)),
+                KeyTaoKeySpec(label: "#+=", action: KeyTaoKeyCommand(type: KeyTaoCommandType.keyboardMode, value: "symbols:last", fallbackValue: nil)),
                 KeyTaoKeySpec(label: "0", value: "0"),
                 KeyTaoKeySpec(label: "␣", action: KeyTaoKeyCommand(type: KeyTaoCommandType.space, value: nil, fallbackValue: nil)),
                 KeyTaoKeySpec(label: "发送", action: KeyTaoKeyCommand(type: KeyTaoCommandType.enter, value: nil, fallbackValue: nil)),
@@ -1035,6 +1064,22 @@ private struct KeyTaoThemeKeyboard: Decodable {
 private struct KeyTaoIOSRuntimeHaptics: Decodable {
     var enabled: Bool?
     var intensity: Int?
+}
+
+private struct KeyTaoKeyboardPreferences: Decodable {
+    var symbolAutoReturn: Bool?
+    var phrases: [String]?
+
+    private enum CodingKeys: String, CodingKey {
+        case symbolAutoReturn
+        case phrases
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        symbolAutoReturn = try? container.decode(Bool.self, forKey: .symbolAutoReturn)
+        phrases = try? container.decode([String].self, forKey: .phrases)
+    }
 }
 
 private struct KeyTaoIOSRuntimeSettings: Decodable {

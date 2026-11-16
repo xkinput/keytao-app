@@ -1,6 +1,7 @@
 package ink.rea.keytao_app
 
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -9,6 +10,54 @@ import org.junit.Test
 import java.nio.file.Files
 
 class KeytaoAndroidImeConfigTest {
+    @Test
+    fun `shared navigation commands survive parsing with safe target fallbacks`() {
+        val config = KeytaoAndroidImeConfig.parse("""{
+          "rows": [[
+            {"label":"返回","action":{"type":"keyboardMode","value":"back"}},
+            {"label":"符号","action":{"type":"keyboardMode","value":"symbols:last"}},
+            {"label":"Emoji","action":{"type":"keyboardMode","value":"emoji:last"}},
+            {"label":"短语","action":{"type":"panel","value":"phrases"}},
+            {"label":"剪贴板","action":{"type":"panel","value":"clipboard"}}
+          ]],
+          "layers":{"symbols_emoji_face":[[{"label":"😀","value":"😀"}]]}
+        }""")
+        assertEquals(listOf("back", "symbols:last", "emoji:last", "phrases", "clipboard"), config.rows.single().map { it.action.value })
+        assertEquals("symbols", config.normalizedLayer("symbols:last"))
+        assertEquals("symbols_emoji_face", config.normalizedLayer("emoji:last"))
+        assertEquals("letters", config.normalizedLayer("back"))
+        assertEquals("letters", config.normalizedLayer("unknown:last"))
+    }
+
+    @Test
+    fun `symbol auto return and phrases preserve defaults empty lists and runtime overrides`() {
+        val bundled = JSONObject("""{"rows":[[{"label":"q","value":"q"}]]}""")
+        val defaults = KeytaoAndroidImeConfig.parse(bundled.toString())
+        assertFalse(defaults.symbolAutoReturn)
+        assertEquals(listOf("谢谢", "好的", "收到", "稍等", "我在路上"), defaults.phrases)
+        val directory = Files.createTempDirectory("keytao-shared-keyboard-settings").toFile()
+        try {
+            val file = directory.resolve("android_ime.json")
+            for (enabled in listOf(true, false)) {
+                val phrases = if (enabled) listOf("自定义", "收到") else emptyList()
+                assertTrue(KeytaoAndroidImeConfig.persistSettings(file, mapOf(
+                    "symbolAutoReturn" to enabled,
+                    "phrases" to JSONArray(phrases),
+                )))
+                val config = KeytaoAndroidImeConfig.parseSources(bundled, file.readText(), bundled)
+                assertEquals(enabled, config.symbolAutoReturn)
+                assertEquals(phrases, config.phrases)
+            }
+            val malformed = KeytaoAndroidImeConfig.parseSources(
+                bundled, """{"symbolAutoReturn":{},"phrases":[42]}""", bundled,
+            )
+            assertFalse(malformed.symbolAutoReturn)
+            assertEquals(defaults.phrases, malformed.phrases)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     @Test
     fun `every historical default is refreshed even with an unrelated seed history`() {
         val bundledHash = "0".repeat(64)
@@ -486,7 +535,7 @@ class KeytaoAndroidImeConfigTest {
 
         val symbolSwitch = config.numberRows.single().single()
         assertEquals(KeyCommandTypes.KEYBOARD_MODE, symbolSwitch.action.type)
-        assertEquals("symbols", symbolSwitch.action.value)
+        assertEquals("symbols:last", symbolSwitch.action.value)
     }
 
     @Test

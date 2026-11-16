@@ -3471,8 +3471,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 26)
-      throw Exception('unexpected arr length: expect 26 but see ${arr.length}');
+    if (arr.length != 28)
+      throw Exception('unexpected arr length: expect 28 but see ${arr.length}');
     return AndroidImeInputSettingsDto(
       hapticsEnabled: dco_decode_bool(arr[0]),
       hapticIntensity: dco_decode_u_8(arr[1]),
@@ -3493,13 +3493,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       numberRowEnabled: dco_decode_bool(arr[16]),
       candidateFontScale: dco_decode_f_32(arr[17]),
       doubleSpacePeriodEnabled: dco_decode_bool(arr[18]),
-      floatingPortraitEnabled: dco_decode_bool(arr[19]),
-      floatingPortraitScale: dco_decode_u_8(arr[20]),
-      floatingLandscapeEnabled: dco_decode_bool(arr[21]),
-      floatingLandscapeScale: dco_decode_u_8(arr[22]),
-      configPath: dco_decode_opt_String(arr[23]),
-      reloadStampPath: dco_decode_opt_String(arr[24]),
-      message: dco_decode_String(arr[25]),
+      symbolAutoReturn: dco_decode_bool(arr[19]),
+      phrases: dco_decode_list_String(arr[20]),
+      floatingPortraitEnabled: dco_decode_bool(arr[21]),
+      floatingPortraitScale: dco_decode_u_8(arr[22]),
+      floatingLandscapeEnabled: dco_decode_bool(arr[23]),
+      floatingLandscapeScale: dco_decode_u_8(arr[24]),
+      configPath: dco_decode_opt_String(arr[25]),
+      reloadStampPath: dco_decode_opt_String(arr[26]),
+      message: dco_decode_String(arr[27]),
     );
   }
 
@@ -4487,6 +4489,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_numberRowEnabled = sse_decode_bool(deserializer);
     var var_candidateFontScale = sse_decode_f_32(deserializer);
     var var_doubleSpacePeriodEnabled = sse_decode_bool(deserializer);
+    var var_symbolAutoReturn = sse_decode_bool(deserializer);
+    var var_phrases = sse_decode_list_String(deserializer);
     var var_floatingPortraitEnabled = sse_decode_bool(deserializer);
     var var_floatingPortraitScale = sse_decode_u_8(deserializer);
     var var_floatingLandscapeEnabled = sse_decode_bool(deserializer);
@@ -4514,6 +4518,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       numberRowEnabled: var_numberRowEnabled,
       candidateFontScale: var_candidateFontScale,
       doubleSpacePeriodEnabled: var_doubleSpacePeriodEnabled,
+      symbolAutoReturn: var_symbolAutoReturn,
+      phrases: var_phrases,
       floatingPortraitEnabled: var_floatingPortraitEnabled,
       floatingPortraitScale: var_floatingPortraitScale,
       floatingLandscapeEnabled: var_floatingLandscapeEnabled,
@@ -5772,6 +5778,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.numberRowEnabled, serializer);
     sse_encode_f_32(self.candidateFontScale, serializer);
     sse_encode_bool(self.doubleSpacePeriodEnabled, serializer);
+    sse_encode_bool(self.symbolAutoReturn, serializer);
+    sse_encode_list_String(self.phrases, serializer);
     sse_encode_bool(self.floatingPortraitEnabled, serializer);
     sse_encode_u_8(self.floatingPortraitScale, serializer);
     sse_encode_bool(self.floatingLandscapeEnabled, serializer);

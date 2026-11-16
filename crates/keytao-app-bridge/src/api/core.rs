@@ -871,7 +871,7 @@ pub async fn get_android_ime_input_settings() -> Result<AndroidImeInputSettingsD
     )
 }
 
-/// Saves all 23 writable fields; returned path/message fields are read-only.
+/// Saves all writable fields; returned path/message fields are read-only.
 pub async fn set_android_ime_input_settings(
     settings: AndroidImeInputSettingsDto,
 ) -> Result<AndroidImeInputSettingsDto, String> {
@@ -897,6 +897,8 @@ pub async fn set_android_ime_input_settings(
             settings.number_row_enabled,
             settings.candidate_font_scale,
             settings.double_space_period_enabled,
+            settings.symbol_auto_return,
+            settings.phrases,
             settings.floating_portrait_enabled,
             settings.floating_portrait_scale,
             settings.floating_landscape_enabled,
@@ -1456,7 +1458,7 @@ mod tests {
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     #[tokio::test]
-    async fn android_settings_change_one_field_preserves_the_other_22() {
+    async fn android_settings_change_one_field_preserves_other_fields() {
         init_core(config()).unwrap();
         let before = get_android_ime_input_settings().await.unwrap();
         let mut edited = before.clone();

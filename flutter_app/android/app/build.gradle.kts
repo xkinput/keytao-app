@@ -70,6 +70,7 @@ android {
 
     sourceSets.getByName("main").assets.srcDirs(
         runtimeAssetsDir.get().asFile,
+        repoRoot.resolve("crates/keytao-theme/resources"),
     )
 }
 

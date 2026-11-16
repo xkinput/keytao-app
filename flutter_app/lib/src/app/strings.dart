@@ -153,6 +153,8 @@ abstract final class AppStrings {
   static const flickKeys = '下拉输入角标符号';
   static const flickKeysHint = '与常驻数字行功能部分重叠';
   static const doubleSpacePeriod = '双击空格输入句号';
+  static const symbolAutoReturn = '输入符号后返回字母';
+  static const phrases = '常用短语';
   static const doubleSpaceHint = '1100ms 内连按两次';
   static const swipeThreshold = '滑动判定阈值';
   static const floatingPortrait = '竖屏悬浮键盘';
