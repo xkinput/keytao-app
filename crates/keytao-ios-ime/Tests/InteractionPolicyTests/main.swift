@@ -1,12 +1,262 @@
 import Foundation
 
 var failures: [String] = []
+var checks = 0
 
 func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String, line: Int = #line) {
+    checks += 1
     if actual != expected {
         failures.append("line \(line): \(message) (expected \(expected), got \(actual))")
     }
 }
+
+let mathSymbols = KeyTaoKeyboardLayer("symbols_math")
+let animalEmoji = KeyTaoKeyboardLayer("symbols_emoji_animal")
+let editorPage = KeyTaoKeyboardLayer("editor")
+var navigation = KeyTaoKeyboardNavigation()
+expect(navigation.resolve(nil), .letters, "an unspecified field layer resolves to letters")
+expect(navigation.resolve("symbols:last"), .symbols, "symbols initially open the default category")
+expect(navigation.resolve("emoji:last"), KeyTaoKeyboardLayer("symbols_emoji_face"), "emoji initially open the face category")
+navigation.navigate(to: .layer(.numbers))
+expect(navigation.returnLayer, .letters, "numbers remember letters as their origin")
+navigation.navigate(to: .layer(mathSymbols))
+expect(navigation.returnLayer, .letters, "numbers and symbols share the original return target")
+navigation.navigate(to: .layer(animalEmoji))
+expect(navigation.returnLayer, .letters, "switching symbols to emoji preserves the original return target")
+expect(navigation.resolve("symbols:last"), mathSymbols, "symbol category memory is independent of emoji")
+expect(navigation.resolve("emoji:last"), animalEmoji, "emoji category memory follows the current category")
+navigation.navigate(to: .back)
+expect(navigation.layer, .letters, "back from the numbers-symbols-emoji group returns to letters")
+navigation.navigate(to: .layer(navigation.resolve("symbols:last")))
+expect(navigation.layer, mathSymbols, "re-entering symbols restores the previous category")
+navigation.navigate(to: .layer(editorPage))
+expect(navigation.returnLayer, mathSymbols, "editor remembers the page from which it was opened")
+navigation.navigate(to: .back)
+expect(navigation.layer, mathSymbols, "editor back returns to its symbol origin")
+expect(navigation.returnLayer, .letters, "return memory has one level rather than a navigation stack")
+navigation.navigate(to: .back)
+expect(navigation.layer, .letters, "a second back does not restore a consumed editor origin")
+navigation.navigate(to: .layer(editorPage))
+navigation.navigate(to: .layer(.numbers))
+expect(navigation.resolve("back"), .letters, "numbers back always resolves to letters even when opened from editor")
+navigation.navigate(to: .back)
+expect(navigation.layer, .letters, "numbers back returns to letters")
+
+for source in [KeyTaoKeyboardLayer.numbers, mathSymbols, animalEmoji, editorPage] {
+    for panel in [KeyTaoNavigationPanel.candidates, .function(.clipboard), .function(.rime), .function(.settings), .function(.phrases)] {
+        var coveredPage = KeyTaoKeyboardNavigation()
+        coveredPage.navigate(to: .layer(source))
+        let origin = coveredPage.returnLayer
+        coveredPage.navigate(to: .panel(panel))
+        expect(coveredPage.layer, source, "opening \(panel) preserves \(source.id)")
+        expect(coveredPage.panel, panel, "the requested overlay is active")
+        coveredPage.navigate(to: .back)
+        expect(coveredPage.panel, nil, "back closes the overlay before leaving its page")
+        expect(coveredPage.layer, source, "back from \(panel) stays on \(source.id)")
+        expect(coveredPage.returnLayer, origin, "closing an overlay preserves its page origin")
+        coveredPage.navigate(to: .panel(panel))
+        coveredPage.navigate(to: .panel(nil))
+        expect(coveredPage.layer, source, "explicit overlay close stays on \(source.id)")
+        expect(coveredPage.panel, nil, "explicit overlay close clears the panel")
+    }
+}
+
+navigation.navigate(to: .layer(mathSymbols))
+navigation.navigate(to: .layer(animalEmoji))
+navigation.shift = .locked
+navigation.navigate(to: .layer(.numbers))
+expect(navigation.shift == .locked, true, "page switches retain caps lock")
+navigation.navigate(to: .back)
+expect(navigation.shift == .locked, true, "back retains caps lock")
+navigation.shift = .once
+navigation.navigate(to: .layer(mathSymbols))
+expect(navigation.shift == .off, true, "page switches clear one-shot shift")
+navigation.shift = .once
+navigation.navigate(to: .panel(.function(.clipboard)))
+expect(navigation.shift == .once, true, "opening an overlay is not a page switch")
+navigation.navigate(to: .back)
+expect(navigation.shift == .once, true, "closing an overlay preserves one-shot shift on its page")
+
+for forcedLayer: KeyTaoKeyboardLayer? in [nil, .numbers] {
+    navigation.shift = .locked
+    navigation.navigate(to: .panel(.function(.phrases)))
+    navigation.navigate(to: .reset(forcedLayer ?? navigation.resolve(nil)))
+    expect(navigation.layer, forcedLayer ?? .letters, "new fields choose their forced layer or letters")
+    expect(navigation.returnLayer, .letters, "new fields discard the previous origin")
+    expect(navigation.panel, nil, "new fields close overlays")
+    expect(navigation.shift == .off, true, "new fields clear caps lock")
+    expect(navigation.resolve("symbols:last"), mathSymbols, "new fields retain the last symbol category")
+    expect(navigation.resolve("emoji:last"), animalEmoji, "new fields retain the last emoji category")
+}
+navigation.shift = .once
+navigation.navigate(to: .reset(.letters))
+expect(navigation.shift == .off, true, "new fields also clear one-shot shift")
+
+navigation.navigate(to: .layer(mathSymbols))
+expect(navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: false), false, "symbol commits stay on the page by default")
+expect(navigation.layer, mathSymbols, "checking the default symbol commit policy leaves the category intact")
+expect(navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: true), true, "enabled symbol auto-return requests letters after a commit")
+navigation.navigate(to: .panel(.function(.phrases)))
+expect(navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: true), false, "overlay commits do not trigger symbol auto-return")
+navigation.navigate(to: .panel(nil))
+navigation.navigate(to: .layer(animalEmoji))
+expect(navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: true), false, "emoji commits stay on emoji even with symbol auto-return enabled")
+navigation.navigate(to: .layer(.numbers))
+expect(navigation.shouldReturnAfterDirectCommit(symbolAutoReturn: true), false, "number commits do not trigger symbol auto-return")
+
+for target in [KeyTaoKeyboardLayer.numbers, mathSymbols, animalEmoji, editorPage] {
+    expect(KeyTaoNavigationAction.layer(target).requiresCompositionCommit, true, "entering \(target.id) first commits pending composition")
+}
+expect(KeyTaoNavigationAction.panel(.function(.clipboard)).requiresCompositionCommit, true, "clipboard entry first commits pending composition")
+expect(KeyTaoNavigationAction.panel(.function(.phrases)).requiresCompositionCommit, true, "phrase entry first commits pending composition")
+for action in [KeyTaoNavigationAction.layer(.letters), .back, .panel(nil), .panel(.candidates), .panel(.function(.rime)), .panel(.function(.settings)), .reset(.numbers)] {
+    expect(action.requiresCompositionCommit, false, "non-insertion navigation leaves composition handling to its existing path")
+}
+
+var clipboard = KeyTaoClipboardHistory()
+clipboard.upsert(KeyTaoClipboardRecord(key: "pinned", text: "Keep me", timestamp: 0))
+clipboard.togglePin("pinned")
+for index in 1...60 {
+    clipboard.upsert(KeyTaoClipboardRecord(key: "text-\(index)", text: "Text \(index)", timestamp: Double(index)))
+}
+expect(clipboard.records.count, 51, "fifty unpinned entries do not count the pinned entry")
+expect(clipboard.records.filter { !$0.pinned }.count, 50, "clipboard unpinned capacity is fifty")
+expect(clipboard.records.first?.key, "pinned", "an old pin stays above new unpinned entries")
+expect(clipboard.records.dropFirst().first?.key, "text-60", "unpinned clipboard entries use descending recency")
+expect(clipboard.records.last?.key, "text-11", "oldest unpinned clipboard entries are evicted")
+clipboard.upsert(KeyTaoClipboardRecord(key: "pinned", text: "Updated pin", timestamp: 100))
+expect(clipboard.records.count, 51, "recapturing a clipboard entry deduplicates its key")
+expect(clipboard.records.first?.pinned, true, "recapturing a pinned entry preserves its pin")
+expect(clipboard.records.first?.text, "Updated pin", "recapturing a pinned entry updates its payload")
+clipboard.upsert(KeyTaoClipboardRecord(key: "text-11", text: "Recaptured", timestamp: 101))
+expect(clipboard.records.count, 51, "recapturing an unpinned entry does not consume capacity")
+expect(clipboard.records.dropFirst().first?.key, "text-11", "recapturing an unpinned entry updates its recency")
+clipboard.togglePin("text-11")
+expect(clipboard.records.first?.key, "text-11", "pins are also sorted by recency")
+clipboard.togglePin("missing")
+clipboard.remove("text-60")
+expect(clipboard.records.contains { $0.key == "text-60" }, false, "individual unpinned entries can be deleted")
+clipboard.clearUnpinned()
+expect(clipboard.records.map(\.key), ["text-11", "pinned"], "clear-all preserves every pin")
+expect(clipboard.records.allSatisfy(\.pinned), true, "clear-all removes all unpinned entries")
+clipboard.remove("pinned")
+expect(clipboard.records.map(\.key), ["text-11"], "individual deletion may remove a pinned entry")
+
+var unpinOverflow = KeyTaoClipboardHistory(records: [
+    KeyTaoClipboardRecord(key: "old-pin", timestamp: 0, pinned: true),
+] + (1...50).map { KeyTaoClipboardRecord(key: "new-\($0)", timestamp: Double($0)) })
+unpinOverflow.togglePin("old-pin")
+expect(unpinOverflow.records.count, 50, "unpinning re-applies the unpinned capacity")
+expect(unpinOverflow.records.contains { $0.key == "old-pin" }, false, "an old unpinned item is evicted before newer entries")
+let duplicateHistory = KeyTaoClipboardHistory(records: [
+    KeyTaoClipboardRecord(key: "same", text: "Old", timestamp: 1),
+    KeyTaoClipboardRecord(key: "same", text: "New", timestamp: 2),
+])
+expect(duplicateHistory.records.count, 1, "initial clipboard records are deduplicated")
+expect(duplicateHistory.records.first?.text, "New", "initial clipboard deduplication keeps the most recent value")
+
+let mediaRecord = KeyTaoClipboardRecord(
+    key: "media:image", mime: "image/png", name: "photo.png", size: 123,
+    width: 30, height: 40, timestamp: 102, pinned: true
+)
+clipboard.upsert(mediaRecord)
+let clipboardTextByteLimit = 64 * 1024
+let clipboardHistoryByteLimit = 1024 * 1024
+let boundaryText = String(repeating: "a", count: clipboardTextByteLimit)
+var boundedClipboard = KeyTaoClipboardHistory()
+boundedClipboard.upsert(KeyTaoClipboardRecord(key: boundaryText, text: boundaryText, timestamp: 1))
+expect(boundedClipboard.records.count, 1, "text at the UTF-8 byte limit is retained")
+boundedClipboard.upsert(KeyTaoClipboardRecord(key: "oversized", text: boundaryText + "a", timestamp: 2))
+boundedClipboard.upsert(KeyTaoClipboardRecord(key: "unicode", text: String(repeating: "😀", count: clipboardTextByteLimit / 4 + 1), timestamp: 3))
+expect(boundedClipboard.records.map(\.key) == [boundaryText], true, "oversized ASCII and multibyte text are rejected")
+let oversizedLegacyClipboard = KeyTaoClipboardHistory(records: [
+    KeyTaoClipboardRecord(key: "legacy", text: boundaryText + "a", timestamp: 1, pinned: true),
+    mediaRecord,
+])
+expect(oversizedLegacyClipboard.records == [mediaRecord], true, "legacy oversized text is discarded even when pinned")
+do {
+    // Control characters exercise JSON escaping, and real text keys duplicate the payload.
+    var budgetClipboard = KeyTaoClipboardHistory()
+    for index in 1...60 {
+        let text = "\(index)" + String(repeating: "\u{0001}", count: 16 * 1024)
+        budgetClipboard.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: Double(index)))
+    }
+    expect(try budgetClipboard.encoded().count <= clipboardHistoryByteLimit, true, "serialized history stays within its total byte budget")
+    expect(budgetClipboard.records.count < 50, true, "the byte budget evicts old text before the count limit")
+    expect(budgetClipboard.records.first?.timestamp, 60, "byte eviction retains the newest unpinned entry")
+    for record in budgetClipboard.records { budgetClipboard.togglePin(record.key) }
+    for index in 61...120 {
+        let text = "\(index)" + String(repeating: "\u{0001}", count: 16 * 1024)
+        budgetClipboard.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: Double(index)))
+        budgetClipboard.togglePin(text)
+    }
+    expect(try budgetClipboard.encoded().count <= clipboardHistoryByteLimit, true, "pins cannot bypass the serialized byte budget")
+    expect(budgetClipboard.records.first?.pinned, true, "byte eviction retains pinned-entry priority")
+} catch {
+    failures.append("clipboard byte budget failed: \(error)")
+}
+do {
+    let restoredClipboard = try KeyTaoClipboardHistory(data: clipboard.encoded())
+    expect(restoredClipboard.records, clipboard.records, "clipboard text, media metadata and pins persist through JSON")
+    var restoredCleared = restoredClipboard
+    restoredCleared.clearUnpinned()
+    expect(restoredCleared.records, clipboard.records, "restored pins survive clear-all")
+    let emptyClipboard = try KeyTaoClipboardHistory(data: KeyTaoClipboardHistory().encoded())
+    expect(emptyClipboard.records.isEmpty, true, "empty clipboard history persists")
+    let historyFile = FileManager.default.temporaryDirectory.appendingPathComponent("keytao-clipboard-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: historyFile) }
+    try clipboard.encoded().write(to: historyFile, options: .atomic)
+    var diskClipboard = try KeyTaoClipboardHistory(contentsOf: historyFile)
+    expect(diskClipboard.records, clipboard.records, "clipboard history survives an atomic file write and a fresh load")
+    for index in 200...260 {
+        diskClipboard.upsert(KeyTaoClipboardRecord(key: "after-restart-\(index)", timestamp: Double(index)))
+    }
+    expect(diskClipboard.records.filter(\.pinned), clipboard.records, "restored pins survive later eviction")
+    diskClipboard.clearUnpinned()
+    expect(diskClipboard.records, clipboard.records, "restored pins survive clear-all after later captures")
+    let oversizedData = Data(repeating: 0, count: clipboardHistoryByteLimit + 1)
+    expect(try KeyTaoClipboardHistory(data: oversizedData).records.isEmpty, true, "oversized JSON is skipped before decoding")
+    let handle = try FileHandle(forWritingTo: historyFile)
+    try handle.truncate(atOffset: 20 * 1024 * 1024)
+    try handle.close()
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile).records.isEmpty, true, "a bloated legacy file is skipped before reading its contents")
+    try clipboard.encoded().write(to: historyFile, options: .atomic)
+    expect(try KeyTaoClipboardHistory(contentsOf: historyFile).records, clipboard.records, "valid history can be saved and loaded after skipping a bloated file")
+} catch {
+    failures.append("clipboard roundtrip failed: \(error)")
+}
+for invalidData in ["not json", "{}", "[{}]", "[{\"key\":\"missing-timestamp\"}]"] {
+    do {
+        _ = try KeyTaoClipboardHistory(data: Data(invalidData.utf8))
+        failures.append("malformed clipboard data was accepted: \(invalidData)")
+    } catch {
+        checks += 1
+    }
+}
+
+let emojiIndex = KeyTaoEmojiSearchIndex(keywords: [
+    "😀": ["笑", "笑脸", "GRINNING FACE"],
+    "😁": ["笑颜"],
+    "😂": ["笑哭", "喜极而泣", "lol"],
+    "😄": ["哈哈大笑", "开心"],
+    "😺": ["笑脸猫"],
+    "🧑🏽‍💻": ["程序员", "Coder"],
+])
+expect(emojiIndex.search(query: "笑", recents: []), ["😀", "😁", "😂", "😺", "😄"], "emoji search ranks exact before prefix before contains")
+expect(emojiIndex.search(query: "笑", recents: ["😄", "😂", "😁"]), ["😀", "😂", "😁", "😺", "😄"], "recents boost results within their match rank")
+expect(emojiIndex.search(query: "笑", recents: ["😂", "😁", "😂"]), ["😀", "😂", "😁", "😺", "😄"], "duplicate recents preserve their first ranking")
+expect(emojiIndex.search(query: "  grinning FACE\n", recents: []), ["😀"], "emoji search normalizes query and tts name case")
+expect(emojiIndex.search(query: "喜极而泣", recents: []), ["😂"], "emoji search matches Chinese tts names")
+expect(emojiIndex.search(query: "程序", recents: []), ["🧑🏽‍💻"], "emoji search preserves joined skin-tone Unicode results")
+expect(emojiIndex.search(query: "🧑🏽‍💻", recents: []), ["🧑🏽‍💻"], "emoji search may match the complete emoji itself")
+expect(emojiIndex.search(query: "missing", recents: ["😀"]), [], "recents do not inject unrelated results")
+expect(emojiIndex.search(query: " \n", recents: ["😄", "😀", "😄"]), ["😄", "😀"], "empty queries return unique recents in recency order")
+expect(emojiIndex.search(query: "笑", recents: [], limit: 2), ["😀", "😁"], "emoji search caps ranked results")
+expect(emojiIndex.search(query: "", recents: ["😄", "😀"], limit: 1), ["😄"], "empty-query recents respect the result cap")
+expect(emojiIndex.search(query: "笑", recents: [], limit: 0), [], "zero result cap is a no-op")
+expect(emojiIndex.search(query: "", recents: ["😀"], limit: -1), [], "negative result caps are a no-op")
+let reversedEmojiIndex = KeyTaoEmojiSearchIndex(keywords: ["😺": ["笑脸猫"], "😂": ["笑哭"], "😁": ["笑颜"]])
+expect(reversedEmojiIndex.search(query: "笑", recents: []), ["😁", "😂", "😺"], "equal-rank emoji ordering is deterministic")
 
 let profile = KeyTaoIMEInteractionTuning.backspaceProfile(for: .standard)
 let policy = KeyTaoBackspaceRepeatPolicy(profile: profile)
@@ -313,7 +563,7 @@ expect(KeyTaoColorMath.hsv(fromHex: "custom") == nil, true, "the custom swatch s
 expect(KeyTaoColorMath.hsv(fromHex: "+12345") == nil, true, "a signed literal is not a colour")
 
 if failures.isEmpty {
-    print("interaction policy tests passed")
+    print("interaction policy tests passed (\(checks) checks)")
 } else {
     for failure in failures {
         FileHandle.standardError.write(Data("FAIL \(failure)\n".utf8))

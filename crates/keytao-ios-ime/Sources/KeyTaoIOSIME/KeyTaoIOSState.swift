@@ -10,6 +10,7 @@ struct ClipboardEntry {
     var width: Int = 0
     var height: Int = 0
     var thumb: UIImage? = nil
+    var pinned: Bool = false
 }
 
 public struct KeyTaoCandidate: Codable, Equatable {

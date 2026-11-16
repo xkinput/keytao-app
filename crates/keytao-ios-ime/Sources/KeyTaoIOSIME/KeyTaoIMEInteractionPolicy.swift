@@ -1,5 +1,247 @@
 import Foundation
 
+public enum KeyTaoShiftState {
+    case off
+    case once
+    case locked
+}
+
+public struct KeyTaoKeyboardLayer: Equatable {
+    public var id: String
+
+    public init(_ id: String) {
+        self.id = id
+    }
+
+    public static let letters = KeyTaoKeyboardLayer("letters")
+    public static let numbers = KeyTaoKeyboardLayer("numbers")
+    public static let symbols = KeyTaoKeyboardLayer("symbols")
+
+    var isEmoji: Bool { id.hasPrefix("symbols_emoji_") }
+    var isSymbol: Bool { id == "symbols" || id.hasPrefix("symbols_") }
+    var isInputPage: Bool { self == .numbers || isSymbol }
+}
+
+enum KeyTaoFunctionPanelMode: Equatable {
+    case rime
+    case clipboard
+    case settings
+    case phrases
+}
+
+enum KeyTaoNavigationPanel: Equatable {
+    case candidates
+    case function(KeyTaoFunctionPanelMode)
+}
+
+enum KeyTaoNavigationAction {
+    case layer(KeyTaoKeyboardLayer)
+    case back
+    case panel(KeyTaoNavigationPanel?)
+    case reset(KeyTaoKeyboardLayer)
+
+    var requiresCompositionCommit: Bool {
+        switch self {
+        case .layer(let layer): return layer != .letters
+        case .panel(.function(.clipboard)), .panel(.function(.phrases)): return true
+        default: return false
+        }
+    }
+}
+
+struct KeyTaoKeyboardNavigation {
+    private(set) var layer = KeyTaoKeyboardLayer.letters
+    private(set) var returnLayer = KeyTaoKeyboardLayer.letters
+    private(set) var panel: KeyTaoNavigationPanel?
+    private(set) var lastSymbolCategory = KeyTaoKeyboardLayer.symbols
+    private(set) var lastEmojiCategory = KeyTaoKeyboardLayer("symbols_emoji_face")
+    var shift = KeyTaoShiftState.off
+
+    func resolve(_ value: String?) -> KeyTaoKeyboardLayer {
+        switch value {
+        case "back": return layer == .numbers ? .letters : returnLayer
+        case "symbols:last": return lastSymbolCategory
+        case "emoji:last": return lastEmojiCategory
+        default: return KeyTaoKeyboardLayer(value ?? "letters")
+        }
+    }
+
+    mutating func navigate(to action: KeyTaoNavigationAction) {
+        switch action {
+        case .panel(let next):
+            panel = next
+            return
+        case .reset(let forcedLayer):
+            layer = forcedLayer
+            returnLayer = .letters
+            panel = nil
+            shift = .off
+            return
+        case .back:
+            if panel != nil {
+                panel = nil
+                return
+            }
+            layer = resolve("back")
+            returnLayer = .letters
+        case .layer(let next):
+            if next == .letters {
+                returnLayer = .letters
+            } else if next != layer, !(layer.isInputPage && next.isInputPage) {
+                returnLayer = layer
+            }
+            layer = next
+        }
+        panel = nil
+        if shift == .once { shift = .off }
+        if layer.isEmoji {
+            lastEmojiCategory = layer
+        } else if layer.isSymbol {
+            lastSymbolCategory = layer
+        }
+    }
+
+    func shouldReturnAfterDirectCommit(symbolAutoReturn: Bool) -> Bool {
+        symbolAutoReturn && layer.isSymbol && !layer.isEmoji && panel == nil
+    }
+}
+
+struct KeyTaoClipboardRecord: Codable, Equatable {
+    let key: String
+    var text: String? = nil
+    var mime: String? = nil
+    var name: String? = nil
+    var size: Int = 0
+    var width: Int = 0
+    var height: Int = 0
+    var timestamp: TimeInterval
+    var pinned: Bool = false
+}
+
+struct KeyTaoClipboardHistory {
+    static let unpinnedLimit = 50
+    static let maxTextBytes = 64 * 1024
+    static let maxHistoryBytes = 1024 * 1024
+    private(set) var records: [KeyTaoClipboardRecord]
+
+    init(records: [KeyTaoClipboardRecord] = []) {
+        self.records = records
+        normalize()
+    }
+
+    init(data: Data) throws {
+        guard data.count <= Self.maxHistoryBytes else {
+            self.init()
+            return
+        }
+        self.init(records: try JSONDecoder().decode([KeyTaoClipboardRecord].self, from: data))
+    }
+
+    init(contentsOf file: URL) throws {
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        guard let size, size <= Self.maxHistoryBytes else {
+            self.init()
+            return
+        }
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        try self.init(data: handle.read(upToCount: Self.maxHistoryBytes + 1) ?? Data())
+    }
+
+    func encoded() throws -> Data {
+        try JSONEncoder().encode(records)
+    }
+
+    mutating func upsert(_ record: KeyTaoClipboardRecord) {
+        guard (record.text?.utf8.count ?? 0) <= Self.maxTextBytes else { return }
+        var next = record
+        if let existing = records.first(where: { $0.key == record.key }) {
+            next.pinned = existing.pinned
+        }
+        records.removeAll { $0.key == record.key }
+        records.append(next)
+        normalize()
+    }
+
+    mutating func togglePin(_ key: String) {
+        guard let index = records.firstIndex(where: { $0.key == key }) else { return }
+        records[index].pinned.toggle()
+        normalize()
+    }
+
+    mutating func remove(_ key: String) {
+        records.removeAll { $0.key == key }
+    }
+
+    mutating func clearUnpinned() {
+        records.removeAll { !$0.pinned }
+    }
+
+    private mutating func normalize() {
+        records.sort {
+            if $0.pinned != $1.pinned { return $0.pinned }
+            if $0.timestamp != $1.timestamp { return $0.timestamp > $1.timestamp }
+            return $0.key < $1.key
+        }
+        var keys = Set<String>()
+        var unpinnedCount = 0
+        var remainingBytes = Self.maxHistoryBytes - 2
+        let encoder = JSONEncoder()
+        records = records.filter {
+            guard ($0.text?.utf8.count ?? 0) <= Self.maxTextBytes,
+                  keys.insert($0.key).inserted else { return false }
+            if !$0.pinned, unpinnedCount >= Self.unpinnedLimit { return false }
+            // Include JSON escaping, the text key, metadata and array separators.
+            guard let data = try? encoder.encode($0), data.count + 1 <= remainingBytes else { return false }
+            remainingBytes -= data.count + 1
+            if !$0.pinned { unpinnedCount += 1 }
+            return true
+        }
+    }
+}
+
+struct KeyTaoEmojiSearchIndex {
+    private let entries: [(emoji: String, keywords: [String])]
+
+    init(keywords: [String: [String]]) {
+        entries = keywords.map { emoji, terms in
+            (emoji, ([emoji] + terms).map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        }
+    }
+
+    func search(query: String, recents: [String], limit: Int = 60) -> [String] {
+        guard limit > 0 else { return [] }
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var recentRanks: [String: Int] = [:]
+        var uniqueRecents: [String] = []
+        for emoji in recents where recentRanks[emoji] == nil {
+            recentRanks[emoji] = uniqueRecents.count
+            uniqueRecents.append(emoji)
+        }
+        guard !query.isEmpty else { return Array(uniqueRecents.prefix(limit)) }
+        var matches: [(emoji: String, rank: Int, recent: Int)] = []
+        for entry in entries {
+            let rank: Int
+            if entry.keywords.contains(query) {
+                rank = 0
+            } else if entry.keywords.contains(where: { $0.hasPrefix(query) }) {
+                rank = 1
+            } else if entry.keywords.contains(where: { $0.contains(query) }) {
+                rank = 2
+            } else {
+                continue
+            }
+            matches.append((entry.emoji, rank, recentRanks[entry.emoji] ?? Int.max))
+        }
+        matches.sort {
+            if $0.rank != $1.rank { return $0.rank < $1.rank }
+            if $0.recent != $1.recent { return $0.recent < $1.recent }
+            return $0.emoji < $1.emoji
+        }
+        return matches.prefix(limit).map(\.emoji)
+    }
+}
+
 public enum KeyTaoDeleteSpeed: String, Codable {
     case slow
     case standard

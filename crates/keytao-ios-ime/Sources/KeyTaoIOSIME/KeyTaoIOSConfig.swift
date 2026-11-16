@@ -184,24 +184,6 @@ public struct KeyTaoKeySpec: Codable, Equatable {
     }
 }
 
-public enum KeyTaoShiftState {
-    case off
-    case once
-    case locked
-}
-
-public struct KeyTaoKeyboardLayer: Equatable {
-    public var id: String
-
-    public init(_ id: String) {
-        self.id = id
-    }
-
-    public static let letters = KeyTaoKeyboardLayer("letters")
-    public static let numbers = KeyTaoKeyboardLayer("numbers")
-    public static let symbols = KeyTaoKeyboardLayer("symbols")
-}
-
 public enum KeyTaoEnterKeyBehavior {
     public static let system = "system"
     public static let newline = "newline"

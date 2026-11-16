@@ -1,6 +1,7 @@
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import CryptoKit
 import CKeytaoCore
 import os
 
@@ -15,12 +16,10 @@ private final class KeyTaoInputView: UIInputView, UIInputViewAudioFeedback {
     var enableInputClicksWhenVisible: Bool { true }
 }
 
-/// Serializes the short disk write with privacy wipes, including controller
-/// destruction while a global-queue snapshot is still running.
+/// Cancels unfinished snapshots when the input context changes.
 private final class KeyTaoClipboardMediaLifetime {
     private let lock = NSLock()
     private var generation = 0
-    private var directories: Set<URL> = []
 
     func currentGeneration() -> Int {
         lock.lock()
@@ -32,10 +31,9 @@ private final class KeyTaoClipboardMediaLifetime {
         lock.lock()
         defer { lock.unlock() }
         guard generation == expected else { return false }
-        directories.insert(file.deletingLastPathComponent())
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: file)
+            try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             return true
         } catch {
             try? FileManager.default.removeItem(at: file)
@@ -43,20 +41,14 @@ private final class KeyTaoClipboardMediaLifetime {
         }
     }
 
-    func wipe() {
+    func cancel() {
         lock.lock()
         defer { lock.unlock() }
         generation += 1
-        directories.insert(KeyTaoIOSPaths.clipboardDir())
-        for directory in directories {
-            try? FileManager.default.removeItem(at: directory)
-        }
     }
 }
 
 open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboardViewDelegate {
-    private static let clipboardHistoryLimit = 24
-    private static let clipboardMediaLimit = 8
     private static let clipboardMediaMaxBytes = 8 * 1024 * 1024
     private static let clipboardMediaTotalBytes = 48 * 1024 * 1024
     private static let clipboardThumbPx = 176
@@ -119,8 +111,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var chineseSwitchSnapshot: [String: Bool] = [:]
     private var inputAvailable = false
     private var unavailableMessage = "请先在 KeyTao App 安装键道方案"
-    private var clipboardHistory: [String] = []
-    private var clipboardTextTimestamps: [String: TimeInterval] = [:]
+    private var clipboardHistory = KeyTaoClipboardHistory()
+    private var clipboardHistoryLoaded = false
     private var clipboardSuppression: (text: String, changeCount: Int)?
     private var clipboardMedia: [ClipboardMedia] = []
     private var clipboardLastReadChangeCount: Int?
@@ -154,19 +146,17 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     public override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
         keyTaoKeyboardLog.info("KeyTao keyboard init")
         super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
-        clipboardMediaLifetime.wipe()
         KeyTaoLog.event("lifecycle", "ext_init") { ["t0_uptime": extensionStarted] }
     }
 
     public required init?(coder: NSCoder) {
         keyTaoKeyboardLog.info("KeyTao keyboard init coder")
         super.init(coder: coder)
-        clipboardMediaLifetime.wipe()
         KeyTaoLog.event("lifecycle", "ext_init") { ["t0_uptime": extensionStarted] }
     }
 
     deinit {
-        clipboardMediaLifetime.wipe()
+        clipboardMediaLifetime.cancel()
     }
 
     public override func loadView() {
@@ -259,7 +249,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         // The keyboard is coming back for a (possibly different) input context:
         // start from a clean composition instead of resurrecting whatever the
         // librime session still held from the previous one.
-        resetInputContextCaches()
+        resetInputContextCaches(resetNavigation: true)
         reloadIfNeeded()
         let systemColorScheme = currentSystemColorScheme()
         keyboardView?.update(hapticsAvailable: hasFullAccess)
@@ -282,7 +272,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         super.viewWillDisappear(animated)
         // Equivalent of macOS deactivateServer / Android onFinishInput: the
         // input context is over, so nothing may survive into the next one.
-        resetInputContextCaches()
+        resetInputContextCaches(resetNavigation: true)
     }
 
     public override func viewDidAppear(_ animated: Bool) {
@@ -336,6 +326,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         KeyTaoLog.event("memory", "mem_warning")
         KeyTaoLog.memorySnapshot("memory_warning")
         resetClipboardState()
+        for index in clipboardMedia.indices { clipboardMedia[index].thumb = nil }
         queuedCommands.removeAll()
         engine.releaseCaches()
         currentThemeCacheKey = nil
@@ -388,7 +379,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard hostTextMutationDepth == 0 else {
             return
         }
-        resetInputContextCaches()
+        resetInputContextCaches(resetNavigation: currentDocumentIdentifier() != inputDocumentIdentifier)
     }
 
     public override func selectionWillChange(_ textInput: UITextInput?) {
@@ -396,7 +387,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard hostTextMutationDepth == 0 else {
             return
         }
-        resetInputContextCaches()
+        resetInputContextCaches(resetNavigation: currentDocumentIdentifier() != inputDocumentIdentifier)
+    }
+
+    public override func selectionDidChange(_ textInput: UITextInput?) {
+        super.selectionDidChange(textInput)
+        guard hostTextMutationDepth == 0 else { return }
+        _ = refreshInputDocumentIfNeeded()
+        applyHostTraits()
     }
 
     private func currentDocumentIdentifier() -> UUID? {
@@ -410,7 +408,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// Everything bound to "the text field the user is in right now": the Rime
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
-    private func resetInputContextCaches() {
+    private func resetInputContextCaches(resetNavigation: Bool = false) {
         inputContextGeneration &+= 1
         inputDocumentIdentifier = currentDocumentIdentifier()
         // Cold-start keystrokes belong to the context where they were queued.
@@ -422,7 +420,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         lastCommittedText = nil
         resetClipboardState()
         clearHostMarkedText()
-        keyboardView?.resetShiftForNewContext()
+        if resetNavigation {
+            keyboardView?.resetNavigation(forcedLayer: KeyTaoHostTraits(proxy: textDocumentProxy).forcedLayer)
+        }
         guard engine.nativeReady else {
             currentState = currentState.withoutTransientCommit()
             keyboardView?.update(state: currentState)
@@ -440,7 +440,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         // A host that never attaches an identifier keeps reporting nil; treating
         // nil as a field change would reset the composition on every keystroke.
         guard currentDocumentIdentifier() == inputDocumentIdentifier else {
-            resetInputContextCaches()
+            resetInputContextCaches(resetNavigation: true)
             applyHostTraits()
             return false
         }
@@ -545,6 +545,22 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         showMessage("请在系统设置中允许 KeyTao 完全访问后使用按键振动")
     }
 
+    func keyboardViewWillEnterDirectInputPage(_ view: KeyTaoIOSKeyboardView) -> Bool {
+        guard refreshInputDocumentIfNeeded() else { return false }
+        return commitPendingComposition()
+    }
+
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, commitEmojiSearchResult text: String) {
+        guard refreshInputDocumentIfNeeded(), view.isEmojiSearching,
+              commitPendingComposition() else { return }
+        _ = insertHostText(text, intoSearch: false)
+    }
+
+    func keyboardViewEmojiSearchModeDidChange(_ view: KeyTaoIOSKeyboardView) {
+        guard let config = baseKeyboardConfig else { return }
+        applyKeyboardPresentation(config: config, force: true)
+    }
+
     /// The layout drops paging keys when the runtime cannot turn a page
     /// natively, but swipes, long presses and key stacks can carry the same
     /// command, so the capability is checked here as well: without
@@ -624,9 +640,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, requestClipboardHistory completion: @escaping ([ClipboardEntry]) -> Void) {
         refreshInputDocumentIfNeeded()
-        guard !hostTraits.isSensitive, hasFullAccess else {
+        guard !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive else {
             resetClipboardState()
             completion([])
+            return
+        }
+        loadClipboardHistoryIfNeeded()
+        guard hasFullAccess else {
+            completion(clipboardEntries())
             return
         }
         if clipboardMediaCapturePending {
@@ -642,7 +663,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let lifetime = clipboardMediaLifetime
         let generation = lifetime.currentGeneration()
         guard let source = currentClipboardMedia(expectedChangeCount: changeCount) else {
-            guard generation == lifetime.currentGeneration(), !hostTraits.isSensitive, hasFullAccess else {
+            guard generation == lifetime.currentGeneration(), clipboardCaptureAllowed else {
                 completion([])
                 return
             }
@@ -652,21 +673,38 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             completion(clipboardEntries())
             return
         }
-        guard generation == lifetime.currentGeneration(), !hostTraits.isSensitive, hasFullAccess else {
+        guard generation == lifetime.currentGeneration(), clipboardCaptureAllowed else {
             completion([])
             return
         }
-        // Reserve the byte/count budget before the worker writes its snapshot.
-        while !clipboardMedia.isEmpty && (clipboardMedia.count >= Self.clipboardMediaLimit
-            || clipboardMedia.reduce(0, { $0 + $1.size }) + source.data.count > Self.clipboardMediaTotalBytes) {
-            let evicted = clipboardMedia.removeLast()
-            try? FileManager.default.removeItem(at: evicted.file)
+        let digest = SHA256.hash(data: source.data).map { String(format: "%02x", $0) }.joined()
+        let timestamp = Date().timeIntervalSince1970
+        if let media = clipboardMedia.first(where: { $0.id.hasPrefix(digest + ".") }) {
+            clipboardHistory.upsert(KeyTaoClipboardRecord(
+                key: "media:\(media.id)", mime: media.mime, name: media.name, size: media.size,
+                width: media.width, height: media.height, timestamp: timestamp
+            ))
+            persistClipboardHistory()
+            clipboardLastReadChangeCount = changeCount
+            completion(clipboardEntries())
+            return
+        }
+        // Reserve the byte budget before the worker writes its snapshot.
+        while clipboardMedia.reduce(0, { $0 + $1.size }) + source.data.count > Self.clipboardMediaTotalBytes {
+            guard let evicted = clipboardHistory.records.last(where: { $0.mime != nil && !$0.pinned }) else {
+                completion(clipboardEntries())
+                return
+            }
+            clipboardHistory.remove(evicted.key)
+            reconcileClipboardMedia()
+            persistClipboardHistory()
         }
         clipboardMediaCapturePending = true
         clipboardMediaCompletions.append(completion)
-        let id = UUID().uuidString
-        let file = KeyTaoIOSPaths.clipboardDir().appendingPathComponent(id).appendingPathExtension(source.fileExtension)
-        let timestamp = KeyTaoLog.now()
+        // Unique snapshots prevent a cancelled worker from deleting a newer capture.
+        let id = digest + "." + UUID().uuidString + "." + source.fileExtension
+        let directory = clipboardHistoryFile?.deletingLastPathComponent() ?? KeyTaoIOSPaths.clipboardDir()
+        let file = directory.appendingPathComponent(id)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let media: ClipboardMedia? = autoreleasepool {
                 guard lifetime.write(source.data, to: file, generation: generation) else { return nil }
@@ -681,12 +719,19 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
                     try? FileManager.default.removeItem(at: file)
                     return
                 }
-                guard !self.hostTraits.isSensitive, self.hasFullAccess else {
+                guard self.clipboardCaptureAllowed else {
+                    try? FileManager.default.removeItem(at: file)
                     self.resetClipboardState()
                     return
                 }
                 if let media {
                     self.clipboardMedia.insert(media, at: 0)
+                    self.clipboardHistory.upsert(KeyTaoClipboardRecord(
+                        key: "media:\(media.id)", mime: media.mime, name: media.name, size: media.size,
+                        width: media.width, height: media.height, timestamp: media.timestamp
+                    ))
+                    self.reconcileClipboardMedia()
+                    self.persistClipboardHistory()
                     self.clipboardLastReadChangeCount = changeCount
                     self.logClipboardMedia()
                 }
@@ -700,36 +745,36 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteClipboardEntry key: String, media: Bool) {
-        guard !hostTraits.isSensitive, hasFullAccess else {
-            resetClipboardState()
-            return
-        }
-        if media {
-            guard let index = clipboardMedia.firstIndex(where: { "media:\($0.id)" == key }) else { return }
-            let item = clipboardMedia.remove(at: index)
-            try? FileManager.default.removeItem(at: item.file)
-            logClipboardMedia()
-            return
-        }
-        // History is de-duplicated on insert, so text identity is stable while
-        // the asynchronously rendered panel index may already be stale.
-        clipboardHistory.removeAll { $0 == key }
-        clipboardTextTimestamps.removeValue(forKey: key)
-        if currentClipboardText() == key {
+        guard !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive else { return }
+        clipboardHistory.remove(key)
+        reconcileClipboardMedia()
+        persistClipboardHistory()
+        if !media, currentClipboardText() == key {
             clipboardSuppression = (text: key, changeCount: UIPasteboard.general.changeCount)
         }
     }
 
+    func keyboardView(_ view: KeyTaoIOSKeyboardView, toggleClipboardPin key: String) {
+        guard !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive else { return }
+        clipboardHistory.togglePin(key)
+        reconcileClipboardMedia()
+        persistClipboardHistory()
+    }
+
     func keyboardViewClearClipboardHistory(_ view: KeyTaoIOSKeyboardView) {
+        guard !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive else { return }
         let changeCount = hasFullAccess ? UIPasteboard.general.changeCount : nil
         resetClipboardState()
+        clipboardHistory.clearUnpinned()
+        reconcileClipboardMedia()
+        persistClipboardHistory()
         clipboardLastReadChangeCount = changeCount
         clipboardMediaSuppressionChangeCount = changeCount
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, commitClipboardMedia key: String) {
         guard refreshInputDocumentIfNeeded() else { return }
-        guard !hostTraits.isSensitive, hasFullAccess else {
+        guard clipboardCaptureAllowed else {
             resetClipboardState()
             return
         }
@@ -739,7 +784,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             let data = try? Data(contentsOf: item.file, options: .mappedIfSafe)
             DispatchQueue.main.async { [weak self] in
                 guard let self, generation == self.clipboardMediaLifetime.currentGeneration() else { return }
-                guard !self.hostTraits.isSensitive, self.hasFullAccess else {
+                guard self.clipboardCaptureAllowed else {
                     self.resetClipboardState()
                     return
                 }
@@ -870,6 +915,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         keyboardView.update(settingsConfig: config)
         keyboardView.update(config: presented)
         let keyboardHeight = presented.effectiveKeyboardHeightDp + presented.candidateBarHeightDp
+            + keyboardView.emojiSearchExtraHeight
         keyboardHeightConstraint?.constant = keyboardHeight
         let margin = presentation.isCompact ? config.floating.marginDp : 0
         heightConstraint?.constant = keyboardHeight + (presentation.isCompact ? margin * 2 : 0)
@@ -994,10 +1040,15 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             }
             return
         }
+        if keyboardView?.deleteEmojiSearchText() == true { return }
         _ = deleteOneBeforeCursorForRestore()
     }
 
     private func handleBackspaceGesture(_ action: String, count: Int) {
+        if keyboardView?.isEmojiSearching == true {
+            if ["delete", "deleteSegment", "deleteAll"].contains(action) { handleBackspace() }
+            return
+        }
         switch action {
         case "begin":
             backspaceGestureRestoreStart = backspaceRestoreStack.count
@@ -1257,7 +1308,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         let replace = doubleSpacePeriodTracker.shouldReplaceSpace(
             nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
             contextBefore: contextBefore,
-            enabled: config.doubleSpacePeriodEnabled,
+            enabled: config.doubleSpacePeriodEnabled && keyboardView?.isEmojiSearching != true,
             hasComposition: currentState.hasComposition
         )
         if replace {
@@ -1430,6 +1481,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func handleEditAction(_ action: String, value: String?) {
+        if keyboardView?.isEmojiSearching == true,
+           !["paste", "pasteText", "tab", "repeatCommit"].contains(action) { return }
         switch action {
         case "paste":
             pasteClipboard()
@@ -1482,7 +1535,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func copySelection(cut: Bool) {
         clearCompositionBeforeEdit()
-        guard !hostTraits.isSensitive else {
+        guard !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive else {
             return
         }
         guard hasFullAccess else {
@@ -1501,7 +1554,6 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func pasteClipboard() {
-        clearCompositionBeforeEdit()
         guard hasFullAccess else {
             showMessage("请在系统设置中允许 KeyTao 完全访问后使用剪贴板")
             return
@@ -1598,7 +1650,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// it also raises the system paste prompt. `hasStrings` is metadata only, so
     /// it lets an empty clipboard be reported without bothering the user.
     private func currentClipboardText() -> String? {
-        guard !hostTraits.isSensitive, hasFullAccess,
+        guard clipboardCaptureAllowed,
               !UIPasteboard.general.hasImages, UIPasteboard.general.hasStrings else {
             return nil
         }
@@ -1608,7 +1660,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// Called only by the explicit clipboard-panel request. Inspect metadata
     /// first, then retain one original representation without UIImage encoding.
     private func currentClipboardMedia(expectedChangeCount: Int) -> (data: Data, type: String, mime: String, name: String, fileExtension: String)? {
-        guard !hostTraits.isSensitive, hasFullAccess else { return nil }
+        guard clipboardCaptureAllowed else { return nil }
         let pasteboard = UIPasteboard.general
         let hasImages = pasteboard.hasImages
         // Rich text may also advertise flat RTFD/webarchive data; preserve its
@@ -1655,18 +1707,89 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func clipboardEntries() -> [ClipboardEntry] {
-        let text = clipboardHistory.map { (clipboardTextTimestamps[$0] ?? 0, ClipboardEntry(key: $0, text: $0)) }
-        let media = clipboardMedia.map { ($0.timestamp, $0.entry) }
-        return (text + media).sorted { $0.0 > $1.0 }.map { $0.1 }
+        clipboardHistory.records.compactMap { record in
+            if let text = record.text {
+                return ClipboardEntry(key: record.key, text: text, pinned: record.pinned)
+            }
+            guard var entry = clipboardMedia.first(where: { "media:\($0.id)" == record.key })?.entry else { return nil }
+            entry.pinned = record.pinned
+            return entry
+        }
+    }
+
+    private var clipboardHistoryFile: URL? {
+        guard hasFullAccess else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: KeyTaoIOSPaths.appGroupIdentifier)?
+            .appendingPathComponent("keytao/clipboard/history.json")
+    }
+
+    private var clipboardCaptureAllowed: Bool {
+        hasFullAccess && !KeyTaoHostTraits(proxy: textDocumentProxy).isSensitive
+    }
+
+    private func loadClipboardHistoryIfNeeded() {
+        guard !clipboardHistoryLoaded, let file = clipboardHistoryFile else { return }
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            clipboardHistoryLoaded = true
+            return
+        }
+        do {
+            let saved = try KeyTaoClipboardHistory(contentsOf: file)
+            for record in saved.records {
+                if record.text != nil {
+                    clipboardHistory.upsert(record)
+                    continue
+                }
+                guard record.key.hasPrefix("media:"), let mime = record.mime else { continue }
+                let id = String(record.key.dropFirst("media:".count))
+                let url = file.deletingLastPathComponent().appendingPathComponent(id)
+                let components = id.split(separator: ".")
+                let digest = components.first.map(String.init) ?? ""
+                guard id == url.lastPathComponent,
+                      digest.count == 64, digest.allSatisfy(\.isHexDigit),
+                      components.count == 3, UUID(uuidString: String(components[1])) != nil,
+                      let type = UTType(filenameExtension: url.pathExtension) ?? UTType(mimeType: mime),
+                      let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      let size = attributes[.size] as? NSNumber,
+                      size.intValue > 0, size.intValue <= Self.clipboardMediaMaxBytes else { continue }
+                let preview = Self.clipboardThumbnail(file: url, mime: mime)
+                clipboardMedia.append(ClipboardMedia(
+                    id: id, file: url, pasteboardType: type.identifier, mime: mime,
+                    name: record.name ?? "剪贴板文件", size: size.intValue,
+                    width: preview.width, height: preview.height, timestamp: record.timestamp, thumb: preview.image
+                ))
+                clipboardHistory.upsert(record)
+            }
+            reconcileClipboardMedia()
+            clipboardHistoryLoaded = true
+        } catch {
+            keyTaoKeyboardLog.error("Clipboard history could not be loaded")
+        }
+    }
+
+    private func persistClipboardHistory() {
+        guard clipboardHistoryLoaded, let file = clipboardHistoryFile else { return }
+        do {
+            let data = try clipboardHistory.encoded()
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            showMessage("剪贴板历史保存失败")
+        }
+    }
+
+    private func reconcileClipboardMedia() {
+        let retained = Set(clipboardHistory.records.filter { $0.mime != nil }.map(\.key))
+        clipboardMedia.removeAll { media in
+            guard !retained.contains("media:\(media.id)") else { return false }
+            if hasFullAccess { try? FileManager.default.removeItem(at: media.file) }
+            return true
+        }
     }
 
     private func resetClipboardState() {
-        clipboardMediaLifetime.wipe()
-        clipboardHistory.removeAll()
-        clipboardTextTimestamps.removeAll()
+        clipboardMediaLifetime.cancel()
         clipboardSuppression = nil
-        clipboardMedia.removeAll()
-        clipboardLastReadChangeCount = nil
         clipboardMediaSuppressionChangeCount = nil
         clipboardMediaCapturePending = false
         let completions = clipboardMediaCompletions
@@ -1683,12 +1806,14 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     private func rememberCurrentClipboard(expectedChangeCount: Int) -> Bool {
-        guard !hostTraits.isSensitive, hasFullAccess else {
+        guard clipboardCaptureAllowed else {
             return false
         }
         let generation = clipboardMediaLifetime.currentGeneration()
-        let text = currentClipboardText()
-        guard generation == clipboardMediaLifetime.currentGeneration(), !hostTraits.isSensitive, hasFullAccess,
+        guard let text = currentClipboardText(), text.utf8.count <= KeyTaoClipboardHistory.maxTextBytes else {
+            return false
+        }
+        guard generation == clipboardMediaLifetime.currentGeneration(), clipboardCaptureAllowed,
               UIPasteboard.general.changeCount == expectedChangeCount else { return false }
         if let clipboardSuppression {
             guard text != clipboardSuppression.text
@@ -1697,32 +1822,54 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             }
             self.clipboardSuppression = nil
         }
-        guard let text else {
-            return false
-        }
-        clipboardHistory.removeAll { $0 == text }
-        clipboardHistory.insert(text, at: 0)
-        clipboardTextTimestamps[text] = KeyTaoLog.now()
-        if clipboardHistory.count > Self.clipboardHistoryLimit {
-            for evicted in clipboardHistory.suffix(clipboardHistory.count - Self.clipboardHistoryLimit) {
-                clipboardTextTimestamps.removeValue(forKey: evicted)
-            }
-            clipboardHistory.removeLast(clipboardHistory.count - Self.clipboardHistoryLimit)
-        }
+        clipboardHistory.upsert(KeyTaoClipboardRecord(key: text, text: text, timestamp: Date().timeIntervalSince1970))
+        reconcileClipboardMedia()
+        persistClipboardHistory()
         return true
     }
 
-    private func commitDirect(_ text: String) {
-        guard !text.isEmpty else {
-            return
+    @discardableResult
+    private func commitPendingComposition() -> Bool {
+        guard !runtimeStarting || queuedCommands.isEmpty else { return false }
+        guard currentState.hasComposition else { return true }
+        guard engine.nativeReady else { return false }
+        let generation = inputContextGeneration
+        let documentIdentifier = currentDocumentIdentifier()
+        if !currentState.candidates.isEmpty || !currentState.candidatePanel.candidates.isEmpty {
+            if engineCapabilities.candidateSelection {
+                apply(engine.selectCandidate(0))
+            } else if engineCapabilities.globalCandidateSelection {
+                let index = currentState.candidates.first?.index
+                    ?? currentState.candidatePanel.candidates.first?.index
+                    ?? currentState.page * currentState.pageSize
+                apply(engine.selectCandidateGlobal(index))
+            } else {
+                showMessage("当前 RIME 运行库不支持提交首选")
+                return false
+            }
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
+            if currentState.hasComposition {
+                apply(engine.commitComposition())
+                guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
+            }
         }
         if currentState.hasComposition {
-            _ = engine.reset()
+            // Enter uses the core's raw-input fallback; display preedit is not raw code.
+            apply(engine.processEnter())
+            guard inputContextIsCurrent(generation, documentIdentifier: documentIdentifier) else { return false }
         }
+        return !currentState.hasComposition
+    }
+
+    private func commitDirect(_ text: String) {
+        guard !text.isEmpty, commitPendingComposition() else { return }
         guard insertHostText(text) else { return }
-        lastCommittedText = hostTraits.isSensitive ? nil : text
+        if keyboardView?.isEmojiSearching != true {
+            lastCommittedText = hostTraits.isSensitive ? nil : text
+        }
         currentState = engine.nativeReady ? engine.state().withoutTransientCommit() : currentState.withoutTransientCommit()
         keyboardView?.update(state: currentState)
+        keyboardView?.didCommitDirectInput()
     }
 
     private func apply(_ state: KeyTaoImeState) {
@@ -1771,10 +1918,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     @discardableResult
-    private func insertHostText(_ text: String) -> Bool {
+    private func insertHostText(_ text: String, intoSearch: Bool = true) -> Bool {
         guard !text.isEmpty else {
             return true
         }
+        if intoSearch, keyboardView?.appendEmojiSearchText(text) == true { return true }
         let generation = inputContextGeneration
         let documentIdentifier = currentDocumentIdentifier()
         backspaceRestoreStack.removeAll()
@@ -1792,7 +1940,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// text is disabled, the candidate bar renders the preedit instead.
     private func updateHostMarkedText() {
         let preedit = currentState.candidatePanel.preedit ?? currentState.preedit
-        guard hostMarkedTextEnabled, !preedit.isEmpty,
+        guard keyboardView?.isEmojiSearching != true, hostMarkedTextEnabled, !preedit.isEmpty,
               let documentIdentifier = currentDocumentIdentifier() else {
             clearHostMarkedText()
             return
@@ -1953,9 +2101,9 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     /// `textDocumentProxy` inherits `UITextInputTraits`; it is the only channel
     /// through which an iOS host declares what it expects from the keyboard.
-        private func applyHostTraits() {
+    private func applyHostTraits() {
         let traits = KeyTaoHostTraits(proxy: textDocumentProxy)
-        if !hasFullAccess && (!clipboardHistory.isEmpty || !clipboardMedia.isEmpty || clipboardMediaCapturePending) {
+        if !hasFullAccess && clipboardMediaCapturePending {
             resetClipboardState()
         }
         defer {
@@ -1972,6 +2120,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         let previouslySensitive = hostTraits.isSensitive
+        let previousForcedLayer = hostTraits.forcedLayer
         hostTraits = traits
         if traits.isSensitive && !previouslySensitive {
             resetClipboardState()
@@ -1980,8 +2129,8 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         }
         applyInputPolicyForHost()
         keyboardView?.update(hostTraits: traits)
-        if let layer = traits.forcedLayer {
-            keyboardView?.setLayer(layer)
+        if traits.forcedLayer != previousForcedLayer {
+            keyboardView?.resetNavigation(forcedLayer: traits.forcedLayer)
         }
     }
 
@@ -2094,6 +2243,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         )
         keyboardHeightConstraint = container.heightAnchor.constraint(
             equalToConstant: presentedConfig.effectiveKeyboardHeightDp + presentedConfig.candidateBarHeightDp
+                + keyboardView.emojiSearchExtraHeight
         )
         keyboardLeadingConstraint = container.leadingAnchor.constraint(
             equalTo: self.view.leadingAnchor
@@ -2105,6 +2255,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         heightConstraint = self.view.heightAnchor.constraint(
             equalToConstant: presentedConfig.effectiveKeyboardHeightDp
                 + presentedConfig.candidateBarHeightDp
+                + keyboardView.emojiSearchExtraHeight
                 + (presentation.isCompact ? margin * 2 : 0)
         )
         heightConstraint?.priority = .defaultHigh
