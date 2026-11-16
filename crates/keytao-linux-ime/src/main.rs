@@ -16,6 +16,8 @@ mod kimpanel;
 #[cfg(target_os = "linux")]
 mod panel;
 mod panel_hit;
+#[cfg(any(target_os = "linux", test))]
+mod panel_scale;
 #[cfg(target_os = "linux")]
 mod reload_bus;
 mod surrounding;
