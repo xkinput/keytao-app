@@ -260,7 +260,7 @@ class _CurrentSchemeHero extends StatelessWidget {
           ActionRow(
             children: [
               ActionButton(
-                AppStrings.redeploy,
+                c.isDeploying ? AppStrings.deploying : AppStrings.redeploy,
                 primary: true,
                 tooltip: c.deployTooltip,
                 onPress: c.canDeploy ? c.deploy : null,
