@@ -1,6 +1,6 @@
 use crate::{Core, CoreError, CoreEvent, events::InstallProgress, scheme::build_client};
 use futures_util::StreamExt;
-use std::time::Duration;
+use std::{io::Write, time::Duration};
 
 pub const DOWNLOAD_CANCELLED: &str = "下载已取消";
 
@@ -31,11 +31,10 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
 
         let total_size = response.content_length().unwrap_or(0);
         let mut downloaded = 0u64;
-        let mut bytes: Vec<u8> = if total_size > 0 {
-            Vec::with_capacity(total_size as usize)
-        } else {
-            Vec::new()
-        };
+        let cache_dir = core.env().cache_dir.clone();
+        std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+        let mut temp = tempfile::NamedTempFile::new_in(&cache_dir)
+            .map_err(|e| format!("保存临时文件失败: {e}"))?;
 
         let mut stream = response.bytes_stream();
         while let Some(chunk) = tokio::select! {
@@ -46,7 +45,8 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
         } {
             let chunk = chunk.map_err(|e| format!("下载中断: {e}"))?;
             downloaded += chunk.len() as u64;
-            bytes.extend_from_slice(&chunk);
+            temp.write_all(&chunk)
+                .map_err(|e| format!("保存临时文件失败: {e}"))?;
             if total_size > 0 {
                 let percent = (downloaded * 60 / total_size) as u32;
                 emit(
@@ -61,10 +61,9 @@ pub async fn download_to_temp(core: &Core, url: String) -> Result<String, CoreEr
             }
         }
 
-        let cache_dir = core.env().cache_dir.clone();
-        std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
         let temp_path = cache_dir.join("keytao_download.zip");
-        std::fs::write(&temp_path, &bytes).map_err(|e| format!("保存临时文件失败: {e}"))?;
+        temp.persist(&temp_path)
+            .map_err(|e| format!("保存临时文件失败: {e}"))?;
 
         emit("extracting", 60, "下载完成，准备解压...");
         Ok(temp_path.to_string_lossy().into_owned())
@@ -133,6 +132,8 @@ mod tests {
         let core = open_core(dir.path());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let body: Vec<u8> = (0..3 * 65_536 + 31).map(|i| (i % 251) as u8).collect();
+        let expected = body.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -143,9 +144,16 @@ mod tests {
                 request.extend_from_slice(&buffer[..count]);
             }
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
                 .await
                 .unwrap();
+            stream.write_all(&body).await.unwrap();
         });
 
         core.cancel_download();
@@ -153,7 +161,43 @@ mod tests {
             .await
             .expect("local download timed out")
             .unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"ok");
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_keeps_existing_archive_and_removes_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = open_core(dir.path());
+        std::fs::create_dir_all(core.env().cache_dir.clone()).unwrap();
+        let archive = core.env().cache_dir.join("keytao_download.zip");
+        std::fs::write(&archive, b"previous archive").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = tokio::time::timeout(Duration::from_secs(5), download_to_temp(&core, url))
+            .await
+            .expect("local download timed out")
+            .unwrap_err();
+        assert!(error.to_string().contains("下载中断"), "{error}");
+        assert_eq!(std::fs::read(&archive).unwrap(), b"previous archive");
+        assert_eq!(
+            std::fs::read_dir(core.env().cache_dir.clone())
+                .unwrap()
+                .count(),
+            1
+        );
         server.await.unwrap();
     }
 }

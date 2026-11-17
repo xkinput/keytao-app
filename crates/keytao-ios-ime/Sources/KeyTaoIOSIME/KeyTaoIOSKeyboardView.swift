@@ -409,12 +409,16 @@ final class KeyTaoIOSKeyboardView: UIView {
     var isEmojiSearching: Bool { emojiSearchOrigin != nil }
     var emojiSearchExtraHeight: CGFloat { isEmojiSearching ? Self.emojiSearchRowHeight * 2 : 0 }
     private static let emojiSearchRowHeight: CGFloat = 44
-    private static let emojiSearchIndex: KeyTaoEmojiSearchIndex = {
+    private var cachedEmojiSearchIndex: KeyTaoEmojiSearchIndex?
+    private var emojiSearchIndex: KeyTaoEmojiSearchIndex {
+        if let cachedEmojiSearchIndex { return cachedEmojiSearchIndex }
         let keywords = KeyTaoIOSBundle.url(forResource: "emoji-keywords-zh", withExtension: "json")
             .flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode([String: [String]].self, from: $0) } ?? [:]
-        return KeyTaoEmojiSearchIndex(keywords: keywords)
-    }()
+        let index = KeyTaoEmojiSearchIndex(keywords: keywords)
+        cachedEmojiSearchIndex = index
+        return index
+    }
     private var touchStartScrollY: CGFloat = 0
     private var pendingExpandedCandidateWorkItem: DispatchWorkItem?
     private let lightHapticGenerator = UIImpactFeedbackGenerator(style: .light)
@@ -601,6 +605,9 @@ final class KeyTaoIOSKeyboardView: UIView {
         expandedCandidateItemsCacheSignature = ""
         expandedCandidateItemsCache = []
         cachedLogoImage = nil
+        schemaLogoImage = nil
+        cachedEmojiSearchIndex = nil
+        layer.contents = nil
         invalidateLayoutAndDisplay()
     }
 
@@ -2378,7 +2385,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private func refreshEmojiSearchResults() {
         guard isEmojiSearching else { return }
-        emojiSearchResults = Self.emojiSearchIndex.search(query: emojiSearchQuery,
+        emojiSearchResults = emojiSearchIndex.search(query: emojiSearchQuery,
                                                          recents: hostTraits.isSensitive ? [] : recentEmojis)
     }
 
@@ -7324,9 +7331,7 @@ final class KeyTaoIOSKeyboardView: UIView {
 
     private static func loadLogoImage() -> UIImage? {
         for bundle in KeyTaoIOSBundle.resourceBundles {
-            if let image = UIImage(named: "keytao-logo", in: bundle, compatibleWith: nil) {
-                return image
-            }
+            // Avoid UIKit's process-wide image cache so the view can release it.
             if let url = bundle.url(forResource: "keytao-logo", withExtension: "png"),
                let image = UIImage(contentsOfFile: url.path) {
                 return image

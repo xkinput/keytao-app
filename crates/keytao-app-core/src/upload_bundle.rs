@@ -2,9 +2,10 @@ use crate::CoreError;
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Cursor, Write},
+    io::{BufReader, Cursor, Read, Seek, Write},
     path::Path,
 };
 
@@ -29,11 +30,38 @@ struct SchemaFiles {
 struct Collector<'a> {
     root: &'a Path,
     shared: Option<&'a Path>,
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, BundleFile>,
     schemas: BTreeMap<String, SchemaFiles>,
     pending: BTreeSet<String>,
     bindings: BTreeMap<String, String>,
     targets: BTreeSet<(String, String, bool)>,
+}
+
+enum BundleFile {
+    Contents(Vec<u8>),
+    Copy(fs::File, u64),
+}
+
+impl BundleFile {
+    fn contents(&self) -> Result<Cow<'_, [u8]>, CoreError> {
+        match self {
+            Self::Contents(bytes) => Ok(Cow::Borrowed(bytes)),
+            Self::Copy(file, _) => {
+                let mut file = file;
+                file.rewind()?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok(Cow::Owned(bytes))
+            }
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Contents(bytes) => bytes.len() as u64,
+            Self::Copy(_, size) => *size,
+        }
+    }
 }
 
 fn failure(message: impl Into<String>) -> CoreError {
@@ -142,6 +170,10 @@ impl Collector<'_> {
     }
 
     fn add(&mut self, schema: &str, name: &str) -> Result<bool, CoreError> {
+        self.add_file(schema, name, false)
+    }
+
+    fn add_file(&mut self, schema: &str, name: &str, copy_only: bool) -> Result<bool, CoreError> {
         allowed(name)?;
         let path = crate::packages::safe_path(self.root, name).map_err(failure)?;
         if !path.try_exists()? && self.shared_file(name) {
@@ -152,16 +184,22 @@ impl Collector<'_> {
             return Ok(false);
         }
         if !self.files.contains_key(name) {
-            let bytes = fs::read(path)
-                .map_err(|e| failure(format!("方案 {schema}：无法读取引用文件 {name}: {e}")))?;
-            self.files.insert(name.into(), bytes);
+            let read_error = |e| failure(format!("方案 {schema}：无法读取引用文件 {name}: {e}"));
+            let file = if copy_only {
+                let source = fs::File::open(&path).map_err(read_error)?;
+                let size = source.metadata().map_err(read_error)?.len();
+                BundleFile::Copy(source, size)
+            } else {
+                BundleFile::Contents(fs::read(path).map_err(read_error)?)
+            };
+            self.files.insert(name.into(), file);
         }
         Ok(true)
     }
 
     fn config(&mut self, schema: &str, name: &str) -> Result<(), CoreError> {
         if self.add(schema, name)? {
-            let value = yaml(&self.files[name], name)?;
+            let value = yaml(&self.files[name].contents()?, name)?;
             self.scan(schema, &value, true)?;
         }
         Ok(())
@@ -227,7 +265,7 @@ impl Collector<'_> {
                 {
                     return Ok(());
                 }
-                let value = yaml(bytes, &name)?;
+                let value = yaml(&bytes.contents()?, &name)?;
                 let mut selected = &value;
                 if !preset {
                     let section = target.split_once(':').unwrap().1.trim_start_matches('/');
@@ -416,8 +454,9 @@ impl Collector<'_> {
             )));
         };
         if self.add(schema, &name)? {
-            let text = std::str::from_utf8(&self.files[&name])
-                .map_err(|e| failure(format!("{name}: {e}")))?;
+            let contents = self.files[&name].contents()?;
+            let text =
+                std::str::from_utf8(&contents).map_err(|e| failure(format!("{name}: {e}")))?;
             let modules = lua_requires(text);
             for (module, optional) in modules {
                 self.lua(schema, &module, optional)?;
@@ -429,7 +468,7 @@ impl Collector<'_> {
     fn opencc(&mut self, schema: &str, name: &str) -> Result<(), CoreError> {
         let name = format!("opencc/{name}");
         if self.add(schema, &name)? {
-            let config: serde_json::Value = serde_json::from_slice(&self.files[&name])
+            let config: serde_json::Value = serde_json::from_slice(&self.files[&name].contents()?)
                 .map_err(|e| failure(format!("{name}: {e}")))?;
             fn files(value: &serde_json::Value, out: &mut Vec<String>) {
                 match value {
@@ -471,7 +510,7 @@ impl Collector<'_> {
                             .find(|name| self.shared_file(name))
                     })
                     .unwrap_or(&relative);
-                self.add(schema, file)?;
+                self.add_file(schema, file, true)?;
             }
         }
         Ok(())
@@ -643,7 +682,7 @@ pub fn build(
             collector.schemas.remove(&id);
             continue;
         }
-        let source = yaml(&collector.files[&source], &source)?;
+        let source = yaml(&collector.files[&source].contents()?, &source)?;
         let compiled = format!("build/{id}.schema.yaml");
         let compiled_path = crate::packages::safe_path(root, &compiled).map_err(failure)?;
         let deployed = compiled_path.is_file();
@@ -653,7 +692,7 @@ pub fn build(
         let custom = format!("{id}.custom.yaml");
         if root.join(&custom).try_exists()? {
             collector.add(&id, &custom)?;
-            let value = yaml(&collector.files[&custom], &custom)?;
+            let value = yaml(&collector.files[&custom].contents()?, &custom)?;
             collector.scan(&id, &value, !deployed)?;
         }
         if deployed {
@@ -662,22 +701,25 @@ pub fn build(
         }
     }
     let defaults = serde_yaml::to_string(&serde_json::json!({"patch":{"schema_list":schema_ids.iter().map(|id| serde_json::json!({"schema":id})).collect::<Vec<_>>()}})).map_err(|e| failure(e.to_string()))?;
-    collector
-        .files
-        .insert("default.custom.yaml".into(), defaults.into_bytes());
+    collector.files.insert(
+        "default.custom.yaml".into(),
+        BundleFile::Contents(defaults.into_bytes()),
+    );
     if !collector.bindings.is_empty() {
         collector.files.insert(
             "rime.lua".into(),
-            collector
-                .bindings
-                .into_values()
-                .collect::<String>()
-                .into_bytes(),
+            BundleFile::Contents(
+                collector
+                    .bindings
+                    .into_values()
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
         );
     }
     fn dictionary_inputs(
         id: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, BundleFile>,
         inputs: &mut BTreeSet<String>,
     ) -> Result<(), CoreError> {
         let name = format!("{id}.dict.yaml");
@@ -688,7 +730,7 @@ pub fn build(
         if !inputs.insert(name.clone()) {
             return Ok(());
         }
-        let value = yaml(bytes, &name)?;
+        let value = yaml(&bytes.contents()?, &name)?;
         if let Some(imports) = value["import_tables"].as_sequence() {
             for id in imports.iter().filter_map(Value::as_str) {
                 dictionary_inputs(id, files, inputs)?;
@@ -703,21 +745,25 @@ pub fn build(
             schema.dictionary_sources.insert(id.clone(), inputs);
         }
     }
-    let total_size = collector
-        .files
-        .values()
-        .map(|bytes| bytes.len() as u64)
-        .sum();
+    let total_size = collector.files.values().map(BundleFile::len).sum();
     let files = collector.files.keys().cloned().collect();
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::default())
         .unix_permissions(0o644);
-    for (name, bytes) in collector.files {
-        zip.start_file(name, options)
+    for (name, file) in collector.files {
+        zip.start_file(&name, options)
             .map_err(|e| failure(e.to_string()))?;
-        zip.write_all(&bytes)?;
+        match file {
+            BundleFile::Contents(bytes) => zip.write_all(&bytes)?,
+            BundleFile::Copy(mut source, _) => {
+                source.rewind()?;
+                let mut reader = BufReader::with_capacity(65_536, source);
+                std::io::copy(&mut reader, &mut zip)
+                    .map_err(|e| failure(format!("无法读取引用文件 {name}: {e}")))?;
+            }
+        }
     }
     let bytes = zip
         .finish()
@@ -975,6 +1021,51 @@ fn verify_artifact(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn streamed_opencc_resource_preserves_archive_bytes_and_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("opencc")).unwrap();
+        let schema = b"schema:\n  schema_id: sample\nemoji:\n  opencc_config: emoji.json\n";
+        let config = br#"{"conversion_chain":[{"dict":{"type":"ocd2","file":"emoji.ocd2"}}]}"#;
+        let resource: Vec<u8> = (0..3 * 65_536 + 31).map(|i| (i % 251) as u8).collect();
+        let defaults = serde_yaml::to_string(&serde_json::json!({
+            "patch": {"schema_list": [{"schema": "sample"}]}
+        }))
+        .unwrap();
+        let inputs = BTreeMap::from([
+            ("default.custom.yaml", defaults.into_bytes()),
+            ("opencc/emoji.json", config.to_vec()),
+            ("opencc/emoji.ocd2", resource),
+            ("sample.schema.yaml", schema.to_vec()),
+        ]);
+        for (name, bytes) in &inputs {
+            fs::write(dir.path().join(name), bytes).unwrap();
+        }
+
+        let bundle = build(dir.path(), None, &["sample".into()]).unwrap();
+        let mut previous = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default())
+            .unix_permissions(0o644);
+        for (name, bytes) in &inputs {
+            previous.start_file(name, options).unwrap();
+            previous.write_all(bytes).unwrap();
+        }
+        let previous = previous.finish().unwrap().into_inner();
+        assert_eq!(bundle.bytes, previous);
+        assert_eq!(bundle.sha256, format!("{:x}", Sha256::digest(&previous)));
+        assert_eq!(
+            bundle.total_size,
+            inputs.values().map(|bytes| bytes.len() as u64).sum::<u64>()
+        );
+    }
 }
 
 #[cfg(test)]
