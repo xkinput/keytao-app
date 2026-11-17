@@ -17,6 +17,7 @@ use std::{
 };
 
 pub const SCHEMA_ID: &str = "rime_ice";
+const RELEASES_ATOM: &str = "https://github.com/iDvel/rime-ice/releases.atom";
 const RELEASES: &str = "https://api.github.com/repos/iDvel/rime-ice/releases?per_page=20";
 const MANIFEST: &str = ".keytao-rime-ice.json";
 const NOTICE: &str = "rime_ice-NOTICE.txt";
@@ -66,6 +67,36 @@ fn valid_version(tag: &str) -> bool {
             .is_ok_and(|day| (1..=31).contains(&day))
 }
 
+fn package_from_version(version: &str) -> RemotePackage {
+    RemotePackage {
+        version: version.into(),
+        source: format!("https://github.com/iDvel/rime-ice/tree/{version}"),
+        download_url: format!(
+            "https://github.com/iDvel/rime-ice/releases/download/{version}/full.zip"
+        ),
+        download_bytes: None,
+    }
+}
+
+fn release_package_from_atom(feed: &str) -> Result<RemotePackage, String> {
+    // GitHub release IDs carry the tag; titles and release-note links do not.
+    let version = feed
+        .split("<entry>")
+        .skip(1)
+        .filter_map(|entry| {
+            let (entry, _) = entry.split_once("</entry>")?;
+            let (_, id) = entry.split_once("<id>")?;
+            id.split_once("</id>")?
+                .0
+                .trim()
+                .strip_prefix("tag:github.com,2008:Repository/334110599/")
+        })
+        .filter(|tag| valid_version(tag))
+        .max()
+        .ok_or("雾凇拼音发布订阅中没有 YYYY.MM.DD 版本")?;
+    Ok(package_from_version(version))
+}
+
 fn release_package(releases: &str) -> Result<RemotePackage, String> {
     let releases: serde_json::Value = serde_json::from_str(releases).map_err(|e| e.to_string())?;
     let version = releases
@@ -82,18 +113,31 @@ fn release_package(releases: &str) -> Result<RemotePackage, String> {
         .filter(|tag| valid_version(tag))
         .max()
         .ok_or("雾凇拼音未发布带版本号的 full.zip")?;
-    Ok(RemotePackage {
-        version: version.into(),
-        source: format!("https://github.com/iDvel/rime-ice/tree/{version}"),
-        download_url: format!(
-            "https://github.com/iDvel/rime-ice/releases/download/{version}/full.zip"
-        ),
-        download_bytes: None,
-    })
+    Ok(package_from_version(version))
 }
 
 async fn latest_package() -> Result<RemotePackage, String> {
-    release_package(&wanxiang::github_text(RELEASES).await?)
+    latest_package_with(wanxiang::github_text).await
+}
+
+async fn latest_package_with<F, Fut>(fetch: F) -> Result<RemotePackage, String>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let feed_error = match fetch(RELEASES_ATOM)
+        .await
+        .and_then(|feed| release_package_from_atom(&feed))
+    {
+        Ok(package) => return Ok(package),
+        Err(error) => error,
+    };
+    fetch(RELEASES)
+        .await
+        .and_then(|releases| release_package(&releases))
+        .map_err(|error| {
+            format!("雾凇拼音更新查询失败：Atom 订阅：{feed_error}；API 回退：{error}")
+        })
 }
 
 pub async fn latest_version() -> Result<String, String> {

@@ -7,6 +7,31 @@ use std::{
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 const ARCHIVE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const RELEASES_ATOM_FIXTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:github.com,2008:https://github.com/iDvel/rime-ice/releases</id>
+  <entry>
+    <id>tag:github.com,2008:Repository/334110599/nightly</id>
+    <link href="https://github.com/iDvel/rime-ice/releases/tag/nightly"/>
+  </entry>
+  <entry><id>tag:github.com,2008:Repository/334110599/2026.03.01</id></entry>
+  <entry>
+    <id>
+      tag:github.com,2008:Repository/334110599/2026.06.30
+    </id>
+    <link href="https://github.com/iDvel/rime-ice/releases/tag/2026.06.30"/>
+    <content type="html">&lt;a href="/releases/tag/2099.01.01"&gt;ignore&lt;/a&gt;</content>
+  </entry>
+  <entry><id>tag:github.com,2008:Repository/334110599/v2026.12.01</id></entry>
+  <entry><id>tag:github.com,2008:Repository/334110599/2026.13.01</id></entry>
+  <entry><id>tag:github.com,2008:Repository/334110599/2026.05.31</id></entry>
+</feed>"#;
+const UNDATED_ATOM_FIXTURE: &str = r#"<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>tag:github.com,2008:Repository/334110599/nightly</id></entry>
+  <entry><id>tag:github.com,2008:Repository/334110599/v1.0</id></entry>
+</feed>"#;
+const RELEASES_API_FIXTURE: &str =
+    r#"[{"tag_name":"2026.06.30","assets":[{"name":"full.zip"}]}]"#;
 
 struct TestRoot {
     dir: tempfile::TempDir,
@@ -113,6 +138,84 @@ fn install_fixture(root: &Path, version: &str) {
     let files = stage(&receipt, &package);
     commit_files(&mut receipt, files, &package, ARCHIVE_HASH.into()).unwrap();
     receipt.finish().unwrap();
+}
+
+#[test]
+fn atom_discovers_newest_dated_release_and_builds_package_urls() {
+    let release = release_package_from_atom(RELEASES_ATOM_FIXTURE).unwrap();
+    assert_eq!(release.version, "2026.06.30");
+    assert_eq!(
+        release.source,
+        "https://github.com/iDvel/rime-ice/tree/2026.06.30"
+    );
+    assert_eq!(
+        release.download_url,
+        "https://github.com/iDvel/rime-ice/releases/download/2026.06.30/full.zip"
+    );
+    assert_eq!(release.download_bytes, None);
+}
+
+#[test]
+fn atom_without_dated_releases_returns_a_clear_error() {
+    assert_eq!(
+        release_package_from_atom(UNDATED_ATOM_FIXTURE).err().unwrap(),
+        "雾凇拼音发布订阅中没有 YYYY.MM.DD 版本"
+    );
+}
+
+#[tokio::test]
+async fn atom_success_does_not_query_the_api() {
+    let release = latest_package_with(|url| {
+        assert_eq!(url, RELEASES_ATOM);
+        std::future::ready(Ok(RELEASES_ATOM_FIXTURE.into()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(release.version, "2026.06.30");
+}
+
+#[tokio::test]
+async fn atom_fetch_or_parse_failure_falls_back_to_the_api_once() {
+    for feed in [Err("HTTP 502".into()), Ok(UNDATED_ATOM_FIXTURE.into())] {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let release = latest_package_with(|url| {
+            calls.borrow_mut().push(url);
+            std::future::ready(if url == RELEASES_ATOM {
+                feed.clone()
+            } else {
+                Ok(RELEASES_API_FIXTURE.into())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(release.version, "2026.06.30");
+        assert_eq!(*calls.borrow(), [RELEASES_ATOM, RELEASES]);
+    }
+}
+
+#[tokio::test]
+async fn failed_api_fallback_preserves_both_errors_without_retrying() {
+    for api in [Err("HTTP 403 rate limit exceeded".into()), Ok("[]".into())] {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = latest_package_with(|url| {
+            calls.borrow_mut().push(url);
+            std::future::ready(if url == RELEASES_ATOM {
+                Ok(UNDATED_ATOM_FIXTURE.into())
+            } else {
+                api.clone()
+            })
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("没有 YYYY.MM.DD 版本"), "{error}");
+        assert!(error.contains("API 回退"), "{error}");
+        assert!(
+            error.contains("HTTP 403 rate limit exceeded") || error.contains("full.zip"),
+            "{error}"
+        );
+        assert_eq!(*calls.borrow(), [RELEASES_ATOM, RELEASES]);
+    }
 }
 
 #[test]
