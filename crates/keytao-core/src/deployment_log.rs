@@ -35,7 +35,7 @@ impl DeploymentLog {
         Self { directory, offsets }
     }
 
-    fn messages(&self, severity: &str, level: char) -> Vec<String> {
+    fn messages(&self, severity: &str, level: char, limit: Option<usize>) -> Vec<String> {
         let mut recent: Vec<(String, String)> = Vec::new();
         for path in log_files(&self.directory, severity) {
             let Ok(mut file) = File::open(&path) else {
@@ -62,17 +62,20 @@ impl DeploymentLog {
                 };
                 let message = message.trim();
                 if message.is_empty()
-                    || recent
-                        .iter()
-                        .any(|(previous, text)| text == message && previous.as_str() >= prefix)
+                    || limit.is_some()
+                        && recent
+                            .iter()
+                            .any(|(previous, text)| text == message && previous.as_str() >= prefix)
                 {
                     continue;
                 }
-                recent.retain(|(_, text)| text != message);
+                if limit.is_some() {
+                    recent.retain(|(_, text)| text != message);
+                }
                 recent.push((prefix.to_owned(), message.to_owned()));
                 // glog's date/time prefix orders entries across process/rotation files.
                 recent.sort_by(|a, b| a.0.cmp(&b.0));
-                if recent.len() > 8 {
+                if limit.is_some_and(|limit| recent.len() > limit) {
                     recent.remove(0);
                 }
             }
@@ -80,10 +83,14 @@ impl DeploymentLog {
         recent.into_iter().map(|(_, message)| message).collect()
     }
 
+    pub(super) fn first_error(&self) -> Option<String> {
+        self.messages("ERROR", 'E', None).into_iter().next()
+    }
+
     fn summary(&self) -> String {
-        let mut messages = self.messages("ERROR", 'E');
+        let mut messages = self.messages("ERROR", 'E', Some(8));
         if messages.is_empty() {
-            messages = self.messages("WARNING", 'W');
+            messages = self.messages("WARNING", 'W', Some(8));
         }
         let mut remaining = 800;
         let mut lines = Vec::new();
@@ -235,6 +242,21 @@ mod tests {
     }
 
     #[test]
+    fn first_error_keeps_the_first_occurrence_when_a_message_repeats() {
+        let logs = TempLog::new();
+        let window = DeploymentLog::capture(logs.0.clone());
+        logs.append(
+            "rime.keytao.log.ERROR.20261115-020000.42.log",
+            concat!(
+                "E20261115 02:01:00.000001 123 a.cc:1] first error\n",
+                "E20261115 02:01:01.000001 123 a.cc:1] second error\n",
+                "E20261115 02:01:02.000001 123 a.cc:1] first error\n",
+            ),
+        );
+        assert_eq!(window.first_error().as_deref(), Some("first error"));
+    }
+
+    #[test]
     fn summary_keeps_last_eight_unique_lines_and_caps_unicode_characters() {
         let logs = TempLog::new();
         let window = DeploymentLog::capture(logs.0.clone());
@@ -246,6 +268,7 @@ mod tests {
             );
         }
         let summary = window.summary();
+        assert_eq!(window.first_error().as_deref(), Some("error 0"));
         assert_eq!(summary.lines().count(), 8);
         assert_eq!(summary.lines().next(), Some("error 4"));
         assert_eq!(summary.lines().last(), Some("error 11"));

@@ -56,10 +56,14 @@ pub fn record_android_result(
     if !success {
         return Ok(());
     }
-    let config = ["default.custom.yaml", "default-custom.yaml"]
-        .into_iter()
-        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
-        .ok_or_else(|| CoreError::Other("Android RIME 部署缺少方案配置".into()))?;
+    let config = [
+        "build/default.yaml",
+        "default.custom.yaml",
+        "default-custom.yaml",
+    ]
+    .into_iter()
+    .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+    .ok_or_else(|| CoreError::Other("Android RIME 部署缺少方案配置".into()))?;
     let schemas = crate::scheme_files::parse_schema_list(&config);
     crate::upload_bundle::verify_deploy_artifacts(root, Some(&root.join("rime-data")), &schemas)?;
     record_result(core, root, true)
@@ -370,9 +374,15 @@ pub(crate) async fn rime_deploy_default_inner(
     let deploy_result = deploy_result.map(|result| result.map(|()| None::<String>));
 
     match deploy_result {
-        Ok(Ok(warning)) => {
+        Ok(Ok(public_warning)) => {
             let root = keytao_core::default_user_data_dir()
                 .ok_or("Cannot determine keytao data directory")?;
+            let warning = keytao_core::deployment_warning(&root)
+                .into_iter()
+                .chain(public_warning.map(|warning| format!("系统搜索框方案未更新：{warning}")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let warning = (!warning.is_empty()).then_some(warning);
             record_result(core, &root, true).map_err(|e| e.to_string())?;
             core.emit(CoreEvent::DeployProgress("部署完成".into()));
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -391,9 +401,7 @@ pub(crate) async fn rime_deploy_default_inner(
             #[cfg(target_os = "windows")]
             core.emit(CoreEvent::DeployProgress("已通知系统输入法重载".into()));
             if let Some(warning) = &warning {
-                core.emit(CoreEvent::DeployProgress(format!(
-                    "系统搜索框方案未更新：{warning}"
-                )));
+                core.emit(CoreEvent::DeployProgress(warning.clone()));
             }
             #[cfg(target_os = "linux")]
             match launch_keytao_ime(core, &host, true) {
@@ -442,7 +450,7 @@ pub async fn rime_deploy_default(
         Ok(DeployResult {
             success: true,
             message,
-            warning: None,
+            warning: keytao_core::deployment_warning(&root),
         })
     }
     .await;
@@ -608,6 +616,10 @@ pub async fn rime_deploy_default(
             Ok(Ok(())) => {
                 record_result(core, &dest, true).map_err(|e| e.to_string())?;
                 core.emit(CoreEvent::DeployProgress("部署完成".into()));
+                let warning = keytao_core::deployment_warning(&dest);
+                if let Some(warning) = &warning {
+                    core.emit(CoreEvent::DeployProgress(warning.clone()));
+                }
                 match write_ios_reload_stamp(&dest) {
                     Ok(stamp) => {
                         let message = format!("已通知 iOS 输入法重载：{}", stamp.display());
@@ -615,7 +627,7 @@ pub async fn rime_deploy_default(
                         Ok(DeployResult {
                             success: true,
                             message,
-                            warning: None,
+                            warning,
                         })
                     }
                     Err(e) => {
@@ -624,7 +636,7 @@ pub async fn rime_deploy_default(
                         Ok(DeployResult {
                             success: true,
                             message,
-                            warning: None,
+                            warning,
                         })
                     }
                 }

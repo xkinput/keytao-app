@@ -1196,6 +1196,8 @@ mod desktop {
         if !full_deploy_and_wait().map_err(|error| deploy_log.failure_message(Some(&error)))? {
             return Err(deploy_log.failure_message(None));
         }
+        deploy_desktop_schema_dependencies(user_dir)
+            .map_err(|error| deploy_log.failure_message(Some(&format!("依赖部署失败：{error}"))))?;
         validate_deployed_schema_files(user_dir)
             .map_err(|error| deploy_log.failure_message(Some(&format!("部署验证失败：{error}"))))?;
         complete_deployment(user_dir)
@@ -1232,6 +1234,15 @@ mod desktop {
         let deploy_log = capture_deployment_log(Path::new(&user_data_dir));
         regenerate_active_rime_lua(Path::new(&user_data_dir))?;
         setup_only(user_data_dir.clone(), shared_data_dir)?;
+        let user_dir = Path::new(&user_data_dir);
+        if parse_schema_list_from_dir(user_dir).contains(&schema_id) {
+            if !deploy_listed_schema(user_dir, &schema_id)? {
+                return Ok(Vec::new());
+            }
+            return Ok(schema_dependencies_from_file(&compiled_schema_path(
+                user_dir, &schema_id,
+            )));
+        }
         let source = Path::new(&user_data_dir).join(format!("{schema_id}.schema.yaml"));
         if !source.is_file() {
             return Err(format!("missing schema source: {}", source.display()));
@@ -1336,16 +1347,13 @@ mod desktop {
         let mut pending = std::collections::VecDeque::new();
         for schema_id in &initial_schemas {
             let compiled = compiled_schema_path(user_dir, schema_id);
-            if !compiled.is_file() {
-                let source = user_dir.join(format!("{schema_id}.schema.yaml"));
-                if !source.is_file() {
-                    return Err(format!("missing schema source: {}", source.display()));
-                }
-                deploy_schema_file(&source)?;
+            if !deploy_listed_schema(user_dir, schema_id)? {
+                continue;
             }
             require_compiled_schema(&compiled, schema_id)?;
             pending.extend(schema_dependencies_from_file(&compiled));
         }
+        require_any_compiled_schema(user_dir, &initial_schemas)?;
 
         while let Some(schema_id) = pending.pop_front() {
             if !visited.insert(schema_id.clone()) {
@@ -1368,7 +1376,7 @@ mod desktop {
 
     #[cfg(not(target_os = "android"))]
     fn validate_deployed_schema_files(user_dir: &Path) -> Result<Vec<String>, String> {
-        let schemas = parse_schema_list_from_dir(user_dir);
+        let schemas = effective_schema_list(user_dir, parse_schema_list_from_dir(user_dir));
         if schemas.is_empty() {
             return Err("no schema selected in default.custom.yaml".into());
         }
@@ -1412,7 +1420,8 @@ mod desktop {
         }
 
         let mut pending = initial_schemas
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|schema| (schema, true))
             .collect::<std::collections::VecDeque<_>>();
         let mut deployed = HashSet::new();
@@ -1421,15 +1430,19 @@ mod desktop {
                 continue;
             }
 
-            let source = user_dir.join(format!("{schema_id}.schema.yaml"));
-            if !source.is_file() {
-                if required {
-                    return Err(format!("missing schema source: {}", source.display()));
+            if required {
+                if !deploy_listed_schema(user_dir, &schema_id)? {
+                    continue;
                 }
-                continue;
+            } else {
+                let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+                if !source.is_file() {
+                    continue;
+                }
+                let _dictionary_override =
+                    prepare_android_auxiliary_dictionary(user_dir, &schema_id)?;
+                deploy_schema_file(&source)?;
             }
-            let _dictionary_override = prepare_android_auxiliary_dictionary(user_dir, &schema_id)?;
-            deploy_schema_file(&source)?;
 
             let compiled = user_dir
                 .join("build")
@@ -1440,7 +1453,56 @@ mod desktop {
                 }
             }
         }
+        require_any_compiled_schema(user_dir, &initial_schemas)?;
         Ok(())
+    }
+
+    fn deploy_listed_schema(user_dir: &Path, schema_id: &str) -> Result<bool, String> {
+        let log = capture_deployment_log(user_dir);
+        let source = user_dir.join(format!("{schema_id}.schema.yaml"));
+        let compiled = compiled_schema_path(user_dir, schema_id);
+        // librime can leave a previous build behind when a new config fails to compile.
+        remove_rime_build_artifact(&compiled)?;
+        #[cfg(target_os = "android")]
+        let _dictionary_override =
+            if source.is_file() && user_dir.join("liangfen.dict.yaml").is_file() {
+                prepare_android_auxiliary_dictionary(user_dir, schema_id)?
+            } else {
+                None
+            };
+        let result = if source.is_file() {
+            deploy_schema_file(&source).and_then(|()| require_compiled_schema(&compiled, schema_id))
+        } else {
+            Err(format!("missing schema source: {}", source.display()))
+        };
+        if let Err(error) = result {
+            remove_rime_build_artifact(&compiled)?;
+            let detail = log.first_error().unwrap_or(error);
+            let mut skipped = skipped_schemas(user_dir);
+            skipped.insert(
+                schema_id.to_owned(),
+                format!("方案 {schema_id} 编译失败，已跳过：{detail}"),
+            );
+            let content = serde_json::to_vec(&skipped).map_err(|error| error.to_string())?;
+            write_file_atomic(&user_dir.join("build").join(SKIPPED_SCHEMAS_FILE), &content)
+                .map_err(|error| format!("save skipped schemas: {error}"))?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn require_any_compiled_schema(user_dir: &Path, schemas: &[String]) -> Result<(), String> {
+        if effective_schema_list(user_dir, schemas.to_vec())
+            .iter()
+            .any(|id| compiled_schema_path(user_dir, id).is_file())
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "没有方案编译成功\n{}",
+                deployment_warning(user_dir).unwrap_or_default()
+            ))
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -2743,7 +2805,7 @@ mod desktop {
             let Some(user_data_dir) = self.user_data_dir.as_deref() else {
                 return Vec::new();
             };
-            parse_schema_list_from_dir(user_data_dir)
+            effective_schema_list(user_data_dir, parse_schema_list_from_dir(user_data_dir))
                 .into_iter()
                 .map(|id| SchemaInfo {
                     name: schema_name_from_dir(user_data_dir, &id).unwrap_or_else(|| id.clone()),
@@ -5596,7 +5658,7 @@ fn preferred_schema_location(user_data_dir: &Path) -> Option<(PathBuf, String)> 
 }
 
 pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
-    let configured = configured_schema_list_from_dir(dir);
+    let configured = effective_schema_list(dir, configured_schema_list_from_dir(dir));
     if configured.is_empty() {
         return None;
     }
@@ -5604,7 +5666,7 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
         .ok()
         .map(|content| parse_schema_list(&content))
         .filter(|schemas| !schemas.is_empty());
-    let schemas = deployed.as_ref().cloned().unwrap_or(configured);
+    let schemas = effective_schema_list(dir, deployed.as_ref().cloned().unwrap_or(configured));
     let selected = std::fs::read_to_string(dir.join("user.yaml"))
         .ok()
         .and_then(|content| serde_yaml::from_str::<Value>(&content).ok())
@@ -5623,8 +5685,11 @@ pub fn deployed_schema_id_from_dir(dir: &Path) -> Option<String> {
     }) {
         return Some(schema);
     }
+    if !skipped_schemas(dir).is_empty() {
+        return schemas.into_iter().next();
+    }
     match deployed {
-        Some(schemas) => preferred_schema_from_list(schemas),
+        Some(_) => preferred_schema_from_list(schemas),
         None => preferred_schema_id_from_dir(dir),
     }
 }
@@ -5886,6 +5951,28 @@ fn active_local_schema_ids(user_data_dir: &Path) -> HashSet<String> {
 
 const DEPLOYING_FILE: &str = ".keytao-deploying";
 const DEPLOYED_FILE: &str = ".keytao-deployed";
+const SKIPPED_SCHEMAS_FILE: &str = ".keytao-skipped-schemas.json";
+
+fn skipped_schemas(user_data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read(user_data_dir.join("build").join(SKIPPED_SCHEMAS_FILE))
+        .ok()
+        .and_then(|content| serde_json::from_slice(&content).ok())
+        .unwrap_or_default()
+}
+
+/// Non-blocking warnings from the latest deployment, including deploy children.
+pub fn deployment_warning(user_data_dir: &Path) -> Option<String> {
+    let warnings = skipped_schemas(user_data_dir);
+    (!warnings.is_empty()).then(|| warnings.into_values().collect::<Vec<_>>().join("\n"))
+}
+
+fn effective_schema_list(user_data_dir: &Path, schemas: Vec<String>) -> Vec<String> {
+    let skipped = skipped_schemas(user_data_dir);
+    schemas
+        .into_iter()
+        .filter(|id| !skipped.contains_key(id))
+        .collect()
+}
 
 #[derive(Serialize, Deserialize)]
 struct DeploymentMarker {
@@ -5907,7 +5994,7 @@ fn deployment_fingerprint(user_data_dir: &Path) -> Result<String, String> {
     ))
 }
 
-fn managed_primary_schemas(user_data_dir: &Path) -> Vec<String> {
+fn managed_primary_schemas(user_data_dir: &Path, skip_failed: bool) -> Vec<String> {
     let local_schemas = active_local_schema_ids(user_data_dir);
     let schemas: Vec<_> = ["default.custom.yaml", "default-custom.yaml"]
         .into_iter()
@@ -5917,6 +6004,11 @@ fn managed_primary_schemas(user_data_dir: &Path) -> Vec<String> {
         .into_iter()
         .filter(|schema| valid_rime_build_id(schema))
         .collect();
+    let schemas = if skip_failed {
+        effective_schema_list(user_data_dir, schemas)
+    } else {
+        schemas
+    };
     let has_primary = schemas
         .iter()
         .any(|schema| is_keytao_managed_schema(schema) || local_schemas.contains(schema));
@@ -5941,11 +6033,13 @@ fn begin_deployment(user_data_dir: &Path) -> Result<(), String> {
         .as_nanos();
     std::fs::write(&sentinel, format!("{timestamp}/{}\n", std::process::id()))
         .map_err(|error| format!("write {}: {error}", sentinel.display()))?;
-    let marker = build.join(DEPLOYED_FILE);
-    match std::fs::remove_file(&marker) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("remove {}: {error}", marker.display())),
+    for name in [DEPLOYED_FILE, SKIPPED_SCHEMAS_FILE] {
+        let marker = build.join(name);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("remove {}: {error}", marker.display())),
+        }
     }
     regenerate_active_rime_lua(user_data_dir)
 }
@@ -5962,11 +6056,14 @@ fn write_deployed_marker(user_data_dir: &Path, schemas: &[String]) -> Result<(),
 }
 
 fn persist_standalone_addon_selection(user_data_dir: &Path) -> Result<(), String> {
-    let schemas = configured_schema_list_from_dir(user_data_dir);
-    let Some(schema) = schemas
-        .first()
-        .filter(|_| schemas.iter().all(|schema| is_addon_schema(schema)))
-    else {
+    let schemas = effective_schema_list(
+        user_data_dir,
+        configured_schema_list_from_dir(user_data_dir),
+    );
+    let Some(schema) = schemas.first().filter(|_| {
+        schemas.iter().all(|schema| is_addon_schema(schema))
+            || !skipped_schemas(user_data_dir).is_empty()
+    }) else {
         return Ok(());
     };
     let path = user_data_dir.join("user.yaml");
@@ -5994,6 +6091,14 @@ fn persist_standalone_addon_selection(user_data_dir: &Path) -> Result<(), String
         .or_insert_with(|| Value::Mapping(Mapping::new()))
         .as_mapping_mut()
         .ok_or("user.yaml var must be a YAML mapping")?;
+    if !schemas.iter().all(|schema| is_addon_schema(schema))
+        && vars
+            .get(Value::String("previously_selected_schema".into()))
+            .and_then(Value::as_str)
+            .is_some_and(|selected| schemas.iter().any(|schema| schema == selected))
+    {
+        return Ok(());
+    }
     vars.insert(
         Value::String("previously_selected_schema".into()),
         Value::String(schema.clone()),
@@ -6005,7 +6110,7 @@ fn persist_standalone_addon_selection(user_data_dir: &Path) -> Result<(), String
 
 /// Publish readiness only after every deployment step has succeeded.
 pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
-    let schemas = managed_primary_schemas(user_data_dir);
+    let schemas = managed_primary_schemas(user_data_dir, true);
     if schemas.is_empty()
         || !schemas.iter().all(|schema| {
             user_data_dir
@@ -6019,6 +6124,28 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
     {
         return Err("managed primary schemas are not deployed".into());
     }
+    let effective = effective_schema_list(
+        user_data_dir,
+        configured_schema_list_from_dir(user_data_dir),
+    );
+    let default_path = user_data_dir.join("build/default.yaml");
+    if default_path.is_file() {
+        let content = std::fs::read(&default_path).map_err(|error| error.to_string())?;
+        let mut default: Value =
+            serde_yaml::from_slice(&content).map_err(|error| error.to_string())?;
+        if schema_list_from_yaml(default.get("schema_list")) != effective {
+            default
+                .as_mapping_mut()
+                .ok_or("deployed default.yaml must be a mapping")?
+                .insert(
+                    Value::String("schema_list".into()),
+                    make_schema_list_value(&effective),
+                );
+            let content = serde_yaml::to_string(&default).map_err(|error| error.to_string())?;
+            write_file_atomic(&default_path, content.as_bytes())
+                .map_err(|error| format!("save effective schema list: {error}"))?;
+        }
+    }
     patch_neutral_grammar(user_data_dir);
     persist_standalone_addon_selection(user_data_dir)?;
     write_deployed_marker(user_data_dir, &schemas)?;
@@ -6031,16 +6158,20 @@ pub fn complete_deployment(user_data_dir: &Path) -> Result<(), String> {
 }
 
 pub fn schema_install_state(user_data_dir: &Path) -> SchemaInstallState {
-    let schemas = managed_primary_schemas(user_data_dir);
+    let installed_schemas = managed_primary_schemas(user_data_dir, false);
+    let schemas = managed_primary_schemas(user_data_dir, true);
+    let skipped = skipped_schemas(user_data_dir);
 
-    let installed = !schemas.is_empty()
-        && schemas.iter().all(|schema| {
+    let installed = !installed_schemas.is_empty()
+        && installed_schemas.iter().all(|schema| {
             user_data_dir
                 .join(format!("{schema}.schema.yaml"))
                 .is_file()
+                || skipped.contains_key(schema)
         });
     let build = user_data_dir.join("build");
     let deployed = installed
+        && !schemas.is_empty()
         && schemas.iter().all(|schema| {
             user_data_dir
                 .join("build")

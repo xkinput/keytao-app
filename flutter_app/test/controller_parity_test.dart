@@ -1226,7 +1226,7 @@ void main() {
     for (final withProgress in [false, true]) {
       controller.dispose();
       controller = create(mobile: false)..local = installedLocal;
-      core.deployWarning = 'compile public schema: invalid dictionary';
+      core.deployWarning = warningMessage;
       core.deployGate = Completer<void>();
       await controller.connectEvents();
       await settle();
