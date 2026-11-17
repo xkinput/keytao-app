@@ -141,6 +141,20 @@ if ($Arch -eq "arm64") {
         Save-GitHubContentFile "rime/rime-prelude" $file (Join-Path $rimeDataDest $file)
     }
     Save-GitHubContentFile "rime/rime-essay" "essay.txt" (Join-Path $rimeDataDest "essay.txt")
+    foreach ($file in @(
+        "luna_pinyin.dict.yaml",
+        "luna_pinyin.schema.yaml",
+        "luna_pinyin_fluency.schema.yaml",
+        "luna_pinyin_simp.schema.yaml",
+        "luna_pinyin_tw.schema.yaml",
+        "luna_quanpin.schema.yaml",
+        "pinyin.yaml"
+    )) {
+        Save-GitHubContentFile "rime/rime-luna-pinyin" $file (Join-Path $rimeDataDest $file)
+    }
+    foreach ($file in @("stroke.dict.yaml", "stroke.schema.yaml")) {
+        Save-GitHubContentFile "rime/rime-stroke" $file (Join-Path $rimeDataDest $file)
+    }
 
     $envFile = Join-Path $Destination "env.ps1"
     @"
@@ -265,6 +279,20 @@ foreach ($file in @("default.yaml", "key_bindings.yaml", "punctuation.yaml", "sy
     Save-GitHubContentFile "rime/rime-prelude" $file (Join-Path $rimeDataDest $file)
 }
 Save-GitHubContentFile "rime/rime-essay" "essay.txt" (Join-Path $rimeDataDest "essay.txt")
+foreach ($file in @(
+    "luna_pinyin.dict.yaml",
+    "luna_pinyin.schema.yaml",
+    "luna_pinyin_fluency.schema.yaml",
+    "luna_pinyin_simp.schema.yaml",
+    "luna_pinyin_tw.schema.yaml",
+    "luna_quanpin.schema.yaml",
+    "pinyin.yaml"
+)) {
+    Save-GitHubContentFile "rime/rime-luna-pinyin" $file (Join-Path $rimeDataDest $file)
+}
+foreach ($file in @("stroke.dict.yaml", "stroke.schema.yaml")) {
+    Save-GitHubContentFile "rime/rime-stroke" $file (Join-Path $rimeDataDest $file)
+}
 
 $envFile = Join-Path $Destination "env.ps1"
 @"
