@@ -136,6 +136,10 @@ if (-not $LuaPluginRef) {
 if (-not $LuaPluginRef) {
     throw "Unable to resolve a librime-lua revision for the ARM64 build."
 }
+$octagramPluginRef = $librimeVersions.LIBRIME_OCTAGRAM_REF
+if (-not $octagramPluginRef) {
+    throw "Unable to resolve a librime-octagram revision for the ARM64 build."
+}
 
 $cacheRoot = if ($env:KEYTAO_WINDOWS_BUILD_CACHE) {
     [System.IO.Path]::GetFullPath($env:KEYTAO_WINDOWS_BUILD_CACHE)
@@ -223,6 +227,21 @@ if (-not (Test-Path -LiteralPath $luaHeader -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $luaHeader -PathType Leaf)) {
     throw "librime-lua did not install its bundled Lua source at $luaHeader."
+}
+
+$octagramPluginDir = Join-Path $sourceDir "plugins\octagram"
+if (-not (Test-Path -LiteralPath (Join-Path $octagramPluginDir ".git") -PathType Container)) {
+    Invoke-Checked "git" @(
+        "clone", "--no-checkout",
+        "https://github.com/lotem/librime-octagram.git",
+        $octagramPluginDir
+    )
+}
+Invoke-Checked "git" @("-C", $octagramPluginDir, "fetch", "--depth", "1", "origin", $octagramPluginRef)
+Invoke-Checked "git" @("-C", $octagramPluginDir, "checkout", "--detach", "FETCH_HEAD")
+$resolvedOctagramPluginRef = (& git -C $octagramPluginDir rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $resolvedOctagramPluginRef) {
+    throw "Unable to resolve the checked-out librime-octagram revision."
 }
 
 $boostVersion = "1.84.0"
@@ -393,8 +412,8 @@ try {
     $env:CMAKE_GENERATOR = $cmakeGenerator
     $env:OPENCC_HOST_DICT_BIN = $openccHostDict.FullName
     $env:PYTHON_EXECUTABLE = $pythonExecutable
-    $env:RIME_PLUGINS = "hchunhui/librime-lua@$resolvedLuaPluginRef"
-    $env:common_cmake_flags = "-DPYTHON_EXECUTABLE:FILEPATH=$pythonExecutable"
+    $env:RIME_PLUGINS = "hchunhui/librime-lua@$resolvedLuaPluginRef lotem/librime-octagram@$resolvedOctagramPluginRef"
+    $env:common_cmake_flags = "-DPYTHON_EXECUTABLE:FILEPATH=$pythonExecutable -DBUILD_TOOLS=OFF"
     $env:build_dir = "build-arm64"
     $env:deps_install_prefix = $depsPrefix
     $env:rime_install_prefix = $distDir
@@ -405,7 +424,7 @@ set BOOST_ROOT=$boostRoot
 set ARCH=ARM64
 set CMAKE_GENERATOR="$cmakeGenerator"
 set PYTHON_EXECUTABLE=$pythonExecutable
-set RIME_PLUGINS=hchunhui/librime-lua@$resolvedLuaPluginRef
+set RIME_PLUGINS=hchunhui/librime-lua@$resolvedLuaPluginRef lotem/librime-octagram@$resolvedOctagramPluginRef
 "@ | Set-Content -LiteralPath (Join-Path $sourceDir "env.bat") -Encoding ASCII
 
     Push-Location $sourceDir
@@ -447,6 +466,9 @@ foreach ($marker in @(
         throw "The librime ARM64 build is missing merged librime-lua marker '$marker'."
     }
 }
+if (-not $rimeDllText.Contains("grammar/language")) {
+    throw "The librime ARM64 build is missing the merged librime-octagram grammar component."
+}
 
 $includeDir = Join-Path $Destination "include"
 $libDir = Join-Path $Destination "lib"
@@ -463,7 +485,9 @@ Set-Content -LiteralPath (Join-Path $Destination "librime-release.txt") -Encodin
 @(
     "librime=$resolvedVersion",
     "librime-lua=merged",
-    "librime-lua-ref=$resolvedLuaPluginRef"
+    "librime-lua-ref=$resolvedLuaPluginRef",
+    "librime-octagram=merged",
+    "librime-octagram-ref=$resolvedOctagramPluginRef"
 ) | Set-Content -LiteralPath (Join-Path $Destination "librime-features.txt") -Encoding ASCII
 
 Write-Host ""

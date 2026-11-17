@@ -1144,6 +1144,42 @@ pub fn wanxiang_status() -> Result<AddonStatusDto, String> {
     )
 }
 
+#[derive(serde::Deserialize)]
+pub struct WanxiangGrammarStatusDto {
+    pub available: bool,
+    pub installed: bool,
+    pub version: String,
+    pub size: u64,
+}
+
+pub fn wanxiang_grammar_status() -> Result<WanxiangGrammarStatusDto, String> {
+    let state = runtime::state()?;
+    runtime::dto(
+        keytao_app_core::wanxiang::grammar_status(&state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn cancel_wanxiang_grammar_download() -> Result<(), String> {
+    runtime::state()?.core.cancel_download();
+    Ok(())
+}
+
+/// Uses the add-on deploy contract and holds the install lock through rollback.
+pub async fn manage_wanxiang_grammar(
+    installed: bool,
+    android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
+) -> Result<WanxiangGrammarStatusDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let host = InstallHost::new(state.host.clone(), android_deploy);
+    runtime::dto(
+        keytao_app_core::wanxiang::manage_grammar(&state.core, installed, &host)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+}
+
 pub fn rime_ice_status() -> Result<AddonStatusDto, String> {
     let state = runtime::state()?;
     runtime::dto(

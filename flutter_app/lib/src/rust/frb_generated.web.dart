@@ -353,6 +353,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VerifyEntryDto dco_decode_verify_entry_dto(dynamic raw);
 
   @protected
+  WanxiangGrammarStatusDto dco_decode_wanxiang_grammar_status_dto(dynamic raw);
+
+  @protected
   WindowsImeStatusDto dco_decode_windows_ime_status_dto(dynamic raw);
 
   @protected
@@ -742,6 +745,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VerifyEntryDto sse_decode_verify_entry_dto(SseDeserializer deserializer);
+
+  @protected
+  WanxiangGrammarStatusDto sse_decode_wanxiang_grammar_status_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   WindowsImeStatusDto sse_decode_windows_ime_status_dto(
@@ -1252,6 +1260,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_verify_entry_dto(
     VerifyEntryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_wanxiang_grammar_status_dto(
+    WanxiangGrammarStatusDto self,
     SseSerializer serializer,
   );
 

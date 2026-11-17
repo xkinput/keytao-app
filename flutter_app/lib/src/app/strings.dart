@@ -64,6 +64,8 @@ abstract final class AppStrings {
   static const customInstallDone = '安装完成，请手动重新部署输入法';
   static const easyEnglish = 'Easy English · 英文单词输入';
   static const wanxiang = '万象拼音';
+  static const wanxiangGrammar = '语法模型';
+  static const wanxiangGrammarUnavailable = '语法模型不可用';
   static const rimeIce = '雾凇拼音';
   static const wanxiangVariant = '万象拼音版本';
   static const wanxiangVariants = {
@@ -224,6 +226,8 @@ abstract final class AppStrings {
   static const easyEnglishRemoved = '[ADDON] Easy English 已卸载';
   static const wanxiangInstalled = '[ADDON] 万象拼音已安装并部署';
   static const wanxiangRemoved = '[ADDON] 万象拼音已卸载';
+  static const wanxiangGrammarInstalled = '[ADDON] 语法模型已安装并部署';
+  static const wanxiangGrammarRemoved = '[ADDON] 语法模型已删除并部署';
   static const rimeIceInstalled = '[ADDON] 雾凇拼音已安装并部署';
   static const rimeIceRemoved = '[ADDON] 雾凇拼音已卸载';
 

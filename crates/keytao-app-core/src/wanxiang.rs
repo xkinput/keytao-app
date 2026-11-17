@@ -24,6 +24,13 @@ use tokio::{
 };
 
 pub const SCHEMA_ID: &str = "wanxiang";
+const GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
+const GRAMMAR_LANGUAGE: &str = "wanxiang-lts-zh-hans";
+const GRAMMAR_RELEASE: &str = "https://api.github.com/repos/amzxyz/RIME-LMDG/releases/tags/LTS";
+const GRAMMAR_DOWNLOAD: &str =
+    "https://github.com/amzxyz/RIME-LMDG/releases/download/LTS/wanxiang-lts-zh-hans.gram";
+const GRAMMAR_SIZE: u64 = 407_160_876;
+const MAX_GRAMMAR_BYTES: u64 = 1024 * 1024 * 1024;
 const RELEASE_LATEST: &str = "https://github.com/amzxyz/rime-wanxiang/releases/latest";
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const MANIFEST: &str = ".keytao-wanxiang.json";
@@ -132,6 +139,21 @@ pub struct Status {
     pub variant: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GrammarStatus {
+    pub available: bool,
+    pub installed: bool,
+    pub version: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct GrammarModel {
+    version: String,
+    size: u64,
+    sha256: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct InstalledFile {
     pub(crate) path: String,
@@ -155,6 +177,8 @@ struct Manifest {
     source: String,
     archive_sha256: String,
     includes_grammar: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grammar: Option<GrammarModel>,
     files: Vec<InstalledFile>,
 }
 
@@ -200,18 +224,316 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
         return Err("无法识别万象安装记录".into());
     }
     variant_source(&manifest.variant)?;
+    if manifest.grammar.as_ref().is_some_and(|model| {
+        model.size == 0 || model.size > MAX_GRAMMAR_BYTES || !valid_hash(&model.sha256)
+    }) {
+        return Err("万象语法模型安装记录无效".into());
+    }
     let mut seen = BTreeSet::new();
     for file in &manifest.files {
         validate_relative(&file.path)?;
         if !installable(&file.path)
             || !seen.insert(file.path.to_ascii_lowercase())
-            || file.sha256.len() != 64
-            || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !valid_hash(&file.sha256)
         {
             return Err("万象安装记录含无效文件".into());
         }
     }
     Ok(Some(manifest))
+}
+
+fn valid_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn grammar_supported() -> bool {
+    !cfg!(target_os = "ios") && keytao_core::octagram_available()
+}
+
+pub fn grammar_status(root: &Path) -> Result<GrammarStatus, CoreError> {
+    let result = || -> Result<_, String> {
+        let path = safe_target(root, GRAMMAR_FILE)?;
+        let size = match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata.len(),
+            Ok(_) => return Err("万象语法模型路径不是文件".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(format!("读取万象语法模型失败：{error}")),
+        };
+        let model = read_manifest(root)?.and_then(|manifest| manifest.grammar);
+        Ok(GrammarStatus {
+            available: grammar_supported(),
+            installed: size > 0,
+            version: model.map_or_else(String::new, |model| model.version),
+            size: if size > 0 { size } else { GRAMMAR_SIZE },
+        })
+    };
+    result().map_err(CoreError::Other)
+}
+
+fn grammar_schema(schema: &str, enabled: bool) -> String {
+    if enabled {
+        schema.replace("language: \"\"", &format!("language: {GRAMMAR_LANGUAGE}"))
+    } else {
+        schema.replace(&format!("language: {GRAMMAR_LANGUAGE}"), "language: \"\"")
+    }
+}
+
+fn grammar_package(json: &str) -> Result<RemotePackage, String> {
+    let release: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let asset = release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|asset| asset["name"].as_str() == Some(GRAMMAR_FILE))
+        .ok_or("万象语法模型发布包不存在")?;
+    let size = asset["size"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= MAX_GRAMMAR_BYTES)
+        .ok_or("万象语法模型发布大小无效")?;
+    Ok(RemotePackage {
+        version: format!("LTS@{}", asset["updated_at"].as_str().unwrap_or("unknown")),
+        source: GRAMMAR_RELEASE.into(),
+        download_url: GRAMMAR_DOWNLOAD.into(),
+        download_bytes: Some(size),
+    })
+}
+
+fn available_disk_space(root: &Path) -> Result<u64, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(root.as_os_str().as_bytes())
+            .map_err(|error| error.to_string())?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "检查磁盘空间失败：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let stat = unsafe { stat.assume_init() };
+        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let path: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut available = 0;
+        unsafe {
+            windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                windows::core::PCWSTR(path.as_ptr()),
+                Some(&mut available),
+                None,
+                None,
+            )
+        }
+        .map_err(|error| format!("检查磁盘空间失败：{error}"))?;
+        Ok(available)
+    }
+}
+
+fn verify_disk_space(available: u64, size: u64) -> Result<(), String> {
+    let required = size.saturating_add(64 * 1024 * 1024);
+    if available < required {
+        return Err(format!(
+            "磁盘空间不足：语法模型需要至少 {} MB，可用 {} MB",
+            required.div_ceil(1_000_000),
+            available / 1_000_000
+        ));
+    }
+    Ok(())
+}
+
+async fn save_grammar_stream<S, B, E>(
+    root: &Path,
+    stream: S,
+    expected: u64,
+    cancel: &mut tokio::sync::watch::Receiver<u64>,
+    progress: &(impl Fn(u8, &str) + Send + Sync),
+) -> Result<tempfile::TempPath, String>
+where
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    verify_download_with_limit(expected, Some(expected), MAX_GRAMMAR_BYTES)?;
+    verify_disk_space(available_disk_space(root)?, expected)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".keytao-wanxiang-grammar-")
+        .tempfile_in(root)
+        .map_err(|error| format!("创建语法模型临时文件失败：{error}"))?;
+    let (file, path) = temporary.into_parts();
+    let mut output = tokio::fs::File::from_std(file);
+    futures_util::pin_mut!(stream);
+    let mut downloaded = 0u64;
+    let mut last_percent = 0;
+    while let Some(chunk) = tokio::select! {
+        biased;
+        _ = cancel.changed() => return Err(crate::download::DOWNLOAD_CANCELLED.into()),
+        chunk = tokio::time::timeout(Duration::from_secs(30), stream.next()) =>
+            chunk.map_err(|_| "下载超时：30 秒内未收到数据".to_string())?,
+    } {
+        let chunk = chunk.map_err(|error| format!("语法模型下载中断：{error}"))?;
+        let bytes = chunk.as_ref();
+        downloaded = downloaded
+            .checked_add(bytes.len() as u64)
+            .ok_or("语法模型下载大小溢出")?;
+        if downloaded > expected {
+            return Err("语法模型下载超出预期大小".into());
+        }
+        output
+            .write_all(bytes)
+            .await
+            .map_err(|error| format!("保存语法模型失败：{error}"))?;
+        let percent = (downloaded * 90 / expected) as u8;
+        if percent != last_percent {
+            progress(percent, "正在下载语法模型…");
+            last_percent = percent;
+        }
+    }
+    verify_download_with_limit(downloaded, Some(expected), MAX_GRAMMAR_BYTES)?;
+    output.flush().await.map_err(|error| error.to_string())?;
+    output.sync_all().await.map_err(|error| error.to_string())?;
+    drop(output);
+    Ok(path)
+}
+
+async fn download_grammar(
+    core: &Core,
+    root: &Path,
+    cancel: &mut tokio::sync::watch::Receiver<u64>,
+) -> Result<(tempfile::TempPath, RemotePackage), String> {
+    verify_disk_space(available_disk_space(root)?, GRAMMAR_SIZE)?;
+    let package = tokio::select! {
+        biased;
+        _ = cancel.changed() => return Err(crate::download::DOWNLOAD_CANCELLED.into()),
+        result = github_text(GRAMMAR_RELEASE) => result.and_then(|json| grammar_package(&json)),
+    };
+    let mut package = package.unwrap_or_else(|error| {
+        tracing::warn!(%error, "Wanxiang grammar release lookup failed; requiring Content-Length");
+        RemotePackage {
+            version: "LTS".into(),
+            source: GRAMMAR_RELEASE.into(),
+            download_url: GRAMMAR_DOWNLOAD.into(),
+            download_bytes: None,
+        }
+    });
+    verify_disk_space(
+        available_disk_space(root)?,
+        package.download_bytes.unwrap_or(GRAMMAR_SIZE),
+    )?;
+    let client = client(
+        // Slow links need hours for 407 MB; save_grammar_stream enforces a 30 s idle timeout.
+        Duration::from_secs(24 * 60 * 60),
+        reqwest::redirect::Policy::limited(10),
+    )?;
+    let response = tokio::select! {
+        biased;
+        _ = cancel.changed() => return Err(crate::download::DOWNLOAD_CANCELLED.into()),
+        response = client.get(&package.download_url).send() => response
+            .map_err(|error| format!("语法模型下载失败：{error}"))?
+            .error_for_status().map_err(|error| format!("语法模型下载失败：{error}"))?,
+    };
+    let expected = package
+        .download_bytes
+        .or(response.content_length())
+        .ok_or("语法模型下载缺少可校验的文件大小")?;
+    if response
+        .content_length()
+        .is_some_and(|size| size != expected)
+    {
+        return Err("语法模型发布大小与下载大小不符".into());
+    }
+    package.download_bytes = Some(expected);
+    let path = save_grammar_stream(
+        root,
+        response.bytes_stream(),
+        expected,
+        cancel,
+        &|percent, message| {
+            core.emit(CoreEvent::InstallProgress(InstallProgress {
+                stage: "wanxiang-grammar-download".into(),
+                percent: u32::from(percent),
+                message: message.into(),
+            }));
+        },
+    )
+    .await?;
+    Ok((path, package))
+}
+
+fn commit_grammar(
+    receipt: &mut InstallReceipt,
+    download: Option<(&Path, &RemotePackage)>,
+    installed: bool,
+    supported: bool,
+) -> Result<(), String> {
+    let mut manifest = read_manifest(&receipt.root)?.ok_or("请先安装万象拼音")?;
+    let schema = manifest
+        .files
+        .iter_mut()
+        .find(|file| file.path == "wanxiang.schema.yaml")
+        .ok_or("万象安装记录缺少方案文件")?;
+    if fingerprint(&safe_target(&receipt.root, &schema.path)?)?.0 != schema.sha256 {
+        return Err("万象方案文件已修改，请先更新万象拼音".into());
+    }
+    let stage = receipt.work.join("files");
+    fs::create_dir_all(&stage).map_err(|error| error.to_string())?;
+    let schema_path = stage.join(&schema.path);
+    fs::write(&schema_path, BASIC_SCHEMA).map_err(|error| error.to_string())?;
+    adapt_source(&schema.path, &schema_path, &manifest.variant)?;
+    let content = fs::read_to_string(&schema_path).map_err(|error| error.to_string())?;
+    fs::write(
+        &schema_path,
+        grammar_schema(&content, installed && supported && !cfg!(target_os = "ios")),
+    )
+    .map_err(|error| error.to_string())?;
+    (schema.sha256, schema.size) = fingerprint(&schema_path)?;
+    #[cfg(windows)]
+    {
+        let public = stage.join("public-schema.yaml");
+        fs::write(&public, grammar_schema(&content, false)).map_err(|error| error.to_string())?;
+        receipt.public_sources = vec!["wanxiang.schema.yaml".into()];
+        // The public package is intentionally grammar-free; never buffer the model.
+        fs::rename(&schema_path, stage.join("private-schema.yaml"))
+            .map_err(|error| error.to_string())?;
+        fs::rename(&public, &schema_path).map_err(|error| error.to_string())?;
+    }
+    if let Some((path, package)) = download {
+        let (sha256, size) = fingerprint(path)?;
+        verify_download_with_limit(size, package.download_bytes, MAX_GRAMMAR_BYTES)?;
+        receipt.replace(GRAMMAR_FILE, path, sha256.clone())?;
+        manifest.grammar = Some(GrammarModel {
+            version: package.version.clone(),
+            size,
+            sha256,
+        });
+    } else if !installed {
+        if safe_target(&receipt.root, GRAMMAR_FILE)?.is_file() {
+            receipt.move_original(GRAMMAR_FILE)?;
+        }
+        manifest.grammar = None;
+    } else if manifest.grammar.is_none() {
+        let (sha256, size) = fingerprint(&safe_target(&receipt.root, GRAMMAR_FILE)?)?;
+        verify_download_with_limit(size, Some(size), MAX_GRAMMAR_BYTES)?;
+        manifest.grammar = Some(GrammarModel {
+            version: "local".into(),
+            size,
+            sha256,
+        });
+    }
+    manifest.includes_grammar = installed;
+    #[cfg(windows)]
+    let schema_path = stage.join("private-schema.yaml");
+    receipt.replace(&schema.path, &schema_path, schema.sha256.clone())?;
+    let path = receipt.work.join("manifest.json");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    receipt.replace(MANIFEST, &path, fingerprint(&path)?.0)
 }
 
 // Reject Windows aliases/ADS and traversal on every OS so an archive accepted
@@ -855,18 +1177,35 @@ fn adapt_source(name: &str, path: &Path, variant: &str) -> Result<(), String> {
 
 fn commit_files(
     receipt: &mut InstallReceipt,
-    files: Vec<InstalledFile>,
+    mut files: Vec<InstalledFile>,
     package: &RemotePackage,
     archive_sha256: String,
     variant: &str,
 ) -> Result<(), String> {
     variant_source(variant)?;
+    let grammar_present = safe_target(&receipt.root, GRAMMAR_FILE)?.is_file();
+    if let Some(schema) = files
+        .iter_mut()
+        .find(|file| file.path == "wanxiang.schema.yaml")
+    {
+        let path = receipt.work.join("files").join(&schema.path);
+        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        fs::write(
+            &path,
+            grammar_schema(&content, grammar_present && grammar_supported()),
+        )
+        .map_err(|error| error.to_string())?;
+        (schema.sha256, schema.size) = fingerprint(&path)?;
+    }
     #[cfg(windows)]
     {
         receipt.public_sources = files.iter().map(|file| file.path.clone()).collect();
     }
-    let previous = read_manifest(&receipt.root)?;
-    let previous: BTreeMap<_, _> = previous
+    let previous_manifest = read_manifest(&receipt.root)?;
+    let grammar = previous_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.grammar.clone());
+    let previous: BTreeMap<_, _> = previous_manifest
         .into_iter()
         .flat_map(|m| m.files)
         .map(|file| (file.path.clone(), file))
@@ -918,13 +1257,21 @@ fn commit_files(
         };
         receipt.replace(&file.path, &source, file.sha256)?;
     }
+    #[cfg(windows)]
+    {
+        // Sandboxed hosts use the small public schema package, without the model.
+        let path = receipt.work.join("files/wanxiang.schema.yaml");
+        let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        fs::write(&path, grammar_schema(&content, false)).map_err(|error| error.to_string())?;
+    }
     let manifest = Manifest {
         format: 1,
         version: package.version.clone(),
         variant: variant.into(),
         source: package.source.clone(),
         archive_sha256,
-        includes_grammar: false,
+        includes_grammar: grammar_present,
+        grammar,
         files: owned,
     };
     let path = receipt.work.join("manifest.json");
@@ -979,6 +1326,9 @@ pub fn uninstall(root: &Path) -> Result<InstallReceipt, String> {
                 receipt.move_original(&file.path)?;
             }
         }
+        if safe_target(&receipt.root, GRAMMAR_FILE)?.is_file() {
+            receipt.move_original(GRAMMAR_FILE)?;
+        }
         receipt.move_original(MANIFEST)?;
     }
     Ok(receipt)
@@ -992,6 +1342,98 @@ use crate::{
     Core, CoreError, CoreEvent, addon::write_addon_schema_list, events::InstallProgress,
     scheme_files::write_file_atomic, scheme_host::SchemeHost,
 };
+
+pub async fn manage_grammar(
+    core: &std::sync::Arc<Core>,
+    installed: bool,
+    host: &impl SchemeHost,
+) -> Result<GrammarStatus, CoreError> {
+    let result: Result<_, String> = async {
+        if installed && !grammar_supported() {
+            return Err("当前平台未加载语法模型插件".into());
+        }
+        let root = host.user_root()?;
+        if !status_at(&root).installed {
+            return Err("请先安装万象拼音".into());
+        }
+        let mut receipt = InstallReceipt::new(&root)?;
+        let mut cancel = core.download_cancel.subscribe();
+        cancel.borrow_and_update();
+        core.emit(CoreEvent::InstallProgress(InstallProgress {
+            stage: "wanxiang-grammar-download".into(),
+            percent: 0,
+            message: if installed {
+                "正在准备语法模型…"
+            } else {
+                "正在删除语法模型…"
+            }
+            .into(),
+        }));
+        let download = if installed && !safe_target(&root, GRAMMAR_FILE)?.is_file() {
+            Some(download_grammar(core, &root, &mut cancel).await?)
+        } else {
+            None
+        };
+        if cancel.has_changed().unwrap_or(false) {
+            return Err(crate::download::DOWNLOAD_CANCELLED.into());
+        }
+        core.emit(CoreEvent::InstallProgress(InstallProgress {
+            stage: "wanxiang-grammar-deploy".into(),
+            percent: 92,
+            message: "正在部署万象拼音…".into(),
+        }));
+        commit_grammar(
+            &mut receipt,
+            download
+                .as_ref()
+                .map(|(path, package)| (path.as_ref(), package)),
+            installed,
+            grammar_supported(),
+        )?;
+        #[cfg(windows)]
+        let mut public_update = None;
+        let deployment = async {
+            #[cfg(windows)]
+            {
+                public_update = Some(crate::windows_public_schemas::update_public_schemas(
+                    || host.publish_wanxiang_sources(&receipt.public_source_files()),
+                )?);
+            }
+            host.deploy().await?;
+            if !status_at(&root).deployed {
+                return Err("万象拼音部署产物缺失".to_string());
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = deployment {
+            let rollback = receipt.rollback();
+            #[cfg(windows)]
+            let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
+            rollback.map_err(|restore| format!("{error}；恢复语法模型失败：{restore}"))?;
+            #[cfg(windows)]
+            public_rollback.map_err(|restore| format!("{error}；恢复公共方案失败：{restore}"))?;
+            host.deploy()
+                .await
+                .map_err(|restore| format!("{error}；已恢复文件，请重新部署：{restore}"))?;
+            return Err(error);
+        }
+        receipt.finish()?;
+        core.emit(CoreEvent::InstallProgress(InstallProgress {
+            stage: "done".into(),
+            percent: 100,
+            message: if installed {
+                "语法模型已安装"
+            } else {
+                "语法模型已删除"
+            }
+            .into(),
+        }));
+        grammar_status(&root).map_err(|error| error.to_string())
+    }
+    .await;
+    result.map_err(CoreError::Other)
+}
 
 pub async fn manage_wanxiang(
     core: &std::sync::Arc<Core>,

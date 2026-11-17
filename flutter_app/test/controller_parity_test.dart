@@ -8,7 +8,8 @@ import 'package:keytao/src/app/controller.dart';
 import 'package:keytao/src/app/options.dart';
 import 'package:keytao/src/platform/android_host.dart';
 import 'package:keytao/src/platform/ios_host.dart';
-import 'package:keytao/src/rust/api/core.dart' show AddonStatusDto;
+import 'package:keytao/src/rust/api/core.dart'
+    show AddonStatusDto, WanxiangGrammarStatusDto;
 import 'package:keytao/src/rust/api/types.dart';
 import 'package:keytao/src/rust/frb_generated.dart';
 
@@ -85,6 +86,12 @@ class FakeCore implements RustLibApi {
   final addonUpdateRequests = <String, Completer<AddonStatusDto>>{};
   AddonStatusDto addonStatus = missingAddon;
   AddonStatusDto wanxiangStatus = missingAddon;
+  WanxiangGrammarStatusDto wanxiangGrammarStatus = WanxiangGrammarStatusDto(
+    available: true,
+    installed: false,
+    version: '',
+    size: BigInt.zero,
+  );
   AddonStatusDto rimeIceStatus = missingAddon;
   bool delayAddonUpdates = false;
   bool addonUpdateFails = false;
@@ -146,6 +153,13 @@ class FakeCore implements RustLibApi {
   @override
   Future<AddonStatusDto> crateApiCoreWanxiangStatus() async =>
       wanxiangStatus;
+  @override
+  Future<WanxiangGrammarStatusDto> crateApiCoreWanxiangGrammarStatus() async =>
+      wanxiangGrammarStatus;
+  @override
+  Future<void> crateApiCoreCancelWanxiangGrammarDownload() async {
+    calls.add('cancelWanxiangGrammar');
+  }
   @override
   Future<AddonStatusDto> crateApiCoreRimeIceStatus() async => rimeIceStatus;
   @override
@@ -636,6 +650,7 @@ void main() {
         OperationKind.customDirectory,
         OperationKind.addon,
         OperationKind.wanxiang,
+        OperationKind.wanxiangGrammar,
         OperationKind.rimeIce,
       ]) {
         controller.operation = operation;
@@ -663,6 +678,9 @@ void main() {
         if (operation == OperationKind.wanxiang) {
           expect(controller.wanxiangProgress, same(progress));
         }
+        if (operation == OperationKind.wanxiangGrammar) {
+          expect(controller.wanxiangGrammarProgress, same(progress));
+        }
         if (operation == OperationKind.rimeIce) {
           expect(controller.rimeIceProgress, same(progress));
         }
@@ -682,6 +700,38 @@ void main() {
       expect(controller.operationLogs, logs);
     },
   );
+
+  test('grammar download cancels only during its download stage', () async {
+    await controller.connectEvents();
+    await settle();
+    controller.operation = OperationKind.wanxiangGrammar;
+    controller.busy = true;
+    for (final stage in [
+      'wanxiang-grammar-download',
+      'wanxiang-grammar-deploy',
+    ]) {
+      core.events.add(
+        BridgeEvent(
+          kind: BridgeEventKind.installProgress,
+          installProgress: InstallProgressDto(
+            stage: stage,
+            percent: 40,
+            message: stage,
+          ),
+        ),
+      );
+      await settle();
+      expect(
+        controller.canCancelWanxiangGrammarDownload,
+        stage == 'wanxiang-grammar-download',
+      );
+      await controller.cancelWanxiangGrammarDownload();
+    }
+    expect(core.calls.where((call) => call == 'cancelWanxiangGrammar'), [
+      'cancelWanxiangGrammar',
+    ]);
+    expect(await controller.manageWanxiangGrammar(true), isFalse);
+  });
 
   test(
     'startup checks once and stale scheme releases cannot enable install',

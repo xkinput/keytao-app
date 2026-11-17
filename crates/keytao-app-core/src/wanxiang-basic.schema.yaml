@@ -1,6 +1,6 @@
 # KeyTao's portable Wanxiang dictionary integration.
 # Uses the upstream tone-aware dictionary and full-pinyin algebra, with only
-# built-in Rime components. No Lua modules or grammar model are required.
+# built-in Rime components. The grammar model is an optional separate download.
 schema:
   schema_id: wanxiang
   name: 万象拼音
@@ -8,7 +8,7 @@ schema:
   author:
     - amzxyz and Wanxiang contributors (dictionary and spelling algebra)
     - KeyTao contributors (portable basic schema)
-  description: 万象全拼基础词库，支持词频调频与原生组句，不含语法模型和 Lua 扩展。
+  description: 万象全拼基础词库，支持词频调频与原生组句，语法模型另行安装。
 
 switches:
   - name: ascii_mode
@@ -54,10 +54,17 @@ translator:
   enable_sentence: true
   enable_completion: true
   contextual_suggestions: false
+  max_homophones: 8
   spelling_hints: 0
 
 grammar:
   language: ""
+  collocation_max_length: 6
+  collocation_min_length: 2
+  collocation_penalty: -14
+  non_collocation_penalty: -6
+  weak_collocation_penalty: -100
+  rear_penalty: -18
 
 punctuator:
   import_preset: default

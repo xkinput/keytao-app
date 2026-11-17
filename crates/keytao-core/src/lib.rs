@@ -538,6 +538,27 @@ pub fn librime_runtime_version() -> Option<String> {
     None
 }
 
+/// Whether the linked runtime can load the optional grammar model.
+pub fn octagram_available() -> bool {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    ))]
+    {
+        let _rime = desktop::rime_api_lock();
+        unsafe { desktop::require_octagram_module() }
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    )))]
+    false
+}
+
 // ── Native desktop engine (guarded at the module level) ──────────────────────
 
 #[cfg(any(
@@ -747,6 +768,12 @@ mod desktop {
         fn rime_require_module_lua();
         #[link_name = "_Z26rime_require_module_leversv"]
         fn rime_require_module_levers();
+    }
+
+    #[cfg(target_os = "android")]
+    extern "C" {
+        #[link_name = "_Z28rime_require_module_octagramv"]
+        fn rime_require_module_octagram();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1281,9 +1308,13 @@ mod desktop {
         let distribution_version = CString::new("1.0.0").unwrap();
         let module_default = CString::new("default").unwrap();
         let module_lua = CString::new("lua").unwrap();
+        #[cfg(not(target_os = "ios"))]
+        let module_octagram = CString::new("octagram").unwrap();
         let mut modules = [
             module_default.as_ptr(),
             module_lua.as_ptr(),
+            #[cfg(not(target_os = "ios"))]
+            module_octagram.as_ptr(),
             std::ptr::null::<c_char>(),
         ];
 
@@ -1309,6 +1340,8 @@ mod desktop {
             if !deployer_only {
                 require_levers_module();
                 require_lua_module();
+                #[cfg(not(target_os = "ios"))]
+                require_octagram_module();
             }
 
             let api = rime_get_api();
@@ -1389,6 +1422,88 @@ mod desktop {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     unsafe fn lua_module_registered() -> bool {
         !RimeFindModule(c"lua".as_ptr()).is_null()
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    unsafe fn octagram_module_registered() -> bool {
+        let api = rime_get_api();
+        rime_api_member!(api, find_module)
+            .is_some_and(|find_module| !find_module(c"octagram".as_ptr()).is_null())
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) unsafe fn require_octagram_module() -> bool {
+        rime_require_module_octagram();
+        octagram_module_registered()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub(super) unsafe fn require_octagram_module() -> bool {
+        if octagram_module_registered() {
+            return true;
+        }
+        static LOADED_PLUGINS: LazyLock<Mutex<HashSet<PathBuf>>> =
+            LazyLock::new(|| Mutex::new(HashSet::new()));
+        let mut loaded = lock_ignore_poison(&LOADED_PLUGINS);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let candidates = unix_lua_plugin_candidates();
+        #[cfg(target_os = "windows")]
+        let candidates = windows_lua_plugin_candidates();
+        for candidate in candidates {
+            let Some(dir) = candidate.parent() else {
+                continue;
+            };
+            #[cfg(target_os = "macos")]
+            let filenames = ["librime-octagram.dylib"];
+            #[cfg(target_os = "linux")]
+            let filenames = ["librime-octagram.so"];
+            #[cfg(target_os = "windows")]
+            let filenames = ["librime-octagram.dll", "rime-octagram.dll"];
+            for filename in filenames {
+                let path = dir.join(filename);
+                if loaded.contains(&path) || !path.is_file() {
+                    continue;
+                }
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                let handle = {
+                    let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
+                        continue;
+                    };
+                    #[cfg(target_os = "macos")]
+                    const RTLD_GLOBAL: i32 = 0x8;
+                    #[cfg(target_os = "linux")]
+                    const RTLD_GLOBAL: i32 = 0x100;
+                    dlopen(path.as_ptr(), 0x2 | RTLD_GLOBAL)
+                };
+                #[cfg(target_os = "windows")]
+                let handle = LoadLibraryW(path_to_wide(&path).as_ptr());
+                if handle.is_null() {
+                    continue;
+                }
+                loaded.insert(path);
+                if octagram_module_registered() {
+                    return true;
+                }
+                for symbol in [
+                    c"_Z28rime_require_module_octagramv",
+                    c"?rime_require_module_octagram@@YAXXZ",
+                    c"rime_require_module_octagram",
+                ] {
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    let require = dlsym(handle, symbol.as_ptr());
+                    #[cfg(target_os = "windows")]
+                    let require = GetProcAddress(handle, symbol.as_ptr());
+                    if !require.is_null() {
+                        let require: unsafe extern "C" fn() = std::mem::transmute(require);
+                        require();
+                        if octagram_module_registered() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1823,10 +1938,25 @@ mod desktop {
             if std::env::var("RIME_LIB_DIR").is_err() {
                 return;
             }
+            let _rime = rime_api_lock();
             unsafe {
                 if !lua_module_registered() {
                     load_unix_lua_plugin().expect("load librime-lua plugin");
                 }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn detects_octagram_plugin_from_configured_rime_lib_dir() {
+            let Ok(lib_dir) = std::env::var("RIME_LIB_DIR") else {
+                return;
+            };
+            if Path::new(&lib_dir)
+                .join("rime-plugins/librime-octagram.dylib")
+                .is_file()
+            {
+                assert!(crate::octagram_available());
             }
         }
     }

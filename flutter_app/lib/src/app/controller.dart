@@ -21,7 +21,15 @@ import 'options.dart'
         xmjdVariantSchemes;
 import 'strings.dart';
 
-enum OperationKind { install, deploy, addon, wanxiang, rimeIce, customDirectory }
+enum OperationKind {
+  install,
+  deploy,
+  addon,
+  wanxiang,
+  wanxiangGrammar,
+  rimeIce,
+  customDirectory,
+}
 
 enum LogLineKind { normal, error, warning, deploy, merged }
 
@@ -177,6 +185,7 @@ class AppController extends ChangeNotifier {
   String? installError;
   String? addonError;
   String? wanxiangError;
+  String? wanxiangGrammarError;
   String? rimeIceError;
   String? macosImeError;
   String? windowsImeError;
@@ -188,10 +197,12 @@ class AppController extends ChangeNotifier {
   String? installingSchemeKey;
   InstallProgressDto? addonProgress;
   InstallProgressDto? wanxiangProgress;
+  InstallProgressDto? wanxiangGrammarProgress;
   InstallProgressDto? rimeIceProgress;
   InstallProgressDto? customProgress;
   final List<DeployStep> deploySteps = [];
   core.AddonStatusDto? wanxiang;
+  core.WanxiangGrammarStatusDto? wanxiangGrammar;
   String? _selectedWanxiangVariant;
   String? wanxiangLatestVersion;
   core.AddonStatusDto? rimeIce;
@@ -396,6 +407,21 @@ class AppController extends ChangeNotifier {
   bool get isDeploying => operation == OperationKind.deploy;
   bool get isManagingAddon => operation == OperationKind.addon;
   bool get isManagingWanxiang => operation == OperationKind.wanxiang;
+  bool get isManagingWanxiangGrammar =>
+      operation == OperationKind.wanxiangGrammar;
+  bool get showWanxiangGrammar =>
+      !isIos &&
+      wanxiang?.installed == true &&
+      wanxiangGrammar?.available == true;
+  bool get canManageWanxiangGrammar => !busy && showWanxiangGrammar;
+  bool get canCancelWanxiangGrammarDownload =>
+      isManagingWanxiangGrammar &&
+      wanxiangGrammarProgress?.stage.startsWith('wanxiang-grammar-download') ==
+          true;
+  String get wanxiangGrammarSize =>
+      wanxiangGrammar != null && wanxiangGrammar!.size > BigInt.zero
+      ? formatLogBytes(wanxiangGrammar!.size)
+      : '407 MB';
   bool get isManagingRimeIce => operation == OperationKind.rimeIce;
   bool get isInstallingCustom => operation == OperationKind.customDirectory;
   bool get canInstallAddon => !busy && local?.installed == true;
@@ -610,6 +636,7 @@ class AppController extends ChangeNotifier {
     installError,
     addonError,
     wanxiangError,
+    wanxiangGrammarError,
     rimeIceError,
     customError,
     macosImeError,
@@ -765,6 +792,7 @@ class AppController extends ChangeNotifier {
     if (isInstallingCustom) customProgress = value;
     if (isManagingAddon) addonProgress = value;
     if (isManagingWanxiang) wanxiangProgress = value;
+    if (isManagingWanxiangGrammar) wanxiangGrammarProgress = value;
     if (isManagingRimeIce) rimeIceProgress = value;
     _changed();
   }
@@ -939,6 +967,8 @@ class AppController extends ChangeNotifier {
       read(() async {
         try {
           wanxiang = await core.wanxiangStatus();
+          wanxiangGrammarError = null;
+          await _readWanxiangGrammar();
           wanxiangError = null;
         } catch (failure) {
           wanxiangError = errorText(failure);
@@ -1342,6 +1372,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> cancelDownload() async {
     if (canCancelDownload) await core.cancelSchemeDownload();
+  }
+
+  Future<void> cancelWanxiangGrammarDownload() async {
+    if (canCancelWanxiangGrammarDownload) {
+      await core.cancelWanxiangGrammarDownload();
+    }
   }
 
   Future<bool> installAndDeploy() async {
@@ -2479,6 +2515,7 @@ class AppController extends ChangeNotifier {
         androidDeploy: _androidDeploy,
       );
       if (installed) wanxiangLatestVersion = wanxiang!.version;
+      await _readWanxiangGrammar();
       await _readLocal();
       addOperationLogs([
         installed ? AppStrings.wanxiangInstalled : AppStrings.wanxiangRemoved,
@@ -2487,8 +2524,52 @@ class AppController extends ChangeNotifier {
       wanxiangError = errorText(failure);
       try {
         wanxiang = await core.wanxiangStatus();
+        await _readWanxiangGrammar();
       } catch (_) {}
       try {
+        await _readLocal();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      operation = null;
+    }
+  });
+
+  Future<void> _readWanxiangGrammar() async {
+    try {
+      wanxiangGrammar = isIos ? null : await core.wanxiangGrammarStatus();
+    } catch (failure) {
+      wanxiangGrammar = null;
+      wanxiangGrammarError ??= errorText(failure);
+    }
+  }
+
+  Future<bool> manageWanxiangGrammar(bool installed) => run(() async {
+    _startOperation(
+      OperationKind.wanxiangGrammar,
+      installed ? AppStrings.installing : AppStrings.uninstall,
+    );
+    wanxiangGrammarError = null;
+    wanxiangGrammarProgress = null;
+    try {
+      if (!showWanxiangGrammar) {
+        throw StateError(AppStrings.wanxiangGrammarUnavailable);
+      }
+      if (isAndroid) await _requireStorage();
+      wanxiangGrammar = await core.manageWanxiangGrammar(
+        installed: installed,
+        androidDeploy: _androidDeploy,
+      );
+      await _readLocal();
+      addOperationLogs([
+        installed
+            ? AppStrings.wanxiangGrammarInstalled
+            : AppStrings.wanxiangGrammarRemoved,
+      ]);
+    } catch (failure) {
+      wanxiangGrammarError = errorText(failure);
+      try {
+        await _readWanxiangGrammar();
         await _readLocal();
       } catch (_) {}
       rethrow;

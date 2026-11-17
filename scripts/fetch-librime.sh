@@ -477,6 +477,12 @@ fetch_macos() {
         echo "ERROR: extracted macOS SDK does not contain lib/librime.1.dylib" >&2
         exit 1
     fi
+    for plugin in lua octagram; do
+        if [[ ! -f "$main_root/lib/rime-plugins/librime-$plugin.dylib" ]]; then
+            echo "ERROR: extracted macOS SDK does not contain librime-$plugin.dylib" >&2
+            exit 1
+        fi
+    done
 
     rm -rf "$destination"
     mkdir -p "$destination"
