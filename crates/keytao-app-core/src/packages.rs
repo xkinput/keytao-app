@@ -1304,18 +1304,12 @@ mod tests {
             let value: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
             assert_eq!(
                 value["var"]["previously_selected_schema"].as_str(),
-                Some(if previous == "keytao" {
-                    "easy_en"
-                } else {
-                    "txjx"
-                })
+                // Switching packages selects the new package's primary schema.
+                Some("txjx")
             );
             if existing_user {
                 assert_eq!(value["custom_key"].as_str(), Some("keep"));
                 assert_eq!(value["var"]["option"].as_bool(), Some(true));
-            }
-            if previous == "keytao" {
-                assert_eq!(content, user);
             }
             assert_eq!(
                 crate::scheme_files::parse_schema_list(
