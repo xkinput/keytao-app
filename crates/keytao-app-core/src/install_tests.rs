@@ -233,7 +233,7 @@ fn manifest_cleanup_deletes_only_unchanged_obsolete_files() {
 }
 
 #[test]
-fn manifest_cleanup_preserves_all_lua_modules() {
+fn manifest_cleanup_removes_owned_lua_modules_and_keeps_user_files() {
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
     let dir = tempfile::tempdir().unwrap();
@@ -250,18 +250,22 @@ fn manifest_cleanup_preserves_all_lua_modules() {
         manifest.insert(name.into(), format!("{:x}", Sha256::digest(b"abc")));
     }
     let logs = crate::packages::cleanup_manifest(dir.path(), &manifest, &BTreeSet::new()).unwrap();
-    assert_eq!(
-        fs::read(dir.path().join("lua/a_filter.lua")).unwrap(),
-        b"abc"
-    );
-    assert_eq!(fs::read(dir.path().join("lua/ns/b.lua")).unwrap(), b"abc");
+    assert!(!dir.path().join("lua/a_filter.lua").exists());
+    assert!(!dir.path().join("lua/ns/b.lua").exists());
     assert_eq!(
         fs::read(dir.path().join("keytao.user.dict.yaml")).unwrap(),
         b"abc"
     );
     assert_eq!(fs::read(dir.path().join("xmjd6_user.txt")).unwrap(), b"abc");
     assert!(!dir.path().join("symbols.yaml").exists());
-    assert_eq!(logs, ["[REMOVED] symbols.yaml"]);
+    assert_eq!(
+        logs,
+        [
+            "[REMOVED] lua/a_filter.lua",
+            "[REMOVED] lua/ns/b.lua",
+            "[REMOVED] symbols.yaml"
+        ]
+    );
 }
 
 #[test]

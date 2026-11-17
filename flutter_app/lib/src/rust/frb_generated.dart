@@ -302,7 +302,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiCoreRemoveDownloadedArchive({required String path});
 
-  Future<void> crateApiCoreRemoveSchemePackage({
+  Future<List<String>> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
     required FutureOr<String> Function() androidDeploy,
   });
@@ -2662,7 +2662,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCoreRemoveSchemePackage({
+  Future<List<String>> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
     required FutureOr<String> Function() androidDeploy,
   }) {
@@ -2683,7 +2683,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_list_String,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCoreRemoveSchemePackageConstMeta,

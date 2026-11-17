@@ -18,6 +18,10 @@ pub mod ime_status;
 pub mod download;
 pub mod install;
 mod package_store;
+mod package_activation;
+mod package_artifacts;
+#[cfg(test)]
+mod package_activation_tests;
 pub mod packages;
 pub mod scheme;
 pub mod scheme_files;
@@ -93,6 +97,8 @@ impl Core {
             pending_package: Mutex::new(None),
             user_words: Mutex::new(user_words::UserWordsState::default()),
         });
+        package_activation::recover(&core)?;
+        *core.lock_state() = AppState::load(&core.env.data_dir)?;
         if let Err(error) = package_store::PackageStore::new(&core).migrate() {
             tracing::warn!(%error, "Package store migration will retry at next startup");
         }

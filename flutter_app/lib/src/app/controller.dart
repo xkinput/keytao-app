@@ -1701,10 +1701,14 @@ class AppController extends ChangeNotifier {
       packageError = null;
       _invalidateSchemeUpdates();
       try {
-        await core.removeSchemePackage(
+        final kept = await core.removeSchemePackage(
           schemeKey: key,
           androidDeploy: _androidDeploy,
         );
+        addOperationLogs(
+          kept.map((path) => '[KEPT] User-modified file: $path'),
+        );
+        _reportKeptPackageFiles(kept);
         _invalidateSchemeUpdates();
         if (package.active) {
           await _readState();
@@ -1740,11 +1744,21 @@ class AppController extends ChangeNotifier {
 
   void _recordInstallResult(InstallResultDto result) {
     addOperationLogs(result.logs);
+    const keptPrefix = '[KEPT] User-modified file: ';
+    _reportKeptPackageFiles([
+      for (final line in result.logs.expand((log) => log.split('\n')))
+        if (line.startsWith(keptPrefix)) line.substring(keptPrefix.length),
+    ]);
     addOperationLogs(
       result.verify
           .where((entry) => !entry.ok)
           .map((entry) => '[VERIFY FAIL] ${entry.path}: ${entry.note}'),
     );
+  }
+
+  void _reportKeptPackageFiles(Iterable<String> paths) {
+    final files = paths.join('\n');
+    if (files.isNotEmpty) packageError = '已保留您修改过的文件：\n$files';
   }
 
   Future<bool> deploy({int? imeActionId}) =>

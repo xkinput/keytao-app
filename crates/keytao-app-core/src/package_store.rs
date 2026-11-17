@@ -140,6 +140,10 @@ impl<'a> PackageStore<'a> {
         keytao_core::package_store::active_manifest(&self.core.env().data_dir)
     }
 
+    pub(crate) fn checked_activation_path(&self) -> Result<PathBuf, CoreError> {
+        safe_path(&self.checked_root()?, "activation.json").map_err(CoreError::Other)
+    }
+
     pub(crate) fn checked_active_manifest_path(&self) -> Result<PathBuf, CoreError> {
         self.checked_root()?;
         safe_path(&self.root(), "active-manifest.json").map_err(CoreError::Other)
@@ -290,11 +294,13 @@ impl<'a> PackageStore<'a> {
             {
                 return Err(CoreError::Other("Package contains a symlink".into()));
             }
+            if !names.insert(relative.to_lowercase()) {
+                return Err(CoreError::Other(format!(
+                    "Package contains case-insensitive duplicate path: {relative}"
+                )));
+            }
             if entry.is_dir() {
                 continue;
-            }
-            if !names.insert(relative.clone()) {
-                return Err(CoreError::Other("Package contains duplicate paths".into()));
             }
             total = total.saturating_add(entry.size());
             if total > 512 * 1024 * 1024 {
@@ -396,22 +402,38 @@ impl<'a> PackageStore<'a> {
     }
 
     pub(crate) fn remove(&self, key: &str) -> Result<(), CoreError> {
+        self.remove_with(key, |path| fs::remove_dir_all(path))
+    }
+
+    fn remove_with(
+        &self,
+        key: &str,
+        delete: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), CoreError> {
         let _guard = self
             .core
             .pending_package
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let destination = self.checked_package_path(key)?;
-        for path in [
-            &destination,
-            &destination.with_file_name(format!(".old-{key}")),
+        let tombstone = self.stage()?;
+        for (path, name) in [
+            (destination.with_file_name(format!(".old-{key}")), "old"),
+            (destination.clone(), "package"),
         ] {
-            match fs::remove_dir_all(path) {
+            match fs::rename(&path, tombstone.0.join(name)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
+        sync_directory(&tombstone.0)?;
+        sync_directory(tombstone.0.parent().unwrap())?;
+        if destination.parent().unwrap().exists() {
+            sync_directory(destination.parent().unwrap())?;
+        }
+        delete(&tombstone.0)?;
+        sync_directory(tombstone.0.parent().unwrap())?;
         Ok(())
     }
 
@@ -455,6 +477,15 @@ impl<'a> PackageStore<'a> {
         let root = self.checked_root()?;
         if !root.try_exists()? {
             return Ok(());
+        }
+        let staging = root.join(".staging");
+        match fs::symlink_metadata(&staging) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&staging)?;
+            }
+            Ok(_) => fs::remove_file(&staging)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         for namespace in ["cloud", "local"] {
             let directory = safe_path(&root, namespace).map_err(CoreError::Other)?;
@@ -515,6 +546,20 @@ impl<'a> PackageStore<'a> {
                         return Err(CoreError::Other("Legacy package checksum mismatch".into()));
                     }
                     if !installed {
+                        let report_path = safe_path(&root, &format!("{key}.migration-error.json"))
+                            .map_err(CoreError::Other)?;
+                        if fs::read(report_path)
+                            .ok()
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+                            })
+                            .is_some_and(|report| {
+                                report["status"] == "rejected"
+                                    && report["archive_sha256"] == meta.zip_sha256
+                            })
+                        {
+                            return Ok(());
+                        }
                         self.write_archive(fs::File::open(&zip_path)?, &meta, None)?;
                     }
                 }
@@ -536,6 +581,30 @@ impl<'a> PackageStore<'a> {
                 Ok::<_, CoreError>(())
             })();
             if let Err(error) = result {
+                if matches!(&error, CoreError::Other(message) if message.starts_with("Package contains case-insensitive duplicate path:"))
+                {
+                    let report_path = safe_path(&root, &format!("{key}.migration-error.json"))
+                        .map_err(CoreError::Other)?;
+                    let mut report = self.staging_file(Staging::Metadata)?;
+                    serde_json::to_writer_pretty(
+                        &mut report,
+                        &serde_json::json!({
+                            "key": key,
+                            "error": error.to_string(),
+                            "archive": format!("{key}.zip"),
+                            "archive_sha256": sha256_reader(fs::File::open(root.join(format!("{key}.zip")))?)?,
+                            "status": "rejected",
+                            "recovery": "Rename duplicate paths and import the package again. The original archive and metadata have been retained.",
+                        }),
+                    )?;
+                    report.as_file().sync_all()?;
+                    report
+                        .persist(report_path)
+                        .map_err(|error| CoreError::Io(error.error))?;
+                    sync_directory(&root)?;
+                    tracing::warn!(%key, %error, "Legacy package rejected; see migration-error.json report");
+                    continue;
+                }
                 failed = true;
                 tracing::warn!(%key, %error, "Package migration deferred; legacy archive retained");
             }
@@ -849,6 +918,96 @@ mod tests {
     }
 
     #[test]
+    fn migration_reports_case_duplicates_once_and_keeps_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let duplicate = archive(&[
+            ("Example.schema.yaml", b"first"),
+            ("example.schema.yaml", b"second"),
+        ]);
+        legacy_fixture(&store, "keytao", &duplicate);
+        legacy_fixture(&store, "local-retry", &archive(&[("../unsafe", b"retry")]));
+        store.migrate().unwrap();
+        assert!(!store.root().join(".layout-v2").exists());
+        assert!(!store.package_path("keytao").exists());
+        assert_eq!(
+            fs::read(store.root().join("keytao.zip")).unwrap(),
+            duplicate
+        );
+        assert!(store.root().join("keytao.json").is_file());
+        let report_path = store.root().join("keytao.migration-error.json");
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(report["status"], "rejected");
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("case-insensitive duplicate")
+        );
+        assert_eq!(
+            report["archive_sha256"],
+            sha256_reader(duplicate.as_slice()).unwrap()
+        );
+        report["sentinel"] = true.into();
+        let report_bytes = serde_json::to_vec(&report).unwrap();
+        fs::write(&report_path, &report_bytes).unwrap();
+        store.migrate().unwrap();
+        assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+        legacy_fixture(
+            &store,
+            "local-retry",
+            &archive(&[("valid.schema.yaml", b"valid")]),
+        );
+        store.migrate().unwrap();
+        assert!(store.root().join(".layout-v2").is_file());
+        assert_eq!(store.read_files("local-retry").unwrap().0.len(), 1);
+        assert!(!store.package_path("keytao").exists());
+        assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+    }
+
+    #[test]
+    fn startup_sweeps_staging_and_tombstones_after_layout_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"deleted")]);
+        store
+            .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+            .unwrap();
+        store.migrate().unwrap();
+        let tombstone = store.root().join(".staging/interrupted-delete");
+        fs::create_dir_all(&tombstone).unwrap();
+        fs::rename(store.package_path("keytao"), tombstone.join("package")).unwrap();
+        fs::write(tombstone.join("partial-download"), b"stale").unwrap();
+        store.migrate().unwrap();
+        assert!(!tombstone.exists());
+        assert!(!store.package_path("keytao").exists());
+        assert!(store.root().join(".layout-v2").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_staging_sweep_does_not_follow_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("user-file"), b"keep").unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        fs::create_dir_all(store.root().join(".staging/stale")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), store.root().join(".staging/stale/link"))
+            .unwrap();
+        store.migrate().unwrap();
+        assert_eq!(fs::read(outside.path().join("user-file")).unwrap(), b"keep");
+        fs::remove_dir_all(store.root().join(".staging")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), store.root().join(".staging")).unwrap();
+        store.migrate().unwrap();
+        assert!(fs::symlink_metadata(store.root().join(".staging")).is_err());
+        assert_eq!(fs::read(outside.path().join("user-file")).unwrap(), b"keep");
+    }
+
+    #[test]
     fn migration_retries_crash_between_removing_metadata_and_archive() {
         let directory = tempfile::tempdir().unwrap();
         let core = core(directory.path());
@@ -1012,6 +1171,38 @@ mod tests {
         store.remove("local-example").unwrap();
         assert!(!store.package_path("local-example").exists());
         store.remove("local-example").unwrap();
+    }
+
+    #[test]
+    fn delete_unpublishes_package_and_old_version_before_removing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = core(directory.path());
+        let store = PackageStore::new(&core);
+        let bytes = archive(&[("example.schema.yaml", b"deleted")]);
+        store
+            .write_archive(Cursor::new(&bytes), &metadata("keytao", &bytes), None)
+            .unwrap();
+        let destination = store.package_path("keytao");
+        let old = destination.with_file_name(".old-keytao");
+        fs::create_dir(&old).unwrap();
+        fs::write(old.join("partial-old-file"), b"old").unwrap();
+        let result = store.remove_with("keytao", |tombstone| {
+            assert!(!destination.exists());
+            assert!(!old.exists());
+            assert!(tombstone.join("old/partial-old-file").is_file());
+            assert_eq!(
+                PackageStore::read_files_at(&tombstone.join("package"), "keytao")
+                    .unwrap()
+                    .0[0]
+                    .1,
+                b"deleted"
+            );
+            Err(std::io::Error::other("injected cleanup failure"))
+        });
+        assert!(result.is_err());
+        store.migrate().unwrap();
+        assert!(!destination.exists());
+        assert!(!old.exists());
     }
 
     #[test]

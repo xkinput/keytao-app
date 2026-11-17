@@ -428,7 +428,7 @@ pub async fn activate_scheme(
 pub async fn remove_scheme_package(
     scheme_key: String,
     android_deploy: impl Fn() -> DartFnFuture<String> + Send + Sync,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let state = runtime::state()?;
     let _guard = state.install_lock.lock().await;
     let host = InstallHost::new(state.host.clone(), android_deploy);

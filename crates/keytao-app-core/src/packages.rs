@@ -216,6 +216,8 @@ pub(crate) struct PendingPackage {
     manifest: BTreeMap<String, String>,
     root: String,
     zip_sha256: String,
+    pub(crate) activation: Option<crate::package_activation::Activation>,
+    pub(crate) transaction: Option<crate::package_activation::Transaction>,
 }
 
 pub(crate) fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
@@ -244,6 +246,7 @@ pub(crate) fn stored_archive(
     Ok((archive_from_files(&files)?, meta))
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 pub(crate) fn archive_from_files(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, CoreError> {
     use std::io::Write;
     let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -485,7 +488,7 @@ pub(crate) fn excluded_from_manifest(relative: &str) -> bool {
         relative.rsplit('/').next().unwrap_or(relative),
         "default.custom.yaml" | "default-custom.yaml"
     ) || relative == "rime.lua"
-        || crate::install::is_protected_user_file(relative)
+        || crate::package_activation::user_file(relative)
 }
 
 pub(crate) fn stage_install(
@@ -509,6 +512,8 @@ pub(crate) fn stage_install(
         manifest,
         root,
         zip_sha256: format!("{:x}", Sha256::digest(zip_bytes)),
+        activation: None,
+        transaction: None,
     });
     Ok(())
 }
@@ -577,7 +582,14 @@ pub(crate) fn finalize_pending(
         .pending_package
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let Some(receipt) = pending.as_ref() else {
+    if let Some(receipt) = pending
+        .as_ref()
+        .filter(|receipt| active && !receipt.root.is_empty())
+    {
+        // Reject invalid user settings before consuming the retryable receipt.
+        select_main_schema_after_addon(Path::new(&receipt.root))?;
+    }
+    let Some(mut receipt) = pending.take() else {
         return Ok(());
     };
     let store = PackageStore::new(core);
@@ -602,14 +614,26 @@ pub(crate) fn finalize_pending(
         manifest: receipt.manifest.clone(),
         zip_sha256: receipt.zip_sha256.clone(),
     };
+    // Publish the durable store version before either activation marker.
+    if let Some(transaction) = receipt.transaction.as_mut() {
+        let mut archive = zip::ZipArchive::new(BufReader::new(receipt.archive.reopen()?))
+            .map_err(|e| CoreError::Other(e.to_string()))?;
+        let paths = checked_archive_paths(&mut archive, Path::new(&receipt.root))
+            .map_err(CoreError::Other)?;
+        transaction.snapshot_package(scheme_key, &paths)?;
+    }
+    store.write_archive(BufReader::new(receipt.archive.reopen()?), &meta, None)?;
     if active {
         let active_manifest = ActiveManifest {
             root: receipt.root.clone(),
             scheme_key: scheme_key.into(),
             manifest: receipt.manifest.clone(),
             // Native IME processes deploy without access to the app's package store.
-            rime_lua: rime_lua_from_reader(BufReader::new(receipt.archive.reopen()?))
-                .map_err(CoreError::Other)?,
+            rime_lua: match receipt.activation.as_ref() {
+                Some(activation) => activation.rime_lua.clone(),
+                None => rime_lua_from_reader(BufReader::new(receipt.archive.reopen()?))
+                    .map_err(CoreError::Other)?,
+            },
         };
         if !receipt.root.is_empty() {
             let root = Path::new(&receipt.root);
@@ -632,14 +656,36 @@ pub(crate) fn finalize_pending(
         temporary
             .persist(store.active_manifest_path())
             .map_err(|error| CoreError::from(error.error))?;
+        if let Some(mut activation) = receipt.activation.take() {
+            activation.key = scheme_key.into();
+            activation.scheme_key = scheme_key.into();
+            activation.manifest = receipt.manifest.clone();
+            activation.rime_lua = active_manifest.rime_lua;
+            crate::scheme_files::write_file_atomic(
+                &store.checked_activation_path()?,
+                &serde_json::to_vec_pretty(&activation)?,
+            )?;
+        }
     }
-    // Keep imported version-selection metadata until activation markers are published.
-    store.write_archive(BufReader::new(receipt.archive.reopen()?), &meta, None)?;
-    *pending = None;
     if !preserve_cloud_id && core.state().scheme_cloud_ids.contains_key(scheme_key) {
         core.update_state(|state| {
             state.scheme_cloud_ids.remove(scheme_key);
         })?;
+    }
+    if active {
+        core.update_state(|state| {
+            state.installed_packages.insert(
+                scheme_key.into(),
+                crate::state::InstalledPackage {
+                    version: version.map(str::to_owned),
+                },
+            );
+            state.active_scheme = Some(scheme_key.into());
+            state.last_deploy = None;
+        })?;
+    }
+    if let Some(transaction) = receipt.transaction.take() {
+        transaction.commit()?;
     }
     Ok(())
 }
@@ -697,10 +743,16 @@ pub fn record_package(
     let scheme_key =
         crate::scheme::validate_scheme_key(scheme_key.trim()).map_err(CoreError::Other)?;
     if !active {
-        *core
+        if let Some(mut receipt) = core
             .pending_package
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            if let Some(transaction) = receipt.transaction.take() {
+                transaction.commit()?;
+            }
+        }
         return Ok(());
     }
     let state = core.state();
@@ -741,19 +793,24 @@ pub fn record_package(
             None
         }
     };
-    finalize_pending(core, scheme_key, version, active)?;
-    core.update_state(|state| {
-        state.installed_packages.insert(
-            scheme_key.into(),
-            crate::state::InstalledPackage {
-                version: version.map(str::to_owned),
-            },
-        );
-        if active {
-            state.active_scheme = Some(scheme_key.into());
-            state.last_deploy = None;
-        }
-    })?;
+    if let Err(error) = finalize_pending(core, scheme_key, version, active) {
+        *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
+        return Err(error);
+    }
+    if installed_root.is_none() {
+        core.update_state(|state| {
+            state.installed_packages.insert(
+                scheme_key.into(),
+                crate::state::InstalledPackage {
+                    version: version.map(str::to_owned),
+                },
+            );
+            if active {
+                state.active_scheme = Some(scheme_key.into());
+                state.last_deploy = None;
+            }
+        })?;
+    }
     if let Some(root) = installed_root {
         crate::user_words::remember_reconciliation(core, scheme_key, &root, true);
     }
@@ -768,25 +825,31 @@ pub async fn remove_scheme_package(
     core: &Core,
     scheme_key: &str,
     host: &impl crate::scheme_host::SchemeHost,
-) -> Result<(), CoreError> {
+) -> Result<Vec<String>, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
-    if core.state().active_scheme.as_deref() == Some(scheme_key) {
-        remove_active_package(core, scheme_key, host).await?;
-    }
+    let retained = if core.state().active_scheme.as_deref() == Some(scheme_key) {
+        remove_active_package(core, scheme_key, host).await?
+    } else {
+        Vec::new()
+    };
     let store = PackageStore::new(core);
     store.checked_root()?;
     store.remove(scheme_key)?;
     core.update_state(|state| {
         state.installed_packages.remove(scheme_key);
-    })
+    })?;
+    Ok(retained)
 }
 
 async fn remove_active_package(
     core: &Core,
     scheme_key: &str,
     host: &impl crate::scheme_host::SchemeHost,
-) -> Result<(), CoreError> {
+) -> Result<Vec<String>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?.canonicalize()?;
+    if let Some(activation) = crate::package_activation::read(core, &root)? {
+        return remove_owned_package(core, scheme_key, host, &root, activation).await;
+    }
     let mut active = None;
     for path in [
         safe_path(&root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?,
@@ -829,14 +892,8 @@ async fn remove_active_package(
     let protected: BTreeSet<_> = manifest
         .keys()
         .filter(|relative| {
-            relative.ends_with(".custom.yaml")
-                || relative.split('/').any(|part| {
-                    part == "sync" || part.contains(".userdb") || part.starts_with(".keytao-")
-                })
-                || crate::addon::is_package_file(relative)
-                || crate::wanxiang::installable(relative)
-                || relative.as_str() == "wanxiang-lts-zh-hans.gram"
-                || crate::rime_ice::installable(relative)
+            crate::package_activation::user_file(relative)
+                || crate::package_activation::addon_owned(&root, relative)
         })
         .cloned()
         .collect();
@@ -845,11 +902,6 @@ async fn remove_active_package(
         .filter(|relative| !protected.contains(*relative))
         .filter_map(|relative| relative.strip_suffix(".schema.yaml").map(str::to_owned))
         .collect();
-    let dictionary_ids: Vec<_> = manifest
-        .keys()
-        .filter(|relative| !protected.contains(*relative))
-        .filter_map(|relative| relative.strip_suffix(".dict.yaml").map(str::to_owned))
-        .collect();
     let (relative, mut config) =
         crate::addon::addon_default_custom(&root).map_err(CoreError::Other)?;
     for schema in &schema_ids {
@@ -857,7 +909,7 @@ async fn remove_active_package(
             .map_err(CoreError::Other)?;
     }
     let mut receipt = crate::wanxiang::InstallReceipt::new(&root).map_err(CoreError::Other)?;
-    cleanup_manifest_with(&root, &manifest, &protected, |relative| {
+    let logs = cleanup_manifest_with(&root, &manifest, &protected, |relative| {
         receipt.move_original(relative)
     })
     .map_err(CoreError::Other)?;
@@ -881,8 +933,15 @@ async fn remove_active_package(
                 Err(error) => return Err(error.into()),
             }
         }
-        keytao_core::invalidate_rime_build_artifacts(&root, &schema_ids, &dictionary_ids)
-            .map_err(CoreError::Other)?;
+        let files = PackageStore::new(core).read_files(scheme_key)?.0;
+        let remaining = crate::scheme_files::parse_schema_list(&config)
+            .into_iter()
+            .collect();
+        crate::package_artifacts::cleanup(&root, &files, &remaining)?;
+        let default_build = safe_path(&root, "build/default.yaml").map_err(CoreError::Other)?;
+        if default_build.try_exists()? {
+            fs::remove_file(default_build)?;
+        }
         #[cfg(target_os = "windows")]
         {
             let files = manifest
@@ -956,7 +1015,107 @@ async fn remove_active_package(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    Ok(())
+    Ok(crate::package_activation::retained(&logs))
+}
+
+async fn remove_owned_package(
+    core: &Core,
+    scheme_key: &str,
+    host: &impl crate::scheme_host::SchemeHost,
+    root: &Path,
+    activation: crate::package_activation::Activation,
+) -> Result<Vec<String>, CoreError> {
+    if activation.key != scheme_key {
+        return Err(CoreError::Other(
+            "Active scheme manifest does not match".into(),
+        ));
+    }
+    let files = PackageStore::new(core).read_files(scheme_key)?.0;
+    let paths = crate::package_activation::transaction_paths(root, &[], Some(&activation))?;
+    let transaction = crate::package_activation::Transaction::begin(core, root, paths)?;
+    let logs = crate::package_activation::deactivate(core, root, &activation)?;
+    let mut remaining = BTreeSet::new();
+    for name in ["default.custom.yaml", "default-custom.yaml"] {
+        if let Ok(content) = fs::read_to_string(safe_path(root, name).map_err(CoreError::Other)?) {
+            remaining.extend(crate::scheme_files::parse_schema_list(&content));
+        }
+    }
+    crate::package_artifacts::cleanup(root, &files, &remaining)?;
+    for name in [
+        "build/default.yaml",
+        "build/.keytao-deployed",
+        "build/.keytao-deploying",
+        keytao_core::ACTIVE_SCHEME_MANIFEST,
+    ] {
+        let path = safe_path(root, name).map_err(CoreError::Other)?;
+        if path.try_exists()? {
+            fs::remove_file(path)?;
+        }
+    }
+    // Keep the native deployer's package source in sync with the remaining add-ons.
+    let lua = fs::read_to_string(safe_path(root, "rime.lua").map_err(CoreError::Other)?).ok();
+    let marker = ActiveManifest {
+        root: root.to_string_lossy().into_owned(),
+        scheme_key: String::new(),
+        manifest: BTreeMap::new(),
+        rime_lua: lua,
+    };
+    crate::scheme_files::write_file_atomic(
+        &root.join(keytao_core::ACTIVE_SCHEME_MANIFEST),
+        &serde_json::to_vec_pretty(&marker)?,
+    )?;
+    #[cfg(target_os = "windows")]
+    let public_update = {
+        let public_files: Vec<_> = activation
+            .owned
+            .iter()
+            .filter(|f| !crate::package_activation::addon_owned(root, &f.path))
+            .map(|f| PathBuf::from(&f.path))
+            .collect();
+        Some(
+            crate::windows_public_schemas::update_public_schemas(|| {
+                for schema in activation
+                    .manifest
+                    .keys()
+                    .filter_map(|p| p.strip_suffix(".schema.yaml"))
+                {
+                    host.remove_public_schema(schema, &public_files)?;
+                }
+                Ok(())
+            })
+            .map_err(CoreError::Other)?,
+        )
+    };
+    let deployment = if remaining.is_empty() {
+        host.write_reload_stamp(root)
+            .map(|_| ())
+            .map_err(CoreError::Other)
+    } else {
+        host.deploy().await.map_err(CoreError::Other)
+    };
+    if let Err(error) = deployment {
+        #[cfg(target_os = "windows")]
+        if let Some(update) = public_update {
+            update.rollback().map_err(CoreError::Other)?;
+        }
+        drop(transaction);
+        return Err(error);
+    }
+    let activation_path = PackageStore::new(core).checked_activation_path()?;
+    fs::remove_file(activation_path)?;
+    let legacy = PackageStore::new(core).checked_active_manifest_path()?;
+    if legacy.try_exists()? {
+        fs::remove_file(legacy)?;
+    }
+    core.update_state(|state| {
+        state.active_scheme = None;
+        state.last_deploy = None;
+    })?;
+    if let Err(error) = transaction.commit() {
+        *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
+        return Err(error);
+    }
+    Ok(crate::package_activation::retained(&logs))
 }
 
 pub(crate) fn validate_relative(relative: &str) -> Result<(), String> {
@@ -1093,6 +1252,11 @@ pub(crate) fn cleanup_previous(
     zip_bytes: &[u8],
 ) -> Result<Vec<String>, String> {
     let incoming = archive_paths(zip_bytes, root)?;
+    if let Some(active) = crate::package_activation::read(core, root).map_err(|e| e.to_string())? {
+        let logs = crate::package_activation::deactivate(core, root, &active)
+            .map_err(|e| e.to_string())?;
+        return Ok(logs);
+    }
     let Some(active) = core.state().active_scheme else {
         return Ok(Vec::new());
     };
@@ -1116,7 +1280,33 @@ pub(crate) fn cleanup_previous(
     if Path::new(&meta.root) != actual_root {
         return Ok(Vec::new());
     }
-    let mut logs = cleanup_manifest(root, &meta.manifest, &incoming)?;
+    let protected = meta
+        .manifest
+        .keys()
+        .filter(|path| crate::package_activation::addon_owned(root, path))
+        .cloned()
+        .collect();
+    let mut logs = cleanup_manifest(root, &meta.manifest, &protected)?;
+    if meta.rime_lua.is_some() {
+        let path = safe_path(root, "rime.lua")?;
+        let expected = crate::install::prepare_rime_lua_install(
+            meta.rime_lua.as_deref(),
+            keytao_core::installed_addon_rime_lua_lines(root),
+        );
+        if fs::read_to_string(&path).ok() == expected {
+            match crate::install::prepare_rime_lua_install(
+                None,
+                keytao_core::installed_addon_rime_lua_lines(root),
+            ) {
+                Some(content) => crate::scheme_files::write_file_atomic(&path, content.as_bytes())
+                    .map_err(|e| e.to_string())?,
+                None if path.exists() => fs::remove_file(path).map_err(|e| e.to_string())?,
+                None => {}
+            }
+        } else if path.exists() {
+            logs.push("[KEPT] User-modified file: rime.lua".into());
+        }
+    }
     // Package-owned auxiliary schemas must not survive as user schema references.
     for name in ["default.custom.yaml", "default-custom.yaml"] {
         let path = safe_path(root, name)?;
@@ -1149,14 +1339,7 @@ pub(crate) fn cleanup_manifest(
     manifest: &BTreeMap<String, String>,
     incoming: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
-    let mut incoming = incoming.clone();
-    incoming.extend(
-        manifest
-            .keys()
-            .filter(|path| path.starts_with("lua/"))
-            .cloned(),
-    );
-    cleanup_manifest_with(root, manifest, &incoming, |relative| {
+    cleanup_manifest_with(root, manifest, incoming, |relative| {
         fs::remove_file(safe_path(root, relative)?).map_err(|error| error.to_string())
     })
 }

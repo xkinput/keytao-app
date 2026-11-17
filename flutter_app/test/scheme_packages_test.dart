@@ -54,6 +54,8 @@ class PackageCore extends FakeCore {
   Completer<List<SchemeUpdateDto>>? updateGate;
   bool androidRemoval = false;
   String? removalFailure;
+  List<String> keptFiles = [];
+  InstallResultDto activationResult = successfulInstall;
   LocalSchemaDto localAfterRemoval = const LocalSchemaDto(
     installed: false,
     deployed: false,
@@ -138,11 +140,11 @@ class PackageCore extends FakeCore {
     calls.add('activate:$schemeKey');
     await activationGate?.future;
     replacePackage(schemeKey, active: true);
-    return successfulInstall;
+    return activationResult;
   }
 
   @override
-  Future<void> crateApiCoreRemoveSchemePackage({
+  Future<List<String>> crateApiCoreRemoveSchemePackage({
     required String schemeKey,
     required FutureOr<String> Function() androidDeploy,
   }) async {
@@ -156,6 +158,7 @@ class PackageCore extends FakeCore {
       local = localAfterRemoval;
     }
     if (removalFailure case final failure?) throw StateError(failure);
+    return keptFiles;
   }
 
   @override
@@ -345,6 +348,51 @@ void main() {
     expect(controller.installedPackageFor('xmjd'), isNull);
     expect(controller.installedPackageFor('keytao')!.active, isTrue);
     expect(controller.scheme, 'keytao');
+  });
+
+  test('removal reports preserved user changes without failing', () async {
+    core
+      ..packages = [keytaoPackage]
+      ..keptFiles = ['keytao.custom.yaml', 'lua/user.lua'];
+    await controller.refreshSchemeUpdates();
+
+    expect(await controller.removeSchemePackage('keytao'), isTrue);
+
+    expect(
+      controller.packageError,
+      '已保留您修改过的文件：\nkeytao.custom.yaml\nlua/user.lua',
+    );
+    expect(
+      controller.operationLogs,
+      containsAll([
+        endsWith('[KEPT] User-modified file: keytao.custom.yaml'),
+        endsWith('[KEPT] User-modified file: lua/user.lua'),
+      ]),
+    );
+  });
+
+  test('activation reports preserved user changes from install logs', () async {
+    core.packages = [
+      const InstalledPackageDto(
+        schemeKey: 'keytao',
+        active: false,
+        hasPackageZip: true,
+      ),
+    ];
+    core.activationResult = const InstallResultDto(
+      mergedSchemas: [],
+      logs: ['[KEPT] User-modified file: lua/user.lua'],
+      verify: [],
+    );
+    await controller.refreshSchemeUpdates();
+
+    expect(await controller.activateSchemePackage('keytao'), isTrue);
+
+    expect(controller.packageError, '已保留您修改过的文件：\nlua/user.lua');
+    expect(
+      controller.operationLogs,
+      contains(endsWith('[KEPT] User-modified file: lua/user.lua')),
+    );
   });
 
   test(

@@ -4,8 +4,6 @@ use crate::scheme_host::tests::AddonHost;
 use std::{io::Write, sync::atomic::Ordering};
 
 const USER_FILES: &[&str] = &[
-    "keytao.custom.yaml",
-    "nested/example.custom.yaml",
     "keytao.user.dict.yaml",
     "keytao.userdb/data",
     "keytao.userdb.txt",
@@ -15,6 +13,7 @@ const USER_FILES: &[&str] = &[
     "sync/device/data",
     ".keytao-sync-base-keytao.json",
 ];
+const OWNED_CUSTOM_FILES: &[&str] = &["keytao.custom.yaml", "nested/example.custom.yaml"];
 const ADDON_FILES: &[&str] = &[
     "easy_en.schema.yaml",
     "easy_en.dict.yaml",
@@ -60,6 +59,7 @@ fn fixture(key: &str, addons: bool) -> (tempfile::TempDir, AddonHost) {
     ]
     .into_iter()
     .chain(USER_FILES.iter().copied())
+    .chain(OWNED_CUSTOM_FILES.iter().copied())
     .chain(addon_files.iter().copied())
     {
         let path = root.join(name);
@@ -171,7 +171,10 @@ fn assert_removed(host: &AddonHost, key: &str) {
         "auxiliary.schema.yaml",
         "keytao.dict.yaml",
         "lua/main.lua",
-    ] {
+    ]
+    .into_iter()
+    .chain(OWNED_CUSTOM_FILES.iter().copied())
+    {
         assert!(!host.root.join(name).exists(), "{name}");
     }
     assert!(host.core.state().active_scheme.is_none());

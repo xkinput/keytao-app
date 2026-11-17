@@ -213,7 +213,9 @@ fn local_import_excludes_top_level_junk_and_recursive_private_files() {
     assert_eq!(keytao_core::parse_schema_list(config), ["example"]);
     assert!(!config.contains("private content"));
     let (_, meta) = PackageStore::new(&core).read_files(&key).unwrap();
-    assert_eq!(meta.manifest.len(), 8);
+    assert_eq!(meta.manifest.len(), 7);
+    assert!(!meta.manifest.contains_key("nested/sync/data"));
+    assert_eq!(files["nested/sync/data"], b"package data");
     for name in nested {
         assert_eq!(files[name], b"package data");
     }

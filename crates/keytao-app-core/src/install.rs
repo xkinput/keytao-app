@@ -536,6 +536,49 @@ async fn smart_install_entries(
         emit("extracting", 61, "正在解压...");
 
         let dest = PathBuf::from(&dest_path);
+        *core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        let previous = crate::package_activation::read(core, &dest).map_err(|e| e.to_string())?;
+        let mut removed_files = previous
+            .as_ref()
+            .map(|active| {
+                crate::package_store::PackageStore::new(core)
+                    .read_files(&active.key)
+                    .map(|(files, _)| files)
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        if removed_files.is_none() {
+            let store = crate::package_store::PackageStore::new(core);
+            if let Ok(bytes) = std::fs::read(
+                store
+                    .checked_active_manifest_path()
+                    .map_err(|e| e.to_string())?,
+            ) {
+                if let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if marker["root"].as_str().map(PathBuf::from) == dest.canonicalize().ok() {
+                        if let Some(key) = core.state().active_scheme {
+                            removed_files = store.read_files(&key).ok().map(|(files, _)| files);
+                        }
+                    }
+                }
+            }
+        }
+        let changed_dictionaries = if removed_files.is_some() {
+            Some(
+                crate::package_artifacts::changed_dictionary_ids(&dest, &files)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        let paths = crate::package_activation::transaction_paths(&dest, &files, previous.as_ref())
+            .map_err(|e| e.to_string())?;
+        let transaction = crate::package_activation::Transaction::begin(core, &dest, paths)
+            .map_err(|e| e.to_string())?;
         let replacing_root = dest.canonicalize().ok();
         core.update_state(|state| {
             if state
@@ -550,7 +593,29 @@ async fn smart_install_entries(
         // Validate the entire archive and manifest before deleting or writing files.
         let package_rime_lua = crate::packages::rime_lua_from_archive(&zip_bytes)?;
         let mut cleanup_logs = crate::packages::cleanup_previous(core, &dest, &zip_bytes)?;
-        let (package_schema_ids, package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
+        let retained: std::collections::BTreeSet<_> =
+            crate::package_activation::retained(&cleanup_logs)
+                .into_iter()
+                .collect();
+        let mut activation = crate::package_activation::Activation {
+            root: dest
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        };
+        for relative in ["default.custom.yaml", "default-custom.yaml", "rime.lua"] {
+            if let Some(backup) = crate::package_activation::backup(core, &dest, relative)
+                .map_err(|e| e.to_string())?
+            {
+                activation.backups.push(backup);
+            }
+        }
+        let (package_schema_ids, mut package_dictionary_ids) = rime_package_build_ids(&zip_bytes)?;
+        if let Some(changed) = changed_dictionaries {
+            package_dictionary_ids.retain(|id| changed.contains(id));
+        }
 
         // First pass: merge default settings.
         let (merged_dc_path, merged_dc_content, merged_schemas) = {
@@ -591,8 +656,8 @@ async fn smart_install_entries(
         let mut logs = std::mem::take(&mut cleanup_logs);
         let mut manifest = std::collections::BTreeMap::new();
 
-        for (i, (relative, content)) in files.into_iter().enumerate() {
-            if Some(&relative) == merged_dc_path.as_ref() {
+        for (i, (relative, content)) in files.iter().enumerate() {
+            if Some(relative) == merged_dc_path.as_ref() {
                 if let Some(ref mc) = merged_dc_content {
                     let out = dest.join(&relative);
                     match write_file_force(&out, mc.as_bytes()) {
@@ -605,7 +670,29 @@ async fn smart_install_entries(
                 }
             } else if relative == "rime.lua" {
                 // Regenerate once after extraction, including packages without rime.lua.
+            } else if retained.contains(relative) {
+                continue;
+            } else if is_protected_user_file(relative)
+                && crate::packages::safe_path(&dest, relative)?
+                    .try_exists()
+                    .map_err(|e| e.to_string())?
+            {
+                logs.push(format!("[KEPT] {relative}"));
+            } else if crate::package_activation::user_file(relative)
+                && !is_protected_user_file(relative)
+            {
+                logs.push(format!("[KEPT] {relative}"));
+            } else if crate::package_activation::addon_owned(&dest, relative) {
+                logs.push(format!("[KEPT] Add-on file: {relative}"));
             } else {
+                let existing = crate::packages::safe_path(&dest, relative)?;
+                if !crate::packages::excluded_from_manifest(relative) && existing.is_file() {
+                    if let Some(backup) = crate::package_activation::backup(core, &dest, relative)
+                        .map_err(|e| e.to_string())?
+                    {
+                        activation.backups.push(backup);
+                    }
+                }
                 match write_package_file(&dest, &relative, &content, &mut logs) {
                     Ok(()) => {
                         if !crate::packages::excluded_from_manifest(&relative) {
@@ -632,10 +719,89 @@ async fn smart_install_entries(
             );
         }
 
-        let merged_rime_lua_content = install_rime_lua(&dest, package_rime_lua.as_deref())?;
+        let merged_rime_lua_content = if retained.contains("rime.lua") {
+            std::fs::read_to_string(crate::packages::safe_path(&dest, "rime.lua")?).ok()
+        } else {
+            install_rime_lua(&dest, package_rime_lua.as_deref())?
+        };
+        activation.rime_lua = if retained.contains("rime.lua") {
+            merged_rime_lua_content.clone()
+        } else {
+            package_rime_lua.clone()
+        };
         logs.push("[REGENERATED] rime.lua".into());
 
+        let mut user_customs = Vec::new();
+        for relative in [
+            "keytao.custom.yaml",
+            "keytao-dz.custom.yaml",
+            "keytao-bj.custom.yaml",
+            "lua/keytao_remove_filter.lua",
+        ] {
+            if !manifest.contains_key(relative) {
+                let path = crate::packages::safe_path(&dest, relative)?;
+                if let Ok(bytes) = std::fs::read(&path) {
+                    user_customs.push((relative, bytes));
+                }
+            }
+        }
         crate::remove_filter::ensure_remove_filter(&dest)?;
+        for (relative, bytes) in &user_customs {
+            crate::scheme_files::write_file_atomic(
+                &crate::packages::safe_path(&dest, relative)?,
+                bytes,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for relative in manifest.keys() {
+            if let Some(file) = crate::package_activation::fingerprint(&dest, relative)
+                .map_err(|e| e.to_string())?
+            {
+                activation.owned.push(file);
+            }
+        }
+        for relative in [
+            "default.custom.yaml",
+            "default-custom.yaml",
+            "rime.lua",
+            "keytao.custom.yaml",
+            "keytao-dz.custom.yaml",
+            "keytao-bj.custom.yaml",
+            "lua/keytao_remove_filter.lua",
+        ] {
+            if !manifest.contains_key(relative) && !user_customs.iter().any(|(p, _)| *p == relative)
+            {
+                if let Some(file) = crate::package_activation::fingerprint(&dest, relative)
+                    .map_err(|e| e.to_string())?
+                {
+                    activation.generated.push(file);
+                }
+            }
+        }
+        for name in ["default.custom.yaml", "default-custom.yaml"] {
+            if let Ok(bytes) = std::fs::read(dest.join(name)) {
+                if let Ok(value) = serde_yaml::from_slice(&bytes) {
+                    activation.default_applied.insert(name.into(), value);
+                }
+            }
+        }
+        if let Some(removed_files) = &removed_files {
+            let mut remaining: std::collections::BTreeSet<_> = files
+                .iter()
+                .filter_map(|(p, _)| p.strip_suffix(".schema.yaml").map(str::to_owned))
+                .collect();
+            for name in ["default.custom.yaml", "default-custom.yaml"] {
+                if let Ok(content) = std::fs::read_to_string(dest.join(name)) {
+                    remaining.extend(crate::scheme_files::parse_schema_list(&content));
+                }
+            }
+            logs.extend(
+                crate::package_artifacts::cleanup(&dest, removed_files, &remaining)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|p| format!("[REMOVED BUILD] {p}")),
+            );
+        }
 
         #[cfg(not(target_os = "windows"))]
         logs.extend(
@@ -664,6 +830,15 @@ async fn smart_install_entries(
                 .into_owned(),
         )
         .map_err(|e| e.to_string())?;
+        if let Some(pending) = core
+            .pending_package
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            pending.activation = Some(activation);
+            pending.transaction = Some(transaction);
+        }
         emit("done", 100, "安装完成！");
 
         let verify = verify_install(
@@ -680,6 +855,9 @@ async fn smart_install_entries(
         })
     }
     .await;
+    if result.is_err() {
+        *core.lock_state() = crate::AppState::load(&core.env().data_dir)?;
+    }
     result.map_err(CoreError::Other)
 }
 
