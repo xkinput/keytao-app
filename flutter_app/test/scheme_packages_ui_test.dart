@@ -71,6 +71,18 @@ class _PackageController extends ViewController {
   }
 
   @override
+  Future<bool> manageRimeMint(bool installed) async {
+    actions.add('mint:$installed');
+    return true;
+  }
+
+  @override
+  Future<bool> manageRimeFrost(bool installed) async {
+    actions.add('frost:$installed');
+    return true;
+  }
+
+  @override
   Future<bool> importLocalScheme({String? schemeKey}) async {
     actions.add('import:$schemeKey');
     return true;
@@ -137,6 +149,21 @@ Future<void> _pumpRow(
   await tester.pumpAndSettle();
 }
 
+Future<void> _pumpAddons(
+  WidgetTester tester,
+  _PackageController controller,
+) async {
+  await tester.pumpWidget(
+    KeyTaoTheme(
+      platform: controller.info.platform,
+      home: FScaffold(
+        child: SingleChildScrollView(child: AddonCard(controller: controller)),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 List<String> _actionLabels(WidgetTester tester) => tester
     .widgetList<ActionButton>(find.byType(ActionButton))
     .map((button) => button.label)
@@ -163,15 +190,11 @@ void main() {
           version: '1',
           englishAvailable: false,
         );
-        c.addon = c.wanxiang = c.rimeIce = status;
+        c.addon = c.wanxiang = c.rimeIce = c.rimeMint = c.rimeFrost = status;
         c.addonLatestVersion = c.wanxiangLatestVersion =
-            c.rimeIceLatestVersion = latest;
-        await tester.pumpWidget(
-          KeyTaoTheme(
-            platform: c.info.platform,
-            home: FScaffold(child: AddonCard(controller: c)),
-          ),
-        );
+            c.rimeIceLatestVersion = c.rimeMintLatestVersion =
+                c.rimeFrostLatestVersion = latest;
+        await _pumpAddons(tester, c);
         final buttons = tester.widgetList<ActionButton>(
           find.byType(ActionButton),
         );
@@ -179,13 +202,61 @@ void main() {
           buttons
               .where((button) => button.primary)
               .map((button) => button.label),
-          label == null ? isEmpty : [label, label, label],
+          label == null ? isEmpty : List.filled(5, label),
         );
         expect(
           buttons.where((button) => button.label == AppStrings.uninstall),
-          hasLength(installed ? 3 : 0),
+          hasLength(installed ? 5 : 0),
+        );
+        for (final (key, name) in [
+          ('addon-rime-mint', 'mint'),
+          ('addon-rime-frost', 'frost'),
+        ]) {
+          final card = find.byKey(ValueKey(key));
+          if (label != null) {
+            final install = find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, label),
+            );
+            await tester.ensureVisible(install);
+            await tester.tap(install);
+            await tester.pump(const Duration(seconds: 1));
+            expect(c.actions.last, '$name:true');
+          }
+          if (installed) {
+            final uninstall = find.descendant(
+              of: card,
+              matching: find.widgetWithText(ActionButton, AppStrings.uninstall),
+            );
+            await tester.ensureVisible(uninstall);
+            await tester.tap(uninstall);
+            await tester.pump(const Duration(seconds: 1));
+            expect(c.actions.last, '$name:false');
+          }
+        }
+        c.busy = true;
+        await _pumpAddons(tester, c);
+        expect(
+          tester.widgetList<ActionButton>(find.byType(ActionButton)),
+          everyElement(
+            isA<ActionButton>().having(
+              (button) => button.onPress,
+              'onPress',
+              null,
+            ),
+          ),
+        );
+        expect(
+          tester
+              .widget<FSelect<String>>(
+                find.byWidgetPredicate((widget) => widget is FSelect<String>),
+              )
+              .enabled,
+          isFalse,
         );
         expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
       },
     );
   }
@@ -206,12 +277,7 @@ void main() {
       addTearDown(c.dispose);
       _size(tester, const Size(1000, 1200));
       c.selectWanxiangVariant('pure');
-      await tester.pumpWidget(
-        KeyTaoTheme(
-          platform: c.info.platform,
-          home: FScaffold(child: AddonCard(controller: c)),
-        ),
-      );
+      await _pumpAddons(tester, c);
       expect(
         find.widgetWithText(ActionButton, AppStrings.replace),
         findsOneWidget,
@@ -235,16 +301,13 @@ void main() {
       );
     c.addon = c.wanxiang;
     addTearDown(c.dispose);
-    await tester.pumpWidget(
-      KeyTaoTheme(
-        platform: c.info.platform,
-        home: FScaffold(child: AddonCard(controller: c)),
-      ),
-    );
+    await _pumpAddons(tester, c);
+    expect(find.text(AppStrings.rimeMint), findsOneWidget);
+    expect(find.text(AppStrings.rimeFrost), findsOneWidget);
     final installs = tester.widgetList<ActionButton>(
       find.widgetWithText(ActionButton, AppStrings.install),
     );
-    expect(installs, hasLength(3));
+    expect(installs, hasLength(5));
     expect(installs.every((button) => button.onPress != null), isTrue);
     expect(tester.takeException(), isNull);
   });
@@ -773,6 +836,10 @@ void main() {
     final deployment = find.byWidgetPredicate(
       (widget) => widget is Section && widget.title == '部署',
     );
+    for (final heading in ['方案列表', '键道方案', '附加方案']) {
+      expect(find.text(heading), findsOneWidget);
+    }
+    expect(find.text('云端方案'), findsNothing);
     expect(
       find.descendant(of: catalogue, matching: find.byType(SchemePackageRow)),
       findsNWidgets(4),
@@ -790,6 +857,7 @@ void main() {
       findsNothing,
     );
     expect(find.text('Custom scheme'), findsOneWidget);
+    expect(find.descendant(of: local, matching: active), findsOneWidget);
     expect(
       find.descendant(of: active, matching: find.text('在用')),
       findsOneWidget,
@@ -806,7 +874,7 @@ void main() {
             find.ancestor(of: active, matching: find.byType(SchemePackageRow)),
           )
           .compact,
-      isTrue,
+      isFalse,
     );
     expect(
       find.descendant(of: active, matching: find.byType(SchemaLogo)),
