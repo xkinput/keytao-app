@@ -4,6 +4,7 @@ import 'package:forui/forui.dart';
 import '../app/controller.dart';
 import '../app/options.dart';
 import 'progress.dart';
+import 'package_orphans.dart';
 import 'settings.dart' show SchemaSwitchesSection, showCloudPackageTransfer;
 import 'theme.dart';
 import 'user_words.dart';
@@ -178,6 +179,13 @@ class _SchemePageState extends State<SchemePage> {
                   for (final key in localKeys)
                     if (desktop || key != activeKey)
                       _package(key, compact: true),
+                  ActionButton(
+                    '清理残留文件',
+                    icon: FLucideIcons.trash2,
+                    onPress: c.busy
+                        ? null
+                        : () => showPackageOrphans(context, c),
+                  ),
                 ],
               ),
             ),

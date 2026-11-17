@@ -188,6 +188,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<InstalledPackageDto> dco_decode_list_installed_package_dto(dynamic raw);
 
   @protected
+  List<PackageKeptBackupDto> dco_decode_list_package_kept_backup_dto(
+    dynamic raw,
+  );
+
+  @protected
+  List<PackageOrphanFileDto> dco_decode_list_package_orphan_file_dto(
+    dynamic raw,
+  );
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -277,6 +287,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WindowsImeStatusDto? dco_decode_opt_box_autoadd_windows_ime_status_dto(
     dynamic raw,
   );
+
+  @protected
+  PackageKeptBackupDto dco_decode_package_kept_backup_dto(dynamic raw);
+
+  @protected
+  PackageOrphanFileDto dco_decode_package_orphan_file_dto(dynamic raw);
+
+  @protected
+  PackageOrphanReportDto dco_decode_package_orphan_report_dto(dynamic raw);
 
   @protected
   PanelOrientationDto dco_decode_panel_orientation_dto(dynamic raw);
@@ -550,6 +569,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PackageKeptBackupDto> sse_decode_list_package_kept_backup_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PackageOrphanFileDto> sse_decode_list_package_orphan_file_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -653,6 +682,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WindowsImeStatusDto? sse_decode_opt_box_autoadd_windows_ime_status_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PackageKeptBackupDto sse_decode_package_kept_backup_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PackageOrphanFileDto sse_decode_package_orphan_file_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PackageOrphanReportDto sse_decode_package_orphan_report_dto(
     SseDeserializer deserializer,
   );
 
@@ -1019,6 +1063,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_package_kept_backup_dto(
+    List<PackageKeptBackupDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_package_orphan_file_dto(
+    List<PackageOrphanFileDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1147,6 +1203,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_windows_ime_status_dto(
     WindowsImeStatusDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_package_kept_backup_dto(
+    PackageKeptBackupDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_package_orphan_file_dto(
+    PackageOrphanFileDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_package_orphan_report_dto(
+    PackageOrphanReportDto self,
     SseSerializer serializer,
   );
 

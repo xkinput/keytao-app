@@ -6839,10 +6839,12 @@ pub fn regenerate_active_rime_lua(user_data_dir: &Path) -> Result<(), String> {
         serde_json::Value::Null => None,
         _ => return Err("active scheme rime_lua must be a string or null".into()),
     };
-    match generate_rime_lua_content(
+    let generated = generate_rime_lua_content(
         package_content,
         installed_addon_rime_lua_lines(user_data_dir),
-    ) {
+    );
+    preserve_rime_lua_user_edits(user_data_dir, generated.as_deref())?;
+    match generated {
         Some(content) => write_file_atomic(&rime_lua_path, content.as_bytes())
             .map_err(|error| format!("write {}: {error}", rime_lua_path.display())),
         None => match std::fs::remove_file(&rime_lua_path) {
@@ -6851,6 +6853,56 @@ pub fn regenerate_active_rime_lua(user_data_dir: &Path) -> Result<(), String> {
             Err(error) => Err(format!("remove {}: {error}", rime_lua_path.display())),
         },
     }
+}
+
+/// Keep manual entry-point changes once before restoring the active package snapshot.
+pub fn preserve_rime_lua_user_edits(
+    user_data_dir: &Path,
+    expected: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let source = user_data_dir.join("rime.lua");
+    match std::fs::symlink_metadata(&source) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("refuse symbolic link: {}", source.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let current = match std::fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read rime.lua: {error}")),
+    };
+    if current.is_empty() || expected.is_some_and(|value| value.as_bytes() == current) {
+        return Ok(None);
+    }
+    for index in 0.. {
+        let path = user_data_dir.join(format!(".keytao-rime-user-{index}.lua"));
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                if std::fs::read(&path).map_err(|error| error.to_string())? == current {
+                    return Ok(None);
+                }
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|error| error.to_string())?;
+                file.write_all(&current)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|error| error.to_string())?;
+                eprintln!("Preserved manual rime.lua changes: {}", path.display());
+                return Ok(Some(path));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    unreachable!()
 }
 
 /// Regenerate the active package's Lua entry point with explicit add-on registrations.
@@ -8266,6 +8318,45 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
             assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), manifest);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lua_user_edits_are_preserved_once_while_package_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "keytao-lua-user-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let user = "require('old-package')\nmanual = true\r\n";
+        std::fs::write(dir.join("rime.lua"), user).unwrap();
+        let preserved = super::preserve_rime_lua_user_edits(&dir, Some("require('old-package')\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&preserved).unwrap(), user);
+        assert!(
+            super::preserve_rime_lua_user_edits(&dir, Some("require('old-package')\n"))
+                .unwrap()
+                .is_none()
+        );
+        let manifest = serde_json::json!({"root": dir.canonicalize().unwrap(),
+            "rime_lua": "require('new-package')\n"});
+        std::fs::write(
+            dir.join(super::ACTIVE_SCHEME_MANIFEST),
+            manifest.to_string(),
+        )
+        .unwrap();
+        super::regenerate_active_rime_lua(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("rime.lua")).unwrap(),
+            "require('new-package')\n"
+        );
+        assert_eq!(std::fs::read_to_string(preserved).unwrap(), user);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

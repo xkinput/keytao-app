@@ -1742,6 +1742,15 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<PackageOrphanReportDto> packageOrphanReport() =>
+      core.packageOrphanReport();
+
+  Future<bool> trashPackageOrphans(List<PackageOrphanFileDto> files) =>
+      run(() async {
+        final moved = await core.trashPackageOrphans(files: files);
+        addOperationLogs(moved.map((path) => '[TRASH] $path'));
+      });
+
   void _recordInstallResult(InstallResultDto result) {
     addOperationLogs(result.logs);
     const keptPrefix = '[KEPT] User-modified file: ';

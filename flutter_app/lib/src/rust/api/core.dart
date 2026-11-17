@@ -42,6 +42,13 @@ Future<void> recordInstalledScheme({required String scheme, String? version}) =>
 Future<List<InstalledPackageDto>> listInstalledPackages() =>
     RustLib.instance.api.crateApiCoreListInstalledPackages();
 
+Future<PackageOrphanReportDto> packageOrphanReport() =>
+    RustLib.instance.api.crateApiCorePackageOrphanReport();
+
+Future<List<String>> trashPackageOrphans({
+  required List<PackageOrphanFileDto> files,
+}) => RustLib.instance.api.crateApiCoreTrashPackageOrphans(files: files);
+
 Future<String> importLocalScheme({
   required String directoryPath,
   required String displayName,

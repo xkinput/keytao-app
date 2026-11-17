@@ -44,6 +44,9 @@ pub fn record_result(core: &Core, root: &std::path::Path, success: bool) -> Resu
     if !success && root.is_dir() {
         crate::packages::prepare_active_rime_lua(core, &root)?;
     }
+    if root.is_dir() {
+        crate::packages::sync_generated(core, &root)?;
+    }
     Ok(())
 }
 

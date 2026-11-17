@@ -544,6 +544,7 @@ async fn smart_install_entries(
         let previous = crate::package_activation::read(core, &dest).map_err(|e| e.to_string())?;
         let mut removed_files = previous
             .as_ref()
+            .filter(|active| !active.key.is_empty())
             .map(|active| {
                 crate::package_store::PackageStore::new(core)
                     .read_files(&active.key)
@@ -603,6 +604,10 @@ async fn smart_install_entries(
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .into_owned(),
+            kept_backups: crate::package_activation::read(core, &dest)
+                .map_err(|e| e.to_string())?
+                .map(|active| active.kept_backups)
+                .unwrap_or_default(),
             ..Default::default()
         };
         for relative in ["default.custom.yaml", "default-custom.yaml", "rime.lua"] {
@@ -719,65 +724,40 @@ async fn smart_install_entries(
             );
         }
 
-        let merged_rime_lua_content = if retained.contains("rime.lua") {
-            std::fs::read_to_string(crate::packages::safe_path(&dest, "rime.lua")?).ok()
-        } else {
-            install_rime_lua(&dest, package_rime_lua.as_deref())?
-        };
-        activation.rime_lua = if retained.contains("rime.lua") {
-            merged_rime_lua_content.clone()
-        } else {
-            package_rime_lua.clone()
-        };
+        let merged_rime_lua_content = install_rime_lua(&dest, package_rime_lua.as_deref())?;
+        activation.rime_lua = package_rime_lua.clone();
         logs.push("[REGENERATED] rime.lua".into());
 
-        let mut user_customs = Vec::new();
-        for relative in [
-            "keytao.custom.yaml",
-            "keytao-dz.custom.yaml",
-            "keytao-bj.custom.yaml",
-            "lua/keytao_remove_filter.lua",
-        ] {
-            if !manifest.contains_key(relative) {
-                let path = crate::packages::safe_path(&dest, relative)?;
-                if let Ok(bytes) = std::fs::read(&path) {
-                    user_customs.push((relative, bytes));
-                }
-            }
-        }
-        crate::remove_filter::ensure_remove_filter(&dest)?;
-        for (relative, bytes) in &user_customs {
-            crate::scheme_files::write_file_atomic(
-                &crate::packages::safe_path(&dest, relative)?,
-                bytes,
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        let mut generated_schemas: std::collections::BTreeSet<_> =
+            package_schema_ids.iter().cloned().collect();
+        generated_schemas.extend(
+            crate::managed_custom::active_schema_ids_from_default(&dest)?
+                .into_iter()
+                .filter(|id| keytao_core::is_addon_schema(id)),
+        );
+        crate::managed_custom::regenerate(&dest, &generated_schemas)?;
         for relative in manifest.keys() {
             if let Some(file) = crate::package_activation::fingerprint(&dest, relative)
                 .map_err(|e| e.to_string())?
             {
-                activation.owned.push(file);
-            }
-        }
-        for relative in [
-            "default.custom.yaml",
-            "default-custom.yaml",
-            "rime.lua",
-            "keytao.custom.yaml",
-            "keytao-dz.custom.yaml",
-            "keytao-bj.custom.yaml",
-            "lua/keytao_remove_filter.lua",
-        ] {
-            if !manifest.contains_key(relative) && !user_customs.iter().any(|(p, _)| *p == relative)
-            {
-                if let Some(file) = crate::package_activation::fingerprint(&dest, relative)
+                let sha256 = if relative.ends_with(".custom.yaml") {
+                    let content =
+                        std::fs::read_to_string(crate::packages::safe_path(&dest, relative)?)
+                            .map_err(|e| e.to_string())?;
+                    crate::packages::sha256_reader(
+                        crate::managed_custom::strip(&content)?.as_bytes(),
+                    )
                     .map_err(|e| e.to_string())?
-                {
-                    activation.generated.push(file);
-                }
+                } else {
+                    manifest[relative].clone()
+                };
+                activation.owned.push(crate::package_activation::OwnedFile {
+                    path: file.path,
+                    sha256,
+                });
             }
         }
+        crate::packages::refresh_generated(&dest, &mut activation).map_err(|e| e.to_string())?;
         for name in ["default.custom.yaml", "default-custom.yaml"] {
             if let Ok(bytes) = std::fs::read(dest.join(name)) {
                 if let Ok(value) = serde_yaml::from_slice(&bytes) {

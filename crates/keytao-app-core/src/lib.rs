@@ -20,6 +20,7 @@ pub mod install;
 mod package_store;
 mod package_activation;
 mod package_artifacts;
+pub mod package_orphans;
 #[cfg(test)]
 mod package_activation_tests;
 pub mod packages;
@@ -31,6 +32,7 @@ pub mod update;
 pub mod user_words;
 mod remove_filter;
 mod candidate_page_size;
+mod managed_custom;
 pub mod wanxiang;
 pub mod rime_ice;
 #[cfg(any(target_os = "windows", test))]

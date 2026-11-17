@@ -66,7 +66,20 @@ fn collect(
             if *size > 512 * 1024 * 1024 {
                 return Err(CoreError::Other("方案包解压后过大".into()));
             }
-            files.insert(relative, fs::read(entry.path())?);
+            let mut bytes = fs::read(entry.path())?;
+            if relative.ends_with(".custom.yaml") {
+                let content = std::str::from_utf8(&bytes)
+                    .map_err(|error| CoreError::Other(error.to_string()))?;
+                bytes = crate::managed_custom::strip(content)
+                    .map_err(CoreError::Other)?
+                    .into_bytes();
+                if bytes.is_empty() {
+                    continue;
+                }
+            } else if crate::managed_custom::is_generated(&relative, &bytes) {
+                continue;
+            }
+            files.insert(relative, bytes);
         }
     }
     Ok(())

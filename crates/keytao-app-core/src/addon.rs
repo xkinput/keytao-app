@@ -10,6 +10,28 @@ pub const EASY_EN_ADDON_ID: &str = "easy_en";
 const MANIFEST: &str = ".keytao-easy-en.json";
 const LICENSE: &str = "easy_en-LICENSE";
 const CUSTOM: &str = "# KeyTao add-on defaults: no external word-splitter on mobile/desktop.\npatch:\n  easy_en/split_sentence: false\n";
+
+pub(crate) fn strip_legacy_custom(content: &str) -> String {
+    let marker = CUSTOM.lines().next().unwrap();
+    if content.trim() != "patch:\n  easy_en/split_sentence: false"
+        && !content.lines().any(|line| line == marker)
+    {
+        return content.to_owned();
+    }
+    let updated = crate::managed_custom::strip_legacy_patch(
+        content,
+        "easy_en/split_sentence",
+        "false",
+        serde_yaml::Value::Bool(false),
+    );
+    if updated == content {
+        return updated;
+    }
+    updated
+        .split_inclusive('\n')
+        .filter(|line| line.trim_end_matches(['\r', '\n']) != marker)
+        .collect()
+}
 const COMMITS_ATOM: &str = "https://github.com/BlindingDark/rime-easy-en/commits/master.atom";
 const BRANCH_SOURCE: &str = "https://github.com/BlindingDark/rime-easy-en/tree/master";
 const BRANCH_ARCHIVE: &str =
@@ -343,7 +365,9 @@ fn extract_package(archive: &Path, stage: &Path) -> Result<Vec<InstalledFile>, S
         }
     }
     let custom = stage.join("easy_en.custom.yaml");
-    std::fs::write(&custom, CUSTOM).map_err(|e| e.to_string())?;
+    let content =
+        crate::managed_custom::set_patch("", "english", Some("{easy_en/split_sentence: false}"))?;
+    std::fs::write(&custom, content).map_err(|e| e.to_string())?;
     let (sha256, size) = wanxiang::fingerprint(&custom)?;
     files.push(InstalledFile {
         path: "easy_en.custom.yaml".into(),
@@ -395,6 +419,19 @@ fn commit_package(
         if file.path == "easy_en.custom.yaml"
             && wanxiang::safe_target(&receipt.root, &file.path)?.is_file()
         {
+            let destination = wanxiang::safe_target(&receipt.root, &file.path)?;
+            let original =
+                std::fs::read_to_string(destination).map_err(|error| error.to_string())?;
+            let updated = crate::managed_custom::set_patch(
+                &original,
+                "english",
+                Some("{easy_en/split_sentence: false}"),
+            )?;
+            if updated != original {
+                let source = receipt.work.join("english-custom.yaml");
+                std::fs::write(&source, updated).map_err(|error| error.to_string())?;
+                receipt.replace(&file.path, &source, wanxiang::fingerprint(&source)?.0)?;
+            }
             continue;
         }
         let source = receipt.work.join("files").join(&file.path);
@@ -617,6 +654,7 @@ pub(crate) fn write_schema_list_content_transaction(
             wanxiang::fingerprint(&path)?.0,
         )?;
         if rime_lua.is_none() {
+            keytao_core::preserve_rime_lua_user_edits(&receipt.root, None)?;
             receipt.move_original("rime.lua")?;
         }
     }
@@ -638,7 +676,7 @@ fn remove_path_if_present(path: &Path) -> Result<(), String> {
 }
 
 fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
-    for dir in [root.to_path_buf(), root.join("build")] {
+    for dir in [root.join("build")] {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -646,11 +684,7 @@ fn remove_addon_schema_files(root: &Path, id: &str) -> Result<(), String> {
         };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let remove = if dir == root {
-                name.starts_with(&format!("{id}.userdb"))
-            } else {
-                name.starts_with(&format!("{id}."))
-            };
+            let remove = name.starts_with(&format!("{id}.")) && !name.contains(".userdb");
             if remove {
                 remove_path_if_present(&entry.path())?;
             }
@@ -669,6 +703,18 @@ fn uninstall_package(root: &Path) -> Result<InstallReceipt, String> {
     {
         let path = wanxiang::safe_target(&receipt.root, &relative)?;
         if path.exists() {
+            if relative == "easy_en.custom.yaml" {
+                let original = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+                let updated = crate::managed_custom::strip(&original)?;
+                if !updated.is_empty() {
+                    if updated != original {
+                        let source = receipt.work.join("english-custom.yaml");
+                        std::fs::write(&source, updated).map_err(|error| error.to_string())?;
+                        receipt.replace(&relative, &source, wanxiang::fingerprint(&source)?.0)?;
+                    }
+                    continue;
+                }
+            }
             receipt.move_original(&relative)?;
         }
     }
@@ -849,6 +895,7 @@ where
             return Err(error);
         }
         receipt.finish()?;
+        crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
         core.emit(CoreEvent::InstallProgress(InstallProgress {
             stage: "done".into(),
             percent: 100,
@@ -932,6 +979,7 @@ pub async fn addon_schema_uninstall(
         }
         receipt.finish()?;
         remove_addon_schema_files(&root, id)?;
+        crate::packages::sync_generated(core, &root).map_err(|error| error.to_string())?;
         if reset_english_mode {
             core.emit(CoreEvent::InstallProgress(InstallProgress {
                 stage: "addon-reset-mode".into(),
@@ -1067,6 +1115,23 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["scheme_key"], EASY_EN_ADDON_ID);
         assert!(manifest["rime_lua"].is_null());
+        assert_eq!(
+            std::fs::read(root.path().join(".keytao-rime-user-0.lua")).unwrap(),
+            b"stale = require('old_main')\n"
+        );
+        let report = crate::package_orphans::report(&host.core, root.path()).unwrap();
+        assert!(
+            report
+                .kept_backups
+                .iter()
+                .any(|backup| Path::new(&backup.backup)
+                    == root.path().join(".keytao-rime-user-0.lua"))
+        );
+        std::fs::write(
+            root.path().join("rime.lua"),
+            "manual = require('new_user_hook')\n",
+        )
+        .unwrap();
         let status = addon_schema_uninstall(&host.core, EASY_EN_ADDON_ID.into(), &host)
             .await
             .unwrap();
@@ -1081,11 +1146,27 @@ mod tests {
         );
         assert_eq!(keytao_core::deployed_schema_id_from_dir(root.path()), None);
         assert!(!root.path().join("default.yaml").exists());
+        assert_eq!(
+            std::fs::read(root.path().join(".keytao-rime-user-1.lua")).unwrap(),
+            b"manual = require('new_user_hook')\n"
+        );
+        let report = crate::package_orphans::report(&host.core, root.path()).unwrap();
+        assert!(
+            report
+                .kept_backups
+                .iter()
+                .any(|backup| Path::new(&backup.backup)
+                    == root.path().join(".keytao-rime-user-1.lua"))
+        );
     }
 
     #[test]
     fn standalone_addons_use_shared_defaults_without_shadowing_them() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
+        for id in [
+            EASY_EN_ADDON_ID,
+            wanxiang::SCHEMA_ID,
+            crate::rime_ice::SCHEMA_ID,
+        ] {
             let root = TestRoot::new();
             std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
             let shared = root.path().join("rime-data");
@@ -1104,7 +1185,11 @@ mod tests {
 
     #[test]
     fn standalone_fallback_cleanup_preserves_edits_and_rolls_back() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
+        for id in [
+            EASY_EN_ADDON_ID,
+            wanxiang::SCHEMA_ID,
+            crate::rime_ice::SCHEMA_ID,
+        ] {
             for edited in [false, true] {
                 let root = TestRoot::new();
                 std::fs::write(root.path().join("default.custom.yaml"), "patch: {}\n").unwrap();
@@ -1203,7 +1288,11 @@ mod tests {
 
     #[test]
     fn standalone_defaults_compile_and_input_with_librime() {
-        for id in [EASY_EN_ADDON_ID, wanxiang::SCHEMA_ID, crate::rime_ice::SCHEMA_ID] {
+        for id in [
+            EASY_EN_ADDON_ID,
+            wanxiang::SCHEMA_ID,
+            crate::rime_ice::SCHEMA_ID,
+        ] {
             let root = TestRoot::new();
             smoke_fixture::write(root.path()).unwrap();
             for suffix in ["schema.yaml", "dict.yaml"] {
@@ -1315,7 +1404,8 @@ mod tests {
             .finish()
             .unwrap();
         let mut receipt = InstallReceipt::new(root.path()).unwrap();
-        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, true, root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, true, root.path())
+            .unwrap();
         assert_eq!(
             parse_schema_list(
                 &std::fs::read_to_string(root.path().join("default.custom.yaml")).unwrap()
@@ -1324,7 +1414,8 @@ mod tests {
         );
         receipt.finish().unwrap();
         let mut receipt = InstallReceipt::new(root.path()).unwrap();
-        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, false, root.path()).unwrap();
+        write_schema_list_transaction(&mut receipt, wanxiang::SCHEMA_ID, false, root.path())
+            .unwrap();
         receipt.finish().unwrap();
         assert_eq!(
             parse_schema_list(
@@ -1356,8 +1447,11 @@ mod tests {
             );
         }
         assert_eq!(
-            std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap(),
-            CUSTOM
+            crate::managed_custom::strip(
+                &std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap()
+            )
+            .unwrap(),
+            ""
         );
         assert_eq!(
             std::fs::read_to_string(root.path().join(LICENSE)).unwrap(),
@@ -1451,7 +1545,10 @@ mod tests {
         receipt.finish().unwrap();
         assert!(!addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
         for (_, name) in addon_schema_source_files(EASY_EN_ADDON_ID) {
-            assert!(!root.path().join(name).exists());
+            assert_eq!(
+                root.path().join(&name).exists(),
+                name == "easy_en.custom.yaml"
+            );
         }
     }
 
@@ -1482,7 +1579,14 @@ mod tests {
                 "current upstream"
             };
             assert_eq!(
-                std::fs::read_to_string(root.path().join(name)).unwrap(),
+                if name == "easy_en.custom.yaml" {
+                    crate::managed_custom::strip(
+                        &std::fs::read_to_string(root.path().join(name)).unwrap(),
+                    )
+                    .unwrap()
+                } else {
+                    std::fs::read_to_string(root.path().join(name)).unwrap()
+                },
                 expected
             );
         }
@@ -1501,10 +1605,37 @@ mod tests {
             .finish()
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap(),
+            crate::managed_custom::strip(
+                &std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap()
+            )
+            .unwrap(),
             custom
         );
         assert!(addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).installed);
+        uninstall_package(root.path()).unwrap().finish().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.custom.yaml")).unwrap(),
+            custom
+        );
+    }
+
+    #[test]
+    fn legacy_defaults_with_user_customizations_and_user_databases_are_preserved() {
+        let original = format!("{CUSTOM}  user_setting: true\n");
+        assert_eq!(
+            strip_legacy_custom(&original),
+            "patch:\n  user_setting: true\n"
+        );
+        let root = TestRoot::new();
+        std::fs::create_dir(root.path().join("build")).unwrap();
+        std::fs::write(root.path().join("easy_en.userdb"), "private vocabulary").unwrap();
+        std::fs::write(root.path().join("build/easy_en.table.bin"), "compiled").unwrap();
+        remove_addon_schema_files(root.path(), EASY_EN_ADDON_ID).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("easy_en.userdb")).unwrap(),
+            "private vocabulary"
+        );
+        assert!(!root.path().join("build/easy_en.table.bin").exists());
     }
 
     #[test]
@@ -1522,7 +1653,10 @@ mod tests {
         install_fixture(root.path(), 'b', "updated upstream")
             .finish()
             .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        assert_eq!(
+            crate::managed_custom::strip(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            custom
+        );
         assert_eq!(
             addon_schema_status_at(root.path(), EASY_EN_ADDON_ID).version,
             "bbbbbbbbbbbb"

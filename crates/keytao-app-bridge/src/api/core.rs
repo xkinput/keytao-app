@@ -78,6 +78,30 @@ pub fn list_installed_packages() -> Result<Vec<InstalledPackageDto>, String> {
     )
 }
 
+pub async fn package_orphan_report() -> Result<PackageOrphanReportDto, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    runtime::dto(
+        keytao_app_core::package_orphans::report(&state.core, &state.host.user_root()?)
+            .map_err(|error| error.to_string())?,
+    )
+}
+
+pub async fn trash_package_orphans(files: Vec<PackageOrphanFileDto>) -> Result<Vec<String>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let files: Vec<_> = files
+        .into_iter()
+        .map(|file| keytao_app_core::package_orphans::OrphanFile {
+            path: file.path,
+            sha256: file.sha256,
+            size: file.size,
+        })
+        .collect();
+    keytao_app_core::package_orphans::trash_selected(&state.core, &state.host.user_root()?, &files)
+        .map_err(|error| error.to_string())
+}
+
 pub async fn import_local_scheme(
     directory_path: String,
     display_name: String,
@@ -1078,11 +1102,14 @@ pub fn get_candidate_page_size() -> Result<Option<u8>, String> {
     ))
 }
 
-pub fn set_candidate_page_size(size: Option<u8>) -> Result<Option<u8>, String> {
-    keytao_app_core::ime_settings::set_candidate_page_size(
-        &runtime::state()?.host.user_root()?,
-        size,
-    )
+pub async fn set_candidate_page_size(size: Option<u8>) -> Result<Option<u8>, String> {
+    let state = runtime::state()?;
+    let _guard = state.install_lock.lock().await;
+    let root = state.host.user_root()?;
+    let size = keytao_app_core::ime_settings::set_candidate_page_size(&root, size)?;
+    keytao_app_core::packages::sync_generated(&state.core, &root)
+        .map_err(|error| error.to_string())?;
+    Ok(size)
 }
 
 pub async fn set_desktop_english_mode(mode: EnglishModeDto) -> Result<EnglishModeDto, String> {

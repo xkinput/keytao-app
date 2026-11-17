@@ -841,6 +841,69 @@ class OnboardingDto {
           completed == other.completed;
 }
 
+class PackageKeptBackupDto {
+  final String path;
+  final String backup;
+
+  const PackageKeptBackupDto({required this.path, required this.backup});
+
+  @override
+  int get hashCode => path.hashCode ^ backup.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PackageKeptBackupDto &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          backup == other.backup;
+}
+
+class PackageOrphanFileDto {
+  final String path;
+  final String sha256;
+  final BigInt size;
+
+  const PackageOrphanFileDto({
+    required this.path,
+    required this.sha256,
+    required this.size,
+  });
+
+  @override
+  int get hashCode => path.hashCode ^ sha256.hashCode ^ size.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PackageOrphanFileDto &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          sha256 == other.sha256 &&
+          size == other.size;
+}
+
+class PackageOrphanReportDto {
+  final List<PackageOrphanFileDto> files;
+  final List<PackageKeptBackupDto> keptBackups;
+
+  const PackageOrphanReportDto({
+    required this.files,
+    required this.keptBackups,
+  });
+
+  @override
+  int get hashCode => files.hashCode ^ keptBackups.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PackageOrphanReportDto &&
+          runtimeType == other.runtimeType &&
+          files == other.files &&
+          keptBackups == other.keptBackups;
+}
+
 enum PanelOrientationDto { horizontal, vertical }
 
 class PlatformReleaseDto {

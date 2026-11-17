@@ -123,6 +123,43 @@ fn store(host: &Host, key: &str, entries: Vec<(String, Vec<u8>)>) {
     );
 }
 
+fn sync_legacy_package(host: &Host) {
+    let entries = files("alpha");
+    store(host, "keytao", entries.clone());
+    for (path, bytes) in &entries {
+        if !matches!(path.as_str(), "squirrel.custom.yaml" | "weasel.custom.yaml") {
+            write(&host.root, path, bytes);
+        }
+    }
+    host.core
+        .update_state(|state| state.active_scheme = Some("keytao".into()))
+        .unwrap();
+    let store = PackageStore::new(&host.core);
+    let marker = serde_json::to_vec(&serde_json::json!({
+        "root": host.root.canonicalize().unwrap(), "scheme_key": "keytao",
+        "manifest": store.read_meta("keytao").unwrap().unwrap().manifest,
+        "rime_lua": "require('alpha')\n",
+    }))
+    .unwrap();
+    write(&store.root(), "active-manifest.json", &marker);
+    write(&host.root, keytao_core::ACTIVE_SCHEME_MANIFEST, &marker);
+    assert!(!store.checked_activation_path().unwrap().exists());
+    crate::packages::sync_generated(&host.core, &host.root).unwrap();
+    let active = package_activation::read(&host.core, &host.root)
+        .unwrap()
+        .unwrap();
+    assert!(active.key.is_empty());
+    let generated = active
+        .generated
+        .iter()
+        .find(|file| file.path == "default.custom.yaml")
+        .unwrap();
+    assert_eq!(
+        generated.sha256,
+        sha256_reader(fs::File::open(host.root.join(&generated.path)).unwrap()).unwrap()
+    );
+}
+
 fn snapshot(root: &Path) -> BTreeMap<String, String> {
     fn walk(root: &Path, directory: &Path, result: &mut BTreeMap<String, String>) {
         for entry in fs::read_dir(directory).unwrap() {
@@ -241,6 +278,236 @@ async fn activation_a_b_a_restores_files_and_unowned_backups() {
     let default: serde_yaml::Value =
         serde_yaml::from_slice(&fs::read(host.root.join("default.custom.yaml")).unwrap()).unwrap();
     assert_eq!(default["patch"]["menu/page_size"].as_i64(), Some(9));
+}
+
+#[tokio::test]
+async fn generated_sections_follow_active_set_and_restore_package_bytes() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    crate::ime_settings::set_candidate_page_size(&host.root, Some(4)).unwrap();
+    let original = b"# Package comment\r\npatch: {menu/page_size: 9}";
+    let mut entries = files("keytao");
+    entries
+        .iter_mut()
+        .find(|(path, _)| path == "keytao.schema.yaml")
+        .unwrap()
+        .1 = b"schema: {schema_id: keytao}\nengine: {filters: [lua_filter@*existing]}\n".to_vec();
+    entries
+        .iter_mut()
+        .find(|(path, _)| path == "keytao.custom.yaml")
+        .unwrap()
+        .1 = original.to_vec();
+    store(&host, "keytao", entries);
+    store(&host, "xmjd", files("beta"));
+    for key in ["keytao", "xmjd", "keytao"] {
+        activate_scheme(&host.core, key, &host.root).await.unwrap();
+        let active = package_activation::read(&host.core, &host.root)
+            .unwrap()
+            .unwrap();
+        if key == "keytao" {
+            let custom = fs::read_to_string(host.root.join("keytao.custom.yaml")).unwrap();
+            assert_eq!(
+                crate::managed_custom::strip(&custom).unwrap().as_bytes(),
+                original
+            );
+            assert!(
+                active
+                    .generated
+                    .iter()
+                    .any(|f| f.path == "keytao.custom.yaml")
+            );
+            assert!(host.root.join("lua/keytao_remove_filter.lua").is_file());
+            assert!(!host.root.join("beta.custom.yaml").exists());
+        } else {
+            assert!(!host.root.join("keytao.custom.yaml").exists());
+            assert!(!host.root.join("lua/keytao_remove_filter.lua").exists());
+        }
+    }
+    remove_scheme_package(&host.core, "keytao", &host)
+        .await
+        .unwrap();
+    assert!(
+        crate::managed_custom::generated_paths(&host.root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn legacy_package_generated_entries_are_not_user_customizations() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let mut entries = files("alpha");
+    entries
+        .iter_mut()
+        .find(|(path, _)| path == "alpha.custom.yaml")
+        .unwrap()
+        .1 =
+        b"patch:\n  menu/page_size: 9\n  engine/filters/@next: lua_filter@*keytao_remove_filter\n"
+            .to_vec();
+    store(&host, "keytao", entries);
+    activate_scheme(&host.core, "keytao", &host.root)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(host.root.join("alpha.custom.yaml")).unwrap(),
+        "patch:\n  menu/page_size: 9\n"
+    );
+    assert!(
+        remove_scheme_package(&host.core, "keytao", &host)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!host.root.join("alpha.custom.yaml").exists());
+}
+
+#[tokio::test]
+async fn deactivation_does_not_regenerate_for_restored_unowned_schema() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    write(
+        &host.root,
+        "keytao.schema.yaml",
+        b"engine: {filters: [lua_filter@*user]}\n",
+    );
+    write(
+        &host.root,
+        "default.custom.yaml",
+        b"patch:\n  schema_list: [{schema: keytao}]\n",
+    );
+    store(&host, "keytao", files("keytao"));
+    activate_scheme(&host.core, "keytao", &host.root)
+        .await
+        .unwrap();
+    remove_scheme_package(&host.core, "keytao", &host)
+        .await
+        .unwrap();
+    assert!(host.root.join("keytao.schema.yaml").exists());
+    assert!(
+        crate::managed_custom::generated_paths(&host.root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn user_lua_and_kept_backups_survive_delete_and_reinstall() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    let original_lua = b"manual_original = true\r\n";
+    write(&host.root, "rime.lua", original_lua);
+    write(&host.root, "shared.txt", b"original collision");
+    store(&host, "keytao", files("alpha"));
+    store(&host, "xmjd", files("beta"));
+    activate_scheme(&host.core, "keytao", &host.root)
+        .await
+        .unwrap();
+    write(&host.root, "shared.txt", b"manual edit");
+    let manual_lua = b"require('alpha')\nmanual_edit = true\n";
+    write(&host.root, "rime.lua", manual_lua);
+    crate::ime_settings::set_candidate_page_size(&host.root, Some(4)).unwrap();
+    crate::packages::sync_generated(&host.core, &host.root).unwrap();
+    remove_scheme_package(&host.core, "keytao", &host)
+        .await
+        .unwrap();
+    let inactive = package_activation::read(&host.core, &host.root)
+        .unwrap()
+        .unwrap();
+    for (path, expected) in [
+        ("shared.txt", b"original collision".as_slice()),
+        ("rime.lua", manual_lua),
+    ] {
+        let backup = inactive
+            .kept_backups
+            .iter()
+            .find(|b| b.path == path)
+            .unwrap();
+        assert_eq!(
+            fs::read(PackageStore::new(&host.core).root().join(&backup.backup)).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(fs::read(host.root.join("rime.lua")).unwrap(), original_lua);
+    activate_scheme(&host.core, "xmjd", &host.root)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(host.root.join("rime.lua")).unwrap(),
+        "require('beta')\n"
+    );
+    remove_scheme_package(&host.core, "xmjd", &host)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(host.root.join("rime.lua")).unwrap(), original_lua);
+    assert!(
+        package_activation::read(&host.core, &host.root)
+            .unwrap()
+            .unwrap()
+            .kept_backups
+            .iter()
+            .any(|b| b.path == "shared.txt")
+    );
+}
+
+#[tokio::test]
+async fn legacy_generated_activation_switch_cleans_previous_package() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    sync_legacy_package(&host);
+    store(&host, "xmjd", files("beta"));
+    let result = activate_scheme(&host.core, "xmjd", &host.root)
+        .await
+        .unwrap();
+    for path in ["alpha.schema.yaml", "alpha.custom.yaml", "lua/alpha.lua"] {
+        assert!(!host.root.join(path).exists(), "{path}");
+        assert!(result.logs.contains(&format!("[REMOVED] {path}")), "{path}");
+    }
+    assert!(host.root.join("beta.schema.yaml").is_file());
+    remove_scheme_package(&host.core, "xmjd", &host)
+        .await
+        .unwrap();
+    assert!(!host.root.join("beta.schema.yaml").exists());
+    assert!(host.core.state().active_scheme.is_none());
+}
+
+#[tokio::test]
+async fn legacy_generated_activation_allows_active_package_deletion() {
+    let _serial = crate::wanxiang::TEST_SERIAL.lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::new(directory.path(), Arc::new(Sink));
+    sync_legacy_package(&host);
+    assert!(
+        remove_scheme_package(&host.core, "keytao", &host)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for path in [
+        "alpha.schema.yaml",
+        "alpha.custom.yaml",
+        "lua/alpha.lua",
+        "shared.txt",
+    ] {
+        assert!(!host.root.join(path).exists(), "{path}");
+    }
+    assert!(
+        !PackageStore::new(&host.core)
+            .package_path("keytao")
+            .exists()
+    );
+    assert!(!host.core.state().installed_packages.contains_key("keytao"));
+    assert!(host.core.state().active_scheme.is_none());
+    assert!(
+        package_activation::read(&host.core, &host.root)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -481,6 +748,8 @@ async fn switching_keeps_shared_dictionary_binaries_and_removes_a_only_outputs()
             b"stale incoming dictionary",
         );
     }
+    write(&host.root, "build/beta.schema.yaml",
+        b"schema: {schema_id: beta}\ntranslator: {dictionary: shared}\nextra_translator: {dictionary: beta_only}\n");
     let result = activate_scheme(&host.core, "xmjd", &host.root)
         .await
         .unwrap();
@@ -710,8 +979,12 @@ fn failed_store_publication_preserves_previous_activation_markers() {
     );
     write(&store.root(), "activation.json", b"previous ownership");
     write(&store.root(), "cloud", b"publication blocked by a file");
-    let error = crate::packages::finalize_pending(&host.core, "keytao", Some("v1"), true).unwrap_err();
-    assert!(error.to_string().to_lowercase().contains("directory"), "{error}");
+    let error =
+        crate::packages::finalize_pending(&host.core, "keytao", Some("v1"), true).unwrap_err();
+    assert!(
+        error.to_string().to_lowercase().contains("directory"),
+        "{error}"
+    );
     assert_eq!(
         fs::read(host.root.join(keytao_core::ACTIVE_SCHEME_MANIFEST)).unwrap(),
         br#"{"scheme_key":"previous"}"#
@@ -851,7 +1124,7 @@ async fn activation_real_data_copy_keytao_local_delete_reports_leftovers() {
         std::env::var_os("KEYTAO_B2_COPY_DIR").expect("Explicit isolated copy directory required"),
     );
     let directory = directory.canonicalize().unwrap();
-    assert!(directory.starts_with("/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/pkgb2/"));
+    assert!(directory.starts_with("/private/tmp/claude-501/-Users-rea-code-keytao-org-keytao-app/348229fe-6d80-4d02-b020-e4d903e04588/scratchpad/pkgb3/"));
     assert!(
         directory.join("rime").is_dir() && directory.join("app-state/scheme-packages").is_dir()
     );
@@ -972,11 +1245,13 @@ async fn activation_real_data_copy_keytao_local_delete_reports_leftovers() {
         })
         .map(|(path, _)| path)
         .collect();
+    let generated_leftovers = crate::managed_custom::generated_paths(&host.root).unwrap();
     let report = serde_json::json!({
         "sequence": ["keytao", local, "delete"], "local_source": local_source, "before_count": before.len(), "after_count": after.len(),
         "kept_during_sequence": [package_activation::retained(&keytao_result.logs), package_activation::retained(&local_result.logs)],
         "leftovers": leftovers, "retained_user_modified": retained, "added": added, "changed": changed,
         "removed": removed, "unowned_changed": unowned_changed,
+        "generated_leftovers": generated_leftovers,
     });
     fs::write(
         directory.join("e2e-report.json"),
@@ -990,4 +1265,8 @@ async fn activation_real_data_copy_keytao_local_delete_reports_leftovers() {
     );
     assert!(!store.package_path(&local).exists());
     assert!(host.core.state().active_scheme.is_none());
+    assert!(
+        generated_leftovers.is_empty(),
+        "KeyTao generated customs/filter remained after deletion"
+    );
 }

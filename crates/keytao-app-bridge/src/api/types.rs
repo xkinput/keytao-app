@@ -47,6 +47,25 @@ pub struct InstalledPackageDto {
 }
 
 #[derive(serde::Deserialize)]
+pub struct PackageOrphanFileDto {
+    pub path: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PackageKeptBackupDto {
+    pub path: String,
+    pub backup: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PackageOrphanReportDto {
+    pub files: Vec<PackageOrphanFileDto>,
+    pub kept_backups: Vec<PackageKeptBackupDto>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct SchemeUpdateDto {
     pub scheme_key: String,
     pub installed_version: String,

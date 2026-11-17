@@ -318,6 +318,45 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other)
 }
 
+pub(crate) fn refresh_generated(
+    root: &Path,
+    activation: &mut crate::package_activation::Activation,
+) -> Result<(), CoreError> {
+    let mut paths = crate::managed_custom::generated_paths(root).map_err(CoreError::Other)?;
+    paths.extend(["default.custom.yaml", "default-custom.yaml"].map(str::to_owned));
+    activation.generated.clear();
+    for path in paths {
+        if let Some(file) = crate::package_activation::fingerprint(root, &path)? {
+            activation.generated.push(file);
+        }
+    }
+    if let Some(content) = crate::install::prepare_rime_lua_install(
+        activation.rime_lua.as_deref(),
+        keytao_core::installed_addon_rime_lua_lines(root),
+    ) {
+        activation
+            .generated
+            .push(crate::package_activation::OwnedFile {
+                path: "rime.lua".into(),
+                sha256: sha256_reader(content.as_bytes())?,
+            });
+    }
+    Ok(())
+}
+
+pub fn sync_generated(core: &Core, root: &Path) -> Result<(), CoreError> {
+    let mut active = crate::package_activation::read(core, root)?.unwrap_or_else(|| {
+        crate::package_activation::Activation {
+            root: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        }
+    });
+    active.root = root.canonicalize()?.to_string_lossy().into_owned();
+    refresh_generated(root, &mut active)?;
+    crate::package_activation::write(core, &active)?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn store_cloud_archive(
     core: &Core,
@@ -847,7 +886,9 @@ async fn remove_active_package(
     host: &impl crate::scheme_host::SchemeHost,
 ) -> Result<Vec<String>, CoreError> {
     let root = host.user_root().map_err(CoreError::Other)?.canonicalize()?;
-    if let Some(activation) = crate::package_activation::read(core, &root)? {
+    if let Some(activation) = crate::package_activation::read(core, &root)?
+        .filter(|activation| !activation.key.is_empty())
+    {
         return remove_owned_package(core, scheme_key, host, &root, activation).await;
     }
     let mut active = None;
@@ -1023,7 +1064,7 @@ async fn remove_owned_package(
     scheme_key: &str,
     host: &impl crate::scheme_host::SchemeHost,
     root: &Path,
-    activation: crate::package_activation::Activation,
+    mut activation: crate::package_activation::Activation,
 ) -> Result<Vec<String>, CoreError> {
     if activation.key != scheme_key {
         return Err(CoreError::Other(
@@ -1033,7 +1074,7 @@ async fn remove_owned_package(
     let files = PackageStore::new(core).read_files(scheme_key)?.0;
     let paths = crate::package_activation::transaction_paths(root, &[], Some(&activation))?;
     let transaction = crate::package_activation::Transaction::begin(core, root, paths)?;
-    let logs = crate::package_activation::deactivate(core, root, &activation)?;
+    let logs = crate::package_activation::deactivate(core, root, &mut activation)?;
     let mut remaining = BTreeSet::new();
     for name in ["default.custom.yaml", "default-custom.yaml"] {
         if let Ok(content) = fs::read_to_string(safe_path(root, name).map_err(CoreError::Other)?) {
@@ -1101,8 +1142,13 @@ async fn remove_owned_package(
         drop(transaction);
         return Err(error);
     }
-    let activation_path = PackageStore::new(core).checked_activation_path()?;
-    fs::remove_file(activation_path)?;
+    let mut inactive = crate::package_activation::Activation {
+        root: root.canonicalize()?.to_string_lossy().into_owned(),
+        kept_backups: activation.kept_backups,
+        ..Default::default()
+    };
+    refresh_generated(root, &mut inactive)?;
+    crate::package_activation::write(core, &inactive)?;
     let legacy = PackageStore::new(core).checked_active_manifest_path()?;
     if legacy.try_exists()? {
         fs::remove_file(legacy)?;
@@ -1252,9 +1298,13 @@ pub(crate) fn cleanup_previous(
     zip_bytes: &[u8],
 ) -> Result<Vec<String>, String> {
     let incoming = archive_paths(zip_bytes, root)?;
-    if let Some(active) = crate::package_activation::read(core, root).map_err(|e| e.to_string())? {
-        let logs = crate::package_activation::deactivate(core, root, &active)
+    if let Some(mut active) = crate::package_activation::read(core, root)
+        .map_err(|e| e.to_string())?
+        .filter(|active| !active.key.is_empty())
+    {
+        let logs = crate::package_activation::deactivate(core, root, &mut active)
             .map_err(|e| e.to_string())?;
+        crate::package_activation::write(core, &active).map_err(|e| e.to_string())?;
         return Ok(logs);
     }
     let Some(active) = core.state().active_scheme else {

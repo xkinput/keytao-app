@@ -45,11 +45,13 @@ pub fn set_candidate_page_size(root: &Path, size: Option<u8>) -> Result<Option<u
         &serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    let schemas = crate::managed_custom::active_schema_ids(root)?;
+    crate::managed_custom::regenerate(root, &schemas)?;
     Ok(size)
 }
 
 pub fn prepare_candidate_page_size(root: &Path) -> Result<bool, String> {
-    crate::candidate_page_size::apply_candidate_page_size(root, read_candidate_page_size(root))
+    crate::managed_custom::regenerate(root, &crate::managed_custom::active_schema_ids(root)?)
 }
 
 #[derive(Serialize, Clone)]

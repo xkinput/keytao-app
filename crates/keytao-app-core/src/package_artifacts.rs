@@ -13,6 +13,56 @@ struct References {
     incomplete: bool,
 }
 
+pub(crate) fn owned_artifact_paths(
+    root: &Path,
+    schema_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, CoreError> {
+    let references = references(root, schema_ids.clone(), &BTreeMap::new())?;
+    let mut paths = references.binaries;
+    paths.extend(
+        references
+            .schemas
+            .into_iter()
+            .map(|id| format!("build/{id}.schema.yaml")),
+    );
+    if references.incomplete {
+        fn collect_binaries(
+            root: &Path,
+            directory: &Path,
+            paths: &mut BTreeSet<String>,
+        ) -> Result<(), CoreError> {
+            let entries = match fs::read_dir(directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_symlink() {
+                    continue;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let path = safe_path(root, &relative).map_err(CoreError::Other)?;
+                if kind.is_dir() {
+                    collect_binaries(root, &path, paths)?;
+                } else if kind.is_file() && relative.ends_with(".bin") {
+                    paths.insert(relative);
+                }
+            }
+            Ok(())
+        }
+        let build = safe_path(root, "build").map_err(CoreError::Other)?;
+        collect_binaries(root, &build, &mut paths)?;
+    }
+    Ok(paths)
+}
+
 pub(crate) fn changed_dictionary_ids(
     root: &Path,
     files: &[(String, Vec<u8>)],
@@ -158,7 +208,7 @@ fn references(
             None => read_optional(root, &format!("{id}.schema.yaml"))?,
         };
         let compiled = read_optional(root, &format!("build/{id}.schema.yaml"))?;
-        let mut parsed = false;
+        let mut resolved = false;
         for (bytes, compiled) in [(source, false), (compiled, true)] {
             let Some(bytes) = bytes else {
                 continue;
@@ -171,15 +221,16 @@ fn references(
             {
                 continue;
             }
-            parsed = true;
             if let Some(schema_id) = value["schema"]["schema_id"].as_str() {
                 safe_path(root, &format!("build/{schema_id}.schema.yaml"))
                     .map_err(CoreError::Other)?;
                 result.schemas.insert(schema_id.into());
             }
-            collect_value(root, &value, &mut pending, &mut result.binaries)?;
+            let complete = collect_value(root, &value, &mut pending, &mut result.binaries)?;
+            resolved |= compiled && complete;
         }
-        result.incomplete |= !parsed;
+        // Only a compiled schema includes custom patches and resolved includes.
+        result.incomplete |= !resolved;
     }
     Ok(result)
 }
@@ -198,12 +249,14 @@ fn collect_value(
     value: &Value,
     pending: &mut BTreeSet<String>,
     binaries: &mut BTreeSet<String>,
-) -> Result<(), CoreError> {
+) -> Result<bool, CoreError> {
+    let mut complete = true;
     match value {
         Value::Mapping(items) => {
             for (key, value) in items {
                 let key = key.as_str().unwrap_or("").rsplit('/').next().unwrap_or("");
                 match key {
+                    "__include" | "__patch" => complete = false,
                     "dictionary" | "prism" => {
                         if let Some(id) = value.as_str().filter(|id| !id.is_empty()) {
                             let extensions: &[&str] = if key == "dictionary" {
@@ -216,30 +269,38 @@ fn collect_value(
                                 safe_path(root, &name).map_err(CoreError::Other)?;
                                 binaries.insert(name);
                             }
+                        } else if !value.is_null() && value.as_str() != Some("") {
+                            complete = false;
                         }
                     }
                     "dependencies" => {
                         if let Some(ids) = value.as_sequence() {
-                            for id in ids.iter().filter_map(Value::as_str) {
+                            for value in ids {
+                                let Some(id) = value.as_str() else {
+                                    complete = false;
+                                    continue;
+                                };
                                 safe_path(root, &format!("{id}.schema.yaml"))
                                     .map_err(CoreError::Other)?;
                                 pending.insert(id.into());
                             }
+                        } else {
+                            complete = false;
                         }
                     }
                     _ => {}
                 }
-                collect_value(root, value, pending, binaries)?;
+                complete &= collect_value(root, value, pending, binaries)?;
             }
         }
         Value::Sequence(items) => {
             for value in items {
-                collect_value(root, value, pending, binaries)?;
+                complete &= collect_value(root, value, pending, binaries)?;
             }
         }
         _ => {}
     }
-    Ok(())
+    Ok(complete)
 }
 
 #[cfg(test)]
@@ -250,6 +311,56 @@ mod tests {
         let path = root.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn artifact_ownership_uses_resolved_dictionary_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "active.schema.yaml",
+            b"schema: {schema_id: active}\n__include: shared:/schema\n",
+        );
+        write(
+            root,
+            "build/active.schema.yaml",
+            b"schema: {schema_id: active}\ntranslator: {dictionary: shared, prism: custom_prism}\n",
+        );
+        write(root, "build/unused.table.bin", b"compiled");
+        assert_eq!(
+            owned_artifact_paths(root, &BTreeSet::from(["active".into()])).unwrap(),
+            BTreeSet::from([
+                "build/active.schema.yaml".into(),
+                "build/shared.table.bin".into(),
+                "build/shared.prism.bin".into(),
+                "build/shared.reverse.bin".into(),
+                "build/custom_prism.prism.bin".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn incomplete_artifact_ownership_protects_existing_binaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "active.schema.yaml",
+            b"schema: {schema_id: active}\n__patch: shared:/patch\n",
+        );
+        write(root, "build/shared.table.bin", b"compiled");
+        write(root, "build/nested/shared.prism.bin", b"compiled");
+        write(root, "build/stale.schema.yaml", b"{}");
+        write(root, "build/unrelated.txt", b"text");
+        assert_eq!(
+            owned_artifact_paths(root, &BTreeSet::from(["active".into()])).unwrap(),
+            BTreeSet::from([
+                "build/active.schema.yaml".into(),
+                "build/shared.table.bin".into(),
+                "build/nested/shared.prism.bin".into(),
+            ])
+        );
     }
 
     #[test]
@@ -378,7 +489,12 @@ mod tests {
         write(root, "active.schema.yaml", b"schema: {schema_id: active, dependencies: [helper]}\ntranslator: {dictionary: shared}\n");
         write(root, "helper.schema.yaml", &removed[1].1);
         for name in ["removed", "helper", "active", "unrelated"] {
-            write(root, &format!("build/{name}.schema.yaml"), b"{}");
+            let bytes = match name {
+                "active" => fs::read(root.join("active.schema.yaml")).unwrap(),
+                "helper" => removed[1].1.clone(),
+                _ => b"{}".to_vec(),
+            };
+            write(root, &format!("build/{name}.schema.yaml"), &bytes);
         }
         for name in ["solo", "shared", "helper_dict", "unrelated"] {
             for extension in ["table", "prism", "reverse"] {
@@ -424,6 +540,72 @@ mod tests {
             );
             assert!(root.join("build/shared.table.bin").exists());
         }
+    }
+
+    #[test]
+    fn unresolved_active_compilation_preserves_dictionary_binaries() {
+        for source in [
+            b"schema: {schema_id: active}\ntranslator: {dictionary: direct}\n".as_slice(),
+            b"schema: {schema_id: active}\ntranslator: {__include: shared:/translator}\n",
+            b"schema: {schema_id: active}\n__patch: shared:/patch\n",
+        ] {
+            for compiled in [
+                None,
+                Some(b"invalid: [".as_slice()),
+                Some(b"schema: {schema_id: another}\n".as_slice()),
+                Some(
+                    b"schema: {schema_id: active}\ntranslator: {__include: shared:/translator}\n"
+                        .as_slice(),
+                ),
+                Some(b"schema: {schema_id: active}\n__patch: shared:/patch\n".as_slice()),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path();
+                write(root, "active.schema.yaml", source);
+                if let Some(bytes) = compiled {
+                    write(root, "build/active.schema.yaml", bytes);
+                }
+                write(root, "build/removed.schema.yaml", b"{}");
+                write(root, "build/shared.table.bin", b"compiled");
+                let removed = vec![(
+                    "removed.schema.yaml".into(),
+                    b"translator: {dictionary: shared}".to_vec(),
+                )];
+                assert_eq!(
+                    cleanup(root, &removed, &BTreeSet::from(["active".into()])).unwrap(),
+                    vec!["build/removed.schema.yaml"]
+                );
+                assert!(root.join("build/shared.table.bin").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_compiled_schema_supplies_indirect_dictionary_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "active.schema.yaml",
+            b"schema: {schema_id: active}\n__patch: shared:/patch\n",
+        );
+        write(
+            root,
+            "build/active.schema.yaml",
+            b"schema: {schema_id: active}\ntranslator: {dictionary: shared}\n",
+        );
+        write(root, "build/removed.schema.yaml", b"{}");
+        write(root, "build/shared.table.bin", b"compiled");
+        write(root, "build/unused.table.bin", b"compiled");
+        let removed = vec![(
+            "removed.schema.yaml".into(),
+            b"translator: {dictionary: shared}\nextra: {dictionary: unused}\n".to_vec(),
+        )];
+        assert_eq!(
+            cleanup(root, &removed, &BTreeSet::from(["active".into()])).unwrap(),
+            vec!["build/removed.schema.yaml", "build/unused.table.bin"]
+        );
+        assert!(root.join("build/shared.table.bin").exists());
     }
 
     #[test]
