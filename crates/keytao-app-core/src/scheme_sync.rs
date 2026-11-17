@@ -33,7 +33,8 @@ pub fn export_profile(core: &Core) -> Result<Value, CoreError> {
             crate::scheme::validate_scheme_key(&scheme_key).map_err(CoreError::Other)?;
             let source = if let Some(id) = state.scheme_cloud_ids.get(&scheme_key) {
                 format!("cloud:{id}")
-            } else if let Some(meta) = crate::packages::stored_metadata(core, &scheme_key)?
+            } else if let Some(meta) =
+                crate::package_store::PackageStore::new(core).read_meta(&scheme_key)?
                 && meta.source == "cloud"
             {
                 format!("cloud-sha256:{}", meta.zip_sha256)

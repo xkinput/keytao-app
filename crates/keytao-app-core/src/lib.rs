@@ -17,6 +17,7 @@ pub mod ime_settings;
 pub mod ime_status;
 pub mod download;
 pub mod install;
+mod package_store;
 pub mod packages;
 pub mod scheme;
 pub mod scheme_files;

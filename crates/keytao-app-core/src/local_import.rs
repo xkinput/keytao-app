@@ -1,4 +1,5 @@
-use super::{PackageMeta, checked_store_dir, excluded_from_manifest, safe_path, validate_relative};
+use super::{PackageMeta, excluded_from_manifest, validate_relative};
+use crate::package_store::{PackageStore, Staging};
 use crate::{Core, CoreError};
 use sha2::{Digest, Sha256};
 use std::{
@@ -161,12 +162,13 @@ pub fn import_local_scheme(
         .into_inner();
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let version = digest[..12].to_owned();
-    let store = checked_store_dir(core)?;
+    let store = PackageStore::new(core);
+    let store_root = store.checked_root()?;
     let _guard = core
         .pending_package
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    fs::create_dir_all(&store)?;
+    fs::create_dir_all(&store_root)?;
     let state = core.state();
     let scheme_key = if let Some(key) = scheme_key {
         if !crate::scheme::is_local_scheme_key(key) || !state.installed_packages.contains_key(key) {
@@ -178,8 +180,8 @@ pub fn import_local_scheme(
         let mut key = base.clone();
         let mut suffix = 2u64;
         while state.installed_packages.contains_key(&key)
-            || store.join(format!("{key}.zip")).exists()
-            || store.join(format!("{key}.json")).exists()
+            || store.archive_path(&key).exists()
+            || store.metadata_path(&key).exists()
         {
             key = format!("{base}-{suffix}");
             suffix += 1;
@@ -197,7 +199,7 @@ pub fn import_local_scheme(
     };
     // Keep the active version until activation, including repeated imports and retries.
     let selection_base_version = if state.active_scheme.as_deref() == Some(&scheme_key) {
-        fs::read(safe_path(&store, &format!("{scheme_key}.json")).map_err(CoreError::Other)?)
+        fs::read(store.checked_metadata_path(&scheme_key)?)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<PackageMeta>(&bytes).ok())
             .and_then(|meta| meta.selection_base_version)
@@ -223,20 +225,16 @@ pub fn import_local_scheme(
         manifest,
         zip_sha256: digest,
     };
-    let mut archive = tempfile::Builder::new()
-        .prefix(".local-")
-        .tempfile_in(&store)?;
+    let mut archive = store.staging_file(Staging::Local)?;
     archive.write_all(&bytes)?;
     archive.as_file().sync_all()?;
-    let mut meta = tempfile::Builder::new()
-        .prefix(".meta-")
-        .tempfile_in(&store)?;
+    let mut meta = store.staging_file(Staging::Metadata)?;
     serde_json::to_writer_pretty(meta.as_file_mut(), &metadata)?;
     meta.as_file().sync_all()?;
     archive
-        .persist(safe_path(&store, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?)
+        .persist(store.checked_archive_path(&scheme_key)?)
         .map_err(|error| CoreError::from(error.error))?;
-    meta.persist(safe_path(&store, &format!("{scheme_key}.json")).map_err(CoreError::Other)?)
+    meta.persist(store.checked_metadata_path(&scheme_key)?)
         .map_err(|error| CoreError::from(error.error))?;
     core.update_state(|state| {
         state.installed_packages.insert(

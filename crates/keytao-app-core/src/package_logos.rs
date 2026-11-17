@@ -1,4 +1,5 @@
-use super::{safe_path, stored_archive_file, validate_relative};
+use super::{safe_path, validate_relative};
+use crate::package_store::PackageStore;
 use crate::Core;
 use std::{
     collections::BTreeSet,
@@ -9,8 +10,8 @@ use std::{
 
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 
-pub(super) fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
-    let (archive, meta) = stored_archive_file(core, scheme_key).ok()?;
+pub(crate) fn package_logo_path(core: &Core, scheme_key: &str) -> Option<PathBuf> {
+    let (archive, meta) = PackageStore::new(core).open_archive(scheme_key).ok()?;
     render_archive_logo(&core.env().cache_dir, archive, &meta.zip_sha256, scheme_key)
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AppEnv, CoreEvent, EventSink, Platform};
+use crate::{AppEnv, CoreEvent, EventSink, Platform, package_store::PackageStore};
 use std::{io::Read, sync::Arc};
 
 struct NullSink;
@@ -256,12 +256,7 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
     let config = "patch:\n  menu/page_size: 7\n  schema_list:\n    - schema: example\n";
     fs::write(root.join("default.custom.yaml"), config).unwrap();
     crate::deploy::record_result(&core, &root, true).unwrap();
-    let previous_manifest = fs::read(
-        checked_store_dir(&core)
-            .unwrap()
-            .join("active-manifest.json"),
-    )
-    .unwrap();
+    let previous_manifest = fs::read(PackageStore::new(&core).active_manifest_path()).unwrap();
     let previous_version = core.state().installed_packages[&key].version.clone();
     fs::write(
         path.join("example.schema.yaml"),
@@ -279,12 +274,7 @@ async fn local_reimport_replaces_package_and_preserves_runtime_user_files() {
     );
     assert!(core.state().last_deploy.is_none());
     assert_eq!(
-        fs::read(
-            checked_store_dir(&core)
-                .unwrap()
-                .join("active-manifest.json")
-        )
-        .unwrap(),
+        fs::read(PackageStore::new(&core).active_manifest_path()).unwrap(),
         previous_manifest
     );
     for name in protected {

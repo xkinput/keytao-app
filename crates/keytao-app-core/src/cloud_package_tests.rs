@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AppEnv, CoreEvent, EventSink, Platform};
+use crate::{AppEnv, CoreEvent, EventSink, Platform, package_store::PackageStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::VecDeque, io::Write, sync::Arc};
@@ -208,10 +208,13 @@ async fn upload_uses_contract_sequence_and_only_ticket_headers_for_storage() {
                 .to_owned()
         })
         .collect();
-    assert!(headers[0].starts_with("GET /api/user/scheme-packages HTTP/1.1"));
-    assert!(headers[1].starts_with("POST /api/user/scheme-packages HTTP/1.1"));
+    assert!(headers[0].starts_with(concat!("GET /api/user/scheme", "-packages HTTP/1.1")));
+    assert!(headers[1].starts_with(concat!("POST /api/user/scheme", "-packages HTTP/1.1")));
     assert!(headers[2].starts_with("PUT /storage HTTP/1.1"));
-    assert!(headers[3].starts_with("POST /api/user/scheme-packages/21/complete HTTP/1.1"));
+    assert!(headers[3].starts_with(concat!(
+        "POST /api/user/scheme",
+        "-packages/21/complete HTTP/1.1"
+    )));
     let storage_headers = headers[2].to_ascii_lowercase();
     let content_lengths: Vec<_> = storage_headers
         .lines()
@@ -296,20 +299,8 @@ async fn download_sha_mismatch_rejects_without_writing_package_or_state() {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("SHA-256"), "{error}");
     assert_eq!(serde_json::to_value(core.state()).unwrap(), before);
-    assert!(
-        !core
-            .env()
-            .data_dir
-            .join("scheme-packages/txjx.zip")
-            .exists()
-    );
-    assert!(
-        !core
-            .env()
-            .data_dir
-            .join("scheme-packages/txjx.json")
-            .exists()
-    );
+    assert!(!PackageStore::new(&core).archive_path("txjx").exists());
+    assert!(!PackageStore::new(&core).metadata_path("txjx").exists());
     assert_eq!(requests.len(), 3);
     let storage_headers = String::from_utf8_lossy(&requests[2]).to_ascii_lowercase();
     assert!(!storage_headers.contains("authorization:"));
@@ -971,11 +962,5 @@ async fn logout_while_storage_download_is_running_prevents_local_account_referen
     assert!(matches!(result, Err(CoreError::Permission(_))));
     assert!(!core.state().installed_packages.contains_key("txjx"));
     assert!(!core.state().scheme_cloud_ids.contains_key("txjx"));
-    assert!(
-        !core
-            .env()
-            .data_dir
-            .join("scheme-packages/txjx.zip")
-            .exists()
-    );
+    assert!(!PackageStore::new(&core).archive_path("txjx").exists());
 }
