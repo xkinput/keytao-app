@@ -975,27 +975,42 @@ pub async fn manage_wanxiang(
     } else {
         uninstall(&root)?
     };
+    #[cfg(target_os = "windows")]
+    let mut public_update = None;
     let deploy_result = async {
         write_addon_schema_list(&root, SCHEMA_ID, installed)?;
+        #[cfg(target_os = "windows")]
+        {
+            public_update = Some(crate::windows_public_schemas::update_public_schemas(|| {
+                if installed {
+                    host.publish_wanxiang_sources(&receipt.public_source_files())
+                } else {
+                    host.remove_public_schema(SCHEMA_ID, &[])
+                }
+            })?);
+        }
         host.deploy().await?;
         if installed && !status_at(&root).deployed {
             return Err("万象拼音部署产物缺失".to_string());
-        }
-        #[cfg(target_os = "windows")]
-        if installed {
-            host.publish_wanxiang_sources(&receipt.public_source_files())?;
-        } else {
-            host.remove_public_schema(SCHEMA_ID, &[])?;
         }
         Ok(())
     }.await;
     if let Err(error) = deploy_result {
         let rollback = receipt.rollback();
         let restore = write_file_atomic(&config_path, &previous_config);
+        #[cfg(target_os = "windows")]
+        let public_rollback = public_update.map_or(Ok(()), |update| update.rollback());
+        #[cfg(target_os = "windows")]
+        let error = match &public_rollback {
+            Ok(()) => error,
+            Err(restore) => format!("{error}；恢复公共方案失败：{restore}"),
+        };
         if let Err(rollback_error) = rollback {
             return Err(format!("{error}；恢复词库失败：{rollback_error}"));
         }
         restore.map_err(|e| format!("{error}；恢复方案列表失败：{e}"))?;
+        #[cfg(target_os = "windows")]
+        public_rollback.map_err(|_| error.clone())?;
         if let Err(restore_error) = host.deploy().await {
             return Err(format!("{error}；已恢复文件，请重新部署：{restore_error}"));
         }

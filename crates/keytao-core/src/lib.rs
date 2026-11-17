@@ -2,6 +2,8 @@
 //! Every consumer (the Flutter app via keytao-app-bridge, the C FFI and the
 //! platform IMEs) links against this crate as its rime back-end.
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+pub mod deploy_child;
 mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;

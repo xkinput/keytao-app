@@ -13,7 +13,9 @@ use std::sync::{
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{CloseHandle, FreeLibrary, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0},
+        Foundation::{
+            CloseHandle, FreeLibrary, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        },
         System::{
             LibraryLoader::{
                 LoadLibraryExW, LOAD_LIBRARY_FLAGS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
@@ -90,7 +92,11 @@ pub(crate) fn build_backend() -> Result<
                 "no_learning_fallback_failed",
                 msg = error
             );
-            "server unavailable".to_string()
+            if error.contains("需要重新部署") {
+                error
+            } else {
+                "server unavailable".to_string()
+            }
         })?;
         start_pipe_retry(&engine)?;
         let (path, signature) = engine.reload_stamp();
@@ -154,7 +160,7 @@ impl InProcEngine {
         self.install(Self::try_build_engine(false)?)
     }
 
-    /// Reload externally deployed artifacts without moving deployment out of the App.
+    /// Load externally deployed artifacts without running deployment in this process.
     pub fn reload_server(&self) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
@@ -171,32 +177,25 @@ impl InProcEngine {
         Ok(())
     }
 
-    /// The server serializes callers; core teardown invalidates every live engine.
-    pub fn deploy_server(&self) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+    /// Release mapped dictionaries before the child invalidates their files on Windows.
+    pub fn prepare_server_deploy(&self) -> Result<(), String> {
+        let _inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _init_guard = EngineInitGuard::acquire(false)?;
         let user_dir = default_user_data_dir().ok_or("cannot determine KeyTao data directory")?;
+        keytao_core::reinitialize(
+            user_dir.to_string_lossy().into_owned(),
+            server_shared_data_dir(),
+        )
+    }
+
+    /// Only the short-lived `--deploy` entry point may call this.
+    pub fn deploy_server(deploy: impl FnOnce() -> i32) -> Result<i32, String> {
+        let _init_guard = EngineInitGuard::acquire(false)?;
         let shared = server_shared_data_dir();
-        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
-        keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared.clone())?;
-        keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared.clone())?;
-        keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
-        let runtime = inner
-            .runtime
-            .clone()
-            .unwrap_or_else(|| ImeRuntime::with_dirs(&user_dir, shared).with_ime_host());
-        runtime.reload_without_deploy()?;
-        let session = runtime.create_session()?;
-        let path = ReloadStamp::write(&user_dir)?;
-        *inner = InProcState {
-            runtime: Some(runtime),
-            session: Some(session),
-            reload_stamp_signature: ReloadStamp::signature_at(&path),
-            reload_stamp_path: Some(path),
-            rime_dll,
-        };
-        Ok(())
+        let _rime_dll = preload_rime_dll(&shared)?;
+        // The generic child must use the same bundled data as the server.
+        std::env::set_var("KEYTAO_RIME_SHARED_DATA_DIR", shared);
+        Ok(deploy())
     }
 
     /// A server owns one initialized runtime; each connection gets its own session.
@@ -246,8 +245,11 @@ impl InProcEngine {
 
     fn try_build_engine(sandboxed: bool) -> Result<InProcState, String> {
         let _init_guard = EngineInitGuard::acquire(sandboxed)?;
+        let shared = server_shared_data_dir();
+        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
         let sandbox = if sandboxed {
-            Some(crate::appcontainer::prepare_data()?)
+            let version = keytao_core::librime_runtime_version().ok_or("需要重新部署")?;
+            Some(crate::appcontainer::prepare_data(&version, &shared)?)
         } else {
             None
         };
@@ -255,27 +257,21 @@ impl InProcEngine {
             Some(data) => data.user_dir.clone(),
             None => default_user_data_dir().ok_or("cannot determine keytao data directory")?,
         };
-        let shared = server_shared_data_dir();
-        let rime_dll = preload_rime_dll(&shared)?.map(Arc::new);
         let reload_stamp_path = sandbox.as_ref().map_or_else(
             || ReloadStamp::path(&user_dir),
             |data| data.reload_stamp_path.clone(),
         );
-        let needs_deploy = sandbox.as_ref().is_some_and(|data| {
-            data.changed
-                || !keytao_core::schema_install_state(&user_dir).deployed
-                || keytao_core::windows_rime_build_repair_required(&user_dir)
-        });
         let runtime = ImeRuntime::with_dirs(&user_dir, shared).with_ime_host();
-        if needs_deploy {
-            // This function only runs on the warmup/reload worker, never the
-            // host's input thread. Public package updates preserve private userdb.
-            runtime.reload()?;
-            sandbox.as_ref().unwrap().mark_deployed()?;
+        // Reload after copying prebuilt files into the reinitialized sandbox runtime.
+        if sandbox.is_some() && runtime.is_initialized() {
+            runtime.reload_without_deploy()?;
         } else {
             runtime.init_without_deploy()?;
         }
         let session = runtime.create_session()?;
+        if let Some(data) = sandbox.as_ref().filter(|data| data.changed) {
+            data.mark_loaded()?;
+        }
         let reload_stamp_signature = sandbox.as_ref().map_or_else(
             || ReloadStamp::signature_at(&reload_stamp_path),
             |data| data.reload_stamp_signature.clone(),
@@ -291,16 +287,38 @@ impl InProcEngine {
 
     fn try_build_no_learning(sandboxed: bool) -> Result<InProcState, String> {
         let _init_guard = EngineInitGuard::acquire_no_learning(sandboxed)?;
-        let (temporary_root, deployed, path, reload_stamp_signature) = if sandboxed {
-            crate::appcontainer::fallback_directories()?
-        } else {
-            let deployed =
-                default_user_data_dir().ok_or("cannot determine deployed data directory")?;
-            let path = ReloadStamp::path(&deployed);
-            let signature = ReloadStamp::signature_at(&path);
-            (std::env::temp_dir(), deployed, path, signature)
-        };
-        let user_dir = temporary_root.join("keytao-no-learning");
+        let (temporary_root, deployed, path, reload_stamp_signature) =
+            crate::appcontainer::fallback_directories(sandboxed)?;
+        let bundled = server_shared_data_dir();
+        let rime_dll = preload_rime_dll(&bundled)?.map(Arc::new);
+        let version = keytao_core::librime_runtime_version().ok_or("需要重新部署")?;
+        crate::appcontainer::validate_prebuilt(&deployed, &version)?;
+        let generation = deployed
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid public schema generation")?;
+        let user_dir = crate::appcontainer::cache_directory(
+            &temporary_root.join("keytao-no-learning"),
+            generation,
+            &version,
+        );
+        let stamp = format!("{}\n{version}\n{generation}", env!("CARGO_PKG_VERSION"));
+        let marker = user_dir.join(".keytao-no-learning.version");
+        let stale = std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str())
+            || !keytao_core::schema_install_state(&user_dir).deployed
+            || crate::appcontainer::validate_prebuilt(&user_dir, &version).is_err()
+            || keytao_core::windows_rime_build_repair_required(&user_dir);
+        let runtime = ImeRuntime::with_dirs(&user_dir, bundled);
+        if stale {
+            std::fs::create_dir_all(&user_dir).map_err(|error| error.to_string())?;
+            copy_fallback_data(&deployed, &user_dir)?;
+            keytao_core::complete_deployment(&user_dir)?;
+            keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+        }
+        crate::appcontainer::prune_cache(
+            &temporary_root.join("keytao-no-learning"),
+            Some(&user_dir),
+        );
         if let Ok(entries) = std::fs::read_dir(&temporary_root) {
             for entry in entries.flatten() {
                 if entry
@@ -311,50 +329,12 @@ impl InProcEngine {
                         .file_type()
                         .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
                 {
-                    let _ = std::fs::remove_dir_all(entry.path());
+                    crate::appcontainer::prune_cache(&entry.path(), None);
                 }
             }
         }
-        let bundled = server_shared_data_dir();
-        let rime_dll = preload_rime_dll(&bundled)?.map(Arc::new);
-        let stamp = format!(
-            "{}\n{bundled}\n{}\n{}",
-            env!("CARGO_PKG_VERSION"),
-            deployed.display(),
-            reload_stamp_signature.as_deref().unwrap_or_default(),
-        );
-        let marker = user_dir.join(".keytao-no-learning.version");
-        let stale = std::fs::read_to_string(&marker).ok().as_deref() != Some(stamp.as_str())
-            || !keytao_core::schema_install_state(&user_dir).deployed;
-        let shared = deployed.to_string_lossy().into_owned();
-        let runtime = ImeRuntime::with_dirs(&user_dir, shared.clone());
-        if stale {
-            match std::fs::remove_dir_all(&user_dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("clear stale no-learning directory: {error}")),
-            }
-            std::fs::create_dir_all(&user_dir).map_err(|error| error.to_string())?;
-            if !bundled.is_empty() {
-                copy_fallback_data(Path::new(&bundled), &user_dir)?;
-            }
-            copy_fallback_data(&deployed, &user_dir)?;
-            runtime.reload()?;
-            // Custom patches can override source settings, so enforce compiled settings too.
-            for entry in
-                std::fs::read_dir(user_dir.join("build")).map_err(|error| error.to_string())?
-            {
-                let entry = entry.map_err(|error| error.to_string())?;
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".schema.yaml")
-                {
-                    disable_schema_learning(&entry.path())?;
-                }
-            }
-            keytao_core::reinitialize(user_dir.to_string_lossy().into_owned(), shared)?;
-            keytao_core::mark_windows_rime_build_repair_complete(&user_dir)?;
+        if stale && runtime.is_initialized() {
+            runtime.reload_without_deploy()?;
         } else {
             runtime.init_without_deploy()?;
         }
@@ -379,9 +359,7 @@ impl InProcEngine {
 fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        if entry.file_name() == "build"
-            || !crate::appcontainer::public_asset(Path::new(&entry.file_name()))
-        {
+        if !crate::appcontainer::public_asset(Path::new(&entry.file_name())) {
             continue;
         }
         let kind = entry.file_type().map_err(|error| error.to_string())?;
@@ -393,23 +371,26 @@ fn copy_fallback_data(source: &Path, target: &Path) -> Result<(), String> {
             std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
             copy_fallback_data(&entry.path(), &destination)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &destination).map_err(|error| error.to_string())?;
+            let mut bytes = std::fs::read(entry.path()).map_err(|error| error.to_string())?;
             if entry
                 .file_name()
                 .to_string_lossy()
                 .ends_with(".schema.yaml")
             {
-                disable_schema_learning(&destination)?;
+                bytes = disable_schema_learning(&bytes)?;
+            }
+            if std::fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+                keytao_core::write_file_atomic(&destination, &bytes)
+                    .map_err(|error| error.to_string())?;
             }
         }
     }
     Ok(())
 }
 
-fn disable_schema_learning(path: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+fn disable_schema_learning(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut schema: serde_yaml::Value =
-        serde_yaml::from_slice(&bytes).map_err(|error| error.to_string())?;
+        serde_yaml::from_slice(bytes).map_err(|error| error.to_string())?;
     let mut namespaces = vec!["translator".to_string()];
     if let Some(translators) = schema["engine"]["translators"].as_sequence() {
         for translator in translators.iter().filter_map(|value| value.as_str()) {
@@ -422,8 +403,46 @@ fn disable_schema_learning(path: &Path) -> Result<(), String> {
     for namespace in namespaces {
         schema[namespace]["enable_user_dict"] = serde_yaml::Value::Bool(false);
     }
-    let bytes = serde_yaml::to_string(&schema).map_err(|error| error.to_string())?;
-    std::fs::write(path, bytes).map_err(|error| error.to_string())
+    serde_yaml::to_string(&schema)
+        .map(String::into_bytes)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_learning_copies_prebuilt_and_disables_every_translator() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("build")).unwrap();
+        let schema = "engine:\n  translators:\n    - table_translator\n    - script_translator@english\ntranslator:\n  enable_user_dict: true\nenglish:\n  enable_user_dict: true\n";
+        std::fs::write(source.path().join("build/keytao.schema.yaml"), schema).unwrap();
+        std::fs::write(source.path().join("build/keytao.table.bin"), b"prebuilt").unwrap();
+        std::fs::create_dir_all(source.path().join("keytao.userdb")).unwrap();
+        std::fs::write(source.path().join("keytao.userdb/words"), b"private").unwrap();
+        copy_fallback_data(source.path(), target.path()).unwrap();
+        let schema: serde_yaml::Value = serde_yaml::from_slice(
+            &std::fs::read(target.path().join("build/keytao.schema.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema["translator"]["enable_user_dict"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(schema["english"]["enable_user_dict"].as_bool(), Some(false));
+        assert_eq!(
+            std::fs::read(target.path().join("build/keytao.table.bin")).unwrap(),
+            b"prebuilt"
+        );
+        assert!(!target.path().join("keytao.userdb").exists());
+        assert!(
+            std::fs::read_to_string(source.path().join("build/keytao.schema.yaml"))
+                .unwrap()
+                .contains("enable_user_dict: true")
+        );
+    }
 }
 
 fn start_pipe_retry(engine: &Arc<InProcEngine>) -> Result<(), String> {
@@ -571,6 +590,9 @@ impl EngineInitGuard {
         if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
             unsafe {
                 let _ = CloseHandle(handle);
+            }
+            if wait == WAIT_TIMEOUT {
+                return Err("另一个部署正在进行，请稍后重试".into());
             }
             return Err(format!(
                 "wait for engine initialization mutex: 0x{:08x}",

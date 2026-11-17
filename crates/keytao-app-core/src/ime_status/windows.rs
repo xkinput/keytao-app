@@ -24,6 +24,74 @@ mod pipe_io;
 mod server_recovery;
 
 #[cfg(any(target_os = "windows", test))]
+const WINDOWS_SERVER_EXE: &str = "keytao-windows-ime-server.exe";
+
+#[cfg(any(target_os = "windows", test))]
+fn find_windows_server_exe(
+    root: &std::path::Path,
+    native_arm64: bool,
+) -> Result<std::path::PathBuf, String> {
+    let architectures = if native_arm64 {
+        ["arm64x", "current", "x64"]
+    } else {
+        ["current", "x64", "arm64x"]
+    };
+    architectures
+        .into_iter()
+        .map(|arch| root.join(arch).join(WINDOWS_SERVER_EXE))
+        .chain(std::iter::once(root.join(WINDOWS_SERVER_EXE)))
+        .find(|path| path.is_file())
+        .ok_or_else(|| format!("installed IME server {WINDOWS_SERVER_EXE} is missing from WindowsImeRuntimeDir; reinstall KeyTao before deploying"))
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::{WINDOWS_SERVER_EXE, find_windows_server_exe};
+
+    #[test]
+    fn installed_server_selection_matches_native_architecture_and_requires_a_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let exe = WINDOWS_SERVER_EXE;
+        assert!(
+            find_windows_server_exe(root, false)
+                .unwrap_err()
+                .contains(exe)
+        );
+        for arch in ["arm64x", "current", "x64"] {
+            std::fs::create_dir(root.join(arch)).unwrap();
+            std::fs::write(root.join(arch).join(exe), "").unwrap();
+        }
+        assert_eq!(
+            find_windows_server_exe(root, true).unwrap(),
+            root.join("arm64x").join(exe)
+        );
+        assert_eq!(
+            find_windows_server_exe(root, false).unwrap(),
+            root.join("current").join(exe)
+        );
+        std::fs::remove_file(root.join("current").join(exe)).unwrap();
+        assert_eq!(
+            find_windows_server_exe(root, false).unwrap(),
+            root.join("x64").join(exe)
+        );
+        std::fs::remove_file(root.join("arm64x").join(exe)).unwrap();
+        assert_eq!(
+            find_windows_server_exe(root, true).unwrap(),
+            root.join("x64").join(exe)
+        );
+        std::fs::remove_file(root.join("x64").join(exe)).unwrap();
+        std::fs::write(root.join(exe), "").unwrap();
+        for native_arm64 in [false, true] {
+            assert_eq!(
+                find_windows_server_exe(root, native_arm64).unwrap(),
+                root.join(exe)
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
 #[derive(serde::Deserialize)]
 struct WindowsImeEngineStatus {
     ok: bool,
@@ -1402,28 +1470,23 @@ pub async fn windows_ime_ensure_registered(core: Arc<Core>) -> Result<WindowsIme
 #[cfg(target_os = "windows")]
 pub fn windows_deploy_rime_blocking(
     user_dir: PathBuf,
-    shared_data_dir: String,
+    _shared_data_dir: String,
 ) -> Result<(), String> {
     crate::ime_settings::prepare_candidate_page_size(&user_dir)?;
-    keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
-    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
-    let deployed_by_server = server::deploy_if_available()?;
-    let _engine_guard = if deployed_by_server {
-        None
-    } else {
-        Some(WindowsImeEngineInitGuard::acquire()?)
-    };
-    if !deployed_by_server {
-        write_keytao_ime_reload_stamp()
-            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
-        keytao_core::invalidate_active_windows_rime_build(&user_dir)?;
-        keytao_core::deploy(user_dir.to_string_lossy().into_owned(), shared_data_dir)?;
-    }
     crate::windows_public_schemas::publish_english_settings(
         &user_dir,
         keytao_core::english_mode::read_english_mode(&user_dir)
             == keytao_core::english_mode::EnglishMode::Schema,
     )?;
+    keytao_core::clear_windows_rime_build_repair_marker(&user_dir)?;
+    let profile_guard = WindowsImeProfileDeploymentGuard::suspend()?;
+    let deployed_by_server = server::deploy_if_available()?;
+    if !deployed_by_server {
+        let exe = server::installed_server_exe()?;
+        write_keytao_ime_reload_stamp()
+            .map_err(|error| format!("通知现有输入法会话暂停加载失败：{error}"))?;
+        keytao_core::deploy_child::run_deploy_child(&exe, std::time::Duration::from_secs(600))?;
+    }
     crate::deploy::render_user_schema_logos(&user_dir);
     if !deployed_by_server {
         write_keytao_ime_reload_stamp()

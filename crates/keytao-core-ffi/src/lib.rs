@@ -367,6 +367,40 @@ pub extern "C" fn keytao_log_flush(timeout_ms: u32) {
     });
 }
 
+/// Run the macOS executable's `--deploy` entry without initializing a session.
+/// The executable must exit with the returned status.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn keytao_run_deploy_child_main() -> i32 {
+    guard("keytao_run_deploy_child_main", 1, || {
+        keytao_core::deploy_child::run_deploy_child_main()
+    })
+}
+
+/// Redeploy through the macOS executable itself, with a 600-second timeout.
+/// Returns true only for a successful exit and a valid success protocol result.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn keytao_run_deploy_child() -> bool {
+    guard("keytao_run_deploy_child", false, || {
+        let result = std::env::current_exe()
+            .map_err(|error| format!("cannot locate the input method executable: {error}"))
+            .and_then(|exe| {
+                keytao_core::deploy_child::run_deploy_child(
+                    &exe,
+                    std::time::Duration::from_secs(600),
+                )
+            });
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                log_error(format_args!("keytao_run_deploy_child: {error}"));
+                false
+            }
+        }
+    })
+}
+
 /// Initialize the Rime runtime. Must be called once before any other function.
 /// Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
 /// Returns true on success.

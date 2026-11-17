@@ -76,6 +76,18 @@ void keytao_log_drain_key_stats(void);
 void keytao_log_flush(uint32_t timeout_ms);
 
 /**
+ * Run the macOS executable's `--deploy` entry without initializing a session.
+ * The executable must exit with the returned status.
+ */
+int32_t keytao_run_deploy_child_main(void);
+
+/**
+ * Redeploy through the macOS executable itself, with a 600-second timeout.
+ * Returns true only for a successful exit and a valid success protocol result.
+ */
+bool keytao_run_deploy_child(void);
+
+/**
  * Initialize the Rime runtime. Must be called once before any other function.
  * Both `user_dir` and `shared_dir` must be non-null UTF-8 strings.
  * Returns true on success.

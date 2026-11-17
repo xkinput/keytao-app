@@ -66,9 +66,9 @@ use windows::{
     core::{BSTR, Interface, PCWSTR, PWSTR, VARIANT, w},
 };
 
-const SERVER_EXE: &str = "keytao-windows-ime-server.exe";
 const START_TIMEOUT: Duration = Duration::from_secs(5);
-const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
+// Include the 600s child timeout and the server's two 30s engine-init waits.
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(670);
 // Win32 SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION; never grant impersonation rights.
 const PIPE_SECURITY_QOS: u32 = 0x0010_0000 | 0x0001_0000;
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
@@ -314,25 +314,16 @@ fn start_server(
     Ok(())
 }
 
-fn installed_server_exe() -> Result<PathBuf, String> {
+pub(super) fn installed_server_exe() -> Result<PathBuf, String> {
     let root = registry_path(w!("SOFTWARE\\KeyTao"), w!("WindowsImeRuntimeDir"))?;
-    let architectures = if super::windows_native_machine() == super::WINDOWS_PE_MACHINE_ARM64 {
-        ["arm64x", "current", "x64"]
-    } else {
-        ["current", "x64", "arm64x"]
-    };
-    for path in architectures
-        .into_iter()
-        .map(|arch| root.join(arch).join(SERVER_EXE))
-        .chain(std::iter::once(root.join(SERVER_EXE)))
-    {
-        if path.is_file() {
-            let path = path.canonicalize().map_err(|error| error.to_string())?;
-            verify_installation_path(&path)?;
-            return Ok(path);
-        }
-    }
-    Err("installed IME server is missing from WindowsImeRuntimeDir".into())
+    let path = super::find_windows_server_exe(
+        &root,
+        super::windows_native_machine() == super::WINDOWS_PE_MACHINE_ARM64,
+    )?
+    .canonicalize()
+    .map_err(|error| error.to_string())?;
+    verify_installation_path(&path)?;
+    Ok(path)
 }
 
 pub(super) fn installed_runtime_dir() -> Option<PathBuf> {
@@ -569,10 +560,10 @@ fn verified_server(file: &File) -> Result<VerifiedServer, String> {
         .canonicalize()
         .map_err(|error| error.to_string())?;
         verify_installation_path(&image)?;
-        if !image
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(SERVER_EXE))
-        {
+        if !image.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .eq_ignore_ascii_case(super::WINDOWS_SERVER_EXE)
+        }) {
             return Err("pipe peer is not the installed IME server executable".into());
         }
         Ok(VerifiedServer {
@@ -611,7 +602,7 @@ fn verify_installation_path(path: &Path) -> Result<(), String> {
     }
 }
 
-/// False permits in-process deployment only in InProc mode with no server pipe.
+/// False permits a standalone deploy child only in InProc mode with no server pipe.
 pub(super) fn deploy_if_available() -> Result<bool, String> {
     if !server_enabled() {
         super::server_recovery::require_absent_server(open_pipe(&pipe_name()?).map(|_| ()))?;

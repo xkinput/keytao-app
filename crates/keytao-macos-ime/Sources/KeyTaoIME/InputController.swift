@@ -694,15 +694,13 @@ final class KeyTaoInputController: IMKInputController {
     }
 
     @objc private func redeployKeyTao() {
-        guard KeyTaoRuntime.shared.reloadNow() else {
-            NSLog("KeyTao: manual runtime reload failed")
-            return
+        KeyTaoRuntime.shared.reloadNow { succeeded in
+            guard succeeded else {
+                NSLog("KeyTao: manual runtime redeployment failed")
+                return
+            }
+            NSSound(named: NSSound.Name("Glass"))?.play()
         }
-        // Explicit reloads use the same client cleanup as stamp-triggered
-        // reloads. Clearing only the engine flag leaves embedded marked text
-        // in the host even though the corresponding Rime composition is gone.
-        runtimeDidReload()
-        NSSound(named: NSSound.Name("Glass"))?.play()
     }
 
     @objc private func openKeyTaoApp() {
