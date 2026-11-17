@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-app-core"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "dirs",
  "futures-util",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-linux-ime"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "dirs",
  "freetype-rs",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-schema-logo"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "image",
  "resvg",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "embed-resource",
  "fontdue",
@@ -1737,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "keytao-windows-ime-server"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "keytao-app-core",
  "keytao-core",
