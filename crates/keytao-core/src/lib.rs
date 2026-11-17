@@ -8,6 +8,14 @@ mod deployment_log;
 #[cfg(test)]
 mod deployment_state_tests;
 pub mod english_mode;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "ios"
+))]
+mod global_input;
 #[cfg(test)]
 mod grammar_tests;
 mod reload_stamp_cache;
@@ -2814,6 +2822,15 @@ mod desktop {
                 .unwrap_or(false)
         }
 
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        pub(crate) fn is_composing(&self) -> bool {
+            let _rime = rime_api_lock();
+            self.session
+                .status()
+                .map(|s| s.is_composing)
+                .unwrap_or(true)
+        }
+
         /// Set the session option without reading any state back, so that a
         /// pending commit stays pending (see [`Engine::state`]).
         pub fn apply_ascii_mode(&self, enabled: bool) {
@@ -4444,6 +4461,7 @@ pub struct ImeRuntimeSession {
     dirs: RimeDataDirs,
     inner: Arc<Mutex<ImeRuntimeSessionInner>>,
     policy: Arc<SessionInputPolicy>,
+    context_ascii_mode: Arc<AtomicU8>,
 }
 
 #[cfg(any(
@@ -4484,7 +4502,7 @@ struct RimeDataDirs {
 /// live session ids.
 ///
 /// Lock order: `initialized` → `reload_barrier` → `sessions` → session inner →
-/// librime.
+/// global input → librime.
 #[cfg(any(
     target_os = "linux",
     target_os = "windows",
@@ -4505,6 +4523,8 @@ struct ProcessRimeState {
     /// Every session handed out in this process. A teardown must drop their
     /// engines before finalizing librime; entries die with their session.
     sessions: Mutex<Vec<Weak<Mutex<ImeRuntimeSessionInner>>>>,
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    global_input: Mutex<Option<global_input::GlobalInput>>,
 }
 
 #[cfg(any(
@@ -4519,6 +4539,8 @@ static PROCESS_RIME: ProcessRimeState = ProcessRimeState {
     generation: AtomicU64::new(0),
     reload_barrier: RwLock::new(()),
     sessions: Mutex::new(Vec::new()),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    global_input: Mutex::new(None),
 };
 
 #[cfg(any(
@@ -4563,6 +4585,24 @@ impl ProcessRimeState {
         request: Option<&SchemaSwitchRequest>,
     ) -> Result<(), String> {
         let sessions = lock_ignore_poison(&self.sessions);
+        let apply = |engine: &Engine| -> Result<(), String> {
+            if let Some(request) = request {
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                {
+                    let mut global = lock_ignore_poison(&self.global_input);
+                    let global = global_input::GlobalInput::get(&mut global, engine, root);
+                    if !engine.is_composing() {
+                        global.apply(engine, root)?;
+                    }
+                    let before = global_input::InputState::read(engine);
+                    engine.apply_switch_request(request, false)?;
+                    global.publish(&before, &global_input::InputState::read(engine));
+                }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                engine.apply_switch_request(request, false)?;
+            }
+            Ok(())
+        };
         let mut applied = false;
         for session in sessions.iter().filter_map(Weak::upgrade) {
             let mut inner = lock_ignore_poison(&session);
@@ -4571,16 +4611,13 @@ impl ProcessRimeState {
             }
             ImeRuntimeSession::rebuild_engine(&mut inner, root)?;
             if let Some(engine) = inner.engine.as_ref() {
-                if let Some(request) = request {
-                    engine.apply_switch_request(request, false)?;
-                }
+                apply(engine)?;
+                inner.applied_input_version = 0;
                 applied = true;
             }
         }
         if let Some(engine) = extra {
-            if let Some(request) = request {
-                engine.apply_switch_request(request, false)?;
-            }
+            apply(engine)?;
             applied = true;
         }
         if applied {
@@ -4611,6 +4648,10 @@ impl ProcessRimeState {
             Some(_) => {}
         }
         self.drop_live_engines();
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        {
+            *lock_ignore_poison(&self.global_input) = None;
+        }
         *initialized = None;
         self.generation.fetch_add(1, Ordering::SeqCst);
         desktop::finalize_rime()
@@ -4662,6 +4703,9 @@ struct ImeRuntimeSessionInner {
     carried_ascii_mode: Option<bool>,
     carried_english_mode: Option<bool>,
     english_mode: english_mode::EnglishModeController,
+    applied_input_version: u64,
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    last_input_state: Option<global_input::InputState>,
 }
 
 #[cfg(any(
@@ -4957,6 +5001,16 @@ impl ImeRuntime {
             if self.0.ime_host {
                 engine.apply_reset_switch_request(&dirs.user)?;
             }
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            if self.0.ime_host {
+                let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
+                let global = global_input::GlobalInput::get(&mut global, &engine, &dirs.user);
+                global.english_mode.configure(
+                    english_mode::read_english_mode(&dirs.user),
+                    engine.list_schemas(),
+                );
+                global.apply(&engine, &dirs.user)?;
+            }
             if request.is_some() {
                 PROCESS_RIME.apply_switch_request(&dirs.user, Some(&engine), request.as_ref())?;
             }
@@ -4968,6 +5022,9 @@ impl ImeRuntime {
                 carried_ascii_mode: None,
                 carried_english_mode: None,
                 english_mode,
+                applied_input_version: 0,
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                last_input_state: None,
             }));
             PROCESS_RIME.register(&inner);
             drop(barrier);
@@ -4976,6 +5033,7 @@ impl ImeRuntime {
                 dirs,
                 inner,
                 policy: Arc::new(SessionInputPolicy::new(InputContextPolicy::default())),
+                context_ascii_mode: Arc::new(AtomicU8::new(0)),
             })
         })();
         if let Some(started) = started {
@@ -5029,12 +5087,12 @@ impl ImeRuntimeSession {
         // Reading the policy and handling the key happen in one critical
         // section: a context that turns sensitive between the two would
         // otherwise still hand this key to librime.
-        self.with_engine_and_mode(|engine, policy, english_mode, ime_host| {
+        let publish = keycode != 0xffe5; // Caps Lock must not change the global language.
+        self.with_engine_access(publish, |engine, policy, mode, ime_host, input| {
             if policy.composing {
-                let previous_schema = ime_host.then(|| engine.current_schema());
                 let desktop_dictionary = cfg!(not(any(target_os = "android", target_os = "ios")))
-                    && english_mode.mode == english_mode::EnglishMode::Schema;
-                let before = desktop_dictionary && engine.is_ascii_mode();
+                    && mode.mode == english_mode::EnglishMode::Schema;
+                let before = engine.is_ascii_mode();
                 let mut result = if mask == 0 {
                     key_policy::CandidateArrowAction::from_keycode(keycode)
                         .map(|action| {
@@ -5067,22 +5125,21 @@ impl ImeRuntimeSession {
                 } else {
                     engine.process_key_result(keycode, mask)
                 };
+                if before != result.state.ascii_mode {
+                    self.context_ascii_mode.store(0, Ordering::Release);
+                }
                 // Mobile keyboards already select schemas themselves. Desktop
                 // ascii_composer toggles become dictionary-mode switches only
                 // when the user explicitly selected the schema preference.
                 if desktop_dictionary {
-                    if let Err(error) =
-                        english_mode.reconcile_ascii_toggle(engine, before, &mut result)
-                    {
+                    if let Err(error) = mode.reconcile_ascii_toggle(engine, before, &mut result) {
                         crate::rt_log!(Level::Info, "error", "english_mode_switch", msg = error);
                     }
                 }
-                if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
-                    if let Err(error) =
-                        self.apply_reset_switch_request(engine, ime_host, &mut result.state)
-                    {
-                        crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
-                    }
+                if let Err(error) =
+                    self.apply_reset_switch_request(engine, ime_host, input, &mut result.state)
+                {
+                    crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
                 }
                 result
             } else {
@@ -5104,9 +5161,15 @@ impl ImeRuntimeSession {
                 accepted: false,
             });
         }
-        self.with_engine_and_policy(|engine, policy| {
+        self.with_engine_access(true, |engine, policy, _, ime_host, before| {
             if policy.composing {
-                engine.process_enter()
+                let mut result = engine.process_enter();
+                if let Err(error) =
+                    self.apply_reset_switch_request(engine, ime_host, before, &mut result.state)
+                {
+                    crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
+                }
+                result
             } else {
                 KeyProcessResult {
                     state: engine.state(),
@@ -5143,13 +5206,12 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_candidate_on_page(&self, index: usize) -> Option<ImeState> {
-        self.with_engine_and_mode(|engine, _, _, ime_host| {
-            let previous_schema = ime_host.then(|| engine.current_schema());
+        self.with_engine_and_mode(|engine, _, _, ime_host, before| {
             let mut state = engine.select_candidate_on_page(index);
-            if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
-                if let Err(error) = self.apply_reset_switch_request(engine, ime_host, &mut state) {
-                    crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
-                }
+            if let Err(error) =
+                self.apply_reset_switch_request(engine, ime_host, before, &mut state)
+            {
+                crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
             }
             state
         })
@@ -5168,23 +5230,31 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_candidate_global(&self, index: usize) -> Option<ImeState> {
-        self.with_engine(|engine| engine.select_candidate_global(index))
+        self.with_engine_and_mode(|engine, _, _, ime_host, before| {
+            let mut state = engine.select_candidate_global(index);
+            if let Err(error) =
+                self.apply_reset_switch_request(engine, ime_host, before, &mut state)
+            {
+                crate::rt_log!(Level::Info, "error", "schema_switch_reset", msg = error);
+            }
+            state
+        })
     }
 
     /// Commit whatever is being composed; the path a frontend takes when the
     /// input context ends and the composition must not be lost.
     pub fn commit_composition(&self) -> Option<ImeState> {
-        self.with_engine(Engine::commit_composition)
+        self.with_input_change(Engine::commit_composition)
     }
 
     /// Discard whatever is being composed; the path a frontend takes when the
     /// input context ends and the composition must not reach the client.
     pub fn clear_composition(&self) -> Option<ImeState> {
-        self.with_engine(Engine::clear_composition)
+        self.with_input_change(Engine::clear_composition)
     }
 
     pub fn commit_raw_input(&self) -> Option<ImeState> {
-        self.with_engine(Engine::commit_raw_input)
+        self.with_input_change(Engine::commit_raw_input)
     }
 
     pub fn raw_input(&self) -> Option<String> {
@@ -5208,20 +5278,29 @@ impl ImeRuntimeSession {
     }
 
     pub fn select_schema(&self, schema_id: &str) -> Result<ImeState, String> {
-        self.with_engine_and_mode(|engine, _, _, ime_host| {
-            let mut state = engine.select_schema(schema_id)?;
-            self.apply_reset_switch_request(engine, ime_host, &mut state)?;
+        self.context_ascii_mode.store(0, Ordering::Release);
+        self.with_engine_and_mode(|engine, _, _, ime_host, before| {
+            let mut state = match engine.select_schema(schema_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    if let Some(before) = before {
+                        before.restore(engine, &self.dirs.user)?;
+                    }
+                    return Err(error);
+                }
+            };
+            self.apply_reset_switch_request(engine, ime_host, before, &mut state)?;
             Ok(state)
         })
         .ok_or_else(|| "Rime session is unavailable".to_string())?
     }
 
     pub fn change_page(&self, backward: bool) -> Option<ImeState> {
-        self.with_engine(|engine| engine.change_page(backward))
+        self.with_input_change(|engine| engine.change_page(backward))
     }
 
     pub fn reset(&self) -> Option<ImeState> {
-        self.with_engine(Engine::reset)
+        self.with_input_change(Engine::reset)
     }
 
     pub fn is_ascii_mode(&self) -> bool {
@@ -5229,25 +5308,35 @@ impl ImeRuntimeSession {
     }
 
     pub fn set_ascii_mode(&self, enabled: bool) -> Option<ImeState> {
-        self.with_engine(|engine| engine.set_ascii_mode(enabled))
+        self.context_ascii_mode.store(0, Ordering::Release);
+        self.with_input_change(|engine| engine.set_ascii_mode(enabled))
+    }
+
+    /// Host conversion compartments are local to a context, until its next focus.
+    pub fn set_context_ascii_mode(&self, enabled: Option<bool>) -> Option<ImeState> {
+        self.context_ascii_mode.store(
+            enabled.map_or(0, |enabled| 1 + u8::from(enabled)),
+            Ordering::Release,
+        );
+        self.with_engine(|engine| {
+            enabled.map_or_else(|| engine.state(), |enabled| engine.set_ascii_mode(enabled))
+        })
     }
 
     /// Logical English mode, including a dictionary schema with ASCII off.
     /// Keep `is_ascii_mode` for deciding whether keys should pass through.
     pub fn is_english_mode(&self) -> bool {
-        self.with_engine_and_mode(|engine, _, mode, _| mode.is_english(engine))
+        self.with_engine_access(false, |engine, _, mode, _, _| mode.is_english(engine))
             .unwrap_or(false)
     }
 
     /// Switch desktop input using the saved ASCII/dictionary preference.
     /// Mobile clients that manage schemas themselves keep using set_ascii_mode.
     pub fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String> {
-        self.with_engine_and_mode(|engine, _, mode, ime_host| {
-            let previous_schema = ime_host.then(|| engine.current_schema());
+        self.context_ascii_mode.store(0, Ordering::Release);
+        self.with_engine_and_mode(|engine, _, mode, ime_host, before| {
             let mut state = mode.switch(engine, enabled)?;
-            if previous_schema.is_some_and(|schema| schema != engine.current_schema()) {
-                self.apply_reset_switch_request(engine, ime_host, &mut state)?;
-            }
+            self.apply_reset_switch_request(engine, ime_host, before, &mut state)?;
             Ok(state)
         })
         .ok_or_else(|| "Rime session is unavailable".to_string())?
@@ -5257,9 +5346,13 @@ impl ImeRuntimeSession {
         &self,
         engine: &Engine,
         ime_host: bool,
+        before: Option<&global_input::InputState>,
         state: &mut ImeState,
     ) -> Result<(), String> {
-        if ime_host {
+        if ime_host
+            && state.schema_id != ".default"
+            && before.is_none_or(|before| before.schema_id != state.schema_id)
+        {
             engine.apply_reset_switch_request(&self.dirs.user)?;
             let committed = state.committed.take();
             *state = engine.state();
@@ -5274,7 +5367,8 @@ impl ImeRuntimeSession {
     }
 
     pub fn set_option(&self, option_name: &str, enabled: bool) -> Option<ImeState> {
-        self.with_engine(|engine| engine.set_option(option_name, enabled))
+        self.context_ascii_mode.store(0, Ordering::Release);
+        self.with_input_change(|engine| engine.set_option(option_name, enabled))
     }
 
     /// What the linked librime can do natively, see [`EngineCapabilities`].
@@ -5302,6 +5396,10 @@ impl ImeRuntimeSession {
         self.with_engine_and_policy(|engine, _| action(engine))
     }
 
+    fn with_input_change<T>(&self, action: impl FnOnce(&Engine) -> T) -> Option<T> {
+        self.with_engine_and_mode(|engine, _, _, _, _| action(engine))
+    }
+
     /// Same as [`ImeRuntimeSession::with_engine`], but the action also sees the
     /// input context policy, so that policy checks and the librime call they
     /// guard cannot be split by another thread.
@@ -5309,7 +5407,7 @@ impl ImeRuntimeSession {
         &self,
         action: impl FnOnce(&Engine, InputContextPolicy) -> T,
     ) -> Option<T> {
-        self.with_engine_and_mode(|engine, policy, _, _| action(engine, policy))
+        self.with_engine_access(false, |engine, policy, _, _, _| action(engine, policy))
     }
 
     fn with_engine_and_mode<T>(
@@ -5319,6 +5417,21 @@ impl ImeRuntimeSession {
             InputContextPolicy,
             &mut english_mode::EnglishModeController,
             bool,
+            Option<&global_input::InputState>,
+        ) -> T,
+    ) -> Option<T> {
+        self.with_engine_access(true, action)
+    }
+
+    fn with_engine_access<T>(
+        &self,
+        publish: bool,
+        action: impl FnOnce(
+            &Engine,
+            InputContextPolicy,
+            &mut english_mode::EnglishModeController,
+            bool,
+            Option<&global_input::InputState>,
         ) -> T,
     ) -> Option<T> {
         // A surviving session must not rebuild against another runtime's
@@ -5339,13 +5452,71 @@ impl ImeRuntimeSession {
         let ImeRuntimeSessionInner {
             engine,
             english_mode,
+            applied_input_version,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            last_input_state,
             ..
         } = &mut *inner;
         let engine = engine.as_ref()?;
         if clear_composition {
             engine.discard_composition();
         }
-        Some(action(engine, policy, english_mode, ime_host))
+        let context_ascii_mode = self.context_ascii_mode.load(Ordering::Acquire);
+        if context_ascii_mode != 0 {
+            engine.apply_ascii_mode(context_ascii_mode == 2);
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        if ime_host {
+            let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
+            let global = global_input::GlobalInput::get(&mut global, engine, &self.dirs.user);
+            if policy.composing && context_ascii_mode == 0 {
+                if *applied_input_version != global.version && !engine.is_composing() {
+                    global.apply(engine, &self.dirs.user).ok()?;
+                    *applied_input_version = global.version;
+                }
+                let before = publish
+                    .then(|| global_input::InputState::read(engine))
+                    .and_then(|state| {
+                        if state.is_switcher() {
+                            last_input_state.clone()
+                        } else {
+                            Some(state)
+                        }
+                    });
+                if let Some(before) = &before {
+                    *last_input_state = Some(before.clone());
+                }
+                let result = action(
+                    engine,
+                    policy,
+                    &mut global.english_mode,
+                    ime_host,
+                    before.as_ref(),
+                );
+                if let Some(before) = before {
+                    let after = global_input::InputState::read(engine);
+                    global.publish(&before, &after);
+                    if !after.is_switcher() {
+                        *last_input_state = Some(after.clone());
+                    }
+                    if global.matches(&after) {
+                        *applied_input_version = global.version;
+                    }
+                }
+                return Some(result);
+            }
+            *applied_input_version = 0;
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let _ = (publish, applied_input_version);
+        let before = (ime_host && publish).then(|| global_input::InputState::read(engine));
+        Some(action(
+            engine,
+            policy,
+            english_mode,
+            ime_host,
+            before.as_ref(),
+        ))
     }
 
     fn refresh_if_needed(&self, inner: &mut ImeRuntimeSessionInner) -> Result<(), String> {
@@ -5370,6 +5541,17 @@ impl ImeRuntimeSession {
             inner
                 .english_mode
                 .configure(english_mode::read_english_mode(root), engine.list_schemas());
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            if inner.ime_host {
+                let mut global = lock_ignore_poison(&PROCESS_RIME.global_input);
+                let global = global_input::GlobalInput::get(&mut global, &engine, root);
+                global
+                    .english_mode
+                    .configure(english_mode::read_english_mode(root), engine.list_schemas());
+                global.apply(&engine, root)?;
+                inner.carried_ascii_mode = None;
+                inner.carried_english_mode = None;
+            }
             // Restore live language state before applying any new app request.
             if let Some(ascii_mode) = inner.carried_ascii_mode.take() {
                 engine.apply_ascii_mode(ascii_mode);
@@ -5389,6 +5571,11 @@ impl ImeRuntimeSession {
             }
             inner.engine = Some(engine);
             inner.generation = current;
+            inner.applied_input_version = 0;
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            {
+                inner.last_input_state = None;
+            }
             Ok(())
         })();
         if let Some(started) = started {

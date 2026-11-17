@@ -60,6 +60,7 @@ pub trait ImeEngineBackend: Send + Sync {
     fn reset(&self) -> Option<ImeState>;
     fn state(&self) -> ImeState;
     fn set_input_policy(&self, policy: InputContextPolicy) -> Option<ImeState>;
+    fn set_context_ascii_mode(&self, enabled: Option<bool>) -> Option<ImeState>;
     fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String>;
 }
 
@@ -558,6 +559,10 @@ impl ImeEngineBackend for InProcEngine {
             policy.learning = false;
         }
         self.session()?.set_input_policy(policy)
+    }
+
+    fn set_context_ascii_mode(&self, enabled: Option<bool>) -> Option<ImeState> {
+        self.session()?.set_context_ascii_mode(enabled)
     }
 
     fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String> {

@@ -156,6 +156,7 @@ pub struct TsfState {
     reload_stamp_changed: bool,
     pub shift_pressed_without_key: bool,
     session_reset_pending: bool,
+    focus_state_refresh_pending: bool,
     /// What TSF says about the focused context (password field, disabled
     /// keyboard, empty context). Refreshed on focus changes.
     pub input_context: ContextInputState,
@@ -310,6 +311,7 @@ impl TsfState {
             reload_stamp_changed: false,
             shift_pressed_without_key: false,
             session_reset_pending: false,
+            focus_state_refresh_pending: false,
             input_context: ContextInputState::default(),
             input_context_source: None,
             input_context_document_mgr: None,
@@ -376,12 +378,7 @@ impl TsfState {
         // policy of the focused context has to be pushed again.
         self.input_policy_applied = None;
         if let Some(session) = self.session() {
-            self.ime_state = Some(session.set_english_mode(self.english_mode).unwrap_or_else(
-                |error| {
-                    keytao_core::rt_log!(Level::Info, "error", "restore_english_mode", msg = error);
-                    session.state()
-                },
-            ));
+            self.ime_state = Some(session.state());
             if let Some(ime_state) = &self.ime_state {
                 self.ascii_mode = ime_state.ascii_mode;
                 self.english_mode = ime_state.is_english_mode();
@@ -729,9 +726,11 @@ pub(crate) fn poll_engine_builds(shared_state: &SharedState) {
     // sensitive context never gets that far, so the session would keep composing
     // permissions it must not have.
     sync_input_policy(shared_state);
+    refresh_pending_focus_state(shared_state);
 }
 
 pub(crate) fn refresh_engine_for_focus(shared_state: &SharedState) {
+    shared_state.borrow_mut().focus_state_refresh_pending = true;
     poll_engine_builds(shared_state);
     shared_state.borrow_mut().invalidate_reload_stamp_cache();
     if shared_state.borrow().engine_ready() {
@@ -739,6 +738,32 @@ pub(crate) fn refresh_engine_for_focus(shared_state: &SharedState) {
     } else {
         start_engine_warmup(shared_state);
     }
+}
+
+fn refresh_pending_focus_state(shared_state: &SharedState) {
+    if !shared_state.borrow().focus_state_refresh_pending {
+        return;
+    }
+    let session = shared_state.borrow().session();
+    let Some(session) = session else {
+        return;
+    };
+    if session.set_context_ascii_mode(None).is_none() {
+        return;
+    }
+    let ime_state = session.state();
+    if ime_state.schema_id.is_empty() {
+        return;
+    }
+    let english_mode = ime_state.is_english_mode();
+    {
+        let mut st = shared_state.borrow_mut();
+        st.ascii_mode = ime_state.ascii_mode;
+        st.english_mode = english_mode;
+        st.ime_state = Some(ime_state);
+        st.focus_state_refresh_pending = false;
+    }
+    update_language_bar_mode(shared_state, english_mode);
 }
 
 pub(crate) fn apply_pending_session_reset(shared_state: &SharedState) -> bool {
@@ -788,12 +813,20 @@ pub(crate) fn sync_input_policy(shared_state: &SharedState) {
     };
     // Turning composing off discards whatever librime was holding; the cached
     // state has to go with it so nothing is drawn for the sensitive context.
-    let acknowledged = session.set_input_policy(policy).is_some();
+    let ime_state = session.set_input_policy(policy);
+    let acknowledged = ime_state.is_some();
     let mut st = shared_state.borrow_mut();
     // Pipe contention may skip the RPC entirely; retry until the server acknowledges it.
     st.input_policy_applied = acknowledged.then_some(sensitive);
     if sensitive {
         st.ime_state = None;
+    } else if let Some(ime_state) = ime_state {
+        st.ascii_mode = ime_state.ascii_mode;
+        st.english_mode = ime_state.is_english_mode();
+        st.ime_state = Some(ime_state);
+        let english_mode = st.english_mode;
+        drop(st);
+        update_language_bar_mode(shared_state, english_mode);
     }
 }
 
@@ -1082,7 +1115,22 @@ pub(crate) fn apply_conversion_mode_change(shared_state: &SharedState) {
     if ascii_mode == current {
         return;
     }
-    set_english_mode_from_language_bar(shared_state, ascii_mode);
+    reset_input_for_focus_change(shared_state);
+    let session = shared_state.borrow().session();
+    let Some(ime_state) =
+        session.and_then(|session| session.set_context_ascii_mode(Some(ascii_mode)))
+    else {
+        return;
+    };
+    let english_mode = ime_state.is_english_mode();
+    {
+        let mut st = shared_state.borrow_mut();
+        st.ascii_mode = ime_state.ascii_mode;
+        st.english_mode = english_mode;
+        st.ime_state = Some(ime_state);
+        st.focus_state_refresh_pending = false;
+    }
+    update_language_bar_mode(shared_state, english_mode);
 }
 
 /// True when neither the context nor the system state allows composing.
@@ -2007,7 +2055,97 @@ mod tests {
         INPUT_CONTEXT_SYNC_BACKOFF,
     };
     use std::cell::Cell;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::{Duration, Instant};
+
+    struct FocusStateEngine {
+        clear_calls: AtomicUsize,
+        state_calls: AtomicUsize,
+    }
+
+    impl super::ImeEngineBackend for FocusStateEngine {
+        fn build(&self) -> Result<super::EngineHandle, String> {
+            unreachable!()
+        }
+        fn reload_needed(&self) -> bool {
+            false
+        }
+        fn drop_session(&self) {}
+        fn process_key(&self, _: u32, _: u32) -> Option<keytao_core::KeyProcessResult> {
+            unreachable!()
+        }
+        fn process_keys(&self, _: &[(u32, u32)]) -> Option<keytao_core::KeyProcessResult> {
+            unreachable!()
+        }
+        fn process_enter(&self) -> Option<keytao_core::KeyProcessResult> {
+            unreachable!()
+        }
+        fn select_candidate_on_page(&self, _: usize) -> Option<keytao_core::ImeState> {
+            unreachable!()
+        }
+        fn change_page(&self, _: bool) -> Option<keytao_core::ImeState> {
+            unreachable!()
+        }
+        fn reset(&self) -> Option<keytao_core::ImeState> {
+            unreachable!()
+        }
+        fn state(&self) -> keytao_core::ImeState {
+            let mut state = keytao_core::ImeState::empty();
+            if self.state_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                state.schema_id = "xmjd6".into();
+            }
+            state
+        }
+        fn set_input_policy(
+            &self,
+            _: keytao_core::InputContextPolicy,
+        ) -> Option<keytao_core::ImeState> {
+            unreachable!()
+        }
+        fn set_context_ascii_mode(&self, enabled: Option<bool>) -> Option<keytao_core::ImeState> {
+            assert_eq!(enabled, None);
+            (self.clear_calls.fetch_add(1, Ordering::SeqCst) > 0).then(keytao_core::ImeState::empty)
+        }
+        fn set_english_mode(&self, _: bool) -> Result<keytao_core::ImeState, String> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn focus_refresh_retries_busy_calls_before_ascii_key_routing() {
+        let state = super::new_shared_state();
+        let engine = Arc::new(FocusStateEngine {
+            clear_calls: 0.into(),
+            state_calls: 0.into(),
+        });
+        {
+            let mut st = state.borrow_mut();
+            st.runtime = Some(engine.clone());
+            st.session = Some(super::EngineHandle {
+                schema_id: "xmjd6".into(),
+            });
+            st.input_context = super::ContextInputState::unrestricted();
+            st.input_policy_applied = Some(false);
+            st.focus_state_refresh_pending = true;
+            st.ascii_mode = true;
+            st.english_mode = true;
+        }
+        for _ in 0..2 {
+            super::poll_engine_builds(&state);
+            assert!(state.borrow().focus_state_refresh_pending);
+            assert!(state.borrow().ascii_mode);
+        }
+        super::poll_engine_builds(&state);
+        assert!(!state.borrow().focus_state_refresh_pending);
+        assert!(!state.borrow().ascii_mode);
+        assert!(!state.borrow().english_mode);
+        super::poll_engine_builds(&state);
+        assert_eq!(engine.clear_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(engine.state_calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn missing_public_seed_failure_does_not_permanently_disable_warmup() {

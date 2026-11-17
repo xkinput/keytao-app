@@ -9,7 +9,7 @@ use keytao_core::{ImeState, InputContextPolicy, KeyProcessResult};
 use serde::{Deserialize, Serialize};
 
 /// The server accepts this protocol version and its immediate predecessor.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientRole {
@@ -55,6 +55,9 @@ pub enum Request {
     Deploy,
     /// A replacement server may ask the installed server to exit.
     Shutdown,
+    SetContextAsciiMode {
+        enabled: Option<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

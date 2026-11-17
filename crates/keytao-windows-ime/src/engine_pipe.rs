@@ -235,6 +235,13 @@ impl ImeEngineBackend for PipeEngine {
             .flatten()
     }
 
+    fn set_context_ascii_mode(&self, enabled: Option<bool>) -> Option<ImeState> {
+        self.request(Request::SetContextAsciiMode { enabled })?
+            .into_state()
+            .ok()
+            .flatten()
+    }
+
     fn set_english_mode(&self, enabled: bool) -> Result<ImeState, String> {
         match self.request(Request::SetEnglishMode { enabled }) {
             Some(Response::English(result)) => result,

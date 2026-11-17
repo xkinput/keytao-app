@@ -253,6 +253,35 @@ fn panel_arrows_navigate_without_caret_motion_commits_or_wrapping() {
 }
 
 #[test]
+fn a_shift_ascii_toggle_clears_the_host_context_override() {
+    let _serialized = serialized();
+    let dir = smoke_fixture::scratch_dir("context-ascii-toggle");
+    smoke_fixture::write(&dir).unwrap();
+    let schema_path = dir.join(format!("{}.schema.yaml", smoke_fixture::SCHEMA_ID));
+    let schema = std::fs::read_to_string(&schema_path).unwrap();
+    std::fs::write(
+        schema_path,
+        schema.replace("Shift_L: noop", "Shift_L: commit_code"),
+    )
+    .unwrap();
+    let runtime = ImeRuntime::with_dirs(&dir, dir.to_string_lossy().into_owned()).with_ime_host();
+    runtime.init().unwrap();
+    let session = runtime.create_session().unwrap();
+    assert!(session.set_context_ascii_mode(Some(true)).unwrap().ascii_mode);
+    session.process_key_result(0xffe1, 0).unwrap();
+    let toggled = session
+        .process_key_result(0xffe1, keytao_core::RIME_RELEASE_MASK)
+        .unwrap();
+    assert!(!toggled.state.ascii_mode);
+    let next = session.process_key_result(b'a' as u32, 0).unwrap();
+    assert!(!next.state.ascii_mode);
+    assert!(next.accepted);
+    assert_eq!(next.state.preedit, "a");
+    drop(session);
+    cleanup(&dir);
+}
+
+#[test]
 fn a_shift_mode_switch_can_commit_text_even_when_rime_rejects_the_release() {
     let _serialized = serialized();
     let dir = smoke_fixture::scratch_dir("shift-release-commit");

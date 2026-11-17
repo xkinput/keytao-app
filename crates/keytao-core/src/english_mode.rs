@@ -95,6 +95,19 @@ pub(crate) trait EnglishBackend {
     fn set_ascii_mode(&self, enabled: bool) -> ImeState;
 }
 
+pub(crate) fn schema_options(engine: &impl EnglishBackend) -> BTreeMap<String, bool> {
+    engine
+        .schema_switches()
+        .into_iter()
+        .flat_map(|s| s.name.into_iter().chain(s.options))
+        .filter(|name| name != "ascii_mode")
+        .map(|name| {
+            let enabled = engine.get_option(&name);
+            (name, enabled)
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub(crate) struct EnglishModeController {
     pub mode: EnglishMode,
@@ -117,6 +130,13 @@ impl EnglishModeController {
         self.schemas
             .iter()
             .any(|s| s.id == id && is_english_schema(&s.id, &s.name))
+    }
+
+    pub fn remember_chinese(&mut self, id: &str, options: &BTreeMap<String, bool>) {
+        if !self.is_english_schema(id) {
+            self.chinese_schema = Some(id.to_owned());
+            self.chinese_options = options.clone();
+        }
     }
 
     /// Reconcile an ascii_composer switch after a desktop key event. A handled
@@ -208,18 +228,7 @@ impl EnglishModeController {
                 .cloned()
                 .ok_or("No Chinese input schema is available")?
         };
-        let names = engine
-            .schema_switches()
-            .into_iter()
-            .flat_map(|s| s.name.into_iter().chain(s.options))
-            .chain(std::iter::once("ascii_punct".into()));
-        let snapshot: BTreeMap<_, _> = names
-            .filter(|name| name != "ascii_mode")
-            .map(|name| {
-                let enabled = engine.get_option(&name);
-                (name, enabled)
-            })
-            .collect();
+        let snapshot = schema_options(engine);
         let previous_ascii = engine.state().ascii_mode;
         // Leave an already committed string pending until a successful result
         // can return it to the host; failed deployment must not swallow it.
@@ -239,8 +248,10 @@ impl EnglishModeController {
             self.chinese_schema = Some(current.id);
             self.chinese_options = snapshot;
         } else if self.chinese_schema.as_deref() == Some(target.as_str()) {
-            for (name, enabled) in &self.chinese_options {
-                engine.set_option(name, *enabled);
+            for name in schema_options(engine).keys() {
+                if let Some(enabled) = self.chinese_options.get(name) {
+                    engine.set_option(name, *enabled);
+                }
             }
         }
         Ok(engine.set_ascii_mode(false))
@@ -336,6 +347,12 @@ mod tests {
                 SchemaSwitch {
                     name: None,
                     options: vec!["simplification".into()],
+                    states: vec![],
+                    reset: None,
+                },
+                SchemaSwitch {
+                    name: Some("ascii_punct".into()),
+                    options: vec![],
                     states: vec![],
                     reset: None,
                 },
