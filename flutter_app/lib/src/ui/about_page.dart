@@ -12,6 +12,7 @@ class AboutPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = controller;
+    final locale = Localizations.localeOf(context);
     return AppPageBody(
       controller: c,
       page: AppPage.about,
@@ -66,6 +67,66 @@ class AboutPage extends StatelessWidget {
             ValueRow(
               AppStrings.keytaoVersion,
               c.versions?.appVersion ?? c.info.appVersion,
+            ),
+            FTappable(
+              onPress: c.checkingAppUpdate
+                  ? null
+                  : () async {
+                      final update = await c.checkAppUpdateNow();
+                      if (!context.mounted ||
+                          update == null ||
+                          !update.hasUpdate) {
+                        return;
+                      }
+                      await showFDialog<void>(
+                        context: context,
+                        builder: (context, _, animation) => AppDialog(
+                          title: AppStrings.checkAppUpdate(locale),
+                          animation: animation,
+                          actions: [
+                            ActionButton(
+                              AppStrings.downloadAppUpdate(locale),
+                              primary: true,
+                              onPress: () {
+                                Navigator.pop(context);
+                                c.openAppUpdate();
+                              },
+                            ),
+                          ],
+                          child: Text('v${update.latestVersion}'),
+                        ),
+                      );
+                    },
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 44),
+                child: SettingRow(
+                  AppStrings.checkAppUpdate(locale),
+                  keepInline: true,
+                  description: c.checkingAppUpdate
+                      ? null
+                      : c.appUpdateError != null
+                      ? AppStrings.appUpdateFailure(locale, c.appUpdateError!)
+                      : c.appUpdate?.hasUpdate == false
+                      ? AppStrings.appUpToDate(locale)
+                      : null,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (c.appUpdate?.hasUpdate == true) ...[
+                        FBadge(child: Text('v${c.appUpdate!.latestVersion}')),
+                        const SizedBox(width: 8),
+                      ],
+                      if (c.checkingAppUpdate)
+                        const SizedBox.square(
+                          dimension: 18,
+                          child: FCircularProgress(),
+                        )
+                      else
+                        const Icon(FLucideIcons.chevronRight, size: 16),
+                    ],
+                  ),
+                ),
+              ),
             ),
             ValueRow('Flutter', c.aboutValues['Flutter']!),
             ValueRow(

@@ -1,3 +1,5 @@
+import 'dart:ui' show Locale;
+
 // Keep dynamic copy here so both platform layouts share the same wording.
 abstract final class AppStrings {
   static const title = 'KeyTao 键道';
@@ -261,6 +263,16 @@ abstract final class AppStrings {
   static String fallbackProcesses(int count) => 'XIM+IBUS $count';
 
   static String currentVersion(String version) => '当前 v$version';
+  static String checkAppUpdate(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '检查更新' : 'Check for updates';
+  static String appUpToDate(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '已是最新版本' : 'Already up to date';
+  static String appUpdateFailure(Locale locale, String message) =>
+      locale.languageCode.startsWith('zh')
+      ? '检查更新失败：$message'
+      : 'Update check failed: $message';
+  static String downloadAppUpdate(Locale locale) =>
+      locale.languageCode.startsWith('zh') ? '前往下载' : 'Download';
   static String changelogTitle(String release) => '$release 更新内容';
   static String itemCount(int count) => '$count 个项目';
   static String verifyFailures(int count) => '⚠ 有 $count 个文件校验失败';

@@ -174,6 +174,8 @@ class AppController extends ChangeNotifier {
   bool isOpeningCustomDirectory = false;
   bool onboardingCompleted = false;
   AppUpdateDto? appUpdate;
+  bool checkingAppUpdate = false;
+  String? appUpdateError;
   List<InstalledPackageDto> installedPackages = [];
   List<SchemeUpdateDto> schemeUpdates = [];
   Map<String, String> dismissedSchemeUpdates = {};
@@ -1158,6 +1160,25 @@ class AppController extends ChangeNotifier {
       // Startup update failures are intentionally silent, as in App.tsx.
     }
     _changed();
+  }
+
+  Future<AppUpdateDto?> checkAppUpdateNow() async {
+    if (_disposed || checkingAppUpdate) return null;
+    checkingAppUpdate = true;
+    appUpdateError = null;
+    _changed();
+    try {
+      final update = await core.checkAppUpdate();
+      if (_disposed) return null;
+      appUpdate = update;
+      return update;
+    } catch (failure) {
+      if (!_disposed) appUpdateError = errorText(failure);
+      return null;
+    } finally {
+      checkingAppUpdate = false;
+      _changed();
+    }
   }
 
   Future<void> _readInstalledPackages() async {
