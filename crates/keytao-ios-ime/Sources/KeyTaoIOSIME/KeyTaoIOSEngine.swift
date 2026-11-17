@@ -3,6 +3,7 @@ import CKeytaoCore
 import Darwin
 import ImageIO
 import UIKit
+import os
 
 enum KeyTaoLog {
     private struct PendingEvent {
@@ -86,24 +87,34 @@ enum KeyTaoLog {
         event("error", "config_write") { ["operation": operation, "msg": "config_write_failed"] }
     }
 
+    static func memoryFootprint() -> UInt64? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let capacity = Int(count)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: capacity) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.phys_footprint : nil
+    }
+
     static func memorySnapshot(_ moment: String) {
         event("memory", "footprint") {
-            var info = task_vm_info_data_t()
-            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-            let capacity = Int(count)
-            let result = withUnsafeMutablePointer(to: &info) { pointer in
-                pointer.withMemoryRebound(to: integer_t.self, capacity: capacity) {
-                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-                }
+            guard let footprint = memoryFootprint() else { return ["moment": moment, "available": false] }
+            let megabytes = Double(footprint) / (1024 * 1024)
+            let available: UInt64?
+            if #available(iOS 13.0, *) {
+                let bytes = UInt64(os_proc_available_memory())
+                available = bytes > 0 ? bytes : nil
+            } else {
+                available = nil
             }
-            guard result == KERN_SUCCESS else {
-                return ["moment": moment, "available": false, "error_code": result]
-            }
-            let megabytes = Double(info.phys_footprint) / (1024 * 1024)
-            // This is a diagnostic reference budget, not an OS-reported jetsam limit.
+            let limit = available.map { megabytes + Double($0) / (1024 * 1024) } ?? 60
             return [
                 "moment": moment, "available": true, "mem_mb": megabytes,
-                "limit_pct": megabytes / 60 * 100, "limit_mb": 60, "limit_estimated": true,
+                "limit_pct": megabytes / max(limit, 1) * 100, "limit_mb": limit,
+                "limit_estimated": available == nil,
             ]
         }
     }
@@ -367,6 +378,7 @@ final class KeyTaoIOSEngine {
     private(set) var schemaLogoImage: UIImage?
     var onSchemaLogoChanged: ((UIImage?) -> Void)?
     private var session: UnsafeMutableRawPointer?
+    private var suspendedSession: (schemaID: String, options: [String: Bool], configurationSignature: [String])?
     private var lastState = KeyTaoImeState.empty
     private var lastDisplaySchemaName = ""
     private var lastDisplaySchemaId = ""
@@ -514,6 +526,30 @@ final class KeyTaoIOSEngine {
         }
         session = prepared
         nativeReady = true
+        let suspendedSession = self.suspendedSession
+        self.suspendedSession = nil
+        if let suspendedSession,
+           suspendedSession.configurationSignature == sessionConfigurationSignature(),
+           let restored = keytao_create_session() {
+            // Keep the default session untouched until the entire restore succeeds.
+            session = restored
+            var restoredSuccessfully = selectSchema(suspendedSession.schemaID) != nil
+            if restoredSuccessfully {
+                // Clear disabled alternatives before restoring enabled radio choices.
+                for (name, enabled) in suspendedSession.options.sorted(by: { !$0.value && $1.value }) {
+                    if setOption(name, enabled: enabled) == nil {
+                        restoredSuccessfully = false
+                        break
+                    }
+                }
+            }
+            if restoredSuccessfully {
+                keytao_destroy_session(prepared)
+            } else {
+                keytao_destroy_session(restored)
+                session = prepared
+            }
+        }
         refreshCapabilities()
         lastState = state().withoutTransientCommit()
         return true
@@ -596,6 +632,16 @@ final class KeyTaoIOSEngine {
             return "missing"
         }
         return "\(modified.timeIntervalSince1970):\(size.uint64Value)"
+    }
+
+    private func sessionConfigurationSignature() -> [String] {
+        var files = [userRoot.appendingPathComponent("build/.keytao-deployed")]
+        if let stampPath = userRoot.path.withCString({ ownedCString(keytao_reload_stamp_path_at($0)) }) {
+            files.append(URL(fileURLWithPath: stampPath))
+        }
+        return files.map { url in
+            "\(fileSignature(url)):\((try? Data(contentsOf: url))?.base64EncodedString() ?? "")"
+        }
     }
 
     func persistToolbarCustomization(order: [String], pinnedCount: Int) -> Bool {
@@ -690,6 +736,24 @@ final class KeyTaoIOSEngine {
         lastThemeColorScheme = nil
         lastConfig = nil
         lastConfigSignature = nil
+    }
+
+    @discardableResult
+    func releaseIdleSession() -> Bool {
+        guard !startupInFlight else { return false }
+        if let session {
+            guard let state = decodeState(keytao_session_state_json(session)), !state.hasComposition,
+                  let schema = currentSchema() else { return false }
+            var options: [String: Bool] = [:]
+            for name in schemaSwitches().flatMap(\.optionNames) + ["ascii_mode", "ascii_punct"] {
+                options[name] = getOption(name)
+            }
+            suspendedSession = (schema.id, options, sessionConfigurationSignature())
+        }
+        close()
+        releaseCaches()
+        lastState = .empty
+        return true
     }
 
     func state() -> KeyTaoImeState {
@@ -992,18 +1056,7 @@ final class KeyTaoIOSEngine {
 
     private func initializeRuntime() -> Bool {
         defer { refreshRuntimeLogCollection() }
-        guard let prepared = Self.prepareRuntime(userRoot: userRoot) else {
-            nativeReady = false
-            return false
-        }
-        if let session {
-            keytao_destroy_session(session)
-        }
-        session = prepared
-        nativeReady = true
-        refreshCapabilities()
-        lastState = state().withoutTransientCommit()
-        return true
+        return installPreparedSession(Self.prepareRuntime(userRoot: userRoot))
     }
 
     /// Re-reads the `KEYTAO_CAP_*` mask for whatever session is installed now.

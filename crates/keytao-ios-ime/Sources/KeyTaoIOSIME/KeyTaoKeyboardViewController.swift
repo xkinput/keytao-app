@@ -141,6 +141,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     private var markedTextOwnership = KeyTaoMarkedTextOwnership()
     private var hostTextMutationDepth = 0
     private var runtimeStarting = false
+    private var runtimeReleased = false
+    private var runtimeResumeFailed = false
+    private var memoryReclamation = KeyTaoMemoryReclamationPolicy()
+    private var hiddenMemoryReleaseWorkItem: DispatchWorkItem?
     private var queuedCommands: [KeyTaoKeyCommand] = []
     /// Starts at the ABI-level answer, which is already available while the
     /// runtime boots, then follows the live session's own mask.
@@ -159,6 +163,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     deinit {
+        hiddenMemoryReleaseWorkItem?.cancel()
         if let clipboardChangeObserver { NotificationCenter.default.removeObserver(clipboardChangeObserver) }
         clipboardMediaLifetime.cancel()
     }
@@ -246,6 +251,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             KeyTaoLog.memorySnapshot("view_will_appear")
         }
         super.viewWillAppear(animated)
+        hiddenMemoryReleaseWorkItem?.cancel()
+        hiddenMemoryReleaseWorkItem = nil
+        releaseMemoryIfNeeded()
+        memoryReclamation.hiddenSince = nil
         let statusDefaults = UserDefaults(suiteName: KeyTaoIOSPaths.appGroupIdentifier)
         statusDefaults?.set(hasFullAccess, forKey: "keyboardFullAccess")
         statusDefaults?.set(Date().timeIntervalSince1970, forKey: "keyboardStatusUpdatedAt")
@@ -299,6 +308,11 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     public override func viewDidDisappear(_ animated: Bool) {
         let started = KeyTaoLog.now()
         super.viewDidDisappear(animated)
+        memoryReclamation.hiddenSince = KeyTaoLog.now()
+        hiddenMemoryReleaseWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in self?.releaseMemoryIfNeeded() }
+        hiddenMemoryReleaseWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60.001, execute: workItem)
         KeyTaoLog.event("lifecycle", "view_did_disappear", duration: (KeyTaoLog.now() - started) * 1000)
         KeyTaoLog.flush(200)
     }
@@ -339,12 +353,45 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         super.didReceiveMemoryWarning()
         KeyTaoLog.event("memory", "mem_warning")
         KeyTaoLog.memorySnapshot("memory_warning")
-        resetClipboardState()
-        for index in clipboardMedia.indices { clipboardMedia[index].thumb = nil }
-        queuedCommands.removeAll()
-        engine.releaseCaches()
-        currentThemeCacheKey = nil
-        keyboardView?.releaseCaches()
+        autoreleasepool {
+            resetClipboardState()
+            for index in clipboardMedia.indices { clipboardMedia[index].thumb = nil }
+            engine.releaseCaches()
+            currentThemeCacheKey = nil
+            keyboardView?.releaseCaches()
+        }
+        memoryReclamation.memoryWarningPending = true
+        releaseMemoryIfNeeded()
+    }
+
+    private func releaseMemoryIfNeeded() {
+        guard let reason = memoryReclamation.releaseReason(
+            now: KeyTaoLog.now(), composing: currentState.hasComposition,
+            busy: runtimeStarting || !queuedCommands.isEmpty
+        ) else { return }
+        let before = KeyTaoLog.memoryFootprint()
+        // Candidate enumeration holds the same native handle off the main queue.
+        candidateQueue.sync {}
+        guard engine.releaseIdleSession() else { return }
+        autoreleasepool {
+            clipboardMediaLifetime.cancel()
+            clipboardMediaCapturePending = false
+            let completions = clipboardMediaCompletions
+            clipboardMediaCompletions.removeAll()
+            for index in clipboardMedia.indices { clipboardMedia[index].thumb = nil }
+            keyboardView?.releaseCaches()
+            completions.forEach { $0([]) }
+            currentThemeCacheKey = nil
+        }
+        inputAvailable = false
+        runtimeReleased = true
+        memoryReclamation.didRelease()
+        let after = KeyTaoLog.memoryFootprint()
+        KeyTaoLog.event("memory", "release_idle_resources") {
+            ["reason": reason, "before_bytes": before.map { $0 as Any } ?? NSNull(),
+             "after_bytes": after.map { $0 as Any } ?? NSNull()]
+        }
+        KeyTaoLog.flush(200)
     }
 
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -423,6 +470,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     /// composition, the host marked text, the backspace restore stack and the
     /// clipboard snapshot. Called whenever the input context ends or changes.
     private func resetInputContextCaches(resetNavigation: Bool = false) {
+        defer { releaseMemoryIfNeeded() }
         inputContextGeneration &+= 1
         inputDocumentIdentifier = currentDocumentIdentifier()
         // Cold-start keystrokes belong to the context where they were queued.
@@ -478,6 +526,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
 
     private func performCommand(_ command: KeyTaoKeyCommand) {
         refreshInputDocumentIfNeeded()
+        defer { releaseMemoryIfNeeded() }
+        if runtimeReleased && command.requiresInstalledSchema {
+            startRuntimeIfNeeded()
+        }
         // The runtime is still coming up on the startup queue. Queue the key
         // instead of committing it raw, otherwise the first few characters of
         // every cold start would land in the host as latin letters. Once text
@@ -491,6 +543,10 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             return
         }
         if !inputAvailable && command.requiresInstalledSchema {
+            if runtimeResumeFailed {
+                showMessage(unavailableMessage)
+                return
+            }
             if commitFallbackInput(for: command) {
                 return
             }
@@ -560,11 +616,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardViewWillEnterDirectInputPage(_ view: KeyTaoIOSKeyboardView) -> Bool {
+        defer { releaseMemoryIfNeeded() }
         guard refreshInputDocumentIfNeeded() else { return false }
         return commitPendingComposition()
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, commitEmojiSearchResult text: String) {
+        defer { releaseMemoryIfNeeded() }
         guard refreshInputDocumentIfNeeded(), view.isEmojiSearching,
               commitPendingComposition() else { return }
         _ = insertHostText(text, intoSearch: false)
@@ -603,6 +661,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, didSelectCandidate index: Int, global: Bool) {
+        defer { releaseMemoryIfNeeded() }
         guard refreshInputDocumentIfNeeded() else { return }
         if !inputAvailable {
             showUnavailableMessage()
@@ -626,6 +685,7 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
     }
 
     func keyboardView(_ view: KeyTaoIOSKeyboardView, deleteCandidate index: Int) -> Bool {
+        defer { releaseMemoryIfNeeded() }
         guard refreshInputDocumentIfNeeded() else { return false }
         guard inputAvailable, engineCapabilities.candidateDeletion else {
             showMessage("系统词不可删除")
@@ -1730,7 +1790,13 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
             if let text = record.text {
                 return ClipboardEntry(key: record.key, text: text, pinned: record.pinned)
             }
-            guard var entry = clipboardMedia.first(where: { "media:\($0.id)" == record.key })?.entry else { return nil }
+            guard let index = clipboardMedia.firstIndex(where: { "media:\($0.id)" == record.key }) else { return nil }
+            if clipboardMedia[index].thumb == nil {
+                clipboardMedia[index].thumb = Self.clipboardThumbnail(
+                    file: clipboardMedia[index].file, mime: clipboardMedia[index].mime
+                ).image
+            }
+            var entry = clipboardMedia[index].entry
             entry.pinned = record.pinned
             return entry
         }
@@ -2058,17 +2124,21 @@ open class KeyTaoKeyboardViewController: UIInputViewController, KeyTaoIOSKeyboar
         guard !runtimeStarting else {
             return
         }
+        let resuming = runtimeReleased || runtimeResumeFailed
+        runtimeReleased = false
         runtimeStarting = true
         keyboardView?.updateAvailability(message: "正在加载键道方案…")
-        engine.ensureReadyAsync { [weak self] _ in
+        engine.ensureReadyAsync { [weak self] ready in
             guard let self else {
                 return
             }
             self.runtimeStarting = false
+            self.runtimeResumeFailed = resuming && !ready
             self.refreshRuntimeLogCollection()
             self.refreshInputAvailability()
             self.applyInputPolicyForHost()
             self.flushQueuedCommands()
+            self.releaseMemoryIfNeeded()
         }
     }
 

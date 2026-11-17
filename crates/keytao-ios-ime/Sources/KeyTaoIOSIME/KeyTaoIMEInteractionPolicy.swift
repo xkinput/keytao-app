@@ -1,5 +1,22 @@
 import Foundation
 
+struct KeyTaoMemoryReclamationPolicy {
+    var hiddenSince: TimeInterval?
+    var memoryWarningPending = false
+
+    func releaseReason(now: TimeInterval, composing: Bool, busy: Bool) -> String? {
+        guard !composing, !busy else { return nil }
+        if memoryWarningPending { return "memory_warning" }
+        if let hiddenSince, now - hiddenSince > 60 { return "hidden_timeout" }
+        return nil
+    }
+
+    mutating func didRelease() {
+        hiddenSince = nil
+        memoryWarningPending = false
+    }
+}
+
 public enum KeyTaoShiftState {
     case off
     case once

@@ -10,6 +10,218 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String, line: I
     }
 }
 
+var memoryReclamation = KeyTaoMemoryReclamationPolicy()
+expect(memoryReclamation.releaseReason(now: 100, composing: false, busy: false), nil, "visible idle keyboards keep their session")
+memoryReclamation.hiddenSince = 100
+expect(memoryReclamation.releaseReason(now: 160, composing: false, busy: false), nil, "the hidden timeout is strictly greater than 60 seconds")
+expect(memoryReclamation.releaseReason(now: 161, composing: false, busy: false), "hidden_timeout", "hidden keyboards release after 60 seconds")
+expect(memoryReclamation.releaseReason(now: 161, composing: true, busy: false), nil, "a hidden composition keeps its session")
+expect(memoryReclamation.releaseReason(now: 161, composing: false, busy: true), nil, "startup and queued input prevent release")
+memoryReclamation.hiddenSince = nil
+memoryReclamation.memoryWarningPending = true
+expect(memoryReclamation.releaseReason(now: 120, composing: true, busy: false), nil, "memory warnings defer while composing")
+expect(memoryReclamation.memoryWarningPending, true, "a deferred warning remains pending")
+expect(memoryReclamation.releaseReason(now: 121, composing: false, busy: false), "memory_warning", "a deferred warning releases after composition ends")
+memoryReclamation.didRelease()
+expect(memoryReclamation.releaseReason(now: 200, composing: false, busy: false), nil, "a completed release does not run twice")
+
+do {
+    let engineURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Sources/KeyTaoIOSIME/KeyTaoIOSEngine.swift")
+    let source = try String(contentsOf: engineURL, encoding: .utf8)
+    func engineMethod(_ declaration: String) throws -> String {
+        guard let start = source.range(of: "    \(declaration)")?.lowerBound,
+              let end = source.range(of: "\n    }\n", range: start..<source.endIndex)?.upperBound else {
+            throw NSError(domain: "EngineHarness", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing engine method: \(declaration)"])
+        }
+        return String(source[start..<end])
+    }
+    let methods = try [
+        "private func installPreparedSession(", "private func sessionConfigurationSignature(",
+        "private func fileSignature(", "func releaseIdleSession(", "func close(",
+        "func selectSchema(", "func setOption(",
+    ].map(engineMethod).joined(separator: "\n")
+    guard let suspendedDeclaration = source.split(separator: "\n").first(where: { $0.contains("private var suspendedSession:") }) else {
+        throw NSError(domain: "EngineHarness", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing suspended session declaration"])
+    }
+    let harnessDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("keytao-session-restore-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: harnessDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: harnessDirectory) }
+    let harness = #"""
+    import Foundation
+
+    struct KeyTaoImeState {
+        var schemaID = ""
+        var options: [String: Bool] = [:]
+        var hasComposition = false
+        static let empty = Self()
+        func withoutTransientCommit() -> Self { self }
+    }
+    struct KeyTaoRimeSchema { var id: String }
+    struct KeyTaoRimeSchemaSwitch { var optionNames: [String] }
+    enum KeyTaoLog {
+        static func now() -> TimeInterval { 0 }
+        static func event(_ category: String, _ name: String, duration: Double = .nan, fields: () -> [String: Any]) {}
+    }
+    enum Native {
+        static var sessions: [UnsafeMutableRawPointer: KeyTaoImeState] = [:]
+        static var creations = 0
+        static var failAtCreation = -1
+        static var failSchema = false
+        static var failOption: String?
+        static var schemaSelections = 0
+        static var defaultSchema = "old"
+    }
+    func keytao_create_session() -> UnsafeMutableRawPointer? {
+        Native.creations += 1
+        guard Native.creations != Native.failAtCreation else { return nil }
+        let pointer = UnsafeMutableRawPointer(bitPattern: Native.creations)!
+        Native.sessions[pointer] = KeyTaoImeState(schemaID: Native.defaultSchema)
+        return pointer
+    }
+    func keytao_destroy_session(_ pointer: UnsafeMutableRawPointer) { Native.sessions.removeValue(forKey: pointer) }
+    func keytao_session_state_json(_ pointer: UnsafeMutableRawPointer) -> KeyTaoImeState? { Native.sessions[pointer] }
+    func decodeState(_ state: KeyTaoImeState?) -> KeyTaoImeState? { state }
+    func keytao_session_select_schema_json(_ pointer: UnsafeMutableRawPointer, _ schema: UnsafePointer<CChar>) -> KeyTaoImeState? {
+        Native.schemaSelections += 1
+        Native.sessions[pointer]?.schemaID = String(cString: schema)
+        return Native.failSchema ? nil : Native.sessions[pointer]
+    }
+    func keytao_session_set_option_json(_ pointer: UnsafeMutableRawPointer, _ name: UnsafePointer<CChar>, _ enabled: Bool) -> KeyTaoImeState? {
+        let name = String(cString: name)
+        Native.sessions[pointer]?.options[name] = enabled
+        return Native.failOption == name ? nil : Native.sessions[pointer]
+    }
+    func keytao_reload_stamp_path_at(_ root: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>? {
+        strdup(URL(fileURLWithPath: String(cString: root)).appendingPathComponent("canonical-reload").path)
+    }
+    func ownedCString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
+        guard let pointer else { return nil }
+        defer { free(pointer) }
+        return String(cString: pointer)
+    }
+
+    final class HarnessEngine {
+        let userRoot: URL
+        var session: UnsafeMutableRawPointer?
+        var nativeReady = false
+        var startupInFlight = false
+        var lastState = KeyTaoImeState.empty
+        var schemaLogoGeneration: UInt64 = 0
+        var schemaLogoKey: Int?
+        var schemaLogoImage: Int?
+        var onSchemaLogoChanged: ((Int?) -> Void)?
+        var capabilitySession: UnsafeMutableRawPointer?
+    \#(suspendedDeclaration)
+        init(_ userRoot: URL) { self.userRoot = userRoot }
+        var hasSnapshot: Bool { suspendedSession != nil }
+        func resume() -> Bool { installPreparedSession(keytao_create_session()) }
+        @discardableResult func refreshRuntimeLogCollection() -> Bool { false }
+        func refreshCapabilities() { capabilitySession = session }
+        func releaseCaches() {}
+        func state() -> KeyTaoImeState { session.flatMap { Native.sessions[$0] } ?? .empty }
+        func stableSchemaState(_ state: KeyTaoImeState) -> KeyTaoImeState { state }
+        func currentSchema() -> KeyTaoRimeSchema? { session.flatMap { Native.sessions[$0] }.map { KeyTaoRimeSchema(id: $0.schemaID) } }
+        func schemaSwitches() -> [KeyTaoRimeSchemaSwitch] { [KeyTaoRimeSchemaSwitch(optionNames: ["switch_on", "switch_off"])] }
+        func getOption(_ name: String) -> Bool { state().options[name] ?? false }
+    \#(methods)
+    }
+
+    var checks = 0
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        checks += 1
+        guard condition() else {
+            FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8))
+            exit(1)
+        }
+    }
+    let root = URL(fileURLWithPath: CommandLine.arguments[1])
+    func suspendedEngine(_ name: String) throws -> HarnessEngine {
+        Native.sessions = [:]
+        Native.defaultSchema = "old"
+        Native.failSchema = false
+        Native.failOption = nil
+        Native.failAtCreation = -1
+        let directory = root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("build"), withIntermediateDirectories: true)
+        for file in ["canonical-reload", "build/.keytao-deployed"] {
+            try Data("generation-a".utf8).write(to: directory.appendingPathComponent(file))
+        }
+        let engine = HarnessEngine(directory)
+        require(engine.resume(), "initial session starts")
+        Native.sessions[engine.session!]?.options = ["switch_on": true, "switch_off": false, "ascii_mode": true]
+        require(engine.releaseIdleSession(), "idle session releases")
+        require(engine.hasSnapshot && !engine.nativeReady && engine.session == nil, "release records the suspended session")
+        Native.defaultSchema = "app-default"
+        return engine
+    }
+    func requireDefault(_ engine: HarnessEngine, _ scenario: String) {
+        require(engine.nativeReady && engine.session != nil, "\(scenario) leaves the engine ready")
+        require(!engine.hasSnapshot, "\(scenario) consumes suspended state")
+        require(engine.state().schemaID == "app-default" && engine.state().options.isEmpty, "\(scenario) keeps the fresh default session untouched")
+        require(engine.capabilitySession == engine.session && engine.lastState.schemaID == "app-default", "\(scenario) refreshes capabilities and last state")
+        require(Native.sessions.count == 1, "\(scenario) keeps exactly one live session")
+    }
+    for failure in ["schema", "option", "allocation"] {
+        let engine = try suspendedEngine(failure)
+        Native.failSchema = failure == "schema"
+        Native.failOption = failure == "option" ? "switch_on" : nil
+        Native.failAtCreation = failure == "allocation" ? Native.creations + 2 : -1
+        require(engine.resume(), "\(failure) restore failure returns success for the usable default")
+        requireDefault(engine, failure)
+        engine.close()
+        Native.failSchema = false
+        Native.failOption = nil
+        let selections = Native.schemaSelections
+        require(engine.resume(), "the next appearance succeeds after \(failure) failure")
+        requireDefault(engine, "next appearance after \(failure)")
+        require(Native.schemaSelections == selections, "the next appearance does not retry stale restore after \(failure)")
+    }
+    for file in ["canonical-reload", "build/.keytao-deployed"] {
+        let engine = try suspendedEngine(file.replacingOccurrences(of: "/", with: "-"))
+        let changed = engine.userRoot.appendingPathComponent(file)
+        let modified = try FileManager.default.attributesOfItem(atPath: changed.path)[.modificationDate]!
+        try Data("generation-b".utf8).write(to: changed)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: changed.path)
+        let selections = Native.schemaSelections
+        require(engine.resume(), "changed \(file) starts the default session")
+        requireDefault(engine, "changed \(file)")
+        require(Native.schemaSelections == selections, "changed \(file) skips the old schema even when metadata is unchanged")
+    }
+    let restored = try suspendedEngine("unchanged")
+    require(restored.resume(), "unchanged configuration restores successfully")
+    require(restored.nativeReady && !restored.hasSnapshot, "successful restoration consumes the snapshot")
+    require(restored.state().schemaID == "old" && restored.state().options["switch_on"] == true && restored.state().options["switch_off"] == false && restored.state().options["ascii_mode"] == true, "unchanged configuration restores the schema and options")
+    require(Native.sessions.count == 1 && restored.capabilitySession == restored.session, "successful restoration replaces and destroys the fresh spare")
+    print("engine session restore harness passed (\(checks) checks)")
+    """#
+    let harnessFile = harnessDirectory.appendingPathComponent("main.swift")
+    let executable = harnessDirectory.appendingPathComponent("session-restore-tests")
+    try harness.write(to: harnessFile, atomically: true, encoding: .utf8)
+    func runHarnessProcess(_ executable: URL, _ arguments: [String]) throws -> (Int32, String) {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+    let compilation = try runHarnessProcess(URL(fileURLWithPath: "/usr/bin/xcrun"), ["swiftc", "-o", executable.path, harnessFile.path])
+    expect(compilation.0, 0, "actual engine session restore methods compile in the host harness: \(compilation.1)")
+    if compilation.0 == 0 {
+        let execution = try runHarnessProcess(executable, [harnessDirectory.path])
+        expect(execution.0, 0, "actual engine session restore methods pass the host harness: \(execution.1)")
+        if execution.0 == 0 { print(execution.1, terminator: "") }
+    }
+} catch {
+    failures.append("engine session restore harness failed: \(error)")
+}
+
 let toolbarIDs = ["rime", "language", "editor", "clipboard", "emoji", "layout"]
 let configuredToolbarIDs = ["clipboard", "emoji", "clipboard", "unknown", "rime"]
 expect(

@@ -32,7 +32,7 @@ fn record_reference(
     id: &str,
     stored_sha256: &str,
 ) -> Result<(), CoreError> {
-    if !crate::packages::stored_archive(core, scheme_key)?
+    if !crate::packages::stored_archive_file(core, scheme_key)?
         .1
         .zip_sha256
         .eq_ignore_ascii_case(stored_sha256)
@@ -130,12 +130,11 @@ fn eligible(core: &Core, scheme_key: &str, root: &Path) -> Result<(), CoreError>
 }
 
 fn package_schema_ids(
-    bytes: &[u8],
+    reader: impl std::io::Read + std::io::Seek,
     meta: &crate::packages::PackageMeta,
 ) -> Result<Vec<String>, CoreError> {
     use std::io::Read;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|e| CoreError::Other(e.to_string()))?;
+    let mut zip = zip::ZipArchive::new(reader).map_err(|e| CoreError::Other(e.to_string()))?;
     let mut fallback = std::collections::BTreeSet::new();
     for name in meta.manifest.keys() {
         if !name.contains('/') {
@@ -174,8 +173,8 @@ fn prepare_with_smoke(
     smoke: impl FnMut(&str, u32) -> Result<(), String>,
 ) -> Result<PreparedUpload, CoreError> {
     eligible(core, scheme_key, root)?;
-    let (stored, meta) = crate::packages::stored_archive(core, scheme_key)?;
-    let ids = package_schema_ids(&stored, &meta)?;
+    let (stored, meta) = crate::packages::stored_archive_file(core, scheme_key)?;
+    let ids = package_schema_ids(stored, &meta)?;
     let bundle = if cfg!(target_os = "android") {
         // Android validates Kotlin's deploy result and artifacts, without in-process Rime.
         crate::upload_bundle::verified_artifacts(root, shared, &ids)?
@@ -504,6 +503,7 @@ pub(crate) async fn download_at(
     api_base: &str,
 ) -> Result<(), CoreError> {
     use futures_util::StreamExt;
+    use std::io::{BufReader, Seek, Write};
     let account = account_id(core);
     valid_id(id).map_err(CoreError::Other)?;
     let package = list_at(core, api_base)
@@ -547,30 +547,35 @@ pub(crate) async fn download_at(
     {
         return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
     }
-    let mut bytes = Vec::new();
+    let cache_dir = core.env().cache_dir.clone();
+    std::fs::create_dir_all(&cache_dir)?;
+    let mut archive = tempfile::NamedTempFile::new_in(&cache_dir)?;
+    let mut digest = Sha256::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| CoreError::Network(error.to_string()))?;
-        if bytes.len() as u64 + chunk.len() as u64 > MAX_PACKAGE_SIZE {
+        if progress.bytes_transferred + chunk.len() as u64 > MAX_PACKAGE_SIZE {
             return Err(CoreError::Other("方案包不能超过 30 MiB".into()));
         }
-        bytes.extend_from_slice(&chunk);
-        progress.bytes_transferred = bytes.len() as u64;
+        archive.write_all(&chunk)?;
+        digest.update(&chunk);
+        progress.bytes_transferred += chunk.len() as u64;
         core.emit(CoreEvent::CloudTransferProgress(progress.clone()));
     }
-    if bytes.len() as u64 != package.size
-        || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(&package.sha256)
+    if progress.bytes_transferred != package.size
+        || !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(&package.sha256)
     {
         return Err(CoreError::Other("方案包 SHA-256 校验失败".into()));
     }
     ensure_account(core, account)?;
-    let scheme_key = crate::packages::store_cloud_archive(
+    archive.rewind()?;
+    let scheme_key = crate::packages::store_cloud_archive_reader(
         core,
         &package.scheme_key,
         package.version.as_deref(),
         "cloud",
         Some(&package.name),
-        &bytes,
+        BufReader::new(archive.as_file()),
         user_root,
     )?;
     record_reference(core, account, &scheme_key, id, &package.sha256)?;

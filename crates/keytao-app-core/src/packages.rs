@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{BufReader, Read, Seek},
     path::{Path, PathBuf},
 };
 
@@ -84,14 +85,13 @@ where
     let (version, url) = fetch().await?;
     let archive_path = download(url).await?;
     let result = (|| {
-        let bytes = fs::read(&archive_path)?;
-        store_cloud_archive(
+        store_cloud_archive_reader(
             core,
             scheme_key,
             Some(&version),
             "official",
             None,
-            &bytes,
+            BufReader::new(fs::File::open(&archive_path)?),
             user_root,
         )?;
         core.emit(crate::CoreEvent::InstallProgress(
@@ -254,10 +254,27 @@ pub(crate) fn stored_metadata(
     Ok(Some(meta))
 }
 
-pub(crate) fn stored_archive(
+fn sha256_reader(mut reader: impl Read) -> std::io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    sha256_reader(BufReader::new(fs::File::open(path)?))
+}
+
+pub(crate) fn stored_archive_file(
     core: &Core,
     scheme_key: &str,
-) -> Result<(Vec<u8>, PackageMeta), CoreError> {
+) -> Result<(BufReader<fs::File>, PackageMeta), CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     let _store_guard = core
         .pending_package
@@ -267,18 +284,32 @@ pub(crate) fn stored_archive(
     let archive = safe_path(&dir, &format!("{scheme_key}.zip")).map_err(CoreError::Other)?;
     let metadata = safe_path(&dir, &format!("{scheme_key}.json")).map_err(CoreError::Other)?;
     // The upload size limit applies to the rebuilt dependency zip, not this distribution.
-    let bytes = fs::read(archive)?;
+    let mut archive = BufReader::new(fs::File::open(archive)?);
     let meta: PackageMeta = serde_json::from_slice(&fs::read(metadata)?)?;
-    if meta.scheme_key != scheme_key || meta.zip_sha256 != format!("{:x}", Sha256::digest(&bytes)) {
+    if meta.scheme_key != scheme_key || meta.zip_sha256 != sha256_reader(&mut archive)? {
         return Err(CoreError::Other("本地方案包校验失败".into()));
     }
+    archive.rewind()?;
+    Ok((archive, meta))
+}
+
+#[cfg(test)]
+pub(crate) fn stored_archive(
+    core: &Core,
+    scheme_key: &str,
+) -> Result<(Vec<u8>, PackageMeta), CoreError> {
+    let (mut archive, meta) = stored_archive_file(core, scheme_key)?;
+    let mut bytes = Vec::new();
+    archive.read_to_end(&mut bytes)?;
     Ok((bytes, meta))
 }
 
 pub(crate) fn rime_lua_from_archive(zip_bytes: &[u8]) -> Result<Option<String>, String> {
-    use std::io::Read;
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|error| error.to_string())?;
+    rime_lua_from_reader(std::io::Cursor::new(zip_bytes))
+}
+
+fn rime_lua_from_reader(reader: impl Read + Seek) -> Result<Option<String>, String> {
+    let mut archive = zip::ZipArchive::new(reader).map_err(|error| error.to_string())?;
     let mut file = match archive.by_name("rime.lua") {
         Ok(file) => file,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
@@ -294,7 +325,7 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
     let Some(scheme_key) = core.state().active_scheme else {
         return Ok(());
     };
-    let (bytes, meta) = match stored_archive(core, &scheme_key) {
+    let (archive, meta) = match stored_archive_file(core, &scheme_key) {
         Ok(archive) => archive,
         Err(error) => {
             tracing::warn!(%scheme_key, %error, "Skipping active rime.lua snapshot refresh: no verified stored archive");
@@ -305,13 +336,14 @@ pub(crate) fn prepare_active_rime_lua(core: &Core, root: &Path) -> Result<(), Co
         root: root.canonicalize()?.to_string_lossy().into_owned(),
         scheme_key,
         manifest: meta.manifest,
-        rime_lua: rime_lua_from_archive(&bytes).map_err(CoreError::Other)?,
+        rime_lua: rime_lua_from_reader(archive).map_err(CoreError::Other)?,
     };
     let path = safe_path(root, keytao_core::ACTIVE_SCHEME_MANIFEST).map_err(CoreError::Other)?;
     crate::scheme_files::write_file_atomic(&path, &serde_json::to_vec_pretty(&active)?)?;
     keytao_core::regenerate_active_rime_lua(root).map_err(CoreError::Other)
 }
 
+#[cfg(test)]
 pub(crate) fn store_cloud_archive(
     core: &Core,
     scheme_key: &str,
@@ -321,18 +353,44 @@ pub(crate) fn store_cloud_archive(
     zip_bytes: &[u8],
     user_root: &Path,
 ) -> Result<String, CoreError> {
-    use std::io::{Read, Write};
+    store_cloud_archive_reader(
+        core,
+        scheme_key,
+        version,
+        source,
+        display_name,
+        std::io::Cursor::new(zip_bytes),
+        user_root,
+    )
+}
+
+pub(crate) fn store_cloud_archive_reader(
+    core: &Core,
+    scheme_key: &str,
+    version: Option<&str>,
+    source: &str,
+    display_name: Option<&str>,
+    reader: impl Read + Seek,
+    user_root: &Path,
+) -> Result<String, CoreError> {
     let scheme_key = crate::scheme::validate_scheme_key(scheme_key).map_err(CoreError::Other)?;
     let dir = checked_store_dir(core)?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
-        .map_err(|error| CoreError::Other(error.to_string()))?;
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|error| CoreError::Other(error.to_string()))?;
     let mut manifest = BTreeMap::new();
     let mut expanded = 0u64;
     if archive.len() > 10_000 {
         return Err(CoreError::Other("方案包文件过多".into()));
     }
-    let paths = archive_paths(zip_bytes, if source == "official" { &dir } else { user_root })
-        .map_err(CoreError::Other)?;
+    let paths = checked_archive_paths(
+        &mut archive,
+        if source == "official" {
+            &dir
+        } else {
+            user_root
+        },
+    )
+    .map_err(CoreError::Other)?;
     let mut read_bytes = 0u64;
     for relative in paths {
         let mut file = archive
@@ -346,7 +404,7 @@ pub(crate) fn store_cloud_archive(
             continue;
         }
         let mut digest = Sha256::new();
-        let mut buffer = [0u8; 8192];
+        let mut buffer = [0u8; 64 * 1024];
         loop {
             let read = file.read(&mut buffer)?;
             if read == 0 {
@@ -360,7 +418,10 @@ pub(crate) fn store_cloud_archive(
         }
         manifest.insert(relative, format!("{:x}", digest.finalize()));
     }
-    let digest = format!("{:x}", Sha256::digest(zip_bytes));
+    let mut reader = archive.into_inner();
+    reader.rewind()?;
+    let digest = sha256_reader(&mut reader)?;
+    reader.rewind()?;
     // Allocate under the store lock so concurrent downloads cannot claim the same key.
     let store_guard = core
         .pending_package
@@ -428,7 +489,7 @@ pub(crate) fn store_cloud_archive(
     let mut stored = tempfile::Builder::new()
         .prefix(".cloud-")
         .tempfile_in(&dir)?;
-    stored.write_all(zip_bytes)?;
+    std::io::copy(&mut reader, stored.as_file_mut())?;
     stored.as_file().sync_all()?;
     let mut metadata = tempfile::Builder::new()
         .prefix(".meta-")
@@ -547,7 +608,7 @@ pub(crate) fn finalize_pending(
             scheme_key: scheme_key.into(),
             manifest: receipt.manifest.clone(),
             // Native IME processes deploy without access to the app's package store.
-            rime_lua: rime_lua_from_archive(&fs::read(receipt.archive.path())?)
+            rime_lua: rime_lua_from_reader(BufReader::new(receipt.archive.reopen()?))
                 .map_err(CoreError::Other)?,
         };
         if !receipt.root.is_empty() {
@@ -746,7 +807,7 @@ pub async fn activate_scheme(
     let meta: PackageMeta = serde_json::from_slice(&fs::read(archive.with_extension("json"))?)?;
     if meta.scheme_key != scheme_key
         || meta.version != package.version
-        || meta.zip_sha256 != format!("{:x}", Sha256::digest(fs::read(&archive)?))
+        || meta.zip_sha256 != sha256_file(&archive)?
     {
         return Err(CoreError::Other(
             "Stored package metadata is inconsistent; re-download this scheme before activation"
@@ -781,6 +842,13 @@ pub async fn activate_scheme(
 pub(crate) fn archive_paths(zip_bytes: &[u8], root: &Path) -> Result<BTreeSet<String>, String> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|e| e.to_string())?;
+    checked_archive_paths(&mut archive, root)
+}
+
+fn checked_archive_paths<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    root: &Path,
+) -> Result<BTreeSet<String>, String> {
     let mut paths = BTreeSet::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|e| e.to_string())?;
@@ -873,8 +941,8 @@ pub(crate) fn cleanup_manifest(
             continue;
         }
         let path = safe_path(root, relative)?;
-        match fs::read(&path) {
-            Ok(bytes) if format!("{:x}", Sha256::digest(&bytes)) == *expected => {
+        match sha256_file(&path) {
+            Ok(digest) if digest == *expected => {
                 fs::remove_file(&path).map_err(|error| error.to_string())?;
                 logs.push(format!("[REMOVED] {relative}"));
             }
@@ -910,6 +978,19 @@ mod tests {
             Arc::new(NullSink),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn streaming_hash_matches_whole_file_across_chunks() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes: Vec<u8> = (0..(3 * 64 * 1024 + 173))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        fs::write(file.path(), &bytes).unwrap();
+        assert_eq!(
+            sha256_file(file.path()).unwrap(),
+            format!("{:x}", Sha256::digest(fs::read(file.path()).unwrap()))
+        );
     }
 
     #[test]
